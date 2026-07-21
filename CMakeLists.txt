@@ -62,7 +62,7 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
 
 elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
-    add_executable(fcaevpn WIN32
+    add_executable(fcaevpn
         ${IMGUI_SOURCES}
         ${IMGUI_BACKEND_DIR}/imgui_impl_win32.cpp
         ${IMGUI_BACKEND_DIR}/imgui_impl_dx11.cpp
@@ -92,7 +92,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
     target_link_libraries(fcaevpn PRIVATE ws2_32 userenv bcrypt shell32 ole32 uuid mingwthrd ntdll dwmapi)
 
     if(MINGW)
-        target_link_options(fcaevpn PRIVATE -static)
+        target_link_options(fcaevpn PRIVATE -static -mwindows)
         target_link_libraries(fcaevpn PRIVATE stdc++ pthread)
     endif()
 
