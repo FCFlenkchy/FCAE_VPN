@@ -90,7 +90,8 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
     target_link_libraries(fcaevpn PRIVATE ws2_32 userenv bcrypt shell32 ole32 uuid mingwthrd)
 
     if(MINGW)
-        target_link_libraries(fcaevpn PRIVATE static stdc++ pthread)
+        target_link_options(fcaevpn PRIVATE -static)
+        target_link_libraries(fcaevpn PRIVATE stdc++ pthread)
     endif()
 
 elseif(UNIX)

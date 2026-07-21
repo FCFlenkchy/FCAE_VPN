@@ -8,6 +8,12 @@ on:
         required: true
         default: 'v1.0.0-gui'
 
+permissions:
+  contents: write
+
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,13 +22,13 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            name: linux
+            name: linux-x64
             cmake_args: >-
               -DCMAKE_BUILD_TYPE=Release
               -DAETHER_TARGET=LINUX_X64
 
           - target: x86_64-pc-windows-gnu
-            name: windows
+            name: windows-x64
             cmake_args: >-
               -DCMAKE_BUILD_TYPE=Release
               -DCMAKE_SYSTEM_NAME=Windows
@@ -31,7 +37,7 @@ jobs:
               -DAETHER_TARGET=WIN_X64
 
           - target: aarch64-linux-android
-            name: android
+            name: android-arm64
             cmake_args: "-DAETHER_TARGET=ANDROID_ARM64"
 
     steps:
@@ -66,7 +72,7 @@ jobs:
           cache-on-failure: true
 
       - name: cache cmake
-        if: matrix.name != 'android'
+        if: matrix.name != 'android-arm64'
         uses: actions/cache@v4
         with:
           path: build
@@ -74,7 +80,7 @@ jobs:
           restore-keys: cmake-${{ matrix.name }}-
 
       - name: cache gradle
-        if: matrix.name == 'android'
+        if: matrix.name == 'android-arm64'
         uses: actions/cache@v4
         with:
           path: |
@@ -84,7 +90,7 @@ jobs:
           restore-keys: gradle-
 
       - name: setup ndk
-        if: matrix.name == 'android'
+        if: matrix.name == 'android-arm64'
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
@@ -103,7 +109,7 @@ jobs:
         run: cd crates/aether-ffi && cargo build --release --target ${{ matrix.target }}
 
       - name: build frontend (linux)
-        if: matrix.name == 'linux'
+        if: matrix.name == 'linux-x64'
         run: |
           mkdir -p build && cd build
           cmake .. -G Ninja -DCMAKE_CXX_COMPILER=g++ \
@@ -111,7 +117,7 @@ jobs:
           cmake --build . --config Release
 
       - name: build frontend (windows)
-        if: matrix.name == 'windows'
+        if: matrix.name == 'windows-x64'
         run: |
           mkdir -p build && cd build
           cmake .. -G Ninja \
@@ -119,7 +125,7 @@ jobs:
           cmake --build . --config Release
 
       - name: build apk
-        if: matrix.name == 'android'
+        if: matrix.name == 'android-arm64'
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_HOME: /usr/local/lib/android/sdk
@@ -159,7 +165,7 @@ jobs:
             android/app/build/outputs/apk/release/*.apk
 
       - name: release
-        if: matrix.name == 'linux'
+        if: matrix.name == 'linux-x64'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag }}
