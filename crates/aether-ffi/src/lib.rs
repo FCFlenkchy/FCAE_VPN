@@ -239,7 +239,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         std::env::set_var("AETHER_QUICK_RECONNECT", "1");
     }
 
-    if cfg.frag_enabled {
+    if cfg.fragment_enabled {
         std::env::set_var("AETHER_MASQUE_H2_FRAGMENT", "1");
         std::env::set_var(
             "AETHER_MASQUE_H2_FRAGMENT_SIZE",
@@ -261,36 +261,6 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         }
     }
 
-    let config_path = unsafe {
-        if !(*config).config_path.is_null() {
-            CStr::from_ptr((*config).config_path)
-                .to_str()
-                .unwrap_or("aether.toml")
-        } else {
-            "aether.toml"
-        }
-    };
-    std::env::set_var("AETHER_CONFIG", config_path);
-
-    // ── Also accept quick-reconnect from config ──────────────────────────
-    if cfg.quick_reconnect {
-        std::env::set_var("AETHER_QUICK_RECONNECT", "1");
-    } else {
-        std::env::set_var("AETHER_QUICK_RECONNECT", "0");
-    }
-
-    // ── Accept forced peer from config ───────────────────────────────────
-    unsafe {
-        if !(*config).force_peer.is_null() {
-            if let Ok(p) = CStr::from_ptr((*config).force_peer).to_str() {
-                if !p.is_empty() {
-                    std::env::set_var("AETHER_PEER", p);
-                }
-            }
-        }
-    }
-
-    // ── Accept config path from config ───────────────────────────────────
     let config_path = unsafe {
         if !(*config).config_path.is_null() {
             CStr::from_ptr((*config).config_path)
