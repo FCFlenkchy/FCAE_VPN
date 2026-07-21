@@ -167,13 +167,13 @@ jobs:
           # Bundle MinGW runtime DLLs for Windows
           if [[ "${{ matrix.name }}" == "windows-x64" ]]; then
             EXE=$(ls *.exe 2>/dev/null | head -1)
-            x86_64-w64-mingw32-ldd "$EXE" 2>/dev/null | grep -oP '/\S+\.dll' | while read dll; do
-              [ -f "$dll" ] && cp "$dll" .
-            done
-            # Fallback: copy known DLLs from standard locations
+            # Copy from standard MinGW sysroot
+            MINGW_SYS=/usr/x86_64-w64-mingw32/lib
             for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
-              [ -f "$dll" ] || find /usr -name "$dll" -exec cp {} . \; 2>/dev/null || true
+              [ -f "$MINGW_SYS/$dll" ] && cp "$MINGW_SYS/$dll" . 2>/dev/null
+              [ -f "$dll" ] || cp /usr/lib/gcc/x86_64-w64-mingw32/13-win32/$dll . 2>/dev/null || true
             done
+            ls -la *.dll 2>/dev/null || echo "WARNING: no DLLs found to bundle"
           fi
 
       - name: package (android)
