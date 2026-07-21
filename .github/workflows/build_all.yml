@@ -38,7 +38,7 @@ jobs:
               -DAETHER_TARGET=WIN_X64
 
           - target: aarch64-linux-android
-            name: android-arm64
+            name: android-arm64-v8a
             cmake_args: "-DAETHER_TARGET=ANDROID_ARM64"
 
     steps:
@@ -165,7 +165,7 @@ jobs:
           path: package/
 
       - name: upload (android)
-        if: matrix.name == 'android-arm64'
+        if: matrix.name == 'android-arm64-v8a'
         uses: actions/upload-artifact@v4
         with:
           name: fcaevpn-${{ matrix.name }}-${{ github.event.inputs.release_tag }}
