@@ -12,8 +12,6 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
-import java.io.FileDescriptor;
-
 /**
  * FCAE VPN — Android VpnService with live notification stats.
  *
@@ -122,11 +120,11 @@ public class FCAEVpnService extends VpnService {
                     return;
                 }
 
-                FileDescriptor fd = vpnInterface.getFileDescriptor();
-                nativeSetTunFd(fd.getInt());
+                int fd = vpnInterface.getFd();
+                nativeSetTunFd(fd);
 
                 running = true;
-                Log.i(TAG, "VPN established, fd=" + fd.getInt());
+                Log.i(TAG, "VPN established, fd=" + fd);
                 updateNotificationStats();
 
                 // Start periodic notification updates
