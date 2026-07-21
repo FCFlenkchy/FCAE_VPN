@@ -59,6 +59,36 @@ jobs:
           targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android
           components: rust-src
 
+      # ── Rust build cache ───────────────────────────────────────────────
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          workspaces: |
+            aether -> aether/target
+            crates/aether-ffi -> crates/aether-ffi/target
+          cache-on-failure: true
+
+      # ── CMake build cache (desktop only) ───────────────────────────────
+      - name: Cache CMake build
+        if: matrix.name != 'Android-arm64-v8a'
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: cmake-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt', 'src_cpp/**') }}
+          restore-keys: cmake-${{ matrix.name }}-
+
+      # ── Gradle cache (Android only) ────────────────────────────────────
+      - name: Cache Gradle
+        if: matrix.name == 'Android-arm64-v8a'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
       - name: Setup Android NDK (For arm64-v8a)
         if: matrix.name == 'Android-arm64-v8a'
         uses: nttld/setup-ndk@v1
@@ -113,7 +143,6 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_HOME: /usr/local/lib/android/sdk
         run: |
-          # Set up Android SDK command-line tools
           if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
             mkdir -p "$ANDROID_HOME/cmdline-tools"
             cd "$ANDROID_HOME/cmdline-tools"
@@ -124,7 +153,6 @@ jobs:
 
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
 
-          # Accept licenses and install required SDK components
           yes | sdkmanager --licenses || true
           sdkmanager "platforms;android-34" "build-tools;34.0.0"
 
@@ -139,7 +167,6 @@ jobs:
           mkdir -p package
           cp build/fcaevpn* package/ 2>/dev/null || true
           cp aether/target/${{ matrix.target }}/release/aether* package/ 2>/dev/null || true
-          # For Windows, also grab the .exe
           if [ "${{ matrix.name }}" = "Windows-x64" ]; then
             cp build/fcaevpn.exe package/ 2>/dev/null || true
             cp aether/target/${{ matrix.target }}/release/aether.exe package/ 2>/dev/null || true

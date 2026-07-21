@@ -51,6 +51,7 @@ static TELEMETRY: Mutex<TelemetryState> = Mutex::new(TelemetryState::new());
 use std::ffi::c_void;
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub struct AetherCfgRaw {
     pub protocol: i32,
     pub mode: i32,
