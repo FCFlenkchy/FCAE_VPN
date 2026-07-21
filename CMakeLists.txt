@@ -66,6 +66,8 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
 
 elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libgcc -static-libstdc++")
+
     add_executable(fcaevpn
         ${IMGUI_SOURCES}
         ${IMGUI_BACKEND_DIR}/imgui_impl_win32.cpp
@@ -92,7 +94,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
     target_link_directories(fcaevpn PRIVATE ${RUST_LIB_DIR})
 
     if(MINGW)
-        target_link_options(fcaevpn PRIVATE -static -static-libgcc -static-libstdc++ -mwindows -municode)
+        target_link_options(fcaevpn PRIVATE -mwindows -municode)
     endif()
 
     target_link_libraries(fcaevpn PRIVATE
