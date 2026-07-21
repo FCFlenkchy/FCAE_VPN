@@ -154,7 +154,6 @@ jobs:
         run: |
           mkdir -p package
           cp build/fcaevpn* package/ 2>/dev/null || true
-          cp aether/target/${{ matrix.target }}/release/aether* package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
           cd package
           for f in fcaevpn*; do
@@ -163,14 +162,6 @@ jobs:
               mv "$f" "FCAE_VPN-${{ matrix.name }}.exe"
             else
               mv "$f" "FCAE_VPN-${{ matrix.name }}"
-            fi
-          done
-          for f in aether*; do
-            [ -f "$f" ] || continue
-            if [[ "$f" == *.exe ]]; then
-              mv "$f" "aether-${{ matrix.name }}.exe"
-            else
-              mv "$f" "aether-${{ matrix.name }}"
             fi
           done
 
