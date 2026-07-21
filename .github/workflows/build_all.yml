@@ -186,8 +186,17 @@ jobs:
           name: FCAE_VPN-android-arm64-v8a
           path: package/
 
-      - name: release
-        if: matrix.name == 'linux-x64'
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag }}
@@ -196,7 +205,8 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: |
-            FCAE_VPN-${{ matrix.name }}/**
-            package/*.apk
+            artifacts/FCAE_VPN-*/FCAE_VPN*
+            artifacts/FCAE_VPN-*/FCAE_VPN.exe
+            artifacts/FCAE_VPN-android-arm64-v8a/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
