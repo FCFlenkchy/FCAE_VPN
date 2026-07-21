@@ -152,17 +152,16 @@ jobs:
       - name: package
         if: matrix.name != 'android-arm64-v8a'
         run: |
-          DIR="FCAE_VPN-${{ matrix.name }}"
-          mkdir -p "$DIR"
-          cp build/fcaevpn* "$DIR/" 2>/dev/null || true
-          chmod +x "$DIR/"* 2>/dev/null || true
-          cd "$DIR"
+          mkdir -p package
+          cp build/fcaevpn* package/ 2>/dev/null || true
+          chmod +x package/* 2>/dev/null || true
+          cd package
           for f in fcaevpn*; do
             [ -f "$f" ] || continue
             if [[ "$f" == *.exe ]]; then
-              mv "$f" "FCAE_VPN.exe"
+              mv "$f" "FCAE_VPN-${{ matrix.name }}.exe"
             else
-              mv "$f" "FCAE_VPN"
+              mv "$f" "FCAE_VPN-${{ matrix.name }}"
             fi
           done
 
@@ -172,18 +171,10 @@ jobs:
           mkdir -p package
           cp android/app/build/outputs/apk/release/*.apk package/FCAE_VPN-android-arm64-v8a.apk 2>/dev/null || true
 
-      - name: upload (desktop)
-        if: matrix.name != 'android-arm64-v8a'
+      - name: upload
         uses: actions/upload-artifact@v4
         with:
           name: FCAE_VPN-${{ matrix.name }}
-          path: FCAE_VPN-${{ matrix.name }}/
-
-      - name: upload (android)
-        if: matrix.name == 'android-arm64-v8a'
-        uses: actions/upload-artifact@v4
-        with:
-          name: FCAE_VPN-android-arm64-v8a
           path: package/
 
   release:
@@ -195,6 +186,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
+          merge-multiple: true
 
       - name: create release
         uses: softprops/action-gh-release@v2
@@ -204,9 +196,6 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: |
-            artifacts/FCAE_VPN-*/FCAE_VPN*
-            artifacts/FCAE_VPN-*/FCAE_VPN.exe
-            artifacts/FCAE_VPN-android-arm64-v8a/*.apk
+          files: artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
