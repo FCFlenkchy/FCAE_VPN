@@ -166,11 +166,13 @@ jobs:
           done
           # Bundle MinGW runtime DLLs for Windows
           if [[ "${{ matrix.name }}" == "windows-x64" ]]; then
-            MINGW_DIR=$(dirname $(which x86_64-w64-mingw32-g++))
+            EXE=$(ls *.exe 2>/dev/null | head -1)
+            x86_64-w64-mingw32-ldd "$EXE" 2>/dev/null | grep -oP '/\S+\.dll' | while read dll; do
+              [ -f "$dll" ] && cp "$dll" .
+            done
+            # Fallback: copy known DLLs from standard locations
             for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
-              cp "/usr/x86_64-w64-mingw32/bin/$dll" . 2>/dev/null || \
-              cp "$MINGW_DIR/../x86_64-w64-mingw32/bin/$dll" . 2>/dev/null || \
-              cp "$MINGW_DIR/$dll" . 2>/dev/null || true
+              [ -f "$dll" ] || find /usr -name "$dll" -exec cp {} . \; 2>/dev/null || true
             done
           fi
 
