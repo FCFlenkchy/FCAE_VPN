@@ -1,0 +1,42 @@
+# Build outputs
+/target/
+/build/
+/build-*/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+build/
+compile_commands.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+local.properties
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Third-party (fetched at build time)
+third_party/
+
+# Rust
+crates/*/target/
+Cargo.lock

@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/aether-ffi"]
+resolver = "2"

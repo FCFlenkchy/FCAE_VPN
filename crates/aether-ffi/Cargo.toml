@@ -1,0 +1,21 @@
+[package]
+name = "aether-ffi"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "process", "signal"] }
+libc = "0.2"
+log = "0.4"
+env_logger = "0.11"
+parking_lot = "0.12"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
