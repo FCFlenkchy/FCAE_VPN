@@ -155,7 +155,6 @@ jobs:
           DIR="FCAE_VPN-${{ matrix.name }}"
           mkdir -p "$DIR"
           cp build/fcaevpn* "$DIR/" 2>/dev/null || true
-          cp fcae.toml "$DIR/" 2>/dev/null || true
           chmod +x "$DIR/"* 2>/dev/null || true
           cd "$DIR"
           for f in fcaevpn*; do
@@ -167,7 +166,7 @@ jobs:
             fi
           done
           cd ..
-          tar czf "${DIR}.tar.gz" "$DIR"
+          zip -r "${DIR}.zip" "$DIR"
           rm -rf "$DIR"
 
       - name: package (android)
@@ -181,7 +180,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FCAE_VPN-${{ matrix.name }}
-          path: FCAE_VPN-${{ matrix.name }}.tar.gz
+          path: FCAE_VPN-${{ matrix.name }}.zip
 
       - name: upload (android)
         if: matrix.name == 'android-arm64-v8a'
@@ -200,7 +199,7 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: |
-            FCAE_VPN-*.tar.gz
+            FCAE_VPN-*.zip
             package/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
