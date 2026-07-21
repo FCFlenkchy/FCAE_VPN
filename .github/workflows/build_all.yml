@@ -1,30 +1,28 @@
-name: Build FCAE VPN Cross-Platform ImGui (x64 & arm64)
+name: build
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release Tag (e.g., v1.0.0-gui)'
+        description: 'release tag (e.g. v1.0.0-gui)'
         required: true
         default: 'v1.0.0-gui'
 
 jobs:
-  build-all-targets:
+  build:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            name: Linux-x64
-            toolchain_cxx: g++
+            name: linux-x64
             cmake_args: >-
               -DCMAKE_BUILD_TYPE=Release
               -DAETHER_TARGET=LINUX_X64
 
           - target: x86_64-pc-windows-gnu
-            name: Windows-x64
-            toolchain_cxx: x86_64-w64-mingw32-g++
+            name: windows-x64
             cmake_args: >-
               -DCMAKE_BUILD_TYPE=Release
               -DCMAKE_SYSTEM_NAME=Windows
@@ -33,17 +31,16 @@ jobs:
               -DAETHER_TARGET=WIN_X64
 
           - target: aarch64-linux-android
-            name: Android-arm64-v8a
-            toolchain_cxx: ndk
+            name: android-arm64
             cmake_args: "-DAETHER_TARGET=ANDROID_ARM64"
 
     steps:
-      - name: Checkout Repository
+      - name: checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install System & MinGW Cross-Toolchains
+      - name: install deps
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential g++ gcc cmake ninja-build \
@@ -53,14 +50,13 @@ jobs:
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
             protobuf-compiler
 
-      - name: Install Rust & Cross Targets
+      - name: install rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android
           components: rust-src
 
-      # ── Rust build cache ───────────────────────────────────────────────
-      - name: Cache Rust build artifacts
+      - name: cache rust
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
@@ -69,18 +65,16 @@ jobs:
             crates/aether-ffi -> crates/aether-ffi/target
           cache-on-failure: true
 
-      # ── CMake build cache (desktop only) ───────────────────────────────
-      - name: Cache CMake build
-        if: matrix.name != 'Android-arm64-v8a'
+      - name: cache cmake
+        if: matrix.name != 'android-arm64'
         uses: actions/cache@v4
         with:
           path: build
           key: cmake-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt', 'src_cpp/**') }}
           restore-keys: cmake-${{ matrix.name }}-
 
-      # ── Gradle cache (Android only) ────────────────────────────────────
-      - name: Cache Gradle
-        if: matrix.name == 'Android-arm64-v8a'
+      - name: cache gradle
+        if: matrix.name == 'android-arm64'
         uses: actions/cache@v4
         with:
           path: |
@@ -89,56 +83,43 @@ jobs:
           key: gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-
 
-      - name: Setup Android NDK (For arm64-v8a)
-        if: matrix.name == 'Android-arm64-v8a'
+      - name: setup ndk
+        if: matrix.name == 'android-arm64'
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
 
-      - name: Fetch Dear ImGui Source
+      - name: fetch imgui
         run: |
           mkdir -p third_party
           if [ ! -d "third_party/imgui" ]; then
             git clone --depth 1 --branch v1.91.8 https://github.com/ocornut/imgui.git third_party/imgui
           fi
 
-      # ── Build the Aether engine binary ─────────────────────────────────
-      - name: Build Aether Engine Binary
-        run: |
-          cd aether
-          cargo build --release --target ${{ matrix.target }}
+      - name: build engine
+        run: cd aether && cargo build --release --target ${{ matrix.target }}
 
-      # ── Build the FFI static library ──────────────────────────────────
-      - name: Build FFI Static Library (libaether_ffi)
-        run: |
-          cd crates/aether-ffi
-          cargo build --release --target ${{ matrix.target }}
+      - name: build ffi
+        run: cd crates/aether-ffi && cargo build --release --target ${{ matrix.target }}
 
-      # ── Desktop CMake builds ──────────────────────────────────────────
-      - name: Build C++ ImGui Frontend (Linux via CMake + GCC)
-        if: matrix.name == 'Linux-x64'
+      - name: build frontend (linux)
+        if: matrix.name == 'linux-x64'
+        run: |
+          mkdir -p build && cd build
+          cmake .. -G Ninja -DCMAKE_CXX_COMPILER=g++ \
+            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
+          cmake --build . --config Release
+
+      - name: build frontend (windows)
+        if: matrix.name == 'windows-x64'
         run: |
           mkdir -p build && cd build
           cmake .. -G Ninja \
-            -DCMAKE_CXX_COMPILER=g++ \
-            ${{ matrix.cmake_args }} \
-            -DRUST_TARGET=${{ matrix.target }}
+            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
           cmake --build . --config Release
 
-      - name: Build C++ ImGui Frontend (Windows via CMake + MinGW)
-        if: matrix.name == 'Windows-x64'
-        run: |
-          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++
-          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc
-          mkdir -p build && cd build
-          cmake .. -G Ninja \
-            ${{ matrix.cmake_args }} \
-            -DRUST_TARGET=${{ matrix.target }}
-          cmake --build . --config Release
-
-      # ── Android APK build ─────────────────────────────────────────────
-      - name: Build Android APK (arm64-v8a with Native VpnService Hook)
-        if: matrix.name == 'Android-arm64-v8a'
+      - name: build apk
+        if: matrix.name == 'android-arm64'
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_HOME: /usr/local/lib/android/sdk
@@ -150,51 +131,41 @@ jobs:
             unzip -q tools.zip
             mv cmdline-tools latest
           fi
-
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
-
           yes | sdkmanager --licenses || true
           sdkmanager "platforms;android-34" "build-tools;34.0.0"
-
           cd android
           chmod +x ./gradlew
           ./gradlew assembleRelease -PNDK_ABI=arm64-v8a
 
-      # ── Package desktop artifacts ─────────────────────────────────────
-      - name: Package Desktop Artifacts
-        if: matrix.name != 'Android-arm64-v8a'
+      - name: package (desktop)
+        if: matrix.name != 'android-arm64'
         run: |
           mkdir -p package
           cp build/fcaevpn* package/ 2>/dev/null || true
           cp aether/target/${{ matrix.target }}/release/aether* package/ 2>/dev/null || true
-          if [ "${{ matrix.name }}" = "Windows-x64" ]; then
-            cp build/fcaevpn.exe package/ 2>/dev/null || true
-            cp aether/target/${{ matrix.target }}/release/aether.exe package/ 2>/dev/null || true
-          fi
           chmod +x package/* 2>/dev/null || true
 
-      - name: Upload Desktop Artifacts
-        if: matrix.name != 'Android-arm64-v8a'
+      - name: upload (desktop)
+        if: matrix.name != 'android-arm64'
         uses: actions/upload-artifact@v4
         with:
-          name: FCAE-VPN-${{ matrix.name }}-${{ github.event.inputs.release_tag }}
+          name: fcaevpn-${{ matrix.name }}-${{ github.event.inputs.release_tag }}
           path: package/
 
-      - name: Upload Android Artifacts
-        if: matrix.name == 'Android-arm64-v8a'
+      - name: upload (android)
+        if: matrix.name == 'android-arm64'
         uses: actions/upload-artifact@v4
         with:
-          name: FCAE-VPN-${{ matrix.name }}-${{ github.event.inputs.release_tag }}
-          path: |
-            android/app/build/outputs/apk/release/*.apk
+          name: fcaevpn-${{ matrix.name }}-${{ github.event.inputs.release_tag }}
+          path: android/app/build/outputs/apk/release/*.apk
 
-      # ── Create GitHub Release ──────────────────────────────────────────
-      - name: Create GitHub Release
+      - name: release
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag }}
-          name: "FCAE VPN ${{ github.event.inputs.release_tag }}"
+          name: "fcaevpn ${{ github.event.inputs.release_tag }}"
           draft: false
           prerelease: false
           generate_release_notes: true
