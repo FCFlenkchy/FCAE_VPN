@@ -72,6 +72,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         ${IMGUI_BACKEND_DIR}/imgui_impl_dx11.cpp
         ${CMAKE_SOURCE_DIR}/src_cpp/main_win32_dx11.cpp
         ${UI_SOURCES}
+        ${CMAKE_SOURCE_DIR}/src_cpp/icon.rc
     )
 
     target_include_directories(fcaevpn PRIVATE
@@ -92,7 +93,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
     target_link_directories(fcaevpn PRIVATE ${RUST_LIB_DIR})
 
     if(MINGW)
-        target_link_options(fcaevpn PRIVATE -mwindows -municode)
+        target_link_options(fcaevpn PRIVATE -static-libgcc -static-libstdc++ -mwindows -municode)
     endif()
 
     target_link_libraries(fcaevpn PRIVATE

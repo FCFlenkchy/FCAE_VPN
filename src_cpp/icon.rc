@@ -1,0 +1,4 @@
+#include <windows.h>
+
+// FCAE VPN Application Icon
+IDI_ICON1 ICON "icon.ico"

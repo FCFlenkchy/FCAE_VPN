@@ -1,36 +1,24 @@
 #include "ui_render.h"
 
-// ── Log callback ─────────────────────────────────────────────────────────
 void log_callback(int level, const char* message, void* user_data) {
     (void)user_data;
     g_app.add_log(level, message);
 }
 
-// ── Auto-scaling byte rate ──────────────────────────────────────────────
-static void fmt_rate(char* buf, size_t len, double bps) {
-    if (bps < 0.0) bps = 0.0;
-    if (bps >= 1073741824.0)
-        snprintf(buf, len, "%.2f GB/s", bps / 1073741824.0);
-    else if (bps >= 1048576.0)
-        snprintf(buf, len, "%.2f MB/s", bps / 1048576.0);
-    else if (bps >= 1024.0)
-        snprintf(buf, len, "%.2f KB/s", bps / 1024.0);
-    else
-        snprintf(buf, len, "%.0f B/s", bps);
+static void fmt_bytes(char* buf, size_t len, uint64_t b) {
+    if (b >= 1073741824ULL) snprintf(buf, len, "%.2f GB", (double)b / 1073741824.0);
+    else if (b >= 1048576ULL) snprintf(buf, len, "%.2f MB", (double)b / 1048576.0);
+    else if (b >= 1024ULL) snprintf(buf, len, "%.2f KB", (double)b / 1024.0);
+    else snprintf(buf, len, "%llu B", (unsigned long long)b);
 }
 
-static void fmt_total(char* buf, size_t len, uint64_t bytes) {
-    if (bytes >= 1073741824ULL)
-        snprintf(buf, len, "%.2f GB", (double)bytes / 1073741824.0);
-    else if (bytes >= 1048576ULL)
-        snprintf(buf, len, "%.2f MB", (double)bytes / 1048576.0);
-    else if (bytes >= 1024ULL)
-        snprintf(buf, len, "%.2f KB", (double)bytes / 1024.0);
-    else
-        snprintf(buf, len, "%llu B", (unsigned long long)bytes);
+static void fmt_rate(char* buf, size_t len, uint64_t bps) {
+    if (bps >= 1073741824ULL) snprintf(buf, len, "%.2f GB/s", (double)bps / 1073741824.0);
+    else if (bps >= 1048576ULL) snprintf(buf, len, "%.2f MB/s", (double)bps / 1048576.0);
+    else if (bps >= 1024ULL) snprintf(buf, len, "%.2f KB/s", (double)bps / 1024.0);
+    else snprintf(buf, len, "%llu B/s", (unsigned long long)bps);
 }
 
-// ── Status helpers ──────────────────────────────────────────────────────
 static ImVec4 state_color(AetherState s) {
     switch (s) {
         case AETHER_STATE_DISCONNECTED: return ImVec4(0.55f, 0.55f, 0.60f, 1.0f);
@@ -55,7 +43,6 @@ static const char* state_label(AetherState s) {
     return "UNKNOWN";
 }
 
-// ── Spinner ─────────────────────────────────────────────────────────────
 static void draw_spinner(float radius, int segments, float speed) {
     float t = (float)ImGui::GetTime() * speed;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -72,10 +59,6 @@ static void draw_spinner(float radius, int segments, float speed) {
     ImGui::Dummy(ImVec2(radius * 2 + 4, radius * 2 + 4));
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-//  PUBLIC API
-// ══════════════════════════════════════════════════════════════════════════
-
 void ui_init() {
     aether_init(log_callback, nullptr);
 }
@@ -88,10 +71,6 @@ void ui_shutdown() {
     aether_stop();
     aether_free();
 }
-
-// ══════════════════════════════════════════════════════════════════════════
-//  MAIN UI RENDER
-// ══════════════════════════════════════════════════════════════════════════
 
 void render_ui() {
     const ImGuiIO& io = ImGui::GetIO();
@@ -108,7 +87,6 @@ void render_ui() {
     AetherTelemetry telem = {};
     aether_get_telemetry(&telem);
     g_app.telem = telem;
-    g_app.ring.push((float)telem.rx_bytes_sec, (float)telem.tx_bytes_sec);
     g_app.ffi_state.store(telem.state);
     g_app.ffi_connected.store(telem.state == AETHER_STATE_CONNECTED);
 
@@ -116,7 +94,7 @@ void render_ui() {
     bool connected  = (cur == AETHER_STATE_CONNECTED);
     bool busy       = (cur == AETHER_STATE_PROVISIONING || cur == AETHER_STATE_SCANNING || cur == AETHER_STATE_CONNECTING);
 
-    // ── 1. STATUS BAR + CONNECT BUTTON ───────────────────────────────────
+    // ── 1. STATUS BAR + CONNECT ──────────────────────────────────────────
     {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 10));
@@ -158,46 +136,32 @@ void render_ui() {
 
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
-    // ── 2. THROUGHPUT ────────────────────────────────────────────────────
+    // ── 2. TRAFFIC STATS ─────────────────────────────────────────────────
     {
-        char rate_buf[32];
-        float col_w = (ImGui::GetContentRegionAvail().x - 12.0f) * 0.5f;
+        char total_buf[32], rate_buf[32];
 
-        ImGui::BeginChild("##dl", ImVec2(col_w, 0), ImGuiChildFlags_Borders);
         ImGui::TextColored(ImVec4(0.30f, 0.80f, 1.00f, 1.0f), "Download");
-        fmt_rate(rate_buf, sizeof(rate_buf), (double)telem.rx_bytes_sec);
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(rate_buf).x);
-        ImGui::TextColored(ImVec4(0.30f, 0.80f, 1.00f, 1.0f), "%s", rate_buf);
-        ImGui::PlotLines("##rx", g_app.ring.rx_ptr(), PLOT_HISTORY, 0, nullptr, 0.0f, FLT_MAX, ImVec2(0, 70));
-        ImGui::EndChild();
-
         ImGui::SameLine(0, 12);
+        fmt_bytes(total_buf, sizeof(total_buf), telem.total_rx);
+        ImGui::Text("%s", total_buf);
+        ImGui::SameLine(0, 12);
+        fmt_rate(rate_buf, sizeof(rate_buf), telem.rx_bytes_sec);
+        ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "%s", rate_buf);
 
-        ImGui::BeginChild("##ul", ImVec2(0, 0), ImGuiChildFlags_Borders);
-        ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "Upload");
-        fmt_rate(rate_buf, sizeof(rate_buf), (double)telem.tx_bytes_sec);
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(rate_buf).x);
-        ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "%s", rate_buf);
-        ImGui::PlotLines("##tx", g_app.ring.tx_ptr(), PLOT_HISTORY, 0, nullptr, 0.0f, FLT_MAX, ImVec2(0, 70));
-        ImGui::EndChild();
-    }
+        ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "Upload  ");
+        ImGui::SameLine(0, 12);
+        fmt_bytes(total_buf, sizeof(total_buf), telem.total_tx);
+        ImGui::Text("%s", total_buf);
+        ImGui::SameLine(0, 12);
+        fmt_rate(rate_buf, sizeof(rate_buf), telem.tx_bytes_sec);
+        ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "%s", rate_buf);
 
-    ImGui::Spacing();
-
-    // ── Info row ─────────────────────────────────────────────────────────
-    {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.70f, 0.75f, 1.0f));
-        ImGui::Text("Mode: %s", g_app.mode == 0 ? "Proxy" : "TUN");
-        ImGui::SameLine(0, 20);
-        ImGui::Text("Peer: %s", telem.connected_peer[0] ? telem.connected_peer : "-");
-        ImGui::SameLine(0, 20);
-        ImGui::Text("RTT: %u ms", telem.rtt_ms);
-
-        char tbuf[32];
-        ImGui::Text("RX Total: "); fmt_total(tbuf, sizeof(tbuf), telem.total_rx); ImGui::SameLine(); ImGui::Text("%s", tbuf);
-        ImGui::SameLine(0, 24);
-        ImGui::Text("TX Total: "); fmt_total(tbuf, sizeof(tbuf), telem.total_tx); ImGui::SameLine(); ImGui::Text("%s", tbuf);
-        ImGui::PopStyleColor();
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.60f, 1.0f),
+            "Peer: %s  |  RTT: %u ms  |  Mode: %s",
+            telem.connected_peer[0] ? telem.connected_peer : "-",
+            telem.rtt_ms,
+            g_app.mode == 0 ? "Proxy" : "TUN");
     }
 
     // ── Address callout ──────────────────────────────────────────────────
@@ -216,9 +180,9 @@ void render_ui() {
                     ImGui::Text("  Local:  SOCKS5 127.0.0.1:%u  |  HTTP 127.0.0.1:%u", g_app.socks_port, g_app.http_port);
             } else {
                 if (g_app.lan_sharing)
-                    ImGui::Text("  TUN Active  |  LAN Gateways:  SOCKS5 %s:%u  |  HTTP %s:%u", lip, g_app.socks_port, lip, g_app.http_port);
+                    ImGui::Text("  TUN Active  |  LAN: SOCKS5 %s:%u  |  HTTP %s:%u", lip, g_app.socks_port, lip, g_app.http_port);
                 else
-                    ImGui::Text("  TUN Active (System VPN)  |  SOCKS5 127.0.0.1:%u", g_app.socks_port);
+                    ImGui::Text("  TUN Active  |  SOCKS5 127.0.0.1:%u", g_app.socks_port);
             }
         } else {
             ImGui::Text("  No active tunnel");
@@ -230,34 +194,36 @@ void render_ui() {
 
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
-    // ── 3. CONFIGURATION TABS ────────────────────────────────────────────
+    // ── 3. CONFIG TABS ───────────────────────────────────────────────────
     if (ImGui::BeginTabBar("##Tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
 
         if (ImGui::BeginTabItem("Protocol")) {
             ImGui::Spacing();
-            ImGui::Text("Transport Protocol");
+            ImGui::Text("Transport");
             ImGui::RadioButton("MASQUE (HTTP/3 QUIC)", &g_app.protocol, 0);
-            ImGui::RadioButton("WireGuard (Classic)",   &g_app.protocol, 1);
+            ImGui::RadioButton("WireGuard",             &g_app.protocol, 1);
             ImGui::RadioButton("WARP-in-WARP (Gool)",   &g_app.protocol, 2);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Mode");
-            ImGui::RadioButton("Proxy (Local Forwarding)", &g_app.mode, 0);
-            ImGui::RadioButton("TUN (System VPN)",         &g_app.mode, 1);
+            ImGui::RadioButton("Proxy", &g_app.mode, 0);
+            ImGui::RadioButton("TUN",   &g_app.mode, 1);
             ImGui::Spacing();
-            ImGui::Checkbox("LAN Sharing (Allow Local Network)", &g_app.lan_sharing);
+            ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Text("Options");
+            ImGui::Text("Transport Options");
             ImGui::Checkbox("HTTP/2 Fallback (--h2)", &g_app.h2_enabled);
-            ImGui::Checkbox("Encrypted ClientHello (ECH)", &g_app.ech_enabled);
+            ImGui::Checkbox("ECH", &g_app.ech_enabled);
             ImGui::Checkbox("Quick Reconnect", &g_app.quick_reconnect);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Text("Ports");
-            ImGui::PushItemWidth(100);
-            ImGui::InputScalar("SOCKS5", ImGuiDataType_U16, &g_app.socks_port);
-            ImGui::SameLine(0, 20);
-            ImGui::InputScalar("HTTP",   ImGuiDataType_U16, &g_app.http_port);
-            ImGui::PopItemWidth();
-            ImGui::Spacing();
+            if (g_app.mode == 0) {
+                ImGui::Text("Proxy Ports");
+                ImGui::PushItemWidth(100);
+                ImGui::InputScalar("SOCKS5", ImGuiDataType_U16, &g_app.socks_port);
+                ImGui::SameLine(0, 20);
+                ImGui::InputScalar("HTTP",   ImGuiDataType_U16, &g_app.http_port);
+                ImGui::PopItemWidth();
+                ImGui::Spacing();
+            }
             ImGui::InputText("Force Peer", g_app.force_peer, sizeof(g_app.force_peer));
             ImGui::InputText("Config Path", g_app.config_path, sizeof(g_app.config_path));
             ImGui::EndTabItem();
@@ -265,7 +231,7 @@ void render_ui() {
 
         if (ImGui::BeginTabItem("Obfuscation")) {
             ImGui::Spacing();
-            ImGui::Text("Noize Profile (--noize)");
+            ImGui::Text("Noize Profile");
             const char* profiles[] = { "off", "firewall", "balanced", "gfw" };
             int idx = 0;
             for (int i = 0; i < 4; i++)
@@ -273,8 +239,8 @@ void render_ui() {
             if (ImGui::Combo("Profile", &idx, profiles, 4))
                 strncpy(g_app.noize_profile, profiles[idx], sizeof(g_app.noize_profile) - 1);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Text("TLS ClientHello Fragmentation");
-            ImGui::Checkbox("Enable Fragmentation (--fragment)", &g_app.fragment_enabled);
+            ImGui::Text("TLS Fragmentation");
+            ImGui::Checkbox("Enable", &g_app.fragment_enabled);
             if (g_app.fragment_enabled) {
                 ImGui::PushItemWidth(180);
                 ImGui::SliderInt("Chunk Min (B)", &g_app.frag_min_size, 8, 64);
@@ -288,7 +254,7 @@ void render_ui() {
 
         if (ImGui::BeginTabItem("Scanner")) {
             ImGui::Spacing();
-            ImGui::Text("Scan Mode (--scan)");
+            ImGui::Text("Scan Mode");
             const char* modes[] = { "Turbo", "Balanced", "Thorough", "Stealth", "Ironclad" };
             ImGui::Combo("Mode", &g_app.scan_mode, modes, 5);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();

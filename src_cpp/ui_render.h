@@ -15,23 +15,6 @@ extern "C" {
 #include "../include/aether_ffi.h"
 }
 
-static constexpr int PLOT_HISTORY = 256;
-
-struct TelemetryRing {
-    float rx[PLOT_HISTORY] = {};
-    float tx[PLOT_HISTORY] = {};
-    int   idx = 0;
-
-    void push(float r, float t) {
-        rx[idx] = r;
-        tx[idx] = t;
-        idx = (idx + 1) % PLOT_HISTORY;
-    }
-
-    const float* rx_ptr() const { return rx + idx; }
-    const float* tx_ptr() const { return tx + idx; }
-};
-
 struct AppState {
     std::atomic<bool> running{true};
     std::atomic<int>  ffi_state{AETHER_STATE_DISCONNECTED};
@@ -57,7 +40,6 @@ struct AppState {
     bool ech_enabled     = false;
 
     AetherTelemetry telem = {};
-    TelemetryRing   ring  = {};
 
     std::vector<std::pair<int, std::string>> logs;
     int  max_logs    = 500;
@@ -92,7 +74,6 @@ struct AppState {
 
 static AppState g_app;
 
-// ── API (implemented in ui_render.cpp) ──────────────────────────────────
 void ui_init();
 void ui_frame();
 void ui_shutdown();
