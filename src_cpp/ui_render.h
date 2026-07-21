@@ -97,6 +97,11 @@ struct AppState {
 
 static AppState g_app;
 
+// ── Public API (implemented in ui_render.cpp) ────────────────────────────
+void ui_init();
+void ui_frame();
+void ui_shutdown();
+
 static void log_callback(int level, const char* message, void* user_data) {
     (void)user_data;
     g_app.add_log(level, message);

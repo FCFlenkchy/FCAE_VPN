@@ -294,7 +294,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         }
     };
 
-    std::thread::Builder::new()
+    let _ = std::thread::Builder::new()
         .name("aether-engine".to_string())
         .spawn(move || {
             rt.block_on(async move {

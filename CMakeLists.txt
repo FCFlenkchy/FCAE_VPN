@@ -18,24 +18,13 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/imgui_widgets.cpp
 )
 
-set(IMGUI_HEADERS
-    ${IMGUI_DIR}/imgui.h
-    ${IMGUI_DIR}/imgui_internal.h
-)
-
 set(UI_SOURCES
     ${CMAKE_SOURCE_DIR}/src_cpp/ui_render.cpp
-)
-
-set(UI_HEADERS
-    ${CMAKE_SOURCE_DIR}/src_cpp/ui_render.h
-    ${CMAKE_SOURCE_DIR}/include/aether_ffi.h
 )
 
 # ── Target-specific configuration ────────────────────────────────────────
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
 
-    # ── Android NDK / GLES3 + NativeActivity ─────────────────────────────
     add_library(fcaevpn_native SHARED
         ${IMGUI_SOURCES}
         ${IMGUI_BACKEND_DIR}/imgui_impl_android.cpp
@@ -64,40 +53,25 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
     find_library(app-glue-lib android_native_app_glue)
 
     target_link_libraries(fcaevpn_native
-        ${log-lib}
-        ${android-lib}
-        ${gles-lib}
-        ${egl-lib}
-        ${app-glue-lib}
-        m
+        ${log-lib} ${android-lib} ${gles-lib} ${egl-lib} ${app-glue-lib} m
     )
 
-    # Statically link the Rust FFI library
     set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/target/aarch64-linux-android/release)
     target_link_directories(fcaevpn_native PRIVATE ${RUST_LIB_DIR})
     target_link_libraries(fcaevpn_native libaether_ffi.a)
 
 elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
-    # ── Windows DirectX 11 + Win32 ───────────────────────────────────────
-    set(IMGUI_PLATFORM_SOURCES
-        ${IMGUI_BACKEND_DIR}/imgui_impl_win32.cpp
-    )
-    set(IMGUI_BACKEND_SOURCES
-        ${IMGUI_BACKEND_DIR}/imgui_impl_dx11.cpp
-    )
-
     add_executable(fcaevpn WIN32
         ${IMGUI_SOURCES}
-        ${IMGUI_PLATFORM_SOURCES}
-        ${IMGUI_BACKEND_SOURCES}
+        ${IMGUI_BACKEND_DIR}/imgui_impl_win32.cpp
+        ${IMGUI_BACKEND_DIR}/imgui_impl_dx11.cpp
         ${CMAKE_SOURCE_DIR}/src_cpp/main_win32_dx11.cpp
         ${UI_SOURCES}
     )
 
     target_include_directories(fcaevpn PRIVATE
-        ${IMGUI_DIR}
-        ${IMGUI_BACKEND_DIR}
+        ${IMGUI_DIR} ${IMGUI_BACKEND_DIR}
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src_cpp
     )
@@ -108,11 +82,8 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         AETHER_TARGET_WIN_X64
     )
 
-    target_link_libraries(fcaevpn PRIVATE
-        d3d11 dxgi d3dcompiler
-    )
+    target_link_libraries(fcaevpn PRIVATE d3d11 dxgi d3dcompiler)
 
-    # Statically link the Rust FFI library
     set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/target/x86_64-pc-windows-gnu/release)
     target_link_directories(fcaevpn PRIVATE ${RUST_LIB_DIR})
     target_link_libraries(fcaevpn PRIVATE libaether_ffi.a)
@@ -124,29 +95,20 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
 elseif(UNIX)
 
-    # ── Linux OpenGL3 + GLFW ─────────────────────────────────────────────
     find_package(glfw3 3.3 REQUIRED)
     find_package(OpenGL REQUIRED)
     find_package(X11 REQUIRED)
 
-    set(IMGUI_PLATFORM_SOURCES
-        ${IMGUI_BACKEND_DIR}/imgui_impl_glfw.cpp
-    )
-    set(IMGUI_BACKEND_SOURCES
-        ${IMGUI_BACKEND_DIR}/imgui_impl_opengl3.cpp
-    )
-
     add_executable(fcaevpn
         ${IMGUI_SOURCES}
-        ${IMGUI_PLATFORM_SOURCES}
-        ${IMGUI_BACKEND_SOURCES}
+        ${IMGUI_BACKEND_DIR}/imgui_impl_glfw.cpp
+        ${IMGUI_BACKEND_DIR}/imgui_impl_opengl3.cpp
         ${CMAKE_SOURCE_DIR}/src_cpp/main_linux_glfw.cpp
         ${UI_SOURCES}
     )
 
     target_include_directories(fcaevpn PRIVATE
-        ${IMGUI_DIR}
-        ${IMGUI_BACKEND_DIR}
+        ${IMGUI_DIR} ${IMGUI_BACKEND_DIR}
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src_cpp
     )
@@ -157,24 +119,13 @@ elseif(UNIX)
     )
 
     target_link_libraries(fcaevpn PRIVATE
-        glfw
-        OpenGL::GL
-        X11::X11
-        X11::Xi
-        pthread
-        dl
-        m
+        glfw OpenGL::GL X11::X11 X11::Xi pthread dl m
     )
 
-    # Statically link the Rust FFI library
     set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/target/x86_64-unknown-linux-gnu/release)
     target_link_directories(fcaevpn PRIVATE ${RUST_LIB_DIR})
     target_link_libraries(fcaevpn PRIVATE libaether_ffi.a)
-
-    # Link system libraries needed by Rust staticlib
-    target_link_libraries(fcaevpn PRIVATE
-        ssl crypto z bz2 lzma curl
-    )
+    target_link_libraries(fcaevpn PRIVATE ssl crypto z bz2 lzma curl)
 
 endif()
 
