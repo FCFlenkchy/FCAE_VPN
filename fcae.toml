@@ -1,0 +1,38 @@
+# FCAE VPN Configuration
+# Edit this file to customize your connection settings
+
+[general]
+# Protocol: masque, wg, gool
+protocol = "masque"
+# Mode: proxy or tun
+mode = "proxy"
+# Scan mode: turbo, balanced, thorough, stealth, ironclad
+scan = "balanced"
+
+[network]
+# IP version: 4, 6, 10 (dual-stack)
+ip_version = 4
+# SOCKS5 proxy port
+socks_port = 1819
+# HTTP proxy port
+http_port = 1820
+# LAN sharing (bind to 0.0.0.0 instead of 127.0.0.1)
+lan_sharing = false
+
+[obfuscation]
+# Noize profile: off, firewall, balanced, gfw
+noize = "balanced"
+# TLS ClientHello fragmentation
+fragment = false
+frag_min_size = 16
+frag_max_size = 32
+frag_min_delay = 2
+frag_max_delay = 10
+
+[advanced]
+# Quick reconnect to last known-good gateway
+quick_reconnect = true
+# Force a specific peer (ip:port) or leave empty
+force_peer = ""
+# Config path for identity files
+config_path = "aether.toml"

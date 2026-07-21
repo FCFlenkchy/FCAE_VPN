@@ -71,7 +71,7 @@ static void engine_draw_frame(AndroidAppData* data) {
     if (data->display == EGL_NO_DISPLAY) return;
 
     ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplAndroid_NewFrame(data->width, data->height);
+    ImGui_ImplAndroid_NewFrame();
     ImGui::NewFrame();
 
     ui_frame();
@@ -149,7 +149,7 @@ static void engine_handle_cmd(struct android_app* app, int32_t cmd) {
             data->initialized = false;
             break;
 
-        case APP_CMD_GAIN_FOCUS:
+        case APP_CMD_GAINED_FOCUS:
             data->focused = true;
             break;
 
