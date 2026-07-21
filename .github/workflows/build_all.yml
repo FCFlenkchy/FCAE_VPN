@@ -150,33 +150,56 @@ jobs:
           ./gradlew assembleRelease -PNDK_ABI=arm64-v8a
 
       - name: package
-        if: matrix.name != 'android'
+        if: matrix.name != 'android-arm64'
         run: |
           mkdir -p package
           cp build/fcaevpn* package/ 2>/dev/null || true
           cp aether/target/${{ matrix.target }}/release/aether* package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
+          cd package
+          for f in fcaevpn*; do
+            [ -f "$f" ] || continue
+            if [[ "$f" == *.exe ]]; then
+              mv "$f" "FCAE_VPN_${{ matrix.name }}.exe"
+            else
+              mv "$f" "FCAE_VPN_${{ matrix.name }}"
+            fi
+          done
+          for f in aether*; do
+            [ -f "$f" ] || continue
+            if [[ "$f" == *.exe ]]; then
+              mv "$f" "aether_${{ matrix.name }}.exe"
+            else
+              mv "$f" "aether_${{ matrix.name }}"
+            fi
+          done
+
+      - name: package (android)
+        if: matrix.name == 'android-arm64'
+        run: |
+          mkdir -p package
+          cp android/app/build/outputs/apk/release/*.apk package/FCAE_VPN_android-arm64.apk 2>/dev/null || true
 
       - name: upload (desktop)
         if: matrix.name != 'android-arm64'
         uses: actions/upload-artifact@v4
         with:
-          name: fcaevpn-${{ matrix.name }}-${{ github.event.inputs.release_tag }}
+          name: FCAE_VPN-${{ matrix.name }}
           path: package/
 
       - name: upload (android)
-        if: matrix.name == 'android-arm64-v8a'
+        if: matrix.name == 'android-arm64'
         uses: actions/upload-artifact@v4
         with:
-          name: fcaevpn-${{ matrix.name }}-${{ github.event.inputs.release_tag }}
-          path: android/app/build/outputs/apk/release/*.apk
+          name: FCAE_VPN-android-arm64
+          path: package/
 
       - name: release
         if: matrix.name == 'linux-x64'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag }}
-          name: "fcaevpn ${{ github.event.inputs.release_tag }}"
+          name: "FCAE VPN ${{ github.event.inputs.release_tag }}"
           draft: false
           prerelease: false
           generate_release_notes: true
