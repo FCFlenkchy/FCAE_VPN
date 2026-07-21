@@ -157,13 +157,19 @@ jobs:
           cp aether/target/${{ matrix.target }}/release/aether* package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
 
-      - name: upload
+      - name: upload (desktop)
+        if: matrix.name != 'android-arm64'
         uses: actions/upload-artifact@v4
         with:
           name: fcaevpn-${{ matrix.name }}-${{ github.event.inputs.release_tag }}
-          path: |
-            package/
-            android/app/build/outputs/apk/release/*.apk
+          path: package/
+
+      - name: upload (android)
+        if: matrix.name == 'android-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcaevpn-${{ matrix.name }}-${{ github.event.inputs.release_tag }}
+          path: android/app/build/outputs/apk/release/*.apk
 
       - name: release
         if: matrix.name == 'linux-x64'
@@ -174,5 +180,6 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+          files: package/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -50,10 +50,14 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
     find_library(android-lib android)
     find_library(gles-lib GLESv3)
     find_library(egl-lib EGL)
-    find_library(app-glue-lib android_native_app_glue)
+
+    # Build android_native_app_glue from NDK source
+    set(APP_GLUE_DIR ${ANDROID_NDK}/sources/android/native_app_glue)
+    add_library(app-glue STATIC ${APP_GLUE_DIR}/android_native_app_glue.c)
+    target_include_directories(app-glue PUBLIC ${APP_GLUE_DIR})
 
     target_link_libraries(fcaevpn_native
-        ${log-lib} ${android-lib} ${gles-lib} ${egl-lib} ${app-glue-lib} m
+        ${log-lib} ${android-lib} ${gles-lib} ${egl-lib} app-glue m
     )
 
     set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/target/aarch64-linux-android/release)
