@@ -9,6 +9,7 @@ option(AETHER_TARGET "Build target" "LINUX_X64")
 
 # ── Source files ──────────────────────────────────────────────────────────
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
+set(IMGUI_BACKEND_DIR ${IMGUI_DIR}/backends)
 
 set(IMGUI_SOURCES
     ${IMGUI_DIR}/imgui.cpp
@@ -37,14 +38,15 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
     # ── Android NDK / GLES3 + NativeActivity ─────────────────────────────
     add_library(fcaevpn_native SHARED
         ${IMGUI_SOURCES}
-        ${IMGUI_DIR}/imgui_impl_android.cpp
-        ${IMGUI_DIR}/imgui_impl_opengl3.cpp
+        ${IMGUI_BACKEND_DIR}/imgui_impl_android.cpp
+        ${IMGUI_BACKEND_DIR}/imgui_impl_opengl3.cpp
         ${CMAKE_SOURCE_DIR}/src_cpp/main_android_gles3.cpp
         ${UI_SOURCES}
     )
 
     target_include_directories(fcaevpn_native PRIVATE
         ${IMGUI_DIR}
+        ${IMGUI_BACKEND_DIR}
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src_cpp
     )
@@ -79,10 +81,10 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     # ── Windows DirectX 11 + Win32 ───────────────────────────────────────
     set(IMGUI_PLATFORM_SOURCES
-        ${IMGUI_DIR}/imgui_impl_win32.cpp
+        ${IMGUI_BACKEND_DIR}/imgui_impl_win32.cpp
     )
     set(IMGUI_BACKEND_SOURCES
-        ${IMGUI_DIR}/imgui_impl_dx11.cpp
+        ${IMGUI_BACKEND_DIR}/imgui_impl_dx11.cpp
     )
 
     add_executable(fcaevpn WIN32
@@ -95,6 +97,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     target_include_directories(fcaevpn PRIVATE
         ${IMGUI_DIR}
+        ${IMGUI_BACKEND_DIR}
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src_cpp
     )
@@ -127,10 +130,10 @@ elseif(UNIX)
     find_package(X11 REQUIRED)
 
     set(IMGUI_PLATFORM_SOURCES
-        ${IMGUI_DIR}/imgui_impl_glfw.cpp
+        ${IMGUI_BACKEND_DIR}/imgui_impl_glfw.cpp
     )
     set(IMGUI_BACKEND_SOURCES
-        ${IMGUI_DIR}/imgui_impl_opengl3.cpp
+        ${IMGUI_BACKEND_DIR}/imgui_impl_opengl3.cpp
     )
 
     add_executable(fcaevpn
@@ -143,6 +146,7 @@ elseif(UNIX)
 
     target_include_directories(fcaevpn PRIVATE
         ${IMGUI_DIR}
+        ${IMGUI_BACKEND_DIR}
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src_cpp
     )

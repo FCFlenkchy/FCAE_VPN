@@ -134,7 +134,12 @@ jobs:
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           yes | sdkmanager --licenses || true
           sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+          # Generate gradle wrapper if missing
           cd android
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            gradle wrapper --gradle-version 8.5
+          fi
           chmod +x ./gradlew
           ./gradlew assembleRelease -PNDK_ABI=arm64-v8a
 
