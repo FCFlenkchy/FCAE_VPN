@@ -53,14 +53,15 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const caches = await github.rest.actions.getActionsCacheList({
+            const res = await github.rest.actions.getActionsCacheList({
               owner: context.repo.owner,
               repo: context.repo.repo,
               key: 'cmake-${{ matrix.name }}-',
               per_page: 100,
             });
+            const caches = res.data.actions_caches || [];
             // Keep only the 2 most recent cmake caches per platform
-            const toDelete = caches.data.caches.slice(2);
+            const toDelete = caches.slice(2);
             for (const cache of toDelete) {
               await github.rest.actions.deleteActionsCacheById({
                 owner: context.repo.owner,
