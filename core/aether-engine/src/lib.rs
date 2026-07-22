@@ -1388,7 +1388,7 @@ async fn prompt_line(prompt: &str) -> Option<String> {
     }
 }
 
-const SCAN_MODE_PROMPT: &str = "\nScan mode (discovery speed):\n  [1] turbo     (fast, first hit)\n  [2] balanced  (default)\n  [3] thorough  (deep, best ping)\n  [4] stealth   (quiet, patient)\nChoose [1-4] (default 2): ";
+const SCAN_MODE_PROMPT: &str = "\nScan mode (discovery speed):\n  [1] turbo     (fast, first hit)\n  [2] balanced  (thorough)\n  [3] thorough  (deep, best ping)\n  [4] stealth   (quiet, patient)\nChoose [1-4] (default 1): ";
 
 const VALIDATE_PROMPT: &str = "\nValidate candidates with:\n  [1] handshake / dataplane ping (default, fast)\n  [2] ironclad — real tunnel + HTTP on top candidates only\nChoose [1-2] (default 1): ";
 
@@ -1400,10 +1400,10 @@ async fn select_scan_mode() -> prober::ScanMode {
     let answer = prompt_line(SCAN_MODE_PROMPT).await;
 
     match answer.as_deref() {
-        Some("1") => prober::ScanMode::Turbo,
+        Some("2") => prober::ScanMode::Balanced,
         Some("3") => prober::ScanMode::Thorough,
         Some("4") => prober::ScanMode::Stealth,
-        _ => prober::ScanMode::Balanced,
+        _ => prober::ScanMode::Turbo,
     }
 }
 
@@ -1414,10 +1414,10 @@ async fn select_scan_mode_str() -> String {
 
     let answer = prompt_line(SCAN_MODE_PROMPT).await;
     let mode = match answer.as_deref() {
-        Some("1") => "turbo".to_string(),
+        Some("2") => "balanced".to_string(),
         Some("3") => "thorough".to_string(),
         Some("4") => "stealth".to_string(),
-        _ => "balanced".to_string(),
+        _ => "turbo".to_string(),
     };
 
     // Optional ironclad validation (independent of scan mode).

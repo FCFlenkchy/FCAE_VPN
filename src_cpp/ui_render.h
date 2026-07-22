@@ -26,9 +26,9 @@ struct AppState {
     int  protocol        = 0;
     int  mode            = 0;
     bool lan_sharing     = false;
-    int  scan_mode       = 1;
+    int  scan_mode       = 0;
     int  ip_version      = 4;
-    bool quick_reconnect = true;
+    bool quick_reconnect = false;
     char noize_profile[32] = "balanced";
     bool fragment_enabled = false;
     int  frag_min_size   = 16;
@@ -40,8 +40,8 @@ struct AppState {
     char force_peer[128] = {};
     // Engine identity file (Cloudflare device certs). Not the UI settings file.
     char config_path[256] = "aether.toml";
-    bool h2_enabled      = false;
-    bool ech_enabled     = false;
+    bool h2_enabled      = true;
+    bool ech_enabled     = true;
 
     // MASQUE SNI (empty = default consumer-masque.cloudflareclient.com)
     char sni[128] = {};

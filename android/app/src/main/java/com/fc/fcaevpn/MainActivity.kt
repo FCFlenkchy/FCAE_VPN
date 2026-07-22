@@ -194,7 +194,7 @@ class MainActivity : AppCompatActivity() {
         spinnerScan.setSelection(prefs.getInt("scan", 0))
         switchH2.isChecked = prefs.getBoolean("h2", true)
         switchEch.isChecked = prefs.getBoolean("ech", true)
-        switchQuick.isChecked = prefs.getBoolean("quick", true)
+        switchQuick.isChecked = prefs.getBoolean("quick", false)
         switchIronclad.isChecked = prefs.getBoolean("ironclad", false)
         switchLogging.isChecked = prefs.getBoolean("logging", true)
         editSni.setText(prefs.getString("sni", ""))

@@ -127,7 +127,6 @@
             android:id="@+id/switchQuick"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:checked="true"
             android:text="Quick reconnect"
             android:textColor="#FFE0E4EE" />
 
