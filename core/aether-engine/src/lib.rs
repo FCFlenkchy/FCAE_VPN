@@ -986,7 +986,7 @@ fn wg_profile_candidates() -> Vec<(String, aethernoize::AetherNoizeConfig)> {
 
     let mut names = vec![primary.clone()];
     if std::env::var("AETHER_WG_NO_PROFILE_RETRY").is_err() {
-        for fallback in ["balanced", "aggressive", "light", "off"] {
+        for fallback in ["balanced", "chrome", "aggressive", "light", "off"] {
             if !names.iter().any(|n| n.eq_ignore_ascii_case(fallback)) {
                 names.push(fallback.to_string());
             }

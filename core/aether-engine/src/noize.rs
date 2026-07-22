@@ -53,6 +53,45 @@ impl NoizeConfig {
         }
     }
 
+    /// Chrome TLS fingerprint — blends with legitimate Chrome traffic
+    pub fn chrome() -> Self {
+        Self {
+            jc_before_hs: 3,
+            jc_after_i1: 2,
+            jmin: 128,
+            jmax: 512,
+            i1: Some("<b 16030300><rd 2><b 010000><rd 2><b 0303><rc 32>".to_string()),
+            i2: Some("<b 504f5354><rc 20-30><rd 10-20>".to_string()),
+            junk_interval: Duration::from_millis(2),
+        }
+    }
+
+    /// VoIP-like — fixed-size packets at 20ms intervals
+    pub fn voice() -> Self {
+        Self {
+            jc_before_hs: 1,
+            jc_after_i1: 1,
+            jmin: 120,
+            jmax: 180,
+            i1: Some("<b 806f0001><t><r 152-160>".to_string()),
+            i2: Some("<b 80f00002><t><r 120-128>".to_string()),
+            junk_interval: Duration::from_millis(20),
+        }
+    }
+
+    /// Streaming — large burst packets
+    pub fn streaming() -> Self {
+        Self {
+            jc_before_hs: 2,
+            jc_after_i1: 3,
+            jmin: 256,
+            jmax: 1400,
+            i1: Some("<b 16030300><rd 2><b 010000><rd 2><b 0303><r 64-128>".to_string()),
+            i2: Some("<b 0000000000><r 256-512>".to_string()),
+            junk_interval: Duration::from_millis(1),
+        }
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.jc_before_hs > 0 || self.jc_after_i1 > 0 || self.i1.is_some()
     }
@@ -62,6 +101,9 @@ pub fn from_profile(name: &str) -> NoizeConfig {
     match name {
         "off" | "none" => NoizeConfig::off(),
         "gfw" => NoizeConfig::gfw(),
+        "chrome" => NoizeConfig::chrome(),
+        "voice" => NoizeConfig::voice(),
+        "streaming" => NoizeConfig::streaming(),
         _ => NoizeConfig::firewall(),
     }
 }

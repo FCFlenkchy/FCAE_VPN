@@ -37,7 +37,7 @@ Tunnel health (background monitoring while connected):
   --reconnect-secs <n>     delay before reconnecting after a tunnel drop (default 2)
 
 Obfuscation:
-  --noize <profile>        obfuscation profile (off, light/firewall, balanced, gfw/aggressive, ...)
+  --noize <profile>        obfuscation profile (off, light/firewall, balanced, gfw/aggressive, chrome, voice, streaming)
 
 MASQUE transport:
   --h2, --http2            use HTTP/2 (TCP) instead of HTTP/3 (QUIC)

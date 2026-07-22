@@ -100,6 +100,73 @@ impl AetherNoizeConfig {
         }
     }
 
+    /// Mimic Chrome TLS fingerprint — blends with legitimate Chrome traffic
+    pub fn chrome() -> Self {
+        Self {
+            // TLS ClientHello-like preamble: content type 0x16, version 0x0303, then Chrome's cipher suites
+            i1: Some("<b 16030300><rd 2><b 010000><rd 2><b 0303><rc 32>".to_string()),
+            // POST-like header after "handshake"
+            i2: Some("<b 504f5354><rc 20-30><rd 10-20>".to_string()),
+            // HTTP/2 SETTINGS frame mimicry
+            i3: Some("<b 00000c040000000000000300006400040000ffff><r 8-16>".to_string()),
+            i4: None,
+            i5: None,
+            jc: 6,
+            jc_before_hs: 3,
+            jc_after_i1: 2,
+            jc_after_hs: 1,
+            jmin: 128,
+            jmax: 512,
+            junk_interval: Duration::from_millis(2),
+            handshake_delay: Duration::from_millis(8),
+            allow_zero_size: false,
+        }
+    }
+
+    /// VoIP/Zoom-like traffic — fixed-size packets at regular 20ms intervals
+    pub fn voice() -> Self {
+        Self {
+            // RTP-like header: V=2, PT=111 (dynamic), fixed 160-byte payload (20ms @ 8kHz)
+            i1: Some("<b 806f0001><t><r 152-160>".to_string()),
+            // Keepalive SRTP-like
+            i2: Some("<b 80f00002><t><r 120-128>".to_string()),
+            i3: None,
+            i4: None,
+            i5: None,
+            jc: 3,
+            jc_before_hs: 1,
+            jc_after_i1: 1,
+            jc_after_hs: 1,
+            jmin: 120,
+            jmax: 180,
+            junk_interval: Duration::from_millis(20),
+            handshake_delay: Duration::from_millis(5),
+            allow_zero_size: false,
+        }
+    }
+
+    /// Streaming traffic — large bursts followed by idle periods
+    pub fn streaming() -> Self {
+        Self {
+            // Large initial burst (like Netflix buffer fill)
+            i1: Some("<b 16030300><rd 2><b 010000><rd 2><b 0303><r 64-128>".to_string()),
+            // HTTP/2 DATA frame-like
+            i2: Some("<b 0000000000><r 256-512>".to_string()),
+            i3: Some("<b 0000000000><r 512-1024>".to_string()),
+            i4: Some("<r 256-512>".to_string()),
+            i5: None,
+            jc: 8,
+            jc_before_hs: 2,
+            jc_after_i1: 3,
+            jc_after_hs: 3,
+            jmin: 256,
+            jmax: 1400,
+            junk_interval: Duration::from_millis(1),
+            handshake_delay: Duration::from_millis(10),
+            allow_zero_size: false,
+        }
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.jc > 0 || self.i1.is_some()
     }
@@ -110,6 +177,9 @@ pub fn from_profile(name: &str) -> AetherNoizeConfig {
         "off" | "none" => AetherNoizeConfig::off(),
         "light" => AetherNoizeConfig::light(),
         "aggressive" | "heavy" => AetherNoizeConfig::aggressive(),
+        "chrome" => AetherNoizeConfig::chrome(),
+        "voice" => AetherNoizeConfig::voice(),
+        "streaming" => AetherNoizeConfig::streaming(),
         _ => AetherNoizeConfig::balanced(),
     }
 }

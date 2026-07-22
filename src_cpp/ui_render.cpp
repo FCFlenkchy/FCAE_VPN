@@ -583,11 +583,11 @@ void render_ui() {
             ImGui::BeginChild("##obf_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Noize Profile");
-            const char* profiles[] = { "off", "firewall", "balanced", "gfw" };
+            const char* profiles[] = { "off", "firewall", "balanced", "gfw", "chrome", "voice", "streaming" };
             int idx = 0;
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 7; i++)
                 if (strcmp(g_app.noize_profile, profiles[i]) == 0) { idx = i; break; }
-            if (ImGui::Combo("Profile", &idx, profiles, 4))
+            if (ImGui::Combo("Profile", &idx, profiles, 7))
                 snprintf(g_app.noize_profile, sizeof(g_app.noize_profile), "%s", profiles[idx]);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("TLS Fragmentation");
