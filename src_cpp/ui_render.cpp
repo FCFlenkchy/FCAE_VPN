@@ -661,16 +661,18 @@ void render_ui() {
 
             // Selectable multi-line log view (click lines to select; Ctrl+C via ImGui input)
             ImGui::BeginChild("##log", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 4), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
-            // Track whether user is at the bottom for auto-scroll
-            if (g_app.auto_scroll) {
-                // Scroll to bottom on first frame or when new logs arrive
+
+            // Auto-scroll: only when new logs arrived AND user was already at the bottom
+            int cur_count = (int)g_app.logs.size();
+            if (g_app.auto_scroll && cur_count > g_app.prev_log_count) {
                 float scroll_y = ImGui::GetScrollY();
                 float scroll_max = ImGui::GetScrollMaxY();
-                bool at_bottom = (scroll_max <= 0.0f) || (scroll_y >= scroll_max - 2.0f);
+                bool at_bottom = (scroll_max <= 0.0f) || (scroll_y >= scroll_max - 4.0f);
                 if (at_bottom) {
                     ImGui::SetScrollHereY(1.0f);
                 }
             }
+            g_app.prev_log_count = cur_count;
             ImGuiListClipper clipper;
             clipper.Begin((int)g_app.logs.size());
             while (clipper.Step()) {
