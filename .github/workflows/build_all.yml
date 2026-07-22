@@ -55,7 +55,10 @@ jobs:
             libglfw3-dev libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
             pkg-config openjdk-17-jdk \
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
-            protobuf-compiler upx-ucl
+            protobuf-compiler upx-ucl \
+            nasm golang-go
+          # boring-sys / BoringSSL needs NASM for x86_64 (incl. MinGW cross builds)
+          nasm -v
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
