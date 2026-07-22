@@ -179,12 +179,6 @@ jobs:
               mv "$f" "FCAE_VPN-${{ matrix.name }}"
             fi
           done
-          # Bundle MinGW DLLs for Windows
-          if [[ "${{ matrix.name }}" == "windows-x64" ]]; then
-            for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
-              cp /usr/x86_64-w64-mingw32/bin/$dll . 2>/dev/null || true
-            done
-          fi
 
       - name: package (android)
         if: matrix.name == 'android-arm64-v8a'
