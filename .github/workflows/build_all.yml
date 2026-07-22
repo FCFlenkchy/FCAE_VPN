@@ -103,6 +103,13 @@ jobs:
             git clone --depth 1 --branch v1.91.8 https://github.com/ocornut/imgui.git third_party/imgui
           fi
 
+      - name: generate icon
+        run: |
+          python3 src_cpp/gen_icon.py src_cpp/icon.ico
+          # Copy PNGs for Android/Linux
+          cp src_cpp/icon_192.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png 2>/dev/null || true
+          cp src_cpp/icon_48.png android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png 2>/dev/null || true
+
       - name: build engine
         run: cd aether && cargo build --release --target ${{ matrix.target }}
         env:
@@ -124,7 +131,7 @@ jobs:
       - name: build frontend (windows)
         if: matrix.name == 'windows-x64'
         run: |
-          python3 src_cpp/gen_icon.py
+          python3 src_cpp/gen_icon.py src_cpp/icon.ico
           mkdir -p build && cd build
           cmake .. -G Ninja \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
