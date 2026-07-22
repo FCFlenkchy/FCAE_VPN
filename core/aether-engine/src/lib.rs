@@ -45,6 +45,15 @@ const TUNNEL_MTU: usize = 1280;
 const INNER_MTU: usize = 1200;
 const DEFAULT_CONFIG: &str = "aether.toml";
 
+/// TLS Server Name (SNI) for MASQUE. Override with AETHER_SNI / --sni.
+fn connect_sni() -> String {
+    std::env::var("AETHER_SNI")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| consts::CONNECT_SNI.to_string())
+}
+
 fn tun_mode_active() -> bool {
     matches!(
         std::env::var("AETHER_MODE")
@@ -53,6 +62,107 @@ fn tun_mode_active() -> bool {
             .as_str(),
         "tun" | "1" | "true" | "vpn"
     ) && tun::resolve_fd().is_some()
+}
+
+/// Post-scan validation: ironclad = real HTTP through tunnel; handshake = probe only.
+fn ironclad_validate() -> bool {
+    match std::env::var("AETHER_VALIDATE")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "ironclad" | "http" | "real" | "1" | "true" | "yes" | "on" => true,
+        _ => false,
+    }
+}
+
+fn health_interval() -> std::time::Duration {
+    let secs = std::env::var("AETHER_HEALTH_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(20);
+    std::time::Duration::from_secs(secs)
+}
+
+fn health_timeout() -> std::time::Duration {
+    let secs = std::env::var("AETHER_HEALTH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(5);
+    std::time::Duration::from_secs(secs)
+}
+
+fn health_max_fails() -> u32 {
+    std::env::var("AETHER_HEALTH_MAX_FAILS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(2)
+}
+
+/// Probe the live netstack before exposing SOCKS (DNS + optional HTTP).
+async fn validate_live_stack(stack: &netstack::StackHandle, label: &str) -> Result<()> {
+    if std::env::var("AETHER_NO_LIVE_CHECK").is_ok() {
+        return Ok(());
+    }
+    let timeout = health_timeout();
+    log::info!("[*] validating live {label} data-plane before exposing SOCKS (timeout {timeout:?})");
+    match tokio::time::timeout(timeout, tunnelping::live_stack_probe(stack)).await {
+        Ok(Ok(())) => {
+            log::info!("[+] live {label} data-plane OK");
+            Ok(())
+        }
+        Ok(Err(e)) => Err(AetherError::Other(format!("live {label} validation failed: {e}"))),
+        Err(_) => Err(AetherError::Other(format!(
+            "live {label} validation timeout ({timeout:?})"
+        ))),
+    }
+}
+
+/// Background health monitor: consecutive failed probes abort the tunnel task.
+fn spawn_health_monitor(
+    stack: netstack::StackHandle,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+) -> tokio::task::JoinHandle<()> {
+    let interval = health_interval();
+    let max_fails = health_max_fails();
+    let probe_timeout = health_timeout();
+    tokio::spawn(async move {
+        let mut fails = 0u32;
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // skip first immediate tick
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let ok = match tokio::time::timeout(probe_timeout, tunnelping::live_stack_probe(&stack))
+                .await
+            {
+                Ok(Ok(())) => true,
+                Ok(Err(e)) => {
+                    log::debug!("[health] probe failed: {e}");
+                    false
+                }
+                Err(_) => {
+                    log::debug!("[health] probe timeout");
+                    false
+                }
+            };
+            if ok {
+                fails = 0;
+            } else {
+                fails += 1;
+                log::warn!("[health] consecutive failures {fails}/{max_fails}");
+                if fails >= max_fails {
+                    log::warn!("[health] tunnel considered dead; forcing reconnect");
+                    let _ = shutdown.send(());
+                    return;
+                }
+            }
+        }
+    })
 }
 
 async fn spawn_local_proxies(
@@ -291,7 +401,7 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
             log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip verification)");
             let mode = prober::ScanMode::parse(&mode_str);
             let probe = prober::MasqueProbe {
-                sni: consts::CONNECT_SNI.to_string(),
+                sni: connect_sni(),
                 authority: quic::default_authority().to_string(),
                 path: quic::default_path().to_string(),
                 cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -378,7 +488,7 @@ async fn hunt_masque_peer(
     log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip + data-plane verification)");
     let mode = prober::ScanMode::parse(mode_str);
     let probe = prober::MasqueProbe {
-        sni: consts::CONNECT_SNI.to_string(),
+        sni: connect_sni(),
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -409,7 +519,7 @@ fn lastconn_path(config_path: &str) -> String {
 async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr) -> bool {
     let vp = quic::VerifyParams {
         peer,
-        sni: consts::CONNECT_SNI.to_string(),
+        sni: connect_sni(),
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: identity.cert_pem.clone(),
@@ -423,7 +533,7 @@ async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr
     if masque_h2::enabled() {
         let cfg = masque_h2::H2TunnelConfig {
             peer: masque_h2::h2_peer(peer),
-            sni: consts::CONNECT_SNI.to_string(),
+            sni: connect_sni(),
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
@@ -610,7 +720,7 @@ async fn run_masque_tunnel(
 
     let cfg = quic::TunnelConfig {
         peer,
-        sni: consts::CONNECT_SNI.to_string(),
+        sni: connect_sni(),
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: identity.cert_pem.clone(),
@@ -657,7 +767,7 @@ async fn run_masque_tunnel(
     let tunnel_task = if masque_h2::enabled() {
         let h2cfg = masque_h2::H2TunnelConfig {
             peer: masque_h2::h2_peer(peer),
-            sni: consts::CONNECT_SNI.to_string(),
+            sni: connect_sni(),
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
@@ -695,10 +805,29 @@ async fn run_masque_tunnel(
         }));
     }
 
+    // Re-validate on the live stack before SOCKS (avoids false positives after reconnect).
+    if let Err(e) = validate_live_stack(&stack, "MASQUE").await {
+        tunnel_task.abort();
+        if let Some(t) = tun_task {
+            t.abort();
+        }
+        return Err(e);
+    }
+
+    let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
+    let health_task = spawn_health_monitor(stack.clone(), health_tx);
     let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
 
-    let tunnel_result = tunnel_task.await;
+    enum End {
+        Tunnel(std::result::Result<Result<()>, tokio::task::JoinError>),
+        Health,
+    }
+    let end = tokio::select! {
+        r = tunnel_task => End::Tunnel(r),
+        _ = health_rx => End::Health,
+    };
     socks_task.abort();
+    health_task.abort();
     if let Some(t) = http_task {
         t.abort();
     }
@@ -706,10 +835,11 @@ async fn run_masque_tunnel(
         t.abort();
     }
 
-    match tunnel_result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(AetherError::Other(format!("tunnel exited: {e}"))),
-        Err(e) => Err(AetherError::Other(format!("tunnel task join error: {e}"))),
+    match end {
+        End::Health => Err(AetherError::Other("tunnel health check failed".into())),
+        End::Tunnel(Ok(Ok(()))) => Ok(()),
+        End::Tunnel(Ok(Err(e))) => Err(AetherError::Other(format!("tunnel exited: {e}"))),
+        End::Tunnel(Err(e)) => Err(AetherError::Other(format!("tunnel task join error: {e}"))),
     }
 }
 
@@ -1005,6 +1135,9 @@ async fn run_wireguard_tunnel(
         ns_out_tx,
     )?;
 
+    // Run tunnel first so live validation can pass traffic.
+    let tunnel_task = tokio::spawn(async move { tunnel.run(outbound_rx).await });
+
     let mut tun_task = None;
     if let Some((fd, ot, tun_rx)) = tun_bridge {
         log::info!("[+] TUN mode: bridging Android/system fd={fd}");
@@ -1015,10 +1148,33 @@ async fn run_wireguard_tunnel(
         }));
     }
 
+    // Brief settle for handshake + first timers before live probe.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    // WireGuard was verified on a throwaway session; re-check the LIVE stack
+    // before SOCKS (fixes false positives on quick-reconnect / Ironclad).
+    if let Err(e) = validate_live_stack(&stack, "WireGuard").await {
+        tunnel_task.abort();
+        if let Some(t) = tun_task {
+            t.abort();
+        }
+        return Err(e);
+    }
+
+    let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
+    let health_task = spawn_health_monitor(stack.clone(), health_tx);
     let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
 
-    let tunnel_result = tunnel.run(outbound_rx).await;
+    enum End {
+        Tunnel(std::result::Result<Result<()>, tokio::task::JoinError>),
+        Health,
+    }
+    let end = tokio::select! {
+        r = tunnel_task => End::Tunnel(r),
+        _ = health_rx => End::Health,
+    };
     socks_task.abort();
+    health_task.abort();
     if let Some(t) = http_task {
         t.abort();
     }
@@ -1026,9 +1182,11 @@ async fn run_wireguard_tunnel(
         t.abort();
     }
 
-    match tunnel_result {
-        Ok(()) => Ok(()),
-        Err(e) => Err(AetherError::Other(format!("wireguard tunnel exited: {e}"))),
+    match end {
+        End::Health => Err(AetherError::Other("tunnel health check failed".into())),
+        End::Tunnel(Ok(Ok(()))) => Ok(()),
+        End::Tunnel(Ok(Err(e))) => Err(AetherError::Other(format!("wireguard tunnel exited: {e}"))),
+        End::Tunnel(Err(e)) => Err(AetherError::Other(format!("wireguard task join: {e}"))),
     }
 }
 
@@ -1195,7 +1353,9 @@ async fn prompt_line(prompt: &str) -> Option<String> {
     }
 }
 
-const SCAN_MODE_PROMPT: &str = "\nScan mode:\n  [1] turbo     (fast, first hit)\n  [2] balanced  (default)\n  [3] thorough  (deep, best ping)\n  [4] stealth   (quiet, patient)\n  [5] ironclad  (real tunnel + real HTTP check per candidate, guaranteed working)\nChoose [1-5] (default 2): ";
+const SCAN_MODE_PROMPT: &str = "\nScan mode (discovery speed):\n  [1] turbo     (fast, first hit)\n  [2] balanced  (default)\n  [3] thorough  (deep, best ping)\n  [4] stealth   (quiet, patient)\nChoose [1-4] (default 2): ";
+
+const VALIDATE_PROMPT: &str = "\nValidate candidates with:\n  [1] handshake / dataplane ping (default, fast)\n  [2] ironclad — real tunnel + HTTP on top candidates only\nChoose [1-2] (default 1): ";
 
 async fn select_scan_mode() -> prober::ScanMode {
     if let Ok(v) = std::env::var("AETHER_SCAN") {
@@ -1208,7 +1368,6 @@ async fn select_scan_mode() -> prober::ScanMode {
         Some("1") => prober::ScanMode::Turbo,
         Some("3") => prober::ScanMode::Thorough,
         Some("4") => prober::ScanMode::Stealth,
-        Some("5") => prober::ScanMode::Ironclad,
         _ => prober::ScanMode::Balanced,
     }
 }
@@ -1219,14 +1378,24 @@ async fn select_scan_mode_str() -> String {
     }
 
     let answer = prompt_line(SCAN_MODE_PROMPT).await;
-
-    match answer.as_deref() {
+    let mode = match answer.as_deref() {
         Some("1") => "turbo".to_string(),
         Some("3") => "thorough".to_string(),
         Some("4") => "stealth".to_string(),
-        Some("5") => "ironclad".to_string(),
         _ => "balanced".to_string(),
+    };
+
+    // Optional ironclad validation (independent of scan mode).
+    if std::env::var("AETHER_VALIDATE").is_err() && std::env::var("AETHER_NONINTERACTIVE").is_err()
+    {
+        let v = prompt_line(VALIDATE_PROMPT).await;
+        if matches!(v.as_deref(), Some("2")) {
+            std::env::set_var("AETHER_VALIDATE", "ironclad");
+            log::info!("[+] validation mode: ironclad (post-scan HTTP check on top candidates)");
+        }
     }
+
+    mode
 }
 
 async fn select_protocol() -> Protocol {

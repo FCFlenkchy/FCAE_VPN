@@ -101,7 +101,13 @@ impl ScanMode {
             "turbo" | "fast" => ScanMode::Turbo,
             "thorough" | "deep" | "pro" => ScanMode::Thorough,
             "stealth" | "quiet" => ScanMode::Stealth,
-            "ironclad" | "real" | "verify" | "guaranteed" => ScanMode::Ironclad,
+            // Legacy: ironclad was a scan mode — treat as balanced discovery.
+            "ironclad" | "real" | "verify" | "guaranteed" => {
+                if std::env::var("AETHER_VALIDATE").is_err() {
+                    std::env::set_var("AETHER_VALIDATE", "ironclad");
+                }
+                ScanMode::Balanced
+            }
             _ => ScanMode::Balanced,
         }
     }
@@ -158,12 +164,13 @@ impl ScanMode {
                 full_subnet: false,
                 sample_per_cidr: 64,
             },
+            // Kept for type completeness; parse() maps ironclad → Balanced + AETHER_VALIDATE.
             ScanMode::Ironclad => Strategy {
-                concurrency: 4,
-                per_probe_timeout: Duration::from_millis(15000),
-                overall_deadline: Duration::from_secs(180),
-                quiet_after_first: Duration::from_secs(15),
-                target_successes: 3,
+                concurrency: 16,
+                per_probe_timeout: Duration::from_millis(6000),
+                overall_deadline: Duration::from_secs(120),
+                quiet_after_first: Duration::from_secs(20),
+                target_successes: 6,
                 early_exit_first: false,
                 full_subnet: false,
                 sample_per_cidr: 140,
@@ -232,12 +239,20 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
         st.overall_deadline,
     );
 
-    let ironclad = mode == ScanMode::Ironclad;
+    let ironclad = std::env::var("AETHER_VALIDATE")
+        .map(|v| {
+            let v = v.to_lowercase();
+            matches!(
+                v.as_str(),
+                "ironclad" | "http" | "real" | "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
 
     let stream = futures::stream::iter(
         candidates
             .into_iter()
-            .map(|(ip, port)| verify_one(probe, ip, port, timeout, ironclad)),
+            .map(|(ip, port)| verify_one(probe, ip, port, timeout, false)),
     )
     .buffer_unordered(st.concurrency);
     tokio::pin!(stream);
@@ -246,6 +261,8 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
     let mut best: Option<ProbeResult> = None;
     let mut found = 0usize;
     let mut quiet_until: Option<Instant> = None;
+    // Collect handshake-ok candidates for optional ironclad post-validation.
+    let mut candidates_ok: Vec<ProbeResult> = Vec::new();
 
     loop {
         let effective = match quiet_until {
@@ -254,7 +271,7 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
         };
         let remaining = effective.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            if best.is_some() {
+            if best.is_some() || !candidates_ok.is_empty() {
                 if quiet_until.is_some() {
                     log::info!("[+] no new gateways recently, finalizing selection");
                 } else {
@@ -273,15 +290,14 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
                     Some(None) => continue,
                     Some(Some(pr)) => {
                         log::info!("[+] candidate ok {}:{} rtt={:?}", pr.ip, pr.port, pr.rtt);
-                        if st.early_exit_first {
+                        if st.early_exit_first && !ironclad {
                             return Ok(pr);
                         }
-                        best = Some(match best {
-                            Some(cur) if cur.rtt <= pr.rtt => cur,
-                            _ => pr,
-                        });
+                        candidates_ok.push(pr);
+                        candidates_ok.sort_by_key(|p| p.rtt);
+                        best = candidates_ok.first().copied();
                         found += 1;
-                        
+
                         if st.target_successes > 0 && found >= st.target_successes && quiet_until.is_none() {
                             log::info!("[+] reached target of {} gateways, selecting best", st.target_successes);
                             if !st.quiet_after_first.is_zero() {
@@ -294,7 +310,7 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
                 }
             }
             _ = tokio::time::sleep(remaining) => {
-                if best.is_some() {
+                if best.is_some() || !candidates_ok.is_empty() {
                     if quiet_until.is_some() {
                         log::info!("[+] no new gateways recently, finalizing selection");
                     } else {
@@ -306,6 +322,31 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
                 break;
             }
         }
+    }
+
+    if ironclad && !candidates_ok.is_empty() {
+        log::info!(
+            "[*] ironclad validation on top {} handshake candidates (not full scan)",
+            candidates_ok.len().min(8)
+        );
+        for pr in candidates_ok.iter().take(8) {
+            if let Some(ok) = verify_one(probe, pr.ip, pr.port, IRONCLAD_TCPING_TIMEOUT, true).await
+            {
+                log::info!(
+                    "[+] ironclad-validated gateway {}:{} rtt={:?}",
+                    ok.ip,
+                    ok.port,
+                    ok.rtt
+                );
+                return Ok(ok);
+            }
+            log::warn!(
+                "[-] ironclad rejected {}:{} — trying next candidate",
+                pr.ip,
+                pr.port
+            );
+        }
+        return Err(AetherError::NoCleanEndpoint);
     }
 
     match best {

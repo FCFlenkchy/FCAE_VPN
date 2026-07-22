@@ -52,6 +52,7 @@ typedef struct {
     int dns_ip_prefer;        // 0 = follow ip_version, 4 = A only, 6 = AAAA only, 10 = dual (AAAA then A)
     const char* tls_groups;   // e.g. "P-256:X25519:P-384" (BoringSSL curves list)
     uint32_t udp_buf_kb;      // UDP socket buffer size in KiB (0 = default 512)
+    const char* sni;          // TLS Server Name for MASQUE (NULL = default consumer-masque...)
 } AetherConfig;
 
 typedef struct {

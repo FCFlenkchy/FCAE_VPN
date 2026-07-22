@@ -24,7 +24,17 @@ Scan mode:
   --balanced               shortcut for --scan balanced
   --thorough               shortcut for --scan thorough
   --stealth                shortcut for --scan stealth
-  --ironclad               shortcut for --scan ironclad (real tunnel + real HTTP check per candidate)
+
+Validation (after scan finds candidates):
+  --validate <mode>        handshake (default) | ironclad
+  --ironclad               shortcut for --validate ironclad
+                           (real tunnel + HTTP check on top candidates, not every IP)
+
+Tunnel health (background monitoring while connected):
+  --health-interval <n>    seconds between live probes (default 20)
+  --health-max-fails <n>   consecutive failed probes before reconnect (default 2)
+  --health-timeout <n>     seconds per health probe (default 5)
+  --reconnect-secs <n>     delay before reconnecting after a tunnel drop (default 2)
 
 Obfuscation:
   --noize <profile>        obfuscation profile (off, light/firewall, balanced, gfw/aggressive, ...)
@@ -32,10 +42,11 @@ Obfuscation:
 MASQUE transport:
   --h2, --http2            use HTTP/2 (TCP) instead of HTTP/3 (QUIC)
   --h2-peer <ip:port>      override the peer used for the HTTP/2 transport
+  --sni <hostname>         custom TLS Server Name (SNI) for MASQUE handshakes
+                           (default consumer-masque.cloudflareclient.com)
   --ech <auto|base64>      enable Encrypted Client Hello
   --no-data-check          skip the end-to-end data-plane validation
   --validate-secs <n>      seconds to wait for data-plane validation (default 10)
-  --reconnect-secs <n>     delay before reconnecting after a tunnel drop (default 2)
   --fragment               fragment the TLS ClientHello on the HTTP/2 transport
   --fragment-size <n|a-b>  fragment chunk size in bytes (default 16-32)
   --fragment-delay <n|a-b> delay between fragments in ms (default 2-10)
@@ -107,19 +118,30 @@ pub fn parse_and_apply() -> crate::error::Result<()> {
             "--balanced" => set("AETHER_SCAN", "balanced"),
             "--thorough" => set("AETHER_SCAN", "thorough"),
             "--stealth" => set("AETHER_SCAN", "stealth"),
-            "--ironclad" => set("AETHER_SCAN", "ironclad"),
+            // Legacy: --ironclad used to be a scan mode; now it's validation.
+            "--ironclad" => set("AETHER_VALIDATE", "ironclad"),
+            "--validate" => set("AETHER_VALIDATE", next_value!()),
 
             "--noize" => set("AETHER_NOIZE", next_value!()),
 
             "--h2" | "--http2" => set("AETHER_MASQUE_HTTP2", "1"),
             "--h2-peer" => set("AETHER_MASQUE_H2_PEER", next_value!()),
+            "--sni" => set("AETHER_SNI", next_value!()),
             "--ech" => set("AETHER_ECH", next_value!()),
             "--no-data-check" => {
                 set("AETHER_MASQUE_NO_DATA_CHECK", "1");
                 set("AETHER_WG_NO_DATA_CHECK", "1");
+                set("AETHER_NO_LIVE_CHECK", "1");
             }
             "--validate-secs" => set("AETHER_MASQUE_VALIDATE_SECS", next_value!()),
-            "--reconnect-secs" => set("AETHER_MASQUE_RECONNECT_SECS", next_value!()),
+            "--reconnect-secs" => {
+                let v = next_value!();
+                set("AETHER_MASQUE_RECONNECT_SECS", v);
+                set("AETHER_WG_RECONNECT_SECS", v);
+            }
+            "--health-interval" => set("AETHER_HEALTH_INTERVAL_SECS", next_value!()),
+            "--health-max-fails" => set("AETHER_HEALTH_MAX_FAILS", next_value!()),
+            "--health-timeout" => set("AETHER_HEALTH_TIMEOUT_SECS", next_value!()),
             "--fragment" => set("AETHER_MASQUE_H2_FRAGMENT", "1"),
             "--fragment-size" => set("AETHER_MASQUE_H2_FRAGMENT_SIZE", next_value!()),
             "--fragment-delay" => set("AETHER_MASQUE_H2_FRAGMENT_DELAY", next_value!()),

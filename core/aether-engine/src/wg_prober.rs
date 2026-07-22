@@ -33,7 +33,13 @@ impl WgScanMode {
             "turbo" | "fast" => WgScanMode::Turbo,
             "thorough" | "deep" | "pro" => WgScanMode::Thorough,
             "stealth" | "quiet" => WgScanMode::Stealth,
-            "ironclad" | "real" | "verify" | "guaranteed" => WgScanMode::Ironclad,
+            // Legacy scan-mode name → balanced discovery + ironclad validation.
+            "ironclad" | "real" | "verify" | "guaranteed" => {
+                if std::env::var("AETHER_VALIDATE").is_err() {
+                    std::env::set_var("AETHER_VALIDATE", "ironclad");
+                }
+                WgScanMode::Balanced
+            }
             _ => WgScanMode::Balanced,
         }
     }
@@ -154,12 +160,20 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
         st.overall_deadline,
     );
 
-    let ironclad = mode == WgScanMode::Ironclad;
+    let ironclad = std::env::var("AETHER_VALIDATE")
+        .map(|v| {
+            let v = v.to_lowercase();
+            matches!(
+                v.as_str(),
+                "ironclad" | "http" | "real" | "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
 
     let stream = futures::stream::iter(
         candidates
             .into_iter()
-            .map(|(ip, port)| verify_one_wg(probe, ip, port, timeout, ironclad)),
+            .map(|(ip, port)| verify_one_wg(probe, ip, port, timeout, false)),
     )
     .buffer_unordered(st.concurrency);
     tokio::pin!(stream);
@@ -168,6 +182,7 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
     let mut best: Option<WgProbeResult> = None;
     let mut found = 0usize;
     let mut quiet_until: Option<Instant> = None;
+    let mut candidates_ok: Vec<WgProbeResult> = Vec::new();
 
     loop {
         let effective = match quiet_until {
@@ -176,7 +191,7 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
         };
         let remaining = effective.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            if best.is_some() {
+            if best.is_some() || !candidates_ok.is_empty() {
                 if quiet_until.is_some() {
                     log::info!("[+] no new endpoints recently, finalizing selection");
                 } else {
@@ -195,13 +210,12 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
                     Some(None) => continue,
                     Some(Some(pr)) => {
                         log::info!("[+] wg candidate ok {}:{} rtt={:?}", pr.ip, pr.port, pr.rtt);
-                        if st.early_exit_first {
+                        if st.early_exit_first && !ironclad {
                             return Ok(pr);
                         }
-                        best = Some(match best {
-                            Some(cur) if cur.rtt <= pr.rtt => cur,
-                            _ => pr,
-                        });
+                        candidates_ok.push(pr);
+                        candidates_ok.sort_by_key(|p| p.rtt);
+                        best = candidates_ok.first().copied();
                         found += 1;
 
                         if st.target_successes > 0 && found >= st.target_successes && quiet_until.is_none() {
@@ -216,7 +230,7 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
                 }
             }
             _ = tokio::time::sleep(remaining) => {
-                if best.is_some() {
+                if best.is_some() || !candidates_ok.is_empty() {
                     if quiet_until.is_some() {
                         log::info!("[+] no new endpoints recently, finalizing selection");
                     } else {
@@ -228,6 +242,32 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
                 break;
             }
         }
+    }
+
+    if ironclad && !candidates_ok.is_empty() {
+        log::info!(
+            "[*] ironclad validation on top {} handshake WG candidates",
+            candidates_ok.len().min(8)
+        );
+        for pr in candidates_ok.iter().take(8) {
+            if let Some(ok) =
+                verify_one_wg(probe, pr.ip, pr.port, WG_IRONCLAD_TCPING_TIMEOUT, true).await
+            {
+                log::info!(
+                    "[+] ironclad-validated wg {}:{} rtt={:?}",
+                    ok.ip,
+                    ok.port,
+                    ok.rtt
+                );
+                return Ok(ok);
+            }
+            log::warn!(
+                "[-] ironclad rejected wg {}:{} — trying next",
+                pr.ip,
+                pr.port
+            );
+        }
+        return Err(AetherError::NoCleanEndpoint);
     }
 
     match best {

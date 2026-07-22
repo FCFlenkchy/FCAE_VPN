@@ -70,6 +70,20 @@ async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
     }
 }
 
+/// End-to-end probe on an already-running netstack (DNS + HTTP 204).
+/// Used before exposing SOCKS and for background health checks.
+pub async fn live_stack_probe(stack: &netstack::StackHandle) -> Result<()> {
+    // Prefer full HTTP path; fall back to DNS-only if HTTP host is blocked.
+    match http_probe(stack).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            log::debug!("[health] http probe failed ({e}); trying DNS-only");
+            let _ip = socks::dns_resolve(stack, "one.one.one.one").await?;
+            Ok(())
+        }
+    }
+}
+
 pub struct MasquePingParams {
     pub peer: SocketAddr,
     pub sni: String,

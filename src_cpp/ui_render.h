@@ -44,14 +44,6 @@ struct AppState {
     bool h2_enabled      = false;
     bool ech_enabled     = false;
 
-    // DNS / TLS
-    char dns_server[128] = "1.1.1.1:53";
-    int  dns_mode        = 0; // 0=UDP 1=DoH
-    char doh_url[256]    = "https://cloudflare-dns.com/dns-query";
-    int  dns_ip_prefer   = 0; // 0=follow scan, 4, 6, 10
-    char tls_groups[128] = ""; // empty = engine default (P-256:X25519:P-384)
-    int  udp_buf_kb      = 512;
-
     AetherTelemetry telem = {};
     double last_telem_t = 0.0;
 
@@ -103,12 +95,13 @@ struct AppState {
         c.config_path      = config_path;
         c.h2_enabled       = h2_enabled;
         c.ech_enabled      = ech_enabled;
-        c.dns_server       = dns_server[0] ? dns_server : nullptr;
-        c.dns_mode         = dns_mode;
-        c.doh_url          = doh_url[0] ? doh_url : nullptr;
-        c.dns_ip_prefer    = dns_ip_prefer;
-        c.tls_groups       = tls_groups[0] ? tls_groups : nullptr;
-        c.udp_buf_kb       = (uint32_t)(udp_buf_kb > 0 ? udp_buf_kb : 0);
+        c.dns_server       = nullptr;
+        c.dns_mode         = 0;
+        c.doh_url          = nullptr;
+        c.dns_ip_prefer    = 0;
+        c.tls_groups       = nullptr;
+        c.udp_buf_kb       = 0;
+        c.sni              = nullptr;
         return c;
     }
 };

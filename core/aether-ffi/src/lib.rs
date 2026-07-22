@@ -77,6 +77,7 @@ pub struct AetherCfgRaw {
     pub dns_ip_prefer: i32,
     pub tls_groups: *const c_char,
     pub udp_buf_kb: u32,
+    pub sni: *const c_char,
 }
 
 #[repr(C)]
@@ -442,6 +443,11 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
         std::env::set_var("AETHER_UDP_BUF_KB", cfg.udp_buf_kb.to_string());
     } else {
         std::env::remove_var("AETHER_UDP_BUF_KB");
+    }
+    if let Some(sni) = cstr_opt(cfg.sni) {
+        std::env::set_var("AETHER_SNI", sni);
+    } else {
+        std::env::remove_var("AETHER_SNI");
     }
     // TUN mode flag for engine (Android sets fd separately via aether_set_android_tun_fd)
     if cfg.mode == 1 {
