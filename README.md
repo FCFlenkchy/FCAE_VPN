@@ -38,7 +38,7 @@ All traffic between the client and Cloudflare is encrypted. From Cloudflare onwa
 │         ▼                                                           │
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │                    Encrypted Tunnel                          │   │
-│  │   ┌──────────┐    ┌──────────────┐   ┌──────────────────┐    │   │
+│  │   ┌───────────┐   ┌──────────────┐   ┌──────────────────┐    │   │
 │  │   │  MASQUE   │   │  WireGuard   │   │  WARP-in-WARP    │    │   │
 │  │   │ HTTP/3/2  │   │   (UDP)      │   │  (WG inside WG)  │    │   │
 │  │   └─────┬─────┘   └──────┬───────┘   └────────┬─────────┘    │   │
