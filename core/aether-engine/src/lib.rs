@@ -102,23 +102,46 @@ fn health_max_fails() -> u32 {
         .unwrap_or(2)
 }
 
+fn live_validate_timeout() -> std::time::Duration {
+    // Pre-SOCKS validation needs more headroom than background health probes
+    // (handshake settle + DNS + HTTP through a cold tunnel).
+    let secs = std::env::var("AETHER_LIVE_VALIDATE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(20);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Probe the live netstack before exposing SOCKS (DNS + optional HTTP).
 async fn validate_live_stack(stack: &netstack::StackHandle, label: &str) -> Result<()> {
     if std::env::var("AETHER_NO_LIVE_CHECK").is_ok() {
         return Ok(());
     }
-    let timeout = health_timeout();
+    let timeout = live_validate_timeout();
     log::info!("[*] validating live {label} data-plane before exposing SOCKS (timeout {timeout:?})");
-    match tokio::time::timeout(timeout, tunnelping::live_stack_probe(stack)).await {
-        Ok(Ok(())) => {
-            log::info!("[+] live {label} data-plane OK");
-            Ok(())
+    // A few retries — cold WG/MASQUE often needs 1–2 attempts after handshake.
+    let mut last_err = AetherError::Other("live validation failed".into());
+    for attempt in 1..=3u32 {
+        match tokio::time::timeout(timeout, tunnelping::live_stack_probe(stack)).await {
+            Ok(Ok(())) => {
+                log::info!("[+] live {label} data-plane OK (attempt {attempt})");
+                return Ok(());
+            }
+            Ok(Err(e)) => {
+                last_err = AetherError::Other(format!("live {label} validation failed: {e}"));
+                log::debug!("[-] live {label} attempt {attempt}/3: {e}");
+            }
+            Err(_) => {
+                last_err = AetherError::Other(format!(
+                    "live {label} validation timeout ({timeout:?})"
+                ));
+                log::debug!("[-] live {label} attempt {attempt}/3: timeout");
+            }
         }
-        Ok(Err(e)) => Err(AetherError::Other(format!("live {label} validation failed: {e}"))),
-        Err(_) => Err(AetherError::Other(format!(
-            "live {label} validation timeout ({timeout:?})"
-        ))),
+        tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
     }
+    Err(last_err)
 }
 
 /// Background health monitor: consecutive failed probes abort the tunnel task.
@@ -1148,8 +1171,8 @@ async fn run_wireguard_tunnel(
         }));
     }
 
-    // Brief settle for handshake + first timers before live probe.
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    // Settle for handshake + keepalives before live probe (cold endpoints need more).
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
     // WireGuard was verified on a throwaway session; re-check the LIVE stack
     // before SOCKS (fixes false positives on quick-reconnect / Ironclad).
@@ -1297,7 +1320,8 @@ async fn run_warp_in_warp(
     log::info!("[*] establishing outer WARP tunnel to {peer}...");
     let outer_stack = establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
 
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    // Outer needs time for handshake + first data before inner can forward.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
 
     let forwarder = spawn_udp_forwarder(&outer_stack, peer).await?;
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
@@ -1305,31 +1329,33 @@ async fn run_warp_in_warp(
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
     let inner_stack = establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
 
-    let socks_stack = inner_stack.clone();
-    let socks_task = tokio::spawn(async move {
-        log::info!("[+] socks5 server listening on {listen}");
-        socks::serve(listen, socks_stack).await
-    });
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
-    let http_task = http_listen.map(|http_addr| {
-        let http_stack = inner_stack.clone();
-        tokio::spawn(async move {
-            log::info!("[+] http proxy listening on {http_addr}");
-            if let Err(e) = http_proxy::serve(http_addr, http_stack).await {
-                log::warn!("[-] http proxy ended: {e}");
-            }
-        })
-    });
+    if let Err(e) = validate_live_stack(&inner_stack, "WARP-in-WARP").await {
+        return Err(e);
+    }
 
-    // Block until socks ends (it only ends on error / abort)
-    let r = socks_task.await;
+    let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
+    let health_task = spawn_health_monitor(inner_stack.clone(), health_tx);
+    let (socks_task, http_task) = spawn_local_proxies(inner_stack, listen, http_listen).await;
+
+    enum End {
+        Socks(std::result::Result<Result<()>, tokio::task::JoinError>),
+        Health,
+    }
+    let end = tokio::select! {
+        r = socks_task => End::Socks(r),
+        _ = health_rx => End::Health,
+    };
+    health_task.abort();
     if let Some(t) = http_task {
         t.abort();
     }
-    match r {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(e) => Err(AetherError::Other(format!("socks task join: {e}"))),
+    match end {
+        End::Health => Err(AetherError::Other("tunnel health check failed".into())),
+        End::Socks(Ok(Ok(()))) => Ok(()),
+        End::Socks(Ok(Err(e))) => Err(e),
+        End::Socks(Err(e)) => Err(AetherError::Other(format!("socks task join: {e}"))),
     }
 }
 

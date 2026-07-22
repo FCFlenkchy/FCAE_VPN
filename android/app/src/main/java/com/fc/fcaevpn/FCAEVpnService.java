@@ -87,15 +87,27 @@ public class FCAEVpnService extends VpnService {
         int ipVersion = intent.getIntExtra("ipVersion", 4);
         boolean quickReconnect = intent.getBooleanExtra("quickReconnect", true);
         boolean h2Enabled = intent.getBooleanExtra("h2Enabled", false);
+        boolean ironclad = intent.getBooleanExtra("ironclad", false);
+        int healthInterval = intent.getIntExtra("healthInterval", 20);
+        int healthMaxFails = intent.getIntExtra("healthMaxFails", 2);
+        int healthTimeout = intent.getIntExtra("healthTimeout", 5);
+        int liveValidate = intent.getIntExtra("liveValidate", 20);
         String configPathExtra = intent.getStringExtra("configPath");
+        String sniExtra = intent.getStringExtra("sni");
         final String configPath =
             (configPathExtra == null || configPathExtra.isEmpty()) ? "aether.toml" : configPathExtra;
+        final String sni = (sniExtra == null) ? "" : sniExtra;
         final int fProtocol = protocol;
         final int fMode = mode;
         final int fScanMode = scanMode;
         final int fIpVersion = ipVersion;
         final boolean fQuickReconnect = quickReconnect;
         final boolean fH2Enabled = h2Enabled;
+        final boolean fIronclad = ironclad;
+        final int fHealthInterval = healthInterval;
+        final int fHealthMaxFails = healthMaxFails;
+        final int fHealthTimeout = healthTimeout;
+        final int fLiveValidate = liveValidate;
 
         vpnThread = new Thread(() -> {
             try {
@@ -131,7 +143,8 @@ public class FCAEVpnService extends VpnService {
                     fProtocol, fMode, false, fScanMode,
                     fIpVersion, fQuickReconnect, "balanced",
                     false, 16, 32, 2, 10, 1819, 1820,
-                    "", configPath, fH2Enabled, false
+                    "", configPath, fH2Enabled, false,
+                    sni, fIronclad, fHealthInterval, fHealthMaxFails, fHealthTimeout, fLiveValidate
                 );
                 if (!ok) {
                     Log.e(TAG, "nativeStart failed");

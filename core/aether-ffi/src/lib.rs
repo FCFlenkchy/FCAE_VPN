@@ -78,6 +78,11 @@ pub struct AetherCfgRaw {
     pub tls_groups: *const c_char,
     pub udp_buf_kb: u32,
     pub sni: *const c_char,
+    pub ironclad_validate: bool,
+    pub health_interval_secs: u32,
+    pub health_max_fails: u32,
+    pub health_timeout_secs: u32,
+    pub live_validate_secs: u32,
 }
 
 #[repr(C)]
@@ -448,6 +453,40 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
         std::env::set_var("AETHER_SNI", sni);
     } else {
         std::env::remove_var("AETHER_SNI");
+    }
+    if cfg.ironclad_validate {
+        std::env::set_var("AETHER_VALIDATE", "ironclad");
+    } else {
+        std::env::remove_var("AETHER_VALIDATE");
+    }
+    if cfg.health_interval_secs > 0 {
+        std::env::set_var(
+            "AETHER_HEALTH_INTERVAL_SECS",
+            cfg.health_interval_secs.to_string(),
+        );
+    } else {
+        std::env::remove_var("AETHER_HEALTH_INTERVAL_SECS");
+    }
+    if cfg.health_max_fails > 0 {
+        std::env::set_var("AETHER_HEALTH_MAX_FAILS", cfg.health_max_fails.to_string());
+    } else {
+        std::env::remove_var("AETHER_HEALTH_MAX_FAILS");
+    }
+    if cfg.health_timeout_secs > 0 {
+        std::env::set_var(
+            "AETHER_HEALTH_TIMEOUT_SECS",
+            cfg.health_timeout_secs.to_string(),
+        );
+    } else {
+        std::env::remove_var("AETHER_HEALTH_TIMEOUT_SECS");
+    }
+    if cfg.live_validate_secs > 0 {
+        std::env::set_var(
+            "AETHER_LIVE_VALIDATE_SECS",
+            cfg.live_validate_secs.to_string(),
+        );
+    } else {
+        std::env::remove_var("AETHER_LIVE_VALIDATE_SECS");
     }
     // TUN mode flag for engine (Android sets fd separately via aether_set_android_tun_fd)
     if cfg.mode == 1 {

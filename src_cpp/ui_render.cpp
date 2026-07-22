@@ -117,6 +117,13 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         snprintf(g_app.config_path, sizeof(g_app.config_path), "%s", val.c_str());
     else if (key == "h2_enabled") g_app.h2_enabled = atoi(val.c_str()) != 0;
     else if (key == "ech_enabled") g_app.ech_enabled = atoi(val.c_str()) != 0;
+    else if (key == "sni")
+        snprintf(g_app.sni, sizeof(g_app.sni), "%s", val.c_str());
+    else if (key == "ironclad_validate") g_app.ironclad_validate = atoi(val.c_str()) != 0;
+    else if (key == "health_interval_secs") g_app.health_interval_secs = atoi(val.c_str());
+    else if (key == "health_max_fails") g_app.health_max_fails = atoi(val.c_str());
+    else if (key == "health_timeout_secs") g_app.health_timeout_secs = atoi(val.c_str());
+    else if (key == "live_validate_secs") g_app.live_validate_secs = atoi(val.c_str());
     else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
 }
@@ -148,6 +155,12 @@ static void save_config() {
     fprintf(f, "config_path=%s\n", g_app.config_path);
     fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled ? 1 : 0);
     fprintf(f, "ech_enabled=%d\n", g_app.ech_enabled ? 1 : 0);
+    fprintf(f, "sni=%s\n", g_app.sni);
+    fprintf(f, "ironclad_validate=%d\n", g_app.ironclad_validate ? 1 : 0);
+    fprintf(f, "health_interval_secs=%d\n", g_app.health_interval_secs);
+    fprintf(f, "health_max_fails=%d\n", g_app.health_max_fails);
+    fprintf(f, "health_timeout_secs=%d\n", g_app.health_timeout_secs);
+    fprintf(f, "live_validate_secs=%d\n", g_app.live_validate_secs);
     fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
     fprintf(f, "auto_scroll=%d\n", g_app.auto_scroll ? 1 : 0);
     fclose(f);
@@ -379,17 +392,19 @@ void render_ui() {
                 g_app.start_busy.store(true);
                 // Snapshot config + own string storage for the worker thread.
                 struct Owned {
-                    std::string noize, peer, path;
+                    std::string noize, peer, path, sni;
                     AetherConfig c{};
                 };
                 auto* o = new Owned();
                 o->noize = g_app.noize_profile;
                 o->peer  = g_app.force_peer;
                 o->path  = g_app.config_path;
+                o->sni   = g_app.sni;
                 o->c = g_app.to_config();
                 o->c.noize_profile = o->noize.c_str();
                 o->c.force_peer    = o->peer.empty() ? nullptr : o->peer.c_str();
                 o->c.config_path   = o->path.c_str();
+                o->c.sni           = o->sni.empty() ? nullptr : o->sni.c_str();
                 std::thread([o] {
                     (void)aether_start(&o->c);
                     g_app.start_busy.store(false);
@@ -563,19 +578,36 @@ void render_ui() {
         if (ImGui::BeginTabItem("Scanner")) {
             ImGui::BeginChild("##scan_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
-            ImGui::Text("Scan Mode (discovery)");
+            ImGui::Text("Scan Mode");
             const char* modes[] = { "Turbo", "Balanced", "Thorough", "Stealth" };
-            if (g_app.scan_mode > 3) g_app.scan_mode = 1; // legacy ironclad index
+            if (g_app.scan_mode > 3) g_app.scan_mode = 1;
             ImGui::Combo("Mode", &g_app.scan_mode, modes, 4);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("IP Version");
             ImGui::RadioButton("IPv4",       &g_app.ip_version, 4);
+            ImGui::SameLine();
             ImGui::RadioButton("IPv6",       &g_app.ip_version, 6);
+            ImGui::SameLine();
             ImGui::RadioButton("Dual-Stack", &g_app.ip_version, 10);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::TextDisabled("Ironclad validation is CLI: --validate ironclad or --ironclad");
-            ImGui::TextDisabled("Health: --health-interval / --health-max-fails / --health-timeout");
-            ImGui::TextDisabled("SNI: --sni hostname  (or AETHER_SNI)");
+            ImGui::Checkbox("Ironclad validation", &g_app.ironclad_validate);
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("MASQUE SNI");
+            ImGui::InputText("##sni", g_app.sni, sizeof(g_app.sni));
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Health")) {
+            ImGui::BeginChild("##health_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            ImGui::Spacing();
+            ImGui::Text("Background health checks");
+            ImGui::SliderInt("Interval (s)", &g_app.health_interval_secs, 5, 120);
+            ImGui::SliderInt("Max fails", &g_app.health_max_fails, 1, 10);
+            ImGui::SliderInt("Probe timeout (s)", &g_app.health_timeout_secs, 2, 30);
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("Pre-connect validation");
+            ImGui::SliderInt("Live validate (s)", &g_app.live_validate_secs, 5, 60);
             ImGui::EndChild();
             ImGui::EndTabItem();
         }

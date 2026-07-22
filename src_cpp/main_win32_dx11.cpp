@@ -85,12 +85,33 @@ static void CleanupDeviceD3D() {
     if (g_pd3dDevice)  { g_pd3dDevice->Release();  g_pd3dDevice = nullptr; }
 }
 
-int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
-    (void)hInst;
+// Must match IDI_ICON1 in icon.rc (resource id 101 is conventional for first ICON).
+#ifndef IDI_ICON1
+#define IDI_ICON1 101
+#endif
 
-    WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"FCAE_VPN_CLASS", nullptr };
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
+    HINSTANCE inst = hInst ? hInst : GetModuleHandleW(nullptr);
+
+    WNDCLASSEXW wc = {};
+    wc.cbSize        = sizeof(wc);
+    wc.style         = CS_CLASSDC;
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = inst;
+    wc.hIcon         = LoadIconW(inst, MAKEINTRESOURCEW(IDI_ICON1));
+    wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+    wc.lpszClassName = L"FCAE_VPN_CLASS";
+    wc.hIconSm       = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(IDI_ICON1), IMAGE_ICON,
+                                         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+                                         LR_DEFAULTCOLOR);
+    if (!wc.hIcon) {
+        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    }
+    if (!wc.hIconSm) {
+        wc.hIconSm = wc.hIcon;
+    }
     RegisterClassExW(&wc);
-    HWND hWnd = CreateWindowW(wc.lpszClassName, L"FCAE VPN", WS_OVERLAPPEDWINDOW, 100, 100, 1024, 700, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hWnd = CreateWindowW(wc.lpszClassName, L"FCAE VPN", WS_OVERLAPPEDWINDOW, 100, 100, 1024, 700, nullptr, nullptr, inst, nullptr);
 
     if (!CreateDeviceD3D(hWnd)) { CleanupDeviceD3D(); UnregisterClassW(wc.lpszClassName, wc.hInstance); return 1; }
 

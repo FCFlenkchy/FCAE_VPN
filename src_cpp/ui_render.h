@@ -39,10 +39,19 @@ struct AppState {
     uint16_t http_port   = 1820;
     char force_peer[128] = {};
     // Engine identity file (Cloudflare device certs). Not the UI settings file.
-    // UI settings always live in FCAE_VPN.cfg next to the executable.
     char config_path[256] = "aether.toml";
     bool h2_enabled      = false;
     bool ech_enabled     = false;
+
+    // MASQUE SNI (empty = default consumer-masque.cloudflareclient.com)
+    char sni[128] = {};
+    // Post-scan ironclad validation
+    bool ironclad_validate = false;
+    // Tunnel health
+    int health_interval_secs = 20;
+    int health_max_fails     = 2;
+    int health_timeout_secs  = 5;
+    int live_validate_secs   = 20;
 
     AetherTelemetry telem = {};
     double last_telem_t = 0.0;
@@ -101,7 +110,12 @@ struct AppState {
         c.dns_ip_prefer    = 0;
         c.tls_groups       = nullptr;
         c.udp_buf_kb       = 0;
-        c.sni              = nullptr;
+        c.sni              = sni[0] ? sni : nullptr;
+        c.ironclad_validate     = ironclad_validate;
+        c.health_interval_secs  = (uint32_t)(health_interval_secs > 0 ? health_interval_secs : 0);
+        c.health_max_fails      = (uint32_t)(health_max_fails > 0 ? health_max_fails : 0);
+        c.health_timeout_secs   = (uint32_t)(health_timeout_secs > 0 ? health_timeout_secs : 0);
+        c.live_validate_secs    = (uint32_t)(live_validate_secs > 0 ? live_validate_secs : 0);
         return c;
     }
 };

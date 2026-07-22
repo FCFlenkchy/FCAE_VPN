@@ -39,6 +39,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerScan: Spinner
     private lateinit var switchH2: SwitchMaterial
     private lateinit var switchQuick: SwitchMaterial
+    private lateinit var switchIronclad: SwitchMaterial
+    private lateinit var editSni: android.widget.EditText
+    private lateinit var editHealthInterval: android.widget.EditText
+    private lateinit var editHealthMaxFails: android.widget.EditText
 
     private val poll = object : Runnable {
         override fun run() {
@@ -72,6 +76,10 @@ class MainActivity : AppCompatActivity() {
         spinnerScan = findViewById(R.id.spinnerScan)
         switchH2 = findViewById(R.id.switchH2)
         switchQuick = findViewById(R.id.switchQuick)
+        switchIronclad = findViewById(R.id.switchIronclad)
+        editSni = findViewById(R.id.editSni)
+        editHealthInterval = findViewById(R.id.editHealthInterval)
+        editHealthMaxFails = findViewById(R.id.editHealthMaxFails)
 
         spinnerProtocol.adapter = ArrayAdapter(
             this,
@@ -86,7 +94,7 @@ class MainActivity : AppCompatActivity() {
         spinnerScan.adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_dropdown_item,
-            listOf("Turbo", "Balanced", "Thorough", "Stealth", "Ironclad"),
+            listOf("Turbo", "Balanced", "Thorough", "Stealth"),
         )
         spinnerScan.setSelection(1)
 
@@ -147,6 +155,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun healthInterval(): Int =
+        editHealthInterval.text.toString().toIntOrNull()?.coerceIn(5, 120) ?: 20
+
+    private fun healthMaxFails(): Int =
+        editHealthMaxFails.text.toString().toIntOrNull()?.coerceIn(1, 10) ?: 2
+
     private fun startTunServiceWithConfig() {
         connecting = true
         updateButton()
@@ -159,6 +173,12 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("quickReconnect", switchQuick.isChecked)
         i.putExtra("h2Enabled", switchH2.isChecked)
         i.putExtra("configPath", filesDir.resolve("aether.toml").absolutePath)
+        i.putExtra("sni", editSni.text.toString().trim())
+        i.putExtra("ironclad", switchIronclad.isChecked)
+        i.putExtra("healthInterval", healthInterval())
+        i.putExtra("healthMaxFails", healthMaxFails())
+        i.putExtra("healthTimeout", 5)
+        i.putExtra("liveValidate", 20)
         startForegroundService(i)
     }
 
@@ -166,15 +186,26 @@ class MainActivity : AppCompatActivity() {
         connecting = true
         updateButton()
 
+        val protocol = spinnerProtocol.selectedItemPosition
+        val mode = spinnerMode.selectedItemPosition
+        val scanMode = spinnerScan.selectedItemPosition
+        val quick = switchQuick.isChecked
+        val h2 = switchH2.isChecked
+        val ironclad = switchIronclad.isChecked
+        val sni = editSni.text.toString().trim()
+        val hi = healthInterval()
+        val hf = healthMaxFails()
+        val cfgPath = filesDir.resolve("aether.toml").absolutePath
+
         Thread {
             val ok = try {
                 NativeEngine.nativeStart(
-                    protocol = spinnerProtocol.selectedItemPosition,
-                    mode = spinnerMode.selectedItemPosition,
+                    protocol = protocol,
+                    mode = mode,
                     lanSharing = false,
-                    scanMode = spinnerScan.selectedItemPosition,
+                    scanMode = scanMode,
                     ipVersion = 4,
-                    quickReconnect = switchQuick.isChecked,
+                    quickReconnect = quick,
                     noizeProfile = "balanced",
                     fragmentEnabled = false,
                     fragMinSize = 16,
@@ -184,9 +215,15 @@ class MainActivity : AppCompatActivity() {
                     socksPort = 1819,
                     httpPort = 1820,
                     forcePeer = "",
-                    configPath = filesDir.resolve("aether.toml").absolutePath,
-                    h2Enabled = switchH2.isChecked,
+                    configPath = cfgPath,
+                    h2Enabled = h2,
                     echEnabled = false,
+                    sni = sni,
+                    ironcladValidate = ironclad,
+                    healthIntervalSecs = hi,
+                    healthMaxFails = hf,
+                    healthTimeoutSecs = 5,
+                    liveValidateSecs = 20,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }

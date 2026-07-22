@@ -25,6 +25,12 @@ object NativeEngine {
         configPath: String,
         h2Enabled: Boolean,
         echEnabled: Boolean,
+        sni: String,
+        ironcladValidate: Boolean,
+        healthIntervalSecs: Int,
+        healthMaxFails: Int,
+        healthTimeoutSecs: Int,
+        liveValidateSecs: Int,
     ): Boolean
     @JvmStatic external fun nativeStop()
     @JvmStatic external fun nativeGetStatusJson(): String

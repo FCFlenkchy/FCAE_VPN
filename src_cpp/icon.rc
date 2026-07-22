@@ -1,7 +1,7 @@
 #include <windows.h>
 
-// FCAE VPN Application Icon
-IDI_ICON1 ICON "icon.ico"
+// Resource id 101 — must match MAKEINTRESOURCE(IDI_ICON1) in main_win32_dx11.cpp
+101 ICON "icon.ico"
 
 // Windows Manifest
 1 RT_MANIFEST "app.manifest"

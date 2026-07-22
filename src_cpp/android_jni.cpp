@@ -46,6 +46,15 @@ static void ensure_init() {
     LOGI("aether_init via JNI");
 }
 
+static std::string jstr(JNIEnv* env, jstring s) {
+    if (!s) return {};
+    const char* p = env->GetStringUTFChars(s, nullptr);
+    if (!p) return {};
+    std::string out(p);
+    env->ReleaseStringUTFChars(s, p);
+    return out;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeInit(JNIEnv*, jclass) {
     ensure_init();
@@ -72,38 +81,22 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jstring forcePeer,
     jstring configPath,
     jboolean h2Enabled,
-    jboolean echEnabled
+    jboolean echEnabled,
+    jstring sni,
+    jboolean ironcladValidate,
+    jint healthIntervalSecs,
+    jint healthMaxFails,
+    jint healthTimeoutSecs,
+    jint liveValidateSecs
 ) {
     ensure_init();
 
-    const char* noize = "balanced";
-    std::string noizeOwned;
-    if (noizeProfile) {
-        const char* p = env->GetStringUTFChars(noizeProfile, nullptr);
-        if (p) {
-            noizeOwned = p;
-            noize = noizeOwned.c_str();
-            env->ReleaseStringUTFChars(noizeProfile, p);
-        }
-    }
-
-    std::string peerOwned;
-    const char* peer = nullptr;
-    if (forcePeer) {
-        const char* p = env->GetStringUTFChars(forcePeer, nullptr);
-        if (p && p[0]) {
-            peerOwned = p;
-            peer = peerOwned.c_str();
-        }
-        if (p) env->ReleaseStringUTFChars(forcePeer, p);
-    }
-
-    std::string cfgOwned = "aether.toml";
-    if (configPath) {
-        const char* p = env->GetStringUTFChars(configPath, nullptr);
-        if (p && p[0]) cfgOwned = p;
-        if (p) env->ReleaseStringUTFChars(configPath, p);
-    }
+    std::string noizeOwned = jstr(env, noizeProfile);
+    if (noizeOwned.empty()) noizeOwned = "balanced";
+    std::string peerOwned = jstr(env, forcePeer);
+    std::string cfgOwned = jstr(env, configPath);
+    if (cfgOwned.empty()) cfgOwned = "aether.toml";
+    std::string sniOwned = jstr(env, sni);
 
     AetherConfig cfg = {};
     cfg.protocol = protocol;
@@ -112,7 +105,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.scan_mode = scanMode;
     cfg.ip_version = ipVersion;
     cfg.quick_reconnect = quickReconnect == JNI_TRUE;
-    cfg.noize_profile = noize;
+    cfg.noize_profile = noizeOwned.c_str();
     cfg.fragment_enabled = fragmentEnabled == JNI_TRUE;
     cfg.frag_min_size = (uint32_t)fragMinSize;
     cfg.frag_max_size = (uint32_t)fragMaxSize;
@@ -120,10 +113,16 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.frag_max_delay = (uint32_t)fragMaxDelay;
     cfg.socks_port = (uint16_t)socksPort;
     cfg.http_port = (uint16_t)httpPort;
-    cfg.force_peer = peer;
+    cfg.force_peer = peerOwned.empty() ? nullptr : peerOwned.c_str();
     cfg.config_path = cfgOwned.c_str();
     cfg.h2_enabled = h2Enabled == JNI_TRUE;
     cfg.ech_enabled = echEnabled == JNI_TRUE;
+    cfg.sni = sniOwned.empty() ? nullptr : sniOwned.c_str();
+    cfg.ironclad_validate = ironcladValidate == JNI_TRUE;
+    cfg.health_interval_secs = healthIntervalSecs > 0 ? (uint32_t)healthIntervalSecs : 0;
+    cfg.health_max_fails = healthMaxFails > 0 ? (uint32_t)healthMaxFails : 0;
+    cfg.health_timeout_secs = healthTimeoutSecs > 0 ? (uint32_t)healthTimeoutSecs : 0;
+    cfg.live_validate_secs = liveValidateSecs > 0 ? (uint32_t)liveValidateSecs : 0;
 
     bool ok = aether_start(&cfg);
     LOGI("aether_start -> %s", ok ? "ok" : "fail");
@@ -158,7 +157,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativeGetStatusJson(JNIEnv* env, jclass) {
         t.status_message[0] ? t.status_message : "",
         t.last_error[0] ? t.last_error : ""
     );
-    // crude escape: strip quotes inside strings already avoided by using empty or simple text
     return env->NewStringUTF(buf);
 }
 
@@ -180,7 +178,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativeClearLogs(JNIEnv*, jclass) {
     g_logs.clear();
 }
 
-// Service helpers (same library)
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_FCAEVpnService_nativeSetTunFd(JNIEnv*, jclass, jint fd) {
     ensure_init();
