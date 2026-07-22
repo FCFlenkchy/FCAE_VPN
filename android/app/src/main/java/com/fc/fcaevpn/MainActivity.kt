@@ -403,7 +403,7 @@ class MainActivity : AppCompatActivity() {
             )
             statsText.text =
                 "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "—"}"
-            peerText.text = "Peer: ${peer.ifEmpty { "—" }}" +
+            peerText.text = "Peer: ${peer.ifEmpty { " — " }}" +
                 if (err.isNotEmpty()) "\nError: $err" else ""
 
             val h = logs.hashCode()
