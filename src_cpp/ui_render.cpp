@@ -321,7 +321,6 @@ void ui_shutdown() {
 
 void render_ui() {
     const ImGuiIO& io = ImGui::GetIO();
-    const float W = 1024.0f;
     const bool narrow = io.DisplaySize.x < 720.0f;
 
     ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
