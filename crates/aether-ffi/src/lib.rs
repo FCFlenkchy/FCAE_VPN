@@ -1,11 +1,9 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tokio::process::Child;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -49,7 +47,6 @@ impl TelemetryState {
 }
 
 static TELEMETRY: Mutex<TelemetryState> = Mutex::new(TelemetryState::new());
-static CHILD: Mutex<Option<Child>> = Mutex::new(None);
 
 use std::ffi::c_void;
 
@@ -89,6 +86,72 @@ pub struct AetherTelemetryOut {
     pub status_message: [u8; 128],
     pub last_error: [u8; 256],
 }
+
+struct GuiLogger;
+
+impl log::Log for GuiLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Debug
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let level = match record.level() {
+            log::Level::Error => 1,
+            log::Level::Warn => 2,
+            log::Level::Info => 3,
+            log::Level::Debug | log::Level::Trace => 4,
+        };
+        let msg = format!("{}", record.args());
+        unsafe {
+            log_msg(level, &msg);
+        }
+
+        // Lightweight telemetry hooks from engine log lines
+        let line_lower = msg.to_lowercase();
+        let mut t = TELEMETRY.lock();
+        if line_lower.contains("socks5") && line_lower.contains("listen") {
+            t.state = 4;
+            t.status_message = "Connected — SOCKS5 active".to_string();
+        }
+        if line_lower.contains("identity ready") || line_lower.contains("using cloudflare edge") {
+            if t.state < 4 {
+                t.state = 3;
+                t.status_message = "Connecting...".to_string();
+            }
+        }
+        if line_lower.contains("scanning") || line_lower.contains("probe") {
+            if t.state < 3 {
+                t.state = 2;
+                t.status_message = "Scanning gateways...".to_string();
+            }
+        }
+        if let Some(idx) = msg.find("gateway ") {
+            let rest = &msg[idx + 8..];
+            if let Some(end) = rest.find(|c: char| c.is_whitespace() || c == ',') {
+                t.connected_peer = rest[..end].to_string();
+            }
+        }
+        if let Some(idx) = msg.find("edge ") {
+            let rest = &msg[idx + 5..];
+            let peer: String = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(|c| c == '(' || c == ')')
+                .to_string();
+            if !peer.is_empty() {
+                t.connected_peer = peer;
+            }
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static GUI_LOGGER: GuiLogger = GuiLogger;
 
 unsafe fn log_msg(level: i32, msg: &str) {
     if let Some(cb) = LOG_CB {
@@ -146,79 +209,76 @@ fn ip_version_to_env(v: i32) -> &'static str {
     }
 }
 
-fn exe_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-}
+fn apply_config_env(cfg: &AetherCfgRaw) {
+    std::env::set_var("AETHER_PROTOCOL", protocol_to_env(cfg.protocol));
+    std::env::set_var("AETHER_SCAN", scan_mode_to_env(cfg.scan_mode));
+    std::env::set_var("AETHER_IP", ip_version_to_env(cfg.ip_version));
 
-fn is_runnable(path: &Path) -> bool {
-    path.is_file()
-}
-
-/// Locate the bundled aether engine binary next to the GUI (or Android native lib dir).
-fn resolve_aether_bin() -> PathBuf {
-    if let Ok(p) = std::env::var("AETHER_BIN_PATH") {
-        let pb = PathBuf::from(&p);
-        if pb.is_file() {
-            return pb;
-        }
-    }
-
-    let dir = exe_dir();
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    if cfg!(target_os = "windows") {
-        candidates.push(dir.join("aether.exe"));
-        candidates.push(dir.join("aether"));
-        candidates.push(dir.join("libaether.exe"));
-    } else if cfg!(target_os = "android") {
-        // Packaged as libaether.so in jniLibs → extracted under nativeLibraryDir
-        candidates.push(dir.join("libaether.so"));
-        candidates.push(dir.join("aether"));
-        if let Ok(nd) = std::env::var("AETHER_NATIVE_LIB_DIR") {
-            candidates.push(PathBuf::from(&nd).join("libaether.so"));
-            candidates.push(PathBuf::from(&nd).join("aether"));
-        }
+    let socks_addr = if cfg.lan_sharing {
+        format!("0.0.0.0:{}", cfg.socks_port)
     } else {
-        candidates.push(dir.join("aether"));
-        candidates.push(dir.join("libaether.so"));
-    }
+        format!("127.0.0.1:{}", cfg.socks_port)
+    };
+    std::env::set_var("AETHER_SOCKS", &socks_addr);
 
-    // Also try cwd (dev builds)
-    candidates.push(PathBuf::from(if cfg!(target_os = "windows") {
-        "aether.exe"
-    } else {
-        "aether"
-    }));
-
-    for c in &candidates {
-        if is_runnable(c) {
-            return c.clone();
+    let noize = unsafe {
+        if cfg.noize_profile.is_null() {
+            "balanced"
+        } else {
+            CStr::from_ptr(cfg.noize_profile)
+                .to_str()
+                .unwrap_or("balanced")
         }
-        // Android may ship libaether.so without +x; still try to exec
-        if c.is_file() {
-            return c.clone();
+    };
+    std::env::set_var("AETHER_NOIZE", noize);
+
+    if cfg.quick_reconnect {
+        std::env::set_var("AETHER_QUICK_RECONNECT", "1");
+    } else {
+        std::env::set_var("AETHER_QUICK_RECONNECT", "0");
+    }
+
+    if cfg.fragment_enabled {
+        std::env::set_var("AETHER_MASQUE_H2_FRAGMENT", "1");
+        std::env::set_var(
+            "AETHER_MASQUE_H2_FRAGMENT_SIZE",
+            &format!("{}-{}", cfg.frag_min_size, cfg.frag_max_size),
+        );
+        std::env::set_var(
+            "AETHER_MASQUE_H2_FRAGMENT_DELAY",
+            &format!("{}-{}", cfg.frag_min_delay, cfg.frag_max_delay),
+        );
+    } else {
+        std::env::remove_var("AETHER_MASQUE_H2_FRAGMENT");
+    }
+
+    unsafe {
+        if !cfg.force_peer.is_null() {
+            if let Ok(p) = CStr::from_ptr(cfg.force_peer).to_str() {
+                if !p.is_empty() {
+                    std::env::set_var("AETHER_PEER", p);
+                } else {
+                    std::env::remove_var("AETHER_PEER");
+                }
+            }
+        } else {
+            std::env::remove_var("AETHER_PEER");
         }
     }
 
-    // Default path used in error messages
-    if cfg!(target_os = "windows") {
-        dir.join("aether.exe")
-    } else if cfg!(target_os = "android") {
-        dir.join("libaether.so")
-    } else {
-        dir.join("aether")
-    }
-}
-
-async fn kill_child() {
-    let mut guard = CHILD.lock();
-    if let Some(mut child) = guard.take() {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-    }
+    let config_path = unsafe {
+        if !cfg.config_path.is_null() {
+            CStr::from_ptr(cfg.config_path)
+                .to_str()
+                .unwrap_or("aether.toml")
+        } else {
+            "aether.toml"
+        }
+    };
+    std::env::set_var("AETHER_CONFIG", config_path);
+    std::env::set_var("AETHER_VERBOSE", "1");
+    // GUI never prompts on stdin
+    std::env::set_var("AETHER_NONINTERACTIVE", "1");
 }
 
 #[no_mangle]
@@ -231,16 +291,8 @@ pub extern "C" fn aether_init(
         LOG_USER_DATA = user_data;
     }
 
-    let default_filter = if std::env::var("AETHER_VERBOSE").is_ok() {
-        "info,aether=debug"
-    } else {
-        "info"
-    };
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(default_filter),
-    )
-    .format_timestamp_millis()
-    .try_init();
+    // Install a logger that forwards into the GUI. Ignore if already set.
+    let _ = log::set_logger(&GUI_LOGGER).map(|()| log::set_max_level(log::LevelFilter::Debug));
 
     {
         let mut t = TELEMETRY.lock();
@@ -251,16 +303,7 @@ pub extern "C" fn aether_init(
 
     INITIALIZED.store(true, Ordering::SeqCst);
     unsafe {
-        log_msg(4, "[ffi] aether_init completed");
-        let bin = resolve_aether_bin();
-        log_msg(
-            4,
-            &format!(
-                "[ffi] engine binary: {} (exists={})",
-                bin.display(),
-                bin.is_file()
-            ),
-        );
+        log_msg(4, "[ffi] aether_init completed (in-process engine)");
     }
 }
 
@@ -296,70 +339,10 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         t.tx_bytes_sec = 0;
     }
 
+    apply_config_env(&cfg);
     unsafe {
-        log_msg(4, "[ffi] aether_start called");
+        log_msg(4, "[ffi] aether_start — launching in-process engine");
     }
-
-    std::env::set_var("AETHER_PROTOCOL", protocol_to_env(cfg.protocol));
-    std::env::set_var("AETHER_SCAN", scan_mode_to_env(cfg.scan_mode));
-    std::env::set_var("AETHER_IP", ip_version_to_env(cfg.ip_version));
-
-    let socks_addr = if cfg.lan_sharing {
-        format!("0.0.0.0:{}", cfg.socks_port)
-    } else {
-        format!("127.0.0.1:{}", cfg.socks_port)
-    };
-    std::env::set_var("AETHER_SOCKS", &socks_addr);
-
-    let noize = unsafe {
-        if (*config).noize_profile.is_null() {
-            "balanced"
-        } else {
-            CStr::from_ptr((*config).noize_profile)
-                .to_str()
-                .unwrap_or("balanced")
-        }
-    };
-    std::env::set_var("AETHER_NOIZE", noize);
-
-    if cfg.quick_reconnect {
-        std::env::set_var("AETHER_QUICK_RECONNECT", "1");
-    } else {
-        std::env::set_var("AETHER_QUICK_RECONNECT", "0");
-    }
-
-    if cfg.fragment_enabled {
-        std::env::set_var("AETHER_MASQUE_H2_FRAGMENT", "1");
-        std::env::set_var(
-            "AETHER_MASQUE_H2_FRAGMENT_SIZE",
-            &format!("{}-{}", cfg.frag_min_size, cfg.frag_max_size),
-        );
-        std::env::set_var(
-            "AETHER_MASQUE_H2_FRAGMENT_DELAY",
-            &format!("{}-{}", cfg.frag_min_delay, cfg.frag_max_delay),
-        );
-    }
-
-    unsafe {
-        if !(*config).force_peer.is_null() {
-            if let Ok(p) = CStr::from_ptr((*config).force_peer).to_str() {
-                if !p.is_empty() {
-                    std::env::set_var("AETHER_PEER", p);
-                }
-            }
-        }
-    }
-
-    let config_path = unsafe {
-        if !(*config).config_path.is_null() {
-            CStr::from_ptr((*config).config_path)
-                .to_str()
-                .unwrap_or("aether.toml")
-        } else {
-            "aether.toml"
-        }
-    };
-    std::env::set_var("AETHER_CONFIG", config_path);
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -382,20 +365,74 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         }
     };
 
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_flag = shutdown.clone();
+
     let _ = std::thread::Builder::new()
         .name("aether-engine".to_string())
         .spawn(move || {
-            rt.block_on(async move {
-                if let Err(e) = aether_core_run().await {
+            // Watch SHUTDOWN from aether_stop and abort the runtime.
+            let watch = std::thread::spawn({
+                let shutdown_flag = shutdown_flag.clone();
+                move || {
+                    while !SHUTDOWN.load(Ordering::SeqCst) {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    shutdown_flag.store(true, Ordering::SeqCst);
+                }
+            });
+
+            {
+                let mut t = TELEMETRY.lock();
+                t.state = 2;
+                t.status_message = "Scanning gateways...".to_string();
+            }
+
+            let result = rt.block_on(async {
+                // Race engine against shutdown flag
+                let engine = aether_engine::run_from_env();
+                tokio::pin!(engine);
+                loop {
+                    if SHUTDOWN.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    tokio::select! {
+                        biased;
+                        r = &mut engine => return r.map_err(|e| anyhow::anyhow!("{e:#}")),
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                            if SHUTDOWN.load(Ordering::SeqCst) {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            });
+
+            SHUTDOWN.store(true, Ordering::SeqCst);
+            let _ = watch.join();
+
+            match result {
+                Ok(()) => {
+                    let mut t = TELEMETRY.lock();
+                    if !matches!(t.state, 5) {
+                        t.state = 0;
+                        t.status_message = "Disconnected".to_string();
+                    }
                     unsafe {
-                        log_msg(1, &format!("[ffi] engine error: {e}"));
+                        log_msg(3, "[ffi] engine finished");
+                    }
+                }
+                Err(e) => {
+                    unsafe {
+                        log_msg(1, &format!("[ffi] engine error: {e:#}"));
                     }
                     let mut t = TELEMETRY.lock();
                     t.state = 5;
-                    t.last_error = format!("{e}");
+                    t.last_error = format!("{e:#}");
                     t.status_message = "Error".to_string();
                 }
-            });
+            }
+
             RUNNING.store(false, Ordering::SeqCst);
             unsafe {
                 log_msg(4, "[ffi] engine thread exiting");
@@ -405,198 +442,14 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
     true
 }
 
-async fn aether_core_run() -> anyhow::Result<()> {
-    {
-        let mut t = TELEMETRY.lock();
-        t.state = 2;
-        t.status_message = "Scanning gateways...".to_string();
-    }
-    unsafe {
-        log_msg(3, "[ffi] entering aether_core_run");
-    }
-
-    let aether_bin = resolve_aether_bin();
-    if !aether_bin.is_file() {
-        return Err(anyhow::anyhow!(
-            "aether engine not found at {}. Reinstall or set AETHER_BIN_PATH.",
-            aether_bin.display()
-        ));
-    }
-
-    unsafe {
-        log_msg(
-            3,
-            &format!("[ffi] launching aether engine: {}", aether_bin.display()),
-        );
-    }
-
-    let mut cmd = tokio::process::Command::new(&aether_bin);
-    // Keep PATH / system env for TLS certs etc., but ensure our AETHER_* win.
-    for (key, val) in std::env::vars() {
-        if key.starts_with("AETHER_") || key.starts_with("RUST_LOG") {
-            cmd.env(&key, &val);
-        }
-    }
-    cmd.env("AETHER_VERBOSE", "1");
-
-    let mut child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to spawn aether binary at {}: {e}",
-                aether_bin.display()
-            )
-        })?;
-
-    {
-        let mut t = TELEMETRY.lock();
-        t.state = 3;
-        t.status_message = "Connecting...".to_string();
-        t.connected_peer = std::env::var("AETHER_PEER").unwrap_or_default();
-    }
-
-    let stderr = child.stderr.take();
-    let stdout = child.stdout.take();
-    *CHILD.lock() = Some(child);
-
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_err = shutdown.clone();
-    let shutdown_out = shutdown.clone();
-
-    let stderr_task = tokio::spawn(async move {
-        if let Some(reader) = stderr {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(reader).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if shutdown_err.load(Ordering::SeqCst) {
-                    break;
-                }
-                unsafe {
-                    log_msg(3, &line);
-                }
-
-                let line_lower = line.to_lowercase();
-                {
-                    let mut t = TELEMETRY.lock();
-                    if line_lower.contains("socks5") && line_lower.contains("listening") {
-                        t.state = 4;
-                        t.status_message = "Connected — SOCKS5 active".to_string();
-                    }
-                    if line_lower.contains("connected") || line_lower.contains("tunnel ready") {
-                        t.state = 4;
-                        t.status_message = "Connected".to_string();
-                    }
-                    if let Some(idx) = line.find("gateway ") {
-                        let rest = &line[idx + 8..];
-                        if let Some(end) = rest.find(' ') {
-                            t.connected_peer = rest[..end].to_string();
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    let stdout_task = tokio::spawn(async move {
-        if let Some(reader) = stdout {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(reader).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if shutdown_out.load(Ordering::SeqCst) {
-                    break;
-                }
-                unsafe {
-                    log_msg(4, &line);
-                }
-            }
-        }
-    });
-
-    // Poll child + SHUTDOWN flag
-    let status = loop {
-        if SHUTDOWN.load(Ordering::SeqCst) {
-            shutdown.store(true, Ordering::SeqCst);
-            kill_child().await;
-            break Ok(None);
-        }
-
-        let mut guard = CHILD.lock();
-        if let Some(child) = guard.as_mut() {
-            match child.try_wait() {
-                Ok(Some(s)) => {
-                    *guard = None;
-                    break Ok(Some(s));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    *guard = None;
-                    break Err(e);
-                }
-            }
-        } else {
-            break Ok(None);
-        }
-        drop(guard);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    };
-
-    shutdown.store(true, Ordering::SeqCst);
-    stderr_task.abort();
-    stdout_task.abort();
-    *CHILD.lock() = None;
-
-    match status {
-        Ok(None) => {
-            unsafe {
-                log_msg(3, "[ffi] aether engine stopped");
-            }
-            let mut t = TELEMETRY.lock();
-            t.state = 0;
-            t.status_message = "Disconnected".to_string();
-            Ok(())
-        }
-        Ok(Some(s)) if s.success() => {
-            unsafe {
-                log_msg(3, "[ffi] aether engine exited cleanly");
-            }
-            let mut t = TELEMETRY.lock();
-            t.state = 0;
-            t.status_message = "Disconnected".to_string();
-            Ok(())
-        }
-        Ok(Some(s)) => {
-            let msg = format!("aether engine exited with status: {s}");
-            unsafe {
-                log_msg(1, &msg);
-            }
-            Err(anyhow::anyhow!(msg))
-        }
-        Err(e) => {
-            let msg = format!("aether engine process error: {e}");
-            unsafe {
-                log_msg(1, &msg);
-            }
-            Err(anyhow::anyhow!(msg))
-        }
-    }
-}
-
 #[no_mangle]
 pub extern "C" fn aether_stop() {
-    if !RUNNING.load(Ordering::SeqCst) && CHILD.lock().is_none() {
-        return;
+    if !RUNNING.load(Ordering::SeqCst) {
+        // still clear telemetry
     }
     SHUTDOWN.store(true, Ordering::SeqCst);
     unsafe {
         log_msg(4, "[ffi] aether_stop called");
-    }
-
-    // Best-effort sync kill (engine thread also watches SHUTDOWN)
-    if let Some(mut child) = CHILD.lock().take() {
-        let _ = child.start_kill();
     }
 
     let mut t = TELEMETRY.lock();
@@ -642,9 +495,6 @@ pub extern "C" fn aether_set_android_tun_fd(tun_fd: i32) {
 #[no_mangle]
 pub extern "C" fn aether_free() {
     SHUTDOWN.store(true, Ordering::SeqCst);
-    if let Some(mut child) = CHILD.lock().take() {
-        let _ = child.start_kill();
-    }
     RUNNING.store(false, Ordering::SeqCst);
     INITIALIZED.store(false, Ordering::SeqCst);
     unsafe {

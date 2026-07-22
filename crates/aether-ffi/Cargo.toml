@@ -7,17 +7,12 @@ edition = "2021"
 crate-type = ["staticlib"]
 
 [dependencies]
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "process", "signal"] }
+aether-engine = { path = "../aether-engine" }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
 libc = "0.2"
 log = "0.4"
 env_logger = "0.11"
 parking_lot = "0.12"
 anyhow = "1"
 
-# Windows static CRT flags live in .cargo/config.toml (rustflags in Cargo.toml are ignored)
-
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-strip = true
+# Windows static CRT flags live in .cargo/config.toml

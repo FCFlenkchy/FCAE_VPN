@@ -1,3 +1,9 @@
 [workspace]
-members = ["crates/aether-ffi"]
+members = ["crates/aether-engine", "crates/aether-ffi"]
 resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

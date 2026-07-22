@@ -110,31 +110,21 @@ jobs:
           cp src_cpp/icon_192.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png 2>/dev/null || true
           cp src_cpp/icon_48.png android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png 2>/dev/null || true
 
-      - name: build engine
+      - name: build rust (engine + ffi, in-process)
         run: |
-          # Engine lives at aether/aether (submodule package root)
-          cd aether/aether
-          cargo build --release --target ${{ matrix.target }}
-          ls -la target/${{ matrix.target }}/release/aether* 2>/dev/null || ls -la ../target/${{ matrix.target }}/release/aether* 2>/dev/null || true
-        env:
-          # Prefer workspace .cargo/config.toml; env RUSTFLAGS as belt-and-suspenders.
-          # -static-libwinpthread is invalid; use -Bstatic around -lpthread/-lwinpthread.
-          RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libgcc -C link-args=-static-libstdc++ -C link-args=-Wl,-Bstatic -C link-args=-lpthread -C link-args=-lwinpthread -C link-args=-Wl,-Bdynamic' || '' }}
-
-      - name: build ffi
-        run: |
-          # Build from workspace root so output lands in target/<triple>/release
+          # aether-engine is a path dependency of aether-ffi — one staticlib contains both.
           cargo build --release --target ${{ matrix.target }} -p aether-ffi
           mkdir -p target/${{ matrix.target }}/release
           for f in \
-            crates/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a \
-            target/${{ matrix.target }}/release/libaether_ffi.a; do
+            target/${{ matrix.target }}/release/libaether_ffi.a \
+            crates/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a; do
             if [ -f "$f" ]; then
               cp -f "$f" target/${{ matrix.target }}/release/libaether_ffi.a
+              ls -lh target/${{ matrix.target }}/release/libaether_ffi.a
               break
             fi
           done
-          ls -la target/${{ matrix.target }}/release/libaether_ffi.a
+          test -f target/${{ matrix.target }}/release/libaether_ffi.a
         env:
           RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libgcc -C link-args=-static-libstdc++ -C link-args=-Wl,-Bstatic -C link-args=-lpthread -C link-args=-lwinpthread -C link-args=-Wl,-Bdynamic' || '' }}
 
@@ -186,25 +176,8 @@ jobs:
         if: matrix.name != 'android-arm64-v8a'
         run: |
           mkdir -p package
+          # Standalone single binary — engine is linked into fcaevpn
           cp build/fcaevpn* package/ 2>/dev/null || true
-          # Bundle aether engine next to GUI (CMake POST_BUILD also copies into build/)
-          ENGINE_CANDIDATES=(
-            "build/aether.exe"
-            "build/aether"
-            "aether/aether/target/${{ matrix.target }}/release/aether.exe"
-            "aether/aether/target/${{ matrix.target }}/release/aether"
-            "aether/target/${{ matrix.target }}/release/aether.exe"
-            "aether/target/${{ matrix.target }}/release/aether"
-          )
-          if [ "${{ matrix.name }}" = "windows-x64" ]; then
-            for c in "${ENGINE_CANDIDATES[@]}"; do
-              if [ -f "$c" ]; then cp -f "$c" package/aether.exe; break; fi
-            done
-          else
-            for c in "${ENGINE_CANDIDATES[@]}"; do
-              if [ -f "$c" ]; then cp -f "$c" package/aether; chmod +x package/aether; break; fi
-            done
-          fi
           chmod +x package/* 2>/dev/null || true
           cd package
           for f in fcaevpn*; do
@@ -216,6 +189,8 @@ jobs:
             fi
           done
           ls -la
+          # Sanity: only one artifact expected
+          test $(ls -1 | wc -l) -ge 1
 
       - name: package (android)
         if: matrix.name == 'android-arm64-v8a'
