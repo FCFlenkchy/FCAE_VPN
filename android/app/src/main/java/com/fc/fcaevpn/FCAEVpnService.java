@@ -32,6 +32,9 @@ public class FCAEVpnService extends VpnService {
     private volatile boolean running = false;
     private volatile boolean vpnPaused = false;
 
+    // Last config used to start the VPN (for notification Start button)
+    private Intent lastStartIntent;
+
     private Handler statsHandler;
     private final Runnable statsRunnable = new Runnable() {
         @Override
@@ -64,7 +67,13 @@ public class FCAEVpnService extends VpnService {
                     stopVpnAndNotification();
                     return START_NOT_STICKY;
                 case ACTION_START:
-                    startVpn(intent);
+                    // If intent has no config extras, reuse last config
+                    if (!intent.hasExtra("protocol") && lastStartIntent != null) {
+                        startVpn(lastStartIntent);
+                    } else {
+                        lastStartIntent = new Intent(intent);
+                        startVpn(intent);
+                    }
                     return START_STICKY;
             }
         }
