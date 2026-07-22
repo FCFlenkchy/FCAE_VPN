@@ -158,22 +158,22 @@ jobs:
 
           # Workspace is crates/Cargo.toml so quiche keeps its own workspace.
           cargo build --manifest-path crates/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
-          # Normalize artifact location for CMake (CARGO_TARGET_DIR already points here)
-          DEST="target/${{ matrix.target }}/release/libaether_ffi.a"
+
+          # CMake expects: ${CMAKE_SOURCE_DIR}/target/<triple>/release/libaether_ffi.a
+          # With CARGO_TARGET_DIR set, cargo already writes there — do not cp onto itself.
+          DEST="$(pwd)/target/${{ matrix.target }}/release/libaether_ffi.a"
           mkdir -p "$(dirname "$DEST")"
-          if [ -f "$DEST" ]; then
-            ls -lh "$DEST"
-          else
+          if [ ! -f "$DEST" ]; then
             for f in \
-              crates/target/${{ matrix.target }}/release/libaether_ffi.a \
-              crates/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a; do
-              if [ -f "$f" ]; then
+              "$(pwd)/crates/target/${{ matrix.target }}/release/libaether_ffi.a" \
+              "$(pwd)/crates/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a"; do
+              if [ -f "$f" ] && [ "$(realpath "$f" 2>/dev/null || echo "$f")" != "$(realpath "$DEST" 2>/dev/null || echo "$DEST")" ]; then
                 cp -f "$f" "$DEST"
-                ls -lh "$DEST"
                 break
               fi
             done
           fi
+          ls -lh "$DEST"
           test -f "$DEST"
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
