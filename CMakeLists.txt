@@ -93,7 +93,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
     target_link_directories(fcaevpn PRIVATE ${RUST_LIB_DIR})
 
     if(MINGW)
-        target_link_options(fcaevpn PRIVATE -static -static-libgcc -static-libstdc++ -s -mwindows -municode)
+        target_link_options(fcaevpn PRIVATE -static-libgcc -static-libstdc++ -s -mwindows -municode)
     endif()
 
     target_link_libraries(fcaevpn PRIVATE

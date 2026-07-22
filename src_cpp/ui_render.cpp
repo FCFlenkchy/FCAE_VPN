@@ -49,7 +49,7 @@ static bool load_config() {
         else if (!strcmp(key, "scan_mode")) g_app.scan_mode = atoi(val);
         else if (!strcmp(key, "ip_version")) g_app.ip_version = atoi(val);
         else if (!strcmp(key, "quick_reconnect")) g_app.quick_reconnect = atoi(val);
-        else if (!strcmp(key, "noize_profile")) strncpy(g_app.noize_profile, val, sizeof(g_app.noize_profile)-1);
+        else if (!strcmp(key, "noize_profile")) snprintf(g_app.noize_profile, sizeof(g_app.noize_profile), "%s", val);
         else if (!strcmp(key, "fragment_enabled")) g_app.fragment_enabled = atoi(val);
         else if (!strcmp(key, "frag_min_size")) g_app.frag_min_size = atoi(val);
         else if (!strcmp(key, "frag_max_size")) g_app.frag_max_size = atoi(val);
@@ -57,8 +57,8 @@ static bool load_config() {
         else if (!strcmp(key, "frag_max_delay")) g_app.frag_max_delay = atoi(val);
         else if (!strcmp(key, "socks_port")) g_app.socks_port = (uint16_t)atoi(val);
         else if (!strcmp(key, "http_port")) g_app.http_port = (uint16_t)atoi(val);
-        else if (!strcmp(key, "force_peer")) strncpy(g_app.force_peer, val, sizeof(g_app.force_peer)-1);
-        else if (!strcmp(key, "config_path")) strncpy(g_app.config_path, val, sizeof(g_app.config_path)-1);
+        else if (!strcmp(key, "force_peer")) snprintf(g_app.force_peer, sizeof(g_app.force_peer), "%s", val);
+        else if (!strcmp(key, "config_path")) snprintf(g_app.config_path, sizeof(g_app.config_path), "%s", val);
         else if (!strcmp(key, "h2_enabled")) g_app.h2_enabled = atoi(val);
         else if (!strcmp(key, "ech_enabled")) g_app.ech_enabled = atoi(val);
         else if (!strcmp(key, "logging_enabled")) g_app.logging_enabled = atoi(val);
@@ -321,7 +321,7 @@ void render_ui() {
             for (int i = 0; i < 4; i++)
                 if (strcmp(g_app.noize_profile, profiles[i]) == 0) { idx = i; break; }
             if (ImGui::Combo("Profile", &idx, profiles, 4))
-                strncpy(g_app.noize_profile, profiles[idx], sizeof(g_app.noize_profile) - 1);
+                snprintf(g_app.noize_profile, sizeof(g_app.noize_profile), "%s", profiles[idx]);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("TLS Fragmentation");
             ImGui::Checkbox("Enable", &g_app.fragment_enabled);
