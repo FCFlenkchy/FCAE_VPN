@@ -195,22 +195,17 @@ pub(crate) async fn dns_resolve(stack: &StackHandle, name: &str) -> Result<IpAdd
     dns_resolve_udp(stack, name).await
 }
 
-async fn dns_resolve_udp(stack: &StackHandle, name: &str) -> Result<IpAddr> {
-    let prefer = dns_prefer();
-    let types: &[u16] = match prefer {
-        6 => &[28],
-        10 => &[28, 1],
-        _ => &[1],
-    };
-    let server = dns_server();
-    let mut last_err = AetherError::Other(format!("no DNS record for {name}"));
-    for qtype in types {
-        match dns_query_udp(stack, name, server, *qtype).await {
-            Ok(ip) => return Ok(ip),
-            Err(e) => last_err = e,
+fn dns_servers() -> Vec<SocketAddr> {
+    let mut out = Vec::new();
+    out.push(dns_server());
+    for extra in ["1.1.1.1:53", "1.0.0.1:53", "8.8.8.8:53", "8.8.4.4:53"] {
+        if let Ok(a) = extra.parse::<SocketAddr>() {
+            if !out.contains(&a) {
+                out.push(a);
+            }
         }
     }
-    Err(last_err)
+    out
 }
 
 async fn dns_query_udp(
@@ -221,14 +216,48 @@ async fn dns_query_udp(
 ) -> Result<IpAddr> {
     let udp = stack.open_udp().await?;
     let query = build_dns_query(name, qtype);
-    udp.send_to(server, query).await?;
+    // One resend helps cold tunnels that drop the first UDP packet.
+    udp.send_to(server, query.clone()).await?;
     let (_sender, mut from_stack) = udp.into_split();
-    let resp = tokio::time::timeout(Duration::from_secs(5), from_stack.recv())
-        .await
-        .map_err(|_| AetherError::Other("dns timeout".into()))?
-        .ok_or_else(|| AetherError::Other("dns channel closed".into()))?;
-    parse_dns_answer(&resp.1, qtype)
-        .ok_or_else(|| AetherError::Other(format!("no DNS type {qtype} for {name}")))
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Err(AetherError::Other("dns timeout".into()));
+        }
+        let wait = left.min(Duration::from_millis(1500));
+        match tokio::time::timeout(wait, from_stack.recv()).await {
+            Ok(Some((_src, data))) => {
+                if let Some(ip) = parse_dns_answer(&data, qtype) {
+                    return Ok(ip);
+                }
+            }
+            Ok(None) => return Err(AetherError::Other("dns channel closed".into())),
+            Err(_) => {
+                // Resend on timeout tick
+                let _ = udp.send_to(server, query.clone()).await;
+            }
+        }
+    }
+}
+
+async fn dns_resolve_udp(stack: &StackHandle, name: &str) -> Result<IpAddr> {
+    let prefer = dns_prefer();
+    let types: &[u16] = match prefer {
+        6 => &[28],
+        10 => &[28, 1],
+        _ => &[1],
+    };
+    let mut last_err = AetherError::Other(format!("no DNS record for {name}"));
+    for server in dns_servers() {
+        for qtype in types {
+            match dns_query_udp(stack, name, server, *qtype).await {
+                Ok(ip) => return Ok(ip),
+                Err(e) => last_err = e,
+            }
+        }
+    }
+    Err(last_err)
 }
 
 async fn dns_resolve_doh(name: &str) -> Result<IpAddr> {

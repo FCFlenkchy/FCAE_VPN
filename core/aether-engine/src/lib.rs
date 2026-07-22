@@ -151,9 +151,12 @@ fn spawn_health_monitor(
 ) -> tokio::task::JoinHandle<()> {
     let interval = health_interval();
     let max_fails = health_max_fails();
-    let probe_timeout = health_timeout();
+    let probe_timeout = health_timeout().max(std::time::Duration::from_secs(8));
+    // Don't count failures during the first interval after SOCKS is up (tunnel still warming).
+    let grace = interval.max(std::time::Duration::from_secs(15));
     tokio::spawn(async move {
         let mut fails = 0u32;
+        let started = std::time::Instant::now();
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // skip first immediate tick
@@ -175,6 +178,11 @@ fn spawn_health_monitor(
             };
             if ok {
                 fails = 0;
+            } else if started.elapsed() < grace {
+                log::debug!(
+                    "[health] probe failed during grace ({:?} left); not counting",
+                    grace.saturating_sub(started.elapsed())
+                );
             } else {
                 fails += 1;
                 log::warn!("[health] consecutive failures {fails}/{max_fails}");
@@ -1171,8 +1179,9 @@ async fn run_wireguard_tunnel(
         }));
     }
 
-    // Settle for handshake + keepalives before live probe (cold endpoints need more).
-    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    // New WG session after scan: handshake + keepalive path needs more settle time
+    // than MASQUE (scan used a throwaway Tunn; this is a fresh connection).
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
 
     // WireGuard was verified on a throwaway session; re-check the LIVE stack
     // before SOCKS (fixes false positives on quick-reconnect / Ironclad).

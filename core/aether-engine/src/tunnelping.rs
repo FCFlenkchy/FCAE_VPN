@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
@@ -31,21 +31,18 @@ fn http_probe_port() -> u16 {
         .unwrap_or(80)
 }
 
-async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
-    let ip = socks::dns_resolve(stack, HTTP_PROBE_HOST).await?;
-    let dst = SocketAddr::new(ip, http_probe_port());
-
+async fn http_probe_to(stack: &netstack::StackHandle, dst: SocketAddr, host: &str) -> Result<()> {
     let conn = stack.open_tcp(dst).await?;
     let (sender, mut from_stack) = conn.into_split();
 
     let request = format!(
-        "GET {HTTP_PROBE_PATH} HTTP/1.1\r\nHost: {HTTP_PROBE_HOST}\r\nConnection: close\r\nUser-Agent: aether-ironclad\r\n\r\n"
+        "GET {HTTP_PROBE_PATH} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: aether-ironclad\r\n\r\n"
     );
     sender.send(request.into_bytes()).await?;
 
     let mut buf = Vec::new();
     loop {
-        match tokio::time::timeout(Duration::from_secs(6), from_stack.recv()).await {
+        match tokio::time::timeout(Duration::from_secs(8), from_stack.recv()).await {
             Ok(Some(chunk)) => {
                 buf.extend_from_slice(&chunk);
                 if buf.len() >= 12 {
@@ -60,8 +57,11 @@ async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
     sender.close().await;
 
     let status_line = String::from_utf8_lossy(&buf);
-    if status_line.contains("204") {
+    // 204 (gstatic) or any 2xx/3xx proves the tunnel carries TCP.
+    if status_line.contains(" 20") || status_line.contains(" 30") || status_line.contains("204") {
         Ok(())
+    } else if buf.is_empty() {
+        Err(AetherError::Other("http probe empty response".into()))
     } else {
         let first_line = status_line.lines().next().unwrap_or("").trim();
         Err(AetherError::Other(format!(
@@ -70,15 +70,63 @@ async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
     }
 }
 
-/// End-to-end probe on an already-running netstack (DNS + HTTP 204).
-/// Used before exposing SOCKS and for background health checks.
+async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
+    let ip = socks::dns_resolve(stack, HTTP_PROBE_HOST).await?;
+    http_probe_to(stack, SocketAddr::new(ip, http_probe_port()), HTTP_PROBE_HOST).await
+}
+
+/// TCP connectivity without DNS — works even when resolver path is flaky.
+async fn tcp_ip_probe(stack: &netstack::StackHandle) -> Result<()> {
+    // Cloudflare anycast HTTP (returns 301/400-ish but proves data plane).
+    const TARGETS: &[(IpAddr, u16, &str)] = &[
+        (IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 80, "1.1.1.1"),
+        (IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)), 80, "1.0.0.1"),
+        (IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53, "dns.google"),
+    ];
+    let mut last = AetherError::Other("tcp ip probe failed".into());
+    for &(ip, port, host) in TARGETS {
+        let dst = SocketAddr::new(ip, port);
+        if port == 80 {
+            match http_probe_to(stack, dst, host).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    log::debug!("[health] tcp http to {dst}: {e}");
+                    last = e;
+                }
+            }
+        } else {
+            // Port 53: just establish TCP (DoT-ish connectivity check).
+            match tokio::time::timeout(Duration::from_secs(6), stack.open_tcp(dst)).await {
+                Ok(Ok(conn)) => {
+                    conn.close().await;
+                    return Ok(());
+                }
+                Ok(Err(e)) => {
+                    log::debug!("[health] tcp connect {dst}: {e}");
+                    last = e;
+                }
+                Err(_) => {
+                    last = AetherError::Other(format!("tcp connect timeout {dst}"));
+                }
+            }
+        }
+    }
+    Err(last)
+}
+
+/// End-to-end probe on an already-running netstack.
+/// Prefer IP-literal TCP (no DNS) so cold WireGuard tunnels still pass.
 pub async fn live_stack_probe(stack: &netstack::StackHandle) -> Result<()> {
-    // Prefer full HTTP path; fall back to DNS-only if HTTP host is blocked.
+    match tcp_ip_probe(stack).await {
+        Ok(()) => return Ok(()),
+        Err(e) => log::debug!("[health] ip-literal probe failed ({e}); trying DNS+HTTP"),
+    }
     match http_probe(stack).await {
         Ok(()) => Ok(()),
         Err(e) => {
-            log::debug!("[health] http probe failed ({e}); trying DNS-only");
-            let _ip = socks::dns_resolve(stack, "one.one.one.one").await?;
+            log::debug!("[health] named http probe failed ({e}); trying DNS-only");
+            // Last resort: UDP DNS A query for a short name.
+            let _ip = socks::dns_resolve(stack, "cloudflare.com").await?;
             Ok(())
         }
     }
