@@ -14,103 +14,196 @@
 
 // ── Config persistence ──────────────────────────────────────────────────
 
-static std::string get_config_path() {
-#ifdef ANDROID
-    return "/data/data/com.fc.fcaevpn/files/FCAE_VPN.cfg";
-#else
-    // Prefer directory of the running executable so cwd does not matter.
-    static std::string cached;
-    if (!cached.empty()) return cached;
+static std::string join_cfg(const std::string& dir) {
+    if (dir.empty()) return "FCAE_VPN.cfg";
+    char sep =
 #if defined(_WIN32)
+        '\\';
+#else
+        '/';
+#endif
+    if (dir.back() == '/' || dir.back() == '\\') return dir + "FCAE_VPN.cfg";
+    return dir + sep + "FCAE_VPN.cfg";
+}
+
+static std::string exe_dir() {
+#if defined(ANDROID)
+    return "/data/data/com.fc.fcaevpn/files";
+#elif defined(_WIN32)
     wchar_t wbuf[MAX_PATH];
     DWORD n = GetModuleFileNameW(nullptr, wbuf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        std::wstring w(wbuf, n);
-        size_t slash = w.find_last_of(L"\\/");
-        if (slash != std::wstring::npos) w.resize(slash + 1);
-        w += L"FCAE_VPN.cfg";
-        int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            std::string u8((size_t)len - 1, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &u8[0], len, nullptr, nullptr);
-            cached = u8;
-            return cached;
-        }
-    }
+    if (n == 0 || n >= MAX_PATH) return {};
+    std::wstring w(wbuf, n);
+    size_t slash = w.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) w.resize(slash);
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 1) return {};
+    std::string u8((size_t)len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &u8[0], len, nullptr, nullptr);
+    return u8;
 #else
     char buf[4096];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (n > 0) {
-        buf[n] = '\0';
-        std::string p(buf);
-        size_t slash = p.find_last_of('/');
-        if (slash != std::string::npos) p.resize(slash + 1);
-        p += "FCAE_VPN.cfg";
-        cached = p;
-        return cached;
-    }
-#endif
-    cached = "FCAE_VPN.cfg";
-    return cached;
+    if (n <= 0) return {};
+    buf[n] = '\0';
+    std::string p(buf);
+    size_t slash = p.find_last_of('/');
+    if (slash != std::string::npos) p.resize(slash);
+    return p;
 #endif
 }
 
+// Preferred write path: next to the executable (stable regardless of cwd).
+static std::string get_config_path() {
+    static std::string cached;
+    if (!cached.empty()) return cached;
+    std::string dir = exe_dir();
+    cached = dir.empty() ? "FCAE_VPN.cfg" : join_cfg(dir);
+    return cached;
+}
+
+// Open for read/write. On Windows use wide paths so UTF-8 exe dirs work.
+static FILE* open_cfg(const std::string& path, const char* mode) {
+#if defined(_WIN32)
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return nullptr;
+    std::wstring wpath((size_t)wlen - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &wpath[0], wlen);
+    int mlen = MultiByteToWideChar(CP_UTF8, 0, mode, -1, nullptr, 0);
+    if (mlen <= 0) return nullptr;
+    std::wstring wmode((size_t)mlen - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, mode, -1, &wmode[0], mlen);
+    return _wfopen(wpath.c_str(), wmode.c_str());
+#else
+    return fopen(path.c_str(), mode);
+#endif
+}
+
+static bool file_exists(const std::string& path) {
+    FILE* f = open_cfg(path, "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+// Resolve which cfg to load: prefer next to exe, then cwd (legacy), then create at exe.
+static std::string resolve_config_path_for_load() {
+    std::string primary = get_config_path();
+    if (file_exists(primary)) return primary;
+    if (primary != "FCAE_VPN.cfg" && file_exists("FCAE_VPN.cfg"))
+        return "FCAE_VPN.cfg";
+    return primary;
+}
+
+static void apply_config_kv(const std::string& key, const std::string& val) {
+    if (key == "protocol") g_app.protocol = atoi(val.c_str());
+    else if (key == "mode") g_app.mode = atoi(val.c_str());
+    else if (key == "lan_sharing") g_app.lan_sharing = atoi(val.c_str()) != 0;
+    else if (key == "scan_mode") g_app.scan_mode = atoi(val.c_str());
+    else if (key == "ip_version") g_app.ip_version = atoi(val.c_str());
+    else if (key == "quick_reconnect") g_app.quick_reconnect = atoi(val.c_str()) != 0;
+    else if (key == "noize_profile")
+        snprintf(g_app.noize_profile, sizeof(g_app.noize_profile), "%s", val.c_str());
+    else if (key == "fragment_enabled") g_app.fragment_enabled = atoi(val.c_str()) != 0;
+    else if (key == "frag_min_size") g_app.frag_min_size = atoi(val.c_str());
+    else if (key == "frag_max_size") g_app.frag_max_size = atoi(val.c_str());
+    else if (key == "frag_min_delay") g_app.frag_min_delay = atoi(val.c_str());
+    else if (key == "frag_max_delay") g_app.frag_max_delay = atoi(val.c_str());
+    else if (key == "socks_port") g_app.socks_port = (uint16_t)atoi(val.c_str());
+    else if (key == "http_port") g_app.http_port = (uint16_t)atoi(val.c_str());
+    else if (key == "force_peer")
+        snprintf(g_app.force_peer, sizeof(g_app.force_peer), "%s", val.c_str());
+    else if (key == "config_path")
+        snprintf(g_app.config_path, sizeof(g_app.config_path), "%s", val.c_str());
+    else if (key == "h2_enabled") g_app.h2_enabled = atoi(val.c_str()) != 0;
+    else if (key == "ech_enabled") g_app.ech_enabled = atoi(val.c_str()) != 0;
+    else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
+    else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
+}
+
 static void save_config() {
-    FILE* f = fopen(get_config_path().c_str(), "w");
+    const std::string path = get_config_path();
+    FILE* f = open_cfg(path, "wb");
     if (!f) {
         snprintf(g_app.save_status, sizeof(g_app.save_status), "Save failed");
+        g_app.add_log(1, ("[ui] save failed: " + path).c_str());
         return;
     }
+    // Always LF; empty values allowed. Line-based load is robust on Win/Linux.
     fprintf(f, "protocol=%d\n", g_app.protocol);
     fprintf(f, "mode=%d\n", g_app.mode);
-    fprintf(f, "lan_sharing=%d\n", g_app.lan_sharing);
+    fprintf(f, "lan_sharing=%d\n", g_app.lan_sharing ? 1 : 0);
     fprintf(f, "scan_mode=%d\n", g_app.scan_mode);
     fprintf(f, "ip_version=%d\n", g_app.ip_version);
-    fprintf(f, "quick_reconnect=%d\n", g_app.quick_reconnect);
+    fprintf(f, "quick_reconnect=%d\n", g_app.quick_reconnect ? 1 : 0);
     fprintf(f, "noize_profile=%s\n", g_app.noize_profile);
-    fprintf(f, "fragment_enabled=%d\n", g_app.fragment_enabled);
+    fprintf(f, "fragment_enabled=%d\n", g_app.fragment_enabled ? 1 : 0);
     fprintf(f, "frag_min_size=%d\n", g_app.frag_min_size);
     fprintf(f, "frag_max_size=%d\n", g_app.frag_max_size);
     fprintf(f, "frag_min_delay=%d\n", g_app.frag_min_delay);
     fprintf(f, "frag_max_delay=%d\n", g_app.frag_max_delay);
-    fprintf(f, "socks_port=%u\n", g_app.socks_port);
-    fprintf(f, "http_port=%u\n", g_app.http_port);
+    fprintf(f, "socks_port=%u\n", (unsigned)g_app.socks_port);
+    fprintf(f, "http_port=%u\n", (unsigned)g_app.http_port);
     fprintf(f, "force_peer=%s\n", g_app.force_peer);
     fprintf(f, "config_path=%s\n", g_app.config_path);
-    fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled);
-    fprintf(f, "ech_enabled=%d\n", g_app.ech_enabled);
-    fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled);
+    fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled ? 1 : 0);
+    fprintf(f, "ech_enabled=%d\n", g_app.ech_enabled ? 1 : 0);
+    fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
+    fprintf(f, "auto_scroll=%d\n", g_app.auto_scroll ? 1 : 0);
     fclose(f);
     snprintf(g_app.save_status, sizeof(g_app.save_status), "Config saved!");
+    g_app.add_log(4, ("[ui] config saved: " + path).c_str());
+}
+
+static bool load_config_from(const std::string& path) {
+    FILE* f = open_cfg(path, "rb");
+    if (!f) return false;
+
+    char line[512];
+    int applied = 0;
+    while (fgets(line, sizeof(line), f)) {
+        // strip CR/LF and trailing spaces
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' ||
+                           line[len - 1] == ' ' || line[len - 1] == '\t')) {
+            line[--len] = '\0';
+        }
+        if (len == 0 || line[0] == '#' || line[0] == ';') continue;
+
+        char* eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        const char* key = line;
+        const char* val = eq + 1;
+        // trim key
+        while (*key == ' ' || *key == '\t') key++;
+        char* kend = (char*)key + strlen(key);
+        while (kend > key && (kend[-1] == ' ' || kend[-1] == '\t')) *--kend = '\0';
+        // trim val leading only (preserve peer strings)
+        while (*val == ' ' || *val == '\t') val++;
+
+        if (*key) {
+            apply_config_kv(key, val);
+            applied++;
+        }
+    }
+    fclose(f);
+
+    if (applied == 0) return false;
+    snprintf(g_app.save_status, sizeof(g_app.save_status), "Config loaded!");
+    g_app.add_log(4, ("[ui] config loaded (" + std::to_string(applied) + " keys): " + path).c_str());
+    return true;
 }
 
 static bool load_config() {
-    FILE* f = fopen(get_config_path().c_str(), "r");
-    if (!f) return false;
-    char key[64], val[256];
-    while (fscanf(f, "%63[^=]=%255[^\n]\n", key, val) == 2) {
-        if (!strcmp(key, "protocol")) g_app.protocol = atoi(val);
-        else if (!strcmp(key, "mode")) g_app.mode = atoi(val);
-        else if (!strcmp(key, "lan_sharing")) g_app.lan_sharing = atoi(val);
-        else if (!strcmp(key, "scan_mode")) g_app.scan_mode = atoi(val);
-        else if (!strcmp(key, "ip_version")) g_app.ip_version = atoi(val);
-        else if (!strcmp(key, "quick_reconnect")) g_app.quick_reconnect = atoi(val);
-        else if (!strcmp(key, "noize_profile")) snprintf(g_app.noize_profile, sizeof(g_app.noize_profile), "%s", val);
-        else if (!strcmp(key, "fragment_enabled")) g_app.fragment_enabled = atoi(val);
-        else if (!strcmp(key, "frag_min_size")) g_app.frag_min_size = atoi(val);
-        else if (!strcmp(key, "frag_max_size")) g_app.frag_max_size = atoi(val);
-        else if (!strcmp(key, "frag_min_delay")) g_app.frag_min_delay = atoi(val);
-        else if (!strcmp(key, "frag_max_delay")) g_app.frag_max_delay = atoi(val);
-        else if (!strcmp(key, "socks_port")) g_app.socks_port = (uint16_t)atoi(val);
-        else if (!strcmp(key, "http_port")) g_app.http_port = (uint16_t)atoi(val);
-        else if (!strcmp(key, "force_peer")) snprintf(g_app.force_peer, sizeof(g_app.force_peer), "%s", val);
-        else if (!strcmp(key, "config_path")) snprintf(g_app.config_path, sizeof(g_app.config_path), "%s", val);
-        else if (!strcmp(key, "h2_enabled")) g_app.h2_enabled = atoi(val);
-        else if (!strcmp(key, "ech_enabled")) g_app.ech_enabled = atoi(val);
-        else if (!strcmp(key, "logging_enabled")) g_app.logging_enabled = atoi(val);
+    std::string path = resolve_config_path_for_load();
+    if (!load_config_from(path)) return false;
+    // If we loaded a legacy cwd cfg, migrate a copy next to the exe for next time.
+    std::string primary = get_config_path();
+    if (path != primary && !file_exists(primary)) {
+        save_config();
+        g_app.add_log(4, ("[ui] migrated config to " + primary).c_str());
     }
-    fclose(f);
-    snprintf(g_app.save_status, sizeof(g_app.save_status), "Config loaded!");
     return true;
 }
 
@@ -176,13 +269,10 @@ static void draw_spinner(float radius, int segments, float speed) {
 void ui_init() {
     aether_init(log_callback, nullptr);
     if (!load_config()) {
-#ifndef ANDROID
-        // First run on desktop: write defaults next to the executable.
+        // First run: write defaults next to the executable (or app files on Android).
         save_config();
         snprintf(g_app.save_status, sizeof(g_app.save_status), "Created FCAE_VPN.cfg");
-#else
-        save_config();
-#endif
+        g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
     }
 }
 

@@ -81,6 +81,8 @@ struct AppState {
         c.http_port        = http_port;
         c.force_peer       = force_peer[0] ? force_peer : nullptr;
         c.config_path      = config_path;
+        c.h2_enabled       = h2_enabled;
+        c.ech_enabled      = ech_enabled;
         return c;
     }
 };

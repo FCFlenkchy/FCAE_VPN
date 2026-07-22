@@ -69,6 +69,8 @@ pub struct AetherCfgRaw {
     pub http_port: u16,
     pub force_peer: *const c_char,
     pub config_path: *const c_char,
+    pub h2_enabled: bool,
+    pub ech_enabled: bool,
 }
 
 #[repr(C)]
@@ -279,6 +281,19 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
     std::env::set_var("AETHER_VERBOSE", "1");
     // GUI never prompts on stdin
     std::env::set_var("AETHER_NONINTERACTIVE", "1");
+
+    if cfg.h2_enabled {
+        std::env::set_var("AETHER_MASQUE_HTTP2", "1");
+    } else {
+        std::env::remove_var("AETHER_MASQUE_HTTP2");
+    }
+
+    if cfg.ech_enabled {
+        // "auto" is accepted by resolve_ech() in the engine
+        std::env::set_var("AETHER_ECH", "auto");
+    } else {
+        std::env::remove_var("AETHER_ECH");
+    }
 }
 
 #[no_mangle]

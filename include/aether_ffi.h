@@ -42,6 +42,8 @@ typedef struct {
     uint16_t http_port;       // Default: 1820
     const char* force_peer;   // NULL or "ip:port"
     const char* config_path;  // Base config path (e.g., "aether.toml")
+    bool h2_enabled;          // MASQUE over HTTP/2 (AETHER_MASQUE_HTTP2)
+    bool ech_enabled;         // Encrypted Client Hello (AETHER_ECH=auto)
 } AetherConfig;
 
 typedef struct {
