@@ -194,7 +194,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        g_pSwapChain->Present(1, 1);
+        g_pSwapChain->Present(1, 0);
+
+        // Cap at ~60 FPS without VSync (VSync causes white screen on some GPUs)
+        Sleep(16);
     }
 
     ui_shutdown();
