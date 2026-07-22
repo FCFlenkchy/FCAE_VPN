@@ -4,6 +4,20 @@ A censorship circumvention client designed for heavily restricted networks. It a
 
 Built on top of **[Aether](https://github.com/CluvexStudio/aether)** with native GUI frontends for Windows, Linux, and Android.
 
+## How It Works
+
+FCAE VPN connects to **Cloudflare's WARP network** — the same infrastructure behind Cloudflare's 1.1.1.1 DNS service. Here's the flow:
+
+1. **Account provisioning** — On first launch, the client creates a WARP device identity and obtains dedicated IPv4/IPv6 addresses plus WireGuard keypairs from Cloudflare's registration API.
+2. **Endpoint scanning** — The client probes a list of Cloudflare edge IPs across multiple ports to find a reachable gateway. Each candidate is validated with a real handshake (and optionally a full HTTP request in ironclad mode) to confirm the route actually passes traffic.
+3. **Tunnel establishment** — Once a working edge is found, an encrypted tunnel is opened:
+   - **MASQUE** — Traffic is encapsulated inside HTTP/3 (QUIC) or HTTP/2 (TLS) sessions using the `CONNECT-IP` method, making it look like normal HTTPS traffic to DPI systems.
+   - **WireGuard** — A standard WireGuard UDP tunnel is established directly to the edge node.
+   - **WARP-in-WARP (gool)** — Two nested WireGuard tunnels for an additional encryption layer.
+4. **Local proxy** — The tunnel exposes a local SOCKS5 proxy (port 1819) and HTTP proxy (port 1820). Applications configured to use these proxies route their traffic through the encrypted tunnel to the internet via Cloudflare's network.
+
+All traffic between the client and Cloudflare is encrypted. From Cloudflare onward, traffic exits to the public internet normally.
+
 ## Features
 
 - Automatic endpoint discovery with end-to-end data-plane validation
