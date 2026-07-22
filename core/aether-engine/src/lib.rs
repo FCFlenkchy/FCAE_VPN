@@ -198,13 +198,15 @@ fn spawn_health_monitor(
 
 async fn spawn_local_proxies(
     stack: netstack::StackHandle,
-    listen: SocketAddr,
+    listen: Option<SocketAddr>,
     http_listen: Option<SocketAddr>,
-) -> (tokio::task::JoinHandle<Result<()>>, Option<tokio::task::JoinHandle<()>>) {
-    let socks_stack = stack.clone();
-    let socks_task = tokio::spawn(async move {
-        log::info!("[+] socks5 server listening on {listen}");
-        socks::serve(listen, socks_stack).await
+) -> (Option<tokio::task::JoinHandle<Result<()>>>, Option<tokio::task::JoinHandle<()>>) {
+    let socks_task = listen.map(|addr| {
+        let socks_stack = stack.clone();
+        tokio::spawn(async move {
+            log::info!("[+] socks5 server listening on {addr}");
+            socks::serve(addr, socks_stack).await
+        })
     });
     let http_task = http_listen.map(|http_addr| {
         let http_stack = stack.clone();
@@ -241,10 +243,10 @@ pub async fn run_from_env() -> Result<()> {
     log::info!("Aether v{}", env!("CARGO_PKG_VERSION"));
     install_netstack_panic_guard();
 
-    let listen: SocketAddr = std::env::var("AETHER_SOCKS")
+    let listen: Option<SocketAddr> = std::env::var("AETHER_SOCKS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| "127.0.0.1:1819".parse().unwrap());
+        .filter(|a| a.port() != 0);
 
     let http_listen: Option<SocketAddr> = std::env::var("AETHER_HTTP")
         .ok()
@@ -255,10 +257,11 @@ pub async fn run_from_env() -> Result<()> {
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(1820);
-            if port == 0 || port == listen.port() {
-                None
-            } else {
-                Some(SocketAddr::new(listen.ip(), port))
+            match listen {
+                Some(addr) if port != 0 && port != addr.port() => {
+                    Some(SocketAddr::new(addr.ip(), port))
+                }
+                _ => None,
             }
         });
 
@@ -599,7 +602,7 @@ async fn want_quick_reconnect(cached: &lastconn::LastConnection) -> bool {
 async fn run_masque(
     identity: account::Identity,
     ech: Option<Vec<u8>>,
-    listen: SocketAddr,
+    listen: Option<SocketAddr>,
     http_listen: Option<SocketAddr>,
     lastconn_path: String,
 ) -> Result<()> {
@@ -744,7 +747,7 @@ async fn run_masque_tunnel(
     identity: &account::Identity,
     peer: SocketAddr,
     ech: Option<Vec<u8>>,
-    listen: SocketAddr,
+    listen: Option<SocketAddr>,
     http_listen: Option<SocketAddr>,
 ) -> Result<()> {
     let (chans, internals) = quic::channels();
@@ -857,7 +860,9 @@ async fn run_masque_tunnel(
         r = tunnel_task => End::Tunnel(r),
         _ = health_rx => End::Health,
     };
-    socks_task.abort();
+    if let Some(t) = socks_task {
+        t.abort();
+    }
     health_task.abort();
     if let Some(t) = http_task {
         t.abort();
@@ -970,7 +975,7 @@ async fn hunt_wg_peer(
 
 async fn run_wireguard(
     identity: account::Identity,
-    listen: SocketAddr,
+    listen: Option<SocketAddr>,
     http_listen: Option<SocketAddr>,
     lastconn_path: String,
 ) -> Result<()> {
@@ -1128,7 +1133,7 @@ async fn run_wireguard_tunnel(
     identity: account::Identity,
     peer: SocketAddr,
     aethernoize: aethernoize::AetherNoizeConfig,
-    listen: SocketAddr,
+    listen: Option<SocketAddr>,
     http_listen: Option<SocketAddr>,
 ) -> Result<()> {
     log::info!("[*] establishing WireGuard tunnel with {peer} (already verified during scan)...");
@@ -1205,7 +1210,9 @@ async fn run_wireguard_tunnel(
         r = tunnel_task => End::Tunnel(r),
         _ = health_rx => End::Health,
     };
-    socks_task.abort();
+    if let Some(t) = socks_task {
+        t.abort();
+    }
     health_task.abort();
     if let Some(t) = http_task {
         t.abort();
@@ -1323,7 +1330,7 @@ async fn run_warp_in_warp(
     primary: account::Identity,
     secondary: account::Identity,
     peer: SocketAddr,
-    listen: SocketAddr,
+    listen: Option<SocketAddr>,
     http_listen: Option<SocketAddr>,
 ) -> Result<()> {
     log::info!("[*] establishing outer WARP tunnel to {peer}...");

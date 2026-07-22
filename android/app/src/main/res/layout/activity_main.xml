@@ -207,6 +207,24 @@
             android:text="Enable logging"
             android:textColor="#FFE0E4EE" />
 
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchSocks"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="true"
+            android:text="SOCKS5 proxy (:1819)"
+            android:textColor="#FFE0E4EE" />
+
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchHttp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:checked="true"
+            android:text="HTTP proxy (:1820)"
+            android:textColor="#FFE0E4EE" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

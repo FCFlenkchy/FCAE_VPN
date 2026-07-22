@@ -48,6 +48,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchQuick: SwitchMaterial
     private lateinit var switchIronclad: SwitchMaterial
     private lateinit var switchLogging: SwitchMaterial
+    private lateinit var switchSocks: SwitchMaterial
+    private lateinit var switchHttp: SwitchMaterial
     private lateinit var editSni: android.widget.EditText
     private lateinit var editHealthInterval: android.widget.EditText
     private lateinit var editHealthMaxFails: android.widget.EditText
@@ -98,6 +100,8 @@ class MainActivity : AppCompatActivity() {
         switchQuick = findViewById(R.id.switchQuick)
         switchIronclad = findViewById(R.id.switchIronclad)
         switchLogging = findViewById(R.id.switchLogging)
+        switchSocks = findViewById(R.id.switchSocks)
+        switchHttp = findViewById(R.id.switchHttp)
         editSni = findViewById(R.id.editSni)
         editHealthInterval = findViewById(R.id.editHealthInterval)
         editHealthMaxFails = findViewById(R.id.editHealthMaxFails)
@@ -181,6 +185,8 @@ class MainActivity : AppCompatActivity() {
             putBoolean("quick", switchQuick.isChecked)
             putBoolean("ironclad", switchIronclad.isChecked)
             putBoolean("logging", switchLogging.isChecked)
+            putBoolean("socks", switchSocks.isChecked)
+            putBoolean("http", switchHttp.isChecked)
             putString("sni", editSni.text.toString().trim())
             putString("healthInterval", editHealthInterval.text.toString())
             putString("healthMaxFails", editHealthMaxFails.text.toString())
@@ -197,6 +203,8 @@ class MainActivity : AppCompatActivity() {
         switchQuick.isChecked = prefs.getBoolean("quick", false)
         switchIronclad.isChecked = prefs.getBoolean("ironclad", false)
         switchLogging.isChecked = prefs.getBoolean("logging", true)
+        switchSocks.isChecked = prefs.getBoolean("socks", true)
+        switchHttp.isChecked = prefs.getBoolean("http", true)
         editSni.setText(prefs.getString("sni", ""))
         editHealthInterval.setText(prefs.getString("healthInterval", "20"))
         editHealthMaxFails.setText(prefs.getString("healthMaxFails", "2"))
@@ -258,6 +266,8 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("healthMaxFails", healthMaxFails())
         i.putExtra("healthTimeout", 5)
         i.putExtra("liveValidate", 20)
+        i.putExtra("socksPort", if (switchSocks.isChecked) 1819 else 0)
+        i.putExtra("httpPort", if (switchHttp.isChecked) 1820 else 0)
         startForegroundService(i)
     }
 
@@ -293,8 +303,8 @@ class MainActivity : AppCompatActivity() {
                     fragMaxSize = 32,
                     fragMinDelay = 2,
                     fragMaxDelay = 10,
-                    socksPort = 1819,
-                    httpPort = 1820,
+                    socksPort = if (switchSocks.isChecked) 1819 else 0,
+                    httpPort = if (switchHttp.isChecked) 1820 else 0,
                     forcePeer = "",
                     configPath = cfgPath,
                     h2Enabled = h2,

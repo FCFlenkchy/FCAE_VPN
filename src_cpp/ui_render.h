@@ -37,6 +37,8 @@ struct AppState {
     int  frag_max_delay  = 10;
     uint16_t socks_port  = 1819;
     uint16_t http_port   = 1820;
+    bool socks_enabled   = true;
+    bool http_enabled    = true;
     char force_peer[128] = {};
     // Engine identity file (Cloudflare device certs). Not the UI settings file.
     char config_path[256] = "aether.toml";
@@ -98,8 +100,8 @@ struct AppState {
         c.frag_max_size    = (uint32_t)frag_max_size;
         c.frag_min_delay   = (uint32_t)frag_min_delay;
         c.frag_max_delay   = (uint32_t)frag_max_delay;
-        c.socks_port       = socks_port;
-        c.http_port        = http_port;
+        c.socks_port       = socks_enabled ? socks_port : 0;
+        c.http_port        = http_enabled ? http_port : 0;
         c.force_peer       = force_peer[0] ? force_peer : nullptr;
         c.config_path      = config_path;
         c.h2_enabled       = h2_enabled;

@@ -96,9 +96,9 @@ public class FCAEVpnService extends VpnService {
 
         int protocol = intent.getIntExtra("protocol", 0);
         int mode = intent.getIntExtra("mode", 1);
-        int scanMode = intent.getIntExtra("scanMode", 1);
+        int scanMode = intent.getIntExtra("scanMode", 0);
         int ipVersion = intent.getIntExtra("ipVersion", 4);
-        boolean quickReconnect = intent.getBooleanExtra("quickReconnect", true);
+        boolean quickReconnect = intent.getBooleanExtra("quickReconnect", false);
         boolean h2Enabled = intent.getBooleanExtra("h2Enabled", true);
         boolean echEnabled = intent.getBooleanExtra("echEnabled", true);
         boolean ironclad = intent.getBooleanExtra("ironclad", false);
@@ -106,6 +106,8 @@ public class FCAEVpnService extends VpnService {
         int healthMaxFails = intent.getIntExtra("healthMaxFails", 2);
         int healthTimeout = intent.getIntExtra("healthTimeout", 5);
         int liveValidate = intent.getIntExtra("liveValidate", 20);
+        int socksPort = intent.getIntExtra("socksPort", 1819);
+        int httpPort = intent.getIntExtra("httpPort", 1820);
         String configPathExtra = intent.getStringExtra("configPath");
         String sniExtra = intent.getStringExtra("sni");
         final String configPath =
@@ -157,7 +159,7 @@ public class FCAEVpnService extends VpnService {
                 boolean ok = NativeEngine.nativeStart(
                     fProtocol, fMode, false, fScanMode,
                     fIpVersion, fQuickReconnect, "balanced",
-                    false, 16, 32, 2, 10, 1819, 1820,
+                    false, 16, 32, 2, 10, socksPort, httpPort,
                     "", configPath, fH2Enabled, fEchEnabled,
                     sni, fIronclad, fHealthInterval, fHealthMaxFails, fHealthTimeout, fLiveValidate
                 );

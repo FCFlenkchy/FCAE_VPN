@@ -111,6 +111,8 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "frag_max_delay") g_app.frag_max_delay = atoi(val.c_str());
     else if (key == "socks_port") g_app.socks_port = (uint16_t)atoi(val.c_str());
     else if (key == "http_port") g_app.http_port = (uint16_t)atoi(val.c_str());
+    else if (key == "socks_enabled") g_app.socks_enabled = atoi(val.c_str()) != 0;
+    else if (key == "http_enabled") g_app.http_enabled = atoi(val.c_str()) != 0;
     else if (key == "force_peer")
         snprintf(g_app.force_peer, sizeof(g_app.force_peer), "%s", val.c_str());
     else if (key == "config_path")
@@ -151,6 +153,8 @@ static void save_config() {
     fprintf(f, "frag_max_delay=%d\n", g_app.frag_max_delay);
     fprintf(f, "socks_port=%u\n", (unsigned)g_app.socks_port);
     fprintf(f, "http_port=%u\n", (unsigned)g_app.http_port);
+    fprintf(f, "socks_enabled=%d\n", g_app.socks_enabled ? 1 : 0);
+    fprintf(f, "http_enabled=%d\n", g_app.http_enabled ? 1 : 0);
     fprintf(f, "force_peer=%s\n", g_app.force_peer);
     fprintf(f, "config_path=%s\n", g_app.config_path);
     fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled ? 1 : 0);
@@ -537,9 +541,16 @@ void render_ui() {
             if (g_app.mode == 0) {
                 ImGui::Text("Proxy Ports");
                 ImGui::PushItemWidth(100);
-                ImGui::InputScalar("SOCKS5", ImGuiDataType_U16, &g_app.socks_port);
+                ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
                 ImGui::SameLine(0, 20);
-                ImGui::InputScalar("HTTP",   ImGuiDataType_U16, &g_app.http_port);
+                if (g_app.socks_enabled) {
+                    ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
+                }
+                ImGui::Checkbox("HTTP", &g_app.http_enabled);
+                ImGui::SameLine(0, 20);
+                if (g_app.http_enabled) {
+                    ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
+                }
                 ImGui::PopItemWidth();
                 ImGui::Spacing();
             }
