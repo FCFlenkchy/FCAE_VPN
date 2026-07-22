@@ -141,9 +141,8 @@ jobs:
             git clone --depth 1 --branch v1.91.8 https://github.com/ocornut/imgui.git third_party/imgui
           fi
 
-      - name: generate icon
+      - name: copy pre-generated icons
         run: |
-          python3 src_cpp/gen_icon.py src_cpp/icon.ico
           cp src_cpp/icon_192.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png 2>/dev/null || true
           cp src_cpp/icon_48.png android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png 2>/dev/null || true
 

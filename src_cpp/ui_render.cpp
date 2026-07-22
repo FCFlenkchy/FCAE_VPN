@@ -493,12 +493,12 @@ void render_ui() {
             const char* lip = telem.lan_ip[0] ? telem.lan_ip : "127.0.0.1";
             if (g_app.mode == 0) {
                 if (g_app.lan_sharing)
-                    ImGui::TextWrapped("LAN Gateways: SOCKS5 %s:%u | HTTP %s:%u", lip, g_app.socks_port, lip, g_app.http_port);
+                    ImGui::TextWrapped("Local 127.0.0.1:%u | LAN %s:%u", g_app.socks_port, lip, g_app.socks_port);
                 else
                     ImGui::TextWrapped("Local: SOCKS5 127.0.0.1:%u | HTTP 127.0.0.1:%u", g_app.socks_port, g_app.http_port);
             } else {
                 if (g_app.lan_sharing)
-                    ImGui::TextWrapped("TUN Active | LAN SOCKS5 %s:%u | HTTP %s:%u", lip, g_app.socks_port, lip, g_app.http_port);
+                    ImGui::TextWrapped("TUN | Local 127.0.0.1 | LAN %s", lip);
                 else
                     ImGui::TextWrapped("TUN Active | SOCKS5 127.0.0.1:%u", g_app.socks_port);
             }
