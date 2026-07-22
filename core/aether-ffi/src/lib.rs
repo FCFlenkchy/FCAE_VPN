@@ -71,6 +71,12 @@ pub struct AetherCfgRaw {
     pub config_path: *const c_char,
     pub h2_enabled: bool,
     pub ech_enabled: bool,
+    pub dns_server: *const c_char,
+    pub dns_mode: i32,
+    pub doh_url: *const c_char,
+    pub dns_ip_prefer: i32,
+    pub tls_groups: *const c_char,
+    pub udp_buf_kb: u32,
 }
 
 #[repr(C)]
@@ -233,14 +239,26 @@ fn copy_str_to_buf(buf: &mut [u8], s: &str) {
 
 fn detect_lan_ip() -> String {
     use std::net::UdpSocket;
-    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("1.1.1.1:80").is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                return addr.ip().to_string();
-            }
+    use std::time::Duration;
+    let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
+        return "127.0.0.1".to_string();
+    };
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(200)));
+    let _ = socket.set_write_timeout(Some(Duration::from_millis(200)));
+    if socket.connect("1.1.1.1:80").is_ok() {
+        if let Ok(addr) = socket.local_addr() {
+            return addr.ip().to_string();
         }
     }
     "127.0.0.1".to_string()
+}
+
+fn cstr_opt(p: *const c_char) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(p).to_str().ok().map(|s| s.trim().to_string()) }
+        .filter(|s| !s.is_empty())
 }
 
 fn protocol_to_env(p: i32) -> &'static str {
@@ -370,6 +388,49 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
     } else {
         std::env::remove_var("AETHER_ECH");
     }
+
+    // DNS / TLS / buffers
+    if let Some(dns) = cstr_opt(cfg.dns_server) {
+        std::env::set_var("AETHER_DNS", dns);
+    } else {
+        std::env::remove_var("AETHER_DNS");
+    }
+    match cfg.dns_mode {
+        1 => std::env::set_var("AETHER_DNS_MODE", "doh"),
+        _ => std::env::set_var("AETHER_DNS_MODE", "udp"),
+    }
+    if let Some(url) = cstr_opt(cfg.doh_url) {
+        std::env::set_var("AETHER_DOH_URL", url);
+    } else {
+        std::env::remove_var("AETHER_DOH_URL");
+    }
+    let prefer = match cfg.dns_ip_prefer {
+        4 => "v4",
+        6 => "v6",
+        10 => "both",
+        _ => match cfg.ip_version {
+            6 => "v6",
+            10 => "both",
+            _ => "v4",
+        },
+    };
+    std::env::set_var("AETHER_DNS_IP", prefer);
+    if let Some(g) = cstr_opt(cfg.tls_groups) {
+        std::env::set_var("AETHER_TLS_GROUPS", g);
+    } else {
+        std::env::remove_var("AETHER_TLS_GROUPS");
+    }
+    if cfg.udp_buf_kb > 0 {
+        std::env::set_var("AETHER_UDP_BUF_KB", cfg.udp_buf_kb.to_string());
+    } else {
+        std::env::remove_var("AETHER_UDP_BUF_KB");
+    }
+    // TUN mode flag for engine (Android sets fd separately via aether_set_android_tun_fd)
+    if cfg.mode == 1 {
+        std::env::set_var("AETHER_MODE", "tun");
+    } else {
+        std::env::set_var("AETHER_MODE", "proxy");
+    }
 }
 
 #[no_mangle]
@@ -390,12 +451,18 @@ pub extern "C" fn aether_init(
     };
     let _ = log::set_logger(&GUI_LOGGER).map(|()| log::set_max_level(max));
 
+    // Prefer detecting LAN IP off the critical path; use 127.0.0.1 initially.
     {
         let mut t = TELEMETRY.lock();
         t.state = 0;
         t.status_message = "Disconnected".to_string();
-        t.lan_ip = detect_lan_ip();
+        t.lan_ip = "127.0.0.1".to_string();
     }
+    std::thread::spawn(|| {
+        let ip = detect_lan_ip();
+        let mut t = TELEMETRY.lock();
+        t.lan_ip = ip;
+    });
 
     INITIALIZED.store(true, Ordering::SeqCst);
     unsafe {
@@ -601,6 +668,7 @@ pub extern "C" fn aether_set_android_tun_fd(tun_fd: i32) {
         log_msg(4, &format!("[ffi] aether_set_android_tun_fd(fd={tun_fd})"));
     }
     std::env::set_var("AETHER_TUN_FD", tun_fd.to_string());
+    aether_engine::tun::set_fd(tun_fd);
 }
 
 #[no_mangle]

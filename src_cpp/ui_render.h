@@ -8,6 +8,8 @@
 #include <vector>
 #include <string>
 #include <atomic>
+#include <thread>
+#include <chrono>
 
 #include "imgui.h"
 
@@ -19,6 +21,7 @@ struct AppState {
     std::atomic<bool> running{true};
     std::atomic<int>  ffi_state{AETHER_STATE_DISCONNECTED};
     std::atomic<bool> ffi_connected{false};
+    std::atomic<bool> start_busy{false};
 
     int  protocol        = 0;
     int  mode            = 0;
@@ -41,7 +44,16 @@ struct AppState {
     bool h2_enabled      = false;
     bool ech_enabled     = false;
 
+    // DNS / TLS
+    char dns_server[128] = "1.1.1.1:53";
+    int  dns_mode        = 0; // 0=UDP 1=DoH
+    char doh_url[256]    = "https://cloudflare-dns.com/dns-query";
+    int  dns_ip_prefer   = 0; // 0=follow scan, 4, 6, 10
+    char tls_groups[128] = "P-256:X25519:P-384";
+    int  udp_buf_kb      = 512;
+
     AetherTelemetry telem = {};
+    double last_telem_t = 0.0;
 
     std::vector<std::pair<int, std::string>> logs;
     int  max_logs    = 400;
@@ -52,11 +64,9 @@ struct AppState {
 
     void add_log(int level, const char* msg) {
         if (!msg) return;
-        // Cap single line length to avoid huge allocations
         std::string s(msg);
         if (s.size() > 512) s.resize(512);
         logs.emplace_back(level, std::move(s));
-        // Erase batch from front (amortized cheaper than one-by-one)
         if ((int)logs.size() > max_logs) {
             const int drop = (int)logs.size() - max_logs;
             logs.erase(logs.begin(), logs.begin() + drop);
@@ -93,6 +103,12 @@ struct AppState {
         c.config_path      = config_path;
         c.h2_enabled       = h2_enabled;
         c.ech_enabled      = ech_enabled;
+        c.dns_server       = dns_server[0] ? dns_server : nullptr;
+        c.dns_mode         = dns_mode;
+        c.doh_url          = doh_url[0] ? doh_url : nullptr;
+        c.dns_ip_prefer    = dns_ip_prefer;
+        c.tls_groups       = tls_groups[0] ? tls_groups : nullptr;
+        c.udp_buf_kb       = (uint32_t)(udp_buf_kb > 0 ? udp_buf_kb : 0);
         return c;
     }
 };

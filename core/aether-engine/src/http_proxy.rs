@@ -97,7 +97,7 @@ async fn handle_client(sock: TcpStream, stack: StackHandle) -> Result<()> {
         let (mut rd, mut wr) = sock.into_split();
 
         let up = tokio::spawn(async move {
-            let mut buf = vec![0u8; 8192];
+            let mut buf = vec![0u8; 32768];
             loop {
                 match rd.read(&mut buf).await {
                     Ok(0) => {
@@ -135,7 +135,7 @@ async fn relay_bidirectional(sock: TcpStream, conn: crate::netstack::TcpConn) ->
     let (mut rd, mut wr) = sock.into_split();
 
     let up = tokio::spawn(async move {
-        let mut buf = vec![0u8; 8192];
+        let mut buf = vec![0u8; 32768];
         loop {
             match rd.read(&mut buf).await {
                 Ok(0) => {

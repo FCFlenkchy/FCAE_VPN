@@ -117,6 +117,15 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         snprintf(g_app.config_path, sizeof(g_app.config_path), "%s", val.c_str());
     else if (key == "h2_enabled") g_app.h2_enabled = atoi(val.c_str()) != 0;
     else if (key == "ech_enabled") g_app.ech_enabled = atoi(val.c_str()) != 0;
+    else if (key == "dns_server")
+        snprintf(g_app.dns_server, sizeof(g_app.dns_server), "%s", val.c_str());
+    else if (key == "dns_mode") g_app.dns_mode = atoi(val.c_str());
+    else if (key == "doh_url")
+        snprintf(g_app.doh_url, sizeof(g_app.doh_url), "%s", val.c_str());
+    else if (key == "dns_ip_prefer") g_app.dns_ip_prefer = atoi(val.c_str());
+    else if (key == "tls_groups")
+        snprintf(g_app.tls_groups, sizeof(g_app.tls_groups), "%s", val.c_str());
+    else if (key == "udp_buf_kb") g_app.udp_buf_kb = atoi(val.c_str());
     else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
 }
@@ -148,6 +157,12 @@ static void save_config() {
     fprintf(f, "config_path=%s\n", g_app.config_path);
     fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled ? 1 : 0);
     fprintf(f, "ech_enabled=%d\n", g_app.ech_enabled ? 1 : 0);
+    fprintf(f, "dns_server=%s\n", g_app.dns_server);
+    fprintf(f, "dns_mode=%d\n", g_app.dns_mode);
+    fprintf(f, "doh_url=%s\n", g_app.doh_url);
+    fprintf(f, "dns_ip_prefer=%d\n", g_app.dns_ip_prefer);
+    fprintf(f, "tls_groups=%s\n", g_app.tls_groups);
+    fprintf(f, "udp_buf_kb=%d\n", g_app.udp_buf_kb);
     fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
     fprintf(f, "auto_scroll=%d\n", g_app.auto_scroll ? 1 : 0);
     fclose(f);
@@ -316,15 +331,22 @@ void render_ui() {
         ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    AetherTelemetry telem = {};
-    aether_get_telemetry(&telem);
-    g_app.telem = telem;
-    g_app.ffi_state.store(telem.state);
-    g_app.ffi_connected.store(telem.state == AETHER_STATE_CONNECTED);
+    // Throttle telemetry FFI (~4 Hz) — UI still paints at full rate.
+    const double now = ImGui::GetTime();
+    if (now - g_app.last_telem_t >= 0.25) {
+        AetherTelemetry telem = {};
+        aether_get_telemetry(&telem);
+        g_app.telem = telem;
+        g_app.ffi_state.store(telem.state);
+        g_app.ffi_connected.store(telem.state == AETHER_STATE_CONNECTED);
+        g_app.last_telem_t = now;
+    }
+    const AetherTelemetry& telem = g_app.telem;
 
     AetherState cur = (AetherState)telem.state;
     bool connected  = (cur == AETHER_STATE_CONNECTED);
-    bool busy       = (cur == AETHER_STATE_PROVISIONING || cur == AETHER_STATE_SCANNING || cur == AETHER_STATE_CONNECTING);
+    bool busy       = (cur == AETHER_STATE_PROVISIONING || cur == AETHER_STATE_SCANNING || cur == AETHER_STATE_CONNECTING)
+                      || g_app.start_busy.load();
     bool errored    = (cur == AETHER_STATE_ERROR);
 
     // ── 1. STATUS BAR + ACTIONS ──────────────────────────────────────────
@@ -363,13 +385,43 @@ void render_ui() {
         if (btn_w < 100.0f) btn_w = 100.0f;
         if (ImGui::Button(connected || busy ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 34))) {
             if (connected || busy || errored) {
-                aether_stop();
-                g_app.ffi_state.store(AETHER_STATE_DISCONNECTED);
-            } else {
+                g_app.start_busy.store(false);
+                std::thread([] {
+                    aether_stop();
+                    g_app.ffi_state.store(AETHER_STATE_DISCONNECTED);
+                }).detach();
+            } else if (!g_app.start_busy.load()) {
+                g_app.start_busy.store(true);
                 AetherConfig cfg = g_app.to_config();
-                if (!aether_start(&cfg)) {
-                    g_app.add_log(1, "[ui] aether_start failed");
-                }
+                // Heap-copy strings for async start (pointers must outlive this frame).
+                auto* heap = new AetherConfig(cfg);
+                // Keep owned strings alive for the worker.
+                struct Owned {
+                    std::string noize, peer, path, dns, doh, tls;
+                    AetherConfig c;
+                };
+                auto* o = new Owned();
+                o->noize = g_app.noize_profile;
+                o->peer  = g_app.force_peer;
+                o->path  = g_app.config_path;
+                o->dns   = g_app.dns_server;
+                o->doh   = g_app.doh_url;
+                o->tls   = g_app.tls_groups;
+                o->c = g_app.to_config();
+                o->c.noize_profile = o->noize.c_str();
+                o->c.force_peer    = o->peer.empty() ? nullptr : o->peer.c_str();
+                o->c.config_path   = o->path.c_str();
+                o->c.dns_server    = o->dns.empty() ? nullptr : o->dns.c_str();
+                o->c.doh_url       = o->doh.empty() ? nullptr : o->doh.c_str();
+                o->c.tls_groups    = o->tls.empty() ? nullptr : o->tls.c_str();
+                delete heap;
+                std::thread([o] {
+                    if (!aether_start(&o->c)) {
+                        g_app.add_log(1, "[ui] aether_start failed");
+                    }
+                    g_app.start_busy.store(false);
+                    delete o;
+                }).detach();
             }
         }
         ImGui::PopStyleColor(3);
@@ -542,10 +594,41 @@ void render_ui() {
             const char* modes[] = { "Turbo", "Balanced", "Thorough", "Stealth", "Ironclad" };
             ImGui::Combo("Mode", &g_app.scan_mode, modes, 5);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Text("IP Version");
+            ImGui::Text("IP Version (scan + default DNS prefer)");
             ImGui::RadioButton("IPv4",       &g_app.ip_version, 4);
             ImGui::RadioButton("IPv6",       &g_app.ip_version, 6);
             ImGui::RadioButton("Dual-Stack", &g_app.ip_version, 10);
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("DNS / TLS")) {
+            ImGui::BeginChild("##dns_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            ImGui::Spacing();
+            ImGui::Text("DNS Resolver");
+            ImGui::InputText("DNS server", g_app.dns_server, sizeof(g_app.dns_server));
+            ImGui::TextDisabled("UDP: host or host:port (default 1.1.1.1:53)");
+            const char* dnsModes[] = { "UDP (classic)", "DoH (HTTPS)" };
+            ImGui::Combo("DNS mode", &g_app.dns_mode, dnsModes, 2);
+            if (g_app.dns_mode == 1) {
+                ImGui::InputText("DoH URL", g_app.doh_url, sizeof(g_app.doh_url));
+            }
+            ImGui::Spacing();
+            ImGui::Text("DNS address family");
+            ImGui::RadioButton("Follow scan IP", &g_app.dns_ip_prefer, 0);
+            ImGui::RadioButton("A only (IPv4)",  &g_app.dns_ip_prefer, 4);
+            ImGui::RadioButton("AAAA only (IPv6)", &g_app.dns_ip_prefer, 6);
+            ImGui::RadioButton("Prefer AAAA then A", &g_app.dns_ip_prefer, 10);
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("TLS");
+            ImGui::InputText("TLS groups", g_app.tls_groups, sizeof(g_app.tls_groups));
+            ImGui::TextDisabled("BoringSSL curves list, e.g. P-256:X25519:P-384");
+            ImGui::Checkbox("ECH", &g_app.ech_enabled);
+            ImGui::Checkbox("HTTP/2 MASQUE fallback", &g_app.h2_enabled);
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("UDP socket buffer (KiB)");
+            ImGui::SliderInt("##udpbuf", &g_app.udp_buf_kb, 64, 2048);
+            ImGui::TextDisabled("Default 512. Higher may improve throughput; more RAM on Windows.");
             ImGui::EndChild();
             ImGui::EndTabItem();
         }

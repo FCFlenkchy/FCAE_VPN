@@ -24,7 +24,8 @@ async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     sock.set_nonblocking(true).map_err(AetherError::Io)?;
 
     // Keep modest socket buffers — 7MB each caused multi‑hundred MB RSS on Windows.
-    let buf_size = 512 * 1024; // 512 KiB
+    let kb = std::env::var("AETHER_UDP_BUF_KB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&k| (64..=8192).contains(&k)).unwrap_or(512);
+    let buf_size = kb * 1024;
     let _ = sock.set_recv_buffer_size(buf_size);
     let _ = sock.set_send_buffer_size(buf_size);
 

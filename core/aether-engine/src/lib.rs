@@ -19,6 +19,7 @@ mod stats;
 mod tls;
 mod aethernoize;
 mod tunnelping;
+pub mod tun;
 mod wireguard;
 mod wg_prober;
 
@@ -43,6 +44,38 @@ fn parse_local_v4(s: &str) -> Ipv4Addr {
 const TUNNEL_MTU: usize = 1280;
 const INNER_MTU: usize = 1200;
 const DEFAULT_CONFIG: &str = "aether.toml";
+
+fn tun_mode_active() -> bool {
+    matches!(
+        std::env::var("AETHER_MODE")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "tun" | "1" | "true" | "vpn"
+    ) && tun::resolve_fd().is_some()
+}
+
+async fn spawn_local_proxies(
+    stack: netstack::StackHandle,
+    listen: SocketAddr,
+    http_listen: Option<SocketAddr>,
+) -> (tokio::task::JoinHandle<Result<()>>, Option<tokio::task::JoinHandle<()>>) {
+    let socks_stack = stack.clone();
+    let socks_task = tokio::spawn(async move {
+        log::info!("[+] socks5 server listening on {listen}");
+        socks::serve(listen, socks_stack).await
+    });
+    let http_task = http_listen.map(|http_addr| {
+        let http_stack = stack.clone();
+        tokio::spawn(async move {
+            log::info!("[+] http proxy listening on {http_addr}");
+            if let Err(e) = http_proxy::serve(http_addr, http_stack).await {
+                log::warn!("[-] http proxy ended: {e}");
+            }
+        })
+    });
+    (socks_task, http_task)
+}
 /// Blocking CLI entry used by the optional binary target.
 pub fn run_cli() -> Result<()> {
     cli::parse_and_apply()?;
@@ -515,6 +548,61 @@ async fn run_masque(
     }
 }
 
+type TunBridge = (
+    i32,
+    tokio::sync::mpsc::Sender<Vec<u8>>,
+    tokio::sync::mpsc::Receiver<Vec<u8>>,
+);
+
+/// Split tunnel channels so SOCKS netstack and optional TUN can both use the data plane.
+fn split_dataplane(
+    outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    mut inbound_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) -> (
+    tokio::sync::mpsc::Sender<Vec<u8>>,
+    tokio::sync::mpsc::Receiver<Vec<u8>>,
+    Option<TunBridge>,
+) {
+    let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+
+    let ot_fwd = outbound_tx.clone();
+    tokio::spawn(async move {
+        while let Some(p) = ns_out_rx.recv().await {
+            if ot_fwd.send(p).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let tun_fd = if tun_mode_active() {
+        tun::resolve_fd()
+    } else {
+        None
+    };
+
+    if let Some(fd) = tun_fd {
+        let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+        let ot_tun = outbound_tx;
+        tokio::spawn(async move {
+            while let Some(p) = inbound_rx.recv().await {
+                let _ = ns_in_tx.send(p.clone()).await;
+                let _ = tun_in_tx.send(p).await;
+            }
+        });
+        (ns_out_tx, ns_in_rx, Some((fd, ot_tun, tun_in_rx)))
+    } else {
+        tokio::spawn(async move {
+            while let Some(p) = inbound_rx.recv().await {
+                if ns_in_tx.send(p).await.is_err() {
+                    break;
+                }
+            }
+        });
+        (ns_out_tx, ns_in_rx, None)
+    }
+}
+
 async fn run_masque_tunnel(
     identity: &account::Identity,
     peer: SocketAddr,
@@ -542,10 +630,17 @@ async fn run_masque_tunnel(
         inbound_rx,
         ctrl_tx,
     } = chans;
-
-    let stack =
-        netstack::spawn(&identity.ipv4, &identity.ipv6, TUNNEL_MTU, inbound_rx, outbound_tx)?;
     let _ctrl = ctrl_tx;
+
+    let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
+
+    let stack = netstack::spawn(
+        &identity.ipv4,
+        &identity.ipv6,
+        TUNNEL_MTU,
+        ns_in_rx,
+        ns_out_tx,
+    )?;
 
     let (addr_tx, mut addr_rx) = tokio::sync::mpsc::channel::<quic::AssignedAddr>(8);
     let bridge_stack = stack.clone();
@@ -594,25 +689,24 @@ async fn run_masque_tunnel(
         }
     }
 
-    let socks_stack = stack.clone();
-    let socks_task = tokio::spawn(async move {
-        log::info!("[+] socks5 server listening on {listen}");
-        socks::serve(listen, socks_stack).await
-    });
-
-    let http_task = http_listen.map(|http_addr| {
-        let http_stack = stack.clone();
-        tokio::spawn(async move {
-            log::info!("[+] http proxy listening on {http_addr}");
-            if let Err(e) = http_proxy::serve(http_addr, http_stack).await {
-                log::warn!("[-] http proxy ended: {e}");
+    let mut tun_task = None;
+    if let Some((fd, ot, tun_rx)) = tun_bridge {
+        log::info!("[+] TUN mode: bridging Android/system fd={fd}");
+        tun_task = Some(tokio::spawn(async move {
+            if let Err(e) = tun::run(fd, ot, tun_rx).await {
+                log::warn!("[-] tun bridge ended: {e}");
             }
-        })
-    });
+        }));
+    }
+
+    let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
 
     let tunnel_result = tunnel_task.await;
     socks_task.abort();
     if let Some(t) = http_task {
+        t.abort();
+    }
+    if let Some(t) = tun_task {
         t.abort();
     }
 
@@ -901,32 +995,38 @@ async fn run_wireguard_tunnel(
         aethernoize: std::sync::Arc::new(aethernoize),
     };
 
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(256);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(256);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(512);
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(512);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
 
-    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, TUNNEL_MTU, inbound_rx, outbound_tx)?;
+    let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
+    let stack = netstack::spawn(
+        &identity.ipv4,
+        &identity.ipv6,
+        TUNNEL_MTU,
+        ns_in_rx,
+        ns_out_tx,
+    )?;
 
-    let socks_stack = stack.clone();
-    let socks_task = tokio::spawn(async move {
-        log::info!("[+] socks5 server listening on {listen}");
-        socks::serve(listen, socks_stack).await
-    });
-
-    let http_task = http_listen.map(|http_addr| {
-        let http_stack = stack.clone();
-        tokio::spawn(async move {
-            log::info!("[+] http proxy listening on {http_addr}");
-            if let Err(e) = http_proxy::serve(http_addr, http_stack).await {
-                log::warn!("[-] http proxy ended: {e}");
+    let mut tun_task = None;
+    if let Some((fd, ot, tun_rx)) = tun_bridge {
+        log::info!("[+] TUN mode: bridging Android/system fd={fd}");
+        tun_task = Some(tokio::spawn(async move {
+            if let Err(e) = tun::run(fd, ot, tun_rx).await {
+                log::warn!("[-] tun bridge ended: {e}");
             }
-        })
-    });
+        }));
+    }
+
+    let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
 
     let tunnel_result = tunnel.run(outbound_rx).await;
     socks_task.abort();
     if let Some(t) = http_task {
+        t.abort();
+    }
+    if let Some(t) = tun_task {
         t.abort();
     }
 

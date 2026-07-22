@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -147,21 +147,156 @@ async fn resolve(stack: &StackHandle, target: Target) -> Result<IpAddr> {
     }
 }
 
+fn dns_server() -> SocketAddr {
+    let raw = std::env::var("AETHER_DNS").unwrap_or_else(|_| "1.1.1.1:53".into());
+    if let Ok(a) = raw.parse::<SocketAddr>() {
+        return a;
+    }
+    if let Ok(ip) = raw.parse::<IpAddr>() {
+        return SocketAddr::new(ip, 53);
+    }
+    "1.1.1.1:53".parse().unwrap()
+}
+
+fn dns_prefer() -> u8 {
+    // 4 = A, 6 = AAAA, 10 = dual (AAAA then A)
+    match std::env::var("AETHER_DNS_IP")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "6" | "v6" | "ipv6" => 6,
+        "both" | "dual" | "10" => 10,
+        _ => 4,
+    }
+}
+
+fn dns_mode_doh() -> bool {
+    matches!(
+        std::env::var("AETHER_DNS_MODE")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "doh" | "https" | "1" | "true" | "yes"
+    )
+}
+
+fn doh_url() -> String {
+    std::env::var("AETHER_DOH_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into())
+}
+
 pub(crate) async fn dns_resolve(stack: &StackHandle, name: &str) -> Result<IpAddr> {
+    if dns_mode_doh() {
+        return dns_resolve_doh(name).await;
+    }
+    dns_resolve_udp(stack, name).await
+}
+
+async fn dns_resolve_udp(stack: &StackHandle, name: &str) -> Result<IpAddr> {
+    let prefer = dns_prefer();
+    let types: &[u16] = match prefer {
+        6 => &[28],
+        10 => &[28, 1],
+        _ => &[1],
+    };
+    let server = dns_server();
+    let mut last_err = AetherError::Other(format!("no DNS record for {name}"));
+    for qtype in types {
+        match dns_query_udp(stack, name, server, *qtype).await {
+            Ok(ip) => return Ok(ip),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+async fn dns_query_udp(
+    stack: &StackHandle,
+    name: &str,
+    server: SocketAddr,
+    qtype: u16,
+) -> Result<IpAddr> {
     let udp = stack.open_udp().await?;
-    let server: SocketAddr = "1.1.1.1:53".parse().unwrap();
-
-    let query = build_dns_query(name, 1);
+    let query = build_dns_query(name, qtype);
     udp.send_to(server, query).await?;
-
     let (_sender, mut from_stack) = udp.into_split();
-
     let resp = tokio::time::timeout(Duration::from_secs(5), from_stack.recv())
         .await
         .map_err(|_| AetherError::Other("dns timeout".into()))?
         .ok_or_else(|| AetherError::Other("dns channel closed".into()))?;
+    parse_dns_answer(&resp.1, qtype)
+        .ok_or_else(|| AetherError::Other(format!("no DNS type {qtype} for {name}")))
+}
 
-    parse_dns_a(&resp.1).ok_or_else(|| AetherError::Other(format!("no A record for {name}")))
+async fn dns_resolve_doh(name: &str) -> Result<IpAddr> {
+    let prefer = dns_prefer();
+    let types: &[&str] = match prefer {
+        6 => &["AAAA"],
+        10 => &["AAAA", "A"],
+        _ => &["A"],
+    };
+    let base = doh_url();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| AetherError::Other(format!("doh client: {e}")))?;
+    let mut last_err = AetherError::Other(format!("no DoH record for {name}"));
+    for t in types {
+        let url = format!(
+            "{base}?name={}&type={t}",
+            urlencoding_simple(name)
+        );
+        match client
+            .get(&url)
+            .header("accept", "application/dns-json")
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| AetherError::Other(format!("doh body: {e}")))?;
+                if let Some(ip) = parse_doh_json(&text) {
+                    return Ok(ip);
+                }
+                last_err = AetherError::Other(format!("DoH empty for {name} type {t}"));
+            }
+            Err(e) => last_err = AetherError::Other(format!("doh: {e}")),
+        }
+    }
+    Err(last_err)
+}
+
+fn urlencoding_simple(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn parse_doh_json(text: &str) -> Option<IpAddr> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let answers = v.get("Answer")?.as_array()?;
+    for a in answers {
+        let ty = a.get("type")?.as_u64()?;
+        let data = a.get("data")?.as_str()?;
+        if ty == 1 || ty == 28 {
+            if let Ok(ip) = data.parse::<IpAddr>() {
+                return Some(ip);
+            }
+        }
+    }
+    None
 }
 
 fn build_dns_query(name: &str, qtype: u16) -> Vec<u8> {
@@ -181,7 +316,7 @@ fn build_dns_query(name: &str, qtype: u16) -> Vec<u8> {
     q
 }
 
-fn parse_dns_a(resp: &[u8]) -> Option<IpAddr> {
+fn parse_dns_answer(resp: &[u8], want_type: u16) -> Option<IpAddr> {
     if resp.len() < 12 {
         return None;
     }
@@ -205,13 +340,20 @@ fn parse_dns_a(resp: &[u8]) -> Option<IpAddr> {
         if pos + rdlen > resp.len() {
             return None;
         }
-        if rtype == 1 && rdlen == 4 {
-            return Some(IpAddr::V4(Ipv4Addr::new(
-                resp[pos],
-                resp[pos + 1],
-                resp[pos + 2],
-                resp[pos + 3],
-            )));
+        if rtype == want_type || (want_type == 0 && (rtype == 1 || rtype == 28)) {
+            if rtype == 1 && rdlen == 4 {
+                return Some(IpAddr::V4(Ipv4Addr::new(
+                    resp[pos],
+                    resp[pos + 1],
+                    resp[pos + 2],
+                    resp[pos + 3],
+                )));
+            }
+            if rtype == 28 && rdlen == 16 {
+                let mut b = [0u8; 16];
+                b.copy_from_slice(&resp[pos..pos + 16]);
+                return Some(IpAddr::V6(b.into()));
+            }
         }
         pos += rdlen;
     }
@@ -260,7 +402,7 @@ async fn handle_connect(
     let (mut rd, mut wr) = sock.into_split();
 
     let up = tokio::spawn(async move {
-        let mut buf = vec![0u8; 8192];
+        let mut buf = vec![0u8; 32768];
         loop {
             match rd.read(&mut buf).await {
                 Ok(0) => {

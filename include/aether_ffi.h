@@ -27,7 +27,7 @@ typedef struct {
     AetherMode mode;          // 0 = Proxy Mode, 1 = TUN Mode
     bool lan_sharing;         // false = bind 127.0.0.1, true = bind 0.0.0.0 & show LAN IP
     int scan_mode;            // 0 = Turbo, 1 = Balanced, 2 = Thorough, 3 = Stealth, 4 = Ironclad
-    int ip_version;           // 4 = IPv4, 6 = IPv6, 10 = Dual-Stack
+    int ip_version;           // 4 = IPv4, 6 = IPv6, 10 = Dual-Stack (scan + DNS preference)
     bool quick_reconnect;     // Use cached known-good gateway if verified
 
     // Obfuscation & Fragmentation
@@ -44,6 +44,14 @@ typedef struct {
     const char* config_path;  // Base config path (e.g., "aether.toml")
     bool h2_enabled;          // MASQUE over HTTP/2 (AETHER_MASQUE_HTTP2)
     bool ech_enabled;         // Encrypted Client Hello (AETHER_ECH=auto)
+
+    // DNS / TLS (optional; NULL or empty = defaults)
+    const char* dns_server;   // e.g. "1.1.1.1:53" or "8.8.8.8"
+    int dns_mode;             // 0 = UDP classic, 1 = DoH (HTTPS)
+    const char* doh_url;      // e.g. "https://cloudflare-dns.com/dns-query"
+    int dns_ip_prefer;        // 0 = follow ip_version, 4 = A only, 6 = AAAA only, 10 = dual (AAAA then A)
+    const char* tls_groups;   // e.g. "P-256:X25519:P-384" (BoringSSL curves list)
+    uint32_t udp_buf_kb;      // UDP socket buffer size in KiB (0 = default 512)
 } AetherConfig;
 
 typedef struct {

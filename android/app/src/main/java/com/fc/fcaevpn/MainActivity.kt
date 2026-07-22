@@ -42,7 +42,17 @@ class MainActivity : AppCompatActivity() {
 
     private val poll = object : Runnable {
         override fun run() {
-            refreshStatus()
+            Thread {
+                try {
+                    val statusJson = NativeEngine.nativeGetStatusJson()
+                    val logs = NativeEngine.nativeGetLogs()
+                    handler.post { applyStatus(statusJson, logs) }
+                } catch (e: Throwable) {
+                    handler.post {
+                        statusText.text = "UI error: ${e.message}"
+                    }
+                }
+            }.start()
             handler.postDelayed(this, 1500L)
         }
     }
@@ -215,8 +225,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshStatus() {
+        Thread {
+            try {
+                val statusJson = NativeEngine.nativeGetStatusJson()
+                val logs = NativeEngine.nativeGetLogs()
+                handler.post { applyStatus(statusJson, logs) }
+            } catch (e: Throwable) {
+                handler.post { statusText.text = "UI error: ${e.message}" }
+            }
+        }.start()
+    }
+
+    private fun applyStatus(statusJson: String, logs: String) {
         try {
-            val json = JSONObject(NativeEngine.nativeGetStatusJson())
+            val json = JSONObject(statusJson)
             val state = json.optInt("state", 0)
             val status = json.optString("status", "")
             val err = json.optString("error", "")
@@ -253,12 +275,9 @@ class MainActivity : AppCompatActivity() {
             peerText.text = "Peer: ${peer.ifEmpty { "—" }}" +
                 if (err.isNotEmpty()) "\nError: $err" else ""
 
-            // Avoid rebuilding huge CharSequences every tick
-            val logs = NativeEngine.nativeGetLogs()
             val h = logs.hashCode()
             if (h != lastLogHash) {
                 lastLogHash = h
-                // Cap UI text size
                 val shown = if (logs.length > 24_000) logs.takeLast(24_000) else logs
                 logText.text = shown
                 logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
