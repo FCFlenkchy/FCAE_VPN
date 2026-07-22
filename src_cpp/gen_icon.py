@@ -1,115 +1,77 @@
 #!/usr/bin/env python3
-"""Generate FCAE VPN icon: blue background (#1A3A5C) with white 'FCAE' text."""
+"""Generate FCAE VPN icon: blue circle with white 'FCAE' text centered."""
 import struct, zlib, sys, os
 
-# 5x7 pixel font for F, C, A, E
 FONT = {
-    'F': [
-        [1,1,1,1,0],
-        [1,0,0,0,0],
-        [1,0,0,0,0],
-        [1,1,1,0,0],
-        [1,0,0,0,0],
-        [1,0,0,0,0],
-        [1,0,0,0,0],
-    ],
-    'C': [
-        [0,1,1,1,0],
-        [1,0,0,0,1],
-        [1,0,0,0,0],
-        [1,0,0,0,0],
-        [1,0,0,0,0],
-        [1,0,0,0,1],
-        [0,1,1,1,0],
-    ],
-    'A': [
-        [0,1,1,1,0],
-        [1,0,0,0,1],
-        [1,0,0,0,1],
-        [1,1,1,1,1],
-        [1,0,0,0,1],
-        [1,0,0,0,1],
-        [1,0,0,0,1],
-    ],
-    'E': [
-        [1,1,1,1,1],
-        [1,0,0,0,0],
-        [1,0,0,0,0],
-        [1,1,1,0,0],
-        [1,0,0,0,0],
-        [1,0,0,0,0],
-        [1,1,1,1,1],
-    ],
+    'F': [[1,1,1,1,0],[1,0,0,0,0],[1,0,0,0,0],[1,1,1,0,0],[1,0,0,0,0],[1,0,0,0,0],[1,0,0,0,0]],
+    'C': [[0,1,1,1,0],[1,0,0,0,1],[1,0,0,0,0],[1,0,0,0,0],[1,0,0,0,0],[1,0,0,0,1],[0,1,1,1,0]],
+    'A': [[0,1,1,1,0],[1,0,0,0,1],[1,0,0,0,1],[1,1,1,1,1],[1,0,0,0,1],[1,0,0,0,1],[1,0,0,0,1]],
+    'E': [[1,1,1,1,1],[1,0,0,0,0],[1,0,0,0,0],[1,1,1,0,0],[1,0,0,0,0],[1,0,0,0,0],[1,1,1,1,1]],
 }
 
 def create_icon(size):
     bg = (0x1A, 0x3A, 0x5C)
     fg = (0xFF, 0xFF, 0xFF)
+    border = (0x22, 0x44, 0x66)
+    edge = (0x10, 0x28, 0x40)
     pixels = []
-    # Text is 4 chars * 5px wide + 3 gaps = 23px, 7px tall
-    text_w, text_h = 23, 7
-    scale = max(1, (size - 4) // max(text_w, text_h))
-    tw, th = text_w * scale, text_h * scale
+    # 4 chars * 5px + 3 gaps = 23px source, 7px tall
+    src_w, src_h = 23, 7
+    scale = max(1, (size - 6) // max(src_w, src_h))
+    tw, th = src_w * scale, src_h * scale
     ox = (size - tw) // 2
     oy = (size - th) // 2
 
     for y in range(size):
         for x in range(size):
-            # Border circle approximation
-            dx, dy = x - size//2, y - size//2
-            dist = (dx*dx + dy*dy) ** 0.5
+            dx, dy = x - size // 2, y - size // 2
+            dist = (dx * dx + dy * dy) ** 0.5
             if dist > size * 0.48:
-                pixels.append((0x10, 0x28, 0x40))
-                continue
+                pixels.append(edge); continue
             if dist > size * 0.44:
-                pixels.append((0x22, 0x44, 0x66))
-                continue
+                pixels.append(border); continue
 
-            # Check if pixel falls on text
-            tx = x - ox
-            ty = y - oy
+            tx, ty = x - ox, y - oy
             if 0 <= tx < tw and 0 <= ty < th:
-                char_idx = tx // (5 * scale)
-                px_in_char = tx % (5 * scale)
-                py_in_char = ty % (1 * scale)  # scale maps 1 source px to `scale` screen px
-                src_x = px_in_char // scale
+                src_x = tx // scale
                 src_y = ty // scale
-                if 0 <= src_x < 5 and 0 <= src_y < 7:
-                    ch = 'FCAE'[char_idx] if char_idx < 4 else None
-                    if ch and FONT[ch][src_y][src_x]:
-                        pixels.append(fg)
-                        continue
+                char_idx = src_x // 6  # 5px char + 1px gap
+                px_in = src_x % 6
+                if px_in < 5 and 0 <= src_y < 7 and char_idx < 4:
+                    ch = 'FCAE'[char_idx]
+                    if FONT[ch][src_y][px_in]:
+                        pixels.append(fg); continue
             pixels.append(bg)
     return pixels
 
 def make_ico():
     sizes = [16, 32, 48]
-    all_icons = []
+    icons = []
     for sz in sizes:
         px = create_icon(sz)
-        and_mask = bytes(sz * ((sz + 7) // 8))
-        bmp = struct.pack('<IiiHHIIiiII', 40, sz, sz*2, 1, 32, 0, 0, 0, 0, 0, 0)
-        img_data = b''
-        for y in range(sz-1, -1, -1):
+        mask = bytes(sz * ((sz + 7) // 8))
+        hdr = struct.pack('<IiiHHIIiiII', 40, sz, sz * 2, 1, 32, 0, 0, 0, 0, 0, 0)
+        data = b''
+        for y in range(sz - 1, -1, -1):
             for x in range(sz):
-                r, g, b = px[y*sz+x]
-                img_data += bytes([b, g, r, 0xFF])
-        all_icons.append((sz, bmp + img_data + and_mask))
-    ico = struct.pack('<HHH', 0, 1, len(all_icons))
-    off = 6 + len(all_icons) * 16
-    for sz, data in all_icons:
-        ico += struct.pack('<BBBBHHII', sz, sz, 0, 0, 1, 32, len(data), off)
-        off += len(data)
-    for _, data in all_icons:
-        ico += data
+                r, g, b = px[y * sz + x]
+                data += bytes([b, g, r, 0xFF])
+        icons.append((sz, hdr + data + mask))
+    ico = struct.pack('<HHH', 0, 1, len(icons))
+    off = 6 + len(icons) * 16
+    for sz, d in icons:
+        ico += struct.pack('<BBBBHHII', sz, sz, 0, 0, 1, 32, len(d), off)
+        off += len(d)
+    for _, d in icons:
+        ico += d
     return ico
 
-def write_png(pixels, size, path):
+def write_png(pixels, size):
     raw = b''
     for y in range(size):
         raw += b'\x00'
         for x in range(size):
-            r, g, b = pixels[y*size+x]
+            r, g, b = pixels[y * size + x]
             raw += bytes([r, g, b, 0xFF])
     def chunk(ct, d):
         c = ct + d
@@ -118,17 +80,14 @@ def write_png(pixels, size, path):
     return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
 
 if __name__ == '__main__':
-    ico_out = sys.argv[1] if len(sys.argv) > 1 else 'icon.ico'
+    out = sys.argv[1] if len(sys.argv) > 1 else 'icon.ico'
+    d = os.path.dirname(out) or '.'
     ico = make_ico()
-    with open(ico_out, 'wb') as f:
+    with open(out, 'wb') as f:
         f.write(ico)
-    print(f'Generated {ico_out} ({len(ico)} bytes)')
-
-    out_dir = os.path.dirname(ico_out) or '.'
+    print(f'{out} ({len(ico)} bytes)')
     for sz in [48, 192, 512]:
-        px = create_icon(sz)
-        png = write_png(px, sz, '')
-        p = os.path.join(out_dir, f'icon_{sz}.png')
+        p = os.path.join(d, f'icon_{sz}.png')
         with open(p, 'wb') as f:
-            f.write(png)
-        print(f'Generated {p} ({len(png)} bytes)')
+            f.write(write_png(create_icon(sz), sz))
+        print(f'{p}')
