@@ -15,7 +15,7 @@ parking_lot = "0.12"
 anyhow = "1"
 
 [target.x86_64-pc-windows-gnu]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-args=-static-libstdc++", "-C", "link-args=-static-libwinpthread"]
 
 [profile.release]
 opt-level = 3

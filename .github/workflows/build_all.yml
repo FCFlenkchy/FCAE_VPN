@@ -113,12 +113,12 @@ jobs:
       - name: build engine
         run: cd aether && cargo build --release --target ${{ matrix.target }}
         env:
-          RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libstdc++' || '' }}
+          RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libstdc++ -C link-args=-static-libwinpthread' || '' }}
 
       - name: build ffi
         run: cd crates/aether-ffi && cargo build --release --target ${{ matrix.target }}
         env:
-          RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libstdc++' || '' }}
+          RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libstdc++ -C link-args=-static-libwinpthread' || '' }}
 
       - name: build frontend (linux)
         if: matrix.name == 'linux-x64'

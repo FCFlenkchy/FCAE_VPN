@@ -92,22 +92,20 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
     set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/target/x86_64-pc-windows-gnu/release)
     target_link_directories(fcaevpn PRIVATE ${RUST_LIB_DIR})
 
+    target_link_libraries(fcaevpn PRIVATE
+        libaether_ffi.a
+        d3d11 dxgi d3dcompiler dwmapi ntdll
+        ws2_32 userenv bcrypt shell32 ole32 uuid
+    )
+
     if(MINGW)
         set(MINGW_LIB /usr/x86_64-w64-mingw32/lib)
         target_link_options(fcaevpn PRIVATE
             -L${MINGW_LIB}
-            -static-libgcc -static-libstdc++
-            -Wl,--whole-archive -lstdc++ -lmingwthrd -lpthread -Wl,--no-whole-archive
+            -static-libgcc -static-libstdc++ -static-libwinpthread
             -s -mwindows -municode
         )
     endif()
-
-    target_link_libraries(fcaevpn PRIVATE
-        libaether_ffi.a
-        d3d11 dxgi d3dcompiler dwmapi ntdll
-        ws2_32 userenv bcrypt shell32 ole32 uuid mingwthrd
-        stdc++ pthread
-    )
 
 elseif(UNIX)
 
