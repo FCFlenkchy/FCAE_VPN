@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/outerScroll"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:fillViewport="true"
+    android:scrollbars="none"
     android:background="#FF141420">
 
     <LinearLayout
@@ -197,6 +199,15 @@
             android:textColor="#FFE8ECF4"
             android:textSize="14sp" />
 
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchLogging"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:checked="true"
+            android:text="Enable logging"
+            android:textColor="#FFE0E4EE" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -223,14 +234,28 @@
                 android:textIsSelectable="true" />
         </ScrollView>
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnClearLogs"
-            style="@style/Widget.MaterialComponents.Button.TextButton"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="Clear logs"
-            android:textAllCaps="false" />
+            android:orientation="horizontal"
+            android:layout_marginTop="4dp">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnCopyLogs"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Copy logs"
+                android:textAllCaps="false" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnClearLogs"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Clear logs"
+                android:textAllCaps="false" />
+        </LinearLayout>
 
     </LinearLayout>
 </ScrollView>

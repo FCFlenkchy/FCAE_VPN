@@ -631,7 +631,7 @@ void render_ui() {
             ImGui::Spacing();
 
             // Selectable multi-line log view (click lines to select; Ctrl+C via ImGui input)
-            ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGui::BeginChild("##log", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 4), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
             ImGuiListClipper clipper;
             clipper.Begin((int)g_app.logs.size());
             while (clipper.Step()) {
@@ -646,14 +646,12 @@ void render_ui() {
                     }
                     ImGui::PushStyleColor(ImGuiCol_Text, c);
                     ImGui::PushID(i);
-                    // Selectable allows keyboard focus + multi-select feel; double-click copies line
                     if (ImGui::Selectable(msg.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick)) {
                         if (ImGui::IsMouseDoubleClicked(0)) {
                             ImGui::SetClipboardText(msg.c_str());
                             snprintf(g_app.copy_status, sizeof(g_app.copy_status), "Line copied");
                         }
                     }
-                    // Right-click context: copy line
                     if (ImGui::BeginPopupContextItem("log_ctx")) {
                         if (ImGui::MenuItem("Copy line")) {
                             ImGui::SetClipboardText(msg.c_str());
@@ -673,6 +671,23 @@ void render_ui() {
             if (g_app.auto_scroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f)
                 ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
+
+            // Mouse-drag selectable text view (Ctrl+A to select all, Ctrl+C to copy)
+            {
+                static std::string log_buf;
+                log_buf.clear();
+                for (auto& [lvl, msg] : g_app.logs) {
+                    log_buf += msg;
+                    log_buf += '\n';
+                }
+                ImGuiInputTextFlags sel_flags = ImGuiInputTextFlags_ReadOnly;
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.06f, 0.06f, 0.08f, 1.0f));
+                ImGui::InputTextMultiline("##log_sel", (char*)log_buf.c_str(), log_buf.size(),
+                    ImVec2(-1, 80), sel_flags);
+                ImGui::PopStyleColor();
+                ImGui::PopStyleVar();
+            }
             ImGui::EndTabItem();
         }
 

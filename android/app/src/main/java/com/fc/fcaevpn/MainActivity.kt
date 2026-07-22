@@ -1,6 +1,9 @@
 package com.fc.fcaevpn
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.net.VpnService
@@ -18,6 +21,7 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.switchmaterial.SwitchMaterial
 import org.json.JSONObject
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Kotlin Material UI — CONNECT is manual (no auto-start VPN).
@@ -43,24 +47,32 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchEch: SwitchMaterial
     private lateinit var switchQuick: SwitchMaterial
     private lateinit var switchIronclad: SwitchMaterial
+    private lateinit var switchLogging: SwitchMaterial
     private lateinit var editSni: android.widget.EditText
     private lateinit var editHealthInterval: android.widget.EditText
     private lateinit var editHealthMaxFails: android.widget.EditText
 
     private val bgExecutor = Executors.newSingleThreadExecutor()
+    private val pollBusy = AtomicBoolean(false)
     private lateinit var prefs: SharedPreferences
 
     private val poll = object : Runnable {
         override fun run() {
+            if (!pollBusy.compareAndSet(false, true)) {
+                handler.postDelayed(this, 1500L)
+                return
+            }
             bgExecutor.execute {
                 try {
                     val statusJson = NativeEngine.nativeGetStatusJson()
-                    val logs = NativeEngine.nativeGetLogs()
+                    val logs = if (switchLogging.isChecked) NativeEngine.nativeGetLogs() else ""
                     handler.post { applyStatus(statusJson, logs) }
                 } catch (e: Throwable) {
                     handler.post {
                         statusText.text = "UI error: ${e.message}"
                     }
+                } finally {
+                    pollBusy.set(false)
                 }
             }
             handler.postDelayed(this, 1500L)
@@ -85,6 +97,7 @@ class MainActivity : AppCompatActivity() {
         switchEch = findViewById(R.id.switchEch)
         switchQuick = findViewById(R.id.switchQuick)
         switchIronclad = findViewById(R.id.switchIronclad)
+        switchLogging = findViewById(R.id.switchLogging)
         editSni = findViewById(R.id.editSni)
         editHealthInterval = findViewById(R.id.editHealthInterval)
         editHealthMaxFails = findViewById(R.id.editHealthMaxFails)
@@ -104,8 +117,16 @@ class MainActivity : AppCompatActivity() {
             android.R.layout.simple_spinner_dropdown_item,
             listOf("Turbo", "Balanced", "Thorough", "Stealth"),
         )
-        spinnerScan.setSelection(1)
         loadSettings()
+
+        // Clear logs on fresh app open
+        bgExecutor.execute {
+            try {
+                NativeEngine.nativeClearLogs()
+            } catch (_: Throwable) {}
+        }
+        logText.text = ""
+        lastLogHash = 0
 
         bgExecutor.execute {
             try {
@@ -125,8 +146,18 @@ class MainActivity : AppCompatActivity() {
             lastLogHash = 0
         }
 
+        findViewById<MaterialButton>(R.id.btnCopyLogs).setOnClickListener {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = ClipData.newPlainText("FCAE Logs", logText.text)
+            clipboard.setPrimaryClip(clip)
+            Toast.makeText(this, "Logs copied", Toast.LENGTH_SHORT).show()
+        }
+
         updateButton()
         handler.post(poll)
+
+        // Ensure ScrollView starts at the top
+        logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_UP) }
     }
 
     override fun onPause() {
@@ -149,6 +180,7 @@ class MainActivity : AppCompatActivity() {
             putBoolean("ech", switchEch.isChecked)
             putBoolean("quick", switchQuick.isChecked)
             putBoolean("ironclad", switchIronclad.isChecked)
+            putBoolean("logging", switchLogging.isChecked)
             putString("sni", editSni.text.toString().trim())
             putString("healthInterval", editHealthInterval.text.toString())
             putString("healthMaxFails", editHealthMaxFails.text.toString())
@@ -159,11 +191,12 @@ class MainActivity : AppCompatActivity() {
     private fun loadSettings() {
         spinnerProtocol.setSelection(prefs.getInt("protocol", 0))
         spinnerMode.setSelection(prefs.getInt("mode", 1))
-        spinnerScan.setSelection(prefs.getInt("scan", 1))
+        spinnerScan.setSelection(prefs.getInt("scan", 0))
         switchH2.isChecked = prefs.getBoolean("h2", true)
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", true)
         switchIronclad.isChecked = prefs.getBoolean("ironclad", false)
+        switchLogging.isChecked = prefs.getBoolean("logging", true)
         editSni.setText(prefs.getString("sni", ""))
         editHealthInterval.setText(prefs.getString("healthInterval", "20"))
         editHealthMaxFails.setText(prefs.getString("healthMaxFails", "2"))
@@ -289,6 +322,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnectAll() {
+        connecting = true
+        engineRunning = false
+        updateButton()
         bgExecutor.execute {
             try {
                 NativeEngine.nativeStop()
@@ -313,7 +349,7 @@ class MainActivity : AppCompatActivity() {
         bgExecutor.execute {
             try {
                 val statusJson = NativeEngine.nativeGetStatusJson()
-                val logs = NativeEngine.nativeGetLogs()
+                val logs = if (switchLogging.isChecked) NativeEngine.nativeGetLogs() else ""
                 handler.post { applyStatus(statusJson, logs) }
             } catch (e: Throwable) {
                 handler.post { statusText.text = "UI error: ${e.message}" }

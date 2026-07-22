@@ -54,6 +54,7 @@ public class FCAEVpnService extends VpnService {
         super.onCreate();
         Log.i(TAG, "FCAEVpnService created");
         statsHandler = new Handler(Looper.getMainLooper());
+        createNotificationChannel();
     }
 
     @Override
@@ -78,9 +79,9 @@ public class FCAEVpnService extends VpnService {
             }
         }
 
-        createNotificationChannel();
+        // Fallback: show notification even if no action
         startForeground(NOTIFICATION_ID, buildNotification(
-            "FCAE VPN \u2014 Ready (tap Connect in app)",
+            "FCAE VPN — Ready (tap Connect in app)",
             false
         ));
         return START_STICKY;
@@ -89,6 +90,9 @@ public class FCAEVpnService extends VpnService {
     private void startVpn(Intent intent) {
         if (running) return;
         vpnPaused = false;
+
+        // Show foreground notification IMMEDIATELY (required within 5s of startForegroundService)
+        startForeground(NOTIFICATION_ID, buildNotification("FCAE VPN — Connecting...", false));
 
         int protocol = intent.getIntExtra("protocol", 0);
         int mode = intent.getIntExtra("mode", 1);
@@ -139,7 +143,7 @@ public class FCAEVpnService extends VpnService {
                 vpnInterface = builder.establish();
                 if (vpnInterface == null) {
                     Log.e(TAG, "Failed to establish VPN (permission denied?)");
-                    stopSelf();
+                    stopVpnAndNotification();
                     return;
                 }
 
@@ -159,17 +163,18 @@ public class FCAEVpnService extends VpnService {
                 );
                 if (!ok) {
                     Log.e(TAG, "nativeStart failed");
-                    stopSelf();
+                    stopVpnAndNotification();
                     return;
                 }
 
                 running = true;
                 Log.i(TAG, "VPN engine started in TUN mode");
+                cachedTotalRx = 0;
+                cachedTotalTx = 0;
                 updateNotificationStats();
                 statsHandler.post(statsRunnable);
 
                 // Keep thread alive — engine runs in its own thread via FFI.
-                // TUN fd is shared with the Rust engine via nativeSetTunFd.
                 while (running) {
                     try {
                         Thread.sleep(200);
@@ -179,6 +184,7 @@ public class FCAEVpnService extends VpnService {
                 }
             } catch (Exception e) {
                 Log.e(TAG, "VPN error: " + e.getMessage(), e);
+                handler.post(() -> stopVpnAndNotification());
             } finally {
                 cleanupVpnInterface();
             }
@@ -186,6 +192,8 @@ public class FCAEVpnService extends VpnService {
 
         vpnThread.start();
     }
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
 
     private void stopVpnKeepNotification() {
         running = false;
@@ -268,7 +276,7 @@ public class FCAEVpnService extends VpnService {
 
         String text;
         if (vpnPaused) {
-            text = "FCAE VPN \u2014 Stopped (tap Start to resume)";
+            text = "FCAE VPN — Stopped (tap Start to resume)";
         } else if (running) {
             long rx = 0, tx = 0;
             try {
@@ -288,7 +296,7 @@ public class FCAEVpnService extends VpnService {
                 fmtBytes(cachedTotalRx), fmtRate(rx),
                 fmtBytes(cachedTotalTx), fmtRate(tx));
         } else {
-            text = "FCAE VPN \u2014 Disconnected";
+            text = "FCAE VPN — Disconnected";
         }
 
         mgr.notify(NOTIFICATION_ID, buildNotification(text, showStopBtn));
@@ -313,18 +321,18 @@ public class FCAEVpnService extends VpnService {
           .setOngoing(true)
           .setStyle(new Notification.BigTextStyle().bigText(text));
 
-        Intent discIntent = new Intent(this, FCAEVpnService.class);
-        discIntent.setAction(ACTION_DISCONNECT);
-        PendingIntent piDisc = PendingIntent.getService(this, DISCONNECT_ACTION_CODE,
-            discIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        nb.addAction(new Notification.Action.Builder(null, "Disconnect", piDisc).build());
-
         if (showStopButton) {
             Intent stopIntent = new Intent(this, FCAEVpnService.class);
             stopIntent.setAction(ACTION_STOP);
             PendingIntent piStop = PendingIntent.getService(this, STOP_ACTION_CODE,
                 stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             nb.addAction(new Notification.Action.Builder(null, "Stop", piStop).build());
+
+            Intent discIntent = new Intent(this, FCAEVpnService.class);
+            discIntent.setAction(ACTION_DISCONNECT);
+            PendingIntent piDisc = PendingIntent.getService(this, DISCONNECT_ACTION_CODE,
+                discIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            nb.addAction(new Notification.Action.Builder(null, "Disconnect", piDisc).build());
         } else {
             Intent startIntent = new Intent(this, FCAEVpnService.class);
             startIntent.setAction(ACTION_START);
