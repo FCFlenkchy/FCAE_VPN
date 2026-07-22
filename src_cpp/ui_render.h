@@ -44,6 +44,7 @@ struct AppState {
     std::vector<std::pair<int, std::string>> logs;
     int  max_logs    = 500;
     bool auto_scroll = true;
+    bool logging_enabled = true;
     char save_status[128] = {};
 
     void add_log(int level, const char* msg) {

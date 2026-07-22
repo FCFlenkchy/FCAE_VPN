@@ -33,6 +33,7 @@ static void save_config() {
     fprintf(f, "config_path=%s\n", g_app.config_path);
     fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled);
     fprintf(f, "ech_enabled=%d\n", g_app.ech_enabled);
+    fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled);
     fclose(f);
     snprintf(g_app.save_status, sizeof(g_app.save_status), "Config saved!");
 }
@@ -60,6 +61,7 @@ static bool load_config() {
         else if (!strcmp(key, "config_path")) strncpy(g_app.config_path, val, sizeof(g_app.config_path)-1);
         else if (!strcmp(key, "h2_enabled")) g_app.h2_enabled = atoi(val);
         else if (!strcmp(key, "ech_enabled")) g_app.ech_enabled = atoi(val);
+        else if (!strcmp(key, "logging_enabled")) g_app.logging_enabled = atoi(val);
     }
     fclose(f);
     snprintf(g_app.save_status, sizeof(g_app.save_status), "Config loaded!");
@@ -68,7 +70,7 @@ static bool load_config() {
 
 void log_callback(int level, const char* message, void* user_data) {
     (void)user_data;
-    g_app.add_log(level, message);
+    if (g_app.logging_enabled) g_app.add_log(level, message);
 }
 
 static void fmt_bytes(char* buf, size_t len, uint64_t b) {
@@ -181,14 +183,14 @@ void render_ui() {
 
         if (busy) { ImGui::SameLine(0, 8); draw_spinner(7.0f, 14, 7.0f); }
 
-        ImGui::SameLine(ImGui::GetWindowWidth() - 230);
+        ImGui::SameLine(ImGui::GetWindowWidth() - 290);
         ImVec4 btn = connected ? ImVec4(0.70f, 0.18f, 0.18f, 1.0f) : ImVec4(0.12f, 0.55f, 0.18f, 1.0f);
         ImVec4 btn_h(btn.x + 0.08f, btn.y + 0.08f, btn.z + 0.08f, 1.0f);
         ImGui::PushStyleColor(ImGuiCol_Button, btn);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btn_h);
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(btn.x - 0.05f, btn.y - 0.05f, btn.z - 0.05f, 1.0f));
 
-        if (ImGui::Button(connected ? "  DISCONNECT  " : "  CONNECT  ", ImVec2(200, 34))) {
+        if (ImGui::Button(connected ? " DISCONNECT " : " CONNECT ", ImVec2(140, 34))) {
             if (connected || busy) {
                 aether_stop();
                 g_app.ffi_state.store(AETHER_STATE_DISCONNECTED);
@@ -199,9 +201,13 @@ void render_ui() {
         }
         ImGui::PopStyleColor(3);
 
-        ImGui::SameLine(0, 8);
+        ImGui::SameLine(0, 6);
         if (ImGui::Button("Save", ImVec2(60, 34))) {
             save_config();
+        }
+        ImGui::SameLine(0, 6);
+        if (ImGui::Button(g_app.telem.state == AETHER_STATE_CONNECTED ? "Stop Log" : "Start Log", ImVec2(80, 34))) {
+            g_app.auto_scroll = !g_app.auto_scroll;
         }
         if (g_app.save_status[0]) {
             ImGui::SameLine(0, 6);
@@ -344,6 +350,8 @@ void render_ui() {
         }
 
         if (ImGui::BeginTabItem("Logs")) {
+            ImGui::Checkbox("Logging", &g_app.logging_enabled);
+            ImGui::SameLine(0, 20);
             ImGui::Checkbox("Auto-scroll", &g_app.auto_scroll);
             ImGui::SameLine(0, 20);
             if (ImGui::Button("Clear")) g_app.logs.clear();
