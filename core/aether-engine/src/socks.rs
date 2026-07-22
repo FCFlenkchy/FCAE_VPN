@@ -218,7 +218,7 @@ async fn dns_query_udp(
     let query = build_dns_query(name, qtype);
     // One resend helps cold tunnels that drop the first UDP packet.
     udp.send_to(server, query.clone()).await?;
-    let (_sender, mut from_stack) = udp.into_split();
+    let (sender, mut from_stack) = udp.into_split();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -235,7 +235,7 @@ async fn dns_query_udp(
             Ok(None) => return Err(AetherError::Other("dns channel closed".into())),
             Err(_) => {
                 // Resend on timeout tick
-                let _ = udp.send_to(server, query.clone()).await;
+                let _ = sender.send_to(server, query.clone()).await;
             }
         }
     }
