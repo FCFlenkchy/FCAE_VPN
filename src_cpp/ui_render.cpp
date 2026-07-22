@@ -274,6 +274,23 @@ void ui_init() {
         snprintf(g_app.save_status, sizeof(g_app.save_status), "Created FCAE_VPN.cfg");
         g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
     }
+    // Make relative identity path (aether.toml) resolve next to the executable
+    if (g_app.config_path[0] && g_app.config_path[0] != '/' && g_app.config_path[0] != '\\'
+        && !(g_app.config_path[0] && g_app.config_path[1] == ':')) {
+        std::string dir = exe_dir();
+        if (!dir.empty()) {
+            char sep =
+#if defined(_WIN32)
+                '\\';
+#else
+                '/';
+#endif
+            std::string full = dir + sep + g_app.config_path;
+            snprintf(g_app.config_path, sizeof(g_app.config_path), "%s", full.c_str());
+        }
+    }
+    g_app.add_log(4, ("[ui] settings file: " + get_config_path()).c_str());
+    g_app.add_log(4, (std::string("[ui] identity file: ") + g_app.config_path).c_str());
 }
 
 void ui_frame() {
@@ -487,7 +504,8 @@ void render_ui() {
                 ImGui::Spacing();
             }
             ImGui::InputText("Force Peer", g_app.force_peer, sizeof(g_app.force_peer));
-            ImGui::InputText("Config Path", g_app.config_path, sizeof(g_app.config_path));
+            ImGui::InputText("Identity file (aether.toml)", g_app.config_path, sizeof(g_app.config_path));
+            ImGui::TextDisabled("UI settings: FCAE_VPN.cfg (next to app). Identity: Cloudflare device certs.");
             ImGui::EndChild();
             ImGui::EndTabItem();
         }

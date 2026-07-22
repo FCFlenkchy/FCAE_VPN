@@ -35,6 +35,8 @@ struct AppState {
     uint16_t socks_port  = 1819;
     uint16_t http_port   = 1820;
     char force_peer[128] = {};
+    // Engine identity file (Cloudflare device certs). Not the UI settings file.
+    // UI settings always live in FCAE_VPN.cfg next to the executable.
     char config_path[256] = "aether.toml";
     bool h2_enabled      = false;
     bool ech_enabled     = false;

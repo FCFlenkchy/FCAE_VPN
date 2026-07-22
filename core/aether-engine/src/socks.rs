@@ -6,6 +6,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 use crate::error::{AetherError, Result};
 use crate::netstack::StackHandle;
+use crate::stats;
 
 const VER: u8 = 0x05;
 const CMD_CONNECT: u8 = 0x01;
@@ -32,7 +33,17 @@ pub async fn serve(listen: SocketAddr, stack: StackHandle) -> Result<()> {
         let stack = stack.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_client(sock, stack, bind_ip).await {
-                log::debug!("socks client {peer} ended: {e}");
+                // 10054 / connection reset is normal when clients close mid-stream
+                let msg = e.to_string();
+                if msg.contains("10054")
+                    || msg.contains("forcibly closed")
+                    || msg.contains("Connection reset")
+                    || msg.contains("broken pipe")
+                {
+                    log::trace!("socks client {peer} closed: {e}");
+                } else {
+                    log::debug!("socks client {peer} ended: {e}");
+                }
             }
         });
     }
@@ -257,6 +268,7 @@ async fn handle_connect(
                     break;
                 }
                 Ok(n) => {
+                    stats::add_tx(n as u64);
                     if sender.send(buf[..n].to_vec()).await.is_err() {
                         break;
                     }
@@ -270,6 +282,7 @@ async fn handle_connect(
     });
 
     while let Some(chunk) = from_stack.recv().await {
+        stats::add_rx(chunk.len() as u64);
         if wr.write_all(&chunk).await.is_err() {
             break;
         }
@@ -307,6 +320,7 @@ async fn handle_udp_associate(mut sock: TcpStream, stack: StackHandle, bind_ip: 
                             }
                         }
                     };
+                    stats::add_tx(payload.1.len() as u64);
                     let _ = sender.send_to(dst, payload.1).await;
                 }
             }
@@ -314,6 +328,7 @@ async fn handle_udp_associate(mut sock: TcpStream, stack: StackHandle, bind_ip: 
             maybe = from_stack.recv() => {
                 let (src, data) = match maybe { Some(v) => v, None => break };
                 if let Some(c) = client {
+                    stats::add_rx(data.len() as u64);
                     let pkt = build_udp_reply(src, &data);
                     let _ = relay.send_to(&pkt, c).await;
                 }

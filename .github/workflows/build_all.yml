@@ -238,9 +238,6 @@ jobs:
           done
           ls -la
           test $(ls -1 | wc -l) -ge 1
-          # Same zip packaging as Releases (also used for Actions artifacts)
-          zip -9 "FCAE_VPN-${{ matrix.name }}.zip" FCAE_VPN-*
-          ls -lah "FCAE_VPN-${{ matrix.name }}.zip"
 
       - name: package (android)
         if: matrix.name == 'android-arm64-v8a'
@@ -248,18 +245,16 @@ jobs:
           set -euo pipefail
           mkdir -p package
           cp android/app/build/outputs/apk/release/*.apk package/FCAE_VPN-android-arm64-v8a.apk 2>/dev/null || true
-          cd package
-          test -f FCAE_VPN-android-arm64-v8a.apk
-          zip -9 FCAE_VPN-android-arm64-v8a.zip FCAE_VPN-android-arm64-v8a.apk
-          ls -lah FCAE_VPN-android-arm64-v8a.zip
+          test -f package/FCAE_VPN-android-arm64-v8a.apk
+          ls -lah package/
 
-      # Zip files only (same format as GitHub Releases)
+      # Upload raw binary/apk only. Actions always wraps downloads in one outer zip;
+      # pre-zipping here would double-zip. Release job zips for GitHub Releases.
       - name: upload
         uses: actions/upload-artifact@v4
         with:
           name: FCAE_VPN-${{ matrix.name }}
-          path: package/FCAE_VPN-*.zip
-          compression-level: 0
+          path: package/*
           if-no-files-found: error
 
   release:
@@ -271,16 +266,27 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
-          merge-multiple: true
+          merge-multiple: false
 
-      - name: collect release zips
+      - name: zip for GitHub Release
         run: |
           set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zip
           mkdir -p release-zips
-          # Artifacts are already .zip from the build jobs
-          find artifacts -type f -name 'FCAE_VPN-*.zip' -exec cp -f {} release-zips/ \;
+          for dir in artifacts/*/; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            # One platform zip per artifact folder (contains the binary/apk)
+            (
+              cd "$dir"
+              zip -9 -j "../../release-zips/${name}.zip" ./*
+            )
+            echo "Created release-zips/${name}.zip"
+            unzip -l "release-zips/${name}.zip" | head -20
+          done
           ls -lah release-zips/
-          test $(ls -1 release-zips/*.zip 2>/dev/null | wc -l) -ge 1
+          test $(ls -1 release-zips/*.zip | wc -l) -ge 1
 
       - name: create release
         uses: softprops/action-gh-release@v2

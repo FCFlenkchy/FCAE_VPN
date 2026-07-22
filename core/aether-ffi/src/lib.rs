@@ -118,6 +118,19 @@ impl log::Log for GuiLogger {
             t.state = 4;
             t.status_message = "Connected — SOCKS5 active".to_string();
         }
+        if line_lower.contains("http proxy listening") {
+            t.state = 4;
+            if !t.status_message.contains("HTTP") {
+                t.status_message = "Connected — SOCKS5 + HTTP proxy".to_string();
+            }
+        }
+        // Capture scan RTT from engine logs: "rtt=12.3ms" or "rtt 12ms" / Duration Debug
+        if let Some(ms) = parse_rtt_ms_from_log(&msg) {
+            if ms > 0 {
+                t.rtt_ms = ms;
+                aether_engine::set_rtt_ms(ms as u64);
+            }
+        }
         if line_lower.contains("identity ready") || line_lower.contains("using cloudflare edge") {
             if t.state < 4 {
                 t.state = 3;
@@ -154,6 +167,48 @@ impl log::Log for GuiLogger {
 }
 
 static GUI_LOGGER: GuiLogger = GuiLogger;
+
+fn parse_rtt_ms_from_log(msg: &str) -> Option<u32> {
+    // Matches: rtt=1.234s, rtt=45ms, rtt=450µs, rtt 12.3ms, (rtt 12ms)
+    let lower = msg.to_lowercase();
+    let idx = lower.find("rtt")?;
+    let rest = &lower[idx + 3..];
+    let rest = rest.trim_start_matches(|c: char| c == '=' || c == ':' || c.is_whitespace() || c == '(');
+    // Duration Debug formats like "12.345ms" or "1.2s"
+    let mut num = String::new();
+    let mut unit = String::new();
+    let mut seen_dot = false;
+    for c in rest.chars() {
+        if c.is_ascii_digit() {
+            if unit.is_empty() {
+                num.push(c);
+            } else {
+                break;
+            }
+        } else if c == '.' && !seen_dot && unit.is_empty() {
+            seen_dot = true;
+            num.push(c);
+        } else if c.is_alphabetic() || c == 'µ' || c == 'μ' {
+            unit.push(c);
+        } else if !unit.is_empty() {
+            break;
+        } else if !num.is_empty() {
+            break;
+        }
+    }
+    if num.is_empty() {
+        return None;
+    }
+    let v: f64 = num.parse().ok()?;
+    let ms = match unit.as_str() {
+        "s" | "sec" | "secs" => v * 1000.0,
+        "ms" | "msec" => v,
+        "us" | "µs" | "μs" | "micros" => v / 1000.0,
+        "ns" => v / 1_000_000.0,
+        _ => v, // bare number → assume ms
+    };
+    Some(ms.round().max(1.0) as u32)
+}
 
 unsafe fn log_msg(level: i32, msg: &str) {
     if let Some(cb) = LOG_CB {
@@ -222,6 +277,20 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
         format!("127.0.0.1:{}", cfg.socks_port)
     };
     std::env::set_var("AETHER_SOCKS", &socks_addr);
+
+    // HTTP CONNECT proxy (GUI default 1820)
+    if cfg.http_port != 0 && cfg.http_port != cfg.socks_port {
+        let http_addr = if cfg.lan_sharing {
+            format!("0.0.0.0:{}", cfg.http_port)
+        } else {
+            format!("127.0.0.1:{}", cfg.http_port)
+        };
+        std::env::set_var("AETHER_HTTP", &http_addr);
+        std::env::set_var("AETHER_HTTP_PORT", cfg.http_port.to_string());
+    } else {
+        std::env::remove_var("AETHER_HTTP");
+        std::env::remove_var("AETHER_HTTP_PORT");
+    }
 
     let noize = unsafe {
         if cfg.noize_profile.is_null() {
@@ -355,6 +424,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
     }
 
     apply_config_env(&cfg);
+    aether_engine::reset_stats();
     unsafe {
         log_msg(4, "[ffi] aether_start — launching in-process engine");
     }
@@ -482,7 +552,21 @@ pub extern "C" fn aether_get_telemetry(out: *mut AetherTelemetryOut) {
         return;
     }
 
-    let t = TELEMETRY.lock();
+    // Refresh live traffic counters from the engine
+    let (rx_bps, tx_bps) = aether_engine::rates();
+    let total_rx = aether_engine::total_rx();
+    let total_tx = aether_engine::total_tx();
+    let rtt = aether_engine::rtt_ms() as u32;
+
+    let mut t = TELEMETRY.lock();
+    t.rx_bytes_sec = rx_bps;
+    t.tx_bytes_sec = tx_bps;
+    t.total_rx = total_rx;
+    t.total_tx = total_tx;
+    if rtt > 0 {
+        t.rtt_ms = rtt;
+    }
+
     unsafe {
         (*out).state = t.state;
         (*out).mode = t.mode;
