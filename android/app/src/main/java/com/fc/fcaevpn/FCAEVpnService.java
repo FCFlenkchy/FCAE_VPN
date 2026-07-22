@@ -87,8 +87,15 @@ public class FCAEVpnService extends VpnService {
         int ipVersion = intent.getIntExtra("ipVersion", 4);
         boolean quickReconnect = intent.getBooleanExtra("quickReconnect", true);
         boolean h2Enabled = intent.getBooleanExtra("h2Enabled", false);
-        String configPath = intent.getStringExtra("configPath");
-        if (configPath == null) configPath = "aether.toml";
+        String configPathExtra = intent.getStringExtra("configPath");
+        final String configPath =
+            (configPathExtra == null || configPathExtra.isEmpty()) ? "aether.toml" : configPathExtra;
+        final int fProtocol = protocol;
+        final int fMode = mode;
+        final int fScanMode = scanMode;
+        final int fIpVersion = ipVersion;
+        final boolean fQuickReconnect = quickReconnect;
+        final boolean fH2Enabled = h2Enabled;
 
         vpnThread = new Thread(() -> {
             try {
@@ -121,10 +128,10 @@ public class FCAEVpnService extends VpnService {
                 NativeEngine.nativeInit();
 
                 boolean ok = NativeEngine.nativeStart(
-                    protocol, mode, false, scanMode,
-                    ipVersion, quickReconnect, "balanced",
+                    fProtocol, fMode, false, fScanMode,
+                    fIpVersion, fQuickReconnect, "balanced",
                     false, 16, 32, 2, 10, 1819, 1820,
-                    "", configPath, h2Enabled, false
+                    "", configPath, fH2Enabled, false
                 );
                 if (!ok) {
                     Log.e(TAG, "nativeStart failed");
