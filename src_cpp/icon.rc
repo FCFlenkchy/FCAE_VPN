@@ -2,3 +2,6 @@
 
 // FCAE VPN Application Icon
 IDI_ICON1 ICON "icon.ico"
+
+// Windows Manifest
+1 RT_MANIFEST "app.manifest"
