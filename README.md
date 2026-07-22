@@ -1,0 +1,61 @@
+# Aether VPN
+
+A censorship circumvention client designed for heavily restricted networks. It automatically discovers reachable routes, establishes an encrypted tunnel, and exposes a local SOCKS5/HTTP proxy for your applications.
+
+Built on top of **[Aether](https://github.com/CluvexStudio/aether)** with native GUI frontends for Windows, Linux, and Android.
+
+## Features
+
+- Automatic endpoint discovery with end-to-end data-plane validation
+- MASQUE (HTTP/3 QUIC / HTTP/2), WireGuard, and WARP-in-WARP (gool) support
+- Traffic obfuscation with configurable profiles
+- Automatic reconnection with quick-reconnect
+- Local SOCKS5 and HTTP proxies
+- Native GUI on all platforms (ImGui + DirectX11 / OpenGL / GLES3)
+
+## Platforms
+
+| Platform | Backend | UI |
+|----------|---------|----|
+| Windows | DirectX 11 | ImGui |
+| Linux | GLFW + OpenGL | ImGui |
+| Android | GLES3 | ImGui (NativeActivity) or Kotlin Material UI |
+
+## Building
+
+### Requirements
+
+- Rust (latest stable)
+- C/C++ compiler (GCC/Clang/MSVC)
+- CMake >= 3.22
+- Vulkan SDK or DirectX SDK (Windows)
+- For Android: NDK, Android SDK, Kotlin
+
+### Build the Rust engine first
+
+```bash
+cargo build --manifest-path core/Cargo.toml -p aether-ffi --release
+```
+
+### Build the native GUI
+
+```bash
+cmake -B build -DAETHER_TARGET=LINUX_X64
+cmake --build build --config Release
+```
+
+Targets: `LINUX_X64`, `WIN_X64`, `ANDROID_ARM64`.
+
+### Android
+
+Open `android/` in Android Studio and build. The Gradle config invokes CMake with `ANDROID_ARM64` automatically.
+
+## Credits
+
+- **[Aether](https://github.com/CluvexStudio/aether)** — The core censorship circumvention engine by CluvexStudio. Provides MASQUE, WireGuard, and WARP-in-WARP protocols.
+- **[Dear ImGui](https://github.com/ocornut/imgui)** — Immediate-mode GUI library by Omar Cornut. Used for all native desktop and Android UI rendering.
+- **[Quiche](https://github.com/cloudflare/quiche)** — Cloudflare's HTTP/3 and QUIC implementation. Used as the QUIC transport backend for MASQUE protocol support.
+
+## License
+
+See the individual components for their respective licenses.

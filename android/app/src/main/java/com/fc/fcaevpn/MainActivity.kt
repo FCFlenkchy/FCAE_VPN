@@ -144,54 +144,63 @@ class MainActivity : AppCompatActivity() {
     private fun startEngine() {
         connecting = true
         updateButton()
-        val ok = try {
-            NativeEngine.nativeStart(
-                protocol = spinnerProtocol.selectedItemPosition,
-                mode = spinnerMode.selectedItemPosition,
-                lanSharing = false,
-                scanMode = spinnerScan.selectedItemPosition,
-                ipVersion = 4,
-                quickReconnect = switchQuick.isChecked,
-                noizeProfile = "balanced",
-                fragmentEnabled = false,
-                fragMinSize = 16,
-                fragMaxSize = 32,
-                fragMinDelay = 2,
-                fragMaxDelay = 10,
-                socksPort = 1819,
-                httpPort = 1820,
-                forcePeer = "",
-                configPath = filesDir.resolve("aether.toml").absolutePath,
-                h2Enabled = switchH2.isChecked,
-                echEnabled = false,
-            )
-        } catch (e: Throwable) {
-            Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show()
-            false
-        }
-        if (!ok) {
-            connecting = false
-            Toast.makeText(this, "Failed to start engine", Toast.LENGTH_SHORT).show()
-        }
-        updateButton()
-        refreshStatus()
+
+        Thread {
+            val ok = try {
+                NativeEngine.nativeStart(
+                    protocol = spinnerProtocol.selectedItemPosition,
+                    mode = spinnerMode.selectedItemPosition,
+                    lanSharing = false,
+                    scanMode = spinnerScan.selectedItemPosition,
+                    ipVersion = 4,
+                    quickReconnect = switchQuick.isChecked,
+                    noizeProfile = "balanced",
+                    fragmentEnabled = false,
+                    fragMinSize = 16,
+                    fragMaxSize = 32,
+                    fragMinDelay = 2,
+                    fragMaxDelay = 10,
+                    socksPort = 1819,
+                    httpPort = 1820,
+                    forcePeer = "",
+                    configPath = filesDir.resolve("aether.toml").absolutePath,
+                    h2Enabled = switchH2.isChecked,
+                    echEnabled = false,
+                )
+            } catch (e: Throwable) {
+                handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }
+                false
+            }
+            handler.post {
+                if (!ok) {
+                    connecting = false
+                    Toast.makeText(this, "Failed to start engine", Toast.LENGTH_SHORT).show()
+                }
+                updateButton()
+                refreshStatus()
+            }
+        }.start()
     }
 
     private fun disconnectAll() {
-        try {
-            NativeEngine.nativeStop()
-        } catch (_: Throwable) {
-        }
-        try {
-            val i = Intent(this, FCAEVpnService::class.java)
-            i.action = FCAEVpnService.ACTION_DISCONNECT
-            startService(i)
-        } catch (_: Throwable) {
-        }
-        connecting = false
-        engineRunning = false
-        updateButton()
-        refreshStatus()
+        Thread {
+            try {
+                NativeEngine.nativeStop()
+            } catch (_: Throwable) {
+            }
+            handler.post {
+                try {
+                    val i = Intent(this, FCAEVpnService::class.java)
+                    i.action = FCAEVpnService.ACTION_DISCONNECT
+                    startService(i)
+                } catch (_: Throwable) {
+                }
+                connecting = false
+                engineRunning = false
+                updateButton()
+                refreshStatus()
+            }
+        }.start()
     }
 
     private fun refreshStatus() {
