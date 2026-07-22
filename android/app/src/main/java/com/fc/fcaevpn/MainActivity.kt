@@ -38,6 +38,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerMode: Spinner
     private lateinit var spinnerScan: Spinner
     private lateinit var switchH2: SwitchMaterial
+    private lateinit var switchEch: SwitchMaterial
     private lateinit var switchQuick: SwitchMaterial
     private lateinit var switchIronclad: SwitchMaterial
     private lateinit var editSni: android.widget.EditText
@@ -75,6 +76,7 @@ class MainActivity : AppCompatActivity() {
         spinnerMode = findViewById(R.id.spinnerMode)
         spinnerScan = findViewById(R.id.spinnerScan)
         switchH2 = findViewById(R.id.switchH2)
+        switchEch = findViewById(R.id.switchEch)
         switchQuick = findViewById(R.id.switchQuick)
         switchIronclad = findViewById(R.id.switchIronclad)
         editSni = findViewById(R.id.editSni)
@@ -172,6 +174,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("ipVersion", 4)
         i.putExtra("quickReconnect", switchQuick.isChecked)
         i.putExtra("h2Enabled", switchH2.isChecked)
+        i.putExtra("echEnabled", switchEch.isChecked)
         i.putExtra("configPath", filesDir.resolve("aether.toml").absolutePath)
         i.putExtra("sni", editSni.text.toString().trim())
         i.putExtra("ironclad", switchIronclad.isChecked)
@@ -191,6 +194,7 @@ class MainActivity : AppCompatActivity() {
         val scanMode = spinnerScan.selectedItemPosition
         val quick = switchQuick.isChecked
         val h2 = switchH2.isChecked
+        val ech = switchEch.isChecked
         val ironclad = switchIronclad.isChecked
         val sni = editSni.text.toString().trim()
         val hi = healthInterval()
@@ -217,7 +221,7 @@ class MainActivity : AppCompatActivity() {
                     forcePeer = "",
                     configPath = cfgPath,
                     h2Enabled = h2,
-                    echEnabled = false,
+                    echEnabled = ech,
                     sni = sni,
                     ironcladValidate = ironclad,
                     healthIntervalSecs = hi,

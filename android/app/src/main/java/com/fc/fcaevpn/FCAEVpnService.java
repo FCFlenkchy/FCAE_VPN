@@ -86,7 +86,8 @@ public class FCAEVpnService extends VpnService {
         int scanMode = intent.getIntExtra("scanMode", 1);
         int ipVersion = intent.getIntExtra("ipVersion", 4);
         boolean quickReconnect = intent.getBooleanExtra("quickReconnect", true);
-        boolean h2Enabled = intent.getBooleanExtra("h2Enabled", false);
+        boolean h2Enabled = intent.getBooleanExtra("h2Enabled", true);
+        boolean echEnabled = intent.getBooleanExtra("echEnabled", true);
         boolean ironclad = intent.getBooleanExtra("ironclad", false);
         int healthInterval = intent.getIntExtra("healthInterval", 20);
         int healthMaxFails = intent.getIntExtra("healthMaxFails", 2);
@@ -103,6 +104,7 @@ public class FCAEVpnService extends VpnService {
         final int fIpVersion = ipVersion;
         final boolean fQuickReconnect = quickReconnect;
         final boolean fH2Enabled = h2Enabled;
+        final boolean fEchEnabled = echEnabled;
         final boolean fIronclad = ironclad;
         final int fHealthInterval = healthInterval;
         final int fHealthMaxFails = healthMaxFails;
@@ -143,7 +145,7 @@ public class FCAEVpnService extends VpnService {
                     fProtocol, fMode, false, fScanMode,
                     fIpVersion, fQuickReconnect, "balanced",
                     false, 16, 32, 2, 10, 1819, 1820,
-                    "", configPath, fH2Enabled, false,
+                    "", configPath, fH2Enabled, fEchEnabled,
                     sni, fIronclad, fHealthInterval, fHealthMaxFails, fHealthTimeout, fLiveValidate
                 );
                 if (!ok) {

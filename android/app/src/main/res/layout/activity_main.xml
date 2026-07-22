@@ -109,7 +109,16 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
+            android:checked="true"
             android:text="HTTP/2 fallback"
+            android:textColor="#FFE0E4EE" />
+
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchEch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:checked="true"
+            android:text="ECH (Encrypted Client Hello)"
             android:textColor="#FFE0E4EE" />
 
         <com.google.android.material.switchmaterial.SwitchMaterial
