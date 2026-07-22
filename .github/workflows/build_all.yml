@@ -93,10 +93,12 @@ jobs:
           restore-keys: gradle-
 
       - name: setup ndk
+        id: setup-ndk
         if: matrix.name == 'android-arm64-v8a'
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
+          link-to-sdk: true
 
       - name: fetch imgui
         run: |
@@ -114,23 +116,68 @@ jobs:
 
       - name: build rust (engine + ffi, in-process)
         run: |
+          set -euo pipefail
+
+          # Android: ring/boring-sys need NDK clang (not aarch64-linux-android-clang on PATH by default)
+          if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
+            NDK="${ANDROID_NDK_HOME:-${{ steps.setup-ndk.outputs.ndk-path }}}"
+            if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+              echo "ANDROID_NDK_HOME not set or missing: $NDK"
+              exit 1
+            fi
+            HOST_TAG=linux-x86_64
+            PREBUILT="$NDK/toolchains/llvm/prebuilt/$HOST_TAG"
+            BIN="$PREBUILT/bin"
+            export PATH="$BIN:$PATH"
+            export ANDROID_NDK_HOME="$NDK"
+            export ANDROID_NDK_ROOT="$NDK"
+
+            # API 24 matches minSdk in android/app/build.gradle.kts
+            export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
+            export CXX_aarch64_linux_android="$BIN/aarch64-linux-android24-clang++"
+            export AR_aarch64_linux_android="$BIN/llvm-ar"
+            export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android24-clang"
+            export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$BIN/llvm-ar"
+            # Also set the dashed names some crates look for
+            export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
+            # Symlink plain names ring/cc-rs may search for
+            ln -sf "$BIN/aarch64-linux-android24-clang" "$BIN/aarch64-linux-android-clang"
+            ln -sf "$BIN/aarch64-linux-android24-clang++" "$BIN/aarch64-linux-android-clang++"
+            export CC=aarch64-linux-android24-clang
+            export CXX=aarch64-linux-android24-clang++
+            export AR=llvm-ar
+
+            # bindgen / boring-sys
+            export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$PREBUILT/sysroot"
+            export CFLAGS_aarch64_linux_android="--sysroot=$PREBUILT/sysroot"
+            export CXXFLAGS_aarch64_linux_android="--sysroot=$PREBUILT/sysroot"
+
+            echo "Using NDK: $NDK"
+            "$CC_aarch64_linux_android" --version | head -1
+          fi
+
           # Workspace is crates/Cargo.toml so quiche keeps its own workspace.
           cargo build --manifest-path crates/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
-          # Normalize artifact location for CMake
-          mkdir -p target/${{ matrix.target }}/release
-          for f in \
-            crates/target/${{ matrix.target }}/release/libaether_ffi.a \
-            target/${{ matrix.target }}/release/libaether_ffi.a \
-            crates/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a; do
-            if [ -f "$f" ]; then
-              cp -f "$f" target/${{ matrix.target }}/release/libaether_ffi.a
-              ls -lh target/${{ matrix.target }}/release/libaether_ffi.a
-              break
-            fi
-          done
-          test -f target/${{ matrix.target }}/release/libaether_ffi.a
+          # Normalize artifact location for CMake (CARGO_TARGET_DIR already points here)
+          DEST="target/${{ matrix.target }}/release/libaether_ffi.a"
+          mkdir -p "$(dirname "$DEST")"
+          if [ -f "$DEST" ]; then
+            ls -lh "$DEST"
+          else
+            for f in \
+              crates/target/${{ matrix.target }}/release/libaether_ffi.a \
+              crates/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a; do
+              if [ -f "$f" ]; then
+                cp -f "$f" "$DEST"
+                ls -lh "$DEST"
+                break
+              fi
+            done
+          fi
+          test -f "$DEST"
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libgcc -C link-args=-static-libstdc++ -C link-args=-Wl,-Bstatic -C link-args=-lpthread -C link-args=-lwinpthread -C link-args=-Wl,-Bdynamic' || '' }}
 
       - name: build frontend (linux)
