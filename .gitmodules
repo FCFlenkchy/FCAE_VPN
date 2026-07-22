@@ -1,6 +1,3 @@
-[submodule "aether"]
-	path = aether
-	url = https://github.com/CluvexStudio/Aether.git
 [submodule "quiche"]
 	path = quiche
 	url = https://github.com/cloudflare/quiche.git

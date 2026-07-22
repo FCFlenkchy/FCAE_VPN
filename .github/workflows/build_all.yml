@@ -45,7 +45,14 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # Only quiche is required (path dep for aether-engine).
+          # aether engine is vendored in crates/aether-engine — no aether submodule.
+          submodules: false
+
+      - name: init quiche submodule
+        run: |
+          git submodule sync -- quiche
+          git submodule update --init --depth 1 -- quiche
 
       - name: install deps
         run: |
@@ -56,8 +63,7 @@ jobs:
             pkg-config openjdk-17-jdk \
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
             protobuf-compiler upx-ucl \
-            nasm golang-go
-          # boring-sys / BoringSSL needs NASM for x86_64 (incl. MinGW cross builds)
+            nasm golang-go zip
           nasm -v
 
       - name: install rust
@@ -110,7 +116,6 @@ jobs:
       - name: generate icon
         run: |
           python3 src_cpp/gen_icon.py src_cpp/icon.ico
-          # Copy PNGs for Android/Linux
           cp src_cpp/icon_192.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png 2>/dev/null || true
           cp src_cpp/icon_48.png android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png 2>/dev/null || true
 
@@ -118,7 +123,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Android: ring/boring-sys need NDK clang (not aarch64-linux-android-clang on PATH by default)
           if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
             NDK="${ANDROID_NDK_HOME:-${{ steps.setup-ndk.outputs.ndk-path }}}"
             if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
@@ -132,22 +136,17 @@ jobs:
             export ANDROID_NDK_HOME="$NDK"
             export ANDROID_NDK_ROOT="$NDK"
 
-            # API 24 matches minSdk in android/app/build.gradle.kts
             export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
             export CXX_aarch64_linux_android="$BIN/aarch64-linux-android24-clang++"
             export AR_aarch64_linux_android="$BIN/llvm-ar"
             export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android24-clang"
             export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$BIN/llvm-ar"
-            # Also set the dashed names some crates look for
-            export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
-            # Symlink plain names ring/cc-rs may search for
             ln -sf "$BIN/aarch64-linux-android24-clang" "$BIN/aarch64-linux-android-clang"
             ln -sf "$BIN/aarch64-linux-android24-clang++" "$BIN/aarch64-linux-android-clang++"
             export CC=aarch64-linux-android24-clang
             export CXX=aarch64-linux-android24-clang++
             export AR=llvm-ar
 
-            # bindgen / boring-sys
             export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$PREBUILT/sysroot"
             export CFLAGS_aarch64_linux_android="--sysroot=$PREBUILT/sysroot"
             export CXXFLAGS_aarch64_linux_android="--sysroot=$PREBUILT/sysroot"
@@ -156,11 +155,8 @@ jobs:
             "$CC_aarch64_linux_android" --version | head -1
           fi
 
-          # Workspace is crates/Cargo.toml so quiche keeps its own workspace.
           cargo build --manifest-path crates/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
 
-          # CMake expects: ${CMAKE_SOURCE_DIR}/target/<triple>/release/libaether_ffi.a
-          # With CARGO_TARGET_DIR set, cargo already writes there — do not cp onto itself.
           DEST="$(pwd)/target/${{ matrix.target }}/release/libaether_ffi.a"
           mkdir -p "$(dirname "$DEST")"
           if [ ! -f "$DEST" ]; then
@@ -228,7 +224,6 @@ jobs:
         if: matrix.name != 'android-arm64-v8a'
         run: |
           mkdir -p package
-          # Standalone single binary — engine is linked into fcaevpn
           cp build/fcaevpn* package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
           cd package
@@ -241,7 +236,6 @@ jobs:
             fi
           done
           ls -la
-          # Sanity: only one artifact expected
           test $(ls -1 | wc -l) -ge 1
 
       - name: package (android)
@@ -250,11 +244,14 @@ jobs:
           mkdir -p package
           cp android/app/build/outputs/apk/release/*.apk package/FCAE_VPN-android-arm64-v8a.apk 2>/dev/null || true
 
+      # Uncompressed workflow artifacts (raw binaries/apk). Zipping is for Releases only.
       - name: upload
         uses: actions/upload-artifact@v4
         with:
           name: FCAE_VPN-${{ matrix.name }}
           path: package/
+          compression-level: 0
+          if-no-files-found: error
 
   release:
     name: release
@@ -265,7 +262,29 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
-          merge-multiple: true
+          # Keep one folder per matrix job so we know platform names
+          merge-multiple: false
+
+      - name: zip for GitHub Release
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zip
+          mkdir -p release-zips
+          # artifacts/<artifact-name>/files...
+          for dir in artifacts/*/; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            # Collect files (no nested junk)
+            count=$(find "$dir" -type f | wc -l)
+            echo "Packing $name ($count files)"
+            (
+              cd "$dir"
+              # Single-file platforms: still zip for a consistent release layout
+              zip -9 -r "../../release-zips/${name}.zip" .
+            )
+          done
+          ls -lah release-zips/
 
       - name: create release
         uses: softprops/action-gh-release@v2
@@ -275,6 +294,6 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: artifacts/*
+          files: release-zips/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
