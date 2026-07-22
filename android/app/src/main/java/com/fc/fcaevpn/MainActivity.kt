@@ -43,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
     private lateinit var spinnerScan: Spinner
+    private lateinit var spinnerNoize: Spinner
     private lateinit var switchH2: SwitchMaterial
     private lateinit var switchEch: SwitchMaterial
     private lateinit var switchQuick: SwitchMaterial
@@ -95,6 +96,7 @@ class MainActivity : AppCompatActivity() {
         spinnerProtocol = findViewById(R.id.spinnerProtocol)
         spinnerMode = findViewById(R.id.spinnerMode)
         spinnerScan = findViewById(R.id.spinnerScan)
+        spinnerNoize = findViewById(R.id.spinnerNoize)
         switchH2 = findViewById(R.id.switchH2)
         switchEch = findViewById(R.id.switchEch)
         switchQuick = findViewById(R.id.switchQuick)
@@ -120,6 +122,11 @@ class MainActivity : AppCompatActivity() {
             this,
             android.R.layout.simple_spinner_dropdown_item,
             listOf("Turbo", "Balanced", "Thorough", "Stealth"),
+        )
+        spinnerNoize.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            listOf("off", "firewall", "balanced", "gfw", "chrome", "voice", "streaming"),
         )
         loadSettings()
 
@@ -180,6 +187,7 @@ class MainActivity : AppCompatActivity() {
             putInt("protocol", spinnerProtocol.selectedItemPosition)
             putInt("mode", spinnerMode.selectedItemPosition)
             putInt("scan", spinnerScan.selectedItemPosition)
+            putInt("noize", spinnerNoize.selectedItemPosition)
             putBoolean("h2", switchH2.isChecked)
             putBoolean("ech", switchEch.isChecked)
             putBoolean("quick", switchQuick.isChecked)
@@ -198,6 +206,7 @@ class MainActivity : AppCompatActivity() {
         spinnerProtocol.setSelection(prefs.getInt("protocol", 0))
         spinnerMode.setSelection(prefs.getInt("mode", 1))
         spinnerScan.setSelection(prefs.getInt("scan", 0))
+        spinnerNoize.setSelection(prefs.getInt("noize", 2))
         switchH2.isChecked = prefs.getBoolean("h2", true)
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", false)
@@ -297,7 +306,7 @@ class MainActivity : AppCompatActivity() {
                     scanMode = scanMode,
                     ipVersion = 4,
                     quickReconnect = quick,
-                    noizeProfile = "balanced",
+                    noizeProfile = spinnerNoize.selectedItem.toString(),
                     fragmentEnabled = false,
                     fragMinSize = 16,
                     fragMaxSize = 32,

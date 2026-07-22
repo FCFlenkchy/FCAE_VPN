@@ -155,19 +155,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     bool done = false;
     while (!done && g_app.running.load()) {
         MSG msg;
-        bool has_msg = false;
         while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
             if (msg.message == WM_QUIT) done = true;
-            has_msg = true;
         }
         if (done) break;
-
-        // If no messages pending, yield CPU to avoid busy-spinning
-        if (!has_msg) {
-            MsgWaitForMultipleObjects(0, nullptr, FALSE, 16, QS_ALLINPUT);
-        }
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
