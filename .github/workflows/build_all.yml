@@ -223,6 +223,7 @@ jobs:
       - name: package
         if: matrix.name != 'android-arm64-v8a'
         run: |
+          set -euo pipefail
           mkdir -p package
           cp build/fcaevpn* package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
@@ -237,19 +238,27 @@ jobs:
           done
           ls -la
           test $(ls -1 | wc -l) -ge 1
+          # Same zip packaging as Releases (also used for Actions artifacts)
+          zip -9 "FCAE_VPN-${{ matrix.name }}.zip" FCAE_VPN-*
+          ls -lah "FCAE_VPN-${{ matrix.name }}.zip"
 
       - name: package (android)
         if: matrix.name == 'android-arm64-v8a'
         run: |
+          set -euo pipefail
           mkdir -p package
           cp android/app/build/outputs/apk/release/*.apk package/FCAE_VPN-android-arm64-v8a.apk 2>/dev/null || true
+          cd package
+          test -f FCAE_VPN-android-arm64-v8a.apk
+          zip -9 FCAE_VPN-android-arm64-v8a.zip FCAE_VPN-android-arm64-v8a.apk
+          ls -lah FCAE_VPN-android-arm64-v8a.zip
 
-      # Uncompressed workflow artifacts (raw binaries/apk). Zipping is for Releases only.
+      # Zip files only (same format as GitHub Releases)
       - name: upload
         uses: actions/upload-artifact@v4
         with:
           name: FCAE_VPN-${{ matrix.name }}
-          path: package/
+          path: package/FCAE_VPN-*.zip
           compression-level: 0
           if-no-files-found: error
 
@@ -262,29 +271,16 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
-          # Keep one folder per matrix job so we know platform names
-          merge-multiple: false
+          merge-multiple: true
 
-      - name: zip for GitHub Release
+      - name: collect release zips
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq zip
           mkdir -p release-zips
-          # artifacts/<artifact-name>/files...
-          for dir in artifacts/*/; do
-            [ -d "$dir" ] || continue
-            name=$(basename "$dir")
-            # Collect files (no nested junk)
-            count=$(find "$dir" -type f | wc -l)
-            echo "Packing $name ($count files)"
-            (
-              cd "$dir"
-              # Single-file platforms: still zip for a consistent release layout
-              zip -9 -r "../../release-zips/${name}.zip" .
-            )
-          done
+          # Artifacts are already .zip from the build jobs
+          find artifacts -type f -name 'FCAE_VPN-*.zip' -exec cp -f {} release-zips/ \;
           ls -lah release-zips/
+          test $(ls -1 release-zips/*.zip 2>/dev/null | wc -l) -ge 1
 
       - name: create release
         uses: softprops/action-gh-release@v2
