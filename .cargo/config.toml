@@ -1,2 +1,10 @@
 [target.x86_64-pc-windows-gnu]
-rustflags = ["-C", "target-feature=+crt-static", "-C", "link-args=-static-libstdc++", "-C", "link-args=-static-libwinpthread"]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-args=-static-libgcc",
+    "-C", "link-args=-static-libstdc++",
+    "-C", "link-args=-Wl,-Bstatic",
+    "-C", "link-args=-lpthread",
+    "-C", "link-args=-lwinpthread",
+    "-C", "link-args=-Wl,-Bdynamic",
+]

@@ -14,8 +14,7 @@ env_logger = "0.11"
 parking_lot = "0.12"
 anyhow = "1"
 
-[target.x86_64-pc-windows-gnu]
-rustflags = ["-C", "target-feature=+crt-static", "-C", "link-args=-static-libstdc++", "-C", "link-args=-static-libwinpthread"]
+# Windows static CRT flags live in .cargo/config.toml (rustflags in Cargo.toml are ignored)
 
 [profile.release]
 opt-level = 3

@@ -113,12 +113,14 @@ jobs:
       - name: build engine
         run: cd aether && cargo build --release --target ${{ matrix.target }}
         env:
-          RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libstdc++ -C link-args=-static-libwinpthread' || '' }}
+          # Prefer workspace .cargo/config.toml; env RUSTFLAGS as belt-and-suspenders.
+          # -static-libwinpthread is invalid; use -Bstatic around -lpthread/-lwinpthread.
+          RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libgcc -C link-args=-static-libstdc++ -C link-args=-Wl,-Bstatic -C link-args=-lpthread -C link-args=-lwinpthread -C link-args=-Wl,-Bdynamic' || '' }}
 
       - name: build ffi
         run: cd crates/aether-ffi && cargo build --release --target ${{ matrix.target }}
         env:
-          RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libstdc++ -C link-args=-static-libwinpthread' || '' }}
+          RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libgcc -C link-args=-static-libstdc++ -C link-args=-Wl,-Bstatic -C link-args=-lpthread -C link-args=-lwinpthread -C link-args=-Wl,-Bdynamic' || '' }}
 
       - name: build frontend (linux)
         if: matrix.name == 'linux-x64'

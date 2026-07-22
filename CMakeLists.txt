@@ -100,9 +100,12 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     if(MINGW)
         set(MINGW_LIB /usr/x86_64-w64-mingw32/lib)
+        # Static-link libgcc/libstdc++/winpthread so the .exe needs no MinGW DLLs.
+        # -static-libwinpthread is not a real gcc flag; use -Bstatic around -lpthread.
         target_link_options(fcaevpn PRIVATE
             -L${MINGW_LIB}
-            -static-libgcc -static-libstdc++ -static-libwinpthread
+            -static-libgcc -static-libstdc++
+            -Wl,-Bstatic -lstdc++ -lpthread -lwinpthread -Wl,-Bdynamic
             -s -mwindows -municode
         )
     endif()
