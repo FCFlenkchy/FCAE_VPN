@@ -573,7 +573,7 @@ void render_ui() {
                 ImGui::PopItemWidth();
                 ImGui::Spacing();
             }
-            ImGui::InputText("Force Peer", g_app.force_peer, sizeof(g_app.force_peer));
+            ImGui::InputTextWithHint("##force_peer", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));
             ImGui::InputText("Identity file (aether.toml)", g_app.config_path, sizeof(g_app.config_path));
             ImGui::TextDisabled("UI settings: FCAE_VPN.cfg (next to app). Identity: Cloudflare device certs.");
             ImGui::EndChild();

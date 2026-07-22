@@ -432,7 +432,34 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
         let peer: SocketAddr = p
             .parse()
             .map_err(|_| AetherError::Other(format!("bad peer address {p}")))?;
-        log::info!("[+] using forced peer {peer} (probe skipped)");
+        log::info!("[+] using forced peer {peer}; probing RTT...");
+        // Quick RTT probe via MASQUE HTTP ping
+        let params = tunnelping::MasquePingParams {
+            peer,
+            sni: connect_sni(),
+            authority: quic::default_authority().to_string(),
+            path: quic::default_path().to_string(),
+            cert_pem: identity.cert_pem.clone(),
+            key_pem: identity.key_pem.clone(),
+            noize: noize_config(),
+            local_ipv4: parse_local_v4(&identity.ipv4),
+            local_ipv4_str: identity.ipv4.clone(),
+            local_ipv6_str: String::new(),
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            tunnelping::masque_http_ping(&params, std::time::Duration::from_secs(5)),
+        )
+        .await
+        {
+            Ok(Ok(rtt)) => {
+                log::info!("[+] forced peer {peer} RTT: {:?}", rtt);
+                stats::set_rtt_ms(rtt.as_millis() as u64);
+            }
+            _ => {
+                log::warn!("[-] forced peer {peer} RTT probe failed; continuing anyway");
+            }
+        }
         return Ok(peer);
     }
 
@@ -668,7 +695,33 @@ async fn run_masque(
                 None => match &forced {
                     Some(p) => match p.parse::<SocketAddr>() {
                         Ok(peer) => {
-                            log::info!("[+] using forced peer {peer} (probe skipped)");
+                            log::info!("[+] using forced peer {peer}; probing RTT...");
+                            let params = tunnelping::MasquePingParams {
+                                peer,
+                                sni: connect_sni(),
+                                authority: quic::default_authority().to_string(),
+                                path: quic::default_path().to_string(),
+                                cert_pem: identity.cert_pem.clone(),
+                                key_pem: identity.key_pem.clone(),
+                                noize: noize_config(),
+                                local_ipv4: parse_local_v4(&identity.ipv4),
+                                local_ipv4_str: identity.ipv4.clone(),
+                                local_ipv6_str: String::new(),
+                            };
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(8),
+                                tunnelping::masque_http_ping(&params, std::time::Duration::from_secs(5)),
+                            )
+                            .await
+                            {
+                                Ok(Ok(rtt)) => {
+                                    log::info!("[+] forced peer {peer} RTT: {:?}", rtt);
+                                    stats::set_rtt_ms(rtt.as_millis() as u64);
+                                }
+                                _ => {
+                                    log::warn!("[-] forced peer {peer} RTT probe failed; continuing anyway");
+                                }
+                            }
                             peer
                         }
                         Err(_) => return Err(AetherError::Other(format!("bad peer address {p}"))),
@@ -1097,6 +1150,7 @@ async fn run_wireguard(
                             {
                                 Ok(rtt) => {
                                     log::info!("[+] profile '{}' passed handshake + data-plane (rtt {:?})", name, rtt);
+                                    stats::set_rtt_ms(rtt.as_millis() as u64);
                                     chosen = Some((peer, profile.clone(), name.clone()));
                                     break;
                                 }
