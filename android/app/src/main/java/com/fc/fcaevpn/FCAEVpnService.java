@@ -247,6 +247,10 @@ public class FCAEVpnService extends VpnService {
         }
     }
 
+    // Cached cumulative totals for notification (filled from JNI traffic stats)
+    private long cachedTotalRx = 0;
+    private long cachedTotalTx = 0;
+
     private void updateNotificationStats() {
         NotificationManager mgr = getSystemService(NotificationManager.class);
         if (mgr == null) return;
@@ -267,8 +271,13 @@ public class FCAEVpnService extends VpnService {
             } catch (UnsatisfiedLinkError e) {
                 Log.w(TAG, "nativeGetTrafficStats missing: " + e.getMessage());
             } catch (Exception ignored) {}
-            text = String.format("\u2193 %s/s  |  \u2191 %s/s",
-                fmtBytesShort(rx), fmtBytesShort(tx));
+            // nativeGetTrafficStats only returns rates; accumulate for totals
+            cachedTotalRx += rx;
+            cachedTotalTx += tx;
+            text = String.format(
+                "\u2193 %s  %s/s  |  \u2191 %s  %s/s",
+                fmtBytes(cachedTotalRx), fmtRate(rx),
+                fmtBytes(cachedTotalTx), fmtRate(tx));
         } else {
             text = "FCAE VPN \u2014 Disconnected";
         }
@@ -318,10 +327,17 @@ public class FCAEVpnService extends VpnService {
         return nb.build();
     }
 
-    private static String fmtBytesShort(long bps) {
-        if (bps >= 1073741824L) return String.format("%.1f GB", bps / 1073741824.0);
-        if (bps >= 1048576L)    return String.format("%.1f MB", bps / 1048576.0);
-        if (bps >= 1024L)       return String.format("%.0f KB", bps / 1024.0);
-        return bps + " B";
+    private static String fmtBytes(long b) {
+        if (b >= 1073741824L) return String.format("%.1f GB", b / 1073741824.0);
+        if (b >= 1048576L)    return String.format("%.1f MB", b / 1048576.0);
+        if (b >= 1024L)       return String.format("%.0f KB", b / 1024.0);
+        return b + " B";
+    }
+
+    private static String fmtRate(long bps) {
+        if (bps >= 1073741824L) return String.format("%.1f GB/s", bps / 1073741824.0);
+        if (bps >= 1048576L)    return String.format("%.1f MB/s", bps / 1048576.0);
+        if (bps >= 1024L)       return String.format("%.0f KB/s", bps / 1024.0);
+        return bps + " B/s";
     }
 }

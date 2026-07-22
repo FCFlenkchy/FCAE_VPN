@@ -7,6 +7,7 @@ import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.content.SharedPreferences
 import android.widget.ArrayAdapter
 import android.widget.ScrollView
 import android.widget.Spinner
@@ -16,6 +17,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.switchmaterial.SwitchMaterial
 import org.json.JSONObject
+import java.util.concurrent.Executors
 
 /**
  * Kotlin Material UI — CONNECT is manual (no auto-start VPN).
@@ -45,9 +47,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editHealthInterval: android.widget.EditText
     private lateinit var editHealthMaxFails: android.widget.EditText
 
+    private val bgExecutor = Executors.newSingleThreadExecutor()
+    private lateinit var prefs: SharedPreferences
+
     private val poll = object : Runnable {
         override fun run() {
-            Thread {
+            bgExecutor.execute {
                 try {
                     val statusJson = NativeEngine.nativeGetStatusJson()
                     val logs = NativeEngine.nativeGetLogs()
@@ -57,7 +62,7 @@ class MainActivity : AppCompatActivity() {
                         statusText.text = "UI error: ${e.message}"
                     }
                 }
-            }.start()
+            }
             handler.postDelayed(this, 1500L)
         }
     }
@@ -65,6 +70,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        prefs = getSharedPreferences("aether_vpn", MODE_PRIVATE)
 
         statusText = findViewById(R.id.statusText)
         statsText = findViewById(R.id.statsText)
@@ -99,14 +105,15 @@ class MainActivity : AppCompatActivity() {
             listOf("Turbo", "Balanced", "Thorough", "Stealth"),
         )
         spinnerScan.setSelection(1)
+        loadSettings()
 
-        Thread {
+        bgExecutor.execute {
             try {
                 NativeEngine.nativeInit()
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Native lib failed: ${e.message}", Toast.LENGTH_LONG).show() }
             }
-        }.start()
+        }
 
         btnConnect.setOnClickListener {
             if (engineRunning || connecting) disconnectAll() else connectClicked()
@@ -124,7 +131,37 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(poll)
+        bgExecutor.shutdownNow()
         super.onDestroy()
+    }
+
+    private fun saveSettings() {
+        prefs.edit().apply {
+            putInt("protocol", spinnerProtocol.selectedItemPosition)
+            putInt("mode", spinnerMode.selectedItemPosition)
+            putInt("scan", spinnerScan.selectedItemPosition)
+            putBoolean("h2", switchH2.isChecked)
+            putBoolean("ech", switchEch.isChecked)
+            putBoolean("quick", switchQuick.isChecked)
+            putBoolean("ironclad", switchIronclad.isChecked)
+            putString("sni", editSni.text.toString().trim())
+            putString("healthInterval", editHealthInterval.text.toString())
+            putString("healthMaxFails", editHealthMaxFails.text.toString())
+            apply()
+        }
+    }
+
+    private fun loadSettings() {
+        spinnerProtocol.setSelection(prefs.getInt("protocol", 0))
+        spinnerMode.setSelection(prefs.getInt("mode", 1))
+        spinnerScan.setSelection(prefs.getInt("scan", 1))
+        switchH2.isChecked = prefs.getBoolean("h2", true)
+        switchEch.isChecked = prefs.getBoolean("ech", true)
+        switchQuick.isChecked = prefs.getBoolean("quick", true)
+        switchIronclad.isChecked = prefs.getBoolean("ironclad", false)
+        editSni.setText(prefs.getString("sni", ""))
+        editHealthInterval.setText(prefs.getString("healthInterval", "20"))
+        editHealthMaxFails.setText(prefs.getString("healthMaxFails", "2"))
     }
 
     private fun connectClicked() {
@@ -166,6 +203,7 @@ class MainActivity : AppCompatActivity() {
     private fun startTunServiceWithConfig() {
         connecting = true
         updateButton()
+        saveSettings()
         val i = Intent(this, FCAEVpnService::class.java)
         i.action = FCAEVpnService.ACTION_START
         i.putExtra("protocol", spinnerProtocol.selectedItemPosition)
@@ -188,6 +226,7 @@ class MainActivity : AppCompatActivity() {
     private fun startEngine() {
         connecting = true
         updateButton()
+        saveSettings()
 
         val protocol = spinnerProtocol.selectedItemPosition
         val mode = spinnerMode.selectedItemPosition
@@ -201,7 +240,7 @@ class MainActivity : AppCompatActivity() {
         val hf = healthMaxFails()
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
 
-        Thread {
+        bgExecutor.execute {
             val ok = try {
                 NativeEngine.nativeStart(
                     protocol = protocol,
@@ -241,11 +280,11 @@ class MainActivity : AppCompatActivity() {
                 updateButton()
                 refreshStatus()
             }
-        }.start()
+        }
     }
 
     private fun disconnectAll() {
-        Thread {
+        bgExecutor.execute {
             try {
                 NativeEngine.nativeStop()
             } catch (_: Throwable) {
@@ -262,11 +301,11 @@ class MainActivity : AppCompatActivity() {
                 updateButton()
                 refreshStatus()
             }
-        }.start()
+        }
     }
 
     private fun refreshStatus() {
-        Thread {
+        bgExecutor.execute {
             try {
                 val statusJson = NativeEngine.nativeGetStatusJson()
                 val logs = NativeEngine.nativeGetLogs()
@@ -274,7 +313,7 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Throwable) {
                 handler.post { statusText.text = "UI error: ${e.message}" }
             }
-        }.start()
+        }
     }
 
     private fun applyStatus(statusJson: String, logs: String) {
