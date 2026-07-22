@@ -1,4 +1,5 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -55,7 +56,7 @@ pub struct WgTunnel {
     sock: Arc<UdpSocket>,
     peer: SocketAddr,
     inbound_tx: mpsc::Sender<Vec<u8>>,
-    pub obf_sent: Arc<Mutex<bool>>,
+    pub obf_sent: Arc<AtomicBool>,
     pub aethernoize: Arc<AetherNoizeConfig>,
     pub client_id: [u8; 3],
 }
@@ -90,7 +91,7 @@ impl WgTunnel {
             sock: Arc::new(sock),
             peer: cfg.peer_endpoint,
             inbound_tx,
-            obf_sent: Arc::new(Mutex::new(false)),
+            obf_sent: Arc::new(AtomicBool::new(false)),
             aethernoize: cfg.aethernoize.clone(),
             client_id: cfg.client_id,
         })
@@ -106,7 +107,7 @@ impl WgTunnel {
             sock: session.sock,
             peer: session.peer,
             inbound_tx,
-            obf_sent: Arc::new(Mutex::new(true)),
+            obf_sent: Arc::new(AtomicBool::new(true)),
             aethernoize,
             client_id: session.client_id,
         }
@@ -161,9 +162,9 @@ impl WgTunnel {
         });
 
         let send_task = tokio::spawn(async move {
+            let mut out_buf = vec![0u8; MAX_PACKET];
             while let Some(ip_packet) = outbound_rx.recv().await {
                 let mut tunn = tunn_w.lock().await;
-                let mut out_buf = vec![0u8; MAX_PACKET];
 
                 match tunn.encapsulate(&ip_packet, &mut out_buf) {
                     TunnResult::Done => {}
@@ -175,13 +176,9 @@ impl WgTunnel {
                         inject_client_id(&mut pkt_vec, &client_id);
                         drop(tunn);
 
-                        {
-                            let mut sent = obf_sent.lock().await;
-                            if !*sent && aethernoize.is_enabled() {
-                                *sent = true;
-                                drop(sent);
-                                aethernoize::apply_obfuscation(&sock_w, peer, &aethernoize).await;
-                            }
+                        if !obf_sent.load(Ordering::Relaxed) && aethernoize.is_enabled() {
+                            obf_sent.store(true, Ordering::Relaxed);
+                            aethernoize::apply_obfuscation(&sock_w, peer, &aethernoize).await;
                         }
 
                         let _ = sock_w.send(&pkt_vec).await;
@@ -201,10 +198,10 @@ impl WgTunnel {
 
         let timer_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(TIMER_TICK);
+            let mut tmp = vec![0u8; MAX_PACKET];
             loop {
                 interval.tick().await;
                 let mut tunn = tunn_t.lock().await;
-                let mut tmp = vec![0u8; MAX_PACKET];
                 if let TunnResult::WriteToNetwork(pkt) = tunn.update_timers(&mut tmp) {
                     let mut pkt_vec = pkt.to_vec();
                     inject_client_id(&mut pkt_vec, &client_id);

@@ -80,11 +80,13 @@ class MainActivity : AppCompatActivity() {
         )
         spinnerScan.setSelection(1)
 
-        try {
-            NativeEngine.nativeInit()
-        } catch (e: Throwable) {
-            Toast.makeText(this, "Native lib failed: ${e.message}", Toast.LENGTH_LONG).show()
-        }
+        Thread {
+            try {
+                NativeEngine.nativeInit()
+            } catch (e: Throwable) {
+                handler.post { Toast.makeText(this, "Native lib failed: ${e.message}", Toast.LENGTH_LONG).show() }
+            }
+        }.start()
 
         btnConnect.setOnClickListener {
             if (engineRunning || connecting) disconnectAll() else connectClicked()
@@ -115,9 +117,10 @@ class MainActivity : AppCompatActivity() {
                 startActivityForResult(prep, vpnRequestCode)
                 return
             }
-            startTunService()
+            startTunServiceWithConfig()
+        } else {
+            startEngine()
         }
-        startEngine()
     }
 
     @Deprecated("Deprecated in Java")
@@ -126,8 +129,7 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == vpnRequestCode) {
             if (resultCode == Activity.RESULT_OK && pendingAfterVpnPermission) {
                 pendingAfterVpnPermission = false
-                startTunService()
-                startEngine()
+                startTunServiceWithConfig()
             } else {
                 pendingAfterVpnPermission = false
                 Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
@@ -135,9 +137,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startTunService() {
+    private fun startTunServiceWithConfig() {
+        connecting = true
+        updateButton()
         val i = Intent(this, FCAEVpnService::class.java)
         i.action = FCAEVpnService.ACTION_START
+        i.putExtra("protocol", spinnerProtocol.selectedItemPosition)
+        i.putExtra("mode", spinnerMode.selectedItemPosition)
+        i.putExtra("scanMode", spinnerScan.selectedItemPosition)
+        i.putExtra("ipVersion", 4)
+        i.putExtra("quickReconnect", switchQuick.isChecked)
+        i.putExtra("h2Enabled", switchH2.isChecked)
+        i.putExtra("configPath", filesDir.resolve("aether.toml").absolutePath)
         startForegroundService(i)
     }
 

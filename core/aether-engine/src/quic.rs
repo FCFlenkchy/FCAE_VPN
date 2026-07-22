@@ -15,7 +15,7 @@ use crate::tls::{self, TlsParams};
 use crate::{consts, error::AetherError, error::Result};
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
-const NET_QUEUE: usize = 256;
+const NET_QUEUE: usize = 512;
 
 async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     use socket2::{Socket, Domain, Type};
@@ -206,9 +206,15 @@ pub async fn run(
         noize::pre_handshake(sock.as_ref(), peer, &cfg.noize).await;
     }
 
-    flush(&mut conn, &sockets).await?;
+    {
+        let mut tmp = vec![0u8; MAX_DATAGRAM_SIZE];
+        flush(&mut conn, &sockets, &mut tmp).await?;
+    }
+
+    let mut h3_body = vec![0u8; 65535];
 
     let mut out_buf = vec![0u8; 65535];
+    let mut flush_buf = vec![0u8; MAX_DATAGRAM_SIZE];
     let mut keepalive_interval = tokio::time::interval(Duration::from_secs(20));
     keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -330,7 +336,7 @@ pub async fn run(
         }
 
         if let (Some(h3c), Some(sid)) = (h3_conn.as_mut(), req_stream) {
-            poll_h3(&mut conn, h3c, sid, &mut capsules, &addr_tx, quiet)?;
+            poll_h3(&mut conn, h3c, sid, &mut capsules, &addr_tx, quiet, &mut h3_body)?;
         }
 
         let got_data =
@@ -352,7 +358,7 @@ pub async fn run(
             }
         }
 
-        flush(&mut conn, &sockets).await?;
+        flush(&mut conn, &sockets, &mut flush_buf).await?;
 
         if conn.is_closed() {
             if !established_ever && !ech_retried && current_ech.is_some() {
@@ -374,7 +380,7 @@ pub async fn run(
                     h3_conn = None;
                     req_stream = None;
                     capsules = CapsuleParser::new();
-                    flush(&mut conn, &sockets).await?;
+                    flush(&mut conn, &sockets, &mut flush_buf).await?;
                     continue;
                 }
             }
@@ -423,8 +429,8 @@ fn poll_h3(
     capsules: &mut CapsuleParser,
     addr_tx: &Option<mpsc::Sender<AssignedAddr>>,
     quiet: bool,
+    body: &mut Vec<u8>,
 ) -> Result<()> {
-    let mut body = vec![0u8; 65535];
 
     loop {
         match h3c.poll(conn) {
@@ -541,11 +547,10 @@ async fn drain_datagrams(
 async fn flush(
     conn: &mut quiche::Connection,
     sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
+    out: &mut [u8],
 ) -> Result<()> {
-    let mut out = vec![0u8; MAX_DATAGRAM_SIZE];
-
     loop {
-        match conn.send(&mut out) {
+        match conn.send(out) {
             Ok((write, send_info)) => {
                 if let Some(sock) = sockets.get(&send_info.from) {
                     sock.send_to(&out[..write], send_info.to).await?;
