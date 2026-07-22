@@ -1,0 +1,13 @@
+[workspace]
+# Workspace lives under crates/ so path deps into ../quiche (or ../aether/quiche)
+# keep quiche's own workspace (edition/license via workspace = true).
+# A root-level [workspace] would steal those crates and break the build.
+members = ["aether-ffi"]
+exclude = ["aether-engine"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

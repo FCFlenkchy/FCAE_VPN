@@ -1,9 +1,2 @@
-[workspace]
-members = ["crates/aether-engine", "crates/aether-ffi"]
-resolver = "2"
-
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-strip = true
+# Root is not a Cargo workspace (avoids nested-workspace fights with quiche/).
+# Build Rust from crates/:  cargo build --manifest-path crates/Cargo.toml -p aether-ffi --release

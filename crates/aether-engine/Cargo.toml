@@ -18,7 +18,8 @@ default = []
 cli = []
 
 [dependencies]
-# Path to quiche: prefer root submodule, fall back to nested aether/quiche
+# Use root quiche submodule; workspace for these crates is quiche/Cargo.toml
+# (not crates/ or repo root — that is why the workspace lives under crates/).
 quiche = { path = "../../quiche/quiche", default-features = false, features = ["boringssl-boring-crate", "qlog"] }
 boring = "4.22"
 foreign-types-shared = "0.3"
