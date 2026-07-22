@@ -11,12 +11,12 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{AetherError, Result};
 
-const TCP_BUF: usize = 512 * 1024;
-const UDP_BUF: usize = 128 * 1024;
-const UDP_META: usize = 128;
-const APP_QUEUE: usize = 4096;
-const MAX_INGEST_PER_TICK: usize = 512;
-const MAX_RECV_CHUNKS: usize = 128;
+const TCP_BUF: usize = 128 * 1024;
+const UDP_BUF: usize = 48 * 1024;
+const UDP_META: usize = 64;
+const APP_QUEUE: usize = 512;
+const MAX_INGEST_PER_TICK: usize = 128;
+const MAX_RECV_CHUNKS: usize = 64;
 
 type OpenTcpResp = oneshot::Sender<std::result::Result<TcpConn, String>>;
 type OpenUdpResp = oneshot::Sender<std::result::Result<UdpConn, String>>;

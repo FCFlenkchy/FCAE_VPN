@@ -15,18 +15,19 @@ use crate::tls::{self, TlsParams};
 use crate::{consts, error::AetherError, error::Result};
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
-const NET_QUEUE: usize = 1024;
+const NET_QUEUE: usize = 256;
 
 async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     use socket2::{Socket, Domain, Type};
     let domain = if bind_addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
     let sock = Socket::new(domain, Type::DGRAM, None).map_err(AetherError::Io)?;
     sock.set_nonblocking(true).map_err(AetherError::Io)?;
-    
-    let buf_size = 7 * 1024 * 1024; // 7MB
+
+    // Keep modest socket buffers — 7MB each caused multi‑hundred MB RSS on Windows.
+    let buf_size = 512 * 1024; // 512 KiB
     let _ = sock.set_recv_buffer_size(buf_size);
     let _ = sock.set_send_buffer_size(buf_size);
-    
+
     sock.bind(&bind_addr.into()).map_err(AetherError::Io)?;
     UdpSocket::from_std(sock.into()).map_err(AetherError::Io)
 }

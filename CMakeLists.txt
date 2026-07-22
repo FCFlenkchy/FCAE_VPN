@@ -61,43 +61,30 @@ endfunction()
 # ── Target-specific configuration ────────────────────────────────────────
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
 
+    # Kotlin UI + JNI bridge only (no ImGui / NativeActivity — that path was blank)
     add_library(fcaevpn_native SHARED
-        ${IMGUI_SOURCES}
-        ${IMGUI_BACKEND_DIR}/imgui_impl_android.cpp
-        ${IMGUI_BACKEND_DIR}/imgui_impl_opengl3.cpp
-        ${CMAKE_SOURCE_DIR}/src_cpp/main_android_gles3.cpp
-        ${UI_SOURCES}
+        ${CMAKE_SOURCE_DIR}/src_cpp/android_jni.cpp
     )
 
     target_include_directories(fcaevpn_native PRIVATE
-        ${IMGUI_DIR}
-        ${IMGUI_BACKEND_DIR}
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src_cpp
     )
 
     target_compile_definitions(fcaevpn_native PRIVATE
-        IMGUI_IMPL_OPENGL_ES3
         ANDROID
         AETHER_TARGET_ANDROID_ARM64
     )
 
     find_library(log-lib log)
     find_library(android-lib android)
-    find_library(gles-lib GLESv3)
-    find_library(egl-lib EGL)
-
-    set(APP_GLUE_DIR ${ANDROID_NDK}/sources/android/native_app_glue)
-    add_library(app-glue STATIC ${APP_GLUE_DIR}/android_native_app_glue.c)
-    target_include_directories(app-glue PUBLIC ${APP_GLUE_DIR})
 
     aether_ffi_lib_path(AETHER_FFI_A aarch64-linux-android)
     aether_link_ffi(fcaevpn_native "${AETHER_FFI_A}")
 
     target_link_libraries(fcaevpn_native PRIVATE
-        ${log-lib} ${android-lib} ${gles-lib} ${egl-lib} app-glue m
+        ${log-lib} ${android-lib} m
     )
-    # Android shared libs: keep Rust #[no_mangle] exports
     target_link_options(fcaevpn_native PRIVATE -Wl,--export-dynamic)
 
 elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")

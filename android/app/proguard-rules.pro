@@ -1,5 +1,5 @@
-# Add project specific ProGuard rules here.
+# Keep JNI entry points
 -keep class com.fc.fcaevpn.** { *; }
--keepclassmembers class com.fc.fcaevpn.FCAEVpnService {
-    private static native void nativeSetTunFd(int);
+-keepclassmembers class * {
+    native <methods>;
 }

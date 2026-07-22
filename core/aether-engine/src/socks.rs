@@ -260,7 +260,7 @@ async fn handle_connect(
     let (mut rd, mut wr) = sock.into_split();
 
     let up = tokio::spawn(async move {
-        let mut buf = vec![0u8; 16384];
+        let mut buf = vec![0u8; 8192];
         loop {
             match rd.read(&mut buf).await {
                 Ok(0) => {
@@ -302,7 +302,7 @@ async fn handle_udp_associate(mut sock: TcpStream, stack: StackHandle, bind_ip: 
     let (sender, mut from_stack) = udp.into_split();
 
     let mut client: Option<SocketAddr> = None;
-    let mut cbuf = vec![0u8; 65535];
+    let mut cbuf = vec![0u8; 16384];
     let mut ctrl = [0u8; 256];
 
     loop {

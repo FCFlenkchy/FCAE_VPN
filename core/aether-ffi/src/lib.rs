@@ -93,7 +93,10 @@ struct GuiLogger;
 
 impl log::Log for GuiLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Debug
+        // Drop Trace; keep Debug only when verbose
+        metadata.level() <= log::Level::Info
+            || (metadata.level() <= log::Level::Debug
+                && std::env::var_os("AETHER_VERBOSE").is_some())
     }
 
     fn log(&self, record: &log::Record) {
@@ -106,12 +109,16 @@ impl log::Log for GuiLogger {
             log::Level::Info => 3,
             log::Level::Debug | log::Level::Trace => 4,
         };
-        let msg = format!("{}", record.args());
+        // Bound message size to limit GUI memory pressure
+        let mut msg = format!("{}", record.args());
+        if msg.len() > 400 {
+            msg.truncate(400);
+            msg.push_str("…");
+        }
         unsafe {
             log_msg(level, &msg);
         }
 
-        // Lightweight telemetry hooks from engine log lines
         let line_lower = msg.to_lowercase();
         let mut t = TELEMETRY.lock();
         if line_lower.contains("socks5") && line_lower.contains("listen") {
@@ -124,7 +131,6 @@ impl log::Log for GuiLogger {
                 t.status_message = "Connected — SOCKS5 + HTTP proxy".to_string();
             }
         }
-        // Capture scan RTT from engine logs: "rtt=12.3ms" or "rtt 12ms" / Duration Debug
         if let Some(ms) = parse_rtt_ms_from_log(&msg) {
             if ms > 0 {
                 t.rtt_ms = ms;
@@ -347,7 +353,8 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
         }
     };
     std::env::set_var("AETHER_CONFIG", config_path);
-    std::env::set_var("AETHER_VERBOSE", "1");
+    // Do NOT force AETHER_VERBOSE — it floods the GUI log buffer and RAM on Windows.
+    // Enable only if the user already set it in the environment.
     // GUI never prompts on stdin
     std::env::set_var("AETHER_NONINTERACTIVE", "1");
 
@@ -375,8 +382,13 @@ pub extern "C" fn aether_init(
         LOG_USER_DATA = user_data;
     }
 
-    // Install a logger that forwards into the GUI. Ignore if already set.
-    let _ = log::set_logger(&GUI_LOGGER).map(|()| log::set_max_level(log::LevelFilter::Debug));
+    // Default Info: Debug floods the UI and RAM (especially on Windows).
+    let max = if std::env::var_os("AETHER_VERBOSE").is_some() {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+    let _ = log::set_logger(&GUI_LOGGER).map(|()| log::set_max_level(max));
 
     {
         let mut t = TELEMETRY.lock();

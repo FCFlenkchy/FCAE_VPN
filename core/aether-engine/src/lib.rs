@@ -901,8 +901,8 @@ async fn run_wireguard_tunnel(
         aethernoize: std::sync::Arc::new(aethernoize),
     };
 
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1024);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(1024);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(256);
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(256);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
 
@@ -974,8 +974,8 @@ async fn establish_wg(
         aethernoize: std::sync::Arc::new(profile),
     };
 
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1024);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(1024);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(256);
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(256);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
     let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;

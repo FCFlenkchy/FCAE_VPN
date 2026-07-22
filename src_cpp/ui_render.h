@@ -44,15 +44,23 @@ struct AppState {
     AetherTelemetry telem = {};
 
     std::vector<std::pair<int, std::string>> logs;
-    int  max_logs    = 2000;
+    int  max_logs    = 400;
     bool auto_scroll = true;
     bool logging_enabled = true;
     char save_status[128] = {};
     char copy_status[64] = {};
 
     void add_log(int level, const char* msg) {
-        logs.emplace_back(level, std::string(msg));
-        if ((int)logs.size() > max_logs) logs.erase(logs.begin());
+        if (!msg) return;
+        // Cap single line length to avoid huge allocations
+        std::string s(msg);
+        if (s.size() > 512) s.resize(512);
+        logs.emplace_back(level, std::move(s));
+        // Erase batch from front (amortized cheaper than one-by-one)
+        if ((int)logs.size() > max_logs) {
+            const int drop = (int)logs.size() - max_logs;
+            logs.erase(logs.begin(), logs.begin() + drop);
+        }
     }
 
     std::string logs_as_text() const {

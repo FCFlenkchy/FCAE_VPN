@@ -31,9 +31,9 @@ public class FCAEVpnService extends VpnService {
     private static final int DISCONNECT_ACTION_CODE = 11;
     private static final int START_ACTION_CODE  = 12;
 
-    private static final String ACTION_STOP      = "com.fc.fcaevpn.STOP";
-    private static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
-    private static final String ACTION_START     = "com.fc.fcaevpn.START";
+    public static final String ACTION_STOP      = "com.fc.fcaevpn.STOP";
+    public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
+    public static final String ACTION_START     = "com.fc.fcaevpn.START";
 
     private ParcelFileDescriptor vpnInterface;
     private Thread vpnThread;
@@ -84,12 +84,11 @@ public class FCAEVpnService extends VpnService {
         }
 
         createNotificationChannel();
+        // Idle foreground shell — do not auto-connect without ACTION_START
         startForeground(NOTIFICATION_ID, buildNotification(
-            "FCAE VPN \u2014 Connecting...",
-            true  // show Stop button
+            "FCAE VPN \u2014 Ready (tap Connect in app)",
+            false
         ));
-
-        startVpn();
         return START_STICKY;
     }
 
