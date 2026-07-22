@@ -14,7 +14,7 @@
 
 static std::mutex g_log_mu;
 static std::vector<std::string> g_logs;
-static constexpr size_t kMaxLogs = 120;
+static constexpr size_t kMaxLogs = 80;
 static bool g_inited = false;
 
 static void jni_log_cb(int level, const char* message, void* /*user*/) {

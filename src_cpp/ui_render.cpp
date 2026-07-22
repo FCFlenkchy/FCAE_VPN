@@ -682,27 +682,6 @@ void render_ui() {
             if (g_app.auto_scroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f)
                 ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
-
-            // Mouse-drag selectable text view (Ctrl+A to select all, Ctrl+C to copy)
-            {
-                static std::string log_buf;
-                log_buf.clear();
-                for (auto& [lvl, msg] : g_app.logs) {
-                    log_buf += msg;
-                    log_buf += '\n';
-                }
-                // ImGui::InputTextMultiline requires a mutable buffer even with ReadOnly
-                static std::vector<char> sel_buf;
-                sel_buf.assign(log_buf.begin(), log_buf.end());
-                sel_buf.push_back('\0');
-                ImGuiInputTextFlags sel_flags = ImGuiInputTextFlags_ReadOnly;
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
-                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.06f, 0.06f, 0.08f, 1.0f));
-                ImGui::InputTextMultiline("##log_sel", sel_buf.data(), sel_buf.size(),
-                    ImVec2(-1, 80), sel_flags);
-                ImGui::PopStyleColor();
-                ImGui::PopStyleVar();
-            }
             ImGui::EndTabItem();
         }
 

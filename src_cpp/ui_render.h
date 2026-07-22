@@ -59,7 +59,7 @@ struct AppState {
     double last_telem_t = 0.0;
 
     std::vector<std::pair<int, std::string>> logs;
-    int  max_logs    = 400;
+    int  max_logs    = 200;
     bool auto_scroll = true;
     bool logging_enabled = true;
     char save_status[128] = {};
@@ -68,7 +68,7 @@ struct AppState {
     void add_log(int level, const char* msg) {
         if (!msg) return;
         std::string s(msg);
-        if (s.size() > 512) s.resize(512);
+        if (s.size() > 256) s.resize(256);
         logs.emplace_back(level, std::move(s));
         if ((int)logs.size() > max_logs) {
             const int drop = (int)logs.size() - max_logs;
