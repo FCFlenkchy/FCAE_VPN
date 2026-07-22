@@ -5,6 +5,10 @@
 #define GL_GLEXT_PROTOTYPES 1
 #include <GLFW/glfw3.h>
 
+// X11 headers for Motif WM hints (disable maximize button)
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
@@ -26,7 +30,6 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-    glfwWindowHint(GLFW_MAXIMIZABLE, GLFW_FALSE);
 
     GLFWwindow* window = glfwCreateWindow(1024, 700, "FCAE VPN", nullptr, nullptr);
     if (!window) {
@@ -35,6 +38,28 @@ int main(int argc, char** argv) {
     }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+
+    // Disable maximize via Motif WM hints (works on all X11 window managers)
+    {
+        // MWM_HINTS flags
+        const unsigned long MWM_HINTS_FUNCTIONS = 1 << 0;
+        const unsigned long MWM_FUNC_MAXIMIZE    = 1 << 4;
+        // All functions except maximize
+        const unsigned long funcs = ~MWM_FUNC_MAXIMIZE & 0xFFUL;
+
+        struct { unsigned long flags, functions, decorations, input_mode, status; } mwm = {};
+        mwm.flags      = MWM_HINTS_FUNCTIONS;
+        mwm.functions  = funcs;
+
+        Display* dpy = glfwGetX11Display();
+        Window   win = glfwGetX11Window(window);
+        if (dpy && win) {
+            Atom prop = XInternAtom(dpy, "_MOTIF_WM_HINTS", False);
+            XChangeProperty(dpy, win, prop, prop, 32, PropModeReplace,
+                            (unsigned char*)&mwm, 5);
+            XFlush(dpy);
+        }
+    }
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
