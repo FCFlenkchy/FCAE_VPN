@@ -662,6 +662,16 @@ void render_ui() {
 
             // Selectable multi-line log view (click lines to select; Ctrl+C via ImGui input)
             ImGui::BeginChild("##log", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 4), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+            // Track whether user is at the bottom for auto-scroll
+            if (g_app.auto_scroll) {
+                // Scroll to bottom on first frame or when new logs arrive
+                float scroll_y = ImGui::GetScrollY();
+                float scroll_max = ImGui::GetScrollMaxY();
+                bool at_bottom = (scroll_max <= 0.0f) || (scroll_y >= scroll_max - 2.0f);
+                if (at_bottom) {
+                    ImGui::SetScrollHereY(1.0f);
+                }
+            }
             ImGuiListClipper clipper;
             clipper.Begin((int)g_app.logs.size());
             while (clipper.Step()) {
@@ -698,8 +708,6 @@ void render_ui() {
                     ImGui::PopStyleColor();
                 }
             }
-            if (g_app.auto_scroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f)
-                ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
