@@ -1,6 +1,8 @@
 // FCAE VPN — Linux OpenGL3 + GLFW + Dear ImGui frontend
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
+#include <chrono>
 
 #define GL_GLEXT_PROTOTYPES 1
 #include <GLFW/glfw3.h>
@@ -98,6 +100,9 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(window);
+
+        // Cap at ~60 FPS (fallback for systems where VSync doesn't work)
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
 
     ui_shutdown();
