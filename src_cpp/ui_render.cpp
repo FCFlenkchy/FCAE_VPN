@@ -1,4 +1,70 @@
 #include "ui_render.h"
+#include <fstream>
+#include <sstream>
+
+// ── Config persistence ──────────────────────────────────────────────────
+
+static std::string get_config_path() {
+#ifdef ANDROID
+    return "/data/data/com.fc.fcaevpn/files/FCAE_VPN.cfg";
+#else
+    return "FCAE_VPN.cfg";
+#endif
+}
+
+static void save_config() {
+    FILE* f = fopen(get_config_path().c_str(), "w");
+    if (!f) { snprintf(g_app.save_status, sizeof(g_app.save_status), "Save failed"); return; }
+    fprintf(f, "protocol=%d\n", g_app.protocol);
+    fprintf(f, "mode=%d\n", g_app.mode);
+    fprintf(f, "lan_sharing=%d\n", g_app.lan_sharing);
+    fprintf(f, "scan_mode=%d\n", g_app.scan_mode);
+    fprintf(f, "ip_version=%d\n", g_app.ip_version);
+    fprintf(f, "quick_reconnect=%d\n", g_app.quick_reconnect);
+    fprintf(f, "noize_profile=%s\n", g_app.noize_profile);
+    fprintf(f, "fragment_enabled=%d\n", g_app.fragment_enabled);
+    fprintf(f, "frag_min_size=%d\n", g_app.frag_min_size);
+    fprintf(f, "frag_max_size=%d\n", g_app.frag_max_size);
+    fprintf(f, "frag_min_delay=%d\n", g_app.frag_min_delay);
+    fprintf(f, "frag_max_delay=%d\n", g_app.frag_max_delay);
+    fprintf(f, "socks_port=%u\n", g_app.socks_port);
+    fprintf(f, "http_port=%u\n", g_app.http_port);
+    fprintf(f, "force_peer=%s\n", g_app.force_peer);
+    fprintf(f, "config_path=%s\n", g_app.config_path);
+    fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled);
+    fprintf(f, "ech_enabled=%d\n", g_app.ech_enabled);
+    fclose(f);
+    snprintf(g_app.save_status, sizeof(g_app.save_status), "Config saved!");
+}
+
+static bool load_config() {
+    FILE* f = fopen(get_config_path().c_str(), "r");
+    if (!f) return false;
+    char key[64], val[256];
+    while (fscanf(f, "%63[^=]=%255[^\n]\n", key, val) == 2) {
+        if (!strcmp(key, "protocol")) g_app.protocol = atoi(val);
+        else if (!strcmp(key, "mode")) g_app.mode = atoi(val);
+        else if (!strcmp(key, "lan_sharing")) g_app.lan_sharing = atoi(val);
+        else if (!strcmp(key, "scan_mode")) g_app.scan_mode = atoi(val);
+        else if (!strcmp(key, "ip_version")) g_app.ip_version = atoi(val);
+        else if (!strcmp(key, "quick_reconnect")) g_app.quick_reconnect = atoi(val);
+        else if (!strcmp(key, "noize_profile")) strncpy(g_app.noize_profile, val, sizeof(g_app.noize_profile)-1);
+        else if (!strcmp(key, "fragment_enabled")) g_app.fragment_enabled = atoi(val);
+        else if (!strcmp(key, "frag_min_size")) g_app.frag_min_size = atoi(val);
+        else if (!strcmp(key, "frag_max_size")) g_app.frag_max_size = atoi(val);
+        else if (!strcmp(key, "frag_min_delay")) g_app.frag_min_delay = atoi(val);
+        else if (!strcmp(key, "frag_max_delay")) g_app.frag_max_delay = atoi(val);
+        else if (!strcmp(key, "socks_port")) g_app.socks_port = (uint16_t)atoi(val);
+        else if (!strcmp(key, "http_port")) g_app.http_port = (uint16_t)atoi(val);
+        else if (!strcmp(key, "force_peer")) strncpy(g_app.force_peer, val, sizeof(g_app.force_peer)-1);
+        else if (!strcmp(key, "config_path")) strncpy(g_app.config_path, val, sizeof(g_app.config_path)-1);
+        else if (!strcmp(key, "h2_enabled")) g_app.h2_enabled = atoi(val);
+        else if (!strcmp(key, "ech_enabled")) g_app.ech_enabled = atoi(val);
+    }
+    fclose(f);
+    snprintf(g_app.save_status, sizeof(g_app.save_status), "Config loaded!");
+    return true;
+}
 
 void log_callback(int level, const char* message, void* user_data) {
     (void)user_data;
@@ -61,6 +127,7 @@ static void draw_spinner(float radius, int segments, float speed) {
 
 void ui_init() {
     aether_init(log_callback, nullptr);
+    load_config();
 }
 
 void ui_frame() {
@@ -131,6 +198,17 @@ void render_ui() {
             }
         }
         ImGui::PopStyleColor(3);
+
+        ImGui::SameLine(0, 8);
+        if (ImGui::Button("Save", ImVec2(60, 34))) {
+            save_config();
+        }
+        if (g_app.save_status[0]) {
+            ImGui::SameLine(0, 6);
+            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", g_app.save_status);
+            g_app.save_status[0] = '\0';
+        }
+
         ImGui::PopStyleVar(2);
     }
 
