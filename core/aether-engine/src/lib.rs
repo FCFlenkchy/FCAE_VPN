@@ -432,32 +432,61 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
         let peer: SocketAddr = p
             .parse()
             .map_err(|_| AetherError::Other(format!("bad peer address {p}")))?;
-        log::info!("[+] using forced peer {peer}; probing RTT...");
-        // Quick RTT probe via MASQUE HTTP ping
-        let params = tunnelping::MasquePingParams {
-            peer,
-            sni: connect_sni(),
-            authority: quic::default_authority().to_string(),
-            path: quic::default_path().to_string(),
-            cert_pem: identity.cert_pem.clone(),
-            key_pem: identity.key_pem.clone(),
-            noize: noize_config(),
-            local_ipv4: parse_local_v4(&identity.ipv4),
-            local_ipv4_str: identity.ipv4.clone(),
-            local_ipv6_str: String::new(),
-        };
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(8),
-            tunnelping::masque_http_ping(&params, std::time::Duration::from_secs(5)),
-        )
-        .await
-        {
-            Ok(Ok(rtt)) => {
-                log::info!("[+] forced peer {peer} RTT: {:?}", rtt);
-                stats::set_rtt_ms(rtt.as_millis() as u64);
+
+        match protocol {
+            Protocol::Masque => {
+                log::info!("[+] using forced MASQUE peer {peer}; probing RTT...");
+                let params = tunnelping::MasquePingParams {
+                    peer,
+                    sni: connect_sni(),
+                    authority: quic::default_authority().to_string(),
+                    path: quic::default_path().to_string(),
+                    cert_pem: identity.cert_pem.clone(),
+                    key_pem: identity.key_pem.clone(),
+                    noize: noize_config(),
+                    local_ipv4: parse_local_v4(&identity.ipv4),
+                    local_ipv4_str: identity.ipv4.clone(),
+                    local_ipv6_str: String::new(),
+                };
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    tunnelping::masque_http_ping(&params, std::time::Duration::from_secs(5)),
+                )
+                .await
+                {
+                    Ok(Ok(rtt)) => {
+                        log::info!("[+] forced peer {peer} RTT: {:?}", rtt);
+                        stats::set_rtt_ms(rtt.as_millis() as u64);
+                    }
+                    _ => {
+                        log::warn!("[-] forced peer {peer} RTT probe failed; continuing anyway");
+                    }
+                }
             }
-            _ => {
-                log::warn!("[-] forced peer {peer} RTT probe failed; continuing anyway");
+            Protocol::WireGuard | Protocol::WarpInWarp => {
+                log::info!("[+] using forced WireGuard peer {peer}; probing RTT...");
+                let private_key = identity.private_key_bytes()?;
+                let peer_public = identity.peer_public_key_bytes()?;
+                let profile = aethernoize_config();
+                match wireguard::verify_endpoint(
+                    peer,
+                    private_key,
+                    peer_public,
+                    identity.client_id,
+                    parse_local_v4(&identity.ipv4),
+                    &profile,
+                    std::time::Duration::from_secs(10),
+                )
+                .await
+                {
+                    Ok(rtt) => {
+                        log::info!("[+] forced WireGuard peer {peer} RTT: {:?}", rtt);
+                        stats::set_rtt_ms(rtt.as_millis() as u64);
+                    }
+                    Err(e) => {
+                        log::warn!("[-] forced WireGuard peer {peer} probe failed: {e}; continuing anyway");
+                    }
+                }
             }
         }
         return Ok(peer);
@@ -1251,7 +1280,7 @@ async fn run_wireguard_tunnel(
 
     // New WG session after scan: handshake + keepalive path needs more settle time
     // than MASQUE (scan used a throwaway Tunn; this is a fresh connection).
-    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
 
     // WireGuard was verified on a throwaway session; re-check the LIVE stack
     // before SOCKS (fixes false positives on quick-reconnect / Ironclad).
@@ -1402,7 +1431,12 @@ async fn run_warp_in_warp(
     let outer_stack = establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
 
     // Outer needs time for handshake + first data before inner can forward.
-    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+
+    // Validate the outer tunnel before building the inner tunnel on top of it.
+    if let Err(e) = validate_live_stack(&outer_stack, "outer WARP").await {
+        log::warn!("[-] outer WARP validation failed: {e}; inner tunnel may not work");
+    }
 
     let forwarder = spawn_udp_forwarder(&outer_stack, peer).await?;
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
@@ -1410,7 +1444,7 @@ async fn run_warp_in_warp(
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
     let inner_stack = establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
 
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
 
     if let Err(e) = validate_live_stack(&inner_stack, "WARP-in-WARP").await {
         return Err(e);
