@@ -446,7 +446,7 @@ fn poll_h3(
                 if stream_id != req_stream {
                     continue;
                 }
-                while let Ok(n) = h3c.recv_body(conn, stream_id, &mut body) {
+                while let Ok(n) = h3c.recv_body(conn, stream_id, &mut *body) {
                     if n == 0 {
                         break;
                     }
