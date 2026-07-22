@@ -662,17 +662,17 @@ void render_ui() {
             // Selectable multi-line log view (click lines to select; Ctrl+C via ImGui input)
             ImGui::BeginChild("##log", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 4), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
 
-            // Auto-scroll: only when new logs arrived AND user was already at the bottom
+            // Check if we should auto-scroll BEFORE rendering (scroll height not yet known)
             int cur_count = (int)g_app.logs.size();
+            bool should_scroll = false;
             if (g_app.auto_scroll && cur_count > g_app.prev_log_count) {
                 float scroll_y = ImGui::GetScrollY();
                 float scroll_max = ImGui::GetScrollMaxY();
-                bool at_bottom = (scroll_max <= 0.0f) || (scroll_y >= scroll_max - 4.0f);
-                if (at_bottom) {
-                    ImGui::SetScrollHereY(1.0f);
-                }
+                // If scrollable area is small or we're near the bottom, auto-scroll
+                should_scroll = (scroll_max <= 0.0f) || (scroll_y >= scroll_max - 4.0f);
             }
             g_app.prev_log_count = cur_count;
+
             ImGuiListClipper clipper;
             clipper.Begin((int)g_app.logs.size());
             while (clipper.Step()) {
@@ -708,6 +708,10 @@ void render_ui() {
                     ImGui::PopID();
                     ImGui::PopStyleColor();
                 }
+            }
+            // Scroll AFTER clipper rendered items so scroll height is correct
+            if (should_scroll) {
+                ImGui::SetScrollHereY(1.0f);
             }
             ImGui::EndChild();
             ImGui::EndTabItem();
