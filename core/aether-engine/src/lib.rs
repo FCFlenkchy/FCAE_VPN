@@ -243,27 +243,38 @@ pub async fn run_from_env() -> Result<()> {
     log::info!("Aether v{}", env!("CARGO_PKG_VERSION"));
     install_netstack_panic_guard();
 
-    let listen: Option<SocketAddr> = std::env::var("AETHER_SOCKS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|a: &SocketAddr| a.port() != 0);
+    let socks_disabled = std::env::var("AETHER_SOCKS_DISABLED").is_ok();
+    let http_disabled = std::env::var("AETHER_HTTP_DISABLED").is_ok();
 
-    let http_listen: Option<SocketAddr> = std::env::var("AETHER_HTTP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .or_else(|| {
-            // Derive HTTP bind from SOCKS bind + AETHER_HTTP_PORT (GUI default 1820)
-            let port: u16 = std::env::var("AETHER_HTTP_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(1820);
-            match listen {
-                Some(addr) if port != 0 && port != addr.port() => {
-                    Some(SocketAddr::new(addr.ip(), port))
+    let listen: Option<SocketAddr> = if socks_disabled {
+        None
+    } else {
+        std::env::var("AETHER_SOCKS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|a: &SocketAddr| a.port() != 0)
+    };
+
+    let http_listen: Option<SocketAddr> = if http_disabled {
+        None
+    } else {
+        std::env::var("AETHER_HTTP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|a: &SocketAddr| a.port() != 0)
+            .or_else(|| {
+                let port: u16 = std::env::var("AETHER_HTTP_PORT")
+                    .ok()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(1820);
+                match listen {
+                    Some(addr) if port != 0 && port != addr.port() => {
+                        Some(SocketAddr::new(addr.ip(), port))
+                    }
+                    _ => None,
                 }
-                _ => None,
-            }
-        });
+            })
+    };
 
     let base_config = std::env::var("AETHER_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
 

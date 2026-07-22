@@ -301,12 +301,19 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
     std::env::set_var("AETHER_SCAN", scan_mode_to_env(cfg.scan_mode));
     std::env::set_var("AETHER_IP", ip_version_to_env(cfg.ip_version));
 
-    let socks_addr = if cfg.lan_sharing {
-        format!("0.0.0.0:{}", cfg.socks_port)
+    // SOCKS5 proxy
+    if cfg.socks_port != 0 {
+        let socks_addr = if cfg.lan_sharing {
+            format!("0.0.0.0:{}", cfg.socks_port)
+        } else {
+            format!("127.0.0.1:{}", cfg.socks_port)
+        };
+        std::env::set_var("AETHER_SOCKS", &socks_addr);
+        std::env::remove_var("AETHER_SOCKS_DISABLED");
     } else {
-        format!("127.0.0.1:{}", cfg.socks_port)
-    };
-    std::env::set_var("AETHER_SOCKS", &socks_addr);
+        std::env::set_var("AETHER_SOCKS", "0.0.0.0:0");
+        std::env::set_var("AETHER_SOCKS_DISABLED", "1");
+    }
 
     // HTTP CONNECT proxy (GUI default 1820)
     if cfg.http_port != 0 && cfg.http_port != cfg.socks_port {
@@ -317,9 +324,11 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
         };
         std::env::set_var("AETHER_HTTP", &http_addr);
         std::env::set_var("AETHER_HTTP_PORT", cfg.http_port.to_string());
+        std::env::remove_var("AETHER_HTTP_DISABLED");
     } else {
-        std::env::remove_var("AETHER_HTTP");
-        std::env::remove_var("AETHER_HTTP_PORT");
+        std::env::set_var("AETHER_HTTP", "0.0.0.0:0");
+        std::env::set_var("AETHER_HTTP_PORT", "0");
+        std::env::set_var("AETHER_HTTP_DISABLED", "1");
     }
 
     let noize = unsafe {

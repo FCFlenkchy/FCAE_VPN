@@ -486,16 +486,35 @@ void render_ui() {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.16f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.85f, 0.45f, 1.0f));
-        float addr_h = narrow ? 48.0f : 30.0f;
+        float addr_h = narrow ? 64.0f : 44.0f;
         ImGui::BeginChild("##addr", ImVec2(0, addr_h), ImGuiChildFlags_Borders);
 
         if (connected) {
             const char* lip = telem.lan_ip[0] ? telem.lan_ip : "127.0.0.1";
             if (g_app.mode == 0) {
-                if (g_app.lan_sharing)
-                    ImGui::TextWrapped("Local 127.0.0.1:%u | LAN %s:%u", g_app.socks_port, lip, g_app.socks_port);
-                else
-                    ImGui::TextWrapped("Local: SOCKS5 127.0.0.1:%u | HTTP 127.0.0.1:%u", g_app.socks_port, g_app.http_port);
+                if (g_app.lan_sharing) {
+                    if (g_app.socks_enabled && g_app.http_enabled)
+                        ImGui::TextWrapped("SOCKS5 Local 127.0.0.1:%u | LAN %s:%u\nHTTP Local 127.0.0.1:%u | LAN %s:%u",
+                            g_app.socks_port, lip, g_app.socks_port,
+                            g_app.http_port, lip, g_app.http_port);
+                    else if (g_app.socks_enabled)
+                        ImGui::TextWrapped("SOCKS5 Local 127.0.0.1:%u | LAN %s:%u\nHTTP proxy disabled",
+                            g_app.socks_port, lip, g_app.socks_port);
+                    else if (g_app.http_enabled)
+                        ImGui::TextWrapped("HTTP Local 127.0.0.1:%u | LAN %s:%u\nSOCKS5 proxy disabled",
+                            g_app.http_port, lip, g_app.http_port);
+                    else
+                        ImGui::TextWrapped("All proxies disabled");
+                } else {
+                    if (g_app.socks_enabled && g_app.http_enabled)
+                        ImGui::TextWrapped("SOCKS5 127.0.0.1:%u | HTTP 127.0.0.1:%u", g_app.socks_port, g_app.http_port);
+                    else if (g_app.socks_enabled)
+                        ImGui::TextWrapped("SOCKS5 127.0.0.1:%u | HTTP disabled", g_app.socks_port);
+                    else if (g_app.http_enabled)
+                        ImGui::TextWrapped("HTTP 127.0.0.1:%u | SOCKS5 disabled", g_app.http_port);
+                    else
+                        ImGui::TextWrapped("All proxies disabled");
+                }
             } else {
                 if (g_app.lan_sharing)
                     ImGui::TextWrapped("TUN | Local 127.0.0.1 | LAN %s", lip);
@@ -543,14 +562,14 @@ void render_ui() {
                 ImGui::PushItemWidth(100);
                 ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
                 ImGui::SameLine(0, 20);
-                if (g_app.socks_enabled) {
-                    ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
-                }
+                if (!g_app.socks_enabled) ImGui::BeginDisabled();
+                ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
+                if (!g_app.socks_enabled) ImGui::EndDisabled();
                 ImGui::Checkbox("HTTP", &g_app.http_enabled);
                 ImGui::SameLine(0, 20);
-                if (g_app.http_enabled) {
-                    ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
-                }
+                if (!g_app.http_enabled) ImGui::BeginDisabled();
+                ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
+                if (!g_app.http_enabled) ImGui::EndDisabled();
                 ImGui::PopItemWidth();
                 ImGui::Spacing();
             }
