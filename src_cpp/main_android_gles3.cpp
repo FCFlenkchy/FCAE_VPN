@@ -197,10 +197,26 @@ void android_main(struct android_app* app) {
     }
 }
 
-// JNI bridge: pass Android VpnService fd to Rust FFI
+// JNI bridge for FCAEVpnService (static natives → second arg is jclass)
 extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_FCAEVpnService_nativeSetTunFd(JNIEnv* env, jobject thiz, jint fd) {
-    (void)env; (void)thiz;
-    aether_set_android_tun_fd(fd);
-    LOGI("TUN fd %d passed to Rust FFI", fd);
+Java_com_fc_fcaevpn_FCAEVpnService_nativeSetTunFd(JNIEnv* env, jclass /*clazz*/, jint fd) {
+    (void)env;
+    aether_set_android_tun_fd((int)fd);
+    LOGI("TUN fd %d passed to Rust FFI", (int)fd);
+}
+
+// Returns long[2] = { rx_bytes_sec, tx_bytes_sec } for the notification ticker.
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_fc_fcaevpn_FCAEVpnService_nativeGetTrafficStats(JNIEnv* env, jclass /*clazz*/) {
+    AetherTelemetry telem = {};
+    aether_get_telemetry(&telem);
+
+    jlongArray out = env->NewLongArray(2);
+    if (!out) return nullptr;
+    jlong vals[2] = {
+        (jlong)telem.rx_bytes_sec,
+        (jlong)telem.tx_bytes_sec,
+    };
+    env->SetLongArrayRegion(out, 0, 2, vals);
+    return out;
 }

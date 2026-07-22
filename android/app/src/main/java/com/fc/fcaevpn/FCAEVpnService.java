@@ -232,12 +232,16 @@ public class FCAEVpnService extends VpnService {
         if (vpnPaused) {
             text = "FCAE VPN \u2014 Stopped (tap Start to resume)";
         } else if (running) {
-            long[] stats = {0, 0};
+            long rx = 0, tx = 0;
             try {
-                stats = nativeGetTrafficStats();
+                long[] stats = nativeGetTrafficStats();
+                if (stats != null && stats.length >= 2) {
+                    rx = stats[0];
+                    tx = stats[1];
+                }
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(TAG, "nativeGetTrafficStats missing: " + e.getMessage());
             } catch (Exception ignored) {}
-            long rx = stats[0];
-            long tx = stats[1];
             text = String.format("\u2193 %s/s  |  \u2191 %s/s",
                 fmtBytesShort(rx), fmtBytesShort(tx));
         } else {
