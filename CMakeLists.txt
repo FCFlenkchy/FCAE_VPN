@@ -26,8 +26,8 @@ set(UI_SOURCES
 function(aether_ffi_lib_path out_var triple)
     set(candidates
         ${CMAKE_SOURCE_DIR}/target/${triple}/release/libaether_ffi.a
-        ${CMAKE_SOURCE_DIR}/crates/aether-ffi/target/${triple}/release/libaether_ffi.a
-        ${CMAKE_SOURCE_DIR}/crates/target/${triple}/release/libaether_ffi.a
+        ${CMAKE_SOURCE_DIR}/core/aether-ffi/target/${triple}/release/libaether_ffi.a
+        ${CMAKE_SOURCE_DIR}/core/target/${triple}/release/libaether_ffi.a
     )
     foreach(c ${candidates})
         if(EXISTS "${c}")

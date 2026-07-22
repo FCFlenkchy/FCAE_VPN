@@ -1,7 +1,7 @@
 [workspace]
-# Workspace lives under crates/ so path deps into ../quiche keep quiche's own
+# Workspace lives under core/ so path deps into ../quiche keep quiche's own
 # workspace (edition/license via workspace = true). Engine is vendored in
-# crates/aether-engine; only the quiche submodule is required at build time.
+# core/aether-engine; only the quiche submodule is required at build time.
 members = ["aether-ffi"]
 exclude = ["aether-engine"]
 resolver = "2"

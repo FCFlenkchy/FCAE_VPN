@@ -19,7 +19,7 @@ cli = []
 
 [dependencies]
 # Use root quiche submodule; workspace for these crates is quiche/Cargo.toml
-# (not crates/ or repo root — that is why the workspace lives under crates/).
+# (not core/ or repo root — that is why the workspace lives under core/).
 quiche = { path = "../../quiche/quiche", default-features = false, features = ["boringssl-boring-crate", "qlog"] }
 boring = "4.22"
 foreign-types-shared = "0.3"

@@ -38,7 +38,7 @@ Thumbs.db
 third_party/
 
 # Rust
-crates/*/target/
+core/*/target/
 Cargo.lock
 
 target/

@@ -1,2 +1,2 @@
 # Root is not a Cargo workspace (avoids nested-workspace fights with quiche/).
-# Build Rust from crates/:  cargo build --manifest-path crates/Cargo.toml -p aether-ffi --release
+# Build Rust from core/:  cargo build --manifest-path core/Cargo.toml -p aether-ffi --release
