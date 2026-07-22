@@ -128,7 +128,8 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
     aether_ffi_lib_path(AETHER_FFI_A x86_64-pc-windows-gnu)
     aether_link_ffi(fcaevpn "${AETHER_FFI_A}")
 
-    # System libs only — crypto is inside the Rust staticlib (BoringSSL), not OpenSSL
+    # System libs only — crypto is inside the Rust staticlib (BoringSSL), not OpenSSL.
+    # pthread MUST come after libaether_ffi.a (BoringSSL thread_pthread needs it).
     target_link_libraries(fcaevpn PRIVATE
         d3d11 dxgi d3dcompiler dwmapi ntdll
         ws2_32 userenv bcrypt shell32 ole32 uuid crypt32 secur32 ncrypt
@@ -140,8 +141,11 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         target_link_options(fcaevpn PRIVATE
             -L${MINGW_LIB}
             -static-libgcc -static-libstdc++
-            -Wl,-Bstatic -lstdc++ -lpthread -lwinpthread -Wl,-Bdynamic
             -s -mwindows -municode
+        )
+        # After Rust staticlib: static pthread for winpthread + stdc++
+        target_link_libraries(fcaevpn PRIVATE
+            -Wl,-Bstatic -lstdc++ -lpthread -lwinpthread -Wl,-Bdynamic
         )
     endif()
 
