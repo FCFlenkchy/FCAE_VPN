@@ -554,53 +554,49 @@ type TunBridge = (
     tokio::sync::mpsc::Receiver<Vec<u8>>,
 );
 
-/// Split tunnel channels so SOCKS netstack and optional TUN can both use the data plane.
+/// Wire tunnel channels to netstack. Only fan-out when a real TUN fd is present
+/// (Android VpnService). Proxy-only mode keeps the original direct path.
 fn split_dataplane(
     outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
-    mut inbound_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    inbound_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) -> (
     tokio::sync::mpsc::Sender<Vec<u8>>,
     tokio::sync::mpsc::Receiver<Vec<u8>>,
     Option<TunBridge>,
 ) {
+    let Some(fd) = (if tun_mode_active() {
+        tun::resolve_fd()
+    } else {
+        None
+    }) else {
+        // Direct: netstack ↔ tunnel (same as pre-TUN-bridge behavior).
+        return (outbound_tx, inbound_rx, None);
+    };
+
     let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
     let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
 
-    let ot_fwd = outbound_tx.clone();
+    let ot_ns = outbound_tx.clone();
     tokio::spawn(async move {
         while let Some(p) = ns_out_rx.recv().await {
-            if ot_fwd.send(p).await.is_err() {
+            if ot_ns.send(p).await.is_err() {
                 break;
             }
         }
     });
 
-    let tun_fd = if tun_mode_active() {
-        tun::resolve_fd()
-    } else {
-        None
-    };
+    // Tunnel → netstack + TUN (clone each IP packet).
+    let mut inbound_rx = inbound_rx;
+    tokio::spawn(async move {
+        while let Some(p) = inbound_rx.recv().await {
+            let _ = ns_in_tx.send(p.clone()).await;
+            let _ = tun_in_tx.send(p).await;
+        }
+    });
 
-    if let Some(fd) = tun_fd {
-        let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
-        let ot_tun = outbound_tx;
-        tokio::spawn(async move {
-            while let Some(p) = inbound_rx.recv().await {
-                let _ = ns_in_tx.send(p.clone()).await;
-                let _ = tun_in_tx.send(p).await;
-            }
-        });
-        (ns_out_tx, ns_in_rx, Some((fd, ot_tun, tun_in_rx)))
-    } else {
-        tokio::spawn(async move {
-            while let Some(p) = inbound_rx.recv().await {
-                if ns_in_tx.send(p).await.is_err() {
-                    break;
-                }
-            }
-        });
-        (ns_out_tx, ns_in_rx, None)
-    }
+    // TUN reads are sent on `outbound_tx` (shared with netstack via ot_ns clone above).
+    (ns_out_tx, ns_in_rx, Some((fd, outbound_tx, tun_in_rx)))
 }
 
 async fn run_masque_tunnel(

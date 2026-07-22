@@ -49,7 +49,7 @@ struct AppState {
     int  dns_mode        = 0; // 0=UDP 1=DoH
     char doh_url[256]    = "https://cloudflare-dns.com/dns-query";
     int  dns_ip_prefer   = 0; // 0=follow scan, 4, 6, 10
-    char tls_groups[128] = "P-256:X25519:P-384";
+    char tls_groups[128] = ""; // empty = engine default (P-256:X25519:P-384)
     int  udp_buf_kb      = 512;
 
     AetherTelemetry telem = {};

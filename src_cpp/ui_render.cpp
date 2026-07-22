@@ -392,13 +392,10 @@ void render_ui() {
                 }).detach();
             } else if (!g_app.start_busy.load()) {
                 g_app.start_busy.store(true);
-                AetherConfig cfg = g_app.to_config();
-                // Heap-copy strings for async start (pointers must outlive this frame).
-                auto* heap = new AetherConfig(cfg);
-                // Keep owned strings alive for the worker.
+                // Snapshot config + own string storage for the worker thread.
                 struct Owned {
                     std::string noize, peer, path, dns, doh, tls;
-                    AetherConfig c;
+                    AetherConfig c{};
                 };
                 auto* o = new Owned();
                 o->noize = g_app.noize_profile;
@@ -414,10 +411,11 @@ void render_ui() {
                 o->c.dns_server    = o->dns.empty() ? nullptr : o->dns.c_str();
                 o->c.doh_url       = o->doh.empty() ? nullptr : o->doh.c_str();
                 o->c.tls_groups    = o->tls.empty() ? nullptr : o->tls.c_str();
-                delete heap;
                 std::thread([o] {
-                    if (!aether_start(&o->c)) {
-                        g_app.add_log(1, "[ui] aether_start failed");
+                    bool ok = aether_start(&o->c);
+                    if (!ok) {
+                        // log via FFI path only (UI log vector is not thread-safe)
+                        // state will show Error via telemetry
                     }
                     g_app.start_busy.store(false);
                     delete o;

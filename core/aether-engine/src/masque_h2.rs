@@ -110,9 +110,12 @@ fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> 
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(CHROME_GROUPS);
-    builder
-        .set_curves_list(groups)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
+    if builder.set_curves_list(groups).is_err() {
+        log::warn!("[-] AETHER_TLS_GROUPS={groups:?} rejected; using default curves");
+        builder
+            .set_curves_list(CHROME_GROUPS)
+            .map_err(|e| AetherError::Tls(e.to_string()))?;
+    }
 
     builder
         .set_alpn_protos(H2_ALPN)

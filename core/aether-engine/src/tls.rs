@@ -45,10 +45,18 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
 
     builder.set_grease_enabled(true);
     let groups = std::env::var("AETHER_TLS_GROUPS").ok();
-    let groups = groups.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(CHROME_GROUPS);
-    builder
-        .set_curves_list(groups)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
+    let groups = groups
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(CHROME_GROUPS);
+    // Never fail the whole handshake path on a bad curves list (scanner would find 0 endpoints).
+    if builder.set_curves_list(groups).is_err() {
+        log::warn!("[-] AETHER_TLS_GROUPS={groups:?} rejected; using default curves");
+        builder
+            .set_curves_list(CHROME_GROUPS)
+            .map_err(|e| AetherError::Tls(e.to_string()))?;
+    }
 
     let mut alpn = Vec::with_capacity(consts::ALPN_H3.len() + 1);
     alpn.push(consts::ALPN_H3.len() as u8);

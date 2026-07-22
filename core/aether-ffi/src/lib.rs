@@ -389,15 +389,19 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
         std::env::remove_var("AETHER_ECH");
     }
 
-    // DNS / TLS / buffers
+    // DNS / TLS / buffers — only apply when pointers look sane (null-safe).
+    // Invalid TLS groups must never hard-fail probes (scanner would find 0 endpoints).
     if let Some(dns) = cstr_opt(cfg.dns_server) {
         std::env::set_var("AETHER_DNS", dns);
     } else {
         std::env::remove_var("AETHER_DNS");
     }
+    // dns_mode: 0/unknown = classic UDP, 1 = DoH. Ignore garbage large values.
     match cfg.dns_mode {
         1 => std::env::set_var("AETHER_DNS_MODE", "doh"),
-        _ => std::env::set_var("AETHER_DNS_MODE", "udp"),
+        _ => {
+            std::env::remove_var("AETHER_DNS_MODE");
+        }
     }
     if let Some(url) = cstr_opt(cfg.doh_url) {
         std::env::set_var("AETHER_DOH_URL", url);
@@ -408,19 +412,33 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
         4 => "v4",
         6 => "v6",
         10 => "both",
-        _ => match cfg.ip_version {
+        0 => match cfg.ip_version {
             6 => "v6",
             10 => "both",
             _ => "v4",
         },
+        // garbage → default v4
+        _ => "v4",
     };
     std::env::set_var("AETHER_DNS_IP", prefer);
-    if let Some(g) = cstr_opt(cfg.tls_groups) {
-        std::env::set_var("AETHER_TLS_GROUPS", g);
-    } else {
-        std::env::remove_var("AETHER_TLS_GROUPS");
+    match cstr_opt(cfg.tls_groups) {
+        Some(g)
+            if g.contains("X25519")
+                || g.contains("P-256")
+                || g.contains("P-384")
+                || g.contains(':') =>
+        {
+            std::env::set_var("AETHER_TLS_GROUPS", g);
+        }
+        Some(g) => {
+            unsafe {
+                log_msg(2, &format!("[ffi] ignoring invalid tls_groups={g:?}"));
+            }
+            std::env::remove_var("AETHER_TLS_GROUPS");
+        }
+        None => std::env::remove_var("AETHER_TLS_GROUPS"),
     }
-    if cfg.udp_buf_kb > 0 {
+    if cfg.udp_buf_kb >= 64 && cfg.udp_buf_kb <= 8192 {
         std::env::set_var("AETHER_UDP_BUF_KB", cfg.udp_buf_kb.to_string());
     } else {
         std::env::remove_var("AETHER_UDP_BUF_KB");
