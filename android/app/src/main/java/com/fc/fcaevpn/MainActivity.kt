@@ -129,6 +129,11 @@ class MainActivity : AppCompatActivity() {
         handler.post(poll)
     }
 
+    override fun onPause() {
+        super.onPause()
+        saveSettings()
+    }
+
     override fun onDestroy() {
         handler.removeCallbacks(poll)
         bgExecutor.shutdownNow()
