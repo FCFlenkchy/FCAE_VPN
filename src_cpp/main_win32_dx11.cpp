@@ -39,6 +39,19 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
             if ((wParam & 0xfff0) == SC_MAXIMIZE || (wParam & 0xfff0) == SC_SIZE) return 0;
             break;
+        case WM_GETMINMAXINFO: {
+            // Lock window size to creation size
+            RECT wr = {100, 100, 100 + 1024, 100 + 700};
+            AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
+            MINMAXINFO* mmi = (MINMAXINFO*)lParam;
+            mmi->ptMinTrackSize.x = wr.right - wr.left;
+            mmi->ptMinTrackSize.y = wr.bottom - wr.top;
+            mmi->ptMaxTrackSize.x = mmi->ptMinTrackSize.x;
+            mmi->ptMaxTrackSize.y = mmi->ptMinTrackSize.y;
+            mmi->ptMaxPosition.x = 100;
+            mmi->ptMaxPosition.y = 100;
+            return 0;
+        }
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
@@ -113,7 +126,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
     RegisterClassExW(&wc);
     HWND hWnd = CreateWindowW(wc.lpszClassName, L"FCAE VPN",
-        WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
+        WS_OVERLAPPEDWINDOW,
         100, 100, 1024, 700, nullptr, nullptr, inst, nullptr);
 
     if (!CreateDeviceD3D(hWnd)) { CleanupDeviceD3D(); UnregisterClassW(wc.lpszClassName, wc.hInstance); return 1; }
@@ -155,12 +168,19 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     bool done = false;
     while (!done && g_app.running.load()) {
         MSG msg;
+        bool has_msg = false;
         while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
             if (msg.message == WM_QUIT) done = true;
+            has_msg = true;
         }
         if (done) break;
+
+        // Yield CPU when no messages pending (VSync alone isn't enough on some GPUs)
+        if (!has_msg) {
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 16, QS_ALLINPUT);
+        }
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
