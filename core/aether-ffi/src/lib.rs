@@ -582,7 +582,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(4)
+        .worker_threads(2)
         .thread_name("aether-ffi")
         .build()
     {

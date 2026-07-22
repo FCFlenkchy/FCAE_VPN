@@ -153,8 +153,7 @@ fn spawn_health_monitor(
     let max_fails = health_max_fails();
     let probe_timeout = health_timeout().max(std::time::Duration::from_secs(8));
     // Don't count failures during the first interval after SOCKS is up (tunnel still warming).
-    // Grace must be longer than interval so the first probe doesn't immediately count as a failure.
-    let grace = interval + std::time::Duration::from_secs(15);
+    let grace = interval;
     tokio::spawn(async move {
         let mut fails = 0u32;
         let started = std::time::Instant::now();
