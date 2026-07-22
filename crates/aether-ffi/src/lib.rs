@@ -1,16 +1,18 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
+use tokio::process::Child;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 static mut LOG_CB: Option<unsafe extern "C" fn(i32, *const c_char, *mut std::ffi::c_void)> = None;
 static mut LOG_USER_DATA: *mut std::ffi::c_void = std::ptr::null_mut();
-
-static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 struct TelemetryState {
     state: u32,
@@ -47,6 +49,7 @@ impl TelemetryState {
 }
 
 static TELEMETRY: Mutex<TelemetryState> = Mutex::new(TelemetryState::new());
+static CHILD: Mutex<Option<Child>> = Mutex::new(None);
 
 use std::ffi::c_void;
 
@@ -86,8 +89,6 @@ pub struct AetherTelemetryOut {
     pub status_message: [u8; 128],
     pub last_error: [u8; 256],
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────────
 
 unsafe fn log_msg(level: i32, msg: &str) {
     if let Some(cb) = LOG_CB {
@@ -145,7 +146,80 @@ fn ip_version_to_env(v: i32) -> &'static str {
     }
 }
 
-// ── FFI exports ──────────────────────────────────────────────────────────
+fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn is_runnable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Locate the bundled aether engine binary next to the GUI (or Android native lib dir).
+fn resolve_aether_bin() -> PathBuf {
+    if let Ok(p) = std::env::var("AETHER_BIN_PATH") {
+        let pb = PathBuf::from(&p);
+        if pb.is_file() {
+            return pb;
+        }
+    }
+
+    let dir = exe_dir();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if cfg!(target_os = "windows") {
+        candidates.push(dir.join("aether.exe"));
+        candidates.push(dir.join("aether"));
+        candidates.push(dir.join("libaether.exe"));
+    } else if cfg!(target_os = "android") {
+        // Packaged as libaether.so in jniLibs → extracted under nativeLibraryDir
+        candidates.push(dir.join("libaether.so"));
+        candidates.push(dir.join("aether"));
+        if let Ok(nd) = std::env::var("AETHER_NATIVE_LIB_DIR") {
+            candidates.push(PathBuf::from(&nd).join("libaether.so"));
+            candidates.push(PathBuf::from(&nd).join("aether"));
+        }
+    } else {
+        candidates.push(dir.join("aether"));
+        candidates.push(dir.join("libaether.so"));
+    }
+
+    // Also try cwd (dev builds)
+    candidates.push(PathBuf::from(if cfg!(target_os = "windows") {
+        "aether.exe"
+    } else {
+        "aether"
+    }));
+
+    for c in &candidates {
+        if is_runnable(c) {
+            return c.clone();
+        }
+        // Android may ship libaether.so without +x; still try to exec
+        if c.is_file() {
+            return c.clone();
+        }
+    }
+
+    // Default path used in error messages
+    if cfg!(target_os = "windows") {
+        dir.join("aether.exe")
+    } else if cfg!(target_os = "android") {
+        dir.join("libaether.so")
+    } else {
+        dir.join("aether")
+    }
+}
+
+async fn kill_child() {
+    let mut guard = CHILD.lock();
+    if let Some(mut child) = guard.take() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn aether_init(
@@ -176,7 +250,18 @@ pub extern "C" fn aether_init(
     }
 
     INITIALIZED.store(true, Ordering::SeqCst);
-    unsafe { log_msg(4, "[ffi] aether_init completed"); }
+    unsafe {
+        log_msg(4, "[ffi] aether_init completed");
+        let bin = resolve_aether_bin();
+        log_msg(
+            4,
+            &format!(
+                "[ffi] engine binary: {} (exists={})",
+                bin.display(),
+                bin.is_file()
+            ),
+        );
+    }
 }
 
 #[no_mangle]
@@ -200,7 +285,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
 
     {
         let mut t = TELEMETRY.lock();
-        t.state = 1; // Provisioning
+        t.state = 1;
         t.mode = cfg.mode as u32;
         t.lan_enabled = cfg.lan_sharing;
         t.status_message = "Provisioning...".to_string();
@@ -211,9 +296,10 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         t.tx_bytes_sec = 0;
     }
 
-    unsafe { log_msg(4, "[ffi] aether_start called"); }
+    unsafe {
+        log_msg(4, "[ffi] aether_start called");
+    }
 
-    // ── Map config into environment variables (aether CLI convention) ────
     std::env::set_var("AETHER_PROTOCOL", protocol_to_env(cfg.protocol));
     std::env::set_var("AETHER_SCAN", scan_mode_to_env(cfg.scan_mode));
     std::env::set_var("AETHER_IP", ip_version_to_env(cfg.ip_version));
@@ -226,7 +312,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
     std::env::set_var("AETHER_SOCKS", &socks_addr);
 
     let noize = unsafe {
-        if config.is_null() || (*config).noize_profile.is_null() {
+        if (*config).noize_profile.is_null() {
             "balanced"
         } else {
             CStr::from_ptr((*config).noize_profile)
@@ -238,6 +324,8 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
 
     if cfg.quick_reconnect {
         std::env::set_var("AETHER_QUICK_RECONNECT", "1");
+    } else {
+        std::env::set_var("AETHER_QUICK_RECONNECT", "0");
     }
 
     if cfg.fragment_enabled {
@@ -273,22 +361,22 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
     };
     std::env::set_var("AETHER_CONFIG", config_path);
 
-    // ── Launch the async engine on a dedicated tokio runtime ──────────────
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("aether-ffi")
-        .build();
-
-    let rt = match rt {
+        .build()
+    {
         Ok(r) => r,
         Err(e) => {
             {
                 let mut t = TELEMETRY.lock();
-                t.state = 5; // Error
+                t.state = 5;
                 t.last_error = format!("Failed to build tokio runtime: {e}");
                 t.status_message = "Error".to_string();
             }
-            unsafe { log_msg(1, &format!("[ffi] runtime build failed: {e}")); }
+            unsafe {
+                log_msg(1, &format!("[ffi] runtime build failed: {e}"));
+            }
             RUNNING.store(false, Ordering::SeqCst);
             return false;
         }
@@ -299,7 +387,9 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         .spawn(move || {
             rt.block_on(async move {
                 if let Err(e) = aether_core_run().await {
-                    unsafe { log_msg(1, &format!("[ffi] engine error: {e}")); }
+                    unsafe {
+                        log_msg(1, &format!("[ffi] engine error: {e}"));
+                    }
                     let mut t = TELEMETRY.lock();
                     t.state = 5;
                     t.last_error = format!("{e}");
@@ -307,99 +397,97 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                 }
             });
             RUNNING.store(false, Ordering::SeqCst);
-            unsafe { log_msg(4, "[ffi] engine thread exiting"); }
+            unsafe {
+                log_msg(4, "[ffi] engine thread exiting");
+            }
         });
 
     true
 }
 
-// ── Core tunnel orchestration (sets env vars, then delegates to aether) ──
-//
-// This function bridges the FFI layer to the existing aether binary logic.
-// Because `aether` is a binary crate (not a library), we re-create its core
-// orchestration here using only the public types we can import, and invoke
-// the engine via environment-variable-driven initialization.
-//
-// The actual tunnel work is done by calling into `aether::main()` after
-// setting the right environment variables. We run it on a fresh tokio
-// runtime and communicate state via the TELEMETRY mutex.
-
 async fn aether_core_run() -> anyhow::Result<()> {
     {
         let mut t = TELEMETRY.lock();
-        t.state = 2; // Scanning
+        t.state = 2;
         t.status_message = "Scanning gateways...".to_string();
     }
-    unsafe { log_msg(3, "[ffi] entering aether_core_run"); }
+    unsafe {
+        log_msg(3, "[ffi] entering aether_core_run");
+    }
 
-    // The aether binary crate reads env vars at startup. Since we already
-    // set all AETHER_* vars in aether_start(), calling main() will use
-    // our config. However, aether::main() calls process::exit() and
-    // reads CLI args which would fail here.
-    //
-    // Instead, we use the approach of spawning the aether binary as a
-    // subprocess with all our env vars pre-set. This is the cleanest
-    // boundary between the FFI GUI and the CLI engine.
+    let aether_bin = resolve_aether_bin();
+    if !aether_bin.is_file() {
+        return Err(anyhow::anyhow!(
+            "aether engine not found at {}. Reinstall or set AETHER_BIN_PATH.",
+            aether_bin.display()
+        ));
+    }
 
-    let aether_bin = std::env::var("AETHER_BIN_PATH")
-        .unwrap_or_else(|_| {
-            // Default: look next to this library
-            let mut p = std::env::current_exe()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
-            p.pop();
-            if cfg!(target_os = "windows") {
-                p.push("aether.exe");
-            } else {
-                p.push("aether");
-            }
-            p.to_string_lossy().to_string()
-        });
-
-    unsafe { log_msg(3, &format!("[ffi] launching aether engine: {aether_bin}")); }
+    unsafe {
+        log_msg(
+            3,
+            &format!("[ffi] launching aether engine: {}", aether_bin.display()),
+        );
+    }
 
     let mut cmd = tokio::process::Command::new(&aether_bin);
-    cmd.env_clear();
-    // Forward all AETHER_* env vars we set
+    // Keep PATH / system env for TLS certs etc., but ensure our AETHER_* win.
     for (key, val) in std::env::vars() {
         if key.starts_with("AETHER_") || key.starts_with("RUST_LOG") {
             cmd.env(&key, &val);
         }
     }
-    // Always set verbose for GUI logging
     cmd.env("AETHER_VERBOSE", "1");
 
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to spawn aether binary at {aether_bin}: {e}"))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to spawn aether binary at {}: {e}",
+                aether_bin.display()
+            )
+        })?;
 
-    // Mark connected once spawned
     {
         let mut t = TELEMETRY.lock();
-        t.state = 4; // Connected
-        t.status_message = "Connected".to_string();
+        t.state = 3;
+        t.status_message = "Connecting...".to_string();
         t.connected_peer = std::env::var("AETHER_PEER").unwrap_or_default();
     }
 
-    // Read stderr/stdout for log lines and telemetry
     let stderr = child.stderr.take();
     let stdout = child.stdout.take();
+    *CHILD.lock() = Some(child);
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_err = shutdown.clone();
+    let shutdown_out = shutdown.clone();
 
     let stderr_task = tokio::spawn(async move {
         if let Some(reader) = stderr {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(reader).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                unsafe { log_msg(3, &line); }
+                if shutdown_err.load(Ordering::SeqCst) {
+                    break;
+                }
+                unsafe {
+                    log_msg(3, &line);
+                }
 
-                // Parse log lines for telemetry updates
                 let line_lower = line.to_lowercase();
                 {
                     let mut t = TELEMETRY.lock();
                     if line_lower.contains("socks5") && line_lower.contains("listening") {
                         t.state = 4;
                         t.status_message = "Connected — SOCKS5 active".to_string();
+                    }
+                    if line_lower.contains("connected") || line_lower.contains("tunnel ready") {
+                        t.state = 4;
+                        t.status_message = "Connected".to_string();
                     }
                     if let Some(idx) = line.find("gateway ") {
                         let rest = &line[idx + 8..];
@@ -417,33 +505,80 @@ async fn aether_core_run() -> anyhow::Result<()> {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(reader).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                unsafe { log_msg(4, &line); }
+                if shutdown_out.load(Ordering::SeqCst) {
+                    break;
+                }
+                unsafe {
+                    log_msg(4, &line);
+                }
             }
         }
     });
 
-    // Wait for the child process
-    let status = child.wait().await;
+    // Poll child + SHUTDOWN flag
+    let status = loop {
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            shutdown.store(true, Ordering::SeqCst);
+            kill_child().await;
+            break Ok(None);
+        }
 
+        let mut guard = CHILD.lock();
+        if let Some(child) = guard.as_mut() {
+            match child.try_wait() {
+                Ok(Some(s)) => {
+                    *guard = None;
+                    break Ok(Some(s));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    *guard = None;
+                    break Err(e);
+                }
+            }
+        } else {
+            break Ok(None);
+        }
+        drop(guard);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+
+    shutdown.store(true, Ordering::SeqCst);
     stderr_task.abort();
     stdout_task.abort();
+    *CHILD.lock() = None;
 
     match status {
-        Ok(s) if s.success() => {
-            unsafe { log_msg(3, "[ffi] aether engine exited cleanly"); }
+        Ok(None) => {
+            unsafe {
+                log_msg(3, "[ffi] aether engine stopped");
+            }
             let mut t = TELEMETRY.lock();
             t.state = 0;
             t.status_message = "Disconnected".to_string();
             Ok(())
         }
-        Ok(s) => {
+        Ok(Some(s)) if s.success() => {
+            unsafe {
+                log_msg(3, "[ffi] aether engine exited cleanly");
+            }
+            let mut t = TELEMETRY.lock();
+            t.state = 0;
+            t.status_message = "Disconnected".to_string();
+            Ok(())
+        }
+        Ok(Some(s)) => {
             let msg = format!("aether engine exited with status: {s}");
-            unsafe { log_msg(1, &msg); }
+            unsafe {
+                log_msg(1, &msg);
+            }
             Err(anyhow::anyhow!(msg))
         }
         Err(e) => {
             let msg = format!("aether engine process error: {e}");
-            unsafe { log_msg(1, &msg); }
+            unsafe {
+                log_msg(1, &msg);
+            }
             Err(anyhow::anyhow!(msg))
         }
     }
@@ -451,13 +586,19 @@ async fn aether_core_run() -> anyhow::Result<()> {
 
 #[no_mangle]
 pub extern "C" fn aether_stop() {
-    if !RUNNING.load(Ordering::SeqCst) {
+    if !RUNNING.load(Ordering::SeqCst) && CHILD.lock().is_none() {
         return;
     }
     SHUTDOWN.store(true, Ordering::SeqCst);
-    unsafe { log_msg(4, "[ffi] aether_stop called"); }
+    unsafe {
+        log_msg(4, "[ffi] aether_stop called");
+    }
 
-    // Send SIGTERM to child processes if any (the engine thread will handle cleanup)
+    // Best-effort sync kill (engine thread also watches SHUTDOWN)
+    if let Some(mut child) = CHILD.lock().take() {
+        let _ = child.start_kill();
+    }
+
     let mut t = TELEMETRY.lock();
     t.state = 0;
     t.status_message = "Disconnected".to_string();
@@ -492,19 +633,23 @@ pub extern "C" fn aether_get_telemetry(out: *mut AetherTelemetryOut) {
 
 #[no_mangle]
 pub extern "C" fn aether_set_android_tun_fd(tun_fd: i32) {
-    unsafe { log_msg(4, &format!("[ffi] aether_set_android_tun_fd(fd={tun_fd})")); }
-    // Pass to the running engine via env var (the engine will pick it up)
+    unsafe {
+        log_msg(4, &format!("[ffi] aether_set_android_tun_fd(fd={tun_fd})"));
+    }
     std::env::set_var("AETHER_TUN_FD", tun_fd.to_string());
 }
 
 #[no_mangle]
 pub extern "C" fn aether_free() {
     SHUTDOWN.store(true, Ordering::SeqCst);
+    if let Some(mut child) = CHILD.lock().take() {
+        let _ = child.start_kill();
+    }
     RUNNING.store(false, Ordering::SeqCst);
     INITIALIZED.store(false, Ordering::SeqCst);
     unsafe {
         LOG_CB = None;
         LOG_USER_DATA = std::ptr::null_mut();
+        log_msg(4, "[ffi] aether_free completed");
     }
-    unsafe { log_msg(4, "[ffi] aether_free completed"); }
 }

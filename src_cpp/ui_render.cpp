@@ -1,6 +1,16 @@
 #include "ui_render.h"
 #include <fstream>
 #include <sstream>
+#include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif !defined(ANDROID)
+#include <unistd.h>
+#endif
 
 // ── Config persistence ──────────────────────────────────────────────────
 
@@ -8,13 +18,49 @@ static std::string get_config_path() {
 #ifdef ANDROID
     return "/data/data/com.fc.fcaevpn/files/FCAE_VPN.cfg";
 #else
-    return "FCAE_VPN.cfg";
+    // Prefer directory of the running executable so cwd does not matter.
+    static std::string cached;
+    if (!cached.empty()) return cached;
+#if defined(_WIN32)
+    wchar_t wbuf[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, wbuf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        std::wstring w(wbuf, n);
+        size_t slash = w.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) w.resize(slash + 1);
+        w += L"FCAE_VPN.cfg";
+        int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            std::string u8((size_t)len - 1, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &u8[0], len, nullptr, nullptr);
+            cached = u8;
+            return cached;
+        }
+    }
+#else
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        std::string p(buf);
+        size_t slash = p.find_last_of('/');
+        if (slash != std::string::npos) p.resize(slash + 1);
+        p += "FCAE_VPN.cfg";
+        cached = p;
+        return cached;
+    }
+#endif
+    cached = "FCAE_VPN.cfg";
+    return cached;
 #endif
 }
 
 static void save_config() {
     FILE* f = fopen(get_config_path().c_str(), "w");
-    if (!f) { snprintf(g_app.save_status, sizeof(g_app.save_status), "Save failed"); return; }
+    if (!f) {
+        snprintf(g_app.save_status, sizeof(g_app.save_status), "Save failed");
+        return;
+    }
     fprintf(f, "protocol=%d\n", g_app.protocol);
     fprintf(f, "mode=%d\n", g_app.mode);
     fprintf(f, "lan_sharing=%d\n", g_app.lan_sharing);
@@ -129,7 +175,15 @@ static void draw_spinner(float radius, int segments, float speed) {
 
 void ui_init() {
     aether_init(log_callback, nullptr);
-    load_config();
+    if (!load_config()) {
+#ifndef ANDROID
+        // First run on desktop: write defaults next to the executable.
+        save_config();
+        snprintf(g_app.save_status, sizeof(g_app.save_status), "Created FCAE_VPN.cfg");
+#else
+        save_config();
+#endif
+    }
 }
 
 void ui_frame() {
@@ -143,15 +197,18 @@ void ui_shutdown() {
 
 void render_ui() {
     const ImGuiIO& io = ImGui::GetIO();
+    const float W = io.DisplaySize.x;
+    const float H = io.DisplaySize.y;
+    const bool narrow = W < 720.0f;
 
     ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
     ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20, 16));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(narrow ? 12.0f : 20.0f, narrow ? 10.0f : 16.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::Begin("##FCAE", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
+        ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     AetherTelemetry telem = {};
     aether_get_telemetry(&telem);
@@ -162,8 +219,9 @@ void render_ui() {
     AetherState cur = (AetherState)telem.state;
     bool connected  = (cur == AETHER_STATE_CONNECTED);
     bool busy       = (cur == AETHER_STATE_PROVISIONING || cur == AETHER_STATE_SCANNING || cur == AETHER_STATE_CONNECTING);
+    bool errored    = (cur == AETHER_STATE_ERROR);
 
-    // ── 1. STATUS BAR + CONNECT ──────────────────────────────────────────
+    // ── 1. STATUS BAR + ACTIONS ──────────────────────────────────────────
     {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 10));
@@ -183,20 +241,29 @@ void render_ui() {
 
         if (busy) { ImGui::SameLine(0, 8); draw_spinner(7.0f, 14, 7.0f); }
 
-        ImGui::SameLine(ImGui::GetWindowWidth() - 290);
-        ImVec4 btn = connected ? ImVec4(0.70f, 0.18f, 0.18f, 1.0f) : ImVec4(0.12f, 0.55f, 0.18f, 1.0f);
+        if (!narrow) {
+            ImGui::SameLine(0, 16);
+        } else {
+            ImGui::Spacing();
+        }
+
+        ImVec4 btn = (connected || busy) ? ImVec4(0.70f, 0.18f, 0.18f, 1.0f) : ImVec4(0.12f, 0.55f, 0.18f, 1.0f);
         ImVec4 btn_h(btn.x + 0.08f, btn.y + 0.08f, btn.z + 0.08f, 1.0f);
         ImGui::PushStyleColor(ImGuiCol_Button, btn);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btn_h);
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(btn.x - 0.05f, btn.y - 0.05f, btn.z - 0.05f, 1.0f));
 
-        if (ImGui::Button(connected ? " DISCONNECT " : " CONNECT ", ImVec2(140, 34))) {
-            if (connected || busy) {
+        float btn_w = narrow ? (ImGui::GetContentRegionAvail().x - 72.0f) : 140.0f;
+        if (btn_w < 100.0f) btn_w = 100.0f;
+        if (ImGui::Button(connected || busy ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 34))) {
+            if (connected || busy || errored) {
                 aether_stop();
                 g_app.ffi_state.store(AETHER_STATE_DISCONNECTED);
             } else {
                 AetherConfig cfg = g_app.to_config();
-                aether_start(&cfg);
+                if (!aether_start(&cfg)) {
+                    g_app.add_log(1, "[ui] aether_start failed");
+                }
             }
         }
         ImGui::PopStyleColor(3);
@@ -205,10 +272,7 @@ void render_ui() {
         if (ImGui::Button("Save", ImVec2(60, 34))) {
             save_config();
         }
-        ImGui::SameLine(0, 6);
-        if (ImGui::Button(g_app.telem.state == AETHER_STATE_CONNECTED ? "Stop Log" : "Start Log", ImVec2(80, 34))) {
-            g_app.auto_scroll = !g_app.auto_scroll;
-        }
+
         if (g_app.save_status[0]) {
             ImGui::SameLine(0, 6);
             ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", g_app.save_status);
@@ -218,34 +282,53 @@ void render_ui() {
         ImGui::PopStyleVar(2);
     }
 
+    if (errored && telem.last_error[0]) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Error: %s", telem.last_error);
+    }
+
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
     // ── 2. TRAFFIC STATS ─────────────────────────────────────────────────
     {
         char total_buf[32], rate_buf[32];
 
-        ImGui::TextColored(ImVec4(0.30f, 0.80f, 1.00f, 1.0f), "Download");
-        ImGui::SameLine(0, 12);
-        fmt_bytes(total_buf, sizeof(total_buf), telem.total_rx);
-        ImGui::Text("%s", total_buf);
-        ImGui::SameLine(0, 12);
-        fmt_rate(rate_buf, sizeof(rate_buf), telem.rx_bytes_sec);
-        ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "%s", rate_buf);
+        if (narrow) {
+            ImGui::TextColored(ImVec4(0.30f, 0.80f, 1.00f, 1.0f), "Download");
+            fmt_bytes(total_buf, sizeof(total_buf), telem.total_rx);
+            fmt_rate(rate_buf, sizeof(rate_buf), telem.rx_bytes_sec);
+            ImGui::Text("%s  %s", total_buf, rate_buf);
 
-        ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "Upload  ");
-        ImGui::SameLine(0, 12);
-        fmt_bytes(total_buf, sizeof(total_buf), telem.total_tx);
-        ImGui::Text("%s", total_buf);
-        ImGui::SameLine(0, 12);
-        fmt_rate(rate_buf, sizeof(rate_buf), telem.tx_bytes_sec);
-        ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "%s", rate_buf);
+            ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "Upload");
+            fmt_bytes(total_buf, sizeof(total_buf), telem.total_tx);
+            fmt_rate(rate_buf, sizeof(rate_buf), telem.tx_bytes_sec);
+            ImGui::Text("%s  %s", total_buf, rate_buf);
+        } else {
+            ImGui::TextColored(ImVec4(0.30f, 0.80f, 1.00f, 1.0f), "Download");
+            ImGui::SameLine(0, 12);
+            fmt_bytes(total_buf, sizeof(total_buf), telem.total_rx);
+            ImGui::Text("%s", total_buf);
+            ImGui::SameLine(0, 12);
+            fmt_rate(rate_buf, sizeof(rate_buf), telem.rx_bytes_sec);
+            ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "%s", rate_buf);
+
+            ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "Upload  ");
+            ImGui::SameLine(0, 12);
+            fmt_bytes(total_buf, sizeof(total_buf), telem.total_tx);
+            ImGui::Text("%s", total_buf);
+            ImGui::SameLine(0, 12);
+            fmt_rate(rate_buf, sizeof(rate_buf), telem.tx_bytes_sec);
+            ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "%s", rate_buf);
+        }
 
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.60f, 1.0f),
-            "Peer: %s  |  RTT: %u ms  |  Mode: %s",
+        ImGui::TextWrapped("Peer: %s  |  RTT: %u ms  |  Mode: %s",
             telem.connected_peer[0] ? telem.connected_peer : "-",
             telem.rtt_ms,
             g_app.mode == 0 ? "Proxy" : "TUN");
+        if (telem.status_message[0]) {
+            ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.60f, 1.0f), "%s", telem.status_message);
+        }
     }
 
     // ── Address callout ──────────────────────────────────────────────────
@@ -253,20 +336,21 @@ void render_ui() {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.16f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.85f, 0.45f, 1.0f));
-        ImGui::BeginChild("##addr", ImVec2(0, 30), ImGuiChildFlags_Borders);
+        float addr_h = narrow ? 48.0f : 30.0f;
+        ImGui::BeginChild("##addr", ImVec2(0, addr_h), ImGuiChildFlags_Borders);
 
         if (connected) {
             const char* lip = telem.lan_ip[0] ? telem.lan_ip : "127.0.0.1";
             if (g_app.mode == 0) {
                 if (g_app.lan_sharing)
-                    ImGui::Text("  LAN Gateways:  SOCKS5 %s:%u  |  HTTP %s:%u", lip, g_app.socks_port, lip, g_app.http_port);
+                    ImGui::TextWrapped("LAN Gateways: SOCKS5 %s:%u | HTTP %s:%u", lip, g_app.socks_port, lip, g_app.http_port);
                 else
-                    ImGui::Text("  Local:  SOCKS5 127.0.0.1:%u  |  HTTP 127.0.0.1:%u", g_app.socks_port, g_app.http_port);
+                    ImGui::TextWrapped("Local: SOCKS5 127.0.0.1:%u | HTTP 127.0.0.1:%u", g_app.socks_port, g_app.http_port);
             } else {
                 if (g_app.lan_sharing)
-                    ImGui::Text("  TUN Active  |  LAN: SOCKS5 %s:%u  |  HTTP %s:%u", lip, g_app.socks_port, lip, g_app.http_port);
+                    ImGui::TextWrapped("TUN Active | LAN SOCKS5 %s:%u | HTTP %s:%u", lip, g_app.socks_port, lip, g_app.http_port);
                 else
-                    ImGui::Text("  TUN Active  |  SOCKS5 127.0.0.1:%u", g_app.socks_port);
+                    ImGui::TextWrapped("TUN Active | SOCKS5 127.0.0.1:%u", g_app.socks_port);
             }
         } else {
             ImGui::Text("  No active tunnel");
@@ -278,10 +362,15 @@ void render_ui() {
 
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
-    // ── 3. CONFIG TABS ───────────────────────────────────────────────────
+    // ── 3. CONFIG TABS (fill remaining height) ───────────────────────────
+    float remain = ImGui::GetContentRegionAvail().y;
+    if (remain < 120.0f) remain = 120.0f;
+    ImGui::BeginChild("##tabs_host", ImVec2(0, remain), ImGuiChildFlags_None);
+
     if (ImGui::BeginTabBar("##Tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
 
         if (ImGui::BeginTabItem("Protocol")) {
+            ImGui::BeginChild("##proto_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Transport");
             ImGui::RadioButton("MASQUE (HTTP/3 QUIC)", &g_app.protocol, 0);
@@ -310,10 +399,12 @@ void render_ui() {
             }
             ImGui::InputText("Force Peer", g_app.force_peer, sizeof(g_app.force_peer));
             ImGui::InputText("Config Path", g_app.config_path, sizeof(g_app.config_path));
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
 
         if (ImGui::BeginTabItem("Obfuscation")) {
+            ImGui::BeginChild("##obf_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Noize Profile");
             const char* profiles[] = { "off", "firewall", "balanced", "gfw" };
@@ -333,10 +424,12 @@ void render_ui() {
                 ImGui::SliderInt("Delay Max (ms)", &g_app.frag_max_delay, 1, 50);
                 ImGui::PopItemWidth();
             }
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
 
         if (ImGui::BeginTabItem("Scanner")) {
+            ImGui::BeginChild("##scan_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Scan Mode");
             const char* modes[] = { "Turbo", "Balanced", "Thorough", "Stealth", "Ironclad" };
@@ -346,30 +439,69 @@ void render_ui() {
             ImGui::RadioButton("IPv4",       &g_app.ip_version, 4);
             ImGui::RadioButton("IPv6",       &g_app.ip_version, 6);
             ImGui::RadioButton("Dual-Stack", &g_app.ip_version, 10);
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
 
         if (ImGui::BeginTabItem("Logs")) {
             ImGui::Checkbox("Logging", &g_app.logging_enabled);
-            ImGui::SameLine(0, 20);
+            ImGui::SameLine(0, 12);
             ImGui::Checkbox("Auto-scroll", &g_app.auto_scroll);
-            ImGui::SameLine(0, 20);
+            ImGui::SameLine(0, 12);
             if (ImGui::Button("Clear")) g_app.logs.clear();
-            ImGui::Spacing();
-            ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_Borders);
-            for (auto& [lvl, msg] : g_app.logs) {
-                ImVec4 c;
-                switch (lvl) {
-                    case 1:  c = ImVec4(1.0f, 0.35f, 0.35f, 1.0f); break;
-                    case 2:  c = ImVec4(1.0f, 0.80f, 0.25f, 1.0f); break;
-                    case 3:  c = ImVec4(0.40f, 0.75f, 1.00f, 1.0f); break;
-                    default: c = ImVec4(0.75f, 0.75f, 0.78f, 1.0f); break;
-                }
-                ImGui::PushStyleColor(ImGuiCol_Text, c);
-                ImGui::TextUnformatted(msg.c_str());
-                ImGui::PopStyleColor();
+            ImGui::SameLine(0, 8);
+            if (ImGui::Button("Copy All")) {
+                std::string all = g_app.logs_as_text();
+                ImGui::SetClipboardText(all.c_str());
+                snprintf(g_app.copy_status, sizeof(g_app.copy_status), "Copied!");
             }
-            if (g_app.auto_scroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+            if (g_app.copy_status[0]) {
+                ImGui::SameLine(0, 8);
+                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", g_app.copy_status);
+            }
+            ImGui::Spacing();
+
+            // Selectable multi-line log view (click lines to select; Ctrl+C via ImGui input)
+            ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGuiListClipper clipper;
+            clipper.Begin((int)g_app.logs.size());
+            while (clipper.Step()) {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
+                    auto& [lvl, msg] = g_app.logs[(size_t)i];
+                    ImVec4 c;
+                    switch (lvl) {
+                        case 1:  c = ImVec4(1.0f, 0.35f, 0.35f, 1.0f); break;
+                        case 2:  c = ImVec4(1.0f, 0.80f, 0.25f, 1.0f); break;
+                        case 3:  c = ImVec4(0.40f, 0.75f, 1.00f, 1.0f); break;
+                        default: c = ImVec4(0.75f, 0.75f, 0.78f, 1.0f); break;
+                    }
+                    ImGui::PushStyleColor(ImGuiCol_Text, c);
+                    ImGui::PushID(i);
+                    // Selectable allows keyboard focus + multi-select feel; double-click copies line
+                    if (ImGui::Selectable(msg.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick)) {
+                        if (ImGui::IsMouseDoubleClicked(0)) {
+                            ImGui::SetClipboardText(msg.c_str());
+                            snprintf(g_app.copy_status, sizeof(g_app.copy_status), "Line copied");
+                        }
+                    }
+                    // Right-click context: copy line
+                    if (ImGui::BeginPopupContextItem("log_ctx")) {
+                        if (ImGui::MenuItem("Copy line")) {
+                            ImGui::SetClipboardText(msg.c_str());
+                            snprintf(g_app.copy_status, sizeof(g_app.copy_status), "Line copied");
+                        }
+                        if (ImGui::MenuItem("Copy all")) {
+                            std::string all = g_app.logs_as_text();
+                            ImGui::SetClipboardText(all.c_str());
+                            snprintf(g_app.copy_status, sizeof(g_app.copy_status), "Copied!");
+                        }
+                        ImGui::EndPopup();
+                    }
+                    ImGui::PopID();
+                    ImGui::PopStyleColor();
+                }
+            }
+            if (g_app.auto_scroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f)
                 ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
             ImGui::EndTabItem();
@@ -377,6 +509,8 @@ void render_ui() {
 
         ImGui::EndTabBar();
     }
+
+    ImGui::EndChild(); // ##tabs_host
 
     ImGui::PopStyleVar(2);
     ImGui::End();

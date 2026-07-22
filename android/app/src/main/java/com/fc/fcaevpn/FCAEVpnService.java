@@ -65,6 +65,27 @@ public class FCAEVpnService extends VpnService {
         super.onCreate();
         Log.i(TAG, "FCAEVpnService created");
         statsHandler = new Handler(Looper.getMainLooper());
+        // Point FFI engine discovery at the extracted native library directory
+        // (libaether.so is packaged via jniLibs as the bundled aether binary).
+        try {
+            String nativeDir = getApplicationInfo().nativeLibraryDir;
+            if (nativeDir != null) {
+                System.setProperty("AETHER_NATIVE_LIB_DIR", nativeDir);
+                // Also expose via process environment for the Rust FFI (android/libc)
+                try {
+                    Class<?> cl = Class.forName("android.system.Os");
+                    java.lang.reflect.Method setenv = cl.getMethod(
+                        "setenv", String.class, String.class, boolean.class);
+                    setenv.invoke(null, "AETHER_NATIVE_LIB_DIR", nativeDir, true);
+                    setenv.invoke(null, "AETHER_BIN_PATH", nativeDir + "/libaether.so", true);
+                    Log.i(TAG, "AETHER engine path: " + nativeDir + "/libaether.so");
+                } catch (Throwable t) {
+                    Log.w(TAG, "Could not setenv AETHER paths: " + t);
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "nativeLibraryDir unavailable: " + t);
+        }
     }
 
     @Override

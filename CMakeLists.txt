@@ -22,6 +22,38 @@ set(UI_SOURCES
     ${CMAKE_SOURCE_DIR}/src_cpp/ui_render.cpp
 )
 
+# Resolve aether engine binary produced by cargo (bundled next to GUI).
+function(aether_engine_bin out_var triple name)
+    set(candidates
+        ${CMAKE_SOURCE_DIR}/aether/aether/target/${triple}/release/${name}
+        ${CMAKE_SOURCE_DIR}/aether/target/${triple}/release/${name}
+        ${CMAKE_SOURCE_DIR}/target/${triple}/release/${name}
+    )
+    foreach(c ${candidates})
+        if(EXISTS "${c}")
+            set(${out_var} "${c}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    set(${out_var} "${CMAKE_SOURCE_DIR}/aether/aether/target/${triple}/release/${name}" PARENT_SCOPE)
+endfunction()
+
+# Resolve libaether_ffi.a from cargo
+function(aether_ffi_lib_dir out_var triple)
+    set(candidates
+        ${CMAKE_SOURCE_DIR}/target/${triple}/release
+        ${CMAKE_SOURCE_DIR}/crates/aether-ffi/target/${triple}/release
+        ${CMAKE_SOURCE_DIR}/crates/aether-ffi/target/release
+    )
+    foreach(c ${candidates})
+        if(EXISTS "${c}/libaether_ffi.a")
+            set(${out_var} "${c}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    set(${out_var} "${CMAKE_SOURCE_DIR}/target/${triple}/release" PARENT_SCOPE)
+endfunction()
+
 # ── Target-specific configuration ────────────────────────────────────────
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
 
@@ -51,7 +83,6 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
     find_library(gles-lib GLESv3)
     find_library(egl-lib EGL)
 
-    # Build android_native_app_glue from NDK source
     set(APP_GLUE_DIR ${ANDROID_NDK}/sources/android/native_app_glue)
     add_library(app-glue STATIC ${APP_GLUE_DIR}/android_native_app_glue.c)
     target_include_directories(app-glue PUBLIC ${APP_GLUE_DIR})
@@ -60,7 +91,7 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
         ${log-lib} ${android-lib} ${gles-lib} ${egl-lib} app-glue m
     )
 
-    set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/target/aarch64-linux-android/release)
+    aether_ffi_lib_dir(RUST_LIB_DIR aarch64-linux-android)
     target_link_directories(fcaevpn_native PRIVATE ${RUST_LIB_DIR})
     target_link_libraries(fcaevpn_native libaether_ffi.a)
 
@@ -89,7 +120,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     target_compile_options(fcaevpn PRIVATE -municode)
 
-    set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/target/x86_64-pc-windows-gnu/release)
+    aether_ffi_lib_dir(RUST_LIB_DIR x86_64-pc-windows-gnu)
     target_link_directories(fcaevpn PRIVATE ${RUST_LIB_DIR})
 
     target_link_libraries(fcaevpn PRIVATE
@@ -100,8 +131,6 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     if(MINGW)
         set(MINGW_LIB /usr/x86_64-w64-mingw32/lib)
-        # Static-link libgcc/libstdc++/winpthread so the .exe needs no MinGW DLLs.
-        # -static-libwinpthread is not a real gcc flag; use -Bstatic around -lpthread.
         target_link_options(fcaevpn PRIVATE
             -L${MINGW_LIB}
             -static-libgcc -static-libstdc++
@@ -109,6 +138,16 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
             -s -mwindows -municode
         )
     endif()
+
+    aether_engine_bin(AETHER_ENGINE_SRC x86_64-pc-windows-gnu aether.exe)
+    add_custom_command(TARGET fcaevpn POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            -DSRC=${AETHER_ENGINE_SRC}
+            -DDST=$<TARGET_FILE_DIR:fcaevpn>/aether.exe
+            -P ${CMAKE_SOURCE_DIR}/cmake/copy_if_exists.cmake
+        COMMENT "Bundle aether.exe next to fcaevpn"
+        VERBATIM
+    )
 
 elseif(UNIX)
 
@@ -139,10 +178,21 @@ elseif(UNIX)
         glfw OpenGL::GL X11::X11 X11::Xi pthread dl m
     )
 
-    set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/target/x86_64-unknown-linux-gnu/release)
+    aether_ffi_lib_dir(RUST_LIB_DIR x86_64-unknown-linux-gnu)
     target_link_directories(fcaevpn PRIVATE ${RUST_LIB_DIR})
     target_link_libraries(fcaevpn PRIVATE libaether_ffi.a)
     target_link_libraries(fcaevpn PRIVATE ssl crypto z bz2 lzma curl)
+
+    aether_engine_bin(AETHER_ENGINE_SRC x86_64-unknown-linux-gnu aether)
+    add_custom_command(TARGET fcaevpn POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            -DSRC=${AETHER_ENGINE_SRC}
+            -DDST=$<TARGET_FILE_DIR:fcaevpn>/aether
+            -DMAKE_EXECUTABLE=1
+            -P ${CMAKE_SOURCE_DIR}/cmake/copy_if_exists.cmake
+        COMMENT "Bundle aether next to fcaevpn"
+        VERBATIM
+    )
 
 endif()
 
