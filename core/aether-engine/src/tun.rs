@@ -72,6 +72,7 @@ pub async fn run(
                     break;
                 }
                 Ok(n) => {
+                    crate::stats::add_tx(n as u64);
                     if out_tx.blocking_send(buf[..n].to_vec()).is_err() {
                         break;
                     }
@@ -96,6 +97,7 @@ pub async fn run(
     let write_task = tokio::spawn(async move {
         let mut file = unsafe { std::fs::File::from_raw_fd(write_fd) };
         while let Some(pkt) = inbound_rx.recv().await {
+            crate::stats::add_rx(pkt.len() as u64);
             if let Err(e) = file.write_all(&pkt) {
                 log::warn!("[tun] write: {e}");
                 break;

@@ -294,7 +294,7 @@ public class FCAEVpnService extends VpnService {
             cachedTotalRx += rx;
             cachedTotalTx += tx;
             text = String.format(
-                "\u2193 %s  %s/s  |  \u2191 %s  %s/s",
+                "\u2193 %s  %s  |  \u2191 %s  %s",
                 fmtBytes(cachedTotalRx), fmtRate(rx),
                 fmtBytes(cachedTotalTx), fmtRate(tx));
         } else {

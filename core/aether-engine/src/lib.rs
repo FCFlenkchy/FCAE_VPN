@@ -246,7 +246,7 @@ pub async fn run_from_env() -> Result<()> {
     let listen: Option<SocketAddr> = std::env::var("AETHER_SOCKS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .filter(|a| a.port() != 0);
+        .filter(|a: &SocketAddr| a.port() != 0);
 
     let http_listen: Option<SocketAddr> = std::env::var("AETHER_HTTP")
         .ok()
@@ -1359,9 +1359,13 @@ async fn run_warp_in_warp(
         Socks(std::result::Result<Result<()>, tokio::task::JoinError>),
         Health,
     }
-    let end = tokio::select! {
-        r = socks_task => End::Socks(r),
-        _ = health_rx => End::Health,
+    let end = if let Some(task) = socks_task {
+        tokio::select! {
+            r = task => End::Socks(r),
+            _ = health_rx => End::Health,
+        }
+    } else {
+        End::Health
     };
     health_task.abort();
     if let Some(t) = http_task {

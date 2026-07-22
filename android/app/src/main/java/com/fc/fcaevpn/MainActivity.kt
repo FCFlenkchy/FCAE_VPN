@@ -344,7 +344,7 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val i = Intent(this, FCAEVpnService::class.java)
                     i.action = FCAEVpnService.ACTION_DISCONNECT
-                    startService(i)
+                    startForegroundService(i)
                 } catch (_: Throwable) {
                 }
                 connecting = false
