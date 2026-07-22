@@ -23,19 +23,39 @@ set(UI_SOURCES
 )
 
 # Resolve libaether_ffi.a from cargo (in-process engine is linked into this staticlib)
-function(aether_ffi_lib_dir out_var triple)
+function(aether_ffi_lib_path out_var triple)
     set(candidates
-        ${CMAKE_SOURCE_DIR}/target/${triple}/release
-        ${CMAKE_SOURCE_DIR}/crates/aether-ffi/target/${triple}/release
-        ${CMAKE_SOURCE_DIR}/crates/aether-ffi/target/release
+        ${CMAKE_SOURCE_DIR}/target/${triple}/release/libaether_ffi.a
+        ${CMAKE_SOURCE_DIR}/crates/aether-ffi/target/${triple}/release/libaether_ffi.a
+        ${CMAKE_SOURCE_DIR}/crates/target/${triple}/release/libaether_ffi.a
     )
     foreach(c ${candidates})
-        if(EXISTS "${c}/libaether_ffi.a")
+        if(EXISTS "${c}")
             set(${out_var} "${c}" PARENT_SCOPE)
             return()
         endif()
     endforeach()
-    set(${out_var} "${CMAKE_SOURCE_DIR}/target/${triple}/release" PARENT_SCOPE)
+    set(${out_var} "${CMAKE_SOURCE_DIR}/target/${triple}/release/libaether_ffi.a" PARENT_SCOPE)
+endfunction()
+
+# Link Rust staticlib once as a full path.
+# Do NOT use --whole-archive: cargo packs C objects (BoringSSL bcm.o, etc.) that can
+# appear more than once in the archive; whole-archive then causes thousands of
+# "multiple definition" errors. Normal archive linking is enough because the C++
+# frontend references aether_init/start/stop/... which pull the rest of the graph.
+function(aether_link_ffi target_name lib_path)
+    if(NOT EXISTS "${lib_path}")
+        message(WARNING "libaether_ffi.a not found at ${lib_path} (build rust first)")
+    endif()
+    # IMPORTED static library so CMake does not re-scan/duplicate the archive
+    get_filename_component(_aether_ffi_name "${lib_path}" NAME_WE)
+    if(NOT TARGET aether_ffi_imported)
+        add_library(aether_ffi_imported STATIC IMPORTED GLOBAL)
+        set_target_properties(aether_ffi_imported PROPERTIES
+            IMPORTED_LOCATION "${lib_path}"
+        )
+    endif()
+    target_link_libraries(${target_name} PRIVATE aether_ffi_imported)
 endfunction()
 
 # ── Target-specific configuration ────────────────────────────────────────
@@ -71,16 +91,14 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
     add_library(app-glue STATIC ${APP_GLUE_DIR}/android_native_app_glue.c)
     target_include_directories(app-glue PUBLIC ${APP_GLUE_DIR})
 
-    target_link_libraries(fcaevpn_native
+    aether_ffi_lib_path(AETHER_FFI_A aarch64-linux-android)
+    aether_link_ffi(fcaevpn_native "${AETHER_FFI_A}")
+
+    target_link_libraries(fcaevpn_native PRIVATE
         ${log-lib} ${android-lib} ${gles-lib} ${egl-lib} app-glue m
     )
-
-    aether_ffi_lib_dir(RUST_LIB_DIR aarch64-linux-android)
-    target_link_directories(fcaevpn_native PRIVATE ${RUST_LIB_DIR})
-    # Whole-archive so all in-process engine symbols from the Rust staticlib are kept
-    target_link_libraries(fcaevpn_native
-        -Wl,--whole-archive ${RUST_LIB_DIR}/libaether_ffi.a -Wl,--no-whole-archive
-    )
+    # Android shared libs: keep Rust #[no_mangle] exports
+    target_link_options(fcaevpn_native PRIVATE -Wl,--export-dynamic)
 
 elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
@@ -107,14 +125,14 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     target_compile_options(fcaevpn PRIVATE -municode)
 
-    aether_ffi_lib_dir(RUST_LIB_DIR x86_64-pc-windows-gnu)
-    target_link_directories(fcaevpn PRIVATE ${RUST_LIB_DIR})
+    aether_ffi_lib_path(AETHER_FFI_A x86_64-pc-windows-gnu)
+    aether_link_ffi(fcaevpn "${AETHER_FFI_A}")
 
-    # Single standalone .exe: GUI + in-process aether engine (via libaether_ffi.a)
+    # System libs only — crypto is inside the Rust staticlib (BoringSSL), not OpenSSL
     target_link_libraries(fcaevpn PRIVATE
-        -Wl,--whole-archive ${RUST_LIB_DIR}/libaether_ffi.a -Wl,--no-whole-archive
         d3d11 dxgi d3dcompiler dwmapi ntdll
         ws2_32 userenv bcrypt shell32 ole32 uuid crypt32 secur32 ncrypt
+        iphlpapi
     )
 
     if(MINGW)
@@ -152,13 +170,13 @@ elseif(UNIX)
         AETHER_TARGET_LINUX_X64
     )
 
-    aether_ffi_lib_dir(RUST_LIB_DIR x86_64-unknown-linux-gnu)
-    target_link_directories(fcaevpn PRIVATE ${RUST_LIB_DIR})
+    aether_ffi_lib_path(AETHER_FFI_A x86_64-unknown-linux-gnu)
+    aether_link_ffi(fcaevpn "${AETHER_FFI_A}")
 
+    # Do not link system OpenSSL (ssl/crypto) — BoringSSL is already in libaether_ffi.a
     target_link_libraries(fcaevpn PRIVATE
-        -Wl,--whole-archive ${RUST_LIB_DIR}/libaether_ffi.a -Wl,--no-whole-archive
         glfw OpenGL::GL X11::X11 X11::Xi pthread dl m
-        ssl crypto z bz2 lzma curl
+        z bz2 lzma
     )
 
 endif()
