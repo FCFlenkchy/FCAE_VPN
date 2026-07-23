@@ -18,6 +18,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.switchmaterial.SwitchMaterial
@@ -29,7 +30,6 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Kotlin Material UI — CONNECT is manual (no auto-start VPN).
  */
 class MainActivity : AppCompatActivity() {
-    private val vpnRequestCode = 100
     private val handler = Handler(Looper.getMainLooper())
     private var connecting = false
     private var engineRunning = false
@@ -64,6 +64,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
 
     private var userScrolledUp = false
+
+    private val vpnPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && pendingAfterVpnPermission) {
+            pendingAfterVpnPermission = false
+            startTunServiceWithConfig()
+        } else {
+            pendingAfterVpnPermission = false
+            Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     private val vpnDisconnectedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -270,27 +282,12 @@ class MainActivity : AppCompatActivity() {
             val prep = VpnService.prepare(this)
             if (prep != null) {
                 pendingAfterVpnPermission = true
-                @Suppress("DEPRECATION")
-                startActivityForResult(prep, vpnRequestCode)
+                vpnPermissionLauncher.launch(prep)
                 return
             }
             startTunServiceWithConfig()
         } else {
             startEngine()
-        }
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == vpnRequestCode) {
-            if (resultCode == Activity.RESULT_OK && pendingAfterVpnPermission) {
-                pendingAfterVpnPermission = false
-                startTunServiceWithConfig()
-            } else {
-                pendingAfterVpnPermission = false
-                Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
-            }
         }
     }
 
