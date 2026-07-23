@@ -393,10 +393,15 @@ class MainActivity : AppCompatActivity() {
         engineRunning = false
         updateButton()
 
+        // Use startService (not startForegroundService) — the service is
+        // already running as foreground. startForegroundService can fail
+        // silently on Android O+ when the service is already foreground.
+        // PendingIntent.getService (used by notification) internally calls
+        // startService, so this makes both paths identical.
         try {
             val i = Intent(this, FCAEVpnService::class.java)
             i.action = FCAEVpnService.ACTION_DISCONNECT
-            startForegroundService(i)
+            startService(i)
         } catch (_: Throwable) {}
     }
 
