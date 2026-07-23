@@ -245,7 +245,7 @@ public class FCAEVpnService extends VpnService {
             stopForeground(STOP_FOREGROUND_REMOVE);
         } else {
             @SuppressWarnings("deprecation")
-            boolean removed = stopForeground(true);
+            stopForeground(true);
         }
         stopSelf();
         Log.i(TAG, "VPN fully stopped + service destroyed");
