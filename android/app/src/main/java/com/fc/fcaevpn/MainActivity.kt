@@ -392,28 +392,12 @@ class MainActivity : AppCompatActivity() {
         engineRunning = false
         updateButton()
 
-        // Stop VPN service first
+        // Send disconnect to the service — it handles nativeStop + fd close + stopSelf
         try {
             val i = Intent(this, FCAEVpnService::class.java)
             i.action = FCAEVpnService.ACTION_DISCONNECT
             startForegroundService(i)
         } catch (_: Throwable) {}
-
-        // Then stop native engine
-        bgExecutor.execute {
-            try {
-                NativeEngine.nativeStop()
-            } catch (_: Throwable) {}
-            handler.post {
-                connecting = false
-                engineRunning = false
-                updateButton()
-                statusText.text = "DISCONNECTED"
-                statusText.setTextColor(Color.parseColor("#8A93A6"))
-                statsText.text = ""
-                peerText.text = ""
-            }
-        }
     }
 
     private fun refreshStatus() {
