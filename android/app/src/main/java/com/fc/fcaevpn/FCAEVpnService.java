@@ -201,9 +201,12 @@ public class FCAEVpnService extends VpnService {
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     /**
-     * Full shutdown — tears down everything immediately without blocking the
-     * main thread. The OS VPN tunnel is killed by closing the fd. The native
-     * engine is stopped asynchronously (fire-and-forget).
+     * Full shutdown — runs the heavy work (nativeStop + fd close) on a
+     * background thread so the main thread is never blocked. The key
+     * insight: nativeStop() MUST complete and release its dup'd fd
+     * BEFORE we close the Java ParcelFileDescriptor. If we close the
+     * Java fd first, the native engine's copy keeps the kernel VPN
+     * tunnel alive (the OS VPN key icon persists).
      */
     private void fullShutdown() {
         if (shuttingDown) {
@@ -216,10 +219,10 @@ public class FCAEVpnService extends VpnService {
 
         Log.i(TAG, "fullShutdown: starting");
 
-        // 1. Cancel stats polling
+        // 1. Cancel stats polling (main thread, instant)
         statsHandler.removeCallbacks(statsRunnable);
 
-        // 2. Kill the VPN worker thread
+        // 2. Kill the VPN worker thread (main thread, fast — just a sleep loop)
         Thread t = vpnThread;
         vpnThread = null;
         if (t != null) {
@@ -227,16 +230,11 @@ public class FCAEVpnService extends VpnService {
             try { t.join(1000); } catch (InterruptedException ignored) {}
         }
 
-        // 3. Close the TUN fd — this is what kills the OS VPN tunnel.
-        //    The kernel tears down the tunnel the instant the last fd closes.
-        //    We do this FIRST and IMMEDIATELY (no blocking).
-        closeVpnFd();
-
-        // 4. Stop the native engine in background — fire and forget.
-        //    By the time nativeStop() runs, the fd is already closed so
-        //    the native engine's read/write calls will fail with EBADF
-        //    and it will exit on its own. We don't need to wait.
+        // 3. Run nativeStop + fd close + service destroy on a background thread.
+        //    nativeStop() must complete FIRST to release the native-held fd.
         new Thread(() -> {
+            // 3a. Stop native engine — this closes the native dup'd fd.
+            //     The kernel tears down the VPN tunnel when ALL fds close.
             try {
                 Log.i(TAG, "fullShutdown: calling nativeStop");
                 NativeEngine.nativeStop();
@@ -244,23 +242,27 @@ public class FCAEVpnService extends VpnService {
             } catch (Exception e) {
                 Log.e(TAG, "fullShutdown: nativeStop failed: " + e.getMessage());
             }
-        }, "FCAE-NativeStop").start();
 
-        // 5. Dismiss foreground notification + destroy service — do this
-        //    IMMEDIATELY on the main thread. No blocking, no waiting.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE);
-        } else {
-            //noinspection deprecation
-            stopForeground(true);
-        }
-        stopSelf();
-        Log.i(TAG, "fullShutdown: service stopped");
+            // 3b. NOW close the Java fd — last reference, kernel tears down tunnel
+            closeVpnFd();
 
-        // 6. Broadcast disconnection so the activity can update its UI
-        Intent broadcast = new Intent("com.fc.fcaevpn.VPN_DISCONNECTED");
-        broadcast.setPackage(getPackageName());
-        sendBroadcast(broadcast);
+            // 3c. Stop foreground + stopSelf on main thread
+            handler.post(() -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(STOP_FOREGROUND_REMOVE);
+                } else {
+                    //noinspection deprecation
+                    stopForeground(true);
+                }
+                stopSelf();
+                Log.i(TAG, "fullShutdown: service stopped");
+
+                // Broadcast disconnection so the activity can update its UI
+                Intent broadcast = new Intent("com.fc.fcaevpn.VPN_DISCONNECTED");
+                broadcast.setPackage(getPackageName());
+                sendBroadcast(broadcast);
+            });
+        }, "FCAE-FullShutdown").start();
     }
 
     /**
@@ -279,17 +281,16 @@ public class FCAEVpnService extends VpnService {
             try { t.join(1000); } catch (InterruptedException ignored) {}
         }
 
-        // Close TUN fd first — kills the OS VPN tunnel immediately
-        closeVpnFd();
-
-        // Stop native engine in background — fire and forget
+        // Same pattern: nativeStop first, then fd close
         new Thread(() -> {
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-        }, "FCAE-NativeStop-Pause").start();
-
-        statsHandler.removeCallbacks(statsRunnable);
-        updateNotificationStats();
-        Log.i(TAG, "VPN paused (service kept alive)");
+            closeVpnFd();
+            handler.post(() -> {
+                statsHandler.removeCallbacks(statsRunnable);
+                updateNotificationStats();
+                Log.i(TAG, "VPN paused (service kept alive)");
+            });
+        }, "FCAE-Pause").start();
     }
 
     private void closeVpnFd() {
