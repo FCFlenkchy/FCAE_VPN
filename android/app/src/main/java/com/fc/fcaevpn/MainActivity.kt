@@ -209,7 +209,7 @@ class MainActivity : AppCompatActivity() {
 
         // Track whether user is at the bottom of the log scroll.
         // Use OnScrollChangeListener (API 23+) for accurate detection.
-        logScroll.setOnScrollChangeListener { _: ScrollView?, _: Int, scrollY: Int, _: Int, oldScrollY: Int ->
+        logScroll.setOnScrollChangeListener { _: android.view.View, _: Int, scrollY: Int, _: Int, _: Int ->
             val child = logScroll.getChildAt(0) ?: return@setOnScrollChangeListener
             val maxScroll = (child.height - logScroll.height).coerceAtLeast(0)
             wasAtBottom = scrollY >= maxScroll - 5
