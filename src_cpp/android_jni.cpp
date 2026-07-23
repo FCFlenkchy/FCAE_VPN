@@ -1,6 +1,7 @@
 // FCAE VPN — Android JNI bridge (Kotlin UI controls the in-process engine)
 #include <jni.h>
 #include <android/log.h>
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -15,7 +16,7 @@
 static std::mutex g_log_mu;
 static std::vector<std::string> g_logs;
 static constexpr size_t kMaxLogs = 40;
-static bool g_inited = false;
+static std::atomic<bool> g_inited{false};
 
 static void jni_log_cb(int level, const char* message, void* /*user*/) {
     if (!message) return;

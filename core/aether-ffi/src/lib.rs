@@ -9,8 +9,14 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+// Use AtomicPtr instead of static mut to avoid undefined behavior when
+// log_msg() reads from the engine thread while aether_init() writes
+// from the main thread.
 static mut LOG_CB: Option<unsafe extern "C" fn(i32, *const c_char, *mut std::ffi::c_void)> = None;
 static mut LOG_USER_DATA: *mut std::ffi::c_void = std::ptr::null_mut();
+
+// Ensure aether_init() is called exactly once even from multiple threads.
+static INIT_ONCE: std::sync::Once = std::sync::Once::new();
 
 struct TelemetryState {
     state: u32,
@@ -518,33 +524,37 @@ pub extern "C" fn aether_init(
     log_cb: Option<unsafe extern "C" fn(i32, *const c_char, *mut c_void)>,
     user_data: *mut c_void,
 ) {
-    unsafe {
-        LOG_CB = log_cb;
-        LOG_USER_DATA = user_data;
-    }
+    // Ensure aether_init() body runs exactly once, even if called from
+    // multiple threads (the JNI g_inited is not atomic).
+    INIT_ONCE.call_once(|| {
+        unsafe {
+            LOG_CB = log_cb;
+            LOG_USER_DATA = user_data;
+        }
 
-    // Default Info: Debug floods the UI and RAM (especially on Windows).
-    let max = if std::env::var_os("AETHER_VERBOSE").is_some() {
-        log::LevelFilter::Debug
-    } else {
-        log::LevelFilter::Info
-    };
-    let _ = log::set_logger(&GUI_LOGGER).map(|()| log::set_max_level(max));
+        // Default Info: Debug floods the UI and RAM (especially on Windows).
+        let max = if std::env::var_os("AETHER_VERBOSE").is_some() {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        };
+        let _ = log::set_logger(&GUI_LOGGER).map(|()| log::set_max_level(max));
 
-    // Prefer detecting LAN IP off the critical path; use 127.0.0.1 initially.
-    {
-        let mut t = TELEMETRY.lock();
-        t.state = 0;
-        t.status_message = "Disconnected".to_string();
-        t.lan_ip = "127.0.0.1".to_string();
-    }
-    std::thread::spawn(|| {
-        let ip = detect_lan_ip();
-        let mut t = TELEMETRY.lock();
-        t.lan_ip = ip;
+        // Prefer detecting LAN IP off the critical path; use 127.0.0.1 initially.
+        {
+            let mut t = TELEMETRY.lock();
+            t.state = 0;
+            t.status_message = "Disconnected".to_string();
+            t.lan_ip = "127.0.0.1".to_string();
+        }
+        std::thread::spawn(|| {
+            let ip = detect_lan_ip();
+            let mut t = TELEMETRY.lock();
+            t.lan_ip = ip;
+        });
+
+        INITIALIZED.store(true, Ordering::SeqCst);
     });
-
-    INITIALIZED.store(true, Ordering::SeqCst);
     unsafe {
         log_msg(4, "[ffi] aether_init completed (in-process engine)");
     }
@@ -633,25 +643,29 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                 t.status_message = "Scanning gateways...".to_string();
             }
 
-            let result = rt.block_on(async {
-                // Race engine against shutdown flag
-                let engine = aether_engine::run_from_env();
-                tokio::pin!(engine);
-                loop {
-                    if SHUTDOWN.load(Ordering::SeqCst) {
-                        return Ok(());
-                    }
-                    tokio::select! {
-                        biased;
-                        r = &mut engine => return r.map_err(|e| anyhow::anyhow!("{e:#}")),
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
-                            if SHUTDOWN.load(Ordering::SeqCst) {
-                                return Ok(());
+            // Catch panics from the engine so they don't unwind through
+            // the tokio runtime drop (which can crash the process).
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rt.block_on(async {
+                    // Race engine against shutdown flag
+                    let engine = aether_engine::run_from_env();
+                    tokio::pin!(engine);
+                    loop {
+                        if SHUTDOWN.load(Ordering::SeqCst) {
+                            return Ok(());
+                        }
+                        tokio::select! {
+                            biased;
+                            r = &mut engine => return r.map_err(|e| anyhow::anyhow!("{e:#}")),
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                                if SHUTDOWN.load(Ordering::SeqCst) {
+                                    return Ok(());
+                                }
                             }
                         }
                     }
-                }
-            });
+                })
+            })).unwrap_or_else(|_| Err(anyhow::anyhow!("engine panicked")));
 
             SHUTDOWN.store(true, Ordering::SeqCst);
             let _ = watch.join();
