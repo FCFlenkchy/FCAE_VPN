@@ -432,24 +432,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnectAll() {
-        handler.removeCallbacks(poll)
-        vpnActive = false
-        connecting = false
-        engineRunning = false
-        updateButton()
-
-        // Defer the disconnect intent to the bgExecutor. Since it's a
-        // single-thread executor, this guarantees the intent is sent
-        // AFTER any in-flight nativeGetStatusJson/nativeGetLogs call
-        // finishes — closing the race where the service tears down
-        // native state while the bg thread is still calling into it.
-        bgExecutor.execute {
-            try {
-                val i = Intent(this, FCAEVpnService::class.java)
-                i.action = FCAEVpnService.ACTION_DISCONNECT
-                startService(i)
-            } catch (_: Throwable) {}
-        }
+        // Do exactly what the notification disconnect button does:
+        // send ACTION_DISCONNECT directly to the service. No bgExecutor
+        // coordination, no flag-setting before the intent — the service
+        // handles everything and the broadcast receiver updates the UI.
+        try {
+            val i = Intent(this, FCAEVpnService::class.java)
+            i.action = FCAEVpnService.ACTION_DISCONNECT
+            startService(i)
+        } catch (_: Throwable) {}
     }
 
     private fun applyStatus(statusJson: String, logs: String) {
