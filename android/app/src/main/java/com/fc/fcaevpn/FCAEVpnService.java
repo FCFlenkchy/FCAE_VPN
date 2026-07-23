@@ -206,40 +206,58 @@ public class FCAEVpnService extends VpnService {
 
         if (vpnThread != null) {
             vpnThread.interrupt();
+            try { vpnThread.join(2000); } catch (InterruptedException ignored) {}
             vpnThread = null;
         }
 
         NativeEngine.nativeStop();
         cleanupVpnInterface();
         statsHandler.removeCallbacks(statsRunnable);
-        // Keep notification alive with "Start" button
         updateNotificationStats();
         Log.i(TAG, "VPN stopped (notification kept, Start available)");
     }
 
     private void stopVpnAndNotification() {
+        Log.i(TAG, "stopVpnAndNotification: beginning full shutdown");
         running = false;
         vpnPaused = false;
 
+        // 1. Stop the engine first (stops all network I/O)
+        try { NativeEngine.nativeStop(); } catch (Exception e) {
+            Log.e(TAG, "nativeStop failed: " + e.getMessage());
+        }
+
+        // 2. Kill the VPN thread
         if (vpnThread != null) {
             vpnThread.interrupt();
+            try { vpnThread.join(3000); } catch (InterruptedException ignored) {}
             vpnThread = null;
         }
 
-        NativeEngine.nativeStop();
+        // 3. Close the VPN interface (kills the OS VPN tunnel)
         cleanupVpnInterface();
+
+        // 4. Cancel periodic stats
         statsHandler.removeCallbacks(statsRunnable);
-        stopForeground(true);
+
+        // 5. Dismiss notification and destroy service
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } else {
+            @SuppressWarnings("deprecation")
+            boolean removed = stopForeground(true);
+        }
         stopSelf();
-        Log.i(TAG, "VPN fully stopped, notification dismissed");
+        Log.i(TAG, "VPN fully stopped + service destroyed");
     }
 
     private void cleanupVpnInterface() {
         if (vpnInterface != null) {
             try {
                 vpnInterface.close();
+                Log.i(TAG, "VPN interface fd closed successfully");
             } catch (Exception e) {
-                Log.e(TAG, "Error closing VPN fd: " + e.getMessage());
+                Log.e(TAG, "Error closing VPN fd: " + e.getMessage(), e);
             }
             vpnInterface = null;
         }
