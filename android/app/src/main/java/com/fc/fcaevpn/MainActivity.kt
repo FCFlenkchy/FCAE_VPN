@@ -29,10 +29,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var connecting = false
-    private var engineRunning = false
+    @Volatile private var engineRunning = false
     private var pendingAfterVpnPermission = false
     private var lastLogHash = 0
-    private var vpnActive = false
+    @Volatile private var vpnActive = false
     private var wasAtBottom = true
     private var updatingLogs = false
 
