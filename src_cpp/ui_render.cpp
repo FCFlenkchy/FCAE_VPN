@@ -387,10 +387,12 @@ void render_ui() {
         if (ImGui::Button(connected || busy ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 34))) {
             if (connected || busy || errored) {
                 g_app.start_busy.store(false);
-                std::thread([] {
-                    aether_stop();
-                    g_app.ffi_state.store(AETHER_STATE_DISCONNECTED);
-                }).detach();
+                // aether_stop() is non-blocking (just sets shutdown flag +
+                // closes TUN fds + updates telemetry), so calling it
+                // directly from the UI thread is safe and avoids races
+                // with the shutdown path in ui_shutdown().
+                aether_stop();
+                g_app.ffi_state.store(AETHER_STATE_DISCONNECTED);
             } else if (!g_app.start_busy.load()) {
                 g_app.start_busy.store(true);
                 // Snapshot config + own string storage for the worker thread.

@@ -132,7 +132,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeStop(JNIEnv*, jclass) {
-    ensure_init();
+    if (!g_inited) return;
+    // aether_stop() is non-blocking: sets shutdown flag, closes TUN fds,
+    // updates telemetry.  Safe to call from any thread.
     aether_stop();
     LOGI("aether_stop");
 }
@@ -140,6 +142,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStop(JNIEnv*, jclass) {
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeFree(JNIEnv*, jclass) {
     if (!g_inited) return;
+    // aether_free() joins the engine thread and tears down the FFI layer.
+    // Must NOT be called while nativeStop() is running on another thread
+    // (the core STOP_GUARD prevents concurrent stop+free).
     aether_free();
     g_inited = false;
     LOGI("aether_free");

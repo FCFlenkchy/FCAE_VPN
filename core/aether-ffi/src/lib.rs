@@ -18,6 +18,18 @@ static mut LOG_USER_DATA: *mut std::ffi::c_void = std::ptr::null_mut();
 // Ensure aether_init() is called exactly once even from multiple threads.
 static INIT_ONCE: std::sync::Once = std::sync::Once::new();
 
+// Guard to prevent concurrent aether_stop() / aether_free() calls.
+// On Windows the DISCONNECT button spawns a detached thread that calls
+// aether_stop() while ui_shutdown() calls aether_stop()+aether_free()
+// from the main thread.  On Android nativeStop/nativeFree can overlap.
+static STOP_GUARD: Mutex<()> = Mutex::new(());
+
+// Store the engine thread handle so aether_free() can join it before
+// tearing down LOG_CB and other statics.  Without this, the engine
+// thread can still be dropping the tokio runtime (cancelling tasks,
+// logging) while aether_free() nulls out LOG_CB → crash.
+static ENGINE_THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
 struct TelemetryState {
     state: u32,
     mode: u32,
@@ -569,6 +581,10 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         return false;
     }
 
+    // If a previous engine thread is still winding down (e.g. tokio
+    // runtime drop), join it before starting a new one.
+    join_engine_thread();
+
     let cfg = unsafe {
         if config.is_null() {
             return false;
@@ -623,7 +639,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_flag = shutdown.clone();
 
-    let _ = std::thread::Builder::new()
+    let handle = match std::thread::Builder::new()
         .name("aether-engine".to_string())
         .spawn(move || {
             // Watch SHUTDOWN from aether_stop and abort the runtime.
@@ -667,7 +683,17 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                 })
             })).unwrap_or_else(|_| Err(anyhow::anyhow!("engine panicked")));
 
-            SHUTDOWN.store(true, Ordering::SeqCst);
+            // Drop the tokio runtime inside catch_unwind — this cancels all
+            // spawned tasks and waits for workers to finish.  If a task's
+            // Drop impl panics during cancellation, catch_unwind prevents
+            // the thread from dying (which would leave RUNNING=true forever).
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                SHUTDOWN.store(true, Ordering::SeqCst);
+                drop(rt);
+            }));
+
+            // Now that the runtime is dropped, join the watch thread and
+            // update telemetry — these run outside the runtime.
             let _ = watch.join();
 
             match result {
@@ -677,14 +703,8 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                         t.state = 0;
                         t.status_message = "Disconnected".to_string();
                     }
-                    unsafe {
-                        log_msg(3, "[ffi] engine finished");
-                    }
                 }
                 Err(e) => {
-                    unsafe {
-                        log_msg(1, &format!("[ffi] engine error: {e:#}"));
-                    }
                     let mut t = TELEMETRY.lock();
                     t.state = 5;
                     t.last_error = format!("{e:#}");
@@ -693,19 +713,30 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
             }
 
             RUNNING.store(false, Ordering::SeqCst);
+        })
+    {
+        Ok(h) => h,
+        Err(e) => {
             unsafe {
-                log_msg(4, "[ffi] engine thread exiting");
+                log_msg(1, &format!("[ffi] failed to spawn engine thread: {e}"));
             }
-        });
+            RUNNING.store(false, Ordering::SeqCst);
+            return false;
+        }
+    };
+
+    // Store the handle so aether_free() can join it.
+    *ENGINE_THREAD.lock() = Some(handle);
 
     true
 }
 
 #[no_mangle]
 pub extern "C" fn aether_stop() {
-    if !RUNNING.load(Ordering::SeqCst) {
-        // still clear telemetry
+    if !RUNNING.load(Ordering::SeqCst) && !SHUTDOWN.load(Ordering::SeqCst) {
+        return;
     }
+
     SHUTDOWN.store(true, Ordering::SeqCst);
 
     // Force-close all dup'd TUN fds so the kernel tears down the TUN device
@@ -713,21 +744,9 @@ pub extern "C" fn aether_stop() {
     // kernel VPN tunnel alive even after Java closes ParcelFileDescriptor.
     aether_engine::tun::close_all_fds();
 
-    // Wait for the engine thread to observe SHUTDOWN and exit, so that
-    // the next aether_start() doesn't race with a still-shutting-down
-    // engine (RUNNING would still be true, causing aether_start to fail).
-    // The engine thread polls SHUTDOWN every 200ms, so 3s is generous.
-    for _ in 0..30 {
-        if !RUNNING.load(Ordering::SeqCst) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-
-    unsafe {
-        log_msg(4, "[ffi] aether_stop called");
-    }
-
+    // Update telemetry immediately so the UI shows DISCONNECTED without
+    // waiting for the engine thread to finish.  The engine thread will
+    // also update telemetry when it exits, which is fine (idempotent).
     let mut t = TELEMETRY.lock();
     t.state = 0;
     t.status_message = "Disconnected".to_string();
@@ -735,6 +754,16 @@ pub extern "C" fn aether_stop() {
     t.rtt_ms = 0;
     t.rx_bytes_sec = 0;
     t.tx_bytes_sec = 0;
+}
+
+/// Join the engine thread if one is running.  Returns true if the thread
+/// was successfully joined (or was never started).
+fn join_engine_thread() -> bool {
+    let handle = ENGINE_THREAD.lock().take();
+    match handle {
+        Some(h) => h.join().is_ok(),
+        None => true,
+    }
 }
 
 #[no_mangle]
@@ -785,12 +814,48 @@ pub extern "C" fn aether_set_android_tun_fd(tun_fd: i32) {
 
 #[no_mangle]
 pub extern "C" fn aether_free() {
+    let _guard = STOP_GUARD.lock();
+
+    // Signal shutdown and close TUN fds (idempotent with aether_stop).
     SHUTDOWN.store(true, Ordering::SeqCst);
+    aether_engine::tun::close_all_fds();
+
+    // Wait for the engine thread to fully exit.  This is critical:
+    // the engine thread drops the tokio runtime *after* block_on returns,
+    // which cancels all async tasks and may log messages.  We must not
+    // null out LOG_CB until the thread has finished, otherwise log_msg
+    // would dereference a null function pointer.
+    join_engine_thread();
+
+    // Also wait for RUNNING to become false — this covers the edge case
+    // where aether_start() spawned the thread but hasn't stored the
+    // JoinHandle yet.  The engine thread sets RUNNING=false on exit.
+    for _ in 0..50 {
+        if !RUNNING.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // Now safe to tear down — the engine thread is no longer running.
     RUNNING.store(false, Ordering::SeqCst);
     INITIALIZED.store(false, Ordering::SeqCst);
+
+    let mut t = TELEMETRY.lock();
+    t.state = 0;
+    t.status_message = "Disconnected".to_string();
+    t.connected_peer.clear();
+    t.rtt_ms = 0;
+    t.rx_bytes_sec = 0;
+    t.tx_bytes_sec = 0;
+    t.total_rx = 0;
+    t.total_tx = 0;
+    t.last_error.clear();
+
+    // Null out log callback LAST — the engine thread may still be
+    // logging up until join_engine_thread() returns above.
     unsafe {
         LOG_CB = None;
         LOG_USER_DATA = std::ptr::null_mut();
-        log_msg(4, "[ffi] aether_free completed");
     }
 }
