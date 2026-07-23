@@ -163,10 +163,6 @@ impl log::Log for GuiLogger {
                 t.status_message = "Connecting...".to_string();
             }
         }
-                t.state = 3;
-                t.status_message = "Connecting...".to_string();
-            }
-        }
         if line_lower.contains("scanning") || line_lower.contains("probe") {
             if t.state < 3 {
                 t.state = 2;
