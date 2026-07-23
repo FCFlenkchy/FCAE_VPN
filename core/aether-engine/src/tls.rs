@@ -1,6 +1,7 @@
 use std::ffi::{c_int, c_void};
 use std::ptr;
 
+use base64::Engine;
 use boring::pkey::PKey;
 use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyMode, SslVersion};
 use boring::x509::X509;
