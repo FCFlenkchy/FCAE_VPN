@@ -2,10 +2,12 @@ use std::ffi::c_void;
 use std::os::raw::c_int;
 use std::ptr;
 
+use base64::Engine;
 use boring::pkey::PKey;
 use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyMode, SslVersion};
 use boring::x509::X509;
 use foreign_types_shared::ForeignTypeRef;
+use ring::digest;
 
 use crate::consts;
 use crate::error::{AetherError, Result};
@@ -32,6 +34,55 @@ pub struct TlsParams<'a> {
     pub pin_endpoint: bool,
 }
 
+/// Compute SHA-256 hash of a certificate's SubjectPublicKeyInfo (SPKI).
+/// Returns the raw 32-byte hash.
+fn compute_spki_hash(cert: &boring::x509::X509Ref) -> Option<[u8; 32]> {
+    let pkey = cert.public_key().ok()?;
+    let der = pkey.public_key_to_der().ok()?;
+    let hash = digest::digest(&digest::SHA256, &der);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(hash.as_ref());
+    Some(out)
+}
+
+/// BoringSSL verify callback: checks the leaf certificate's SPKI hash
+/// against the hardcoded Cloudflare MASQUE pins. Called per-cert in the
+/// chain; we only care about the leaf (first call with preverify_ok=0
+/// on self-signed certs, or the final leaf check).
+fn spki_pin_verify(
+    pins: &[&str],
+    preverify_ok: c_int,
+    x509_store_ctx: &mut boring::x509::X509StoreContextRef,
+) -> bool {
+    // If the standard chain verification already passed, accept.
+    if preverify_ok != 0 {
+        return true;
+    }
+
+    // Extract the certificate being verified.
+    let cert = match x509_store_ctx.current_cert() {
+        Some(c) => c,
+        None => return false,
+    };
+
+    let hash = match compute_spki_hash(cert) {
+        Some(h) => h,
+        None => return false,
+    };
+
+    let hash_b64 = base64::engine::general_purpose::STANDARD.encode(hash);
+
+    for pin in pins {
+        if *pin == hash_b64 {
+            log::debug!("[tls] SPKI pin matched for leaf cert");
+            return true;
+        }
+    }
+
+    log::warn!("[tls] SPKI pin mismatch — rejecting certificate");
+    false
+}
+
 pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
     let mut builder = SslContextBuilder::new(SslMethod::tls())
         .map_err(|e| AetherError::Tls(e.to_string()))?;
@@ -50,7 +101,6 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(CHROME_GROUPS);
-    // Never fail the whole handshake path on a bad curves list (scanner would find 0 endpoints).
     if builder.set_curves_list(groups).is_err() {
         log::warn!("[-] AETHER_TLS_GROUPS={groups:?} rejected; using default curves");
         builder
@@ -75,7 +125,16 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
         .set_private_key(&key)
         .map_err(|e| AetherError::Tls(e.to_string()))?;
 
-    builder.set_verify(SslVerifyMode::NONE);
+    // SPKI pin verification when enabled, plain NONE as fallback.
+    if params.pin_endpoint && !consts::MASQUE_PINS.is_empty() {
+        let pins: Vec<&str> = consts::MASQUE_PINS.iter().copied().collect();
+        builder.set_verify_callback(SslVerifyMode::PEER, move |preverify_ok, ctx| {
+            spki_pin_verify(&pins, preverify_ok, ctx)
+        });
+        log::info!("[+] SPKI pin verification enabled ({} pins)", consts::MASQUE_PINS.len());
+    } else {
+        builder.set_verify(SslVerifyMode::NONE);
+    }
 
     let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, builder)
         .map_err(AetherError::Quic)?;
@@ -96,9 +155,56 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
     config.set_disable_active_migration(true);
     config.enable_dgram(true, 65536, 65536);
 
-    let _ = params.pin_endpoint;
-
     Ok(config)
+}
+
+/// Build an SPKI-verifying TLS config for HTTP/2 (masque_h2.rs).
+/// Returns an `SslConnector`-compatible config that rejects non-pinned certs.
+pub fn build_h2_config(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    pin: bool,
+) -> Result<boring::ssl::SslConnector> {
+    let mut builder = SslContextBuilder::new(SslMethod::tls_client())
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
+
+    builder
+        .set_min_proto_version(Some(SslVersion::TLS1_2))
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
+
+    let groups = std::env::var("AETHER_TLS_GROUPS").ok();
+    let groups = groups
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(CHROME_GROUPS);
+    let _ = builder.set_curves_list(groups);
+
+    let h2_alpn = b"\x02h2";
+    builder
+        .set_alpn_protos(h2_alpn)
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
+
+    let cert = X509::from_pem(cert_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
+    let key =
+        PKey::private_key_from_pem(key_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
+    builder
+        .set_certificate(&cert)
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
+    builder
+        .set_private_key(&key)
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
+
+    if pin && !consts::MASQUE_PINS.is_empty() {
+        let pins: Vec<&str> = consts::MASQUE_PINS.iter().copied().collect();
+        builder.set_verify_callback(SslVerifyMode::PEER, move |preverify_ok, ctx| {
+            spki_pin_verify(&pins, preverify_ok, ctx)
+        });
+    } else {
+        builder.set_verify(SslVerifyMode::NONE);
+    }
+
+    Ok(builder.build())
 }
 
 pub fn inject_ech(conn: &mut quiche::Connection, ech_config_list: &[u8]) -> Result<()> {
@@ -142,7 +248,6 @@ pub fn extract_ech_retry_configs(conn: &mut quiche::Connection) -> Option<Vec<u8
 }
 
 pub fn decode_ech_config_list(b64: &str) -> Result<Vec<u8>> {
-    use base64::Engine;
     base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
         .map_err(|e| AetherError::Ech(e.to_string()))

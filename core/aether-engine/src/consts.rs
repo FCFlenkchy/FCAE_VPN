@@ -48,3 +48,14 @@ pub const CDN_ANYCAST_POOL: &[&str] = &[
 ];
 
 pub const QUIC_PORT: u16 = 443;
+
+/// SHA-256 SPKI hashes for Cloudflare MASQUE edge certificates.
+/// Format: base64-encoded SHA-256 of DER-encoded SubjectPublicKeyInfo.
+/// An adversary presenting a fake certificate will have a different SPKI
+/// hash, causing the connection to be rejected before data flows.
+pub const MASQUE_PINS: &[&str] = &[
+    // masque.cloudflareclient.com (self-signed by Cloudflare)
+    "ylh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=",
+    // cloudflareaccess.com (signed by Google Trust Services WE1)
+    "srHdihwgkaib1P1gNnQk2Mk3M8GhLQfR2FJFMZ/PMbs=",
+];

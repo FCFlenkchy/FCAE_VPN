@@ -3,22 +3,17 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use boring::pkey::PKey;
-use boring::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion};
-use boring::x509::X509;
 use bytes::Bytes;
 use http::Method;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::consts;
 use crate::error::{AetherError, Result};
 use crate::fragment::{FragmentConfig, FragmentingStream};
 use crate::masque::{self, Capsule, CapsuleParser};
 use crate::quic::{AssignedAddr, Control, Internals};
 
 const H2_ALPN: &[u8] = b"\x02h2";
-const CHROME_GROUPS: &str = "P-256:X25519:P-384";
 
 pub struct H2TunnelConfig {
     pub peer: SocketAddr,
@@ -92,54 +87,13 @@ pub fn h2_peer(quic_peer: SocketAddr) -> SocketAddr {
 }
 
 fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> {
-    let mut builder =
-        SslConnector::builder(SslMethod::tls()).map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    builder
-        .set_min_proto_version(Some(SslVersion::TLS1_2))
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-    builder
-        .set_max_proto_version(Some(SslVersion::TLS1_3))
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    builder.set_grease_enabled(true);
-
-    let groups = std::env::var("AETHER_TLS_GROUPS").ok();
-    let groups = groups
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(CHROME_GROUPS);
-    if builder.set_curves_list(groups).is_err() {
-        log::warn!("[-] AETHER_TLS_GROUPS={groups:?} rejected; using default curves");
-        builder
-            .set_curves_list(CHROME_GROUPS)
-            .map_err(|e| AetherError::Tls(e.to_string()))?;
-    }
-
-    builder
-        .set_alpn_protos(H2_ALPN)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    let cert = X509::from_pem(&cfg.cert_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
-    let key =
-        PKey::private_key_from_pem(&cfg.key_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
-    builder
-        .set_certificate(&cert)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-    builder
-        .set_private_key(&key)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    builder.set_verify(SslVerifyMode::NONE);
-
-    let connector = builder.build();
+    use crate::tls;
+    let connector = tls::build_h2_config(&cfg.cert_pem, &cfg.key_pem, true)?;
     let mut config = connector
         .configure()
         .map_err(|e| AetherError::Tls(e.to_string()))?;
     config.set_verify_hostname(false);
     config.set_use_server_name_indication(true);
-
     Ok(config)
 }
 
