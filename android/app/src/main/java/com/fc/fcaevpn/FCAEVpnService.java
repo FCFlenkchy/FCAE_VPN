@@ -185,18 +185,18 @@ public class FCAEVpnService extends VpnService {
     }
 
     /**
-     * Call nativeStop synchronously with a 4s timeout.
-     * aether_stop() waits up to 3s for the engine thread to exit,
-     * so we need at least that much headroom.
+     * Call nativeStop synchronously. aether_stop() returns in <300ms
+     * when the engine sees the SHUTDOWN flag, or instantly if not running.
+     * 1.5s is generous headroom — no need to block the UI for 4s.
      */
     private void stopNativeSync() {
         Thread t = new Thread(() -> {
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
         }, "FCAE-NativeStop-Sync");
         t.start();
-        try { t.join(4000); } catch (InterruptedException ignored) {}
+        try { t.join(1500); } catch (InterruptedException ignored) {}
         if (t.isAlive()) {
-            Log.w(TAG, "nativeStop timed out after 4s — letting it die with process");
+            Log.w(TAG, "nativeStop timed out — letting it die with process");
         }
     }
 
@@ -216,10 +216,6 @@ public class FCAEVpnService extends VpnService {
         // before the next startVpn() call, preventing the race where
         // RUNNING is still true and aether_start() fails.
         stopNativeSync();
-
-        // Fully release native state so the next startVpn gets a clean slate.
-        // Must happen AFTER stopNativeSync (which needs the engine alive to stop).
-        try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
 
         Thread t = vpnThread;
         vpnThread = null;

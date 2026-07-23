@@ -53,7 +53,7 @@ jobs:
         continue-on-error: true
         with:
           script: |
-            const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+            const fifteenHoursAgo = Date.now() - 15 * 60 * 60 * 1000;
             const prefixes = ['cmake-', 'gradle-', 'sccache-'];
             // Rust caches are managed by Swatinem/rust-cache — skip those.
 
@@ -72,9 +72,9 @@ jobs:
                 if (caches.length === 0) break;
 
                 // Delete anything older than 7 days
-                const old = caches.filter(c => new Date(c.created_at).getTime() < sevenDaysAgo);
+                const old = caches.filter(c => new Date(c.created_at).getTime() < fifteenHoursAgo);
                 // Also cap at 3 most recent per prefix
-                const recent = caches.filter(c => new Date(c.created_at).getTime() >= sevenDaysAgo);
+                const recent = caches.filter(c => new Date(c.created_at).getTime() >= fifteenHoursAgo);
                 const excess = recent.slice(3);
                 const toDelete = [...old, ...excess];
 
