@@ -5,6 +5,7 @@ use base64::Engine;
 use boring::pkey::PKey;
 use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyMode, SslVersion};
 use boring::x509::X509;
+use foreign_types_shared::ForeignTypeRef;
 
 use crate::consts;
 use crate::error::{AetherError, Result};
