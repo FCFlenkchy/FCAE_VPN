@@ -104,17 +104,23 @@ jobs:
 
       - name: install deps (linux)
         if: matrix.name == 'linux-x64'
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libglfw3-dev libgl1-mesa-dev \
-            libx11-dev libxi-dev libxcursor-dev libssl-dev libcurl4-openssl-dev \
-            libbz2-dev liblzma-dev protobuf-compiler nasm golang-go
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq --no-install-recommends \
+            libglfw3-dev libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
+            libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
+            protobuf-compiler nasm golang-go
 
       - name: install deps (windows cross)
         if: matrix.name == 'windows-x64'
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq --no-install-recommends \
+            mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 nasm
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
