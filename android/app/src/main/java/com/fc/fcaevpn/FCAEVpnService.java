@@ -1,27 +1,14 @@
 package com.fc.fcaevpn;
 
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
 import android.content.Intent;
 import android.net.VpnService;
-import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
-/**
- * FCAE VPN — Android VpnService with live notification stats.
- */
 public class FCAEVpnService extends VpnService {
     private static final String TAG = "FCAE_VPN";
-    private static final String CHANNEL_ID = "fcaevpn_service";
-    private static final int NOTIFICATION_ID = 1;
-
-    private static final int STOP_ACTION_CODE   = 10;
-    private static final int DISCONNECT_ACTION_CODE = 11;
 
     public static final String ACTION_STOP      = "com.fc.fcaevpn.STOP";
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
@@ -33,16 +20,19 @@ public class FCAEVpnService extends VpnService {
     private volatile boolean vpnPaused = false;
     private volatile boolean shuttingDown = false;
 
-    // Last config used to start the VPN (for notification Start button)
     private Intent lastStartIntent;
+    private VpnNotification notification;
+    private Handler handler;
 
-    private Handler statsHandler;
+    private long cachedTotalRx = 0;
+    private long cachedTotalTx = 0;
+
     private final Runnable statsRunnable = new Runnable() {
         @Override
         public void run() {
-            updateNotificationStats();
+            updateNotification();
             if (running || vpnPaused) {
-                statsHandler.postDelayed(this, 1000);
+                handler.postDelayed(this, 1000);
             }
         }
     };
@@ -53,9 +43,9 @@ public class FCAEVpnService extends VpnService {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.i(TAG, "FCAEVpnService created");
-        statsHandler = new Handler(Looper.getMainLooper());
-        createNotificationChannel();
+        Log.i(TAG, "Service created");
+        handler = new Handler(Looper.getMainLooper());
+        notification = new VpnNotification(this);
     }
 
     @Override
@@ -63,13 +53,12 @@ public class FCAEVpnService extends VpnService {
         if (intent != null && intent.getAction() != null) {
             switch (intent.getAction()) {
                 case ACTION_STOP:
-                    pauseVpnKeepService();
+                    pauseVpn();
                     return START_STICKY;
                 case ACTION_DISCONNECT:
                     fullShutdown();
                     return START_NOT_STICKY;
                 case ACTION_START:
-                    // If intent has no config extras, reuse last config
                     if (!intent.hasExtra("protocol") && lastStartIntent != null) {
                         startVpn(lastStartIntent);
                     } else {
@@ -80,11 +69,10 @@ public class FCAEVpnService extends VpnService {
             }
         }
 
-        // Fallback: show notification even if no action
-        startForeground(NOTIFICATION_ID, buildNotification(
-            "FCAE VPN — Ready (tap Connect in app)",
-            false
-        ));
+        // Fallback
+        notification.show("FCAE VPN \u2014 Ready (tap Connect in app)", false);
+        startForeground(VpnNotification.NOTIFICATION_ID,
+            notification.build("FCAE VPN \u2014 Ready (tap Connect in app)", false));
         return START_STICKY;
     }
 
@@ -93,42 +81,33 @@ public class FCAEVpnService extends VpnService {
         shuttingDown = false;
         vpnPaused = false;
 
-        // Show foreground notification IMMEDIATELY (required within 5s of startForegroundService)
-        startForeground(NOTIFICATION_ID, buildNotification("FCAE VPN — Connecting...", false));
+        notification.show("FCAE VPN \u2014 Connecting...", false);
+        startForeground(VpnNotification.NOTIFICATION_ID,
+            notification.build("FCAE VPN \u2014 Connecting...", false));
 
-        int protocol = intent.getIntExtra("protocol", 0);
-        int mode = intent.getIntExtra("mode", 1);
-        int scanMode = intent.getIntExtra("scanMode", 0);
-        int ipVersion = intent.getIntExtra("ipVersion", 4);
-        boolean quickReconnect = intent.getBooleanExtra("quickReconnect", false);
-        boolean h2Enabled = intent.getBooleanExtra("h2Enabled", true);
-        boolean echEnabled = intent.getBooleanExtra("echEnabled", true);
-        boolean ironclad = intent.getBooleanExtra("ironclad", false);
-        int healthInterval = intent.getIntExtra("healthInterval", 20);
-        int healthMaxFails = intent.getIntExtra("healthMaxFails", 2);
-        int healthTimeout = intent.getIntExtra("healthTimeout", 5);
-        int liveValidate = intent.getIntExtra("liveValidate", 20);
-        int socksPort = intent.getIntExtra("socksPort", 1819);
-        int httpPort = intent.getIntExtra("httpPort", 1820);
-        String noizeProfile = intent.getStringExtra("noizeProfile");
-        String forcePeer = intent.getStringExtra("forcePeer");
-        String configPathExtra = intent.getStringExtra("configPath");
-        String sniExtra = intent.getStringExtra("sni");
-        final String configPath =
-            (configPathExtra == null || configPathExtra.isEmpty()) ? "aether.toml" : configPathExtra;
-        final String sni = (sniExtra == null) ? "" : sniExtra;
-        final int fProtocol = protocol;
-        final int fMode = mode;
-        final int fScanMode = scanMode;
-        final int fIpVersion = ipVersion;
-        final boolean fQuickReconnect = quickReconnect;
-        final boolean fH2Enabled = h2Enabled;
-        final boolean fEchEnabled = echEnabled;
-        final boolean fIronclad = ironclad;
-        final int fHealthInterval = healthInterval;
-        final int fHealthMaxFails = healthMaxFails;
-        final int fHealthTimeout = healthTimeout;
-        final int fLiveValidate = liveValidate;
+        final int protocol    = intent.getIntExtra("protocol", 0);
+        final int mode        = intent.getIntExtra("mode", 1);
+        final int scanMode    = intent.getIntExtra("scanMode", 0);
+        final int ipVersion   = intent.getIntExtra("ipVersion", 4);
+        final boolean quick   = intent.getBooleanExtra("quickReconnect", false);
+        final boolean h2      = intent.getBooleanExtra("h2Enabled", true);
+        final boolean ech     = intent.getBooleanExtra("echEnabled", true);
+        final boolean iron    = intent.getBooleanExtra("ironclad", false);
+        final boolean lan     = intent.getBooleanExtra("lanSharing", false);
+        final int hi          = intent.getIntExtra("healthInterval", 20);
+        final int hf          = intent.getIntExtra("healthMaxFails", 2);
+        final int ht          = intent.getIntExtra("healthTimeout", 5);
+        final int lv          = intent.getIntExtra("liveValidate", 20);
+        final int socks       = intent.getIntExtra("socksPort", 1819);
+        final int http        = intent.getIntExtra("httpPort", 1820);
+        final String noize    = intent.getStringExtra("noizeProfile");
+        final String peer     = intent.getStringExtra("forcePeer");
+        final String cfg      = intent.getStringExtra("configPath");
+        final String sni      = intent.getStringExtra("sni");
+        final String cfgPath  = (cfg == null || cfg.isEmpty()) ? "aether.toml" : cfg;
+        final String sniVal   = (sni == null) ? "" : sni;
+        final String noizeVal = (noize == null || noize.isEmpty()) ? "balanced" : noize;
+        final String peerVal  = (peer == null) ? "" : peer;
 
         vpnThread = new Thread(() -> {
             try {
@@ -148,7 +127,7 @@ public class FCAEVpnService extends VpnService {
 
                 vpnInterface = builder.establish();
                 if (vpnInterface == null) {
-                    Log.e(TAG, "Failed to establish VPN (permission denied?)");
+                    Log.e(TAG, "Failed to establish VPN");
                     handler.post(() -> fullShutdown());
                     return;
                 }
@@ -157,16 +136,14 @@ public class FCAEVpnService extends VpnService {
                 nativeSetTunFd(fd);
                 Log.i(TAG, "VPN established, fd=" + fd);
 
-                // Ensure native engine is initialized
                 NativeEngine.nativeInit();
 
                 boolean ok = NativeEngine.nativeStart(
-                    fProtocol, fMode, false, fScanMode,
-                    fIpVersion, fQuickReconnect,
-                    (noizeProfile == null || noizeProfile.isEmpty()) ? "balanced" : noizeProfile,
-                    false, 16, 32, 2, 10, socksPort, httpPort,
-                    (forcePeer == null) ? "" : forcePeer, configPath, fH2Enabled, fEchEnabled,
-                    sni, fIronclad, fHealthInterval, fHealthMaxFails, fHealthTimeout, fLiveValidate
+                    protocol, mode, lan, scanMode,
+                    ipVersion, quick, noizeVal,
+                    false, 16, 32, 2, 10, socks, http,
+                    peerVal, cfgPath, h2, ech,
+                    sniVal, iron, hi, hf, ht, lv
                 );
                 if (!ok) {
                     Log.e(TAG, "nativeStart failed");
@@ -175,19 +152,14 @@ public class FCAEVpnService extends VpnService {
                 }
 
                 running = true;
-                Log.i(TAG, "VPN engine started in TUN mode");
+                Log.i(TAG, "VPN engine started");
                 cachedTotalRx = 0;
                 cachedTotalTx = 0;
-                updateNotificationStats();
-                statsHandler.post(statsRunnable);
+                updateNotification();
+                handler.post(statsRunnable);
 
-                // Keep thread alive — engine runs in its own thread via FFI.
                 while (running) {
-                    try {
-                        Thread.sleep(200);
-                    } catch (InterruptedException e) {
-                        break;
-                    }
+                    try { Thread.sleep(200); } catch (InterruptedException e) { break; }
                 }
             } catch (Exception e) {
                 Log.e(TAG, "VPN error: " + e.getMessage(), e);
@@ -198,31 +170,15 @@ public class FCAEVpnService extends VpnService {
         vpnThread.start();
     }
 
-    private final Handler handler = new Handler(Looper.getMainLooper());
-
-    /**
-     * Full shutdown — runs the heavy work (nativeStop + fd close) on a
-     * background thread so the main thread is never blocked. The key
-     * insight: nativeStop() MUST complete and release its dup'd fd
-     * BEFORE we close the Java ParcelFileDescriptor. If we close the
-     * Java fd first, the native engine's copy keeps the kernel VPN
-     * tunnel alive (the OS VPN key icon persists).
-     */
     private void fullShutdown() {
-        if (shuttingDown) {
-            Log.i(TAG, "fullShutdown: already shutting down, skipping");
-            return;
-        }
+        if (shuttingDown) return;
         shuttingDown = true;
         running = false;
         vpnPaused = false;
 
         Log.i(TAG, "fullShutdown: starting");
+        handler.removeCallbacks(statsRunnable);
 
-        // 1. Cancel stats polling (main thread, instant)
-        statsHandler.removeCallbacks(statsRunnable);
-
-        // 2. Kill the VPN worker thread (main thread, fast — just a sleep loop)
         Thread t = vpnThread;
         vpnThread = null;
         if (t != null) {
@@ -230,47 +186,30 @@ public class FCAEVpnService extends VpnService {
             try { t.join(1000); } catch (InterruptedException ignored) {}
         }
 
-        // 3. Run nativeStop + fd close + service destroy on a background thread.
-        //    nativeStop() must complete FIRST to release the native-held fd.
         new Thread(() -> {
-            // 3a. Stop native engine — this closes the native dup'd fd.
-            //     The kernel tears down the VPN tunnel when ALL fds close.
             try {
-                Log.i(TAG, "fullShutdown: calling nativeStop");
+                Log.i(TAG, "nativeStop...");
                 NativeEngine.nativeStop();
-                Log.i(TAG, "fullShutdown: nativeStop completed");
+                Log.i(TAG, "nativeStop done");
             } catch (Exception e) {
-                Log.e(TAG, "fullShutdown: nativeStop failed: " + e.getMessage());
+                Log.e(TAG, "nativeStop failed: " + e.getMessage());
             }
 
-            // 3b. NOW close the Java fd — last reference, kernel tears down tunnel
             closeVpnFd();
 
-            // 3c. Stop foreground + stopSelf on main thread
             handler.post(() -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    stopForeground(STOP_FOREGROUND_REMOVE);
-                } else {
-                    //noinspection deprecation
-                    stopForeground(true);
-                }
+                stopForeground(true);
                 stopSelf();
-                Log.i(TAG, "fullShutdown: service stopped");
+                Log.i(TAG, "service stopped");
 
-                // Broadcast disconnection so the activity can update its UI
                 Intent broadcast = new Intent("com.fc.fcaevpn.VPN_DISCONNECTED");
                 broadcast.setPackage(getPackageName());
                 sendBroadcast(broadcast);
             });
-        }, "FCAE-FullShutdown").start();
+        }, "FCAE-Shutdown").start();
     }
 
-    /**
-     * Pause-only: stop the engine and close TUN but keep the service alive
-     * so the user can press Start to reconnect without going through
-     * VpnService.prepare() again.
-     */
-    private void pauseVpnKeepService() {
+    private void pauseVpn() {
         running = false;
         vpnPaused = true;
 
@@ -281,14 +220,13 @@ public class FCAEVpnService extends VpnService {
             try { t.join(1000); } catch (InterruptedException ignored) {}
         }
 
-        // Same pattern: nativeStop first, then fd close
         new Thread(() -> {
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
             closeVpnFd();
             handler.post(() -> {
-                statsHandler.removeCallbacks(statsRunnable);
-                updateNotificationStats();
-                Log.i(TAG, "VPN paused (service kept alive)");
+                handler.removeCallbacks(statsRunnable);
+                updateNotification();
+                Log.i(TAG, "VPN paused");
             });
         }, "FCAE-Pause").start();
     }
@@ -301,8 +239,32 @@ public class FCAEVpnService extends VpnService {
                 pfd.close();
                 Log.i(TAG, "VPN fd closed");
             } catch (Exception e) {
-                Log.e(TAG, "Error closing VPN fd: " + e.getMessage(), e);
+                Log.e(TAG, "Error closing fd: " + e.getMessage());
             }
+        }
+    }
+
+    private void updateNotification() {
+        if (vpnPaused) {
+            notification.show("FCAE VPN \u2014 Stopped (tap Start to resume)", false);
+        } else if (running) {
+            long rx = 0, tx = 0;
+            try {
+                long[] stats = nativeGetTrafficStats();
+                if (stats != null && stats.length >= 2) {
+                    rx = stats[0];
+                    tx = stats[1];
+                }
+            } catch (Exception ignored) {}
+            cachedTotalRx += rx;
+            cachedTotalTx += tx;
+            String text = String.format(
+                "\u2193 %s  %s  |  \u2191 %s  %s",
+                VpnNotification.fmtBytes(cachedTotalRx), VpnNotification.fmtRate(rx),
+                VpnNotification.fmtBytes(cachedTotalTx), VpnNotification.fmtRate(tx));
+            notification.show(text, true);
+        } else {
+            notification.show("FCAE VPN \u2014 Disconnected", false);
         }
     }
 
@@ -316,122 +278,5 @@ public class FCAEVpnService extends VpnService {
     public void onRevoke() {
         fullShutdown();
         super.onRevoke();
-    }
-
-    // ── Notification ─────────────────────────────────────────────────────
-
-    private void createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel ch = new NotificationChannel(
-                CHANNEL_ID, "FCAE VPN",
-                NotificationManager.IMPORTANCE_LOW);
-            ch.setDescription("FCAE VPN tunnel status");
-            NotificationManager mgr = getSystemService(NotificationManager.class);
-            if (mgr != null) mgr.createNotificationChannel(ch);
-        }
-    }
-
-    // Cached cumulative totals for notification (filled from JNI traffic stats)
-    private long cachedTotalRx = 0;
-    private long cachedTotalTx = 0;
-
-    private void updateNotificationStats() {
-        NotificationManager mgr = getSystemService(NotificationManager.class);
-        if (mgr == null) return;
-
-        boolean showStopBtn = running;
-
-        String text;
-        if (vpnPaused) {
-            text = "FCAE VPN — Stopped (tap Start to resume)";
-        } else if (running) {
-            long rx = 0, tx = 0;
-            try {
-                long[] stats = nativeGetTrafficStats();
-                if (stats != null && stats.length >= 2) {
-                    rx = stats[0];
-                    tx = stats[1];
-                }
-            } catch (UnsatisfiedLinkError e) {
-                Log.w(TAG, "nativeGetTrafficStats missing: " + e.getMessage());
-            } catch (Exception ignored) {}
-            // nativeGetTrafficStats only returns rates; accumulate for totals
-            cachedTotalRx += rx;
-            cachedTotalTx += tx;
-            text = String.format(
-                "\u2193 %s  %s  |  \u2191 %s  %s",
-                fmtBytes(cachedTotalRx), fmtRate(rx),
-                fmtBytes(cachedTotalTx), fmtRate(tx));
-        } else {
-            text = "FCAE VPN — Disconnected";
-        }
-
-        mgr.notify(NOTIFICATION_ID, buildNotification(text, showStopBtn));
-    }
-
-    private Notification buildNotification(String text, boolean showStopButton) {
-        Intent mainIntent = new Intent(this, MainActivity.class);
-        PendingIntent piMain = PendingIntent.getActivity(this, 0, mainIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
-        Notification.Builder nb;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            nb = new Notification.Builder(this, CHANNEL_ID);
-        } else {
-            nb = new Notification.Builder(this);
-        }
-
-        nb.setContentTitle("FCAE VPN")
-          .setContentText(text)
-          .setSmallIcon(android.R.drawable.ic_lock_lock)
-          .setContentIntent(piMain)
-          .setOngoing(true)
-          .setStyle(new Notification.BigTextStyle().bigText(text));
-
-        if (showStopButton) {
-            // Disconnect button first
-            Intent discIntent = new Intent(this, FCAEVpnService.class);
-            discIntent.setAction(ACTION_DISCONNECT);
-            PendingIntent piDisc = PendingIntent.getService(this, DISCONNECT_ACTION_CODE,
-                discIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            nb.addAction(new Notification.Action.Builder(null, "Disconnect", piDisc).build());
-
-            // Stop button second
-            Intent stopIntent = new Intent(this, FCAEVpnService.class);
-            stopIntent.setAction(ACTION_STOP);
-            PendingIntent piStop = PendingIntent.getService(this, STOP_ACTION_CODE,
-                stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            nb.addAction(new Notification.Action.Builder(null, "Stop", piStop).build());
-        } else {
-            // Disconnect always available
-            Intent discIntent = new Intent(this, FCAEVpnService.class);
-            discIntent.setAction(ACTION_DISCONNECT);
-            PendingIntent piDisc = PendingIntent.getService(this, DISCONNECT_ACTION_CODE,
-                discIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            nb.addAction(new Notification.Action.Builder(null, "Disconnect", piDisc).build());
-
-            // Start button second
-            Intent startIntent = new Intent(this, FCAEVpnService.class);
-            startIntent.setAction(ACTION_START);
-            PendingIntent piStart = PendingIntent.getService(this, STOP_ACTION_CODE,
-                startIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            nb.addAction(new Notification.Action.Builder(null, "Start", piStart).build());
-        }
-
-        return nb.build();
-    }
-
-    private static String fmtBytes(long b) {
-        if (b >= 1073741824L) return String.format("%.1f GB", b / 1073741824.0);
-        if (b >= 1048576L)    return String.format("%.1f MB", b / 1048576.0);
-        if (b >= 1024L)       return String.format("%.0f KB", b / 1024.0);
-        return b + " B";
-    }
-
-    private static String fmtRate(long bps) {
-        if (bps >= 1073741824L) return String.format("%.1f GB/s", bps / 1073741824.0);
-        if (bps >= 1048576L)    return String.format("%.1f MB/s", bps / 1048576.0);
-        if (bps >= 1024L)       return String.format("%.0f KB/s", bps / 1024.0);
-        return bps + " B/s";
     }
 }

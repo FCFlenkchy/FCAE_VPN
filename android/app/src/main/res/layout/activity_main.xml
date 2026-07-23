@@ -154,6 +154,13 @@
             android:text="Ironclad validation"
             android:textColor="#FFE0E4EE" />
 
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchLan"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="LAN sharing"
+            android:textColor="#FFE0E4EE" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

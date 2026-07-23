@@ -26,15 +26,13 @@ import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Kotlin Material UI — CONNECT is manual (no auto-start VPN).
- */
 class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var connecting = false
     private var engineRunning = false
     private var pendingAfterVpnPermission = false
     private var lastLogHash = 0
+    private var vpnActive = false
 
     private lateinit var statusText: TextView
     private lateinit var statsText: TextView
@@ -50,6 +48,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchEch: SwitchMaterial
     private lateinit var switchQuick: SwitchMaterial
     private lateinit var switchIronclad: SwitchMaterial
+    private lateinit var switchLan: SwitchMaterial
     private lateinit var switchLogging: SwitchMaterial
     private lateinit var switchSocks: SwitchMaterial
     private lateinit var switchHttp: SwitchMaterial
@@ -84,6 +83,7 @@ class MainActivity : AppCompatActivity() {
                 handler.post {
                     connecting = false
                     engineRunning = false
+                    vpnActive = false
                     updateButton()
                     statusText.text = "DISCONNECTED"
                     statusText.setTextColor(Color.parseColor("#8A93A6"))
@@ -96,6 +96,7 @@ class MainActivity : AppCompatActivity() {
 
     private val poll = object : Runnable {
         override fun run() {
+            if (!vpnActive) return
             if (!pollBusy.compareAndSet(false, true)) {
                 handler.postDelayed(this, 1500L)
                 return
@@ -136,6 +137,7 @@ class MainActivity : AppCompatActivity() {
         switchEch = findViewById(R.id.switchEch)
         switchQuick = findViewById(R.id.switchQuick)
         switchIronclad = findViewById(R.id.switchIronclad)
+        switchLan = findViewById(R.id.switchLan)
         switchLogging = findViewById(R.id.switchLogging)
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
@@ -146,46 +148,38 @@ class MainActivity : AppCompatActivity() {
         outerScroll = findViewById(R.id.outerScroll)
 
         spinnerProtocol.adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_dropdown_item,
+            this, android.R.layout.simple_spinner_dropdown_item,
             listOf("MASQUE (HTTP/3)", "WireGuard", "WARP-in-WARP"),
         )
         spinnerMode.adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_dropdown_item,
+            this, android.R.layout.simple_spinner_dropdown_item,
             listOf("Proxy (SOCKS/HTTP)", "TUN (system VPN)"),
         )
         spinnerScan.adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_dropdown_item,
+            this, android.R.layout.simple_spinner_dropdown_item,
             listOf("Turbo", "Balanced", "Thorough", "Stealth"),
         )
         spinnerNoize.adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_dropdown_item,
+            this, android.R.layout.simple_spinner_dropdown_item,
             listOf("off", "firewall", "balanced", "gfw", "chrome", "voice", "streaming"),
         )
         loadSettings()
 
-        // Clear logs on fresh app open
         bgExecutor.execute {
-            try {
-                NativeEngine.nativeClearLogs()
-            } catch (_: Throwable) {}
+            try { NativeEngine.nativeClearLogs() } catch (_: Throwable) {}
         }
         logText.text = ""
         lastLogHash = 0
 
         bgExecutor.execute {
-            try {
-                NativeEngine.nativeInit()
-            } catch (e: Throwable) {
+            try { NativeEngine.nativeInit() }
+            catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Native lib failed: ${e.message}", Toast.LENGTH_LONG).show() }
             }
         }
 
         btnConnect.setOnClickListener {
-            if (engineRunning || connecting) disconnectAll() else connectClicked()
+            if (vpnActive || engineRunning || connecting) disconnectAll() else connectClicked()
         }
 
         findViewById<MaterialButton>(R.id.btnClearLogs).setOnClickListener {
@@ -204,21 +198,15 @@ class MainActivity : AppCompatActivity() {
         updateButton()
         handler.post(poll)
 
-        // Detect manual scroll on log area — ignore during programmatic scrolls
         logScroll.viewTreeObserver.addOnScrollChangedListener {
             if (programmaticScroll) return@addOnScrollChangedListener
             val scrollable = logScroll.getChildAt(0)?.height?.minus(logScroll.height) ?: 0
             userScrolledUp = scrollable > 0 && logScroll.scrollY < scrollable - 10
         }
 
-        // Scroll outer layout to top after layout is measured
-        outerScroll.post {
-            outerScroll.scrollTo(0, 0)
-        }
-        // Fallback: force scroll to top after a short delay
+        outerScroll.post { outerScroll.scrollTo(0, 0) }
         outerScroll.postDelayed({ outerScroll.scrollTo(0, 0) }, 100)
 
-        // Listen for VPN disconnection from notification
         val filter = IntentFilter("com.fc.fcaevpn.VPN_DISCONNECTED")
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(vpnDisconnectedReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -249,6 +237,7 @@ class MainActivity : AppCompatActivity() {
             putBoolean("ech", switchEch.isChecked)
             putBoolean("quick", switchQuick.isChecked)
             putBoolean("ironclad", switchIronclad.isChecked)
+            putBoolean("lan", switchLan.isChecked)
             putBoolean("logging", switchLogging.isChecked)
             putBoolean("socks", switchSocks.isChecked)
             putBoolean("http", switchHttp.isChecked)
@@ -269,6 +258,7 @@ class MainActivity : AppCompatActivity() {
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", false)
         switchIronclad.isChecked = prefs.getBoolean("ironclad", false)
+        switchLan.isChecked = prefs.getBoolean("lan", false)
         switchLogging.isChecked = prefs.getBoolean("logging", true)
         switchSocks.isChecked = prefs.getBoolean("socks", true)
         switchHttp.isChecked = prefs.getBoolean("http", true)
@@ -301,6 +291,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startTunServiceWithConfig() {
         connecting = true
+        vpnActive = true
         updateButton()
         saveSettings()
         val i = Intent(this, FCAEVpnService::class.java)
@@ -312,6 +303,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("quickReconnect", switchQuick.isChecked)
         i.putExtra("h2Enabled", switchH2.isChecked)
         i.putExtra("echEnabled", switchEch.isChecked)
+        i.putExtra("lanSharing", switchLan.isChecked)
         i.putExtra("configPath", filesDir.resolve("aether.toml").absolutePath)
         i.putExtra("sni", editSni.text.toString().trim())
         i.putExtra("ironclad", switchIronclad.isChecked)
@@ -324,10 +316,12 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
         i.putExtra("forcePeer", editForcePeer.text.toString().trim())
         startForegroundService(i)
+        handler.post(poll)
     }
 
     private fun startEngine() {
         connecting = true
+        vpnActive = true
         updateButton()
         saveSettings()
 
@@ -337,7 +331,8 @@ class MainActivity : AppCompatActivity() {
         val quick = switchQuick.isChecked
         val h2 = switchH2.isChecked
         val ech = switchEch.isChecked
-        val ironclad = switchIronclad.isChecked
+        val iron = switchIronclad.isChecked
+        val lan = switchLan.isChecked
         val sni = editSni.text.toString().trim()
         val hi = healthInterval()
         val hf = healthMaxFails()
@@ -348,7 +343,7 @@ class MainActivity : AppCompatActivity() {
                 NativeEngine.nativeStart(
                     protocol = protocol,
                     mode = mode,
-                    lanSharing = false,
+                    lanSharing = lan,
                     scanMode = scanMode,
                     ipVersion = 4,
                     quickReconnect = quick,
@@ -365,7 +360,7 @@ class MainActivity : AppCompatActivity() {
                     h2Enabled = h2,
                     echEnabled = ech,
                     sni = sni,
-                    ironcladValidate = ironclad,
+                    ironcladValidate = iron,
                     healthIntervalSecs = hi,
                     healthMaxFails = hf,
                     healthTimeoutSecs = 5,
@@ -378,36 +373,41 @@ class MainActivity : AppCompatActivity() {
             handler.post {
                 if (!ok) {
                     connecting = false
+                    vpnActive = false
                     Toast.makeText(this, "Failed to start engine", Toast.LENGTH_SHORT).show()
                 }
                 updateButton()
-                refreshStatus()
+                if (ok) handler.post(poll)
             }
         }
     }
 
+    /**
+     * Disconnect: stop the poll and native engine from the activity side FIRST,
+     * then tell the service to clean up. The poll was interfering with nativeStop()
+     * because it kept calling nativeGetStatusJson() during shutdown.
+     */
     private fun disconnectAll() {
+        // 1. Kill the poll immediately — it calls native methods that interfere
+        //    with nativeStop() running in the service
+        handler.removeCallbacks(poll)
+        vpnActive = false
+
         connecting = false
         engineRunning = false
         updateButton()
 
-        // Send disconnect to the service — it handles nativeStop + fd close + stopSelf
-        try {
-            val i = Intent(this, FCAEVpnService::class.java)
-            i.action = FCAEVpnService.ACTION_DISCONNECT
-            startForegroundService(i)
-        } catch (_: Throwable) {}
-    }
-
-    private fun refreshStatus() {
+        // 2. Stop native engine from the activity's background thread — this
+        //    ensures no other native calls are in flight when we stop
         bgExecutor.execute {
+            try { NativeEngine.nativeStop() } catch (_: Throwable) {}
+
+            // 3. Now tell the service to close fd and destroy itself
             try {
-                val statusJson = NativeEngine.nativeGetStatusJson()
-                val logs = if (switchLogging.isChecked) NativeEngine.nativeGetLogs() else ""
-                handler.post { applyStatus(statusJson, logs) }
-            } catch (e: Throwable) {
-                handler.post { statusText.text = "UI error: ${e.message}" }
-            }
+                val i = Intent(this@MainActivity, FCAEVpnService::class.java)
+                i.action = FCAEVpnService.ACTION_DISCONNECT
+                startForegroundService(i)
+            } catch (_: Throwable) {}
         }
     }
 
@@ -436,7 +436,7 @@ class MainActivity : AppCompatActivity() {
                 5 -> "ERROR"
                 else -> "UNKNOWN"
             }
-            statusText.text = if (status.isNotEmpty()) "$label — $status" else label
+            statusText.text = if (status.isNotEmpty()) "$label \u2014 $status" else label
             statusText.setTextColor(
                 when (state) {
                     4 -> Color.parseColor("#34D399")
@@ -446,18 +446,16 @@ class MainActivity : AppCompatActivity() {
                 },
             )
             statsText.text =
-                "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "—"}"
-            peerText.text = "Peer: ${peer.ifEmpty { " — " }}" +
+                "\u2193 ${fmt(rx)}/s (${fmt(totalRx)})  |  \u2191 ${fmt(tx)}/s (${fmt(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "\u2014"}"
+            peerText.text = "Peer: ${peer.ifEmpty { " \u2014 " }}" +
                 if (err.isNotEmpty()) "\nError: $err" else ""
 
             val h = logs.hashCode()
             if (h != lastLogHash) {
                 lastLogHash = h
                 val shown = if (logs.length > 24_000) logs.takeLast(24_000) else logs
-                // Save scroll position before updating text to prevent outer scroll jump
                 val wasAtBottom = !userScrolledUp
                 logText.text = shown
-                // Auto-scroll if user was at the bottom (or hasn't scrolled up)
                 if (wasAtBottom) {
                     programmaticScroll = true
                     logScroll.post {
@@ -473,7 +471,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateButton() {
-        if (engineRunning || connecting) {
+        if (vpnActive || engineRunning || connecting) {
             btnConnect.text = "DISCONNECT"
             btnConnect.setBackgroundColor(Color.parseColor("#B91C1C"))
         } else {
