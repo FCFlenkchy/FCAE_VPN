@@ -6,8 +6,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 public class FCAEVpnService extends VpnService {
     private static final String TAG = "FCAE_VPN";
@@ -20,8 +18,6 @@ public class FCAEVpnService extends VpnService {
     private volatile Thread vpnThread;
     private volatile boolean running = false;
     private volatile boolean vpnPaused = false;
-    // Ensures nativeStop completes before nativeStart is called
-    private final CountDownLatch nativeStopLatch = new CountDownLatch(1);
 
     private Intent lastStartIntent;
     private VpnNotification notification;
@@ -82,6 +78,12 @@ public class FCAEVpnService extends VpnService {
         if (running) return;
         vpnPaused = false;
 
+        // Ensure any previous native engine is fully stopped before starting.
+        // nativeStop is now fast (sets flag + closes dup'd fds), so calling
+        // it synchronously here won't block. This prevents nativeStart/nativeStop
+        // from crashing when the user reconnects quickly after disconnect.
+        stopNativeSync();
+
         notification.show("FCAE VPN \u2014 Connecting...", false);
         startForeground(VpnNotification.NOTIFICATION_ID,
             notification.build("FCAE VPN \u2014 Connecting...", false));
@@ -112,12 +114,6 @@ public class FCAEVpnService extends VpnService {
 
         vpnThread = new Thread(() -> {
             try {
-                // Wait for any pending nativeStop to finish before calling
-                // nativeStart — they clash inside the native engine.
-                if (!nativeStopLatch.await(5, TimeUnit.SECONDS)) {
-                    Log.w(TAG, "nativeStop didn't complete in 5s, proceeding anyway");
-                }
-
                 Builder builder = new Builder();
                 builder.setSession("FCAE VPN");
                 builder.setMtu(1420);
@@ -177,6 +173,23 @@ public class FCAEVpnService extends VpnService {
         vpnThread.start();
     }
 
+    /**
+     * Call nativeStop synchronously with a 2s timeout.
+     * nativeStop is now fast (sets SHUTDOWN flag + closes dup'd fds),
+     * so this returns in milliseconds in the normal case.
+     */
+    private void stopNativeSync() {
+        Thread t = new Thread(() -> {
+            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+        }, "FCAE-NativeStop-Sync");
+        t.start();
+        try { t.join(2000); } catch (InterruptedException ignored) {}
+        if (t.isAlive()) {
+            Log.w(TAG, "nativeStop timed out after 2s");
+            t.interrupt();
+        }
+    }
+
     private void fullShutdown() {
         if (!running && vpnInterface == null) return;
         running = false;
@@ -211,21 +224,7 @@ public class FCAEVpnService extends VpnService {
         broadcast.setPackage(getPackageName());
         sendBroadcast(broadcast);
 
-        new Thread(() -> {
-            Thread worker = new Thread(() -> {
-                try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-            }, "FCAE-NativeStop");
-            worker.start();
-            try { worker.join(3000); } catch (InterruptedException ignored) {}
-            if (worker.isAlive()) {
-                Log.w(TAG, "nativeStop timed out after 3s");
-                worker.interrupt();
-            } else {
-                Log.i(TAG, "nativeStop completed");
-            }
-            // Signal that nativeStop is done — startVpn() can now call nativeStart()
-            nativeStopLatch.countDown();
-        }, "FCAE-NativeStop-Watchdog").start();
+        stopNativeSync();
     }
 
     private void pauseVpn() {
@@ -249,15 +248,7 @@ public class FCAEVpnService extends VpnService {
         updateNotification();
         Log.i(TAG, "VPN paused");
 
-        new Thread(() -> {
-            Thread worker = new Thread(() -> {
-                try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-            }, "FCAE-NativeStop-Pause");
-            worker.start();
-            try { worker.join(3000); } catch (InterruptedException ignored) {}
-            if (worker.isAlive()) worker.interrupt();
-            nativeStopLatch.countDown();
-        }, "FCAE-Pause-Watchdog").start();
+        stopNativeSync();
     }
 
     private void updateNotification() {
