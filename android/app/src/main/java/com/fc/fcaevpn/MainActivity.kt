@@ -388,6 +388,13 @@ class MainActivity : AppCompatActivity() {
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
 
         bgExecutor.execute {
+            // Ensure previous engine is fully stopped before starting.
+            // aether_start() now waits for RUNNING=false if SHUTDOWN is set,
+            // but we still call nativeStop() first for safety.
+            try { NativeEngine.nativeStop() } catch (_: Throwable) {}
+            // Brief pause to let the engine thread observe SHUTDOWN
+            try { Thread.sleep(300) } catch (_: Throwable) {}
+
             val ok = try {
                 NativeEngine.nativeStart(
                     protocol = protocol,
@@ -432,10 +439,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnectAll() {
-        // Do exactly what the notification disconnect button does:
-        // send ACTION_DISCONNECT directly to the service. No bgExecutor
-        // coordination, no flag-setting before the intent — the service
-        // handles everything and the broadcast receiver updates the UI.
+        // Reset UI state immediately so the button flips to CONNECT
+        // before the async broadcast arrives.  This prevents double-tap
+        // races where the user taps CONNECT while the old broadcast is
+        // still in-flight.
+        vpnActive = false
+        engineRunning = false
+        connecting = false
+        handler.removeCallbacks(poll)
+        updateButton()
+        statusText.text = "DISCONNECTING..."
+        statusText.setTextColor(Color.parseColor("#8A93A6"))
+
         try {
             val i = Intent(this, FCAEVpnService::class.java)
             i.action = FCAEVpnService.ACTION_DISCONNECT

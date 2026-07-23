@@ -88,11 +88,12 @@ public class FCAEVpnService extends VpnService {
         vpnPaused = false;
         shuttingDown = false;
 
-        // Ensure any previous native engine is fully stopped before starting.
-        // nativeStop is now fast (sets flag + closes dup'd fds), so calling
-        // it synchronously here won't block. This prevents nativeStart/nativeStop
-        // from crashing when the user reconnects quickly after disconnect.
-        stopNativeSync();
+        // Ensure any previous native engine is FULLY stopped (thread joined)
+        // before starting a new one.  stopNativeFree() blocks until the
+        // engine thread exits, so RUNNING will be false when nativeStart()
+        // is called.  This prevents the rapid-connect crash where
+        // aether_start() sees RUNNING=true from a previous run.
+        stopNativeFree();
 
         notification.show("FCAE VPN \u2014 Connecting...", false);
         startForeground(VpnNotification.NOTIFICATION_ID,
@@ -185,9 +186,10 @@ public class FCAEVpnService extends VpnService {
     }
 
     /**
-     * Call nativeStop synchronously. aether_stop() returns in <300ms
-     * when the engine sees the SHUTDOWN flag, or instantly if not running.
-     * 1.5s is generous headroom — no need to block the UI for 4s.
+     * Call nativeStop synchronously. aether_stop() is non-blocking (sets
+     * shutdown flag + closes dup'd fds + updates telemetry), so it returns
+     * in under 300 ms.  The engine thread may still be alive (dropping the
+     * tokio runtime) — use stopNativeFree() if you need a full drain.
      */
     private void stopNativeSync() {
         Thread t = new Thread(() -> {
@@ -197,6 +199,23 @@ public class FCAEVpnService extends VpnService {
         try { t.join(1500); } catch (InterruptedException ignored) {}
         if (t.isAlive()) {
             Log.w(TAG, "nativeStop timed out — letting it die with process");
+        }
+    }
+
+    /**
+     * Call nativeFree synchronously — blocks until the engine thread fully
+     * exits (drops the tokio runtime, joins the watch thread).
+     * Use this when you MUST guarantee the engine is done with the TUN fd
+     * before closing it (e.g. fullShutdown, pauseVpn).
+     */
+    private void stopNativeFree() {
+        Thread t = new Thread(() -> {
+            try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
+        }, "FCAE-NativeFree-Sync");
+        t.start();
+        try { t.join(5000); } catch (InterruptedException ignored) {}
+        if (t.isAlive()) {
+            Log.w(TAG, "nativeFree timed out — letting it die with process");
         }
     }
 
@@ -212,10 +231,10 @@ public class FCAEVpnService extends VpnService {
         handler.removeCallbacks(statsRunnable);
 
         // Stop the native engine BEFORE closing the VPN fd and stopping
-        // the service. This ensures the engine thread is fully drained
-        // before the next startVpn() call, preventing the race where
-        // RUNNING is still true and aether_start() fails.
-        stopNativeSync();
+        // the service.  nativeFree() blocks until the engine thread fully
+        // exits (drops the tokio runtime), so after it returns we are
+        // guaranteed the engine is done with the TUN fd.
+        stopNativeFree();
 
         Thread t = vpnThread;
         vpnThread = null;
@@ -224,6 +243,7 @@ public class FCAEVpnService extends VpnService {
             try { t.join(1000); } catch (InterruptedException ignored) {}
         }
 
+        // NOW safe to close the VPN fd — engine thread is gone.
         ParcelFileDescriptor pfdToClose = vpnInterface;
         vpnInterface = null;
         if (pfdToClose != null) {
@@ -248,6 +268,11 @@ public class FCAEVpnService extends VpnService {
         running = false;
         vpnPaused = true;
 
+        // Stop the native engine FIRST — before closing the VPN fd.
+        // stopNativeFree() blocks until the engine thread exits, so after
+        // it returns the engine is guaranteed done with the TUN fd.
+        stopNativeFree();
+
         Thread t = vpnThread;
         vpnThread = null;
         if (t != null) {
@@ -255,6 +280,7 @@ public class FCAEVpnService extends VpnService {
             try { t.join(1000); } catch (InterruptedException ignored) {}
         }
 
+        // NOW safe to close the VPN fd.
         ParcelFileDescriptor pfdToClose = vpnInterface;
         vpnInterface = null;
         if (pfdToClose != null) {
@@ -264,8 +290,6 @@ public class FCAEVpnService extends VpnService {
         handler.removeCallbacks(statsRunnable);
         updateNotification();
         Log.i(TAG, "VPN paused");
-
-        stopNativeSync();
         notifyUi();
     }
 

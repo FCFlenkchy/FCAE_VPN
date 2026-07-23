@@ -578,12 +578,25 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         return false;
     }
     if RUNNING.load(Ordering::SeqCst) {
-        return false;
+        // Previous engine still running.  If SHUTDOWN was signaled (i.e.
+        // aether_stop() was called), wait up to 5 s for it to drain.
+        // This prevents the Android rapid-connect crash where
+        // nativeStop() is non-blocking but nativeStart() sees RUNNING=true.
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            for _ in 0..50 {
+                if !RUNNING.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        if RUNNING.load(Ordering::SeqCst) {
+            return false;
+        }
     }
 
-    // If a previous engine thread is still winding down (e.g. tokio
-    // runtime drop), join it before starting a new one.
-    join_engine_thread();
+    // Take any leftover JoinHandle from a previous run.
+    let _ = ENGINE_THREAD.lock().take();
 
     let cfg = unsafe {
         if config.is_null() {
@@ -822,9 +835,7 @@ pub extern "C" fn aether_free() {
 
     // Wait for the engine thread to fully exit.  This is critical:
     // the engine thread drops the tokio runtime *after* block_on returns,
-    // which cancels all async tasks and may log messages.  We must not
-    // null out LOG_CB until the thread has finished, otherwise log_msg
-    // would dereference a null function pointer.
+    // which cancels all async tasks and may log messages.
     join_engine_thread();
 
     // Also wait for RUNNING to become false — this covers the edge case
@@ -839,7 +850,12 @@ pub extern "C" fn aether_free() {
 
     // Now safe to tear down — the engine thread is no longer running.
     RUNNING.store(false, Ordering::SeqCst);
-    INITIALIZED.store(false, Ordering::SeqCst);
+
+    // NOTE: Do NOT clear INITIALIZED or LOG_CB here.  On Android the
+    // VPN service may call aether_free() (via nativeFree) and then
+    // re-start the engine later.  aether_init() uses INIT_ONCE so it
+    // can only set these once — clearing them here would make the FFI
+    // layer permanently unusable after the first free.
 
     let mut t = TELEMETRY.lock();
     t.state = 0;
@@ -851,11 +867,4 @@ pub extern "C" fn aether_free() {
     t.total_rx = 0;
     t.total_tx = 0;
     t.last_error.clear();
-
-    // Null out log callback LAST — the engine thread may still be
-    // logging up until join_engine_thread() returns above.
-    unsafe {
-        LOG_CB = None;
-        LOG_USER_DATA = std::ptr::null_mut();
-    }
 }
