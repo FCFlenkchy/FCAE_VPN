@@ -1,10 +1,12 @@
 package com.fc.fcaevpn
 
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.net.VpnService
 import android.os.Bundle
@@ -62,6 +64,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
 
     private var userScrolledUp = false
+
+    private val vpnDisconnectedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == "com.fc.fcaevpn.VPN_DISCONNECTED") {
+                handler.post {
+                    connecting = false
+                    engineRunning = false
+                    updateButton()
+                    statusText.text = "DISCONNECTED"
+                    statusText.setTextColor(Color.parseColor("#8A93A6"))
+                    statsText.text = ""
+                    peerText.text = ""
+                }
+            }
+        }
+    }
 
     private val poll = object : Runnable {
         override fun run() {
@@ -185,6 +203,14 @@ class MainActivity : AppCompatActivity() {
         }
         // Fallback: force scroll to top after a short delay
         outerScroll.postDelayed({ outerScroll.scrollTo(0, 0) }, 100)
+
+        // Listen for VPN disconnection from notification
+        val filter = IntentFilter("com.fc.fcaevpn.VPN_DISCONNECTED")
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(vpnDisconnectedReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(vpnDisconnectedReceiver, filter)
+        }
     }
 
     override fun onPause() {
@@ -194,6 +220,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(poll)
+        try { unregisterReceiver(vpnDisconnectedReceiver) } catch (_: Throwable) {}
         bgExecutor.shutdownNow()
         super.onDestroy()
     }

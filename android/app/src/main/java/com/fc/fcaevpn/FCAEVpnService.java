@@ -27,10 +27,11 @@ public class FCAEVpnService extends VpnService {
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
     public static final String ACTION_START     = "com.fc.fcaevpn.START";
 
-    private ParcelFileDescriptor vpnInterface;
-    private Thread vpnThread;
+    private volatile ParcelFileDescriptor vpnInterface;
+    private volatile Thread vpnThread;
     private volatile boolean running = false;
     private volatile boolean vpnPaused = false;
+    private volatile boolean shutdownRequested = false;
 
     // Last config used to start the VPN (for notification Start button)
     private Intent lastStartIntent;
@@ -89,6 +90,7 @@ public class FCAEVpnService extends VpnService {
 
     private void startVpn(Intent intent) {
         if (running) return;
+        shutdownRequested = false;
         vpnPaused = false;
 
         // Show foreground notification IMMEDIATELY (required within 5s of startForegroundService)
@@ -130,6 +132,8 @@ public class FCAEVpnService extends VpnService {
 
         vpnThread = new Thread(() -> {
             try {
+                if (shutdownRequested) return;
+
                 Builder builder = new Builder();
                 builder.setSession("FCAE VPN");
                 builder.setMtu(1420);
@@ -148,6 +152,11 @@ public class FCAEVpnService extends VpnService {
                 if (vpnInterface == null) {
                     Log.e(TAG, "Failed to establish VPN (permission denied?)");
                     stopVpnAndNotification();
+                    return;
+                }
+
+                if (shutdownRequested) {
+                    cleanupVpnInterface();
                     return;
                 }
 
@@ -172,6 +181,11 @@ public class FCAEVpnService extends VpnService {
                     return;
                 }
 
+                if (shutdownRequested) {
+                    cleanupVpnInterface();
+                    return;
+                }
+
                 running = true;
                 Log.i(TAG, "VPN engine started in TUN mode");
                 cachedTotalRx = 0;
@@ -180,7 +194,7 @@ public class FCAEVpnService extends VpnService {
                 statsHandler.post(statsRunnable);
 
                 // Keep thread alive — engine runs in its own thread via FFI.
-                while (running) {
+                while (running && !shutdownRequested) {
                     try {
                         Thread.sleep(200);
                     } catch (InterruptedException e) {
@@ -189,9 +203,14 @@ public class FCAEVpnService extends VpnService {
                 }
             } catch (Exception e) {
                 Log.e(TAG, "VPN error: " + e.getMessage(), e);
-                handler.post(() -> stopVpnAndNotification());
+                if (!shutdownRequested) {
+                    handler.post(() -> stopVpnAndNotification());
+                }
             } finally {
-                cleanupVpnInterface();
+                // Only close if shutdown hasn't already handled it
+                if (!shutdownRequested) {
+                    cleanupVpnInterface();
+                }
             }
         }, "FCAE-VPN-Worker");
 
@@ -203,6 +222,7 @@ public class FCAEVpnService extends VpnService {
     private void stopVpnKeepNotification() {
         running = false;
         vpnPaused = true;
+        shutdownRequested = true;
 
         if (vpnThread != null) {
             vpnThread.interrupt();
@@ -218,32 +238,60 @@ public class FCAEVpnService extends VpnService {
     }
 
     private void stopVpnAndNotification() {
+        // Idempotency guard — prevent double execution from onDestroy()
+        if (shutdownRequested) {
+            Log.i(TAG, "stopVpnAndNotification: already stopped, skipping");
+            return;
+        }
+        shutdownRequested = true;
+
         Log.i(TAG, "stopVpnAndNotification: beginning full shutdown");
+
+        // 1. Mark as not running FIRST so no new work starts
         running = false;
         vpnPaused = false;
 
-        // 1. Stop the engine first (stops all network I/O)
+        // 2. Cancel periodic stats immediately
+        statsHandler.removeCallbacks(statsRunnable);
+
+        // 3. Stop native engine FIRST — this signals the engine to release the TUN fd
         try { NativeEngine.nativeStop(); } catch (Exception e) {
             Log.e(TAG, "nativeStop failed: " + e.getMessage());
         }
 
-        // 2. Kill the VPN thread
-        if (vpnThread != null) {
-            vpnThread.interrupt();
-            try { vpnThread.join(3000); } catch (InterruptedException ignored) {}
-            vpnThread = null;
+        // 4. Force-kill the VPN thread
+        Thread t = vpnThread;
+        vpnThread = null;
+        if (t != null) {
+            t.interrupt();
+            try { t.join(2000); } catch (InterruptedException ignored) {}
+            if (t.isAlive()) {
+                Log.w(TAG, "VPN thread still alive after join, interrupting again");
+                t.interrupt();
+            }
         }
 
-        // 3. Close the VPN interface (kills the OS VPN tunnel)
+        // 5. Close the VPN interface — tears down the OS VPN tunnel
         cleanupVpnInterface();
 
-        // 4. Cancel periodic stats
-        statsHandler.removeCallbacks(statsRunnable);
-
-        // 5. Dismiss notification and destroy service
-        stopForeground(STOP_FOREGROUND_REMOVE);
+        // 6. Dismiss notification and destroy service
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE);
+            } else {
+                //noinspection deprecation
+                stopForeground(true);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "stopForeground failed: " + e.getMessage());
+        }
         stopSelf();
         Log.i(TAG, "VPN fully stopped + service destroyed");
+
+        // 7. Broadcast disconnection so the activity can update its UI
+        Intent broadcast = new Intent("com.fc.fcaevpn.VPN_DISCONNECTED");
+        broadcast.setPackage(getPackageName());
+        sendBroadcast(broadcast);
     }
 
     private void cleanupVpnInterface() {
@@ -260,6 +308,7 @@ public class FCAEVpnService extends VpnService {
 
     @Override
     public void onDestroy() {
+        // stopVpnAndNotification() has its own idempotency guard
         stopVpnAndNotification();
         super.onDestroy();
     }
