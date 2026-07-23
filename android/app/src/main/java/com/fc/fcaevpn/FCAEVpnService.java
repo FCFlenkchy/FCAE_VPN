@@ -205,11 +205,6 @@ public class FCAEVpnService extends VpnService {
         if (shuttingDown) return;
         shuttingDown = true;
 
-        if (!running && vpnInterface == null) {
-            notifyUi();
-            return;
-        }
-
         running = false;
         vpnPaused = false;
 

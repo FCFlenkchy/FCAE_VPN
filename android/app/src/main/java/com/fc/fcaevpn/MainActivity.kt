@@ -124,6 +124,13 @@ class MainActivity : AppCompatActivity() {
             }
             bgExecutor.execute {
                 try {
+                    // Double-check vpnActive on the bg thread — disconnectAll()
+                    // may have set it to false after we checked on the main thread
+                    // but before this task started executing.
+                    if (!vpnActive) {
+                        handler.post { pollBusy.set(false) }
+                        return@execute
+                    }
                     val statusJson = NativeEngine.nativeGetStatusJson()
                     val logs = if (switchLogging.isChecked) NativeEngine.nativeGetLogs() else ""
                     handler.post { applyStatus(statusJson, logs) }
