@@ -108,6 +108,8 @@ public class FCAEVpnService extends VpnService {
         int liveValidate = intent.getIntExtra("liveValidate", 20);
         int socksPort = intent.getIntExtra("socksPort", 1819);
         int httpPort = intent.getIntExtra("httpPort", 1820);
+        String noizeProfile = intent.getStringExtra("noizeProfile");
+        String forcePeer = intent.getStringExtra("forcePeer");
         String configPathExtra = intent.getStringExtra("configPath");
         String sniExtra = intent.getStringExtra("sni");
         final String configPath =
@@ -158,9 +160,10 @@ public class FCAEVpnService extends VpnService {
 
                 boolean ok = NativeEngine.nativeStart(
                     fProtocol, fMode, false, fScanMode,
-                    fIpVersion, fQuickReconnect, "balanced",
+                    fIpVersion, fQuickReconnect,
+                    (noizeProfile == null || noizeProfile.isEmpty()) ? "balanced" : noizeProfile,
                     false, 16, 32, 2, 10, socksPort, httpPort,
-                    "", configPath, fH2Enabled, fEchEnabled,
+                    (forcePeer == null) ? "" : forcePeer, configPath, fH2Enabled, fEchEnabled,
                     sni, fIronclad, fHealthInterval, fHealthMaxFails, fHealthTimeout, fLiveValidate
                 );
                 if (!ok) {
@@ -198,8 +201,9 @@ public class FCAEVpnService extends VpnService {
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private void stopVpnKeepNotification() {
+        // "Stop" now fully disconnects the VPN (same as Disconnect)
         running = false;
-        vpnPaused = true;
+        vpnPaused = false;
 
         if (vpnThread != null) {
             vpnThread.interrupt();
@@ -209,8 +213,9 @@ public class FCAEVpnService extends VpnService {
         NativeEngine.nativeStop();
         cleanupVpnInterface();
         statsHandler.removeCallbacks(statsRunnable);
-        updateNotificationStats();
-        Log.i(TAG, "VPN stopped (notification kept)");
+        stopForeground(true);
+        stopSelf();
+        Log.i(TAG, "VPN fully stopped via Stop button");
     }
 
     private void stopVpnAndNotification() {
@@ -324,17 +329,19 @@ public class FCAEVpnService extends VpnService {
           .setStyle(new Notification.BigTextStyle().bigText(text));
 
         if (showStopButton) {
-            Intent stopIntent = new Intent(this, FCAEVpnService.class);
-            stopIntent.setAction(ACTION_STOP);
-            PendingIntent piStop = PendingIntent.getService(this, STOP_ACTION_CODE,
-                stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            nb.addAction(new Notification.Action.Builder(null, "Stop", piStop).build());
-
+            // Disconnect button first
             Intent discIntent = new Intent(this, FCAEVpnService.class);
             discIntent.setAction(ACTION_DISCONNECT);
             PendingIntent piDisc = PendingIntent.getService(this, DISCONNECT_ACTION_CODE,
                 discIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             nb.addAction(new Notification.Action.Builder(null, "Disconnect", piDisc).build());
+
+            // Stop button second
+            Intent stopIntent = new Intent(this, FCAEVpnService.class);
+            stopIntent.setAction(ACTION_STOP);
+            PendingIntent piStop = PendingIntent.getService(this, STOP_ACTION_CODE,
+                stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            nb.addAction(new Notification.Action.Builder(null, "Stop", piStop).build());
         } else {
             Intent startIntent = new Intent(this, FCAEVpnService.class);
             startIntent.setAction(ACTION_START);

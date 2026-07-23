@@ -52,8 +52,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchSocks: SwitchMaterial
     private lateinit var switchHttp: SwitchMaterial
     private lateinit var editSni: android.widget.EditText
+    private lateinit var editForcePeer: android.widget.EditText
     private lateinit var editHealthInterval: android.widget.EditText
     private lateinit var editHealthMaxFails: android.widget.EditText
+    private lateinit var outerScroll: ScrollView
 
     private val bgExecutor = Executors.newSingleThreadExecutor()
     private val pollBusy = AtomicBoolean(false)
@@ -105,8 +107,10 @@ class MainActivity : AppCompatActivity() {
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
         editSni = findViewById(R.id.editSni)
+        editForcePeer = findViewById(R.id.editForcePeer)
         editHealthInterval = findViewById(R.id.editHealthInterval)
         editHealthMaxFails = findViewById(R.id.editHealthMaxFails)
+        outerScroll = findViewById(R.id.outerScroll)
 
         spinnerProtocol.adapter = ArrayAdapter(
             this,
@@ -167,8 +171,8 @@ class MainActivity : AppCompatActivity() {
         updateButton()
         handler.post(poll)
 
-        // Ensure ScrollView starts at the top
-        logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_UP) }
+        // Ensure outer ScrollView starts at the top
+        outerScroll.post { outerScroll.fullScroll(ScrollView.FOCUS_UP) }
     }
 
     override fun onPause() {
@@ -196,6 +200,7 @@ class MainActivity : AppCompatActivity() {
             putBoolean("socks", switchSocks.isChecked)
             putBoolean("http", switchHttp.isChecked)
             putString("sni", editSni.text.toString().trim())
+            putString("forcePeer", editForcePeer.text.toString().trim())
             putString("healthInterval", editHealthInterval.text.toString())
             putString("healthMaxFails", editHealthMaxFails.text.toString())
             apply()
@@ -215,6 +220,7 @@ class MainActivity : AppCompatActivity() {
         switchSocks.isChecked = prefs.getBoolean("socks", true)
         switchHttp.isChecked = prefs.getBoolean("http", true)
         editSni.setText(prefs.getString("sni", ""))
+        editForcePeer.setText(prefs.getString("forcePeer", ""))
         editHealthInterval.setText(prefs.getString("healthInterval", "20"))
         editHealthMaxFails.setText(prefs.getString("healthMaxFails", "2"))
     }
@@ -277,6 +283,8 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("liveValidate", 20)
         i.putExtra("socksPort", if (switchSocks.isChecked) 1819 else 0)
         i.putExtra("httpPort", if (switchHttp.isChecked) 1820 else 0)
+        i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
+        i.putExtra("forcePeer", editForcePeer.text.toString().trim())
         startForegroundService(i)
     }
 
@@ -314,7 +322,7 @@ class MainActivity : AppCompatActivity() {
                     fragMaxDelay = 10,
                     socksPort = if (switchSocks.isChecked) 1819 else 0,
                     httpPort = if (switchHttp.isChecked) 1820 else 0,
-                    forcePeer = "",
+                    forcePeer = editForcePeer.text.toString().trim(),
                     configPath = cfgPath,
                     h2Enabled = h2,
                     echEnabled = ech,
@@ -341,25 +349,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnectAll() {
-        connecting = true
+        connecting = false
         engineRunning = false
         updateButton()
+
+        // Stop VPN service first
+        try {
+            val i = Intent(this, FCAEVpnService::class.java)
+            i.action = FCAEVpnService.ACTION_DISCONNECT
+            startForegroundService(i)
+        } catch (_: Throwable) {}
+
+        // Then stop native engine
         bgExecutor.execute {
             try {
                 NativeEngine.nativeStop()
-            } catch (_: Throwable) {
-            }
+            } catch (_: Throwable) {}
             handler.post {
-                try {
-                    val i = Intent(this, FCAEVpnService::class.java)
-                    i.action = FCAEVpnService.ACTION_DISCONNECT
-                    startForegroundService(i)
-                } catch (_: Throwable) {
-                }
                 connecting = false
                 engineRunning = false
                 updateButton()
-                refreshStatus()
+                statusText.text = "DISCONNECTED"
+                statusText.setTextColor(Color.parseColor("#8A93A6"))
+                statsText.text = ""
+                peerText.text = ""
             }
         }
     }
@@ -420,7 +433,12 @@ class MainActivity : AppCompatActivity() {
                 lastLogHash = h
                 val shown = if (logs.length > 24_000) logs.takeLast(24_000) else logs
                 logText.text = shown
-                logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
+                // Only auto-scroll if user was already at the bottom
+                val scrollableHeight = logScroll.getChildAt(0)?.height?.minus(logScroll.height) ?: 0
+                val wasAtBottom = logScroll.scrollY >= scrollableHeight - 10
+                if (wasAtBottom) {
+                    logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
+                }
             }
             updateButton()
         } catch (e: Throwable) {

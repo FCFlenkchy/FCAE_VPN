@@ -178,6 +178,27 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
+            android:text="Force Peer (optional)"
+            android:textColor="#FF9AA3B5"
+            android:textSize="13sp" />
+
+        <EditText
+            android:id="@+id/editForcePeer"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="4dp"
+            android:background="#FF1E1E2C"
+            android:hint="ip:port"
+            android:inputType="text"
+            android:padding="12dp"
+            android:textColor="#FFE8ECF4"
+            android:textColorHint="#FF5A6478"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
             android:text="Health interval (s)"
             android:textColor="#FF9AA3B5"
             android:textSize="13sp" />
