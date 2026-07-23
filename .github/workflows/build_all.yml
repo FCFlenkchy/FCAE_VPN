@@ -90,7 +90,7 @@ jobs:
             libglfw3-dev libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
             pkg-config openjdk-17-jdk \
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
-            protobuf-compiler upx-ucl \
+            protobuf-compiler \
             nasm golang-go zip
           nasm -v
 
@@ -218,10 +218,6 @@ jobs:
           cmake .. -G Ninja \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
           cmake --build . --config Release
-
-      - name: upx compress (windows)
-        if: matrix.name == 'windows-x64'
-        run: upx --best --lzma build/fcaevpn.exe 2>/dev/null || true
 
       - name: build apk
         if: matrix.name == 'android-arm64-v8a'
