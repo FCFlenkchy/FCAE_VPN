@@ -89,6 +89,7 @@ public class FCAEVpnService extends VpnService {
 
     private void startVpn(Intent intent) {
         if (running) return;
+        shuttingDown = false;
         vpnPaused = false;
 
         // Show foreground notification IMMEDIATELY (required within 5s of startForegroundService)
@@ -227,21 +228,26 @@ public class FCAEVpnService extends VpnService {
             try { t.join(2000); } catch (InterruptedException ignored) {}
         }
 
-        // 3. Stop native engine FIRST — this makes the engine release the
-        //    dup'd TUN fd it holds. Until nativeStop() completes, the kernel
-        //    still sees an open fd on the TUN device and keeps the VPN tunnel
-        //    alive. We MUST wait for this to finish.
-        try {
-            Log.i(TAG, "fullShutdown: calling nativeStop");
-            NativeEngine.nativeStop();
-            Log.i(TAG, "fullShutdown: nativeStop completed");
-        } catch (Exception e) {
-            Log.e(TAG, "fullShutdown: nativeStop failed: " + e.getMessage());
+        // 3. Stop native engine on a background thread — nativeStop() can
+        //    block and calling it on the main thread prevents stopSelf()
+        //    from executing, leaving the VPN service alive.
+        Thread stopNative = new Thread(() -> {
+            try {
+                Log.i(TAG, "fullShutdown: calling nativeStop");
+                NativeEngine.nativeStop();
+                Log.i(TAG, "fullShutdown: nativeStop completed");
+            } catch (Exception e) {
+                Log.e(TAG, "fullShutdown: nativeStop failed: " + e.getMessage());
+            }
+        }, "FCAE-NativeStop");
+        stopNative.start();
+        try { stopNative.join(3000); } catch (InterruptedException ignored) {}
+        if (stopNative.isAlive()) {
+            Log.w(TAG, "fullShutdown: nativeStop timed out, proceeding with teardown");
+            stopNative.interrupt();
         }
 
-        // 4. NOW close the Java ParcelFileDescriptor — the native engine has
-        //    released its dup, so this is the last fd. Kernel tears down the
-        //    OS VPN tunnel immediately.
+        // 4. Close the TUN fd — kernel tears down the OS VPN tunnel
         closeVpnFd();
 
         // 5. Dismiss foreground notification + destroy service
@@ -275,9 +281,16 @@ public class FCAEVpnService extends VpnService {
             try { t.join(2000); } catch (InterruptedException ignored) {}
         }
 
-        try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-
+        // Close TUN fd first so kernel tears down the VPN tunnel
         closeVpnFd();
+
+        // Then stop native engine in background — don't block main thread
+        Thread stopNative = new Thread(() -> {
+            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+        }, "FCAE-NativeStop-Pause");
+        stopNative.start();
+        try { stopNative.join(2000); } catch (InterruptedException ignored) {}
+
         statsHandler.removeCallbacks(statsRunnable);
         updateNotificationStats();
         Log.i(TAG, "VPN paused (service kept alive)");

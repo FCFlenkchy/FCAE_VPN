@@ -64,6 +64,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
 
     private var userScrolledUp = false
+    private var programmaticScroll = false
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -203,8 +204,9 @@ class MainActivity : AppCompatActivity() {
         updateButton()
         handler.post(poll)
 
-        // Detect manual scroll on log area
+        // Detect manual scroll on log area — ignore during programmatic scrolls
         logScroll.viewTreeObserver.addOnScrollChangedListener {
+            if (programmaticScroll) return@addOnScrollChangedListener
             val scrollable = logScroll.getChildAt(0)?.height?.minus(logScroll.height) ?: 0
             userScrolledUp = scrollable > 0 && logScroll.scrollY < scrollable - 10
         }
@@ -452,10 +454,16 @@ class MainActivity : AppCompatActivity() {
             if (h != lastLogHash) {
                 lastLogHash = h
                 val shown = if (logs.length > 24_000) logs.takeLast(24_000) else logs
+                // Save scroll position before updating text to prevent outer scroll jump
+                val wasAtBottom = !userScrolledUp
                 logText.text = shown
-                // Only auto-scroll if user hasn't manually scrolled up
-                if (!userScrolledUp) {
-                    logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
+                // Auto-scroll if user was at the bottom (or hasn't scrolled up)
+                if (wasAtBottom) {
+                    programmaticScroll = true
+                    logScroll.post {
+                        logScroll.fullScroll(ScrollView.FOCUS_DOWN)
+                        programmaticScroll = false
+                    }
                 }
             }
             updateButton()
