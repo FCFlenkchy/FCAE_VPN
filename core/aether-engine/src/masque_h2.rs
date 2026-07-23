@@ -89,7 +89,7 @@ pub fn h2_peer(quic_peer: SocketAddr) -> SocketAddr {
 
 fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> {
     use crate::tls;
-    let connector = tls::build_h2_config(&cfg.cert_pem, &cfg.key_pem, true)?;
+    let connector = tls::build_h2_config(&cfg.cert_pem, &cfg.key_pem)?;
     let mut config = connector
         .configure()
         .map_err(|e| AetherError::Tls(e.to_string()))?;

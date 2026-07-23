@@ -5,8 +5,6 @@ use base64::Engine;
 use boring::pkey::PKey;
 use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyMode, SslVersion};
 use boring::x509::X509;
-use foreign_types_shared::ForeignTypeRef;
-use ring::digest;
 
 use crate::consts;
 use crate::error::{AetherError, Result};
@@ -30,56 +28,6 @@ const CHROME_GROUPS: &str = "P-256:X25519:P-384";
 pub struct TlsParams<'a> {
     pub cert_pem: &'a [u8],
     pub key_pem: &'a [u8],
-    pub pin_endpoint: bool,
-}
-
-/// Compute SHA-256 hash of a certificate's SubjectPublicKeyInfo (SPKI).
-/// Returns the raw 32-byte hash.
-fn compute_spki_hash(cert: &boring::x509::X509Ref) -> Option<[u8; 32]> {
-    let pkey = cert.public_key().ok()?;
-    let der = pkey.public_key_to_der().ok()?;
-    let hash = digest::digest(&digest::SHA256, &der);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(hash.as_ref());
-    Some(out)
-}
-
-/// BoringSSL verify callback: checks the leaf certificate's SPKI hash
-/// against the hardcoded Cloudflare MASQUE pins. Called per-cert in the
-/// chain; we only care about the leaf (first call with preverify_ok=false
-/// on self-signed certs, or the final leaf check).
-fn spki_pin_verify(
-    pins: &[&[u8]],
-    preverify_ok: bool,
-    x509_store_ctx: &mut boring::x509::X509StoreContextRef,
-) -> bool {
-    // If the standard chain verification already passed, accept.
-    if preverify_ok {
-        return true;
-    }
-
-    // Extract the certificate being verified.
-    let cert = match x509_store_ctx.current_cert() {
-        Some(c) => c,
-        None => return false,
-    };
-
-    let hash = match compute_spki_hash(cert) {
-        Some(h) => h,
-        None => return false,
-    };
-
-    let hash_hex = hex::encode(hash);
-
-    for pin in pins {
-        if *pin == hash {
-            log::debug!("[tls] SPKI pin matched for leaf cert");
-            return true;
-        }
-    }
-
-    log::warn!("[tls] SPKI pin mismatch — actual hash: {hash_hex}");
-    false
 }
 
 pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
@@ -124,16 +72,9 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
         .set_private_key(&key)
         .map_err(|e| AetherError::Tls(e.to_string()))?;
 
-    // SPKI pin verification when enabled, plain NONE as fallback.
-    if params.pin_endpoint && !consts::MASQUE_PINS.is_empty() {
-        let pins: Vec<&[u8]> = consts::MASQUE_PINS.iter().copied().collect();
-        builder.set_verify_callback(SslVerifyMode::PEER, move |preverify_ok, ctx| {
-            spki_pin_verify(&pins, preverify_ok, ctx)
-        });
-        log::info!("[+] SPKI pin verification enabled ({} pins)", consts::MASQUE_PINS.len());
-    } else {
-        builder.set_verify(SslVerifyMode::NONE);
-    }
+    // Cloudflare edges serve different certs per SNI and some are self-signed,
+    // so we cannot use standard certificate verification.
+    builder.set_verify(SslVerifyMode::NONE);
 
     let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, builder)
         .map_err(AetherError::Quic)?;
@@ -157,12 +98,10 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
     Ok(config)
 }
 
-/// Build an SPKI-verifying TLS config for HTTP/2 (masque_h2.rs).
-/// Returns an `SslConnector` that rejects non-pinned certs.
+/// Build a TLS config for HTTP/2 (masque_h2.rs).
 pub fn build_h2_config(
     cert_pem: &[u8],
     key_pem: &[u8],
-    pin: bool,
 ) -> Result<boring::ssl::SslConnector> {
     use boring::ssl::SslConnector;
 
@@ -196,14 +135,8 @@ pub fn build_h2_config(
         .set_private_key(&key)
         .map_err(|e| AetherError::Tls(e.to_string()))?;
 
-    if pin && !consts::MASQUE_PINS.is_empty() {
-        let pins: Vec<&[u8]> = consts::MASQUE_PINS.iter().copied().collect();
-        builder.set_verify_callback(SslVerifyMode::PEER, move |preverify_ok, ctx| {
-            spki_pin_verify(&pins, preverify_ok, ctx)
-        });
-    } else {
-        builder.set_verify(SslVerifyMode::NONE);
-    }
+    // Cloudflare edges serve different certs per SNI.
+    builder.set_verify(SslVerifyMode::NONE);
 
     Ok(builder.build())
 }
