@@ -179,6 +179,7 @@ public class FCAEVpnService extends VpnService {
         Log.i(TAG, "fullShutdown: starting");
         handler.removeCallbacks(statsRunnable);
 
+        // Kill VPN thread
         Thread t = vpnThread;
         vpnThread = null;
         if (t != null) {
@@ -186,6 +187,16 @@ public class FCAEVpnService extends VpnService {
             try { t.join(1000); } catch (InterruptedException ignored) {}
         }
 
+        // CRITICAL: close fd + stop service IMMEDIATELY on the main thread.
+        // If we defer this to a background thread, the user can reconnect
+        // before the fd is closed. startVpn() creates a new fd and overwrites
+        // vpnInterface. Then closeVpnFd() closes the NEW fd, leaking the old
+        // one. The leaked old fd keeps the OS VPN tunnel alive.
+        closeVpnFd();
+
+        // Stop native engine in background — fire and forget.
+        // The fd is already closed, so native threads will get EBADF
+        // and exit on their own.
         new Thread(() -> {
             try {
                 Log.i(TAG, "nativeStop...");
@@ -194,19 +205,17 @@ public class FCAEVpnService extends VpnService {
             } catch (Exception e) {
                 Log.e(TAG, "nativeStop failed: " + e.getMessage());
             }
+        }, "FCAE-NativeStop").start();
 
-            closeVpnFd();
+        // Destroy service immediately
+        stopForeground(true);
+        stopSelf();
+        Log.i(TAG, "service stopped");
 
-            handler.post(() -> {
-                stopForeground(true);
-                stopSelf();
-                Log.i(TAG, "service stopped");
-
-                Intent broadcast = new Intent("com.fc.fcaevpn.VPN_DISCONNECTED");
-                broadcast.setPackage(getPackageName());
-                sendBroadcast(broadcast);
-            });
-        }, "FCAE-Shutdown").start();
+        // Broadcast disconnection
+        Intent broadcast = new Intent("com.fc.fcaevpn.VPN_DISCONNECTED");
+        broadcast.setPackage(getPackageName());
+        sendBroadcast(broadcast);
     }
 
     private void pauseVpn() {

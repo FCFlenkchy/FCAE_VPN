@@ -383,32 +383,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Disconnect: stop the poll and native engine from the activity side FIRST,
-     * then tell the service to clean up. The poll was interfering with nativeStop()
-     * because it kept calling nativeGetStatusJson() during shutdown.
+     * Disconnect: kill the poll, then send ACTION_DISCONNECT to the service.
+     * The service handles nativeStop + fd close + stopSelf immediately.
      */
     private fun disconnectAll() {
-        // 1. Kill the poll immediately — it calls native methods that interfere
-        //    with nativeStop() running in the service
         handler.removeCallbacks(poll)
         vpnActive = false
-
         connecting = false
         engineRunning = false
         updateButton()
 
-        // 2. Stop native engine from the activity's background thread — this
-        //    ensures no other native calls are in flight when we stop
-        bgExecutor.execute {
-            try { NativeEngine.nativeStop() } catch (_: Throwable) {}
-
-            // 3. Now tell the service to close fd and destroy itself
-            try {
-                val i = Intent(this@MainActivity, FCAEVpnService::class.java)
-                i.action = FCAEVpnService.ACTION_DISCONNECT
-                startForegroundService(i)
-            } catch (_: Throwable) {}
-        }
+        try {
+            val i = Intent(this, FCAEVpnService::class.java)
+            i.action = FCAEVpnService.ACTION_DISCONNECT
+            startForegroundService(i)
+        } catch (_: Throwable) {}
     }
 
     private fun applyStatus(statusJson: String, logs: String) {
