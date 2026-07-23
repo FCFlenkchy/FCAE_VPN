@@ -102,6 +102,20 @@ jobs:
           git submodule sync -- quiche
           git submodule update --init --depth 1 -- quiche
 
+      - name: install deps (linux)
+        if: matrix.name == 'linux-x64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libglfw3-dev libgl1-mesa-dev \
+            libx11-dev libxi-dev libxcursor-dev libssl-dev libcurl4-openssl-dev \
+            libbz2-dev liblzma-dev protobuf-compiler nasm golang-go
+
+      - name: install deps (windows cross)
+        if: matrix.name == 'windows-x64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64
+
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
         with:
