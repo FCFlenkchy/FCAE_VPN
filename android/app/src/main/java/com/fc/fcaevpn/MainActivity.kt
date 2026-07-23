@@ -413,8 +413,13 @@ class MainActivity : AppCompatActivity() {
             val totalRx = json.optLong("totalRx", 0)
             val totalTx = json.optLong("totalTx", 0)
 
-            engineRunning = state in 1..4
-            connecting = state in 1..3
+            // Only update engine state if VPN is still active.
+            // After disconnect, vpnActive is false — a stale bgExecutor task
+            // must NOT flip engineRunning back to true based on native state.
+            if (vpnActive) {
+                engineRunning = state in 1..4
+                connecting = state in 1..3
+            }
 
             val label = when (state) {
                 0 -> "DISCONNECTED"

@@ -18,7 +18,6 @@ public class FCAEVpnService extends VpnService {
     private volatile Thread vpnThread;
     private volatile boolean running = false;
     private volatile boolean vpnPaused = false;
-    private volatile boolean shuttingDown = false;
 
     private Intent lastStartIntent;
     private VpnNotification notification;
@@ -78,7 +77,6 @@ public class FCAEVpnService extends VpnService {
 
     private void startVpn(Intent intent) {
         if (running) return;
-        shuttingDown = false;
         vpnPaused = false;
 
         notification.show("FCAE VPN \u2014 Connecting...", false);
@@ -171,8 +169,7 @@ public class FCAEVpnService extends VpnService {
     }
 
     private void fullShutdown() {
-        if (shuttingDown) return;
-        shuttingDown = true;
+        if (!running && vpnInterface == null) return;
         running = false;
         vpnPaused = false;
 
@@ -265,19 +262,6 @@ public class FCAEVpnService extends VpnService {
             try { worker.join(3000); } catch (InterruptedException ignored) {}
             if (worker.isAlive()) worker.interrupt();
         }, "FCAE-Pause-Watchdog").start();
-    }
-
-    private void closeVpnFd() {
-        ParcelFileDescriptor pfd = vpnInterface;
-        vpnInterface = null;
-        if (pfd != null) {
-            try {
-                pfd.close();
-                Log.i(TAG, "VPN fd closed");
-            } catch (Exception e) {
-                Log.e(TAG, "Error closing fd: " + e.getMessage());
-            }
-        }
     }
 
     private void updateNotification() {
