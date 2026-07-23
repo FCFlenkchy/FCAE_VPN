@@ -62,7 +62,7 @@ public class FCAEVpnService extends VpnService {
         if (intent != null && intent.getAction() != null) {
             switch (intent.getAction()) {
                 case ACTION_STOP:
-                    stopVpnKeepNotification();
+                    pauseVpnKeepService();
                     return START_STICKY;
                 case ACTION_DISCONNECT:
                     fullShutdown();
@@ -422,6 +422,6 @@ public class FCAEVpnService extends VpnService {
         if (bps >= 1073741824L) return String.format("%.1f GB/s", bps / 1073741824.0);
         if (bps >= 1048576L)    return String.format("%.1f MB/s", bps / 1048576.0);
         if (bps >= 1024L)       return String.format("%.0f KB/s", bps / 1024.0);
-        return b + " B/s";
+        return bps + " B/s";
     }
 }
