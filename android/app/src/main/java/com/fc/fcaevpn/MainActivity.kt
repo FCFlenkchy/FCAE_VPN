@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private var lastLogHash = 0
     private var vpnActive = false
     private var wasAtBottom = true
+    private var updatingLogs = false
 
     private lateinit var statusText: TextView
     private lateinit var statsText: TextView
@@ -208,8 +209,8 @@ class MainActivity : AppCompatActivity() {
         updateButton()
 
         // Track whether user is at the bottom of the log scroll.
-        // Use OnScrollChangeListener (API 23+) for accurate detection.
         logScroll.setOnScrollChangeListener { _: android.view.View, _: Int, scrollY: Int, _: Int, _: Int ->
+            if (updatingLogs) return@setOnScrollChangeListener
             val child = logScroll.getChildAt(0) ?: return@setOnScrollChangeListener
             val maxScroll = (child.height - logScroll.height).coerceAtLeast(0)
             wasAtBottom = scrollY >= maxScroll - 5
@@ -474,27 +475,56 @@ class MainActivity : AppCompatActivity() {
             )
             statsText.text =
                 "\u2193 ${fmt(rx)}/s (${fmt(totalRx)})  |  \u2191 ${fmt(tx)}/s (${fmt(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "\u2014"}"
-            peerText.text = "Peer: ${peer.ifEmpty { " \u2014 " }}" +
-                if (err.isNotEmpty()) "\nError: $err" else ""
+
+            // Build peer line — include LAN proxy addresses when sharing is on
+            val lan = json.optString("lan", "")
+            val peerLine = StringBuilder()
+            peerLine.append("Peer: ${peer.ifEmpty { " \u2014 " }}")
+            if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") {
+                val socksPort = if (switchSocks.isChecked) "1819" else null
+                val httpPort = if (switchHttp.isChecked) "1820" else null
+                val ports = listOfNotNull(
+                    socksPort?.let { "SOCKS5 $lan:$it" },
+                    httpPort?.let { "HTTP $lan:$it" }
+                ).joinToString("  |  ")
+                if (ports.isNotEmpty()) {
+                    peerLine.append("\nLAN: $ports")
+                }
+            }
+            if (err.isNotEmpty()) peerLine.append("\nError: $err")
+            peerText.text = peerLine.toString()
 
             val h = logs.hashCode()
             if (h != lastLogHash) {
                 lastLogHash = h
                 val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
 
-                // wasAtBottom is tracked by the scroll listener — it reflects the
-                // state BEFORE we change the text, so it's accurate.
                 val scrollWasAtBottom = wasAtBottom
                 val outerY = outerScroll.scrollY
 
+                // Flag tells the scroll listener not to overwrite wasAtBottom
+                // while we're programmatically scrolling.
+                updatingLogs = true
                 logText.text = shown
 
                 if (scrollWasAtBottom) {
+                    // Use scrollTo (not fullScroll) to avoid focus changes
+                    // propagating to the parent outerScroll.
                     logScroll.post {
-                        logScroll.fullScroll(ScrollView.FOCUS_DOWN)
+                        val child = logScroll.getChildAt(0)
+                        if (child != null) {
+                            val target = (child.height - logScroll.height).coerceAtLeast(0)
+                            logScroll.scrollTo(0, target)
+                        }
+                        // Restore outer scroll after inner scroll settles
+                        outerScroll.post {
+                            outerScroll.scrollTo(0, outerY)
+                            updatingLogs = false
+                        }
                     }
+                } else {
+                    updatingLogs = false
                 }
-                outerScroll.post { outerScroll.scrollTo(0, outerY) }
             }
             updateButton()
         } catch (e: Throwable) {

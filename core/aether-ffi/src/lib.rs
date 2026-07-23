@@ -149,8 +149,20 @@ impl log::Log for GuiLogger {
                 aether_engine::set_rtt_ms(ms as u64);
             }
         }
+        // Tunnel failed / reconnecting — drop back to SCANNING so the UI
+        // doesn't stay frozen on "CONNECTING" while the engine retries.
+        if line_lower.contains("reconnecting") || line_lower.contains("rescanning") {
+            if t.state >= 3 {
+                t.state = 2;
+                t.status_message = "Reconnecting...".to_string();
+            }
+        }
         if line_lower.contains("identity ready") || line_lower.contains("using cloudflare edge") {
             if t.state < 4 {
+                t.state = 3;
+                t.status_message = "Connecting...".to_string();
+            }
+        }
                 t.state = 3;
                 t.status_message = "Connecting...".to_string();
             }
