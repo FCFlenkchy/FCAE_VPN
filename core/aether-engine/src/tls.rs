@@ -1,7 +1,6 @@
 use std::ffi::{c_int, c_void};
 use std::ptr;
 
-use base64::Engine;
 use boring::pkey::PKey;
 use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyMode, SslVersion};
 use boring::x509::X509;
@@ -49,7 +48,7 @@ fn compute_spki_hash(cert: &boring::x509::X509Ref) -> Option<[u8; 32]> {
 /// chain; we only care about the leaf (first call with preverify_ok=false
 /// on self-signed certs, or the final leaf check).
 fn spki_pin_verify(
-    pins: &[&str],
+    pins: &[&[u8]],
     preverify_ok: bool,
     x509_store_ctx: &mut boring::x509::X509StoreContextRef,
 ) -> bool {
@@ -69,20 +68,18 @@ fn spki_pin_verify(
         None => return false,
     };
 
-    let hash_b64 = base64::engine::general_purpose::STANDARD.encode(hash);
+    let hash_hex = hex::encode(hash);
 
     for pin in pins {
-        if *pin == hash_b64 {
+        if *pin == hash {
             log::debug!("[tls] SPKI pin matched for leaf cert");
             return true;
         }
     }
 
-    // Log the actual hash so we can collect correct pins.
-    // Accept the connection for now (learning mode) — switch to
-    // return false once the correct pins are in MASQUE_PINS.
-    log::warn!("[tls] SPKI pin mismatch — actual hash: {hash_b64} (accepting in learning mode)");
-    true
+    log::warn!("[tls] SPKI pin mismatch — actual hash: {hash_hex}");
+    false
+}
 }
 
 pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
@@ -129,7 +126,7 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
 
     // SPKI pin verification when enabled, plain NONE as fallback.
     if params.pin_endpoint && !consts::MASQUE_PINS.is_empty() {
-        let pins: Vec<&str> = consts::MASQUE_PINS.iter().copied().collect();
+        let pins: Vec<&[u8]> = consts::MASQUE_PINS.iter().copied().collect();
         builder.set_verify_callback(SslVerifyMode::PEER, move |preverify_ok, ctx| {
             spki_pin_verify(&pins, preverify_ok, ctx)
         });
@@ -200,7 +197,7 @@ pub fn build_h2_config(
         .map_err(|e| AetherError::Tls(e.to_string()))?;
 
     if pin && !consts::MASQUE_PINS.is_empty() {
-        let pins: Vec<&str> = consts::MASQUE_PINS.iter().copied().collect();
+        let pins: Vec<&[u8]> = consts::MASQUE_PINS.iter().copied().collect();
         builder.set_verify_callback(SslVerifyMode::PEER, move |preverify_ok, ctx| {
             spki_pin_verify(&pins, preverify_ok, ctx)
         });
