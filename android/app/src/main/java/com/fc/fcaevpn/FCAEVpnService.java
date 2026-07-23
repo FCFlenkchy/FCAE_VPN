@@ -230,8 +230,8 @@ public class FCAEVpnService extends VpnService {
             vpnThread = null;
         }
 
-        NativeEngine.nativeStop();
         cleanupVpnInterface();
+        try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
         statsHandler.removeCallbacks(statsRunnable);
         updateNotificationStats();
         Log.i(TAG, "VPN stopped (notification kept, Start available)");
@@ -254,12 +254,7 @@ public class FCAEVpnService extends VpnService {
         // 2. Cancel periodic stats immediately
         statsHandler.removeCallbacks(statsRunnable);
 
-        // 3. Stop native engine FIRST — this signals the engine to release the TUN fd
-        try { NativeEngine.nativeStop(); } catch (Exception e) {
-            Log.e(TAG, "nativeStop failed: " + e.getMessage());
-        }
-
-        // 4. Force-kill the VPN thread
+        // 3. Force-kill the VPN thread
         Thread t = vpnThread;
         vpnThread = null;
         if (t != null) {
@@ -271,8 +266,25 @@ public class FCAEVpnService extends VpnService {
             }
         }
 
-        // 5. Close the VPN interface — tears down the OS VPN tunnel
+        // 4. Close the VPN interface FIRST — kernel tears down the OS VPN
+        //    tunnel the instant the fd is closed. This MUST happen before
+        //    nativeStop() because the native engine may still be holding refs.
         cleanupVpnInterface();
+
+        // 5. Stop the native engine in background with a timeout so it
+        //    can't block the service teardown. The fd is already closed
+        //    so the kernel already tore down the VPN tunnel.
+        final Thread stopThread = new Thread(() -> {
+            try { NativeEngine.nativeStop(); } catch (Exception e) {
+                Log.e(TAG, "nativeStop failed: " + e.getMessage());
+            }
+        }, "FCAE-NativeStop");
+        stopThread.start();
+        try { stopThread.join(1500); } catch (InterruptedException ignored) {}
+        if (stopThread.isAlive()) {
+            Log.w(TAG, "nativeStop timed out after 1.5s, forcing service teardown anyway");
+            stopThread.interrupt();
+        }
 
         // 6. Dismiss notification and destroy service
         try {
