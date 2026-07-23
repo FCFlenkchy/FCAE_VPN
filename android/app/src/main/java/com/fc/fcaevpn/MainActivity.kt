@@ -63,7 +63,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
 
     private var userScrolledUp = false
-    private var programmaticScroll = false
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -199,7 +198,6 @@ class MainActivity : AppCompatActivity() {
         handler.post(poll)
 
         logScroll.viewTreeObserver.addOnScrollChangedListener {
-            if (programmaticScroll) return@addOnScrollChangedListener
             val scrollable = logScroll.getChildAt(0)?.height?.minus(logScroll.height) ?: 0
             userScrolledUp = scrollable > 0 && logScroll.scrollY < scrollable - 10
         }
@@ -454,14 +452,17 @@ class MainActivity : AppCompatActivity() {
                 lastLogHash = h
                 val shown = if (logs.length > 24_000) logs.takeLast(24_000) else logs
                 val wasAtBottom = !userScrolledUp
+                // Save outer scroll position — logText.text changes content
+                // height which causes the outer ScrollView to re-layout and jump
+                val outerY = outerScroll.scrollY
                 logText.text = shown
                 if (wasAtBottom) {
-                    programmaticScroll = true
                     logScroll.post {
                         logScroll.fullScroll(ScrollView.FOCUS_DOWN)
-                        programmaticScroll = false
                     }
                 }
+                // Restore outer scroll so user doesn't get yanked to middle
+                outerScroll.post { outerScroll.scrollTo(0, outerY) }
             }
             updateButton()
         } catch (e: Throwable) {
