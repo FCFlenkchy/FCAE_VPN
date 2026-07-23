@@ -15,7 +15,7 @@ use crate::tls::{self, TlsParams};
 use crate::{consts, error::AetherError, error::Result};
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
-const NET_QUEUE: usize = 512;
+const NET_QUEUE: usize = 1024;
 
 async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     use socket2::{Socket, Domain, Type};
@@ -24,7 +24,7 @@ async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     sock.set_nonblocking(true).map_err(AetherError::Io)?;
 
     // Keep modest socket buffers — 7MB each caused multi‑hundred MB RSS on Windows.
-    let kb = std::env::var("AETHER_UDP_BUF_KB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&k| (64..=8192).contains(&k)).unwrap_or(512);
+    let kb = std::env::var("AETHER_UDP_BUF_KB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&k| (64..=8192).contains(&k)).unwrap_or(1024);
     let buf_size = kb * 1024;
     let _ = sock.set_recv_buffer_size(buf_size);
     let _ = sock.set_send_buffer_size(buf_size);

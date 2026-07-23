@@ -41,8 +41,8 @@ fn parse_local_v4(s: &str) -> Ipv4Addr {
         .unwrap_or(Ipv4Addr::UNSPECIFIED)
 }
 
-const TUNNEL_MTU: usize = 1280;
-const INNER_MTU: usize = 1200;
+const TUNNEL_MTU: usize = 1420;
+const INNER_MTU: usize = 1400;
 const DEFAULT_CONFIG: &str = "aether.toml";
 
 /// TLS Server Name (SNI) for MASQUE. Override with AETHER_SNI / --sni.
@@ -1251,8 +1251,8 @@ async fn run_wireguard_tunnel(
         aethernoize: std::sync::Arc::new(aethernoize),
     };
 
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(512);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(512);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1024);
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(1024);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
 
@@ -1361,8 +1361,8 @@ async fn establish_wg(
         aethernoize: std::sync::Arc::new(profile),
     };
 
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(256);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(256);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1024);
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(1024);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
     let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;

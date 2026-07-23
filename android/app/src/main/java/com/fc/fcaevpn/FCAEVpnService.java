@@ -132,7 +132,7 @@ public class FCAEVpnService extends VpnService {
             try {
                 Builder builder = new Builder();
                 builder.setSession("FCAE VPN");
-                builder.setMtu(1280);
+                builder.setMtu(1420);
                 builder.addAddress("10.0.0.2", 32);
                 builder.addRoute("0.0.0.0", 0);
                 builder.addRoute("::", 0);
