@@ -185,19 +185,18 @@ public class FCAEVpnService extends VpnService {
     }
 
     /**
-     * Call nativeStop synchronously with a 2s timeout.
-     * nativeStop is now fast (sets SHUTDOWN flag + closes dup'd fds),
-     * so this returns in milliseconds in the normal case.
+     * Call nativeStop synchronously with a 4s timeout.
+     * aether_stop() waits up to 3s for the engine thread to exit,
+     * so we need at least that much headroom.
      */
     private void stopNativeSync() {
         Thread t = new Thread(() -> {
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
         }, "FCAE-NativeStop-Sync");
         t.start();
-        try { t.join(2000); } catch (InterruptedException ignored) {}
+        try { t.join(4000); } catch (InterruptedException ignored) {}
         if (t.isAlive()) {
-            Log.w(TAG, "nativeStop timed out after 2s");
-            t.interrupt();
+            Log.w(TAG, "nativeStop timed out after 4s — letting it die with process");
         }
     }
 

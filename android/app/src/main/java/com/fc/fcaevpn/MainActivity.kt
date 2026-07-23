@@ -33,6 +33,7 @@ class MainActivity : AppCompatActivity() {
     private var pendingAfterVpnPermission = false
     private var lastLogHash = 0
     private var vpnActive = false
+    private var wasAtBottom = true
 
     private lateinit var statusText: TextView
     private lateinit var statsText: TextView
@@ -62,8 +63,6 @@ class MainActivity : AppCompatActivity() {
     private val pollBusy = AtomicBoolean(false)
     private lateinit var prefs: SharedPreferences
 
-    private var userScrolledUp = false
-
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -76,17 +75,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val vpnDisconnectedReceiver = object : BroadcastReceiver() {
+    private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                "com.fc.fcaevpn.VPN_DISCONNECTED",
+                FCAEVpnService.BROADCAST_VPN_DISCONNECTED,
                 FCAEVpnService.BROADCAST_VPN_STATE_CHANGED -> {
                     val isRunning = intent.getBooleanExtra("running", false)
                     val isPaused = intent.getBooleanExtra("paused", false)
 
                     handler.post {
-                        if (intent.action == "com.fc.fcaevpn.VPN_DISCONNECTED" || (!isRunning && !isPaused)) {
-                            // Full disconnect
+                        if (!isRunning && !isPaused) {
                             connecting = false
                             engineRunning = false
                             vpnActive = false
@@ -96,7 +94,6 @@ class MainActivity : AppCompatActivity() {
                             statsText.text = ""
                             peerText.text = ""
                         } else if (isRunning) {
-                            // Started from notification — resume polling
                             connecting = false
                             engineRunning = true
                             vpnActive = true
@@ -104,15 +101,12 @@ class MainActivity : AppCompatActivity() {
                             handler.removeCallbacks(poll)
                             handler.post(poll)
                         } else if (isPaused) {
-                            // Stopped from notification
                             connecting = false
                             engineRunning = false
                             vpnActive = false
                             updateButton()
                             statusText.text = "STOPPED"
                             statusText.setTextColor(Color.parseColor("#8A93A6"))
-                            statsText.text = ""
-                            peerText.text = ""
                         }
                     }
                 }
@@ -124,7 +118,7 @@ class MainActivity : AppCompatActivity() {
         override fun run() {
             if (!vpnActive) return
             if (!pollBusy.compareAndSet(false, true)) {
-                handler.postDelayed(this, 1500L)
+                handler.postDelayed(this, POLL_INTERVAL_MS)
                 return
             }
             bgExecutor.execute {
@@ -140,7 +134,7 @@ class MainActivity : AppCompatActivity() {
                     pollBusy.set(false)
                 }
             }
-            handler.postDelayed(this, 1500L)
+            handler.postDelayed(this, POLL_INTERVAL_MS)
         }
     }
 
@@ -191,18 +185,8 @@ class MainActivity : AppCompatActivity() {
         )
         loadSettings()
 
-        bgExecutor.execute {
-            try { NativeEngine.nativeClearLogs() } catch (_: Throwable) {}
-        }
         logText.text = ""
         lastLogHash = 0
-
-        bgExecutor.execute {
-            try { NativeEngine.nativeInit() }
-            catch (e: Throwable) {
-                handler.post { Toast.makeText(this, "Native lib failed: ${e.message}", Toast.LENGTH_LONG).show() }
-            }
-        }
 
         btnConnect.setOnClickListener {
             if (vpnActive || engineRunning || connecting) disconnectAll() else connectClicked()
@@ -222,24 +206,52 @@ class MainActivity : AppCompatActivity() {
         }
 
         updateButton()
-        handler.post(poll)
 
-        logScroll.viewTreeObserver.addOnScrollChangedListener {
-            val scrollable = logScroll.getChildAt(0)?.height?.minus(logScroll.height) ?: 0
-            userScrolledUp = scrollable > 0 && logScroll.scrollY < scrollable - 10
+        // Track whether user is at the bottom of the log scroll.
+        // Use OnScrollChangeListener (API 23+) for accurate detection.
+        logScroll.setOnScrollChangeListener { _: ScrollView?, _: Int, scrollY: Int, _: Int, oldScrollY: Int ->
+            val child = logScroll.getChildAt(0) ?: return@setOnScrollChangeListener
+            val maxScroll = (child.height - logScroll.height).coerceAtLeast(0)
+            wasAtBottom = scrollY >= maxScroll - 5
         }
 
         outerScroll.post { outerScroll.scrollTo(0, 0) }
-        outerScroll.postDelayed({ outerScroll.scrollTo(0, 0) }, 100)
 
         val filter = IntentFilter().apply {
-            addAction("com.fc.fcaevpn.VPN_DISCONNECTED")
+            addAction(FCAEVpnService.BROADCAST_VPN_DISCONNECTED)
             addAction(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(vpnDisconnectedReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(vpnStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
-            registerReceiver(vpnDisconnectedReceiver, filter)
+            registerReceiver(vpnStateReceiver, filter)
+        }
+
+        // Init native engine on background thread, then check if VPN is already
+        // running (e.g. service started from notification while app was closed).
+        bgExecutor.execute {
+            try {
+                NativeEngine.nativeInit()
+            } catch (e: Throwable) {
+                handler.post {
+                    Toast.makeText(this, "Native lib failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+                return@execute
+            }
+            // Query native state — if engine is running, sync UI to it
+            try {
+                val json = JSONObject(NativeEngine.nativeGetStatusJson())
+                val state = json.optInt("state", 0)
+                if (state > 0) {
+                    handler.post {
+                        vpnActive = true
+                        engineRunning = state in 1..4
+                        connecting = state in 1..3
+                        updateButton()
+                        handler.post(poll)
+                    }
+                }
+            } catch (_: Throwable) {}
         }
     }
 
@@ -250,7 +262,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(poll)
-        try { unregisterReceiver(vpnDisconnectedReceiver) } catch (_: Throwable) {}
+        try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
         bgExecutor.shutdownNow()
         super.onDestroy()
     }
@@ -410,10 +422,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Disconnect: kill the poll, then send ACTION_DISCONNECT to the service.
-     * The service handles nativeStop + fd close + stopSelf immediately.
-     */
     private fun disconnectAll() {
         handler.removeCallbacks(poll)
         vpnActive = false
@@ -421,11 +429,6 @@ class MainActivity : AppCompatActivity() {
         engineRunning = false
         updateButton()
 
-        // Use startService (not startForegroundService) — the service is
-        // already running as foreground. startForegroundService can fail
-        // silently on Android O+ when the service is already foreground.
-        // PendingIntent.getService (used by notification) internally calls
-        // startService, so this makes both paths identical.
         try {
             val i = Intent(this, FCAEVpnService::class.java)
             i.action = FCAEVpnService.ACTION_DISCONNECT
@@ -446,9 +449,6 @@ class MainActivity : AppCompatActivity() {
             val totalRx = json.optLong("totalRx", 0)
             val totalTx = json.optLong("totalTx", 0)
 
-            // Only update engine state if VPN is still active.
-            // After disconnect, vpnActive is false — a stale bgExecutor task
-            // must NOT flip engineRunning back to true based on native state.
             if (vpnActive) {
                 engineRunning = state in 1..4
                 connecting = state in 1..3
@@ -480,25 +480,20 @@ class MainActivity : AppCompatActivity() {
             val h = logs.hashCode()
             if (h != lastLogHash) {
                 lastLogHash = h
-                val shown = if (logs.length > 24_000) logs.takeLast(24_000) else logs
-                val wasAtBottom = !userScrolledUp
-                // Save outer scroll position BEFORE changing text — setting
-                // logText.text triggers a layout pass that can shift the
-                // outer ScrollView if the content height changes.
+                val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
+
+                // wasAtBottom is tracked by the scroll listener — it reflects the
+                // state BEFORE we change the text, so it's accurate.
+                val scrollWasAtBottom = wasAtBottom
                 val outerY = outerScroll.scrollY
+
                 logText.text = shown
-                if (wasAtBottom) {
-                    // Use scrollTo instead of fullScroll(FOCUS_DOWN) to avoid
-                    // accessibility scroll actions propagating to the parent
-                    // outerScroll, which causes the entire UI to jump.
+
+                if (scrollWasAtBottom) {
                     logScroll.post {
-                        val child = logScroll.getChildAt(0)
-                        if (child != null) {
-                            logScroll.scrollTo(0, child.height - logScroll.height)
-                        }
+                        logScroll.fullScroll(ScrollView.FOCUS_DOWN)
                     }
                 }
-                // Restore outer scroll after a layout pass has settled
                 outerScroll.post { outerScroll.scrollTo(0, outerY) }
             }
             updateButton()
@@ -524,5 +519,10 @@ class MainActivity : AppCompatActivity() {
             bps >= 1024L -> String.format("%.0f KB", bps / 1024.0)
             else -> "$bps B"
         }
+    }
+
+    companion object {
+        private const val POLL_INTERVAL_MS = 3000L
+        private const val MAX_LOG_CHARS = 8000
     }
 }
