@@ -124,10 +124,11 @@ class MainActivity : AppCompatActivity() {
             }
             bgExecutor.execute {
                 try {
-                    // Double-check vpnActive on the bg thread — disconnectAll()
-                    // may have set it to false after we checked on the main thread
-                    // but before this task started executing.
-                    if (!vpnActive) {
+                    // Triple guard: vpnActive (UI thread), engineRunning (set by
+                    // broadcast after nativeStart succeeds), and a second
+                    // vpnActive check on the bg thread to close the race window
+                    // between disconnectAll() and this task executing.
+                    if (!vpnActive || !engineRunning) {
                         handler.post { pollBusy.set(false) }
                         return@execute
                     }
@@ -362,7 +363,9 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
         i.putExtra("forcePeer", editForcePeer.text.toString().trim())
         startForegroundService(i)
-        handler.post(poll)
+        // Poll is started by the VPN_STATE_CHANGED broadcast from the service
+        // AFTER nativeStart() succeeds — NOT here, to avoid calling native
+        // methods while the previous engine is still tearing down.
     }
 
     private fun startEngine() {
