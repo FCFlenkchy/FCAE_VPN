@@ -187,17 +187,20 @@ public class FCAEVpnService extends VpnService {
             try { t.join(1000); } catch (InterruptedException ignored) {}
         }
 
-        // CRITICAL: close fd + stop service IMMEDIATELY on the main thread.
-        // If we defer this to a background thread, the user can reconnect
-        // before the fd is closed. startVpn() creates a new fd and overwrites
-        // vpnInterface. Then closeVpnFd() closes the NEW fd, leaking the old
-        // one. The leaked old fd keeps the OS VPN tunnel alive.
-        closeVpnFd();
+        // CRITICAL: save the fd reference NOW on the main thread, before
+        // any background work. If we close vpnInterface later on a bg
+        // thread, the user might reconnect in between and startVpn()
+        // creates a new fd overwriting vpnInterface. We'd close the new
+        // fd and leak the old one. By saving the reference here, we
+        // guarantee we close the right fd.
+        ParcelFileDescriptor pfdToClose = vpnInterface;
+        vpnInterface = null;
 
-        // Stop native engine in background — fire and forget.
-        // The fd is already closed, so native threads will get EBADF
-        // and exit on their own.
+        // Run nativeStop + fd close on a background thread so we don't
+        // block the main thread. nativeStop() MUST complete before we
+        // close the fd, so the native engine releases its dup'd copy.
         new Thread(() -> {
+            // nativeStop — must complete first to release native-held fd
             try {
                 Log.i(TAG, "nativeStop...");
                 NativeEngine.nativeStop();
@@ -205,17 +208,29 @@ public class FCAEVpnService extends VpnService {
             } catch (Exception e) {
                 Log.e(TAG, "nativeStop failed: " + e.getMessage());
             }
-        }, "FCAE-NativeStop").start();
 
-        // Destroy service immediately
-        stopForeground(true);
-        stopSelf();
-        Log.i(TAG, "service stopped");
+            // Close the saved fd reference (not vpnInterface — it may have
+            // been overwritten by a reconnect)
+            if (pfdToClose != null) {
+                try {
+                    pfdToClose.close();
+                    Log.i(TAG, "VPN fd closed");
+                } catch (Exception e) {
+                    Log.e(TAG, "Error closing fd: " + e.getMessage());
+                }
+            }
 
-        // Broadcast disconnection
-        Intent broadcast = new Intent("com.fc.fcaevpn.VPN_DISCONNECTED");
-        broadcast.setPackage(getPackageName());
-        sendBroadcast(broadcast);
+            // Stop service on main thread
+            handler.post(() -> {
+                stopForeground(true);
+                stopSelf();
+                Log.i(TAG, "service stopped");
+
+                Intent broadcast = new Intent("com.fc.fcaevpn.VPN_DISCONNECTED");
+                broadcast.setPackage(getPackageName());
+                sendBroadcast(broadcast);
+            });
+        }, "FCAE-Shutdown").start();
     }
 
     private void pauseVpn() {
@@ -229,9 +244,14 @@ public class FCAEVpnService extends VpnService {
             try { t.join(1000); } catch (InterruptedException ignored) {}
         }
 
+        ParcelFileDescriptor pfdToClose = vpnInterface;
+        vpnInterface = null;
+
         new Thread(() -> {
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-            closeVpnFd();
+            if (pfdToClose != null) {
+                try { pfdToClose.close(); } catch (Exception ignored) {}
+            }
             handler.post(() -> {
                 handler.removeCallbacks(statsRunnable);
                 updateNotification();
