@@ -685,6 +685,12 @@ pub extern "C" fn aether_stop() {
         // still clear telemetry
     }
     SHUTDOWN.store(true, Ordering::SeqCst);
+
+    // Force-close all dup'd TUN fds so the kernel tears down the TUN device
+    // immediately. Without this, the dup'd copies in tun::run() keep the
+    // kernel VPN tunnel alive even after Java closes ParcelFileDescriptor.
+    aether_engine::tun::close_all_fds();
+
     unsafe {
         log_msg(4, "[ffi] aether_stop called");
     }

@@ -13,11 +13,40 @@ use std::sync::atomic::{AtomicI32, Ordering};
 #[cfg(unix)]
 static TUN_FD: AtomicI32 = AtomicI32::new(-1);
 
+// Saved dup'd fds so we can force-close them on shutdown.
+// Without this, the dup'd copies keep the kernel TUN device alive
+// even after Java closes the original ParcelFileDescriptor.
+#[cfg(unix)]
+static TUN_DUP_READ: AtomicI32 = AtomicI32::new(-1);
+#[cfg(unix)]
+static TUN_DUP_WRITE: AtomicI32 = AtomicI32::new(-1);
+
 pub fn set_fd(fd: i32) {
     #[cfg(unix)]
     TUN_FD.store(fd, Ordering::SeqCst);
     #[cfg(not(unix))]
     let _ = fd;
+}
+
+/// Force-close all dup'd TUN fds. Called from aether_stop() to ensure the
+/// kernel tears down the TUN device immediately, even if the read/write
+/// tasks are still blocked on I/O.
+pub fn close_all_fds() {
+    #[cfg(unix)]
+    {
+        let read_fd = TUN_DUP_READ.swap(-1, Ordering::SeqCst);
+        let write_fd = TUN_DUP_WRITE.swap(-1, Ordering::SeqCst);
+        if read_fd >= 0 {
+            unsafe { libc::close(read_fd); }
+            log::info!("[tun] force-closed dup read fd={read_fd}");
+        }
+        if write_fd >= 0 {
+            unsafe { libc::close(write_fd); }
+            log::info!("[tun] force-closed dup write fd={write_fd}");
+        }
+        // Also clear the original fd reference
+        TUN_FD.store(-1, Ordering::SeqCst);
+    }
 }
 
 pub fn peek_fd() -> Option<i32> {
@@ -62,6 +91,10 @@ pub async fn run(
     let out_tx = outbound_tx;
     let err_tx_r = err_tx.clone();
     let read_fd = dup;
+
+    // Save read fd for force-close on shutdown
+    TUN_DUP_READ.store(read_fd, Ordering::SeqCst);
+
     let read_task = tokio::task::spawn_blocking(move || {
         let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
         let mut buf = vec![0u8; 16384];
@@ -94,6 +127,10 @@ pub async fn run(
     if write_fd < 0 {
         return Err(AetherError::Other("tun write dup failed".into()));
     }
+
+    // Save write fd for force-close on shutdown
+    TUN_DUP_WRITE.store(write_fd, Ordering::SeqCst);
+
     let write_task = tokio::spawn(async move {
         let mut file = unsafe { std::fs::File::from_raw_fd(write_fd) };
         while let Some(pkt) = inbound_rx.recv().await {
@@ -118,6 +155,10 @@ pub async fn run(
             log::warn!("[tun] {msg}");
         }
     }
+
+    // Clear saved fds (they may already be closed by close_all_fds)
+    TUN_DUP_READ.store(-1, Ordering::SeqCst);
+    TUN_DUP_WRITE.store(-1, Ordering::SeqCst);
 
     unsafe {
         let _ = libc::close(dup);
