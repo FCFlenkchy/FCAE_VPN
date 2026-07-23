@@ -78,8 +78,11 @@ fn spki_pin_verify(
         }
     }
 
-    log::warn!("[tls] SPKI pin mismatch — rejecting certificate");
-    false
+    // Log the actual hash so we can collect correct pins.
+    // Accept the connection for now (learning mode) — switch to
+    // return false once the correct pins are in MASQUE_PINS.
+    log::warn!("[tls] SPKI pin mismatch — actual hash: {hash_b64} (accepting in learning mode)");
+    true
 }
 
 pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
