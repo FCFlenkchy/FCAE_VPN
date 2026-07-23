@@ -8,6 +8,7 @@ use http::Method;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::consts;
 use crate::error::{AetherError, Result};
 use crate::fragment::{FragmentConfig, FragmentingStream};
 use crate::masque::{self, Capsule, CapsuleParser};

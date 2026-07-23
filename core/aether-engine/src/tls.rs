@@ -1,5 +1,4 @@
 use std::ffi::c_void;
-use std::os::raw::c_int;
 use std::ptr;
 
 use base64::Engine;
@@ -47,15 +46,15 @@ fn compute_spki_hash(cert: &boring::x509::X509Ref) -> Option<[u8; 32]> {
 
 /// BoringSSL verify callback: checks the leaf certificate's SPKI hash
 /// against the hardcoded Cloudflare MASQUE pins. Called per-cert in the
-/// chain; we only care about the leaf (first call with preverify_ok=0
+/// chain; we only care about the leaf (first call with preverify_ok=false
 /// on self-signed certs, or the final leaf check).
 fn spki_pin_verify(
     pins: &[&str],
-    preverify_ok: c_int,
+    preverify_ok: bool,
     x509_store_ctx: &mut boring::x509::X509StoreContextRef,
 ) -> bool {
     // If the standard chain verification already passed, accept.
-    if preverify_ok != 0 {
+    if preverify_ok {
         return true;
     }
 
@@ -159,7 +158,7 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
 }
 
 /// Build an SPKI-verifying TLS config for HTTP/2 (masque_h2.rs).
-/// Returns an `SslConnector`-compatible config that rejects non-pinned certs.
+/// Returns an `SslConnector` that rejects non-pinned certs.
 pub fn build_h2_config(
     cert_pem: &[u8],
     key_pem: &[u8],
@@ -204,7 +203,8 @@ pub fn build_h2_config(
         builder.set_verify(SslVerifyMode::NONE);
     }
 
-    Ok(builder.build())
+    // SslContextBuilder::build() returns SslContext; convert to SslConnector.
+    Ok(boring::ssl::SslConnector::from(builder.build()))
 }
 
 pub fn inject_ech(conn: &mut quiche::Connection, ech_config_list: &[u8]) -> Result<()> {
