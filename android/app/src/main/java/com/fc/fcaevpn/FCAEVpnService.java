@@ -14,10 +14,14 @@ public class FCAEVpnService extends VpnService {
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
     public static final String ACTION_START     = "com.fc.fcaevpn.START";
 
+    public static final String BROADCAST_VPN_DISCONNECTED = "com.fc.fcaevpn.VPN_DISCONNECTED";
+    public static final String BROADCAST_VPN_STATE_CHANGED = "com.fc.fcaevpn.VPN_STATE_CHANGED";
+
     private volatile ParcelFileDescriptor vpnInterface;
     private volatile Thread vpnThread;
     private volatile boolean running = false;
     private volatile boolean vpnPaused = false;
+    private volatile boolean shuttingDown = false;
 
     private Intent lastStartIntent;
     private VpnNotification notification;
@@ -60,9 +64,14 @@ public class FCAEVpnService extends VpnService {
                 case ACTION_START:
                     if (!intent.hasExtra("protocol") && lastStartIntent != null) {
                         startVpn(lastStartIntent);
-                    } else {
+                    } else if (intent.hasExtra("protocol")) {
                         lastStartIntent = new Intent(intent);
                         startVpn(intent);
+                    } else {
+                        // Notification Start with no config — just show notification
+                        notification.show("FCAE VPN — Ready (tap Connect in app)", false);
+                        startForeground(VpnNotification.NOTIFICATION_ID,
+                            notification.build("FCAE VPN — Ready (tap Connect in app)", false));
                     }
                     return START_STICKY;
             }
@@ -77,6 +86,7 @@ public class FCAEVpnService extends VpnService {
     private void startVpn(Intent intent) {
         if (running) return;
         vpnPaused = false;
+        shuttingDown = false;
 
         // Ensure any previous native engine is fully stopped before starting.
         // nativeStop is now fast (sets flag + closes dup'd fds), so calling
@@ -160,6 +170,7 @@ public class FCAEVpnService extends VpnService {
                 cachedTotalTx = 0;
                 updateNotification();
                 handler.post(statsRunnable);
+                notifyUi();
 
                 while (running) {
                     try { Thread.sleep(200); } catch (InterruptedException e) { break; }
@@ -191,14 +202,17 @@ public class FCAEVpnService extends VpnService {
     }
 
     private void fullShutdown() {
-        if (!running && vpnInterface == null) return;
+        // Prevent re-entrant calls from vpnThread error handler, onDestroy, etc.
+        if (shuttingDown) return;
+        shuttingDown = true;
 
-        // Guard against concurrent calls (e.g. onDestroy + handler post)
-        synchronized (this) {
-            if (!running && vpnInterface == null) return;
-            running = false;
-            vpnPaused = false;
+        if (!running && vpnInterface == null) {
+            notifyUi();
+            return;
         }
+
+        running = false;
+        vpnPaused = false;
 
         Log.i(TAG, "fullShutdown: starting");
         handler.removeCallbacks(statsRunnable);
@@ -231,12 +245,12 @@ public class FCAEVpnService extends VpnService {
         stopSelf();
         Log.i(TAG, "service stopped");
 
-        Intent broadcast = new Intent("com.fc.fcaevpn.VPN_DISCONNECTED");
-        broadcast.setPackage(getPackageName());
-        sendBroadcast(broadcast);
+        notifyUi();
     }
 
     private void pauseVpn() {
+        if (shuttingDown) return;
+
         running = false;
         vpnPaused = true;
 
@@ -258,6 +272,15 @@ public class FCAEVpnService extends VpnService {
         Log.i(TAG, "VPN paused");
 
         stopNativeSync();
+        notifyUi();
+    }
+
+    private void notifyUi() {
+        Intent intent = new Intent(BROADCAST_VPN_STATE_CHANGED);
+        intent.setPackage(getPackageName());
+        intent.putExtra("running", running);
+        intent.putExtra("paused", vpnPaused);
+        sendBroadcast(intent);
     }
 
     private void updateNotification() {

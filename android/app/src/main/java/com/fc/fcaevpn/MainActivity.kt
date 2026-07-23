@@ -78,16 +78,43 @@ class MainActivity : AppCompatActivity() {
 
     private val vpnDisconnectedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == "com.fc.fcaevpn.VPN_DISCONNECTED") {
-                handler.post {
-                    connecting = false
-                    engineRunning = false
-                    vpnActive = false
-                    updateButton()
-                    statusText.text = "DISCONNECTED"
-                    statusText.setTextColor(Color.parseColor("#8A93A6"))
-                    statsText.text = ""
-                    peerText.text = ""
+            when (intent.action) {
+                "com.fc.fcaevpn.VPN_DISCONNECTED",
+                FCAEVpnService.BROADCAST_VPN_STATE_CHANGED -> {
+                    val isRunning = intent.getBooleanExtra("running", false)
+                    val isPaused = intent.getBooleanExtra("paused", false)
+
+                    handler.post {
+                        if (intent.action == "com.fc.fcaevpn.VPN_DISCONNECTED" || (!isRunning && !isPaused)) {
+                            // Full disconnect
+                            connecting = false
+                            engineRunning = false
+                            vpnActive = false
+                            updateButton()
+                            statusText.text = "DISCONNECTED"
+                            statusText.setTextColor(Color.parseColor("#8A93A6"))
+                            statsText.text = ""
+                            peerText.text = ""
+                        } else if (isRunning) {
+                            // Started from notification — resume polling
+                            connecting = false
+                            engineRunning = true
+                            vpnActive = true
+                            updateButton()
+                            handler.removeCallbacks(poll)
+                            handler.post(poll)
+                        } else if (isPaused) {
+                            // Stopped from notification
+                            connecting = false
+                            engineRunning = false
+                            vpnActive = false
+                            updateButton()
+                            statusText.text = "STOPPED"
+                            statusText.setTextColor(Color.parseColor("#8A93A6"))
+                            statsText.text = ""
+                            peerText.text = ""
+                        }
+                    }
                 }
             }
         }
@@ -205,7 +232,10 @@ class MainActivity : AppCompatActivity() {
         outerScroll.post { outerScroll.scrollTo(0, 0) }
         outerScroll.postDelayed({ outerScroll.scrollTo(0, 0) }, 100)
 
-        val filter = IntentFilter("com.fc.fcaevpn.VPN_DISCONNECTED")
+        val filter = IntentFilter().apply {
+            addAction("com.fc.fcaevpn.VPN_DISCONNECTED")
+            addAction(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
+        }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(vpnDisconnectedReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
