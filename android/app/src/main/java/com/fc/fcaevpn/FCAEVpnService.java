@@ -10,12 +10,14 @@ import android.util.Log;
 public class FCAEVpnService extends VpnService {
     private static final String TAG = "FCAE_VPN";
 
+    public static final String ACTION_STOP      = "com.fc.fcaevpn.STOP";
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
     public static final String ACTION_START     = "com.fc.fcaevpn.START";
 
     private volatile ParcelFileDescriptor vpnInterface;
     private volatile Thread vpnThread;
     private volatile boolean running = false;
+    private volatile boolean vpnPaused = false;
 
     private Intent lastStartIntent;
     private VpnNotification notification;
@@ -28,7 +30,7 @@ public class FCAEVpnService extends VpnService {
         @Override
         public void run() {
             updateNotification();
-            if (running) {
+            if (running || vpnPaused) {
                 handler.postDelayed(this, 1000);
             }
         }
@@ -49,6 +51,9 @@ public class FCAEVpnService extends VpnService {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && intent.getAction() != null) {
             switch (intent.getAction()) {
+                case ACTION_STOP:
+                    pauseVpn();
+                    return START_STICKY;
                 case ACTION_DISCONNECT:
                     fullShutdown();
                     return START_NOT_STICKY;
@@ -63,18 +68,19 @@ public class FCAEVpnService extends VpnService {
             }
         }
 
-        notification.show("FCAE VPN \u2014 Ready (tap Connect in app)");
+        notification.show("FCAE VPN \u2014 Ready (tap Connect in app)", false);
         startForeground(VpnNotification.NOTIFICATION_ID,
-            notification.build("FCAE VPN \u2014 Ready (tap Connect in app)"));
+            notification.build("FCAE VPN \u2014 Ready (tap Connect in app)", false));
         return START_STICKY;
     }
 
     private void startVpn(Intent intent) {
         if (running) return;
+        vpnPaused = false;
 
-        notification.show("FCAE VPN \u2014 Connecting...");
+        notification.show("FCAE VPN \u2014 Connecting...", false);
         startForeground(VpnNotification.NOTIFICATION_ID,
-            notification.build("FCAE VPN \u2014 Connecting..."));
+            notification.build("FCAE VPN \u2014 Connecting...", false));
 
         final int protocol    = intent.getIntExtra("protocol", 0);
         final int mode        = intent.getIntExtra("mode", 1);
@@ -164,6 +170,7 @@ public class FCAEVpnService extends VpnService {
     private void fullShutdown() {
         if (!running && vpnInterface == null) return;
         running = false;
+        vpnPaused = false;
 
         Log.i(TAG, "fullShutdown: starting");
         handler.removeCallbacks(statsRunnable);
@@ -209,8 +216,41 @@ public class FCAEVpnService extends VpnService {
         }, "FCAE-NativeStop-Watchdog").start();
     }
 
+    private void pauseVpn() {
+        running = false;
+        vpnPaused = true;
+
+        Thread t = vpnThread;
+        vpnThread = null;
+        if (t != null) {
+            t.interrupt();
+            try { t.join(1000); } catch (InterruptedException ignored) {}
+        }
+
+        ParcelFileDescriptor pfdToClose = vpnInterface;
+        vpnInterface = null;
+        if (pfdToClose != null) {
+            try { pfdToClose.close(); } catch (Exception ignored) {}
+        }
+
+        handler.removeCallbacks(statsRunnable);
+        updateNotification();
+        Log.i(TAG, "VPN paused");
+
+        new Thread(() -> {
+            Thread worker = new Thread(() -> {
+                try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+            }, "FCAE-NativeStop-Pause");
+            worker.start();
+            try { worker.join(3000); } catch (InterruptedException ignored) {}
+            if (worker.isAlive()) worker.interrupt();
+        }, "FCAE-Pause-Watchdog").start();
+    }
+
     private void updateNotification() {
-        if (running) {
+        if (vpnPaused) {
+            notification.show("FCAE VPN \u2014 Stopped (tap Start to resume)", false);
+        } else if (running) {
             long rx = 0, tx = 0;
             try {
                 long[] stats = nativeGetTrafficStats();
@@ -225,9 +265,9 @@ public class FCAEVpnService extends VpnService {
                 "\u2193 %s  %s  |  \u2191 %s  %s",
                 VpnNotification.fmtBytes(cachedTotalRx), VpnNotification.fmtRate(rx),
                 VpnNotification.fmtBytes(cachedTotalTx), VpnNotification.fmtRate(tx));
-            notification.show(text);
+            notification.show(text, true);
         } else {
-            notification.show("FCAE VPN \u2014 Disconnected");
+            notification.show("FCAE VPN \u2014 Disconnected", false);
         }
     }
 
