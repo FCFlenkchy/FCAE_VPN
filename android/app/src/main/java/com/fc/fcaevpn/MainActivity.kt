@@ -216,8 +216,6 @@ class MainActivity : AppCompatActivity() {
             wasAtBottom = scrollY >= maxScroll - 5
         }
 
-        outerScroll.post { outerScroll.scrollTo(0, 0) }
-
         val filter = IntentFilter().apply {
             addAction(FCAEVpnService.BROADCAST_VPN_DISCONNECTED)
             addAction(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
@@ -500,27 +498,18 @@ class MainActivity : AppCompatActivity() {
                 val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
 
                 val scrollWasAtBottom = wasAtBottom
-                val outerY = outerScroll.scrollY
 
-                // Flag tells the scroll listener not to overwrite wasAtBottom
-                // while we're programmatically scrolling.
                 updatingLogs = true
                 logText.text = shown
 
                 if (scrollWasAtBottom) {
-                    // Use scrollTo (not fullScroll) to avoid focus changes
-                    // propagating to the parent outerScroll.
                     logScroll.post {
                         val child = logScroll.getChildAt(0)
                         if (child != null) {
                             val target = (child.height - logScroll.height).coerceAtLeast(0)
                             logScroll.scrollTo(0, target)
                         }
-                        // Restore outer scroll after inner scroll settles
-                        outerScroll.post {
-                            outerScroll.scrollTo(0, outerY)
-                            updatingLogs = false
-                        }
+                        updatingLogs = false
                     }
                 } else {
                     updatingLogs = false

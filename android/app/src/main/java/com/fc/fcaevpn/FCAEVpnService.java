@@ -222,6 +222,10 @@ public class FCAEVpnService extends VpnService {
         // RUNNING is still true and aether_start() fails.
         stopNativeSync();
 
+        // Fully release native state so the next startVpn gets a clean slate.
+        // Must happen AFTER stopNativeSync (which needs the engine alive to stop).
+        try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
+
         Thread t = vpnThread;
         vpnThread = null;
         if (t != null) {

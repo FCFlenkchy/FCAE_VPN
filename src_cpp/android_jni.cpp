@@ -136,6 +136,14 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStop(JNIEnv*, jclass) {
     LOGI("aether_stop");
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeFree(JNIEnv*, jclass) {
+    if (!g_inited) return;
+    aether_free();
+    g_inited = false;
+    LOGI("aether_free");
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeGetStatusJson(JNIEnv* env, jclass) {
     ensure_init();

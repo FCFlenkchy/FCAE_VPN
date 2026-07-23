@@ -33,6 +33,7 @@ object NativeEngine {
         liveValidateSecs: Int,
     ): Boolean
     @JvmStatic external fun nativeStop()
+    @JvmStatic external fun nativeFree()
     @JvmStatic external fun nativeGetStatusJson(): String
     @JvmStatic external fun nativeGetLogs(): String
     @JvmStatic external fun nativeClearLogs()
