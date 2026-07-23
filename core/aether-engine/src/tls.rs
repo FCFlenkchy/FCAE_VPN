@@ -80,7 +80,6 @@ fn spki_pin_verify(
     log::warn!("[tls] SPKI pin mismatch — actual hash: {hash_hex}");
     false
 }
-}
 
 pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
     let mut builder = SslContextBuilder::new(SslMethod::tls())
