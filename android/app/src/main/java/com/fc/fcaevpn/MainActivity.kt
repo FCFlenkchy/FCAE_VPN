@@ -61,6 +61,8 @@ class MainActivity : AppCompatActivity() {
     private val pollBusy = AtomicBoolean(false)
     private lateinit var prefs: SharedPreferences
 
+    private var userScrolledUp = false
+
     private val poll = object : Runnable {
         override fun run() {
             if (!pollBusy.compareAndSet(false, true)) {
@@ -171,8 +173,18 @@ class MainActivity : AppCompatActivity() {
         updateButton()
         handler.post(poll)
 
-        // Ensure outer ScrollView starts at the top
-        outerScroll.post { outerScroll.fullScroll(ScrollView.FOCUS_UP) }
+        // Detect manual scroll on log area
+        logScroll.viewTreeObserver.addOnScrollChangedListener {
+            val scrollable = logScroll.getChildAt(0)?.height?.minus(logScroll.height) ?: 0
+            userScrolledUp = scrollable > 0 && logScroll.scrollY < scrollable - 10
+        }
+
+        // Scroll outer layout to top after layout is measured
+        outerScroll.post {
+            outerScroll.scrollTo(0, 0)
+        }
+        // Fallback: force scroll to top after a short delay
+        outerScroll.postDelayed({ outerScroll.scrollTo(0, 0) }, 100)
     }
 
     override fun onPause() {
@@ -433,10 +445,8 @@ class MainActivity : AppCompatActivity() {
                 lastLogHash = h
                 val shown = if (logs.length > 24_000) logs.takeLast(24_000) else logs
                 logText.text = shown
-                // Only auto-scroll if user was already at the bottom
-                val scrollableHeight = logScroll.getChildAt(0)?.height?.minus(logScroll.height) ?: 0
-                val wasAtBottom = logScroll.scrollY >= scrollableHeight - 10
-                if (wasAtBottom) {
+                // Only auto-scroll if user hasn't manually scrolled up
+                if (!userScrolledUp) {
                     logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
                 }
             }

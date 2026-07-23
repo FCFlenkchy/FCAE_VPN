@@ -201,9 +201,8 @@ public class FCAEVpnService extends VpnService {
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private void stopVpnKeepNotification() {
-        // "Stop" now fully disconnects the VPN (same as Disconnect)
         running = false;
-        vpnPaused = false;
+        vpnPaused = true;
 
         if (vpnThread != null) {
             vpnThread.interrupt();
@@ -213,9 +212,9 @@ public class FCAEVpnService extends VpnService {
         NativeEngine.nativeStop();
         cleanupVpnInterface();
         statsHandler.removeCallbacks(statsRunnable);
-        stopForeground(true);
-        stopSelf();
-        Log.i(TAG, "VPN fully stopped via Stop button");
+        // Keep notification alive with "Start" button
+        updateNotificationStats();
+        Log.i(TAG, "VPN stopped (notification kept, Start available)");
     }
 
     private void stopVpnAndNotification() {
@@ -343,6 +342,14 @@ public class FCAEVpnService extends VpnService {
                 stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             nb.addAction(new Notification.Action.Builder(null, "Stop", piStop).build());
         } else {
+            // Disconnect always available
+            Intent discIntent = new Intent(this, FCAEVpnService.class);
+            discIntent.setAction(ACTION_DISCONNECT);
+            PendingIntent piDisc = PendingIntent.getService(this, DISCONNECT_ACTION_CODE,
+                discIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            nb.addAction(new Notification.Action.Builder(null, "Disconnect", piDisc).build());
+
+            // Start button second
             Intent startIntent = new Intent(this, FCAEVpnService.class);
             startIntent.setAction(ACTION_START);
             PendingIntent piStart = PendingIntent.getService(this, STOP_ACTION_CODE,
