@@ -8,14 +8,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 
-/**
- * Handles all notification creation and updates for the VPN service.
- */
 public class VpnNotification {
     public static final String CHANNEL_ID = "fcaevpn_service";
     public static final int NOTIFICATION_ID = 1;
-
-    private static final int STOP_ACTION_CODE = 10;
     private static final int DISCONNECT_ACTION_CODE = 11;
 
     private final Context context;
@@ -37,7 +32,7 @@ public class VpnNotification {
         }
     }
 
-    public Notification build(String text, boolean showStopButton) {
+    public Notification build(String text) {
         Intent mainIntent = new Intent(context, MainActivity.class);
         PendingIntent piMain = PendingIntent.getActivity(context, 0, mainIntent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
@@ -56,33 +51,24 @@ public class VpnNotification {
           .setOngoing(true)
           .setStyle(new Notification.BigTextStyle().bigText(text));
 
-        if (showStopButton) {
-            nb.addAction(buildAction("Disconnect", FCAEVpnService.ACTION_DISCONNECT, DISCONNECT_ACTION_CODE));
-            nb.addAction(buildAction("Stop", FCAEVpnService.ACTION_STOP, STOP_ACTION_CODE));
-        } else {
-            nb.addAction(buildAction("Disconnect", FCAEVpnService.ACTION_DISCONNECT, DISCONNECT_ACTION_CODE));
-            nb.addAction(buildAction("Start", FCAEVpnService.ACTION_START, STOP_ACTION_CODE));
-        }
+        // Disconnect button — only action
+        Intent discIntent = new Intent(context, FCAEVpnService.class);
+        discIntent.setAction(FCAEVpnService.ACTION_DISCONNECT);
+        PendingIntent piDisc = PendingIntent.getService(context, DISCONNECT_ACTION_CODE,
+            discIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        nb.addAction(new Notification.Action.Builder(null, "Disconnect", piDisc).build());
 
         return nb.build();
     }
 
-    public void show(String text, boolean showStopButton) {
+    public void show(String text) {
         if (manager != null) {
-            manager.notify(NOTIFICATION_ID, build(text, showStopButton));
+            manager.notify(NOTIFICATION_ID, build(text));
         }
     }
 
     public void dismiss() {
         if (manager != null) manager.cancel(NOTIFICATION_ID);
-    }
-
-    private Notification.Action buildAction(String label, String action, int requestCode) {
-        Intent intent = new Intent(context, FCAEVpnService.class);
-        intent.setAction(action);
-        PendingIntent pi = PendingIntent.getService(context, requestCode,
-            intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        return new Notification.Action.Builder(null, label, pi).build();
     }
 
     static String fmtBytes(long b) {
