@@ -1,4 +1,4 @@
-use std::ffi::c_void;
+use std::ffi::{c_int, c_void};
 use std::ptr;
 
 use base64::Engine;
@@ -164,7 +164,9 @@ pub fn build_h2_config(
     key_pem: &[u8],
     pin: bool,
 ) -> Result<boring::ssl::SslConnector> {
-    let mut builder = SslContextBuilder::new(SslMethod::tls_client())
+    use boring::ssl::SslConnector;
+
+    let mut builder = SslConnector::builder(SslMethod::tls_client())
         .map_err(|e| AetherError::Tls(e.to_string()))?;
 
     builder
@@ -203,8 +205,7 @@ pub fn build_h2_config(
         builder.set_verify(SslVerifyMode::NONE);
     }
 
-    // SslContextBuilder::build() returns SslContext; convert to SslConnector.
-    Ok(boring::ssl::SslConnector::from(builder.build()))
+    Ok(builder.build())
 }
 
 pub fn inject_ech(conn: &mut quiche::Connection, ech_config_list: &[u8]) -> Result<()> {
