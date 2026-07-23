@@ -452,16 +452,23 @@ class MainActivity : AppCompatActivity() {
                 lastLogHash = h
                 val shown = if (logs.length > 24_000) logs.takeLast(24_000) else logs
                 val wasAtBottom = !userScrolledUp
-                // Save outer scroll position — logText.text changes content
-                // height which causes the outer ScrollView to re-layout and jump
+                // Save outer scroll position BEFORE changing text — setting
+                // logText.text triggers a layout pass that can shift the
+                // outer ScrollView if the content height changes.
                 val outerY = outerScroll.scrollY
                 logText.text = shown
                 if (wasAtBottom) {
+                    // Use scrollTo instead of fullScroll(FOCUS_DOWN) to avoid
+                    // accessibility scroll actions propagating to the parent
+                    // outerScroll, which causes the entire UI to jump.
                     logScroll.post {
-                        logScroll.fullScroll(ScrollView.FOCUS_DOWN)
+                        val child = logScroll.getChildAt(0)
+                        if (child != null) {
+                            logScroll.scrollTo(0, child.height - logScroll.height)
+                        }
                     }
                 }
-                // Restore outer scroll so user doesn't get yanked to middle
+                // Restore outer scroll after a layout pass has settled
                 outerScroll.post { outerScroll.scrollTo(0, outerY) }
             }
             updateButton()

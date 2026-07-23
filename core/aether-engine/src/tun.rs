@@ -31,6 +31,10 @@ pub fn set_fd(fd: i32) {
 /// Force-close all dup'd TUN fds. Called from aether_stop() to ensure the
 /// kernel tears down the TUN device immediately, even if the read/write
 /// tasks are still blocked on I/O.
+///
+/// Uses swap(-1) so that whichever path runs first (close_all_fds vs
+/// run()'s cleanup) atomically claims ownership of each fd, preventing
+/// double-close.
 pub fn close_all_fds() {
     #[cfg(unix)]
     {
@@ -140,6 +144,9 @@ pub async fn run(
                 break;
             }
         }
+        // Prevent File::drop from closing the fd — close_all_fds() or
+        // run()'s cleanup owns it via the atomic.
+        let _ = file.into_raw_fd();
     });
 
     tokio::select! {
@@ -156,13 +163,18 @@ pub async fn run(
         }
     }
 
-    // Clear saved fds (they may already be closed by close_all_fds)
-    TUN_DUP_READ.store(-1, Ordering::SeqCst);
-    TUN_DUP_WRITE.store(-1, Ordering::SeqCst);
-
-    unsafe {
-        let _ = libc::close(dup);
+    // Clear saved fds — use swap so we atomically claim ownership.
+    // If close_all_fds() already swapped them to -1, we skip the close
+    // (it already did it). If not, we own them and must close.
+    let saved_read = TUN_DUP_READ.swap(-1, Ordering::SeqCst);
+    let saved_write = TUN_DUP_WRITE.swap(-1, Ordering::SeqCst);
+    if saved_read >= 0 {
+        unsafe { libc::close(saved_read); }
     }
+    if saved_write >= 0 {
+        unsafe { libc::close(saved_write); }
+    }
+
     Ok(())
 }
 

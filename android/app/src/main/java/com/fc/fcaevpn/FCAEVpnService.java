@@ -192,11 +192,22 @@ public class FCAEVpnService extends VpnService {
 
     private void fullShutdown() {
         if (!running && vpnInterface == null) return;
-        running = false;
-        vpnPaused = false;
+
+        // Guard against concurrent calls (e.g. onDestroy + handler post)
+        synchronized (this) {
+            if (!running && vpnInterface == null) return;
+            running = false;
+            vpnPaused = false;
+        }
 
         Log.i(TAG, "fullShutdown: starting");
         handler.removeCallbacks(statsRunnable);
+
+        // Stop the native engine BEFORE closing the VPN fd and stopping
+        // the service. This ensures the engine thread is fully drained
+        // before the next startVpn() call, preventing the race where
+        // RUNNING is still true and aether_start() fails.
+        stopNativeSync();
 
         Thread t = vpnThread;
         vpnThread = null;
@@ -223,8 +234,6 @@ public class FCAEVpnService extends VpnService {
         Intent broadcast = new Intent("com.fc.fcaevpn.VPN_DISCONNECTED");
         broadcast.setPackage(getPackageName());
         sendBroadcast(broadcast);
-
-        stopNativeSync();
     }
 
     private void pauseVpn() {

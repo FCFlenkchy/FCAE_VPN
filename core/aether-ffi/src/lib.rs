@@ -691,6 +691,17 @@ pub extern "C" fn aether_stop() {
     // kernel VPN tunnel alive even after Java closes ParcelFileDescriptor.
     aether_engine::tun::close_all_fds();
 
+    // Wait for the engine thread to observe SHUTDOWN and exit, so that
+    // the next aether_start() doesn't race with a still-shutting-down
+    // engine (RUNNING would still be true, causing aether_start to fail).
+    // The engine thread polls SHUTDOWN every 200ms, so 3s is generous.
+    for _ in 0..30 {
+        if !RUNNING.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
     unsafe {
         log_msg(4, "[ffi] aether_stop called");
     }
