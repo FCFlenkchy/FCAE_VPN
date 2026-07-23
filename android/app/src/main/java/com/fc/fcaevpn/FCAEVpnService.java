@@ -241,12 +241,8 @@ public class FCAEVpnService extends VpnService {
         statsHandler.removeCallbacks(statsRunnable);
 
         // 5. Dismiss notification and destroy service
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE);
-        } else {
-            @SuppressWarnings("deprecation")
-            stopForeground(true);
-        }
+        @SuppressWarnings("deprecation")
+        stopForeground(true);
         stopSelf();
         Log.i(TAG, "VPN fully stopped + service destroyed");
     }
