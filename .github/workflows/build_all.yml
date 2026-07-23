@@ -46,8 +46,6 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
         with:
-          # Only quiche is required (path dep for aether-engine).
-          # aether engine is vendored in core/aether-engine — no aether submodule.
           submodules: false
 
       - name: cleanup old caches
@@ -55,44 +53,54 @@ jobs:
         continue-on-error: true
         with:
           script: |
-            const res = await github.rest.actions.getActionsCacheList({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              key: 'cmake-${{ matrix.name }}-',
-              per_page: 100,
-            });
-            const caches = res.data.actions_caches || [];
-            // Keep only the 2 most recent cmake caches per platform
-            const toDelete = caches.slice(2);
-            for (const cache of toDelete) {
-              try {
-                await github.rest.actions.deleteActionsCacheById({
+            const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+            const prefixes = ['cmake-', 'gradle-', 'sccache-'];
+            // Rust caches are managed by Swatinem/rust-cache — skip those.
+
+            for (const prefix of prefixes) {
+              let page = 1;
+              let totalDeleted = 0;
+              while (true) {
+                const res = await github.rest.actions.getActionsCacheList({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  cache_id: cache.id,
+                  key: prefix,
+                  per_page: 100,
+                  page,
                 });
-                console.log(`Deleted old cache: ${cache.key}`);
-              } catch (e) {
-                console.log(`Skipped cache ${cache.key}: ${e.message}`);
+                const caches = res.data.actions_caches || [];
+                if (caches.length === 0) break;
+
+                // Delete anything older than 7 days
+                const old = caches.filter(c => new Date(c.created_at).getTime() < sevenDaysAgo);
+                // Also cap at 3 most recent per prefix
+                const recent = caches.filter(c => new Date(c.created_at).getTime() >= sevenDaysAgo);
+                const excess = recent.slice(3);
+                const toDelete = [...old, ...excess];
+
+                for (const cache of toDelete) {
+                  try {
+                    await github.rest.actions.deleteActionsCacheById({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      cache_id: cache.id,
+                    });
+                    totalDeleted++;
+                    console.log(`Deleted: ${cache.key} (created ${cache.created_at})`);
+                  } catch (e) {
+                    console.log(`Skipped ${cache.key}: ${e.message}`);
+                  }
+                }
+                if (caches.length < 100) break;
+                page++;
               }
+              console.log(`Cleaned ${totalDeleted} caches for prefix '${prefix}'`);
             }
 
       - name: init quiche submodule
         run: |
           git submodule sync -- quiche
           git submodule update --init --depth 1 -- quiche
-
-      - name: install deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential g++ gcc cmake ninja-build \
-            mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 \
-            libglfw3-dev libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
-            pkg-config openjdk-17-jdk \
-            libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
-            protobuf-compiler \
-            nasm golang-go zip
-          nasm -v
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
@@ -113,7 +121,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build
-          key: cmake-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt') }}
+          key: cmake-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt', 'core/**', 'src_cpp/**', 'include/**') }}
           restore-keys: cmake-${{ matrix.name }}-
 
       - name: cache gradle
@@ -271,8 +279,6 @@ jobs:
           test -f package/FCAE_VPN-android-arm64-v8a.apk
           ls -lah package/
 
-      # Upload raw binary/apk only. Actions always wraps downloads in one outer zip;
-      # pre-zipping here would double-zip. Release job zips for GitHub Releases.
       - name: upload
         uses: actions/upload-artifact@v4
         with:
@@ -300,7 +306,6 @@ jobs:
           for dir in artifacts/*/; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
-            # One platform zip per artifact folder (contains the binary/apk)
             (
               cd "$dir"
               zip -9 -j "../../release-zips/${name}.zip" ./*
