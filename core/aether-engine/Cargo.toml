@@ -24,7 +24,7 @@ quiche = { path = "../../quiche/quiche", default-features = false, features = ["
 boring = "4.22"
 foreign-types-shared = "0.3"
 libc = "0.2"
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "io-std", "signal"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "io-std", "signal", "fs"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -47,6 +47,7 @@ chacha20poly1305 = "0.10"
 regex = "1"
 ipnet = "2"
 parking_lot = "0.12"
+once_cell = "1"
 socket2 = "0.6.4"
 h2 = "0.4"
 http = "1"

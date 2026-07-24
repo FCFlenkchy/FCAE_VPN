@@ -125,7 +125,7 @@ pub fn save_masque_creds(path: &str, cert_pem: &[u8], key_pem: &[u8]) -> Result<
 // versions above.
 
 pub async fn load_async(path: &str) -> Result<Option<Identity>> {
-    if !tokio::fs::try_exists(path).await.unwrap_or(false) {
+    if tokio::fs::metadata(path).await.is_err() {
         return Ok(None);
     }
     let text = tokio::fs::read_to_string(path).await?;
@@ -143,7 +143,7 @@ pub async fn save_async(path: &str, identity: &Identity) -> Result<()> {
 }
 
 pub async fn save_masque_creds_async(path: &str, cert_pem: &[u8], key_pem: &[u8]) -> Result<()> {
-    if !tokio::fs::try_exists(path).await.unwrap_or(false) {
+    if tokio::fs::metadata(path).await.is_err() {
         return Ok(());
     }
     let text = tokio::fs::read_to_string(path).await?;
