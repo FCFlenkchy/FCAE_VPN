@@ -6,25 +6,36 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
 
 public class VpnNotification {
     public static final String CHANNEL_ID = "fcaevpn_service";
     public static final int NOTIFICATION_ID = 1;
-    private static final int DISCONNECT_ACTION_CODE = 11;
-    private static final int START_ACTION_CODE = 10;
 
     private final Context context;
     private final NotificationManager manager;
+    // Cached PendingIntents — created once, reused every 5s notification update.
+    // Saves 2 Binder IPC calls to ActivityManagerService per update.
+    private final PendingIntent piMain;
+    private final Notification.Action disconnectAction;
+    private final Notification.Action stopAction;
+    private final Notification.Action startAction;
 
     public VpnNotification(Context context) {
         this.context = context;
         this.manager = context.getSystemService(NotificationManager.class);
         createChannel();
+
+        Intent mainIntent = new Intent(context, MainActivity.class);
+        piMain = PendingIntent.getActivity(context, 0, mainIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        disconnectAction = buildAction("Disconnect", FCAEVpnService.ACTION_DISCONNECT, 11);
+        stopAction = buildAction("Stop", FCAEVpnService.ACTION_STOP, 10);
+        startAction = buildAction("Start", FCAEVpnService.ACTION_START, 10);
     }
 
     private void createChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
                 CHANNEL_ID, "FCAE VPN",
                 NotificationManager.IMPORTANCE_LOW);
@@ -34,10 +45,6 @@ public class VpnNotification {
     }
 
     public Notification build(String text, boolean showStopButton) {
-        Intent mainIntent = new Intent(context, MainActivity.class);
-        PendingIntent piMain = PendingIntent.getActivity(context, 0, mainIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
         Notification.Builder nb = new Notification.Builder(context, CHANNEL_ID);
 
         nb.setContentTitle("FCAE VPN")
@@ -48,11 +55,11 @@ public class VpnNotification {
           .setStyle(new Notification.BigTextStyle().bigText(text));
 
         if (showStopButton) {
-            nb.addAction(buildAction("Disconnect", FCAEVpnService.ACTION_DISCONNECT, DISCONNECT_ACTION_CODE));
-            nb.addAction(buildAction("Stop", FCAEVpnService.ACTION_STOP, START_ACTION_CODE));
+            nb.addAction(disconnectAction);
+            nb.addAction(stopAction);
         } else {
-            nb.addAction(buildAction("Disconnect", FCAEVpnService.ACTION_DISCONNECT, DISCONNECT_ACTION_CODE));
-            nb.addAction(buildAction("Start", FCAEVpnService.ACTION_START, START_ACTION_CODE));
+            nb.addAction(disconnectAction);
+            nb.addAction(startAction);
         }
 
         return nb.build();
@@ -86,7 +93,7 @@ public class VpnNotification {
     static String fmtRate(long bps) {
         if (bps >= 1073741824L) return String.format("%.1f GB/s", bps / 1073741824.0);
         if (bps >= 1048576L)    return String.format("%.1f MB/s", bps / 1048576.0);
-        if (bps >= 1024L)       return String.format("%.0f KB/s", bps / 1024.0);
+        if (bps >= 1024L)       return String.format("%.1f KB/s", bps / 1024.0);
         return bps + " B/s";
     }
 }

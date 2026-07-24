@@ -13,7 +13,7 @@ use crate::error::{AetherError, Result};
 use rand::Rng;
 
 const TIMER_TICK: Duration = Duration::from_millis(1000);
-const MAX_PACKET: usize = 65536;
+const MAX_PACKET: usize = 2048;
 
 const WG_MSG_TYPE_MIN: u8 = 1;
 const WG_MSG_TYPE_MAX: u8 = 4;
@@ -211,7 +211,8 @@ impl WgTunnel {
                 interval.tick().await;
                 let mut tunn = tunn_t.lock().await;
                 if let TunnResult::WriteToNetwork(pkt) = tunn.update_timers(&mut tmp) {
-                    let mut pkt_vec = pkt.to_vec();
+                    let mut pkt_vec = crate::buffer_pool::take(pkt.len());
+                    pkt_vec.extend_from_slice(pkt);
                     inject_client_id(&mut pkt_vec, &client_id);
                     drop(tunn);
 

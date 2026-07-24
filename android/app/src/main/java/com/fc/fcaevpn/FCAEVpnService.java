@@ -6,6 +6,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 public class FCAEVpnService extends VpnService {
     private static final String TAG = "FCAE_VPN";
@@ -23,6 +25,7 @@ public class FCAEVpnService extends VpnService {
     private volatile boolean vpnPaused = false;
     private volatile boolean shuttingDown = false;
     private volatile boolean nativeFreed = false;
+    private CountDownLatch shutdownLatch;
 
     private Intent lastStartIntent;
     private VpnNotification notification;
@@ -30,6 +33,7 @@ public class FCAEVpnService extends VpnService {
 
     private long cachedTotalRx = 0;
     private long cachedTotalTx = 0;
+    private long lastRxTs = 0;
     // Skip redundant manager.notify() calls (Binder call into system_server,
     // can wake SystemUI) when the displayed text hasn't actually changed —
     // meaningful during idle-but-connected periods with no traffic.
@@ -174,14 +178,15 @@ public class FCAEVpnService extends VpnService {
                 Log.i(TAG, "VPN engine started");
                 cachedTotalRx = 0;
                 cachedTotalTx = 0;
+                lastRxTs = System.currentTimeMillis();
                 lastNotifText = null;
                 updateNotification();
                 handler.post(statsRunnable);
                 notifyUi();
 
-                while (running) {
-                    try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
-                }
+                // Block until shutdown — no periodic wakeup, no CPU cost.
+                shutdownLatch = new CountDownLatch(1);
+                try { shutdownLatch.await(); } catch (InterruptedException e) { break; }
             } catch (Exception e) {
                 Log.e(TAG, "VPN error: " + e.getMessage(), e);
                 handler.post(() -> fullShutdown());
@@ -201,6 +206,7 @@ public class FCAEVpnService extends VpnService {
         Thread t = new Thread(() -> {
             try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
         }, "FCAE-NativeFree-Sync");
+        t.setDaemon(true);
         t.start();
         try { t.join(5000); } catch (InterruptedException ignored) {}
         if (t.isAlive()) {
@@ -216,6 +222,12 @@ public class FCAEVpnService extends VpnService {
     private void fullShutdown() {
         running = false;
         vpnPaused = false;
+
+        // Unblock the VPN worker thread immediately.
+        if (shutdownLatch != null) {
+            shutdownLatch.countDown();
+            shutdownLatch = null;
+        }
 
         if (!shuttingDown) {
             shuttingDown = true;
@@ -240,6 +252,7 @@ public class FCAEVpnService extends VpnService {
         vpnThread = null;
         final ParcelFileDescriptor pfdToClose = vpnInterface;
         vpnInterface = null;
+        lastStartIntent = null;
 
         // Heavy cleanup on background thread.  Must NOT block main thread
         // for >100ms (ANR threshold).
@@ -271,6 +284,12 @@ public class FCAEVpnService extends VpnService {
     private void pauseVpn() {
         running = false;
         vpnPaused = true;
+
+        // Unblock the VPN worker thread immediately.
+        if (shutdownLatch != null) {
+            shutdownLatch.countDown();
+            shutdownLatch = null;
+        }
 
         Log.i(TAG, "pauseVpn: starting");
         notifyUi();
@@ -323,8 +342,17 @@ public class FCAEVpnService extends VpnService {
                     tx = stats[1];
                 }
             } catch (Exception ignored) {}
-            cachedTotalRx += rx;
-            cachedTotalTx += tx;
+            // Accumulate bytes: rx/tx are bytes/sec rates, poll every 5s
+            // so approximate total bytes added = rate * interval.
+            long now = System.currentTimeMillis();
+            if (lastRxTs > 0) {
+                long elapsed = (now - lastRxTs) / 1000;
+                if (elapsed > 0) {
+                    cachedTotalRx += rx * elapsed;
+                    cachedTotalTx += tx * elapsed;
+                }
+            }
+            lastRxTs = now;
             String text = String.format(
                 "\u2193 %s  %s  |  \u2191 %s  %s",
                 VpnNotification.fmtBytes(cachedTotalRx), VpnNotification.fmtRate(rx),

@@ -31,7 +31,7 @@ class MainActivity : AppCompatActivity() {
     private var connecting = false
     @Volatile private var engineRunning = false
     private var pendingAfterVpnPermission = false
-    private var lastLogHash = 0
+    private var lastLogHash = 0L
     @Volatile private var vpnActive = false
     private var wasAtBottom = true
     private var updatingLogs = false
@@ -61,7 +61,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editHealthMaxFails: android.widget.EditText
     private lateinit var outerScroll: ScrollView
 
-    private val bgExecutor = Executors.newSingleThreadExecutor()
+    private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        val t = Thread(r, "bgExecutor")
+        t.isDaemon = true
+        t
+    }
     private val pollBusy = AtomicBoolean(false)
     private lateinit var prefs: SharedPreferences
 
@@ -203,7 +207,7 @@ class MainActivity : AppCompatActivity() {
         loadSettings()
 
         logText.text = ""
-        lastLogHash = 0
+        lastLogHash = 0L
 
         btnConnect.setOnClickListener {
             if (vpnActive || engineRunning || connecting) disconnectAll() else connectClicked()
@@ -212,7 +216,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.btnClearLogs).setOnClickListener {
             NativeEngine.nativeClearLogs()
             logText.text = ""
-            lastLogHash = 0
+            lastLogHash = 0L
         }
 
         findViewById<MaterialButton>(R.id.btnCopyLogs).setOnClickListener {
@@ -416,6 +420,11 @@ class MainActivity : AppCompatActivity() {
         val hi = healthInterval()
         val hf = healthMaxFails()
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
+        // Extract ALL UI values on the main thread — never read Views from bg.
+        val noizeProfile = spinnerNoize.selectedItem.toString()
+        val socksPort = if (switchSocks.isChecked) 1819 else 0
+        val httpPort = if (switchHttp.isChecked) 1820 else 0
+        val forcePeer = editForcePeer.text.toString().trim()
 
         bgExecutor.execute {
             // Ensure previous engine is fully stopped before starting.
@@ -433,15 +442,15 @@ class MainActivity : AppCompatActivity() {
                     scanMode = scanMode,
                     ipVersion = 4,
                     quickReconnect = quick,
-                    noizeProfile = spinnerNoize.selectedItem.toString(),
+                    noizeProfile = noizeProfile,
                     fragmentEnabled = false,
                     fragMinSize = 16,
                     fragMaxSize = 32,
                     fragMinDelay = 2,
                     fragMaxDelay = 10,
-                    socksPort = if (switchSocks.isChecked) 1819 else 0,
-                    httpPort = if (switchHttp.isChecked) 1820 else 0,
-                    forcePeer = editForcePeer.text.toString().trim(),
+                    socksPort = socksPort,
+                    httpPort = httpPort,
+                    forcePeer = forcePeer,
                     configPath = cfgPath,
                     h2Enabled = h2,
                     echEnabled = ech,
@@ -547,10 +556,10 @@ class MainActivity : AppCompatActivity() {
             statusText.text = if (status.isNotEmpty()) "$label \u2014 $status" else label
             statusText.setTextColor(
                 when (state) {
-                    4 -> Color.parseColor("#34D399")
-                    5 -> Color.parseColor("#F87171")
-                    0 -> Color.parseColor("#8A93A6")
-                    else -> Color.parseColor("#60A5FA")
+                    4 -> COLOR_CONNECTED
+                    5 -> COLOR_ERROR
+                    0 -> COLOR_DISCONNECTED
+                    else -> COLOR_PROGRESS
                 },
             )
             statsText.text =
@@ -574,7 +583,12 @@ class MainActivity : AppCompatActivity() {
             if (err.isNotEmpty()) peerLine.append("\nError: $err")
             peerText.text = peerLine.toString()
 
-            val h = logs.hashCode()
+            // Fast change detection: length + first/last chars is cheaper
+            // than scanning the entire string for hashCode().
+            val h = if (logs.isEmpty()) 0L else
+                logs.length.toLong() * 31 +
+                logs[0].code.toLong() * 31 +
+                logs[logs.length - 1].code.toLong()
             if (h != lastLogHash) {
                 lastLogHash = h
                 val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
@@ -606,10 +620,10 @@ class MainActivity : AppCompatActivity() {
     private fun updateButton() {
         if (vpnActive || engineRunning || connecting) {
             btnConnect.text = "DISCONNECT"
-            btnConnect.setBackgroundColor(Color.parseColor("#B91C1C"))
+            btnConnect.setBackgroundColor(COLOR_DISCONNECT_BTN)
         } else {
             btnConnect.text = "CONNECT"
-            btnConnect.setBackgroundColor(Color.parseColor("#15803D"))
+            btnConnect.setBackgroundColor(COLOR_CONNECT_BTN)
         }
     }
 
@@ -625,5 +639,13 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val POLL_INTERVAL_MS = 5000L
         private const val MAX_LOG_CHARS = 8000
+
+        // Pre-computed Color constants — avoids String.parseColor() on every poll tick.
+        private val COLOR_CONNECTED = Color.parseColor("#34D399")
+        private val COLOR_ERROR = Color.parseColor("#F87171")
+        private val COLOR_DISCONNECTED = Color.parseColor("#8A93A6")
+        private val COLOR_PROGRESS = Color.parseColor("#60A5FA")
+        private val COLOR_DISCONNECT_BTN = Color.parseColor("#B91C1C")
+        private val COLOR_CONNECT_BTN = Color.parseColor("#15803D")
     }
 }

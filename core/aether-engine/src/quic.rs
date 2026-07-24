@@ -15,7 +15,7 @@ use crate::tls::{self, TlsParams};
 use crate::{consts, error::AetherError, error::Result};
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
-const NET_QUEUE: usize = 1024;
+const NET_QUEUE: usize = 256;
 
 async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     use socket2::{Socket, Domain, Type};
@@ -135,7 +135,7 @@ fn random_scid() -> [u8; 16] {
 
 fn spawn_reader(sock: Arc<UdpSocket>, local: SocketAddr, tx: mpsc::Sender<NetPacket>) {
     tokio::spawn(async move {
-        let mut buf = vec![0u8; 65535];
+        let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
         loop {
             match sock.recv_from(&mut buf).await {
                 Ok((n, from)) => {
@@ -211,9 +211,9 @@ pub async fn run(
         flush(&mut conn, &sockets, &mut tmp).await?;
     }
 
-    let mut h3_body = vec![0u8; 65535];
+    let mut h3_body = vec![0u8; 16384];
 
-    let mut out_buf = vec![0u8; 65535];
+    let mut out_buf = vec![0u8; 16384];
     let mut flush_buf = vec![0u8; MAX_DATAGRAM_SIZE];
     let mut keepalive_interval = tokio::time::interval(Duration::from_secs(20));
     keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -263,9 +263,11 @@ pub async fn run(
             }
 
             Some((to_local, from, mut data)) = net_rx.recv() => {
-                let mut hdr_buf = data.clone();
-                if let Ok(hdr) = quiche::Header::from_slice(&mut hdr_buf, quiche::MAX_CONN_ID_LEN) {
-                    log::debug!("recv {} bytes type={:?} version=0x{:x} from {}", data.len(), hdr.ty, hdr.version, from);
+                if log::log_enabled!(log::Level::Debug) {
+                    let mut hdr_buf = data.clone();
+                    if let Ok(hdr) = quiche::Header::from_slice(&mut hdr_buf, quiche::MAX_CONN_ID_LEN) {
+                        log::debug!("recv {} bytes type={:?} version=0x{:x} from {}", data.len(), hdr.ty, hdr.version, from);
+                    }
                 }
                 let info = quiche::RecvInfo { from, to: to_local };
                 if let Err(e) = conn.recv(&mut data, info) {
@@ -647,7 +649,7 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
     let probe_packet = masque::build_dns_probe_packet(p.local_ipv4);
     let mut connect_ip_ok = false;
     let mut last_probe = Instant::now();
-    let mut dgram_buf = vec![0u8; 65535];
+    let mut dgram_buf = vec![0u8; 16384];
     let mut probe_successes: u32 = 0;
 
     let start = Instant::now();
@@ -657,7 +659,7 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
 
     flush_connected(&mut conn, &sock).await?;
 
-    let mut buf = vec![0u8; 65535];
+    let mut buf = vec![0u8; 16384];
 
     loop {
         if Instant::now() >= deadline {

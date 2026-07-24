@@ -11,10 +11,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{AetherError, Result};
 
-const TCP_BUF: usize = 128 * 1024;
-const UDP_BUF: usize = 48 * 1024;
+const TCP_BUF: usize = 32 * 1024;
+const UDP_BUF: usize = 8 * 1024;
 const UDP_META: usize = 64;
-const APP_QUEUE: usize = 1024;
+const APP_QUEUE: usize = 128;
 const MAX_INGEST_PER_TICK: usize = 256;
 const MAX_RECV_CHUNKS: usize = 128;
 
