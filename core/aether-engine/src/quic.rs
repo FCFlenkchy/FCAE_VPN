@@ -76,7 +76,7 @@ const DATA_PROBE_REQUIRED_SUCCESSES: u32 = 2;
 
 pub struct Channels {
     pub outbound_tx: mpsc::Sender<Vec<u8>>,
-    pub inbound_rx: mpsc::Receiver<Vec<u8>>,
+    pub inbound_rx: mpsc::Receiver<bytes::Bytes>,
     pub ctrl_tx: mpsc::Sender<Control>,
 }
 
@@ -101,7 +101,7 @@ pub fn channels() -> (Channels, Internals) {
 
 pub struct Internals {
     outbound_rx: mpsc::Receiver<Vec<u8>>,
-    inbound_tx: mpsc::Sender<Vec<u8>>,
+    inbound_tx: mpsc::Sender<bytes::Bytes>,
     ctrl_rx: mpsc::Receiver<Control>,
 }
 
@@ -110,7 +110,7 @@ impl Internals {
         self,
     ) -> (
         mpsc::Receiver<Vec<u8>>,
-        mpsc::Sender<Vec<u8>>,
+        mpsc::Sender<bytes::Bytes>,
         mpsc::Receiver<Control>,
     ) {
         (self.outbound_rx, self.inbound_tx, self.ctrl_rx)
@@ -515,7 +515,7 @@ fn bytes_to_ip(version: u8, bytes: &[u8]) -> Option<IpAddr> {
 async fn drain_datagrams(
     conn: &mut quiche::Connection,
     req_stream: Option<u64>,
-    inbound_tx: &mpsc::Sender<Vec<u8>>,
+    inbound_tx: &mpsc::Sender<bytes::Bytes>,
     buf: &mut [u8],
 ) -> bool {
     let sid = match req_stream {
@@ -529,7 +529,7 @@ async fn drain_datagrams(
             Ok(n) => match masque::decode_ip_datagram(&buf[..n], sid) {
                 Ok(Some(ip_packet)) => {
                     delivered = true;
-                    if inbound_tx.send(ip_packet).await.is_err() {
+                    if inbound_tx.send(bytes::Bytes::from(ip_packet)).await.is_err() {
                         return delivered;
                     }
                 }

@@ -809,7 +809,7 @@ type TunBridge = (
 /// (Android VpnService). Proxy-only mode keeps the original direct path.
 fn split_dataplane(
     outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
-    inbound_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    inbound_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
 ) -> (
     tokio::sync::mpsc::Sender<Vec<u8>>,
     tokio::sync::mpsc::Receiver<bytes::Bytes>,
@@ -842,8 +842,7 @@ fn split_dataplane(
     // Tunnel → netstack + TUN (zero-copy via Bytes refcount).
     let mut inbound_rx = inbound_rx;
     tokio::spawn(async move {
-        while let Some(p) = inbound_rx.recv().await {
-            let b = bytes::Bytes::from(p);
+        while let Some(b) = inbound_rx.recv().await {
             let _ = ns_in_tx.send(b.clone()).await;
             let _ = tun_in_tx.send(b).await;
         }
@@ -1272,7 +1271,7 @@ async fn run_wireguard_tunnel(
     };
 
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(256);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(256);
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(256);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
 
@@ -1385,7 +1384,7 @@ async fn establish_wg(
     };
 
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(256);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(256);
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(256);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
     let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;

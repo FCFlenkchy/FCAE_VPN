@@ -158,7 +158,7 @@ pub async fn masque_http_ping(p: &MasquePingParams, timeout: Duration) -> Result
             &p.local_ipv4_str,
             &p.local_ipv6_str,
             PING_MTU,
-            inbound_rx,
+            inbound_rx.map(bytes::Bytes::from),
             outbound_tx,
         )?;
 
@@ -240,7 +240,7 @@ pub async fn wg_http_ping_established(
             &local_ipv4_str,
             &local_ipv6_str,
             PING_MTU,
-            inbound_rx,
+            inbound_rx.map(bytes::Bytes::from),
             outbound_tx,
         )?;
 

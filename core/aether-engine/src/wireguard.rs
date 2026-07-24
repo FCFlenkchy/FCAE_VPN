@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
+use bytes::Bytes;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 
@@ -55,7 +56,7 @@ pub struct WgTunnel {
     tunn: Arc<Mutex<Box<Tunn>>>,
     sock: Arc<UdpSocket>,
     peer: SocketAddr,
-    inbound_tx: mpsc::Sender<Vec<u8>>,
+    inbound_tx: mpsc::Sender<Bytes>,
     pub obf_sent: Arc<AtomicBool>,
     pub aethernoize: Arc<AetherNoizeConfig>,
     pub client_id: [u8; 3],
@@ -69,7 +70,7 @@ pub struct EstablishedSession {
 }
 
 impl WgTunnel {
-    pub async fn new(cfg: WgConfig, inbound_tx: mpsc::Sender<Vec<u8>>) -> Result<Self> {
+    pub async fn new(cfg: WgConfig, inbound_tx: mpsc::Sender<Bytes>) -> Result<Self> {
         let bind_addr = if cfg.peer_endpoint.is_ipv4() {
             "0.0.0.0:0"
         } else {
@@ -100,7 +101,7 @@ impl WgTunnel {
     pub fn from_established(
         session: EstablishedSession,
         aethernoize: Arc<AetherNoizeConfig>,
-        inbound_tx: mpsc::Sender<Vec<u8>>,
+        inbound_tx: mpsc::Sender<Bytes>,
     ) -> Self {
         Self {
             tunn: session.tunn,
@@ -152,10 +153,8 @@ impl WgTunnel {
                                 let mut pkt_vec = crate::buffer_pool::take(pkt.len());
                                 pkt_vec.extend_from_slice(pkt);
                                 drop(tunn);
-                                // Not recycled here — ownership moves downstream via
-                                // inbound_tx to the TUN write task, which recycles it
-                                // back into the same shared pool after writing it out.
-                                let _ = inbound_tx.send(pkt_vec).await;
+                                // Bytes::from(Vec) takes ownership — zero-copy, no recycling needed.
+                                let _ = inbound_tx.send(Bytes::from(pkt_vec)).await;
                             }
                         }
                     }

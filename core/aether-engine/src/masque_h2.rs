@@ -472,7 +472,7 @@ async fn send_capsule(send: &mut h2::SendStream<Bytes>, data: Bytes) -> Result<(
 
 async fn drain_capsules(
     capsules: &mut CapsuleParser,
-    inbound_tx: &mpsc::Sender<Vec<u8>>,
+    inbound_tx: &mpsc::Sender<bytes::Bytes>,
     addr_tx: &Option<mpsc::Sender<AssignedAddr>>,
 ) -> bool {
     let mut delivered = false;
@@ -480,7 +480,7 @@ async fn drain_capsules(
         match capsules.next() {
             Ok(Some(Capsule::Datagram(pkt))) => {
                 delivered = true;
-                if inbound_tx.send(pkt).await.is_err() {
+                if inbound_tx.send(bytes::Bytes::from(pkt)).await.is_err() {
                     return delivered;
                 }
             }
