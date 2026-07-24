@@ -6,6 +6,8 @@ use crate::error::{AetherError, Result};
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
+use std::mem::ManuallyDrop;
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, IntoRawFd};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -136,7 +138,12 @@ pub async fn run(
     TUN_DUP_WRITE.store(write_fd, Ordering::SeqCst);
 
     let write_task = tokio::spawn(async move {
-        let mut file = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        // Use ManuallyDrop so File::drop() NEVER closes the fd.
+        // When the runtime is dropped, this async task is cancelled and
+        // drop() would run — but close_all_fds() already owns the fd via
+        // the atomic. Without ManuallyDrop, cancelling this task causes
+        // a double-close crash on Android disconnect.
+        let mut file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(write_fd) });
         while let Some(pkt) = inbound_rx.recv().await {
             crate::stats::add_rx(pkt.len() as u64);
             if let Err(e) = file.write_all(&pkt) {
@@ -144,9 +151,6 @@ pub async fn run(
                 break;
             }
         }
-        // Prevent File::drop from closing the fd — close_all_fds() or
-        // run()'s cleanup owns it via the atomic.
-        let _ = file.into_raw_fd();
     });
 
     tokio::select! {

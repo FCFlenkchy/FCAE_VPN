@@ -829,13 +829,15 @@ pub extern "C" fn aether_set_android_tun_fd(tun_fd: i32) {
 pub extern "C" fn aether_free() {
     let _guard = STOP_GUARD.lock();
 
-    // Signal shutdown and close TUN fds (idempotent with aether_stop).
+    // Signal shutdown FIRST — this makes the engine thread's select! loop
+    // return so block_on() completes and the tokio runtime is dropped.
     SHUTDOWN.store(true, Ordering::SeqCst);
-    aether_engine::tun::close_all_fds();
 
-    // Wait for the engine thread to fully exit.  This is critical:
-    // the engine thread drops the tokio runtime *after* block_on returns,
-    // which cancels all async tasks and may log messages.
+    // Join the engine thread BEFORE closing TUN fds.  The engine thread
+    // drops the tokio runtime, which cancels async tasks (including the
+    // TUN write_task).  With ManuallyDrop in the write_task, File::drop()
+    // is suppressed, so no fd is closed during runtime teardown.
+    // After this returns, the engine thread is fully gone.
     join_engine_thread();
 
     // Also wait for RUNNING to become false — this covers the edge case
@@ -848,7 +850,11 @@ pub extern "C" fn aether_free() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Now safe to tear down — the engine thread is no longer running.
+    // Now safe to close TUN fds.  The engine thread is gone, async tasks
+    // are cancelled (write_task uses ManuallyDrop so no double-close).
+    // This also unblocks the detached spawn_blocking read_task.
+    aether_engine::tun::close_all_fds();
+
     RUNNING.store(false, Ordering::SeqCst);
 
     // NOTE: Do NOT clear INITIALIZED or LOG_CB here.  On Android the
