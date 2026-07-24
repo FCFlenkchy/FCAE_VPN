@@ -100,12 +100,9 @@ class MainActivity : AppCompatActivity() {
                             statsText.text = ""
                             peerText.text = ""
 
-                            // If the user is not in the app (e.g. disconnected
-                            // from notification while app was backgrounded), kill
-                            // the entire process so nothing lingers.
-                            if (!inForeground) {
-                                finishAndRemoveTask()
-                            }
+                            // Kill the entire process after disconnect so nothing
+                            // lingers in the background.
+                            handler.postDelayed({ finishAndRemoveTask() }, 500)
                         } else if (isRunning) {
                             connecting = false
                             engineRunning = true
@@ -507,8 +504,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // After a brief delay, force UI to DISCONNECTED even if no
-        // broadcast arrives (service might be dead).  If backgrounded,
-        // kill the whole process.
+        // broadcast arrives (service might be dead).  Then kill the process.
         handler.postDelayed({
             if (statusText.text == "DISCONNECTING...") {
                 vpnActive = false
@@ -519,10 +515,8 @@ class MainActivity : AppCompatActivity() {
                 statusText.setTextColor(Color.parseColor("#8A93A6"))
                 statsText.text = ""
                 peerText.text = ""
-                if (!inForeground) {
-                    finishAndRemoveTask()
-                }
             }
+            finishAndRemoveTask()
         }, 2000)
     }
 

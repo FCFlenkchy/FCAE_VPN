@@ -834,6 +834,45 @@ pub extern "C" fn aether_get_telemetry(out: *mut AetherTelemetryOut) {
     }
 }
 
+/// Read cached traffic stats without consuming the rate window.
+/// Used by the notification poll so it doesn't steal data from the
+/// primary UI telemetry caller.
+#[no_mangle]
+pub extern "C" fn aether_get_cached_telemetry(out: *mut AetherTelemetryOut) {
+    if out.is_null() {
+        return;
+    }
+
+    let (rx_bps, tx_bps) = aether_engine::cached_rates();
+    let total_rx = aether_engine::total_rx();
+    let total_tx = aether_engine::total_tx();
+    let rtt = aether_engine::rtt_ms() as u32;
+
+    let mut t = TELEMETRY.lock();
+    t.rx_bytes_sec = rx_bps;
+    t.tx_bytes_sec = tx_bps;
+    t.total_rx = total_rx;
+    t.total_tx = total_tx;
+    if rtt > 0 {
+        t.rtt_ms = rtt;
+    }
+
+    unsafe {
+        (*out).state = t.state;
+        (*out).mode = t.mode;
+        (*out).lan_enabled = t.lan_enabled;
+        (*out).rtt_ms = t.rtt_ms;
+        (*out).rx_bytes_sec = t.rx_bytes_sec;
+        (*out).tx_bytes_sec = t.tx_bytes_sec;
+        (*out).total_rx = t.total_rx;
+        (*out).total_tx = t.total_tx;
+        copy_str_to_buf(&mut (*out).connected_peer, &t.connected_peer);
+        copy_str_to_buf(&mut (*out).lan_ip, &t.lan_ip);
+        copy_str_to_buf(&mut (*out).status_message, &t.status_message);
+        copy_str_to_buf(&mut (*out).last_error, &t.last_error);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn aether_set_android_tun_fd(tun_fd: i32) {
     unsafe {
