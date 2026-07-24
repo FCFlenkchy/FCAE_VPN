@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="mountain.png" alt="FCAE VPN" width="600">
+</p>
+
 # FCAE VPN
 
 A censorship circumvention client designed for heavily restricted networks. It automatically discovers reachable routes, establishes an encrypted tunnel, and exposes a local SOCKS5/HTTP proxy for your applications.
