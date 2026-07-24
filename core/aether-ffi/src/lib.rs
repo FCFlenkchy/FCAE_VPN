@@ -296,13 +296,6 @@ fn detect_lan_ip() -> String {
     "127.0.0.1".to_string()
 }
 
-/// Expose the telemetry lock to the engine crate so it can push state
-/// transitions (e.g. CONNECTED after live validation) without relying on
-/// log-message parsing in the GUI logger.
-pub fn ffi_log_telemetry_lock() -> parking_lot::MutexGuard<'static, TelemetryState> {
-    TELEMETRY.lock()
-}
-
 fn cstr_opt(p: *const c_char) -> Option<String> {
     if p.is_null() {
         return None;
