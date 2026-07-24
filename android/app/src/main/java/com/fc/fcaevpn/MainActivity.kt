@@ -331,10 +331,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun healthInterval(): Int =
-        editHealthInterval.text.toString().toIntOrNull()?.coerceIn(5, 120) ?: 20
+        editHealthInterval.text.toString().toIntOrNull()?.coerceIn(2, 120) ?: 20
 
     private fun healthMaxFails(): Int =
         editHealthMaxFails.text.toString().toIntOrNull()?.coerceIn(1, 10) ?: 2
+
+    private fun liveValidateSecs(): Int =
+        // Default 10s instead of the old hardcoded 20s — much snappier on connect.
+        10
 
     private fun startTunServiceWithConfig() {
         connecting = true
@@ -357,7 +361,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("healthInterval", healthInterval())
         i.putExtra("healthMaxFails", healthMaxFails())
         i.putExtra("healthTimeout", 5)
-        i.putExtra("liveValidate", 20)
+        i.putExtra("liveValidate", liveValidateSecs())
         i.putExtra("socksPort", if (switchSocks.isChecked) 1819 else 0)
         i.putExtra("httpPort", if (switchHttp.isChecked) 1820 else 0)
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
@@ -420,7 +424,7 @@ class MainActivity : AppCompatActivity() {
                     healthIntervalSecs = hi,
                     healthMaxFails = hf,
                     healthTimeoutSecs = 5,
-                    liveValidateSecs = 20,
+                    liveValidateSecs = liveValidateSecs(),
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }

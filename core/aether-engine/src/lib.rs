@@ -109,7 +109,7 @@ fn live_validate_timeout() -> std::time::Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(20);
+        .unwrap_or(10);
     std::time::Duration::from_secs(secs)
 }
 
@@ -152,8 +152,10 @@ fn spawn_health_monitor(
     let interval = health_interval();
     let max_fails = health_max_fails();
     let probe_timeout = health_timeout().max(std::time::Duration::from_secs(8));
-    // Don't count failures during the first interval after SOCKS is up (tunnel still warming).
-    let grace = interval;
+    // Give the tunnel 2 full intervals to stabilize before counting failures.
+    // Using 1x caused the first probe (at t=interval) to land exactly on the
+    // grace boundary, so a single transient failure immediately killed the tunnel.
+    let grace = interval * 2;
     tokio::spawn(async move {
         let mut fails = 0u32;
         let started = std::time::Instant::now();
@@ -946,6 +948,9 @@ async fn run_masque_tunnel(
     }
 
     let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
+    // Keep a StackHandle clone alive so the netstack task is NOT dropped
+    // when socks/http/health tasks are aborted on health-check failure.
+    let _stack_keepalive = stack.clone();
     let health_task = spawn_health_monitor(stack.clone(), health_tx);
     let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
 
@@ -1282,9 +1287,9 @@ async fn run_wireguard_tunnel(
         }));
     }
 
-    // New WG session after scan: handshake + keepalive path needs more settle time
-    // than MASQUE (scan used a throwaway Tunn; this is a fresh connection).
-    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+    // Brief settle for WG handshake + keepalive path.  The health-check grace
+    // period (2x interval) handles the rest — no need for a long sleep here.
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
     // WireGuard was verified on a throwaway session; re-check the LIVE stack
     // before SOCKS (fixes false positives on quick-reconnect / Ironclad).
@@ -1297,6 +1302,9 @@ async fn run_wireguard_tunnel(
     }
 
     let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
+    // Keep a StackHandle clone alive so the netstack task is NOT dropped
+    // when socks/http/health tasks are aborted on health-check failure.
+    let _stack_keepalive = stack.clone();
     let health_task = spawn_health_monitor(stack.clone(), health_tx);
     let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
 
