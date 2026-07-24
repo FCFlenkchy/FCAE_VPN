@@ -84,6 +84,7 @@ void aether_init(AetherLogCallback log_cb, void* user_data);
 bool aether_start(const AetherConfig* config);
 void aether_stop(void);
 void aether_get_telemetry(AetherTelemetry* out_telemetry);
+void aether_get_cached_telemetry(AetherTelemetry* out_telemetry);
 void aether_set_android_tun_fd(int tun_fd); // Pass Android VpnService file descriptor across JNI
 void aether_free(void);
 
