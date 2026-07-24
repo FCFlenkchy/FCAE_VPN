@@ -27,7 +27,7 @@ mod wg_prober;
 
 /// Public traffic counters for the FFI / GUI.
 pub use stats::{
-    add_rx, add_tx, rates, reset as reset_stats, rtt_ms, set_rtt_ms, total_rx, total_tx,
+    add_rx, add_tx, cached_rates, rates, reset as reset_stats, rtt_ms, set_rtt_ms, total_rx, total_tx,
 };
 
 
