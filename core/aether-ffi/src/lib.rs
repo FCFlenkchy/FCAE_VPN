@@ -703,8 +703,15 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
             // spawned tasks and waits for workers to finish.  If a task's
             // Drop impl panics during cancellation, catch_unwind prevents
             // the thread from dying (which would leave RUNNING=true forever).
+            //
+            // CRITICAL: close_all_fds() MUST run before drop(rt).  The TUN
+            // read task uses spawn_blocking which blocks on file.read().
+            // Runtime drop waits for spawn_blocking tasks to complete, but
+            // the read task won't return until the fd is closed — causing
+            // a deadlock if we close fds after the runtime drop.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 SHUTDOWN.store(true, Ordering::SeqCst);
+                aether_engine::tun::close_all_fds();
                 drop(rt);
             }));
 

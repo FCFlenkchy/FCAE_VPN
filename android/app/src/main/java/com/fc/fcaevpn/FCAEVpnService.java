@@ -23,7 +23,6 @@ public class FCAEVpnService extends VpnService {
     private volatile boolean vpnPaused = false;
     private volatile boolean shuttingDown = false;
     private volatile boolean nativeFreed = false;
-    private Runnable pendingKillRunnable;
 
     private Intent lastStartIntent;
     private VpnNotification notification;
@@ -94,12 +93,6 @@ public class FCAEVpnService extends VpnService {
         vpnPaused = false;
         shuttingDown = false;
         nativeFreed = false;
-
-        // Cancel any pending safety-net kill from a previous shutdown.
-        if (pendingKillRunnable != null) {
-            handler.removeCallbacks(pendingKillRunnable);
-            pendingKillRunnable = null;
-        }
 
         // Signal any previous engine to stop (non-blocking).  aether_start()
         // has its own RUNNING-wait loop, so we do NOT block here with
@@ -236,6 +229,12 @@ public class FCAEVpnService extends VpnService {
         stopForeground(STOP_FOREGROUND_REMOVE);
         notifyUi();
 
+        // Stop the service IMMEDIATELY on the main thread so the system
+        // knows this service is done.  nativeFree + fd close happen in
+        // the background — they don't need to block the kill.
+        stopSelf();
+        Log.i(TAG, "service stopped (cleanup continues in background)");
+
         // Save refs — null them out so other code paths see stopped state.
         final Thread t = vpnThread;
         vpnThread = null;
@@ -260,23 +259,9 @@ public class FCAEVpnService extends VpnService {
                     Log.e(TAG, "Error closing fd: " + e.getMessage());
                 }
             }
-
-            stopSelf();
-            Log.i(TAG, "service stopped");
         }, "FCAE-Cleanup");
         cleanupThread.setDaemon(true);
         cleanupThread.start();
-
-        // Safety net: if the process is still alive after 10s (e.g.
-        // nativeFree hung), force-kill the process so nothing lingers
-        // in the background.  Cancelled by startVpn() on reconnect.
-        pendingKillRunnable = () -> {
-            try {
-                Log.w(TAG, "fullShutdown safety net — killing process");
-                android.os.Process.killProcess(android.os.Process.myPid());
-            } catch (Exception ignored) {}
-        };
-        handler.postDelayed(pendingKillRunnable, 10_000);
     }
 
     /**
