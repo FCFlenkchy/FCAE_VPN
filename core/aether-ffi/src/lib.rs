@@ -1,7 +1,6 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use parking_lot::Mutex;
 
@@ -667,23 +666,9 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         }
     };
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_flag = shutdown.clone();
-
     let handle = match std::thread::Builder::new()
         .name("aether-engine".to_string())
         .spawn(move || {
-            // Watch SHUTDOWN from aether_stop and abort the runtime.
-            let watch = std::thread::spawn({
-                let shutdown_flag = shutdown_flag.clone();
-                move || {
-                    while !SHUTDOWN.load(Ordering::SeqCst) {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                    }
-                    shutdown_flag.store(true, Ordering::SeqCst);
-                }
-            });
-
             {
                 let mut t = TELEMETRY.lock();
                 t.state = 2;
@@ -723,10 +708,8 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                 drop(rt);
             }));
 
-            // Now that the runtime is dropped, join the watch thread and
-            // update telemetry — these run outside the runtime.
-            let _ = watch.join();
-
+            // Now that the runtime is dropped, update telemetry — this
+            // runs outside the runtime.
             match result {
                 Ok(()) => {
                     let mut t = TELEMETRY.lock();

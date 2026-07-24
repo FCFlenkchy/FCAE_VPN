@@ -109,3 +109,50 @@ pub fn save_masque_creds(path: &str, cert_pem: &[u8], key_pem: &[u8]) -> Result<
     std::fs::write(path, updated)?;
     Ok(())
 }
+
+// --- Async variants -------------------------------------------------------
+//
+// The functions above use std::fs, which blocks whichever thread calls
+// them. The FFI layer builds its tokio runtime with a single worker thread
+// (worker_threads(1)), so calling the sync functions from inside that
+// runtime (e.g. during provisioning or a credential refresh mid-connection)
+// stalls every other in-flight task — TUN forwarding, health checks,
+// everything — for the duration of the disk I/O.
+//
+// These do the same work via tokio::fs and should be used from any call
+// site that already runs inside the tokio runtime. Call sites that run
+// before the runtime exists (e.g. very early init) can keep using the sync
+// versions above.
+
+pub async fn load_async(path: &str) -> Result<Option<Identity>> {
+    if !tokio::fs::try_exists(path).await.unwrap_or(false) {
+        return Ok(None);
+    }
+    let text = tokio::fs::read_to_string(path).await?;
+    let persisted: PersistedIdentity =
+        toml::from_str(&text).map_err(|e| AetherError::Other(format!("config parse: {e}")))?;
+    Ok(Some(persisted.into()))
+}
+
+pub async fn save_async(path: &str, identity: &Identity) -> Result<()> {
+    let persisted = PersistedIdentity::from(identity);
+    let text = toml::to_string_pretty(&persisted)
+        .map_err(|e| AetherError::Other(format!("config encode: {e}")))?;
+    tokio::fs::write(path, text).await?;
+    Ok(())
+}
+
+pub async fn save_masque_creds_async(path: &str, cert_pem: &[u8], key_pem: &[u8]) -> Result<()> {
+    if !tokio::fs::try_exists(path).await.unwrap_or(false) {
+        return Ok(());
+    }
+    let text = tokio::fs::read_to_string(path).await?;
+    let mut persisted: PersistedIdentity =
+        toml::from_str(&text).map_err(|e| AetherError::Other(format!("config parse: {e}")))?;
+    persisted.cert_pem = String::from_utf8_lossy(cert_pem).to_string();
+    persisted.key_pem = String::from_utf8_lossy(key_pem).to_string();
+    let updated = toml::to_string_pretty(&persisted)
+        .map_err(|e| AetherError::Other(format!("config encode: {e}")))?;
+    tokio::fs::write(path, updated).await?;
+    Ok(())
+}

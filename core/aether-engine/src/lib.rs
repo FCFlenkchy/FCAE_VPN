@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 mod account;
+mod buffer_pool;
 mod cli;
 mod config;
 mod consts;
@@ -1405,8 +1406,8 @@ async fn spawn_udp_forwarder(
     let udp = outer.open_udp().await?;
     let (udp_tx, mut udp_rx) = udp.into_split();
 
-    let inner_peer: std::sync::Arc<tokio::sync::Mutex<Option<SocketAddr>>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let inner_peer: std::sync::Arc<parking_lot::Mutex<Option<SocketAddr>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(None));
 
     let up_sock = sock.clone();
     let up_peer = inner_peer.clone();
@@ -1415,8 +1416,10 @@ async fn spawn_udp_forwarder(
         loop {
             match up_sock.recv_from(&mut buf).await {
                 Ok((n, from)) => {
-                    *up_peer.lock().await = Some(from);
-                    if udp_tx.send_to(remote, buf[..n].to_vec()).await.is_err() {
+                    *up_peer.lock() = Some(from);
+                    let mut pkt = buffer_pool::take(n);
+                    pkt.extend_from_slice(&buf[..n]);
+                    if udp_tx.send_to(remote, pkt).await.is_err() {
                         break;
                     }
                 }
@@ -1429,7 +1432,7 @@ async fn spawn_udp_forwarder(
     let down_peer = inner_peer.clone();
     tokio::spawn(async move {
         while let Some((_src, data)) = udp_rx.recv().await {
-            let dst = *down_peer.lock().await;
+            let dst = *down_peer.lock();
             if let Some(dst) = dst {
                 let _ = down_sock.send_to(&data, dst).await;
             }

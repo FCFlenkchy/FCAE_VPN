@@ -141,14 +141,20 @@ impl WgTunnel {
                                 log::debug!("decapsulate error: {e:?}");
                             }
                             TunnResult::WriteToNetwork(pkt) => {
-                                let mut pkt_vec = pkt.to_vec();
+                                let mut pkt_vec = crate::buffer_pool::take(pkt.len());
+                                pkt_vec.extend_from_slice(pkt);
                                 inject_client_id(&mut pkt_vec, &client_id);
                                 drop(tunn);
                                 let _ = sock_r.send(&pkt_vec).await;
+                                crate::buffer_pool::recycle(pkt_vec);
                             }
                             TunnResult::WriteToTunnelV4(pkt, _) | TunnResult::WriteToTunnelV6(pkt, _) => {
-                                let pkt_vec = pkt.to_vec();
+                                let mut pkt_vec = crate::buffer_pool::take(pkt.len());
+                                pkt_vec.extend_from_slice(pkt);
                                 drop(tunn);
+                                // Not recycled here — ownership moves downstream via
+                                // inbound_tx to the TUN write task, which recycles it
+                                // back into the same shared pool after writing it out.
                                 let _ = inbound_tx.send(pkt_vec).await;
                             }
                         }
@@ -172,7 +178,8 @@ impl WgTunnel {
                         log::debug!("encapsulate error: {e:?}");
                     }
                     TunnResult::WriteToNetwork(pkt) => {
-                        let mut pkt_vec = pkt.to_vec();
+                        let mut pkt_vec = crate::buffer_pool::take(pkt.len());
+                        pkt_vec.extend_from_slice(pkt);
                         inject_client_id(&mut pkt_vec, &client_id);
                         drop(tunn);
 
@@ -182,6 +189,7 @@ impl WgTunnel {
                         }
 
                         let _ = sock_w.send(&pkt_vec).await;
+                        crate::buffer_pool::recycle(pkt_vec);
 
                         if aethernoize.jc_after_hs > 0 {
                             let sock_clone = sock_w.clone();

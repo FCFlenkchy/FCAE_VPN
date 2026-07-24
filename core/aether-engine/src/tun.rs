@@ -112,7 +112,9 @@ pub async fn run(
                 }
                 Ok(n) => {
                     crate::stats::add_tx(n as u64);
-                    if out_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                    let mut pkt = crate::buffer_pool::take(n);
+                    pkt.extend_from_slice(&buf[..n]);
+                    if out_tx.blocking_send(pkt).is_err() {
                         break;
                     }
                 }
@@ -150,6 +152,7 @@ pub async fn run(
                 log::warn!("[tun] write: {e}");
                 break;
             }
+            crate::buffer_pool::recycle(pkt);
         }
     });
 

@@ -1,9 +1,15 @@
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use once_cell::sync::Lazy;
 use rand::{Rng, RngCore};
 use regex::Regex;
 use tokio::net::UdpSocket;
+
+// Compiled once and reused — parse_cps() was previously recompiling this
+// regex on every call (up to 5x per handshake/keepalive burst, once per
+// i1..i5 signature), which is wasted CPU on a path that runs per-reconnect.
+static TAG_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"<([a-z]+)\s*([^>]*)>").unwrap());
 
 #[derive(Debug, Clone)]
 pub struct AetherNoizeConfig {
@@ -248,9 +254,7 @@ fn parse_range(data: &str) -> usize {
 pub fn parse_cps(spec: &str) -> Vec<u8> {
     let mut out = Vec::new();
 
-    let tag_regex = Regex::new(r"<([a-z]+)\s*([^>]*)>").unwrap();
-
-    for cap in tag_regex.captures_iter(spec) {
+    for cap in TAG_REGEX.captures_iter(spec) {
         let tag_type = cap.get(1).map_or("", |m| m.as_str());
         let tag_data = cap.get(2).map_or("", |m| m.as_str()).trim();
 

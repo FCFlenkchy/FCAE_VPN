@@ -273,12 +273,24 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         inForeground = false
+        // Stop the JNI status/log poll while the UI is invisible — it was
+        // previously only gated on vpnActive, so it kept firing every 5s
+        // (JNI calls + TextView updates) even when the app was backgrounded.
+        // The foreground service notification already covers the
+        // "still connected" signal while we're not visible.
+        handler.removeCallbacks(poll)
         saveSettings()
     }
 
     override fun onResume() {
         super.onResume()
         inForeground = true
+        // Resume polling immediately if a tunnel is active, instead of
+        // waiting up to 5s for the next tick or for a broadcast.
+        if (vpnActive) {
+            handler.removeCallbacks(poll)
+            handler.post(poll)
+        }
     }
 
     override fun onDestroy() {

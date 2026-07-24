@@ -31,6 +31,10 @@ public class FCAEVpnService extends VpnService {
 
     private long cachedTotalRx = 0;
     private long cachedTotalTx = 0;
+    // Skip redundant manager.notify() calls (Binder call into system_server,
+    // can wake SystemUI) when the displayed text hasn't actually changed —
+    // meaningful during idle-but-connected periods with no traffic.
+    private String lastNotifText = null;
 
     private final Runnable statsRunnable = new Runnable() {
         @Override
@@ -177,6 +181,7 @@ public class FCAEVpnService extends VpnService {
                 Log.i(TAG, "VPN engine started");
                 cachedTotalRx = 0;
                 cachedTotalTx = 0;
+                lastNotifText = null;
                 updateNotification();
                 handler.post(statsRunnable);
                 notifyUi();
@@ -322,6 +327,7 @@ public class FCAEVpnService extends VpnService {
 
     private void updateNotification() {
         if (vpnPaused) {
+            lastNotifText = null;
             notification.show("FCAE VPN \u2014 Stopped (tap Start to resume)", false);
         } else if (running) {
             long rx = 0, tx = 0;
@@ -338,8 +344,12 @@ public class FCAEVpnService extends VpnService {
                 "\u2193 %s  %s  |  \u2191 %s  %s",
                 VpnNotification.fmtBytes(cachedTotalRx), VpnNotification.fmtRate(rx),
                 VpnNotification.fmtBytes(cachedTotalTx), VpnNotification.fmtRate(tx));
-            notification.show(text, true);
+            if (!text.equals(lastNotifText)) {
+                lastNotifText = text;
+                notification.show(text, true);
+            }
         } else {
+            lastNotifText = null;
             notification.show("FCAE VPN \u2014 Disconnected", false);
         }
     }
