@@ -126,8 +126,8 @@ impl ScanMode {
         match self {
             ScanMode::Turbo => Strategy {
                 concurrency: 20,
-                per_probe_timeout: Duration::from_millis(6000),
-                overall_deadline: Duration::from_secs(45),
+                per_probe_timeout: Duration::from_millis(3000),
+                overall_deadline: Duration::from_secs(20),
                 quiet_after_first: Duration::from_secs(0),
                 target_successes: 1,
                 early_exit_first: true,

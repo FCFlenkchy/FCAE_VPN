@@ -337,8 +337,8 @@ class MainActivity : AppCompatActivity() {
         editHealthMaxFails.text.toString().toIntOrNull()?.coerceIn(1, 10) ?: 2
 
     private fun liveValidateSecs(): Int =
-        // Default 10s instead of the old hardcoded 20s — much snappier on connect.
-        10
+        // Default 5s — fast enough for quick connect, still gives tunnel time to warm up.
+        5
 
     private fun startTunServiceWithConfig() {
         connecting = true

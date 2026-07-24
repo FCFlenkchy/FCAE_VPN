@@ -58,8 +58,8 @@ impl WgScanMode {
         match self {
             WgScanMode::Turbo => WgStrategy {
                 concurrency: 12,
-                per_probe_timeout: Duration::from_millis(5000),
-                overall_deadline: Duration::from_secs(30),
+                per_probe_timeout: Duration::from_millis(2000),
+                overall_deadline: Duration::from_secs(15),
                 quiet_after_first: Duration::from_secs(0),
                 target_successes: 1,
                 early_exit_first: true,

@@ -103,13 +103,13 @@ fn health_max_fails() -> u32 {
 }
 
 fn live_validate_timeout() -> std::time::Duration {
-    // Pre-SOCKS validation needs more headroom than background health probes
+    // Pre-SOCKS validation needs some headroom over health probes
     // (handshake settle + DNS + HTTP through a cold tunnel).
     let secs = std::env::var("AETHER_LIVE_VALIDATE_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(10);
+        .unwrap_or(5);
     std::time::Duration::from_secs(secs)
 }
 
@@ -139,7 +139,7 @@ async fn validate_live_stack(stack: &netstack::StackHandle, label: &str) -> Resu
                 log::debug!("[-] live {label} attempt {attempt}/3: timeout");
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200 * attempt as u64)).await;
     }
     Err(last_err)
 }
@@ -1300,7 +1300,7 @@ async fn run_wireguard_tunnel(
 
     // Brief settle for WG handshake + keepalive path.  The health-check grace
     // period (2x interval) handles the rest — no need for a long sleep here.
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // WireGuard was verified on a throwaway session; re-check the LIVE stack
     // before SOCKS (fixes false positives on quick-reconnect / Ironclad).
