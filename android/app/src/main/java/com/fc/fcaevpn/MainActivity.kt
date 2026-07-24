@@ -101,14 +101,12 @@ class MainActivity : AppCompatActivity() {
                             peerText.text = ""
                             handler.removeCallbacks(poll)
 
-                            // VPN is off — finish the Activity so onDestroy()
-                            // can kill the process.  If backgrounded, kill
-                            // immediately; if foregrounded, let the Activity
-                            // close gracefully.
+                            // If app is in background, kill the process so
+                            // nothing lingers.  If in foreground, just show
+                            // DISCONNECTED — the user can reconnect or close
+                            // the app themselves.
                             if (!inForeground) {
                                 android.os.Process.killProcess(android.os.Process.myPid())
-                            } else {
-                                finishAndRemoveTask()
                             }
                         } else if (isRunning) {
                             connecting = false
