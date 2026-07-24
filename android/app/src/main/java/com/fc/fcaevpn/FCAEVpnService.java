@@ -22,6 +22,8 @@ public class FCAEVpnService extends VpnService {
     private volatile boolean running = false;
     private volatile boolean vpnPaused = false;
     private volatile boolean shuttingDown = false;
+    private volatile boolean nativeFreed = false;
+    private Runnable pendingKillRunnable;
 
     private Intent lastStartIntent;
     private VpnNotification notification;
@@ -87,6 +89,13 @@ public class FCAEVpnService extends VpnService {
         if (running) return;
         vpnPaused = false;
         shuttingDown = false;
+        nativeFreed = false;
+
+        // Cancel any pending safety-net kill from a previous shutdown.
+        if (pendingKillRunnable != null) {
+            handler.removeCallbacks(pendingKillRunnable);
+            pendingKillRunnable = null;
+        }
 
         // Signal any previous engine to stop (non-blocking).  aether_start()
         // has its own RUNNING-wait loop, so we do NOT block here with
@@ -185,29 +194,12 @@ public class FCAEVpnService extends VpnService {
     }
 
     /**
-     * Call nativeStop synchronously. aether_stop() is non-blocking (sets
-     * shutdown flag + closes dup'd fds + updates telemetry), so it returns
-     * in under 300 ms.  The engine thread may still be alive (dropping the
-     * tokio runtime) — use stopNativeFree() if you need a full drain.
+     * Free native engine once — guarded by {@code nativeFreed} so that
+     * pauseVpn() + fullShutdown() never double-free on the Rust STOP_GUARD.
      */
-    private void stopNativeSync() {
-        Thread t = new Thread(() -> {
-            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-        }, "FCAE-NativeStop-Sync");
-        t.start();
-        try { t.join(1500); } catch (InterruptedException ignored) {}
-        if (t.isAlive()) {
-            Log.w(TAG, "nativeStop timed out — letting it die with process");
-        }
-    }
-
-    /**
-     * Call nativeFree synchronously — blocks until the engine thread fully
-     * exits (drops the tokio runtime, joins the watch thread).
-     * Use this when you MUST guarantee the engine is done with the TUN fd
-     * before closing it (e.g. fullShutdown, pauseVpn).
-     */
-    private void stopNativeFree() {
+    private void freeNativeOnce() {
+        if (nativeFreed) return;
+        nativeFreed = true;
         Thread t = new Thread(() -> {
             try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
         }, "FCAE-NativeFree-Sync");
@@ -218,40 +210,37 @@ public class FCAEVpnService extends VpnService {
         }
     }
 
+    /**
+     * Full shutdown — kills everything: engine, notification, service.
+     * Safe to call multiple times (idempotent) and safe to call after
+     * pauseVpn().
+     */
     private void fullShutdown() {
-        // Prevent re-entrant calls from vpnThread error handler, onDestroy, etc.
-        if (shuttingDown) return;
-        shuttingDown = true;
-
         running = false;
         vpnPaused = false;
 
-        Log.i(TAG, "fullShutdown: starting");
-        handler.removeCallbacks(statsRunnable);
+        if (!shuttingDown) {
+            shuttingDown = true;
+            Log.i(TAG, "fullShutdown: starting");
+        }
 
-        // Stop the foreground notification and dismiss it IMMEDIATELY —
-        // not inside the cleanup thread which may never execute if the
-        // system kills the process during nativeFree().
+        // Always re-run the kill sequence — even if called a second time
+        // (e.g. notification disconnect after a stalled first attempt).
+        handler.removeCallbacks(statsRunnable);
         notification.dismiss();
         stopForeground(STOP_FOREGROUND_REMOVE);
-
-        // Notify UI IMMEDIATELY so the activity shows "DISCONNECTED"
-        // instead of staying stuck on "DISCONNECTING..." for seconds.
         notifyUi();
 
-        // Save refs for background cleanup — null them out now so other
-        // code paths see the service as stopped.
+        // Save refs — null them out so other code paths see stopped state.
         final Thread t = vpnThread;
         vpnThread = null;
         final ParcelFileDescriptor pfdToClose = vpnInterface;
         vpnInterface = null;
 
-        // Run heavy cleanup on a background thread so we never block the
-        // main thread for >100ms (Android ANR threshold).  nativeFree()
-        // alone can take several seconds (joins engine thread, drops
-        // tokio runtime).
+        // Heavy cleanup on background thread.  Must NOT block main thread
+        // for >100ms (ANR threshold).
         Thread cleanupThread = new Thread(() -> {
-            stopNativeFree();
+            freeNativeOnce();
 
             if (t != null) {
                 t.interrupt();
@@ -267,13 +256,22 @@ public class FCAEVpnService extends VpnService {
                 }
             }
 
-            handler.post(() -> {
-                stopSelf();
-                Log.i(TAG, "service stopped");
-            });
+            stopSelf();
+            Log.i(TAG, "service stopped");
         }, "FCAE-Cleanup");
         cleanupThread.setDaemon(true);
         cleanupThread.start();
+
+        // Safety net: if the process is still alive after 10s (e.g.
+        // nativeFree hung), force-kill the process so nothing lingers
+        // in the background.  Cancelled by startVpn() on reconnect.
+        pendingKillRunnable = () -> {
+            try {
+                Log.w(TAG, "fullShutdown safety net — killing process");
+                android.os.Process.killProcess(android.os.Process.myPid());
+            } catch (Exception ignored) {}
+        };
+        handler.postDelayed(pendingKillRunnable, 10_000);
     }
 
     /**
@@ -281,12 +279,10 @@ public class FCAEVpnService extends VpnService {
      * user can tap Start in the notification to resume.
      */
     private void pauseVpn() {
-        if (shuttingDown) return;
-
         running = false;
         vpnPaused = true;
 
-        // Notify UI immediately.
+        Log.i(TAG, "pauseVpn: starting");
         notifyUi();
 
         final Thread t = vpnThread;
@@ -294,9 +290,8 @@ public class FCAEVpnService extends VpnService {
         final ParcelFileDescriptor pfdToClose = vpnInterface;
         vpnInterface = null;
 
-        // Run heavy cleanup on a background thread (same as fullShutdown).
         Thread cleanupThread = new Thread(() -> {
-            stopNativeFree();
+            freeNativeOnce();
 
             if (t != null) {
                 t.interrupt();

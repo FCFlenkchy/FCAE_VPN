@@ -465,8 +465,11 @@ class MainActivity : AppCompatActivity() {
         try {
             val i = Intent(this, FCAEVpnService::class.java)
             i.action = FCAEVpnService.ACTION_DISCONNECT
-            startService(i)
-        } catch (_: Throwable) {}
+            startForegroundService(i)
+        } catch (_: Throwable) {
+            // Fallback: stopService works even from background on all APIs
+            try { stopService(Intent(this, FCAEVpnService::class.java)) } catch (_: Throwable) {}
+        }
 
         // After a brief delay, force UI to DISCONNECTED even if no
         // broadcast arrives (service might be dead).
