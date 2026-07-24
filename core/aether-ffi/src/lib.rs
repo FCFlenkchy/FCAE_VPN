@@ -908,10 +908,11 @@ pub extern "C" fn aether_free() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Now safe to close TUN fds.  The engine thread is gone, async tasks
-    // are cancelled (write_task uses ManuallyDrop so no double-close).
+    // Do NOT close TUN fds here.  The engine thread already closes them
+    // before dropping the runtime (line 723).  If a new engine has started
+    // between the engine thread's close and this point, closing fds here
+    // would kill the new engine's TUN interface.
     // This also unblocks the detached spawn_blocking read_task.
-    aether_engine::tun::close_all_fds();
 
     // Do NOT store RUNNING=false here.  The engine thread already set it
     // to false when it exited (line 745).  If we set it here, a race with

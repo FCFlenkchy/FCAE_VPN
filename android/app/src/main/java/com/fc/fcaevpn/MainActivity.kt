@@ -101,13 +101,14 @@ class MainActivity : AppCompatActivity() {
                             peerText.text = ""
                             handler.removeCallbacks(poll)
 
-                            // If app is in background, kill the process so
-                            // nothing lingers.  If in foreground, just show
-                            // DISCONNECTED — the user can reconnect or close
-                            // the app themselves.
-                            if (!inForeground) {
+                            // If disconnect was NOT initiated from the UI
+                            // (i.e. from notification or service-side), kill
+                            // the process.  disconnectPending is true only
+                            // when disconnectAll() was called from the UI.
+                            if (!disconnectPending) {
                                 android.os.Process.killProcess(android.os.Process.myPid())
                             }
+                            disconnectPending = false
                         } else if (isRunning) {
                             connecting = false
                             engineRunning = true
