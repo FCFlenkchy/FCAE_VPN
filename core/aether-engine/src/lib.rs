@@ -802,7 +802,7 @@ async fn run_masque(
 type TunBridge = (
     i32,
     tokio::sync::mpsc::Sender<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<Vec<u8>>,
+    tokio::sync::mpsc::Receiver<bytes::Bytes>,
 );
 
 /// Wire tunnel channels to netstack. Only fan-out when a real TUN fd is present
@@ -812,7 +812,7 @@ fn split_dataplane(
     inbound_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) -> (
     tokio::sync::mpsc::Sender<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<Vec<u8>>,
+    tokio::sync::mpsc::Receiver<bytes::Bytes>,
     Option<TunBridge>,
 ) {
     let Some(fd) = (if tun_mode_active() {
@@ -821,12 +821,14 @@ fn split_dataplane(
         None
     }) else {
         // Direct: netstack ↔ tunnel (same as pre-TUN-bridge behavior).
-        return (outbound_tx, inbound_rx, None);
+        // Return a dummy receiver that will never receive anything.
+        let (_dummy_tx, dummy_rx) = tokio::sync::mpsc::channel(1);
+        return (outbound_tx, dummy_rx, None);
     };
 
     let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
-    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
-    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
+    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(128);
+    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(128);
 
     let ot_ns = outbound_tx.clone();
     tokio::spawn(async move {
@@ -837,12 +839,13 @@ fn split_dataplane(
         }
     });
 
-    // Tunnel → netstack + TUN (clone each IP packet).
+    // Tunnel → netstack + TUN (zero-copy via Bytes refcount).
     let mut inbound_rx = inbound_rx;
     tokio::spawn(async move {
         while let Some(p) = inbound_rx.recv().await {
-            let _ = ns_in_tx.send(p.clone()).await;
-            let _ = tun_in_tx.send(p).await;
+            let b = bytes::Bytes::from(p);
+            let _ = ns_in_tx.send(b.clone()).await;
+            let _ = tun_in_tx.send(b).await;
         }
     });
 

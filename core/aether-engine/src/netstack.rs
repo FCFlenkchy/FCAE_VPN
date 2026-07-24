@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use bytes::Bytes;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::{tcp, udp};
@@ -22,7 +23,7 @@ type OpenTcpResp = oneshot::Sender<std::result::Result<TcpConn, String>>;
 type OpenUdpResp = oneshot::Sender<std::result::Result<UdpConn, String>>;
 
 pub struct StackDevice {
-    rx: VecDeque<Vec<u8>>,
+    rx: VecDeque<Bytes>,
     tx: VecDeque<Vec<u8>>,
     mtu: usize,
 }
@@ -37,7 +38,7 @@ impl StackDevice {
     }
 }
 
-pub struct StackRxToken(Vec<u8>);
+pub struct StackRxToken(Bytes);
 pub struct StackTxToken<'a>(&'a mut VecDeque<Vec<u8>>);
 
 impl RxToken for StackRxToken {
@@ -363,7 +364,7 @@ pub fn spawn(
     ipv4: &str,
     ipv6: &str,
     mtu: usize,
-    inbound_rx: mpsc::Receiver<Vec<u8>>,
+    inbound_rx: mpsc::Receiver<Bytes>,
     outbound_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<StackHandle> {
     let mut device = StackDevice::new(mtu);
@@ -404,7 +405,7 @@ async fn run(
     mut s: NetStack,
     mut cmd_rx: mpsc::Receiver<Cmd>,
     mut data_in_rx: mpsc::Receiver<DataIn>,
-    mut inbound_rx: mpsc::Receiver<Vec<u8>>,
+    mut inbound_rx: mpsc::Receiver<Bytes>,
     outbound_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
     loop {

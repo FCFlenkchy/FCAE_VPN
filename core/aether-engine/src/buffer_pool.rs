@@ -9,13 +9,15 @@
 //!
 //! This pool lets those call sites reuse an existing heap allocation
 //! instead of asking the allocator for fresh memory on every packet.
-//! Buffers taken from `tun::run()`'s TUN-read side and `wireguard.rs`'s
-//! decapsulate side both flow into the same TUN write task, which
-//! recycles them back here — closing the loop between the two modules.
+//! Buffers taken from the TUN-read side flow through `split_dataplane()`
+//! where they're converted to `Bytes` (zero-copy refcount) and fanned out
+//! to both the netstack and TUN write task. The WireGuard side recycles
+//! buffers back here after sending — closing the loop.
 //!
 //! Deliberately does NOT change any `mpsc` channel item types (still
-//! `Vec<u8>`), so it doesn't require touching the channel-creation code
-//! in the engine crate root / ffi layer.
+//! `Vec<u8>` on the tunnel side, `Bytes` in the TUN bridge), so it
+//! doesn't require touching the channel-creation code in the engine
+//! crate root / ffi layer.
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;

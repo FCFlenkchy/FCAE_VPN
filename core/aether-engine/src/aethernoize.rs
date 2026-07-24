@@ -451,9 +451,11 @@ pub async fn send_keepalive_junk(sock: &UdpSocket, cfg: &AetherNoizeConfig) {
         return;
     }
 
-    let base = cfg.jc_before_hs.max(1);
-    let extra = rand::thread_rng().gen_range(0..=base);
-    let count = base + extra;
+    // Battery optimization: cap at 2 junk packets per keepalive tick
+    // instead of base + random(0..=base) which could be 3-6 packets.
+    // Two packets maintain the obfuscation pattern without excessive
+    // radio wake-ups on mobile.
+    let count = cfg.jc_before_hs.max(1).min(2);
 
     for _ in 0..count {
         let mut junk = generate_junk(cfg);

@@ -3,9 +3,9 @@
 #include <android/log.h>
 #include <atomic>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <string>
-#include <vector>
 
 #include "../include/aether_ffi.h"
 
@@ -14,7 +14,7 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 static std::mutex g_log_mu;
-static std::vector<std::string> g_logs;
+static std::deque<std::string> g_logs;
 static constexpr size_t kMaxLogs = 40;
 static std::atomic<bool> g_inited{false};
 
@@ -30,8 +30,8 @@ static void jni_log_cb(int level, const char* message, void* /*user*/) {
     line += " ";
     line += message;
     g_logs.push_back(std::move(line));
-    if (g_logs.size() > kMaxLogs) {
-        g_logs.erase(g_logs.begin(), g_logs.begin() + (g_logs.size() - kMaxLogs));
+    while (g_logs.size() > kMaxLogs) {
+        g_logs.pop_front();
     }
     if (level <= 2) {
         __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "%s", message);
