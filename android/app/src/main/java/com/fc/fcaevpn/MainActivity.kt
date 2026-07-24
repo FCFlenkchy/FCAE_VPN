@@ -302,6 +302,9 @@ class MainActivity : AppCompatActivity() {
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
         bgExecutor.shutdownNow()
         super.onDestroy()
+        // Force-kill the process so nothing lingers in background after
+        // the Activity is destroyed (notification disconnect, system kill, etc.)
+        android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     private fun saveSettings() {
