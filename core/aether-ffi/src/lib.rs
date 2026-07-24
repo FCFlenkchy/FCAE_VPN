@@ -913,7 +913,9 @@ pub extern "C" fn aether_free() {
     // This also unblocks the detached spawn_blocking read_task.
     aether_engine::tun::close_all_fds();
 
-    RUNNING.store(false, Ordering::SeqCst);
+    // Do NOT store RUNNING=false here.  The engine thread already set it
+    // to false when it exited (line 745).  If we set it here, a race with
+    // aether_start() would clobber RUNNING=true from a new engine.
 
     // NOTE: Do NOT clear INITIALIZED or LOG_CB here.  On Android the
     // VPN service may call aether_free() (via nativeFree) and then
