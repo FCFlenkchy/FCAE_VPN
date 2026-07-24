@@ -248,10 +248,15 @@ pub async fn run_from_env() -> Result<()> {
     let socks_disabled = std::env::var("AETHER_SOCKS_DISABLED").is_ok();
     let http_disabled = std::env::var("AETHER_HTTP_DISABLED").is_ok();
     let tun_active = tun_mode_active();
+    let lan_sharing = std::env::var("AETHER_LAN_SHARING")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
-    let listen: Option<SocketAddr> = if socks_disabled || tun_active {
-        // TUN mode: all traffic is routed by the OS through the TUN fd.
-        // Local SOCKS5 proxy is redundant — skip it to save resources.
+    let listen: Option<SocketAddr> = if socks_disabled {
+        None
+    } else if tun_active && !lan_sharing {
+        // TUN mode without LAN sharing: all traffic is routed by the OS
+        // through the TUN fd.  Local SOCKS5 proxy is redundant — skip it.
         None
     } else {
         std::env::var("AETHER_SOCKS")
@@ -260,9 +265,10 @@ pub async fn run_from_env() -> Result<()> {
             .filter(|a: &SocketAddr| a.port() != 0)
     };
 
-    let http_listen: Option<SocketAddr> = if http_disabled || tun_active {
-        // TUN mode: all traffic is routed by the OS through the TUN fd.
-        // Local HTTP proxy is redundant — skip it to save resources.
+    let http_listen: Option<SocketAddr> = if http_disabled {
+        None
+    } else if tun_active && !lan_sharing {
+        // TUN mode without LAN sharing: local HTTP proxy is redundant.
         None
     } else {
         std::env::var("AETHER_HTTP")

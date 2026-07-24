@@ -529,6 +529,13 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
     } else {
         std::env::set_var("AETHER_MODE", "proxy");
     }
+    // LAN sharing flag — when TUN mode is active, proxies are only needed
+    // if LAN sharing is on (other devices on the network use them).
+    if cfg.lan_sharing {
+        std::env::set_var("AETHER_LAN_SHARING", "1");
+    } else {
+        std::env::remove_var("AETHER_LAN_SHARING");
+    }
 }
 
 #[no_mangle]

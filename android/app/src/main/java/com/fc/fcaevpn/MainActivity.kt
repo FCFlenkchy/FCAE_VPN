@@ -455,11 +455,33 @@ class MainActivity : AppCompatActivity() {
         statusText.text = "DISCONNECTING..."
         statusText.setTextColor(Color.parseColor("#8A93A6"))
 
+        // Stop native engine directly — if the service was killed by the
+        // system while the app was backgrounded, startService(i) would go
+        // nowhere and the UI would stay stuck on DISCONNECTING forever.
+        bgExecutor.execute {
+            try { NativeEngine.nativeStop() } catch (_: Throwable) {}
+        }
+
         try {
             val i = Intent(this, FCAEVpnService::class.java)
             i.action = FCAEVpnService.ACTION_DISCONNECT
             startService(i)
         } catch (_: Throwable) {}
+
+        // After a brief delay, force UI to DISCONNECTED even if no
+        // broadcast arrives (service might be dead).
+        handler.postDelayed({
+            if (statusText.text == "DISCONNECTING...") {
+                vpnActive = false
+                engineRunning = false
+                connecting = false
+                updateButton()
+                statusText.text = "DISCONNECTED"
+                statusText.setTextColor(Color.parseColor("#8A93A6"))
+                statsText.text = ""
+                peerText.text = ""
+            }
+        }, 2000)
     }
 
     private fun applyStatus(statusJson: String, logs: String) {
