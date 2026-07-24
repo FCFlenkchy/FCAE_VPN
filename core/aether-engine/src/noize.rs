@@ -60,7 +60,11 @@ impl NoizeConfig {
             jc_after_i1: 2,
             jmin: 128,
             jmax: 512,
-            i1: Some("<b 16030300><rd 2><b 010000><rd 2><b 0303><rc 32>".to_string()),
+            // TLS ClientHello: record type 0x16, version TLS 1.2, 2-byte record length,
+            // handshake type 0x01 (ClientHello), 3-byte handshake length,
+            // client version TLS 1.2, 32-byte random.
+            // Uses <r> (binary random) for length fields — NOT <rd> which generates ASCII digits.
+            i1: Some("<b 16030300><r 2><b 010000><r 3><b 0303><r 32>".to_string()),
             i2: Some("<b 504f5354><rc 20-30><rd 10-20>".to_string()),
             junk_interval: Duration::from_millis(2),
         }
@@ -73,8 +77,10 @@ impl NoizeConfig {
             jc_after_i1: 1,
             jmin: 120,
             jmax: 180,
-            i1: Some("<b 806f0001><t><r 152-160>".to_string()),
-            i2: Some("<b 80f00002><t><r 120-128>".to_string()),
+            // Fixed-size packets mimicking VoIP cadence (20ms interval is the key signal).
+            // No fake RTP headers — generic payloads that match VoIP packet sizes.
+            i1: Some("<r 160>".to_string()),
+            i2: Some("<r 128>".to_string()),
             junk_interval: Duration::from_millis(20),
         }
     }
@@ -86,7 +92,7 @@ impl NoizeConfig {
             jc_after_i1: 3,
             jmin: 256,
             jmax: 1400,
-            i1: Some("<b 16030300><rd 2><b 010000><rd 2><b 0303><r 64-128>".to_string()),
+            i1: Some("<b 16030300><r 2><b 010000><r 3><b 0303><r 64-128>".to_string()),
             i2: Some("<b 0000000000><r 256-512>".to_string()),
             junk_interval: Duration::from_millis(1),
         }
@@ -104,6 +110,7 @@ pub fn from_profile(name: &str) -> NoizeConfig {
         "chrome" => NoizeConfig::chrome(),
         "voice" => NoizeConfig::voice(),
         "streaming" => NoizeConfig::streaming(),
+        "balanced" | "firewall" => NoizeConfig::firewall(),
         _ => NoizeConfig::firewall(),
     }
 }
@@ -119,6 +126,18 @@ fn junk_packet(cfg: &NoizeConfig) -> Vec<u8> {
     let mut buf = vec![0u8; size];
     rand::thread_rng().fill_bytes(&mut buf);
     buf
+}
+
+fn parse_range(data: &str) -> usize {
+    let mut parts = data.split('-');
+    if let (Some(min_str), Some(max_str)) = (parts.next(), parts.next()) {
+        let min: usize = min_str.trim().parse().unwrap_or(0);
+        let max: usize = max_str.trim().parse().unwrap_or(0);
+        if max > min && min > 0 {
+            return rand::thread_rng().gen_range(min..=max).min(1024);
+        }
+    }
+    data.trim().parse().unwrap_or(0).min(1024)
 }
 
 fn parse_cps(spec: &str) -> Vec<u8> {
@@ -158,10 +177,32 @@ fn parse_cps(spec: &str) -> Vec<u8> {
                 out.extend_from_slice(&nonce.to_be_bytes());
             },
             "r" => {
-                let len: usize = data.parse().unwrap_or(0).min(1024);
+                let len = parse_range(data);
                 if len > 0 {
                     let mut r = vec![0u8; len];
                     rand::thread_rng().fill_bytes(&mut r);
+                    out.extend_from_slice(&r);
+                }
+            },
+            "rc" => {
+                let len = parse_range(data);
+                if len > 0 {
+                    let charset = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+                    let mut r = vec![0u8; len];
+                    for b in r.iter_mut() {
+                        *b = charset[rand::thread_rng().gen_range(0..charset.len())];
+                    }
+                    out.extend_from_slice(&r);
+                }
+            },
+            "rd" => {
+                let len = parse_range(data);
+                if len > 0 {
+                    let charset = b"0123456789";
+                    let mut r = vec![0u8; len];
+                    for b in r.iter_mut() {
+                        *b = charset[rand::thread_rng().gen_range(0..charset.len())];
+                    }
                     out.extend_from_slice(&r);
                 }
             },

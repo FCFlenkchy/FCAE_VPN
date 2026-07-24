@@ -84,9 +84,9 @@ pub fn install_verification(
 
             let matched = pins.iter().any(|pin| pin.as_slice() == hash.as_slice());
             if !matched {
+                let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
                 log::warn!(
-                    "tls pin: server cert SPKI hash {:02x?} does not match any pinned hash",
-                    hash
+                    "tls pin: server cert SPKI hash {hex} does not match any pinned hash"
                 );
                 return Err(SslVerifyError::Invalid(
                     boring::ssl::SslAlert::CERTIFICATE_UNKNOWN,

@@ -103,8 +103,11 @@ impl AetherNoizeConfig {
     /// Mimic Chrome TLS fingerprint — blends with legitimate Chrome traffic
     pub fn chrome() -> Self {
         Self {
-            // TLS ClientHello-like preamble: content type 0x16, version 0x0303, then Chrome's cipher suites
-            i1: Some("<b 16030300><rd 2><b 010000><rd 2><b 0303><rc 32>".to_string()),
+            // TLS ClientHello: record type 0x16, version TLS 1.2, 2-byte record length,
+            // handshake type 0x01 (ClientHello), 3-byte handshake length,
+            // client version TLS 1.2, 32-byte random.
+            // Uses <r> (binary random) for length fields — NOT <rd> which generates ASCII digits.
+            i1: Some("<b 16030300><r 2><b 010000><r 3><b 0303><r 32>".to_string()),
             // POST-like header after "handshake"
             i2: Some("<b 504f5354><rc 20-30><rd 10-20>".to_string()),
             // HTTP/2 SETTINGS frame mimicry
@@ -123,13 +126,57 @@ impl AetherNoizeConfig {
         }
     }
 
+    /// GFW-specific — mimics the pattern that GFW's DPI expects to see
+    /// before allowing the connection through
+    pub fn gfw() -> Self {
+        Self {
+            i1: Some("<b 0d0a0d0a><t><rc 24>".to_string()),
+            // TLS ClientHello-like preamble with binary length fields
+            i2: Some("<b 16030300><r 2><b 010000><r 3><b 0303><r 32>".to_string()),
+            i3: None,
+            i4: None,
+            i5: None,
+            jc: 4,
+            jc_before_hs: 2,
+            jc_after_i1: 2,
+            jc_after_hs: 0,
+            jmin: 64,
+            jmax: 256,
+            junk_interval: Duration::from_millis(5),
+            handshake_delay: Duration::from_millis(8),
+            allow_zero_size: false,
+        }
+    }
+
+    /// Firewall bypass — minimal obfuscation tuned for corporate/firewall DPI
+    pub fn firewall() -> Self {
+        Self {
+            i1: Some("<b 0d0a0d0a><t><r 24>".to_string()),
+            i2: Some("<r 48>".to_string()),
+            i3: None,
+            i4: None,
+            i5: None,
+            jc: 4,
+            jc_before_hs: 2,
+            jc_after_i1: 2,
+            jc_after_hs: 0,
+            jmin: 48,
+            jmax: 190,
+            junk_interval: Duration::from_millis(4),
+            handshake_delay: Duration::from_millis(5),
+            allow_zero_size: false,
+        }
+    }
+
     /// VoIP/Zoom-like traffic — fixed-size packets at regular 20ms intervals
     pub fn voice() -> Self {
         Self {
-            // RTP-like header: V=2, PT=111 (dynamic), fixed 160-byte payload (20ms @ 8kHz)
-            i1: Some("<b 806f0001><t><r 152-160>".to_string()),
-            // Keepalive SRTP-like
-            i2: Some("<b 80f00002><t><r 120-128>".to_string()),
+            // Fixed-size packets mimicking VoIP cadence (20ms interval is the key signal).
+            // No fake RTP headers — a DPI system seeing RTP headers carrying WireGuard
+            // packets would immediately flag this as obfuscated traffic.
+            // Instead, use generic fixed-size payloads that match VoIP packet sizes.
+            i1: Some("<r 160>".to_string()),
+            i2: Some("<r 128>".to_string()),
             i3: None,
             i4: None,
             i5: None,
@@ -148,8 +195,8 @@ impl AetherNoizeConfig {
     /// Streaming traffic — large bursts followed by idle periods
     pub fn streaming() -> Self {
         Self {
-            // Large initial burst (like Netflix buffer fill)
-            i1: Some("<b 16030300><rd 2><b 010000><rd 2><b 0303><r 64-128>".to_string()),
+            // TLS ClientHello-like preamble with binary length fields
+            i1: Some("<b 16030300><r 2><b 010000><r 3><b 0303><r 64-128>".to_string()),
             // HTTP/2 DATA frame-like
             i2: Some("<b 0000000000><r 256-512>".to_string()),
             i3: Some("<b 0000000000><r 512-1024>".to_string()),
@@ -180,6 +227,8 @@ pub fn from_profile(name: &str) -> AetherNoizeConfig {
         "chrome" => AetherNoizeConfig::chrome(),
         "voice" => AetherNoizeConfig::voice(),
         "streaming" => AetherNoizeConfig::streaming(),
+        "gfw" => AetherNoizeConfig::gfw(),
+        "firewall" => AetherNoizeConfig::firewall(),
         _ => AetherNoizeConfig::balanced(),
     }
 }
