@@ -102,13 +102,12 @@ class MainActivity : AppCompatActivity() {
                             handler.removeCallbacks(poll)
 
                             // If disconnect was NOT initiated from the UI
-                            // (i.e. from notification or service-side), kill
-                            // the process.  disconnectPending is true only
-                            // when disconnectAll() was called from the UI.
-                            if (!disconnectPending) {
+                            // button, kill the process.  This covers
+                            // notification disconnect and service-side kills.
+                            if (!uiInitiatedDisconnect) {
                                 android.os.Process.killProcess(android.os.Process.myPid())
                             }
-                            disconnectPending = false
+                            uiInitiatedDisconnect = false
                         } else if (isRunning) {
                             connecting = false
                             engineRunning = true
@@ -306,11 +305,12 @@ class MainActivity : AppCompatActivity() {
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
         disconnectPending = false
         super.onDestroy()
-        // If VPN is not running when the Activity is destroyed, kill the
-        // entire process so nothing lingers in background.
-        if (!vpnActive && !engineRunning) {
+        // If VPN is not running and the user did NOT initiate a disconnect
+        // from the UI, kill the process so nothing lingers.
+        if (!vpnActive && !engineRunning && !uiInitiatedDisconnect) {
             android.os.Process.killProcess(android.os.Process.myPid())
         }
+        uiInitiatedDisconnect = false
     }
 
     private fun saveSettings() {
@@ -500,6 +500,7 @@ class MainActivity : AppCompatActivity() {
         vpnActive = false
         engineRunning = false
         connecting = false
+        uiInitiatedDisconnect = true
         handler.removeCallbacks(poll)
         updateButton()
         statusText.text = "DISCONNECTING..."
@@ -529,6 +530,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private var disconnectPending = false
+    private var uiInitiatedDisconnect = false
     private val disconnectFallback = Runnable {
         if (!disconnectPending) return@Runnable
         disconnectPending = false
