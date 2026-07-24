@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="mountain.png" alt="FCAE VPN" width="170%">
+  <img src="mountain.png" alt="FCAE VPN" width="100%">
 </p>
 
 # FCAE VPN
