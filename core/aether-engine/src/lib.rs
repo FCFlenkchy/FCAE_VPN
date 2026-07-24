@@ -247,8 +247,11 @@ pub async fn run_from_env() -> Result<()> {
 
     let socks_disabled = std::env::var("AETHER_SOCKS_DISABLED").is_ok();
     let http_disabled = std::env::var("AETHER_HTTP_DISABLED").is_ok();
+    let tun_active = tun_mode_active();
 
-    let listen: Option<SocketAddr> = if socks_disabled {
+    let listen: Option<SocketAddr> = if socks_disabled || tun_active {
+        // TUN mode: all traffic is routed by the OS through the TUN fd.
+        // Local SOCKS5 proxy is redundant — skip it to save resources.
         None
     } else {
         std::env::var("AETHER_SOCKS")
@@ -257,7 +260,9 @@ pub async fn run_from_env() -> Result<()> {
             .filter(|a: &SocketAddr| a.port() != 0)
     };
 
-    let http_listen: Option<SocketAddr> = if http_disabled {
+    let http_listen: Option<SocketAddr> = if http_disabled || tun_active {
+        // TUN mode: all traffic is routed by the OS through the TUN fd.
+        // Local HTTP proxy is redundant — skip it to save resources.
         None
     } else {
         std::env::var("AETHER_HTTP")
