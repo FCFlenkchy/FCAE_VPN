@@ -251,6 +251,13 @@ public class FCAEVpnService extends VpnService {
         // Heavy cleanup on background thread.  Must NOT block main thread
         // for >100ms (ANR threshold).
         Thread cleanupThread = new Thread(() -> {
+            // Signal the engine to stop BEFORE calling freeNativeOnce().
+            // aether_free() sets SHUTDOWN and joins the engine thread, but
+            // the engine thread won't exit its select! loop until SHUTDOWN
+            // is observed.  nativeStop() sets SHUTDOWN non-blocking and
+            // ensures the engine thread begins its shutdown path.
+            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+
             freeNativeOnce();
 
             if (t != null) {

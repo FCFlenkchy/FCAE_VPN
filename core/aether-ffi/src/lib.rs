@@ -770,11 +770,6 @@ pub extern "C" fn aether_stop() {
     SHUTDOWN.store(true, Ordering::SeqCst);
     SHUTDOWN_NOTIFY.notify_one();
 
-    // Force-close all dup'd TUN fds so the kernel tears down the TUN device
-    // immediately. Without this, the dup'd copies in tun::run() keep the
-    // kernel VPN tunnel alive even after Java closes ParcelFileDescriptor.
-    aether_engine::tun::close_all_fds();
-
     // Update telemetry immediately so the UI shows DISCONNECTED without
     // waiting for the engine thread to finish.  The engine thread will
     // also update telemetry when it exits, which is fine (idempotent).
@@ -908,11 +903,12 @@ pub extern "C" fn aether_free() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Do NOT close TUN fds here.  The engine thread already closes them
-    // before dropping the runtime (line 723).  If a new engine has started
-    // between the engine thread's close and this point, closing fds here
-    // would kill the new engine's TUN interface.
-    // This also unblocks the detached spawn_blocking read_task.
+    // Safety net: close TUN fds AFTER the engine thread has exited.
+    // The engine thread closes them in its cleanup path (line 723), but
+    // if it panicked or was killed before reaching that point, we close
+    // them here to prevent fd leaks.  close_all_fds() uses atomic swap
+    // so double-close is impossible — the first caller claims ownership.
+    aether_engine::tun::close_all_fds();
 
     // Do NOT store RUNNING=false here.  The engine thread already set it
     // to false when it exited (line 745).  If we set it here, a race with
