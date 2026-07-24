@@ -38,12 +38,7 @@ public class VpnNotification {
         PendingIntent piMain = PendingIntent.getActivity(context, 0, mainIntent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        Notification.Builder nb;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            nb = new Notification.Builder(context, CHANNEL_ID);
-        } else {
-            nb = new Notification.Builder(context);
-        }
+        Notification.Builder nb = new Notification.Builder(context, CHANNEL_ID);
 
         nb.setContentTitle("FCAE VPN")
           .setContentText(text)
