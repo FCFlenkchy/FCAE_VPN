@@ -13,7 +13,6 @@ use crate::error::{AetherError, Result};
 use crate::fragment::{FragmentConfig, FragmentingStream};
 use crate::masque::{self, Capsule, CapsuleParser};
 use crate::quic::{AssignedAddr, Control, Internals};
-use crate::tls;
 
 const H2_ALPN: &[u8] = b"\x02h2";
 
@@ -26,8 +25,6 @@ pub struct H2TunnelConfig {
     pub key_pem: Vec<u8>,
     pub local_ipv4: Ipv4Addr,
     pub quiet: bool,
-    pub pin_endpoint: bool,
-    pub expected_pins: Vec<Vec<u8>>,
 }
 
 fn log_or_debug(quiet: bool, msg: String) {
@@ -91,20 +88,13 @@ pub fn h2_peer(quic_peer: SocketAddr) -> SocketAddr {
 }
 
 fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> {
-    let pin_refs: Vec<&[u8]> = cfg.expected_pins.iter().map(|p| p.as_slice()).collect();
-    let connector = tls::build_h2_config_with_pins(&cfg.cert_pem, &cfg.key_pem, cfg.pin_endpoint, &pin_refs)?;
+    use crate::tls;
+    let connector = tls::build_h2_config(&cfg.cert_pem, &cfg.key_pem)?;
     let mut config = connector
         .configure()
         .map_err(|e| AetherError::Tls(e.to_string()))?;
     config.set_verify_hostname(false);
-
-    // When using pin-based verification, SNI may be spoofed for DPI bypass,
-    // so hostname verification against the cert's CN/SAN is not applicable.
-    // Standard CA verification requires hostname matching.
-    let use_pin_verification = cfg.pin_endpoint && !cfg.expected_pins.is_empty();
-    config.set_verify_hostname(!use_pin_verification);
     config.set_use_server_name_indication(true);
-
     Ok(config)
 }
 

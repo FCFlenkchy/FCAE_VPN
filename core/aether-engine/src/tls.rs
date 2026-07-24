@@ -3,10 +3,9 @@ use std::ptr;
 
 use base64::Engine;
 use boring::pkey::PKey;
-use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyError, SslVerifyMode, SslVersion};
+use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyMode, SslVersion};
 use boring::x509::X509;
 use foreign_types_shared::ForeignTypeRef;
-use ring::digest;
 
 use crate::consts;
 use crate::error::{AetherError, Result};
@@ -30,86 +29,6 @@ const CHROME_GROUPS: &str = "P-256:X25519:P-384";
 pub struct TlsParams<'a> {
     pub cert_pem: &'a [u8],
     pub key_pem: &'a [u8],
-    pub pin_endpoint: bool,
-    /// SHA-256 SPKI hashes of expected server certificates for pin-based verification.
-    /// When non-empty and `pin_endpoint` is true, the server cert's SPKI hash is checked
-    /// against these pins instead of relying on standard CA chain validation.
-    /// This allows the TLS handshake to succeed even when SNI is spoofed for DPI bypass,
-    /// while still preventing MITM attacks.
-    pub expected_pins: &'a [&'a [u8]],
-}
-
-/// Compute the SHA-256 hash of a certificate's SubjectPublicKeyInfo (SPKI).
-/// This is the standard format for certificate pinning (e.g., HPKP, CT logs).
-fn spki_sha256(cert: &boring::x509::X509Ref) -> Option<[u8; 32]> {
-    let pubkey = cert.public_key().ok()?;
-    let der = pubkey.public_key_to_der().ok()?;
-    let hash = digest::digest(&digest::SHA256, &der);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(hash.as_ref());
-    Some(out)
-}
-
-/// Install TLS verification on an `SslContextBuilder`.
-///
-/// When `pin_endpoint` is true and `expected_pins` is non-empty:
-///   Pin-only verification: leaf cert SPKI hash is checked against pins.
-///   No CA chain verification is performed (Cloudflare MASQUE edges use
-///   self-signed certs that would fail chain validation).
-///
-/// When `pin_endpoint` is false (or no pins provided):
-///   SslVerifyMode::NONE — no server cert verification.
-///   Required because Cloudflare edges serve different certs per SNI
-///   and some are self-signed. Security relies on the pin-based path
-///   being used in production.
-pub fn install_verification(
-    builder: &mut SslContextBuilder,
-    pin_endpoint: bool,
-    expected_pins: &[&[u8]],
-) -> Result<()> {
-    if pin_endpoint && !expected_pins.is_empty() {
-        let pins: Vec<Vec<u8>> = expected_pins.iter().map(|p| p.to_vec()).collect();
-        builder.set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
-            // Pin-only verification: check leaf cert SPKI hash against known pins.
-            // No CA chain verification — Cloudflare MASQUE edges use self-signed certs.
-            let leaf_cert = ssl.peer_certificate().ok_or_else(|| {
-                log::warn!("tls pin: no peer certificate presented");
-                SslVerifyError::Invalid(boring::ssl::SslAlert::BAD_CERTIFICATE)
-            })?;
-
-            let hash = spki_sha256(&leaf_cert).ok_or_else(|| {
-                log::warn!("tls pin: failed to compute SPKI hash");
-                SslVerifyError::Invalid(boring::ssl::SslAlert::INTERNAL_ERROR)
-            })?;
-
-            let matched = pins.iter().any(|pin| pin.as_slice() == hash.as_slice());
-            if !matched {
-                let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
-                log::warn!(
-                    "tls pin: server cert SPKI hash {hex} does not match any pinned hash"
-                );
-                return Err(SslVerifyError::Invalid(
-                    boring::ssl::SslAlert::CERTIFICATE_UNKNOWN,
-                ));
-            }
-            log::debug!("tls pin: SPKI hash match OK");
-            Ok(())
-        });
-        log::info!(
-            "tls verification: pin-based ({} pins loaded)",
-            expected_pins.len()
-        );
-    } else {
-        // No pin-based verification configured — disable server cert verification.
-        // This is required because Aether connects to Cloudflare edge IPs with
-        // SNI=consumer-masque.cloudflareclient.com but the edge may present a
-        // different certificate or the SNI may be empty/transformed for DPI bypass.
-        // Standard CA validation fails in this context. The security model relies on
-        // the encrypted MASQUE tunnel and ECH rather than TLS cert verification.
-        builder.set_verify(SslVerifyMode::NONE);
-        log::info!("tls verification: disabled (no pin configured)");
-    }
-    Ok(())
 }
 
 pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
@@ -154,8 +73,9 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
         .set_private_key(&key)
         .map_err(|e| AetherError::Tls(e.to_string()))?;
 
-    // Install TLS verification (pin-based or standard CA chain)
-    install_verification(&mut builder, params.pin_endpoint, params.expected_pins)?;
+    // Cloudflare edges serve different certs per SNI and some are self-signed,
+    // so we cannot use standard certificate verification.
+    builder.set_verify(SslVerifyMode::NONE);
 
     let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, builder)
         .map_err(AetherError::Quic)?;
@@ -218,53 +138,6 @@ pub fn build_h2_config(
 
     // Cloudflare edges serve different certs per SNI.
     builder.set_verify(SslVerifyMode::NONE);
-
-    Ok(builder.build())
-}
-
-/// Build a TLS config for HTTP/2 (masque_h2.rs) with optional pin verification.
-pub fn build_h2_config_with_pins(
-    cert_pem: &[u8],
-    key_pem: &[u8],
-    pin_endpoint: bool,
-    expected_pins: &[&[u8]],
-) -> Result<boring::ssl::SslConnector> {
-    use boring::ssl::SslConnector;
-
-    let mut builder = SslConnector::builder(SslMethod::tls_client())
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    builder
-        .set_min_proto_version(Some(SslVersion::TLS1_2))
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    let groups = std::env::var("AETHER_TLS_GROUPS").ok();
-    let groups = groups
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(CHROME_GROUPS);
-    let _ = builder.set_curves_list(groups);
-
-    let h2_alpn = b"\x02h2";
-    builder
-        .set_alpn_protos(h2_alpn)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    let cert = X509::from_pem(cert_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
-    let key =
-        PKey::private_key_from_pem(key_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
-    builder
-        .set_certificate(&cert)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-    builder
-        .set_private_key(&key)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    // Install TLS verification:
-    // pin_endpoint=true with pins: pin-based verification (SNI can be spoofed)
-    // pin_endpoint=false: SslVerifyMode::NONE (default, required for Cloudflare MASQUE edges)
-    install_verification(&mut builder, pin_endpoint, expected_pins)?;
 
     Ok(builder.build())
 }
