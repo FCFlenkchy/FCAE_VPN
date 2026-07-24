@@ -824,9 +824,9 @@ fn split_dataplane(
         return (outbound_tx, inbound_rx, None);
     };
 
-    let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
-    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(128);
-    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(128);
+    let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(512);
+    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(512);
 
     let ot_ns = outbound_tx.clone();
     tokio::spawn(async move {
@@ -1268,7 +1268,7 @@ async fn run_wireguard_tunnel(
         aethernoize: std::sync::Arc::new(aethernoize),
     };
 
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(256);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(512);
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(256);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
@@ -1381,7 +1381,7 @@ async fn establish_wg(
         aethernoize: std::sync::Arc::new(profile),
     };
 
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(256);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(512);
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(256);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;

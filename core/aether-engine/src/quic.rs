@@ -15,7 +15,7 @@ use crate::tls::{self, TlsParams};
 use crate::{consts, error::AetherError, error::Result};
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
-const NET_QUEUE: usize = 256;
+const NET_QUEUE: usize = 512;
 
 async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     use socket2::{Socket, Domain, Type};
@@ -135,7 +135,7 @@ fn random_scid() -> [u8; 16] {
 
 fn spawn_reader(sock: Arc<UdpSocket>, local: SocketAddr, tx: mpsc::Sender<NetPacket>) {
     tokio::spawn(async move {
-        let mut buf = vec![0u8; MAX_DATAGRAM_SIZE];
+        let mut buf = vec![0u8; 2048];
         loop {
             match sock.recv_from(&mut buf).await {
                 Ok((n, from)) => {
