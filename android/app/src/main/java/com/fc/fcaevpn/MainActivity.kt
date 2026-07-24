@@ -101,10 +101,14 @@ class MainActivity : AppCompatActivity() {
                             peerText.text = ""
                             handler.removeCallbacks(poll)
 
-                            // If user is NOT in the app (disconnected from notification
-                            // while app was backgrounded), kill the entire process.
+                            // VPN is off — finish the Activity so onDestroy()
+                            // can kill the process.  If backgrounded, kill
+                            // immediately; if foregrounded, let the Activity
+                            // close gracefully.
                             if (!inForeground) {
                                 android.os.Process.killProcess(android.os.Process.myPid())
+                            } else {
+                                finishAndRemoveTask()
                             }
                         } else if (isRunning) {
                             connecting = false
@@ -301,11 +305,13 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(poll)
         handler.removeCallbacks(disconnectFallback)
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
-        // Don't shutdownNow() — the bgExecutor may be running nativeStart()
-        // which must complete or the engine will be in a broken state.
-        // The daemon threads die with the process.
         disconnectPending = false
         super.onDestroy()
+        // If VPN is not running when the Activity is destroyed, kill the
+        // entire process so nothing lingers in background.
+        if (!vpnActive && !engineRunning) {
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }
     }
 
     private fun saveSettings() {
