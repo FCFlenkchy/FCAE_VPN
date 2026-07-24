@@ -186,7 +186,7 @@ public class FCAEVpnService extends VpnService {
 
                 // Block until shutdown — no periodic wakeup, no CPU cost.
                 shutdownLatch = new CountDownLatch(1);
-                try { shutdownLatch.await(); } catch (InterruptedException e) { break; }
+                try { shutdownLatch.await(); } catch (InterruptedException ignored) {}
             } catch (Exception e) {
                 Log.e(TAG, "VPN error: " + e.getMessage(), e);
                 handler.post(() -> fullShutdown());
