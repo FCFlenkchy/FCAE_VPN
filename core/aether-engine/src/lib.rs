@@ -821,9 +821,7 @@ fn split_dataplane(
         None
     }) else {
         // Direct: netstack ↔ tunnel (same as pre-TUN-bridge behavior).
-        // Return a dummy receiver that will never receive anything.
-        let (_dummy_tx, dummy_rx) = tokio::sync::mpsc::channel(1);
-        return (outbound_tx, dummy_rx, None);
+        return (outbound_tx, inbound_rx, None);
     };
 
     let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
