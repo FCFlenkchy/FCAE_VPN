@@ -23,6 +23,17 @@ static INIT_ONCE: std::sync::Once = std::sync::Once::new();
 // from the main thread.  On Android nativeStop/nativeFree can overlap.
 static STOP_GUARD: Mutex<()> = Mutex::new(());
 
+// Wakes the engine thread's select! loop the instant shutdown is
+// requested, instead of it waking on a 200ms timer for the entire
+// lifetime of the connection (previously a real, continuous battery
+// drain on Android: a periodic timer wakeup fights Doze/idle CPU
+// states for as long as the tunnel stays connected — hours at a time).
+// notify_one() stores a permit if called before anyone is waiting, so
+// a stop requested a hair before the engine thread reaches `.notified()`
+// is never lost.
+static SHUTDOWN_NOTIFY: once_cell::sync::Lazy<tokio::sync::Notify> =
+    once_cell::sync::Lazy::new(tokio::sync::Notify::new);
+
 // Store the engine thread handle so aether_free() can join it before
 // tearing down LOG_CB and other statics.  Without this, the engine
 // thread can still be dropping the tokio runtime (cancelling tasks,
@@ -682,19 +693,17 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                     // Race engine against shutdown flag
                     let engine = aether_engine::run_from_env();
                     tokio::pin!(engine);
-                    loop {
-                        if SHUTDOWN.load(Ordering::SeqCst) {
-                            return Ok(());
-                        }
-                        tokio::select! {
-                            biased;
-                            r = &mut engine => return r.map_err(|e| anyhow::anyhow!("{e:#}")),
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
-                                if SHUTDOWN.load(Ordering::SeqCst) {
-                                    return Ok(());
-                                }
-                            }
-                        }
+                    // Shutdown may already have been requested before this
+                    // thread got scheduled (aether_stop() racing
+                    // aether_start()) — check once up front rather than
+                    // relying solely on the (permit-based) notify below.
+                    if SHUTDOWN.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    tokio::select! {
+                        biased;
+                        r = &mut engine => r.map_err(|e| anyhow::anyhow!("{e:#}")),
+                        _ = SHUTDOWN_NOTIFY.notified() => Ok(()),
                     }
                 })
             })).unwrap_or_else(|_| Err(anyhow::anyhow!("engine panicked")));
@@ -759,6 +768,7 @@ pub extern "C" fn aether_stop() {
     }
 
     SHUTDOWN.store(true, Ordering::SeqCst);
+    SHUTDOWN_NOTIFY.notify_one();
 
     // Force-close all dup'd TUN fds so the kernel tears down the TUN device
     // immediately. Without this, the dup'd copies in tun::run() keep the
@@ -840,6 +850,7 @@ pub extern "C" fn aether_free() {
     // Signal shutdown FIRST — this makes the engine thread's select! loop
     // return so block_on() completes and the tokio runtime is dropped.
     SHUTDOWN.store(true, Ordering::SeqCst);
+    SHUTDOWN_NOTIFY.notify_one();
 
     // Join the engine thread BEFORE closing TUN fds.  The engine thread
     // drops the tokio runtime, which cancels async tasks (including the

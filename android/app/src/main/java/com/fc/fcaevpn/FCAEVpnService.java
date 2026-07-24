@@ -31,9 +31,6 @@ public class FCAEVpnService extends VpnService {
     private VpnNotification notification;
     private Handler handler;
 
-    private long cachedTotalRx = 0;
-    private long cachedTotalTx = 0;
-    private long lastRxTs = 0;
     // Skip redundant manager.notify() calls (Binder call into system_server,
     // can wake SystemUI) when the displayed text hasn't actually changed —
     // meaningful during idle-but-connected periods with no traffic.
@@ -176,9 +173,6 @@ public class FCAEVpnService extends VpnService {
 
                 running = true;
                 Log.i(TAG, "VPN engine started");
-                cachedTotalRx = 0;
-                cachedTotalTx = 0;
-                lastRxTs = System.currentTimeMillis();
                 lastNotifText = null;
                 updateNotification();
                 handler.post(statsRunnable);
@@ -334,29 +328,20 @@ public class FCAEVpnService extends VpnService {
             lastNotifText = null;
             notification.show("FCAE VPN \u2014 Stopped (tap Start to resume)", false);
         } else if (running) {
-            long rx = 0, tx = 0;
+            long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
             try {
                 long[] stats = nativeGetTrafficStats();
-                if (stats != null && stats.length >= 2) {
+                if (stats != null && stats.length >= 4) {
                     rx = stats[0];
                     tx = stats[1];
+                    totalRx = stats[2];
+                    totalTx = stats[3];
                 }
             } catch (Exception ignored) {}
-            // Accumulate bytes: rx/tx are bytes/sec rates, poll every 5s
-            // so approximate total bytes added = rate * interval.
-            long now = System.currentTimeMillis();
-            if (lastRxTs > 0) {
-                long elapsed = (now - lastRxTs) / 1000;
-                if (elapsed > 0) {
-                    cachedTotalRx += rx * elapsed;
-                    cachedTotalTx += tx * elapsed;
-                }
-            }
-            lastRxTs = now;
             String text = String.format(
                 "\u2193 %s  %s  |  \u2191 %s  %s",
-                VpnNotification.fmtBytes(cachedTotalRx), VpnNotification.fmtRate(rx),
-                VpnNotification.fmtBytes(cachedTotalTx), VpnNotification.fmtRate(tx));
+                VpnNotification.fmtBytes(totalRx), VpnNotification.fmtRate(rx),
+                VpnNotification.fmtBytes(totalTx), VpnNotification.fmtRate(tx));
             if (!text.equals(lastNotifText)) {
                 lastNotifText = text;
                 notification.show(text, true);
