@@ -564,7 +564,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val POLL_INTERVAL_MS = 3000L
+        private const val POLL_INTERVAL_MS = 5000L
         private const val MAX_LOG_CHARS = 8000
     }
 }

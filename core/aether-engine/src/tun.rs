@@ -116,7 +116,7 @@ pub async fn run(
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 Err(e) => {
                     let _ = err_tx_r.blocking_send(format!("tun read: {e}"));

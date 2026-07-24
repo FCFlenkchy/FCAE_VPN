@@ -12,7 +12,7 @@ use crate::aethernoize::{self, AetherNoizeConfig};
 use crate::error::{AetherError, Result};
 use rand::Rng;
 
-const TIMER_TICK: Duration = Duration::from_millis(250);
+const TIMER_TICK: Duration = Duration::from_millis(1000);
 const MAX_PACKET: usize = 65536;
 
 const WG_MSG_TYPE_MIN: u8 = 1;

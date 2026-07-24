@@ -629,7 +629,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(2)
+        .worker_threads(1)
         .thread_name("aether-ffi")
         .build()
     {
@@ -660,7 +660,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                 let shutdown_flag = shutdown_flag.clone();
                 move || {
                     while !SHUTDOWN.load(Ordering::SeqCst) {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        std::thread::sleep(std::time::Duration::from_millis(500));
                     }
                     shutdown_flag.store(true, Ordering::SeqCst);
                 }

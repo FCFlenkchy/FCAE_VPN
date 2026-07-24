@@ -35,7 +35,7 @@ public class FCAEVpnService extends VpnService {
         public void run() {
             updateNotification();
             if (running || vpnPaused) {
-                handler.postDelayed(this, 1000);
+                handler.postDelayed(this, 5000);
             }
         }
     };
@@ -174,7 +174,7 @@ public class FCAEVpnService extends VpnService {
                 notifyUi();
 
                 while (running) {
-                    try { Thread.sleep(200); } catch (InterruptedException e) { break; }
+                    try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
                 }
             } catch (Exception e) {
                 Log.e(TAG, "VPN error: " + e.getMessage(), e);
@@ -230,36 +230,46 @@ public class FCAEVpnService extends VpnService {
         Log.i(TAG, "fullShutdown: starting");
         handler.removeCallbacks(statsRunnable);
 
-        // Stop the native engine BEFORE closing the VPN fd and stopping
-        // the service.  nativeFree() blocks until the engine thread fully
-        // exits (drops the tokio runtime), so after it returns we are
-        // guaranteed the engine is done with the TUN fd.
-        stopNativeFree();
-
-        Thread t = vpnThread;
-        vpnThread = null;
-        if (t != null) {
-            t.interrupt();
-            try { t.join(1000); } catch (InterruptedException ignored) {}
-        }
-
-        // NOW safe to close the VPN fd — engine thread is gone.
-        ParcelFileDescriptor pfdToClose = vpnInterface;
-        vpnInterface = null;
-        if (pfdToClose != null) {
-            try {
-                pfdToClose.close();
-                Log.i(TAG, "VPN fd closed");
-            } catch (Exception e) {
-                Log.e(TAG, "Error closing fd: " + e.getMessage());
-            }
-        }
-
-        stopForeground(true);
-        stopSelf();
-        Log.i(TAG, "service stopped");
-
+        // Notify UI IMMEDIATELY so the activity shows "DISCONNECTED"
+        // instead of staying stuck on "DISCONNECTING..." for seconds.
         notifyUi();
+
+        // Save refs for background cleanup — null them out now so other
+        // code paths see the service as stopped.
+        final Thread t = vpnThread;
+        vpnThread = null;
+        final ParcelFileDescriptor pfdToClose = vpnInterface;
+        vpnInterface = null;
+
+        // Run heavy cleanup on a background thread so we never block the
+        // main thread for >100ms (Android ANR threshold).  nativeFree()
+        // alone can take several seconds (joins engine thread, drops
+        // tokio runtime).
+        Thread cleanupThread = new Thread(() -> {
+            stopNativeFree();
+
+            if (t != null) {
+                t.interrupt();
+                try { t.join(1000); } catch (InterruptedException ignored) {}
+            }
+
+            if (pfdToClose != null) {
+                try {
+                    pfdToClose.close();
+                    Log.i(TAG, "VPN fd closed");
+                } catch (Exception e) {
+                    Log.e(TAG, "Error closing fd: " + e.getMessage());
+                }
+            }
+
+            handler.post(() -> {
+                stopForeground(true);
+                stopSelf();
+                Log.i(TAG, "service stopped");
+            });
+        }, "FCAE-Cleanup");
+        cleanupThread.setDaemon(true);
+        cleanupThread.start();
     }
 
     private void pauseVpn() {
@@ -268,29 +278,35 @@ public class FCAEVpnService extends VpnService {
         running = false;
         vpnPaused = true;
 
-        // Stop the native engine FIRST — before closing the VPN fd.
-        // stopNativeFree() blocks until the engine thread exits, so after
-        // it returns the engine is guaranteed done with the TUN fd.
-        stopNativeFree();
-
-        Thread t = vpnThread;
-        vpnThread = null;
-        if (t != null) {
-            t.interrupt();
-            try { t.join(1000); } catch (InterruptedException ignored) {}
-        }
-
-        // NOW safe to close the VPN fd.
-        ParcelFileDescriptor pfdToClose = vpnInterface;
-        vpnInterface = null;
-        if (pfdToClose != null) {
-            try { pfdToClose.close(); } catch (Exception ignored) {}
-        }
-
-        handler.removeCallbacks(statsRunnable);
-        updateNotification();
-        Log.i(TAG, "VPN paused");
+        // Notify UI immediately.
         notifyUi();
+
+        final Thread t = vpnThread;
+        vpnThread = null;
+        final ParcelFileDescriptor pfdToClose = vpnInterface;
+        vpnInterface = null;
+
+        // Run heavy cleanup on a background thread (same as fullShutdown).
+        Thread cleanupThread = new Thread(() -> {
+            stopNativeFree();
+
+            if (t != null) {
+                t.interrupt();
+                try { t.join(1000); } catch (InterruptedException ignored) {}
+            }
+
+            if (pfdToClose != null) {
+                try { pfdToClose.close(); } catch (Exception ignored) {}
+            }
+
+            handler.post(() -> {
+                handler.removeCallbacks(statsRunnable);
+                updateNotification();
+                Log.i(TAG, "VPN paused");
+            });
+        }, "FCAE-PauseCleanup");
+        cleanupThread.setDaemon(true);
+        cleanupThread.start();
     }
 
     private void notifyUi() {
