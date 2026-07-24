@@ -104,7 +104,7 @@ class MainActivity : AppCompatActivity() {
                             // If user is NOT in the app (disconnected from notification
                             // while app was backgrounded), kill the entire process.
                             if (!inForeground) {
-                                handler.postDelayed({ finishAndRemoveTask() }, 500)
+                                android.os.Process.killProcess(android.os.Process.myPid())
                             }
                         } else if (isRunning) {
                             connecting = false
@@ -299,12 +299,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(poll)
+        handler.removeCallbacks(disconnectFallback)
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
-        bgExecutor.shutdownNow()
+        // Don't shutdownNow() — the bgExecutor may be running nativeStart()
+        // which must complete or the engine will be in a broken state.
+        // The daemon threads die with the process.
+        disconnectPending = false
         super.onDestroy()
-        // Force-kill the process so nothing lingers in background after
-        // the Activity is destroyed (notification disconnect, system kill, etc.)
-        android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     private fun saveSettings() {
@@ -374,6 +375,9 @@ class MainActivity : AppCompatActivity() {
         5
 
     private fun startTunServiceWithConfig() {
+        // Cancel any pending disconnect fallback — we're connecting now.
+        disconnectPending = false
+        handler.removeCallbacks(disconnectFallback)
         connecting = true
         vpnActive = true
         updateButton()
@@ -406,6 +410,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startEngine() {
+        // Cancel any pending disconnect fallback — we're connecting now.
+        disconnectPending = false
+        handler.removeCallbacks(disconnectFallback)
         connecting = true
         vpnActive = true
         updateButton()
@@ -510,19 +517,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         // After a brief delay, force UI to DISCONNECTED even if no
-        // broadcast arrives (service might be dead).
-        handler.postDelayed({
-            if (statusText.text == "DISCONNECTING...") {
-                vpnActive = false
-                engineRunning = false
-                connecting = false
-                updateButton()
-                statusText.text = "DISCONNECTED"
-                statusText.setTextColor(Color.parseColor("#8A93A6"))
-                statsText.text = ""
-                peerText.text = ""
-            }
-        }, 2000)
+        // broadcast arrives (service might be dead).  Use a token to
+        // cancel this if a new connect starts before it fires.
+        disconnectPending = true
+        handler.postDelayed(disconnectFallback, 2000)
+    }
+
+    private var disconnectPending = false
+    private val disconnectFallback = Runnable {
+        if (!disconnectPending) return@Runnable
+        disconnectPending = false
+        if (statusText.text == "DISCONNECTING...") {
+            vpnActive = false
+            engineRunning = false
+            connecting = false
+            updateButton()
+            statusText.text = "DISCONNECTED"
+            statusText.setTextColor(Color.parseColor("#8A93A6"))
+            statsText.text = ""
+            peerText.text = ""
+        }
     }
 
     private fun applyStatus(statusJson: String, logs: String) {
