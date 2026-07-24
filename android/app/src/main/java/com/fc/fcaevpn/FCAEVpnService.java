@@ -363,4 +363,14 @@ public class FCAEVpnService extends VpnService {
         fullShutdown();
         super.onRevoke();
     }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            // Help the system reclaim memory by clearing logs.
+            try { NativeEngine.nativeClearLogs(); } catch (Exception ignored) {}
+            lastNotifText = null;
+        }
+    }
 }

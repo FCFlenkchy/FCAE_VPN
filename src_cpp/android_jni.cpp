@@ -15,7 +15,7 @@
 
 static std::mutex g_log_mu;
 static std::deque<std::string> g_logs;
-static constexpr size_t kMaxLogs = 40;
+static constexpr size_t kMaxLogs = 30;
 static std::atomic<bool> g_inited{false};
 
 static void jni_log_cb(int level, const char* message, void* /*user*/) {
