@@ -579,11 +579,11 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
     }
     if RUNNING.load(Ordering::SeqCst) {
         // Previous engine still running.  If SHUTDOWN was signaled (i.e.
-        // aether_stop() was called), wait up to 5 s for it to drain.
+        // aether_stop() was called), wait up to 2 s for it to drain.
         // This prevents the Android rapid-connect crash where
         // nativeStop() is non-blocking but nativeStart() sees RUNNING=true.
         if SHUTDOWN.load(Ordering::SeqCst) {
-            for _ in 0..50 {
+            for _ in 0..20 {
                 if !RUNNING.load(Ordering::SeqCst) {
                     break;
                 }
@@ -843,7 +843,7 @@ pub extern "C" fn aether_free() {
     // Also wait for RUNNING to become false — this covers the edge case
     // where aether_start() spawned the thread but hasn't stored the
     // JoinHandle yet.  The engine thread sets RUNNING=false on exit.
-    for _ in 0..50 {
+    for _ in 0..20 {
         if !RUNNING.load(Ordering::SeqCst) {
             break;
         }
