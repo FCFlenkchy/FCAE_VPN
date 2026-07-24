@@ -296,6 +296,7 @@ async fn verify_one_wg(
         probe.local_ipv4,
         &probe.aethernoize,
         timeout,
+        None,
     )
     .await
     {

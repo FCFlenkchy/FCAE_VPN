@@ -15,6 +15,7 @@ mod noize;
 mod prober;
 mod quic;
 mod socks;
+mod sysprofile;
 mod http_proxy;
 mod stats;
 mod tls;
@@ -490,6 +491,7 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
                     parse_local_v4(&identity.ipv4),
                     &profile,
                     std::time::Duration::from_secs(10),
+                    None,
                 )
                 .await
                 {
@@ -1117,6 +1119,7 @@ async fn run_wireguard(
                         ipv4,
                         &profile,
                         std::time::Duration::from_secs(6),
+                        None,
                     )
                     .await
                     {
@@ -1158,6 +1161,7 @@ async fn run_wireguard(
                         ipv4,
                         profile,
                         std::time::Duration::from_secs(6),
+                        None,
                     )
                     .await
                     {
@@ -1191,6 +1195,7 @@ async fn run_wireguard(
                                 ipv4,
                                 profile,
                                 std::time::Duration::from_secs(10),
+                                None,
                             )
                             .await
                             {

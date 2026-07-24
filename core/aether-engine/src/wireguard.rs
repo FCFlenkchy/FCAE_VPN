@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use boringtun::noise::{Tunn, TunnResult};
@@ -118,15 +118,22 @@ impl WgTunnel {
         let sock_r = self.sock.clone();
         let sock_w = self.sock.clone();
         let sock_t = self.sock.clone();
+        let sock_h = self.sock.clone();
         let tunn_r = self.tunn.clone();
         let tunn_w = self.tunn.clone();
         let tunn_t = self.tunn.clone();
+        let tunn_h = self.tunn.clone();
         let inbound_tx = self.inbound_tx.clone();
         let obf_sent = self.obf_sent.clone();
         let aethernoize = self.aethernoize.clone();
         let aethernoize_t = self.aethernoize.clone();
         let client_id = self.client_id;
+        let client_id_h = self.client_id;
         let peer = self.peer;
+
+        let last_valid_rx: Arc<StdMutex<Instant>> = Arc::new(StdMutex::new(Instant::now()));
+        let last_valid_rx_r = last_valid_rx.clone();
+        let last_valid_rx_h = last_valid_rx.clone();
 
         let recv_task = tokio::spawn(async move {
             let mut buf = vec![0u8; MAX_PACKET];
@@ -137,11 +144,14 @@ impl WgTunnel {
                         strip_client_id(&mut buf[..n]);
                         let mut tunn = tunn_r.lock().await;
                         match tunn.decapsulate(None, &buf[..n], &mut tmp) {
-                            TunnResult::Done => {}
+                            TunnResult::Done => {
+                                *last_valid_rx_r.lock().unwrap() = Instant::now();
+                            }
                             TunnResult::Err(e) => {
                                 log::debug!("decapsulate error: {e:?}");
                             }
                             TunnResult::WriteToNetwork(pkt) => {
+                                *last_valid_rx_r.lock().unwrap() = Instant::now();
                                 let mut pkt_vec = crate::buffer_pool::take(pkt.len());
                                 pkt_vec.extend_from_slice(pkt);
                                 inject_client_id(&mut pkt_vec, &client_id);
@@ -150,6 +160,7 @@ impl WgTunnel {
                                 crate::buffer_pool::recycle(pkt_vec);
                             }
                             TunnResult::WriteToTunnelV4(pkt, _) | TunnResult::WriteToTunnelV6(pkt, _) => {
+                                *last_valid_rx_r.lock().unwrap() = Instant::now();
                                 let mut pkt_vec = crate::buffer_pool::take(pkt.len());
                                 pkt_vec.extend_from_slice(pkt);
                                 drop(tunn);
@@ -229,13 +240,72 @@ impl WgTunnel {
             }
         });
 
-        tokio::select! {
-            _ = recv_task => log::info!("wireguard recv task ended"),
-            _ = send_task => log::info!("wireguard send task ended"),
-            _ = timer_task => log::info!("wireguard timer task ended"),
-        }
+        let stale_timeout = wg_stale_timeout();
+        let health_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(WG_HEALTHCHECK_INTERVAL);
+            let probe = build_dataplane_probe(
+                std::env::var("AETHER_LOCAL_IPV4")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
+            );
+            let mut out_buf = vec![0u8; MAX_PACKET];
+            loop {
+                interval.tick().await;
 
-        Ok(())
+                let idle = last_valid_rx_h.lock().unwrap().elapsed();
+                if idle >= stale_timeout {
+                    log::warn!(
+                        "[wg] no valid data from peer {} in {:?}; tunnel considered dead",
+                        peer, idle
+                    );
+                    return Err::<(), AetherError>(AetherError::Other(
+                        "wireguard tunnel stale: no valid data from peer".into(),
+                    ));
+                }
+
+                let mut tunn = tunn_h.lock().await;
+                if let Err(e) =
+                    send_dataplane_probe(&sock_h, &mut tunn, &client_id_h, &probe, &mut out_buf).await
+                {
+                    log::trace!("[wg] health probe send failed: {e}");
+                }
+            }
+        });
+
+        let recv_abort = recv_task.abort_handle();
+        let send_abort = send_task.abort_handle();
+        let timer_abort = timer_task.abort_handle();
+        let health_abort = health_task.abort_handle();
+
+        let result = tokio::select! {
+            _ = recv_task => {
+                log::info!("wireguard recv task ended");
+                Ok(())
+            }
+            _ = send_task => {
+                log::info!("wireguard send task ended");
+                Ok(())
+            }
+            _ = timer_task => {
+                log::info!("wireguard timer task ended");
+                Ok(())
+            }
+            r = health_task => {
+                match r {
+                    Ok(Err(e)) => Err(e),
+                    Ok(Ok(())) => Ok(()),
+                    Err(e) => Err(AetherError::Other(format!("health task panicked: {e}"))),
+                }
+            }
+        };
+
+        recv_abort.abort();
+        send_abort.abort();
+        timer_abort.abort();
+        health_abort.abort();
+
+        result
     }
 }
 
@@ -401,6 +471,7 @@ pub async fn verify_endpoint(
     local_ipv4: Ipv4Addr,
     aethernoize: &AetherNoizeConfig,
     timeout: Duration,
+    keepalive: Option<u16>,
 ) -> Result<Duration> {
     let (elapsed, _session) = verify_endpoint_keep_session(
         peer,
@@ -410,6 +481,7 @@ pub async fn verify_endpoint(
         local_ipv4,
         aethernoize,
         timeout,
+        keepalive,
     )
     .await?;
     Ok(elapsed)
@@ -423,6 +495,7 @@ pub async fn verify_endpoint_keep_session(
     local_ipv4: Ipv4Addr,
     aethernoize: &AetherNoizeConfig,
     timeout: Duration,
+    keepalive: Option<u16>,
 ) -> Result<(Duration, EstablishedSession)> {
     let data_check = std::env::var("AETHER_WG_NO_DATA_CHECK").is_err();
     log::debug!("[wg] verify {} obf={} data_check={}", peer, aethernoize.is_enabled(), data_check);
@@ -441,7 +514,7 @@ pub async fn verify_endpoint_keep_session(
     let local_secret = StaticSecret::from(private_key);
     let peer_pk = PublicKey::from(peer_public);
 
-    let mut tunn = Tunn::new(local_secret, peer_pk, None, Some(25), 0, None)
+    let mut tunn = Tunn::new(local_secret, peer_pk, None, Some(keepalive.unwrap_or(25)), 0, None)
         .map_err(|e| AetherError::Other(format!("tunn init: {e}")))?;
 
     let mut out_buf = vec![0u8; MAX_PACKET];
@@ -562,3 +635,14 @@ pub const WG_SEEDS_V4: &[&str] = &[
 ];
 
 pub const WG_SEEDS_V6: &[&str] = &["2606:4700:d0::a29f:c001", "2606:4700:d1::a29f:c001", "2606:4700:d0::a29f:c301", "2606:4700:d0::bc72:6001"];
+
+const WG_HEALTHCHECK_INTERVAL: Duration = Duration::from_secs(3);
+
+fn wg_stale_timeout() -> Duration {
+    let secs = std::env::var("AETHER_WG_STALE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(10);
+    Duration::from_secs(secs)
+}
