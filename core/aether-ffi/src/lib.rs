@@ -167,6 +167,17 @@ impl log::Log for GuiLogger {
                 aether_engine::set_rtt_ms(ms as u64);
             }
         }
+        // Live data-plane validated — mark CONNECTED.  This fires after
+        // validate_live_stack() succeeds, which happens BEFORE local proxies
+        // are spawned.  In TUN mode without LAN sharing no proxies are
+        // started, so the log-based "socks5 server listening" transition
+        // never fires — this is the authoritative CONNECTED signal.
+        if line_lower.contains("data-plane ok") {
+            if t.state < 4 {
+                t.state = 4;
+                t.status_message = "Connected".to_string();
+            }
+        }
         // Tunnel failed / reconnecting — drop back to SCANNING so the UI
         // doesn't stay frozen on "CONNECTING" while the engine retries.
         if line_lower.contains("reconnecting") || line_lower.contains("rescanning") {
@@ -283,6 +294,13 @@ fn detect_lan_ip() -> String {
         }
     }
     "127.0.0.1".to_string()
+}
+
+/// Expose the telemetry lock to the engine crate so it can push state
+/// transitions (e.g. CONNECTED after live validation) without relying on
+/// log-message parsing in the GUI logger.
+pub fn ffi_log_telemetry_lock() -> parking_lot::MutexGuard<'static, TelemetryState> {
+    TELEMETRY.lock()
 }
 
 fn cstr_opt(p: *const c_char) -> Option<String> {

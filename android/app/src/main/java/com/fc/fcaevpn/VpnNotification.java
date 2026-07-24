@@ -11,8 +11,8 @@ import android.os.Build;
 public class VpnNotification {
     public static final String CHANNEL_ID = "fcaevpn_service";
     public static final int NOTIFICATION_ID = 1;
-    private static final int STOP_ACTION_CODE = 10;
     private static final int DISCONNECT_ACTION_CODE = 11;
+    private static final int START_ACTION_CODE = 10;
 
     private final Context context;
     private final NotificationManager manager;
@@ -54,10 +54,10 @@ public class VpnNotification {
 
         if (showStopButton) {
             nb.addAction(buildAction("Disconnect", FCAEVpnService.ACTION_DISCONNECT, DISCONNECT_ACTION_CODE));
-            nb.addAction(buildAction("Stop", FCAEVpnService.ACTION_STOP, STOP_ACTION_CODE));
+            nb.addAction(buildAction("Stop", FCAEVpnService.ACTION_STOP, START_ACTION_CODE));
         } else {
             nb.addAction(buildAction("Disconnect", FCAEVpnService.ACTION_DISCONNECT, DISCONNECT_ACTION_CODE));
-            nb.addAction(buildAction("Start", FCAEVpnService.ACTION_START, STOP_ACTION_CODE));
+            nb.addAction(buildAction("Start", FCAEVpnService.ACTION_START, START_ACTION_CODE));
         }
 
         return nb.build();

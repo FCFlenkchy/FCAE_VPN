@@ -34,7 +34,7 @@ public class FCAEVpnService extends VpnService {
         @Override
         public void run() {
             updateNotification();
-            if (running || vpnPaused) {
+            if (running) {
                 handler.postDelayed(this, 5000);
             }
         }
@@ -229,6 +229,12 @@ public class FCAEVpnService extends VpnService {
         Log.i(TAG, "fullShutdown: starting");
         handler.removeCallbacks(statsRunnable);
 
+        // Stop the foreground notification and dismiss it IMMEDIATELY —
+        // not inside the cleanup thread which may never execute if the
+        // system kills the process during nativeFree().
+        notification.dismiss();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+
         // Notify UI IMMEDIATELY so the activity shows "DISCONNECTED"
         // instead of staying stuck on "DISCONNECTING..." for seconds.
         notifyUi();
@@ -262,7 +268,6 @@ public class FCAEVpnService extends VpnService {
             }
 
             handler.post(() -> {
-                stopForeground(true);
                 stopSelf();
                 Log.i(TAG, "service stopped");
             });
@@ -271,6 +276,10 @@ public class FCAEVpnService extends VpnService {
         cleanupThread.start();
     }
 
+    /**
+     * Pause VPN — stops the engine but keeps the service alive so the
+     * user can tap Start in the notification to resume.
+     */
     private void pauseVpn() {
         if (shuttingDown) return;
 
