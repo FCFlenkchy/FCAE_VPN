@@ -35,6 +35,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var vpnActive = false
     private var wasAtBottom = true
     private var updatingLogs = false
+    private var inForeground = false
 
     private lateinit var statusText: TextView
     private lateinit var statsText: TextView
@@ -94,6 +95,13 @@ class MainActivity : AppCompatActivity() {
                             statusText.setTextColor(Color.parseColor("#8A93A6"))
                             statsText.text = ""
                             peerText.text = ""
+
+                            // If the user is not in the app (e.g. disconnected
+                            // from notification while app was backgrounded), kill
+                            // the entire process so nothing lingers.
+                            if (!inForeground) {
+                                finishAndRemoveTask()
+                            }
                         } else if (isRunning) {
                             connecting = false
                             engineRunning = true
@@ -264,7 +272,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        inForeground = false
         saveSettings()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        inForeground = true
     }
 
     override fun onDestroy() {
@@ -472,7 +486,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         // After a brief delay, force UI to DISCONNECTED even if no
-        // broadcast arrives (service might be dead).
+        // broadcast arrives (service might be dead).  If backgrounded,
+        // kill the whole process.
         handler.postDelayed({
             if (statusText.text == "DISCONNECTING...") {
                 vpnActive = false
@@ -483,6 +498,9 @@ class MainActivity : AppCompatActivity() {
                 statusText.setTextColor(Color.parseColor("#8A93A6"))
                 statsText.text = ""
                 peerText.text = ""
+                if (!inForeground) {
+                    finishAndRemoveTask()
+                }
             }
         }, 2000)
     }
