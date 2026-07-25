@@ -707,10 +707,21 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                     if SHUTDOWN.load(Ordering::SeqCst) {
                         return Ok(());
                     }
-                    tokio::select! {
-                        biased;
-                        r = &mut engine => r.map_err(|e| anyhow::anyhow!("{e:#}")),
-                        _ = SHUTDOWN_NOTIFY.notified() => Ok(()),
+                    // Loop to drain stale SHUTDOWN_NOTIFY permits from a
+                    // previous aether_free()/aether_stop().  A stale permit
+                    // fires immediately but SHUTDOWN is false, so we just
+                    // discard it and keep running.
+                    loop {
+                        tokio::select! {
+                            biased;
+                            r = &mut engine => break r.map_err(|e| anyhow::anyhow!("{e:#}")),
+                            _ = SHUTDOWN_NOTIFY.notified() => {
+                                if SHUTDOWN.load(Ordering::SeqCst) {
+                                    break Ok(());
+                                }
+                                // Stale permit — loop and re-enter select.
+                            },
+                        }
                     }
                 })
             })).unwrap_or_else(|_| Err(anyhow::anyhow!("engine panicked")));
@@ -899,7 +910,14 @@ pub extern "C" fn aether_free() {
     // Signal shutdown — this makes the engine thread's select! loop
     // return so block_on() completes and the tokio runtime is dropped.
     SHUTDOWN.store(true, Ordering::SeqCst);
-    SHUTDOWN_NOTIFY.notify_one();
+    // Only store a notify permit if the engine thread is still running.
+    // If it has already exited (RUNNING=false), storing a permit would
+    // leave an orphan that the NEXT aether_start()'s engine thread would
+    // consume and exit immediately — causing DISCONNECTED-forever on
+    // Android reconnect.
+    if RUNNING.load(Ordering::SeqCst) {
+        SHUTDOWN_NOTIFY.notify_one();
+    }
 
     // Join the engine thread AFTER releasing STOP_GUARD.  This blocks
     // only this cleanup thread, not a subsequent aether_start().
