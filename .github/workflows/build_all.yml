@@ -451,6 +451,6 @@ jobs:
           draft: false
           prerelease: ${{ inputs.prerelease }}
           generate_release_notes: true
-          files: release-zips/*
+          files: release-zips/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
