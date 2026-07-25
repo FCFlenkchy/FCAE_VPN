@@ -8,6 +8,7 @@ import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class FCAEVpnService extends VpnService {
     private static final String TAG = "FCAE_VPN";
@@ -18,6 +19,11 @@ public class FCAEVpnService extends VpnService {
 
     public static final String BROADCAST_VPN_DISCONNECTED = "com.fc.fcaevpn.VPN_DISCONNECTED";
     public static final String BROADCAST_VPN_STATE_CHANGED = "com.fc.fcaevpn.VPN_STATE_CHANGED";
+
+    // Monotonically increasing generation counter.  Every startVpn() and
+    // fullShutdown() increments it.  The broadcast carries the generation
+    // so the Activity can ignore stale broadcasts from a previous cycle.
+    private static final AtomicLong sGeneration = new AtomicLong(0);
 
     private volatile ParcelFileDescriptor vpnInterface;
     private volatile Thread vpnThread;
@@ -91,6 +97,7 @@ public class FCAEVpnService extends VpnService {
 
     private void startVpn(Intent intent) {
         if (running) return;
+        sGeneration.incrementAndGet();
         vpnPaused = false;
         shuttingDown = false;
         nativeFreed = false;
@@ -214,6 +221,7 @@ public class FCAEVpnService extends VpnService {
      * pauseVpn().
      */
     private void fullShutdown() {
+        sGeneration.incrementAndGet();
         running = false;
         vpnPaused = false;
 
@@ -273,13 +281,6 @@ public class FCAEVpnService extends VpnService {
                     Log.e(TAG, "Error closing fd: " + e.getMessage());
                 }
             }
-
-            // If the Activity is not alive (app was closed/backgrounded),
-            // kill the entire process so nothing lingers.
-            if (!MainActivity.activityAlive) {
-                Log.i(TAG, "Activity not alive — killing process");
-                android.os.Process.killProcess(android.os.Process.myPid());
-            }
         }, "FCAE-Cleanup");
         cleanupThread.setDaemon(true);
         cleanupThread.start();
@@ -290,6 +291,7 @@ public class FCAEVpnService extends VpnService {
      * user can tap Start in the notification to resume.
      */
     private void pauseVpn() {
+        sGeneration.incrementAndGet();
         running = false;
         vpnPaused = true;
 
@@ -334,6 +336,7 @@ public class FCAEVpnService extends VpnService {
         intent.setPackage(getPackageName());
         intent.putExtra("running", running);
         intent.putExtra("paused", vpnPaused);
+        intent.putExtra("generation", sGeneration.get());
         sendBroadcast(intent);
     }
 
@@ -356,10 +359,8 @@ public class FCAEVpnService extends VpnService {
                 "\u2193 %s  %s  |  \u2191 %s  %s",
                 VpnNotification.fmtBytes(totalRx), VpnNotification.fmtRate(rx),
                 VpnNotification.fmtBytes(totalTx), VpnNotification.fmtRate(tx));
-            if (!text.equals(lastNotifText)) {
-                lastNotifText = text;
-                notification.show(text, true);
-            }
+            lastNotifText = text;
+            notification.show(text, true);
         } else {
             lastNotifText = null;
             notification.show("FCAE VPN \u2014 Disconnected", false);

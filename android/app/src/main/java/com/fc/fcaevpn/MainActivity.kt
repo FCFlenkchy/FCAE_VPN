@@ -81,6 +81,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @Volatile private var lastBroadcastGeneration = 0L
+    // Set to true by disconnectAll().  Cleared by connectClicked().
+    // When set, the receiver ignores disconnect broadcasts — they belong
+    // to the previous cycle and would override the optimistic connect UI.
+    private var userInitiatedDisconnect = false
+
     private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -88,9 +94,20 @@ class MainActivity : AppCompatActivity() {
                 FCAEVpnService.BROADCAST_VPN_STATE_CHANGED -> {
                     val isRunning = intent.getBooleanExtra("running", false)
                     val isPaused = intent.getBooleanExtra("paused", false)
+                    val gen = intent.getLongExtra("generation", 0)
 
                     handler.post {
+                        // Ignore stale broadcasts from a previous
+                        // connect/disconnect cycle.
+                        if (gen < lastBroadcastGeneration) return@post
+
                         if (!isRunning && !isPaused) {
+                            // If the user already called disconnectAll(),
+                            // this broadcast belongs to the old cycle.
+                            // Ignore it so a fast reconnect isn't overridden.
+                            if (userInitiatedDisconnect) return@post
+
+                            lastBroadcastGeneration = gen
                             connecting = false
                             engineRunning = false
                             vpnActive = false
@@ -100,15 +117,9 @@ class MainActivity : AppCompatActivity() {
                             statsText.text = ""
                             peerText.text = ""
                             handler.removeCallbacks(poll)
-
-                            // Do NOT finish the Activity here.  The
-                            // service's cleanup thread checks activityAlive
-                            // and kills the process if the Activity is
-                            // destroyed.  Using inForeground here is
-                            // unreliable — onPause() fires when the
-                            // notification shade is pulled on some devices,
-                            // causing a false "backgrounded" detection.
                         } else if (isRunning) {
+                            userInitiatedDisconnect = false
+                            lastBroadcastGeneration = gen
                             connecting = false
                             engineRunning = true
                             vpnActive = true
@@ -116,6 +127,8 @@ class MainActivity : AppCompatActivity() {
                             handler.removeCallbacks(poll)
                             handler.post(poll)
                         } else if (isPaused) {
+                            userInitiatedDisconnect = false
+                            lastBroadcastGeneration = gen
                             connecting = false
                             engineRunning = false
                             vpnActive = false
@@ -261,15 +274,10 @@ class MainActivity : AppCompatActivity() {
                 return@execute
             }
 
-            // Force-stop any stale engine from a previous session.  This
-            // covers the case where the service was killed while the engine
-            // was still running (e.g. notification disconnect with app in
-            // background).  Without this, nativeStart() would fail because
-            // RUNNING is still true.
-            try { NativeEngine.nativeStop() } catch (_: Throwable) {}
-            try { Thread.sleep(300) } catch (_: Throwable) {}
-
-            // Query native state — if engine is running, sync UI to it
+            // Query native state — if engine is running, sync UI to it.
+            // Do NOT call nativeStop() here: if the service is keeping the
+            // engine alive we must NOT kill it, and if the engine is truly
+            // stale the user can disconnect from the UI.
             try {
                 val json = JSONObject(NativeEngine.nativeGetStatusJson())
                 val state = json.optInt("state", 0)
@@ -315,11 +323,6 @@ class MainActivity : AppCompatActivity() {
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
         activityAlive = false
         super.onDestroy()
-        // If VPN is not running when the Activity is destroyed, kill the
-        // entire process so nothing lingers in background.
-        if (!vpnActive && !engineRunning) {
-            android.os.Process.killProcess(android.os.Process.myPid())
-        }
     }
 
     private fun saveSettings() {
@@ -364,6 +367,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun connectClicked() {
+        userInitiatedDisconnect = false
         val mode = spinnerMode.selectedItemPosition
         if (mode == 1) {
             val prep = VpnService.prepare(this)
@@ -506,6 +510,7 @@ class MainActivity : AppCompatActivity() {
         // before the async broadcast arrives.  This prevents double-tap
         // races where the user taps CONNECT while the old broadcast is
         // still in-flight.
+        userInitiatedDisconnect = true
         vpnActive = false
         engineRunning = false
         connecting = false
@@ -517,9 +522,11 @@ class MainActivity : AppCompatActivity() {
         // Stop native engine directly — if the service was killed by the
         // system while the app was backgrounded, startService(i) would go
         // nowhere and the UI would stay stuck on DISCONNECTING forever.
-        bgExecutor.execute {
+        // Use a dedicated thread so nativeStop() doesn't block the shared
+        // bgExecutor (which the poll also uses).
+        Thread({
             try { NativeEngine.nativeStop() } catch (_: Throwable) {}
-        }
+        }, "NativeStop-Disconnect").start()
 
         try {
             val i = Intent(this, FCAEVpnService::class.java)
