@@ -605,6 +605,12 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
     if !INITIALIZED.load(Ordering::SeqCst) {
         return false;
     }
+
+    // Acquire STOP_GUARD to serialize with aether_free().  Without this,
+    // aether_free() on the cleanup thread could join_engine_thread() after
+    // we've stored a NEW handle, killing the new engine.
+    let _guard = STOP_GUARD.lock();
+
     if RUNNING.load(Ordering::SeqCst) {
         // Previous engine still running.  If SHUTDOWN was signaled (i.e.
         // aether_stop() was called), wait up to 5 s for it to drain.
@@ -612,7 +618,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         // engine was still running (e.g. notification disconnect with
         // app in background), and the user re-opens the app quickly.
         if SHUTDOWN.load(Ordering::SeqCst) {
-            for _ in 0..20 {
+            for _ in 0..50 {
                 if !RUNNING.load(Ordering::SeqCst) {
                     break;
                 }
