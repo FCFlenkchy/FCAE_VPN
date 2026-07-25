@@ -125,3 +125,17 @@ Open `android/` in Android Studio and build. The Gradle config invokes CMake wit
 ## License
 
 See the individual components for their respective licenses.
+
+---
+
+<div align="center">
+
+### Found this useful?
+
+If this project helped you bypass censorship or just saved you some time, consider giving it a **star** — it helps others discover the tool and motivates continued development.
+
+[![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN)
+
+**Other languages:** [فارسی](READMEFA.md) | [中文](READMECH.md)
+
+</div>
