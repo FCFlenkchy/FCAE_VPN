@@ -125,7 +125,7 @@ jobs:
         run: |
           sudo apt-get update -qq || true
           sudo apt-get install -y -qq --no-install-recommends \
-            mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 nasm
+            mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 nasm osslsigncode
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
@@ -252,6 +252,35 @@ jobs:
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
           cmake --build . --config Release
 
+      # Signs the .exe with the STATIC self-signed cert from repo secrets
+      # (generated via the generate-signing-keys workflow). Self-signed
+      # means Windows SmartScreen will still warn on first run — that only
+      # goes away with a CA-issued cert — but this lets users verify the
+      # binary wasn't tampered with after release, and keeps the same
+      # signing identity across releases.
+      - name: sign windows exe
+        if: matrix.name == 'windows-x64'
+        env:
+          WIN_CERT_BASE64: ${{ secrets.WIN_CERT_BASE64 }}
+          WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "$WIN_CERT_BASE64" | base64 -d > /tmp/wincert.p12
+
+          for exe in build/fcaevpn*.exe; do
+            [ -f "$exe" ] || continue
+            osslsigncode sign \
+              -pkcs12 /tmp/wincert.p12 \
+              -pass "$WIN_CERT_PASSWORD" \
+              -n "FCAE VPN" \
+              -t http://timestamp.digicert.com \
+              -in "$exe" \
+              -out "${exe%.exe}-signed.exe"
+            mv -f "${exe%.exe}-signed.exe" "$exe"
+          done
+
+          rm -f /tmp/wincert.p12
+
       - name: build apk
         if: matrix.name == 'android-arm64-v8a'
         env:
@@ -273,31 +302,33 @@ jobs:
           gradle wrapper --gradle-version 9.0
           ./gradlew assembleRelease -PNDK_ABI=arm64-v8a
 
+      # Signs with the STATIC keystore from repo secrets (generated via the
+      # generate-signing-keys workflow). Android requires the same signing
+      # key across releases for users to install updates, so this must
+      # stay stable — never regenerate the keystore between releases.
       - name: sign apk
         if: matrix.name == 'android-arm64-v8a'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          # Generate a fresh keystore for CI signing
-          keytool -genkeypair -v \
-            -keystore /tmp/release.keystore \
-            -alias fcae \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass android -keypass android \
-            -dname "CN=FCAE VPN, OU=Dev, O=FCAE, L=Unknown, ST=Unknown, C=US"
+          echo "$KEYSTORE_BASE64" | base64 -d > /tmp/release.keystore
 
-          # Find build-tools
           BT=$(ls -d /usr/local/lib/android/sdk/build-tools/*/ | sort -V | tail -1)
           "${BT}apksigner" sign \
             --ks /tmp/release.keystore \
-            --ks-pass pass:android \
-            --key-pass pass:android \
-            --ks-key-alias fcae \
+            --ks-pass "pass:${KEYSTORE_PASSWORD}" \
+            --key-pass "pass:${KEY_PASSWORD}" \
+            --ks-key-alias "${KEY_ALIAS}" \
             android/app/build/outputs/apk/release/*.apk
 
-          # Verify signature
           "${BT}apksigner" verify --verbose \
             android/app/build/outputs/apk/release/*.apk || true
           echo "APK signed successfully"
+          rm -f /tmp/release.keystore
 
       - name: package
         if: matrix.name != 'android-arm64-v8a'
@@ -372,29 +403,19 @@ jobs:
           echo "=== SHA256 Checksums ==="
           cat SHA256SUMS.txt
 
+      # Signs with the STATIC GPG key from repo secrets (generated via the
+      # generate-signing-keys workflow). The public key is NOT re-exported
+      # or shipped in the release here — publish it once separately (e.g.
+      # your README) so people can pin it across releases.
       - name: GPG sign checksums
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          # Generate a fresh GPG key for CI signing
-          cat > /tmp/gpg-params <<EOF
-          %no-protection
-          Key-Type: RSA
-          Key-Length: 2048
-          Subkey-Type: RSA
-          Subkey-Length: 2048
-          Name-Real: FCAE VPN
-          Name-Email: fcae@users.noreply.github.com
-          Expire-Date: 0
-          %commit
-          EOF
-          gpg --batch --gen-key /tmp/gpg-params
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
 
-          # Export public key for verification
-          gpg --armor --export "FCAE VPN" > release-zips/SHA256SUMS.sig.asc
-          echo "Public key exported to release-zips/SHA256SUMS.sig.asc"
-
-          # Sign the checksums file
-          gpg --batch --yes --armor --detach-sign release-zips/SHA256SUMS.txt
+          gpg --batch --yes --armor --local-user "FCAE VPN" \
+            --detach-sign release-zips/SHA256SUMS.txt
           echo "Checksums signed"
           ls -la release-zips/
 
@@ -428,7 +449,7 @@ jobs:
           tag_name: ${{ github.event.inputs.release_tag }}
           name: "FCAE VPN ${{ github.event.inputs.release_tag }}"
           draft: false
-          prerelease: ${{ inputs.prerelease == 'true' }}
+          prerelease: ${{ inputs.prerelease }}
           generate_release_notes: true
           files: release-zips/*
         env:
