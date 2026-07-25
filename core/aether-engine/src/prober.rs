@@ -123,7 +123,7 @@ impl ScanMode {
     }
 
     fn strategy(&self) -> Strategy {
-        match self {
+        let base = match self {
             ScanMode::Turbo => Strategy {
                 concurrency: 20,
                 per_probe_timeout: Duration::from_millis(3000),
@@ -175,7 +175,11 @@ impl ScanMode {
                 full_subnet: false,
                 sample_per_cidr: 140,
             },
-        }
+        };
+        // Let the performance profile cap concurrency on low-end devices.
+        let mut s = base;
+        s.concurrency = crate::sysprofile::cap_concurrency(s.concurrency);
+        s
     }
 }
 

@@ -606,11 +606,6 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         return false;
     }
 
-    // Acquire STOP_GUARD to serialize with aether_free().  Without this,
-    // aether_free() on the cleanup thread could join_engine_thread() after
-    // we've stored a NEW handle, killing the new engine.
-    let _guard = STOP_GUARD.lock();
-
     if RUNNING.load(Ordering::SeqCst) {
         // Previous engine still running.  If SHUTDOWN was signaled (i.e.
         // aether_stop() was called), wait up to 5 s for it to drain.
@@ -789,15 +784,6 @@ pub extern "C" fn aether_stop() {
     t.tx_bytes_sec = 0;
 }
 
-/// Join the engine thread if one is running.  Returns true if the thread
-/// was successfully joined (or was never started).
-fn join_engine_thread() -> bool {
-    let handle = ENGINE_THREAD.lock().take();
-    match handle {
-        Some(h) => h.join().is_ok(),
-        None => true,
-    }
-}
 
 #[no_mangle]
 pub extern "C" fn aether_get_telemetry(out: *mut AetherTelemetryOut) {
@@ -886,19 +872,25 @@ pub extern "C" fn aether_set_android_tun_fd(tun_fd: i32) {
 
 #[no_mangle]
 pub extern "C" fn aether_free() {
-    let _guard = STOP_GUARD.lock();
-
     // Signal shutdown FIRST — this makes the engine thread's select! loop
     // return so block_on() completes and the tokio runtime is dropped.
     SHUTDOWN.store(true, Ordering::SeqCst);
     SHUTDOWN_NOTIFY.notify_one();
 
-    // Join the engine thread BEFORE closing TUN fds.  The engine thread
-    // drops the tokio runtime, which cancels async tasks (including the
-    // TUN write_task).  With ManuallyDrop in the write_task, File::drop()
-    // is suppressed, so no fd is closed during runtime teardown.
-    // After this returns, the engine thread is fully gone.
-    join_engine_thread();
+    // Acquire STOP_GUARD briefly to safely take the engine thread handle.
+    // We release it BEFORE joining so that a subsequent aether_start() call
+    // doesn't block waiting for STOP_GUARD while the old cleanup thread is
+    // still completing (this was the root cause of the second-connect hang).
+    let handle = {
+        let _guard = STOP_GUARD.lock();
+        ENGINE_THREAD.lock().take()
+    };
+
+    // Join the engine thread AFTER releasing STOP_GUARD — so the caller
+    // of aether_start() isn't blocked waiting for this lock.
+    if let Some(h) = handle {
+        let _ = h.join();
+    }
 
     // Also wait for RUNNING to become false — this covers the edge case
     // where aether_start() spawned the thread but hasn't stored the

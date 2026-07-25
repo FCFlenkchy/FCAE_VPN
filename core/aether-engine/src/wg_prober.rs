@@ -55,7 +55,7 @@ impl WgScanMode {
     }
 
     fn strategy(&self) -> WgStrategy {
-        match self {
+        let base = match self {
             WgScanMode::Turbo => WgStrategy {
                 concurrency: 12,
                 per_probe_timeout: Duration::from_millis(2000),
@@ -106,7 +106,10 @@ impl WgScanMode {
                 full_subnet: false,
                 sample_per_cidr: 120,
             },
-        }
+        };
+        let mut s = base;
+        s.concurrency = crate::sysprofile::cap_concurrency(s.concurrency);
+        s
     }
 }
 

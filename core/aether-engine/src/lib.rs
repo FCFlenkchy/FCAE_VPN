@@ -245,6 +245,7 @@ pub fn run_cli() -> Result<()> {
 /// Does not parse argv or initialize the global logger (caller owns that).
 pub async fn run_from_env() -> Result<()> {
     log::info!("Aether v{}", env!("CARGO_PKG_VERSION"));
+    sysprofile::log_summary();
     install_netstack_panic_guard();
 
     let socks_disabled = std::env::var("AETHER_SOCKS_DISABLED").is_ok();

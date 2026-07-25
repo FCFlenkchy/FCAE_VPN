@@ -15,7 +15,8 @@ use crate::tls::{self, TlsParams};
 use crate::{consts, error::AetherError, error::Result};
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
-const NET_QUEUE: usize = 512;
+
+fn net_queue() -> usize { crate::sysprofile::channel_capacity() }
 
 async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     use socket2::{Socket, Domain, Type};
@@ -23,8 +24,9 @@ async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     let sock = Socket::new(domain, Type::DGRAM, None).map_err(AetherError::Io)?;
     sock.set_nonblocking(true).map_err(AetherError::Io)?;
 
-    // Keep modest socket buffers — 7MB each caused multi‑hundred MB RSS on Windows.
-    let kb = std::env::var("AETHER_UDP_BUF_KB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&k| (64..=8192).contains(&k)).unwrap_or(1024);
+    // Use AETHER_UDP_BUF_KB env override, then fall back to the
+    // performance profile's tuned value for the detected hardware tier.
+    let kb = std::env::var("AETHER_UDP_BUF_KB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&k| (64..=8192).contains(&k)).unwrap_or_else(|| crate::sysprofile::udp_socket_buf_bytes() / 1024);
     let buf_size = kb * 1024;
     let _ = sock.set_recv_buffer_size(buf_size);
     let _ = sock.set_send_buffer_size(buf_size);
@@ -81,8 +83,8 @@ pub struct Channels {
 }
 
 pub fn channels() -> (Channels, Internals) {
-    let (outbound_tx, outbound_rx) = mpsc::channel(NET_QUEUE);
-    let (inbound_tx, inbound_rx) = mpsc::channel(NET_QUEUE);
+    let (outbound_tx, outbound_rx) = mpsc::channel(net_queue());
+    let (inbound_tx, inbound_rx) = mpsc::channel(net_queue());
     let (ctrl_tx, ctrl_rx) = mpsc::channel(16);
 
     (
@@ -172,7 +174,7 @@ pub async fn run(
     let local = init_sock.local_addr()?;
     let init_sock = Arc::new(init_sock);
 
-    let (net_tx, mut net_rx) = mpsc::channel::<NetPacket>(NET_QUEUE);
+    let (net_tx, mut net_rx) = mpsc::channel::<NetPacket>(net_queue());
 
     let mut sockets: HashMap<SocketAddr, Arc<UdpSocket>> = HashMap::new();
     sockets.insert(local, init_sock.clone());
