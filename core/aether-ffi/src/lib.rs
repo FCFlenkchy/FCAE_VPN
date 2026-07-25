@@ -886,23 +886,29 @@ pub extern "C" fn aether_set_android_tun_fd(tun_fd: i32) {
 
 #[no_mangle]
 pub extern "C" fn aether_free() {
-    let _guard = STOP_GUARD.lock();
+    // Acquire STOP_GUARD ONLY to safely take the engine thread handle.
+    // Release it immediately so a subsequent aether_start() call isn't
+    // blocked for the entire join+cleanup duration (which can exceed the
+    // 5s freeNativeOnce timeout, leaving STOP_GUARD held on an abandoned
+    // thread forever).
+    let handle = {
+        let _guard = STOP_GUARD.lock();
+        ENGINE_THREAD.lock().take()
+    };
 
-    // Signal shutdown FIRST — this makes the engine thread's select! loop
+    // Signal shutdown — this makes the engine thread's select! loop
     // return so block_on() completes and the tokio runtime is dropped.
     SHUTDOWN.store(true, Ordering::SeqCst);
     SHUTDOWN_NOTIFY.notify_one();
 
-    // Join the engine thread BEFORE closing TUN fds.  The engine thread
-    // drops the tokio runtime, which cancels async tasks (including the
-    // TUN write_task).  With ManuallyDrop in the write_task, File::drop()
-    // is suppressed, so no fd is closed during runtime teardown.
-    // After this returns, the engine thread is fully gone.
-    join_engine_thread();
+    // Join the engine thread AFTER releasing STOP_GUARD.  This blocks
+    // only this cleanup thread, not a subsequent aether_start().
+    if let Some(h) = handle {
+        let _ = h.join();
+    }
 
-    // Also wait for RUNNING to become false — this covers the edge case
-    // where aether_start() spawned the thread but hasn't stored the
-    // JoinHandle yet.  The engine thread sets RUNNING=false on exit.
+    // Wait for RUNNING to become false — covers the edge case where
+    // aether_start() spawned the thread but hasn't stored the JoinHandle yet.
     for _ in 0..20 {
         if !RUNNING.load(Ordering::SeqCst) {
             break;
@@ -910,10 +916,7 @@ pub extern "C" fn aether_free() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Safety net: close TUN fds AFTER the engine thread has exited.
-    // The engine thread closes them in its cleanup path (line 723), but
-    // if it panicked or was killed before reaching that point, we close
-    // them here to prevent fd leaks.  close_all_fds() uses atomic swap
+    // Safety net: close TUN fds.  close_all_fds() uses atomic swap
     // so double-close is impossible — the first caller claims ownership.
     aether_engine::tun::close_all_fds();
 
