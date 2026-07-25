@@ -273,6 +273,13 @@ public class FCAEVpnService extends VpnService {
                     Log.e(TAG, "Error closing fd: " + e.getMessage());
                 }
             }
+
+            // If the Activity is not alive (app was closed/backgrounded),
+            // kill the entire process so nothing lingers.
+            if (!MainActivity.activityAlive) {
+                Log.i(TAG, "Activity not alive — killing process");
+                android.os.Process.killProcess(android.os.Process.myPid());
+            }
         }, "FCAE-Cleanup");
         cleanupThread.setDaemon(true);
         cleanupThread.start();

@@ -101,10 +101,14 @@ class MainActivity : AppCompatActivity() {
                             peerText.text = ""
                             handler.removeCallbacks(poll)
 
-                            // Close the Activity so onDestroy() can kill
-                            // the process.  Brief delay so the user sees
-                            // the DISCONNECTED state.
-                            handler.postDelayed({ finishAndRemoveTask() }, 300)
+                            // If the app is in the background (e.g. user
+                            // disconnected from notification while app was
+                            // backgrounded), finish so onDestroy() kills the
+                            // process.  If the user is in the app, just show
+                            // DISCONNECTED — they can reconnect or close.
+                            if (!inForeground) {
+                                finishAndRemoveTask()
+                            }
                         } else if (isRunning) {
                             connecting = false
                             engineRunning = true
@@ -160,6 +164,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        activityAlive = true
         setContentView(R.layout.activity_main)
         prefs = getSharedPreferences("aether_vpn", MODE_PRIVATE)
 
@@ -300,6 +305,7 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(poll)
         handler.removeCallbacks(disconnectFallback)
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
+        activityAlive = false
         super.onDestroy()
         // If VPN is not running when the Activity is destroyed, kill the
         // entire process so nothing lingers in background.
@@ -652,6 +658,10 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val POLL_INTERVAL_MS = 5000L
         private const val MAX_LOG_CHARS = 8000
+
+        // Set to true while the Activity is alive.  The service checks
+        // this after fullShutdown() to decide whether to kill the process.
+        @Volatile @JvmStatic var activityAlive = false
 
         // Pre-computed Color constants — avoids String.parseColor() on every poll tick.
         private val COLOR_CONNECTED = Color.parseColor("#34D399")
