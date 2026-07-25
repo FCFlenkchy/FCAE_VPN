@@ -101,14 +101,13 @@ class MainActivity : AppCompatActivity() {
                             peerText.text = ""
                             handler.removeCallbacks(poll)
 
-                            // If the app is in the background (e.g. user
-                            // disconnected from notification while app was
-                            // backgrounded), finish so onDestroy() kills the
-                            // process.  If the user is in the app, just show
-                            // DISCONNECTED — they can reconnect or close.
-                            if (!inForeground) {
-                                finishAndRemoveTask()
-                            }
+                            // Do NOT finish the Activity here.  The
+                            // service's cleanup thread checks activityAlive
+                            // and kills the process if the Activity is
+                            // destroyed.  Using inForeground here is
+                            // unreliable — onPause() fires when the
+                            // notification shade is pulled on some devices,
+                            // causing a false "backgrounded" detection.
                         } else if (isRunning) {
                             connecting = false
                             engineRunning = true

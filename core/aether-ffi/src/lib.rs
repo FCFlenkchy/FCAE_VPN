@@ -607,9 +607,10 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
     }
     if RUNNING.load(Ordering::SeqCst) {
         // Previous engine still running.  If SHUTDOWN was signaled (i.e.
-        // aether_stop() was called), wait up to 2 s for it to drain.
-        // This prevents the Android rapid-connect crash where
-        // nativeStop() is non-blocking but nativeStart() sees RUNNING=true.
+        // aether_stop() was called), wait up to 5 s for it to drain.
+        // This covers the case where the service was killed while the
+        // engine was still running (e.g. notification disconnect with
+        // app in background), and the user re-opens the app quickly.
         if SHUTDOWN.load(Ordering::SeqCst) {
             for _ in 0..20 {
                 if !RUNNING.load(Ordering::SeqCst) {
