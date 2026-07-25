@@ -96,16 +96,17 @@ public class FCAEVpnService extends VpnService {
     }
 
     private void startVpn(Intent intent) {
-        if (running) return;
         sGeneration.incrementAndGet();
         vpnPaused = false;
         shuttingDown = false;
         nativeFreed = false;
 
-        // Signal any previous engine to stop (non-blocking).  aether_start()
-        // has its own RUNNING-wait loop, so we do NOT block here with
-        // stopNativeFree() which would add 3-5s of cold-start latency on
-        // Android.  nativeStop() just sets SHUTDOWN + closes TUN fds in <1ms.
+        // Force-stop any previous engine — running may still be true if
+        // the old cleanup thread hasn't finished yet.  nativeStop() is
+        // non-blocking (sets SHUTDOWN flag), and aether_start() has its
+        // own RUNNING-wait loop, so the new engine won't start until the
+        // old one fully exits.
+        running = false;
         try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
 
         notification.show("FCAE VPN \u2014 Connecting...", false);
