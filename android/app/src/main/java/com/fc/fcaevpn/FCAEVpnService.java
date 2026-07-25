@@ -77,7 +77,7 @@ public class FCAEVpnService extends VpnService {
                     return START_STICKY;
                 case ACTION_DISCONNECT:
                     fullShutdown();
-                    return START_STICKY;
+                    return START_NOT_STICKY;
                 case ACTION_START:
                     if (!intent.hasExtra("protocol") && lastStartIntent != null) {
                         startVpn(lastStartIntent);
@@ -247,11 +247,14 @@ public class FCAEVpnService extends VpnService {
         // (e.g. notification disconnect after a stalled first attempt).
         handler.removeCallbacks(statsRunnable);
         notification.dismiss();
-        // Do NOT stopForeground() here — keep the service alive as a
-        // foreground service so subsequent ACTION_START intents can be
-        // handled without Android recreating the process (which would
-        // lose Java-side state and cause the reconnect hang).
+        stopForeground(STOP_FOREGROUND_REMOVE);
         notifyUi();
+
+        // Stop the service IMMEDIATELY on the main thread so the system
+        // knows this service is done.  nativeFree + fd close happen in
+        // the background — they don't need to block the kill.
+        stopSelf();
+        Log.i(TAG, "service stopped (cleanup continues in background)");
 
         // Save refs — null them out so other code paths see stopped state.
         final Thread t = vpnThread;
