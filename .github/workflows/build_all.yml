@@ -333,6 +333,30 @@ jobs:
           ls -lah release-zips/
           test $(ls -1 release-zips/*.zip | wc -l) -ge 1
 
+      - name: delete existing release + tag
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            const tag = '${{ github.event.inputs.release_tag }}';
+            // Delete release if it exists
+            try {
+              const rel = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner, repo: context.repo.repo, tag
+              });
+              await github.rest.repos.deleteRelease({
+                owner: context.repo.owner, repo: context.repo.repo, release_id: rel.data.id
+              });
+              console.log(`Deleted release ${rel.data.id} for tag ${tag}`);
+            } catch (e) { console.log(`No existing release: ${e.message}`); }
+            // Delete tag ref if it exists
+            try {
+              await github.rest.git.deleteRef({
+                owner: context.repo.owner, repo: context.repo.repo, ref: `tags/${tag}`
+              });
+              console.log(`Deleted tag ref ${tag}`);
+            } catch (e) { console.log(`No existing tag: ${e.message}`); }
+
       - name: create release
         uses: softprops/action-gh-release@v2
         with:
