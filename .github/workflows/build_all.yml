@@ -414,7 +414,7 @@ jobs:
           set -euo pipefail
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
 
-          gpg --batch --yes --armor --local-user "FCAE VPN" \
+          gpg --batch --yes --armor --local-user "FC" \
             --detach-sign release-zips/SHA256SUMS.txt
           echo "Checksums signed"
           ls -la release-zips/
