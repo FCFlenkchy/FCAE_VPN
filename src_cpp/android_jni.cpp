@@ -203,8 +203,10 @@ extern "C" JNIEXPORT jlongArray JNICALL
 Java_com_fc_fcaevpn_FCAEVpnService_nativeGetTrafficStats(JNIEnv* env, jclass) {
     ensure_init();
     AetherTelemetry telem = {};
-    // Use cached rates so we don't steal window data from the UI poll.
-    aether_get_cached_telemetry(&telem);
+    // Use live rates so the notification always shows current data.
+    // When the app is backgrounded the UI poll is stopped and
+    // cached_rates() would return stale zeros forever.
+    aether_get_telemetry(&telem);
     // [0]=rx bytes/sec, [1]=tx bytes/sec, [2]=exact cumulative rx bytes,
     // [3]=exact cumulative tx bytes.
     jlongArray out = env->NewLongArray(4);
