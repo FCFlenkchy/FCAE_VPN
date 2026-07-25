@@ -669,7 +669,7 @@ class MainActivity : AppCompatActivity() {
 
         // Set to true while the Activity is alive.  The service checks
         // this after fullShutdown() to decide whether to kill the process.
-        @Volatile @JvmStatic var activityAlive = false
+        @JvmField @Volatile var activityAlive = false
 
         // Pre-computed Color constants — avoids String.parseColor() on every poll tick.
         private val COLOR_CONNECTED = Color.parseColor("#34D399")
