@@ -618,7 +618,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         // engine was still running (e.g. notification disconnect with
         // app in background), and the user re-opens the app quickly.
         if SHUTDOWN.load(Ordering::SeqCst) {
-            for _ in 0..50 {
+            for _ in 0..20 {
                 if !RUNNING.load(Ordering::SeqCst) {
                     break;
                 }
