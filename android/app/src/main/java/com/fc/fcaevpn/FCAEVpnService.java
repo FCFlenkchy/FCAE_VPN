@@ -41,7 +41,7 @@ public class FCAEVpnService extends VpnService {
         public void run() {
             updateNotification();
             if (running) {
-                handler.postDelayed(this, 5000);
+                handler.postDelayed(this, 1000);
             }
         }
     };

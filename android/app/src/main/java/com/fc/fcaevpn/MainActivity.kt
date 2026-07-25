@@ -664,7 +664,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val POLL_INTERVAL_MS = 5000L
+        private const val POLL_INTERVAL_MS = 1000L
         private const val MAX_LOG_CHARS = 8000
 
         // Set to true while the Activity is alive.  The service checks
