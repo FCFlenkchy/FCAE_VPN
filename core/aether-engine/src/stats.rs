@@ -58,25 +58,23 @@ pub fn rates() -> (u64, u64) {
 
     match guard.as_mut() {
         None => {
-            // First call: just initialize the timer. Don't discard window data —
-            // it will be picked up on the next call once dt > 0.
+            // First call: initialize the timer. Put window data back so
+            // it's picked up on the next call.
             *guard = Some(RateState {
                 last: now,
                 rx_bps: 0,
                 tx_bps: 0,
             });
-            // Put the window data back so it's not lost.
             WINDOW_RX.fetch_add(win_rx, Ordering::Relaxed);
             WINDOW_TX.fetch_add(win_tx, Ordering::Relaxed);
             (0, 0)
         }
         Some(s) => {
             let dt = now.duration_since(s.last).as_secs_f64().max(0.001);
-            let rx_bps = (win_rx as f64 / dt) as u64;
-            let tx_bps = (win_tx as f64 / dt) as u64;
-            // EMA smoothing: 50/50 blend of previous and current.
-            s.rx_bps = (s.rx_bps / 2).saturating_add(rx_bps / 2);
-            s.tx_bps = (s.tx_bps / 2).saturating_add(tx_bps / 2);
+            // Direct rate: bytes in window / elapsed time. No EMA —
+            // the 1-second poll interval already provides smooth updates.
+            s.rx_bps = (win_rx as f64 / dt) as u64;
+            s.tx_bps = (win_tx as f64 / dt) as u64;
             s.last = now;
             (s.rx_bps, s.tx_bps)
         }
