@@ -800,15 +800,6 @@ pub extern "C" fn aether_stop() {
     t.tx_bytes_sec = 0;
 }
 
-/// Join the engine thread if one is running.  Returns true if the thread
-/// was successfully joined (or was never started).
-fn join_engine_thread() -> bool {
-    let handle = ENGINE_THREAD.lock().take();
-    match handle {
-        Some(h) => h.join().is_ok(),
-        None => true,
-    }
-}
 
 #[no_mangle]
 pub extern "C" fn aether_get_telemetry(out: *mut AetherTelemetryOut) {
