@@ -260,6 +260,15 @@ class MainActivity : AppCompatActivity() {
                 }
                 return@execute
             }
+
+            // Force-stop any stale engine from a previous session.  This
+            // covers the case where the service was killed while the engine
+            // was still running (e.g. notification disconnect with app in
+            // background).  Without this, nativeStart() would fail because
+            // RUNNING is still true.
+            try { NativeEngine.nativeStop() } catch (_: Throwable) {}
+            try { Thread.sleep(300) } catch (_: Throwable) {}
+
             // Query native state — if engine is running, sync UI to it
             try {
                 val json = JSONObject(NativeEngine.nativeGetStatusJson())
