@@ -25,6 +25,11 @@ public class FCAEVpnService extends VpnService {
     // so the Activity can ignore stale broadcasts from a previous cycle.
     private static final AtomicLong sGeneration = new AtomicLong(0);
 
+    // Cleanup generation — incremented by startVpn() so stale cleanup
+    // threads from a previous shutdown skip freeNativeOnce() (which
+    // would otherwise join the NEW engine thread and deadlock it).
+    private volatile long cleanupGeneration = 0;
+
     private volatile ParcelFileDescriptor vpnInterface;
     private volatile Thread vpnThread;
     private volatile boolean running = false;
@@ -97,6 +102,7 @@ public class FCAEVpnService extends VpnService {
 
     private void startVpn(Intent intent) {
         sGeneration.incrementAndGet();
+        cleanupGeneration++;
         vpnPaused = false;
         shuttingDown = false;
         nativeFreed = false;
@@ -259,12 +265,16 @@ public class FCAEVpnService extends VpnService {
 
         // Heavy cleanup on background thread.  Must NOT block main thread
         // for >100ms (ANR threshold).
+        final long myGen = cleanupGeneration;
         Thread cleanupThread = new Thread(() -> {
-            // Signal the engine to stop BEFORE calling freeNativeOnce().
-            // aether_free() sets SHUTDOWN and joins the engine thread, but
-            // the engine thread won't exit its select! loop until SHUTDOWN
-            // is observed.  nativeStop() sets SHUTDOWN non-blocking and
-            // ensures the engine thread begins its shutdown path.
+            // If a new startVpn() has run since this shutdown was
+            // initiated, skip freeNativeOnce() — it would try to join
+            // the NEW engine thread and deadlock it.
+            if (myGen != cleanupGeneration) {
+                Log.i(TAG, "cleanup: stale generation, skipping nativeFree");
+                return;
+            }
+
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
 
             freeNativeOnce();
@@ -319,7 +329,13 @@ public class FCAEVpnService extends VpnService {
         final ParcelFileDescriptor pfdToClose = vpnInterface;
         vpnInterface = null;
 
+        final long myGen = cleanupGeneration;
         Thread cleanupThread = new Thread(() -> {
+            if (myGen != cleanupGeneration) {
+                Log.i(TAG, "pause-cleanup: stale generation, skipping nativeFree");
+                return;
+            }
+
             freeNativeOnce();
 
             if (t != null) {
