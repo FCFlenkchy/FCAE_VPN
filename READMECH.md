@@ -136,13 +136,6 @@ cmake --build build --config Release
 4. 推送到分支 (`git push origin feature/amazing-feature`)
 5. 创建 Pull Request
 
-### 需要帮助的领域
-
-- **macOS TUN 路由** — 当前 tun2socks 的 TUN 模式仅支持 Windows 和 Linux，需要实现 macOS 的路由配置。
-- **IPv6 端点扫描** — 扫描器目前主要关注 IPv4；IPv6 发现需要更多实际测试。
-- **界面翻译** — 为桌面端和 Android 界面添加更多语言支持。
-- **协议指纹改进** — 持续优化，使 MASQUE 和 WireGuard 流量看起来更像标准浏览器 HTTPS。
-
 ## 许可证
 
 请参阅各组件的相应许可证。

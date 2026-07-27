@@ -134,13 +134,6 @@ Contributions are welcome! Whether it's bug reports, feature requests, documenta
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-### Areas that need help
-
-- **TUN routing on macOS** — Current TUN mode with tun2socks only supports Windows and Linux. macOS routing needs implementation.
-- **IPv6 endpoint scanning** — Scanner currently focuses on IPv4; IPv6 discovery needs more real-world testing.
-- **GUI translations** — Adding more languages to the desktop and Android interfaces.
-- **Protocol fingerprinting improvements** — Always looking to make MASQUE and WireGuard traffic look more like standard browser HTTPS.
-
 ## License
 
 See the individual components for their respective licenses.
