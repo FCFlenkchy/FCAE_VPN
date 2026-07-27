@@ -42,6 +42,9 @@ fn main() {
         let out_dir = env::var("OUT_DIR").unwrap();
         let bin_path = PathBuf::from(&out_dir).join(bin_name);
 
+        // Also check workspace target/release for pre-built binary
+        let prebuilt_path = workspace_root.join("target").join("release").join(bin_name);
+
         // Check if binary already exists (from a previous build)
         // and if go.mod hasn't changed, skip rebuild
         let go_mod = tun2socks_src.join("go.mod");
@@ -50,7 +53,13 @@ fn main() {
             let mod_meta = fs::metadata(&go_mod).ok();
             match (bin_meta, mod_meta) {
                 (Some(b), Some(m)) => {
-                    b.modified().ok() > m.modified().ok()
+                    match (b.modified(), m.modified()) {
+                        (Ok(bin_time), Ok(mod_time)) => {
+                            // Rebuild if go.mod is newer than the binary (source changed)
+                            mod_time > bin_time
+                        }
+                        _ => true,
+                    }
                 }
                 _ => true,
             }
@@ -59,37 +68,80 @@ fn main() {
         };
 
         if needs_build {
-            println!("cargo:warning=Building tun2socks from source...");
+            // First check if pre-built binary exists in target/release
+            if prebuilt_path.exists() {
+                println!("cargo:warning=Copying pre-built tun2socks from: {}", prebuilt_path.display());
+                fs::copy(&prebuilt_path, &bin_path)
+                    .expect("Failed to copy pre-built tun2socks");
+                println!("cargo:warning=tun2socks copied successfully");
+            } else {
+                println!("cargo:warning=Building tun2socks from source (windows/amd64)...");
 
-            let status = Command::new("go")
-                .args(["build", "-o"])
-                .arg(&bin_path)
-                .args(["-trimpath", "-ldflags=-s -w"])
-                .current_dir(&tun2socks_src)
-                .status();
+                let status = Command::new("go")
+                    .env("CGO_ENABLED", "0")
+                    .env("GOOS", "windows")
+                    .env("GOARCH", "amd64")
+                    .args(["build", "-o"])
+                    .arg(&bin_path)
+                    .args(["-trimpath", "-ldflags=-s -w"])
+                    .current_dir(&tun2socks_src)
+                    .status();
 
-            match status {
-                Ok(s) if s.success() => {
-                    println!("cargo:warning=tun2socks built successfully");
-                }
-                Ok(s) => {
-                    panic!("go build tun2socks failed with exit code: {:?}", s.code());
-                }
-                Err(e) => {
-                    // If go is not available, try pre-built binary
-                    println!("cargo:warning=go not found ({e}), checking for pre-built binary...");
-                    let prebuilt = workspace_root.join("target/release").join(bin_name);
-                    if prebuilt.exists() {
-                        fs::copy(&prebuilt, &bin_path)
-                            .expect("Failed to copy pre-built tun2socks");
-                        println!("cargo:warning=Using pre-built tun2socks from: {}", prebuilt.display());
-                    } else {
-                        panic!(
-                            "Cannot build tun2socks: go not found and no pre-built binary at {}.\
-\
-                             Install Go or place the binary at that path.",
-                            prebuilt.display()
-                        );
+                match status {
+                    Ok(s) if s.success() => {
+                        println!("cargo:warning=tun2socks built successfully");
+                    }
+                    Ok(s) => {
+                        // If go build failed, try pre-built binary
+                        println!("cargo:warning=go build failed with exit code: {:?}", s.code());
+                        if prebuilt_path.exists() {
+                            println!("cargo:warning=Using pre-built binary from: {}", prebuilt_path.display());
+                            fs::copy(&prebuilt_path, &bin_path)
+                                .expect("Failed to copy pre-built tun2socks");
+                        } else {
+                            panic!(
+                                "Cannot build tun2socks!\n\
+                                 \n\
+                                 Build failed with exit code: {:?}\n\
+                                 \n\
+                                 To fix this on Windows:\n\
+                                 1. Install Go from https://go.dev/dl/\n\
+                                 2. Run: .\\fix_and_build.bat\n\
+                                 3. Then run: cargo build --release\n\
+                                 \n\
+                                 Or manually build tun2socks:\n\
+                                 cd tun2socks\n\
+                                 set GOOS=windows&& set GOARCH=amd64&& set CGO_ENABLED=0\n\
+                                 go build -o ..\\target\\release\\tun2socks.exe -trimpath -ldflags=\"-s -w\" .",
+                                s.code()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // If go is not available, check pre-built binary
+                        println!("cargo:warning=go not found ({e}), checking for pre-built binary...");
+                        if prebuilt_path.exists() {
+                            fs::copy(&prebuilt_path, &bin_path)
+                                .expect("Failed to copy pre-built tun2socks");
+                            println!("cargo:warning=Using pre-built tun2socks from: {}", prebuilt_path.display());
+                        } else {
+                            panic!(
+                                "Cannot build tun2socks: Go is not installed and no pre-built binary found.\n\
+                                 \n\
+                                 Pre-built path checked: {}\n\
+                                 \n\
+                                 To fix this on Windows:\n\
+                                 1. Install Go from https://go.dev/dl/\n\
+                                 2. Run: .\\fix_and_build.bat\n\
+                                 3. Then run: cargo build --release\n\
+                                 \n\
+                                 Or manually build tun2socks:\n\
+                                 cd tun2socks\n\
+                                 set GOOS=windows&& set GOARCH=amd64&& set CGO_ENABLED=0\n\
+                                 go build -o ..\\target\\release\\tun2socks.exe -trimpath -ldflags=\"-s -w\" .",
+                                prebuilt_path.display()
+                            );
+                        }
                     }
                 }
             }

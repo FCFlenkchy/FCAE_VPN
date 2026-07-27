@@ -176,7 +176,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Download tun2socks before building (after caches are restored)
+          # Clean stale build script cache so build.rs always recompiles
+          rm -rf target/release/build/aether-engine-* target/debug/build/aether-engine-* 2>/dev/null || true
+
           if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
             NDK="${ANDROID_NDK_HOME:-${{ steps.setup-ndk.outputs.ndk-path }}}"
             if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
