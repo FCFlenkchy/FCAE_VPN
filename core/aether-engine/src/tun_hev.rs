@@ -8,7 +8,6 @@
 //! 
 //! The Android implementation in tun.rs remains untouched.
 
-use std::io;
 use std::os::raw::{c_char, c_int, c_uint};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -365,30 +364,35 @@ pub async fn run_hev_tun(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> Res
         result
     });
 
-    // Wait for shutdown signal or tunnel exit
-    tokio::select! {
+    // Wait for shutdown signal or tunnel exit using a different approach
+    let result = tokio::select! {
         _ = shutdown => {
             log::info!("[tun_hev] Shutting down hev-socks5-tunnel");
             unsafe { hev_socks5_tunnel_quit(); }
-            let _ = handle.await;
+            // Wait for the task to complete after shutdown
+            Some(handle.await)
         }
         result = handle => {
-            match result {
-                Ok(0) => {
-                    log::info!("[tun_hev] hev-socks5-tunnel exited normally");
-                }
-                Ok(code) => {
-                    log::warn!("[tun_hev] hev-socks5-tunnel exited with code {}", code);
-                    return Err(AetherError::Other(format!(
-                        "hev-socks5-tunnel exited with code {}", code
-                    )));
-                }
-                Err(e) => {
-                    log::error!("[tun_hev] hev-socks5-tunnel task failed: {}", e);
-                    return Err(AetherError::Other(format!(
-                        "hev-socks5-tunnel task failed: {}", e
-                    )));
-                }
+            Some(result)
+        }
+    };
+
+    if let Some(result) = result {
+        match result {
+            Ok(0) => {
+                log::info!("[tun_hev] hev-socks5-tunnel exited normally");
+            }
+            Ok(code) => {
+                log::warn!("[tun_hev] hev-socks5-tunnel exited with code {}", code);
+                return Err(AetherError::Other(format!(
+                    "hev-socks5-tunnel exited with code {}", code
+                )));
+            }
+            Err(e) => {
+                log::error!("[tun_hev] hev-socks5-tunnel task failed: {}", e);
+                return Err(AetherError::Other(format!(
+                    "hev-socks5-tunnel task failed: {}", e
+                )));
             }
         }
     }
