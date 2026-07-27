@@ -54,6 +54,13 @@ jobs:
         with:
           submodules: recursive
 
+      - name: ensure submodules
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1
+          ls -la hev-socks5-tunnel/ || echo "hev-socks5-tunnel not found"
+          ls -la hev-socks5-tunnel/Makefile || echo "Makefile not found"
+
       - name: cleanup old caches
         uses: actions/github-script@v7
         continue-on-error: true
