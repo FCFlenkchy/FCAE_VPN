@@ -217,10 +217,17 @@ fn embed_wintun_dll(tun2socks_src: &PathBuf, out_dir: &str) {
     for p in &candidate_paths {
         if p.exists() {
             println!("cargo:warning=Found wintun.dll at: {}", p.display());
-            if fs::copy(p, &wintun_dll_out).is_ok() {
-                println!("cargo:rustc-cfg=wintun_embedded");
-                println!("cargo:rustc-env=WINTUN_EMBEDDED={}", wintun_dll_out.display());
-                println!("cargo:warning=wintun.dll copied to: {}", wintun_dll_out.display());
+            match fs::copy(p, &wintun_dll_out) {
+                Ok(_) => {
+                    println!("cargo:rustc-cfg=wintun_embedded");
+                    println!("cargo:rustc-env=WINTUN_EMBEDDED={}", wintun_dll_out.display());
+                    println!("cargo:warning=wintun.dll copied to: {}", wintun_dll_out.display());
+                }
+                Err(e) => {
+                    println!("cargo:warning=Failed to copy wintun.dll from {}: {e}", p.display());
+                    // Don't return — fall through to try download
+                    continue;
+                }
             }
             return;
         }

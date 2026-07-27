@@ -347,9 +347,14 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         args.push(&mtu_str);
     }
 
-    log::debug!("[tun_t2s] Running: {} {:?}", t2s_path.display(), args);
+    // Set the current directory to the directory containing tun2socks
+    // so that it can find wintun.dll (which we extracted there).
+    let tun_dir = t2s_path.parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    log::debug!("[tun_t2s] Running: {} {:?} (cwd: {})", t2s_path.display(), args, tun_dir.display());
 
     let mut child = Command::new(&t2s_path)
+        .current_dir(tun_dir)
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
