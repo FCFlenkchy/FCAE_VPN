@@ -51,7 +51,7 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: recursive
 
       - name: cleanup old caches
         uses: actions/github-script@v7
@@ -102,11 +102,6 @@ jobs:
               console.log(`Cleaned ${totalDeleted} caches for prefix '${prefix}'`);
             }
 
-      - name: init quiche submodule
-        run: |
-          git submodule sync -- quiche
-          git submodule update --init --depth 1 -- quiche
-
       - name: install deps (linux)
         if: matrix.name == 'linux-x64'
         env:
@@ -116,7 +111,7 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends \
             libglfw3-dev libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
-            protobuf-compiler nasm golang-go
+            libevent-dev protobuf-compiler nasm golang-go
 
       - name: install deps (windows cross)
         if: matrix.name == 'windows-x64'
