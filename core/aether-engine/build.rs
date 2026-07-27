@@ -75,9 +75,10 @@ fn build_hev_socks5_tunnel() {
     
     // Find the library file
     let lib_path = build_dir.join("lib");
-    let lib_file = match target_os {
-        "windows" => lib_path.join("hev-socks5-tunnel.lib"),
-        _ => lib_path.join("libhev-socks5-tunnel.a"),
+    let lib_file = if target_os == "windows" {
+        lib_path.join("hev-socks5-tunnel.lib")
+    } else {
+        lib_path.join("libhev-socks5-tunnel.a")
     };
     
     if lib_file.exists() {
