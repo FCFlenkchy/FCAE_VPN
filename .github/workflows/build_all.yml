@@ -115,7 +115,7 @@ jobs:
             curl -L -o /tmp/tun2socks.zip https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-linux-amd64.zip
             unzip -o /tmp/tun2socks.zip -d /tmp/tun2socks
             mkdir -p target/release
-            cp /tmp/tun2socks/tun2socks target/release/
+            cp /tmp/tun2socks/tun2socks-linux-amd64 target/release/tun2socks
             chmod +x target/release/tun2socks
             echo "TUN2SOCKS_BIN=$(pwd)/target/release/tun2socks" >> $GITHUB_ENV
             ls -la target/release/tun2socks
