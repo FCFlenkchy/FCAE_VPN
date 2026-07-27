@@ -58,8 +58,6 @@ jobs:
         run: |
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
-          ls -la hev-socks5-tunnel/ || echo "hev-socks5-tunnel not found"
-          ls -la hev-socks5-tunnel/Makefile || echo "Makefile not found"
 
       - name: cleanup old caches
         uses: actions/github-script@v7
@@ -110,59 +108,24 @@ jobs:
               console.log(`Cleaned ${totalDeleted} caches for prefix '${prefix}'`);
             }
 
-      - name: build hev-socks5-tunnel (linux)
-        if: matrix.name == 'linux-x64'
+      - name: install tun2socks
+        if: matrix.name == 'linux-x64' || matrix.name == 'windows-x64'
         run: |
-          cd hev-socks5-tunnel
-          make shared
-          # Copy to target directory for embedding
-          mkdir -p ../target/release
-          cp libhev-socks5-tunnel.so ../target/release/
-          cp libhev-socks5-tunnel.so ../target/debug/ 2>/dev/null || true
-          echo "HEV_SOCKS5_TUNNEL_LIB=$(pwd)/../target/release/libhev-socks5-tunnel.so" >> $GITHUB_ENV
-          ls -la ../target/release/libhev-socks5-tunnel.so
-
-      - name: build hev-socks5-tunnel (windows)
-        if: matrix.name == 'windows-x64'
-        continue-on-error: true
-        run: |
-          # MSYS2 is pre-installed on GitHub Windows runners at C:\msys64
-          # Use the mingw64 environment with proper path
-          /c/msys64/usr/bin/bash -lc "cd $PWD/hev-socks5-tunnel && make shared"
-          # Copy to target directory if build succeeded
-          if [ -f hev-socks5-tunnel/hev-socks5-tunnel.dll ]; then
-            mkdir -p ../target/release
-            cp hev-socks5-tunnel/hev-socks5-tunnel.dll ../target/release/
-            cp hev-socks5-tunnel/hev-socks5-tunnel.dll ../target/debug/ 2>/dev/null || true
-            echo "HEV_SOCKS5_TUNNEL_LIB=$(pwd)/../target/release/hev-socks5-tunnel.dll" >> $GITHUB_ENV
-            ls -la ../target/release/hev-socks5-tunnel.dll
-          else
-            echo "Warning: hev-socks5-tunnel.dll not built, TUN feature disabled"
-          fi
-          # Download wintun.dll for Windows TUN
-          curl -L -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
-          unzip -j wintun.zip 'bin/amd64/wintun.dll' -d ../target/release/ 2>/dev/null || true
-          ls -la ../target/release/wintun.dll 2>/dev/null || echo "wintun.dll not downloaded"
-        env:
-          MSYS2_PATH_TYPE: inherit
-          MSYSTEM: MINGW64
-
-      - name: build hev-socks5-tunnel (linux)
-        if: matrix.name == 'linux-x64'
-        continue-on-error: true
-        run: |
-          cd hev-socks5-tunnel
-          # Build as-is with its own Makefile
-          make shared || echo "hev-socks5-tunnel build failed, continuing..."
-          # Copy to target directory for embedding if build succeeded
-          if [ -f libhev-socks5-tunnel.so ]; then
-            mkdir -p ../target/release
-            cp libhev-socks5-tunnel.so ../target/release/
-            cp libhev-socks5-tunnel.so ../target/debug/ 2>/dev/null || true
-            echo "HEV_SOCKS5_TUNNEL_LIB=$(pwd)/../target/release/libhev-socks5-tunnel.so" >> $GITHUB_ENV
-            ls -la ../target/release/libhev-socks5-tunnel.so
-          else
-            echo "Warning: libhev-socks5-tunnel.so not built, TUN feature disabled"
+          if [ "${{ matrix.name }}" = "linux-x64" ]; then
+            curl -L -o /tmp/tun2socks.zip https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-linux-amd64.zip
+            unzip -o /tmp/tun2socks.zip -d /tmp/tun2socks
+            mkdir -p target/release
+            cp /tmp/tun2socks/tun2socks target/release/
+            chmod +x target/release/tun2socks
+            echo "TUN2SOCKS_BIN=$(pwd)/target/release/tun2socks" >> $GITHUB_ENV
+            ls -la target/release/tun2socks
+          elif [ "${{ matrix.name }}" = "windows-x64" ]; then
+            curl -L -o /tmp/tun2socks.zip https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-windows-amd64.zip
+            unzip -o /tmp/tun2socks.zip -d /tmp/tun2socks
+            mkdir -p target/release
+            cp /tmp/tun2socks/tun2socks.exe target/release/
+            echo "TUN2SOCKS_BIN=$(pwd)/target/release/tun2socks.exe" >> $GITHUB_ENV
+            ls -la target/release/tun2socks.exe
           fi
 
       - name: install deps (linux)
@@ -273,7 +236,6 @@ jobs:
             "$CC_aarch64_linux_android" --version | head -1
           fi
 
-          export HEV_SOCKS5_TUNNEL_LIB="$(pwd)/target/${{ matrix.target }}/release/libhev-socks5-tunnel.so"
           cargo build --manifest-path core/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
 
           DEST="$(pwd)/target/${{ matrix.target }}/release/libaether_ffi.a"
