@@ -72,10 +72,6 @@ fn main() {
             } else {
                 println!("cargo:warning=Also copied to target/release/");
             }
-        } else {
-            println!("cargo:warning=tun2socks binary not found in workspace");
-            println!("cargo:warning=Install it from: https://github.com/xjasonlyu/tun2socks");
-            println!("cargo:warning=Or set TUN2SOCKS_BIN env var at runtime");
         }
     }
 }
