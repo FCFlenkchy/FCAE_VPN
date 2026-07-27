@@ -50,21 +50,27 @@ fn build_hev_socks5_tunnel() {
     // Determine the target OS
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     
-    // Build static library
+    // Build static library - don't fail if it doesn't build
     let status = Command::new("make")
         .current_dir(&hev_src)
         .arg("static")
         .env("BUILD_DIR", build_dir.as_os_str())
-        .status()
-        .expect("Failed to execute make for hev-socks5-tunnel");
+        .status();
     
-    if !status.success() {
-        println!("cargo:warning=Failed to build hev-socks5-tunnel static library");
-        println!("cargo:warning=Make sure you have the required build dependencies:");
-        println!("cargo:warning=  - make, gcc/clang");
-        println!("cargo:warning=  - libevent development headers");
-        println!("cargo:warning=  - For Linux: libevent-dev");
-        println!("cargo:warning=  - For Windows: MSYS2 or WSL");
+    if let Ok(status) = status {
+        if !status.success() {
+            println!("cargo:warning=Failed to build hev-socks5-tunnel static library");
+            println!("cargo:warning=Make sure you have the required build dependencies:");
+            println!("cargo:warning=  - make, gcc/clang");
+            println!("cargo:warning=  - libevent development headers");
+            println!("cargo:warning=  - For Linux: libevent-dev");
+            println!("cargo:warning=  - For Windows: MSYS2 or WSL");
+            println!("cargo:warning=hev-socks5-tunnel will be disabled");
+            return;
+        }
+    } else {
+        println!("cargo:warning=Failed to execute make for hev-socks5-tunnel");
+        println!("cargo:warning=hev-socks5-tunnel will be disabled");
         return;
     }
     

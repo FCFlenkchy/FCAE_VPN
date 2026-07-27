@@ -413,19 +413,7 @@ pub fn is_available() -> bool {
     }
     #[cfg(not(hev_tun_available))]
     {
-        // On Linux/Windows, we still might be able to use the library
-        // if it was built and linked properly
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        {
-            // Try to dynamically load the library
-            // For now, we'll assume it's available if the build succeeded
-            // A more robust check would use dlopen/LoadLibrary
-            true
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        {
-            false
-        }
+        false
     }
 }
 
