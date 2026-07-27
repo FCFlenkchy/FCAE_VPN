@@ -22,7 +22,7 @@ mod tls;
 mod aethernoize;
 mod tunnelping;
 pub mod tun;
-mod tun_t2s;
+pub mod tun_t2s;
 mod wireguard;
 mod wg_prober;
 

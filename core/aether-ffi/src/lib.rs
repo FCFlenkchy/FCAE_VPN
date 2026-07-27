@@ -736,9 +736,15 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
             // Runtime drop waits for spawn_blocking tasks to complete, but
             // the read task won't return until the fd is closed — causing
             // a deadlock if we close fds after the runtime drop.
+            //
+            // ALSO: force-kill tun2socks and clean up Windows TUN adapters
+            // BEFORE dropping the runtime.  The tokio task that normally
+            // does this cleanup will be cancelled during runtime drop.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 SHUTDOWN.store(true, Ordering::SeqCst);
                 aether_engine::tun::close_all_fds();
+                #[cfg(target_os = "windows")]
+                aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
                 drop(rt);
             }));
 
@@ -787,6 +793,18 @@ pub extern "C" fn aether_stop() {
 
     SHUTDOWN.store(true, Ordering::SeqCst);
     SHUTDOWN_NOTIFY.notify_one();
+
+    // ── Emergency cleanup: force-kill tun2socks and remove TUN adapters ──
+    // This runs outside the tokio runtime so it works even if the runtime
+    // is already shutting down.  The engine thread's normal cleanup path
+    // may not get a chance to run if the runtime drops first.
+    #[cfg(target_os = "windows")]
+    {
+        // Use a short timeout so we don't block the UI thread
+        std::thread::spawn(|| {
+            aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
+        });
+    }
 
     // Update telemetry immediately so the UI shows DISCONNECTED without
     // waiting for the engine thread to finish.  The engine thread will
@@ -925,9 +943,11 @@ pub extern "C" fn aether_free() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Safety net: close TUN fds.  close_all_fds() uses atomic swap
-    // so double-close is impossible — the first caller claims ownership.
+    // Safety net: close TUN fds and force-cleanup Windows TUN adapters.
+    // close_all_fds() uses atomic swap so double-close is impossible.
     aether_engine::tun::close_all_fds();
+    #[cfg(target_os = "windows")]
+    aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
 
     // Do NOT store RUNNING=false here.  The engine thread already set it
     // to false when it exited (line 745).  If we set it here, a race with

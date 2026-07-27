@@ -147,6 +147,86 @@ pub fn is_available() -> bool {
     get_tun2socks_path().is_ok()
 }
 
+/// Force-kill any running tun2socks processes and clean up TUN adapters.
+/// This is the emergency cleanup — call from outside the tokio runtime
+/// (e.g., from aether_stop / aether_free) to ensure cleanup even when
+/// the runtime is being torn down and can't run async tasks.
+#[cfg(target_os = "windows")]
+pub fn force_cleanup_windows(name: &str) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    // Kill all tun2socks processes
+    log::info!("[tun_t2s] Force-killing tun2socks processes");
+    let mut c = Command::new("taskkill");
+    c.creation_flags(CREATE_NO_WINDOW);
+    let _ = c.args(["/IM", "tun2socks.exe", "/F", "/T"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    // Also kill by name with wildcard to catch renamed instances
+    let mut c = Command::new("taskkill");
+    c.creation_flags(CREATE_NO_WINDOW);
+    let _ = c.args(["/FI", "IMAGENAME eq tun2socks.exe", "/F", "/T"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    // Clean up the TUN adapter — remove routes and delete interface
+    log::info!("[tun_t2s] Force-cleaning TUN adapter '{}'", name);
+    cleanup_adapter_by_name(name);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn force_cleanup_windows(_name: &str) {
+    // No-op on non-Windows
+}
+
+/// Clean up a named TUN adapter — removes routes, resets DNS, deletes interface.
+/// Standalone function callable without a TunConfig.
+#[cfg(target_os = "windows")]
+fn cleanup_adapter_by_name(name: &str) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut c = Command::new(cmd);
+        c.creation_flags(CREATE_NO_WINDOW);
+        c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    };
+
+    // Reset DNS to DHCP
+    let _ = run_silent("netsh", &["interface", "ip", "set", "dns", name, "dhcp"]);
+
+    // Delete the interface itself (prevents adapter name accumulation)
+    // Try multiple times with both the original name and numbered variants
+    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", name]);
+    // Also try removing numbered variants (FCAE-VPN 2, FCAE-VPN 3, etc.)
+    for i in 2..20 {
+        let numbered = format!("{} {}", name, i);
+        let output = run_silent("netsh", &["interface", "ip", "delete", "interface", &numbered]);
+        match output {
+            Ok(o) if o.status.success() => log::info!("[tun_t2s] Deleted leftover adapter '{}'", numbered),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                if stderr.contains("No matching") {
+                    // No more numbered adapters — stop looking
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    log::info!("[tun_t2s] TUN adapter cleanup complete for '{}'", name);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cleanup_adapter_by_name(_name: &str) {}
+
 // ============================================================================
 // Platform-specific TUN device creation
 // ============================================================================
@@ -672,6 +752,11 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
              On Linux/macOS: Use 'sudo'".into()
         ));
     }
+
+    // ── Pre-startup cleanup: remove leftover TUN adapters from previous runs ──
+    // This prevents "FCAE-VPN 2, 3, 4..." accumulation across sessions.
+    #[cfg(target_os = "windows")]
+    cleanup_adapter_by_name(&cfg.name);
 
     // Extract embedded binary
     let t2s_path = get_tun2socks_path()?;

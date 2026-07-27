@@ -52,7 +52,21 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             mmi->ptMaxPosition.y = 100;
             return 0;
         }
+        case WM_CLOSE:
+            // User clicked X button — trigger engine shutdown BEFORE
+            // the window is destroyed.  This gives the engine time to
+            // kill tun2socks and clean up before the message loop exits.
+            g_app.running.store(false);
+            aether_stop();
+            // Fall through to DestroyWindow which will trigger WM_DESTROY
+            DestroyWindow(hWnd);
+            return 0;
         case WM_DESTROY:
+            // Trigger full cleanup before the window closes.
+            // This ensures tun2socks is killed and TUN adapters are removed
+            // even if the user closes the window with X button instead of
+            // clicking DISCONNECT first.
+            g_app.running.store(false);
             PostQuitMessage(0);
             return 0;
     }
