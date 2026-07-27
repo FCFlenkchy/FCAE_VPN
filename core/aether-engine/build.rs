@@ -36,10 +36,9 @@ fn main() {
             panic!("tun2socks submodule not found at {}! Run: git submodule update --init --recursive", tun2socks_src.display());
         }
 
-        #[cfg(target_os = "windows")]
-        let bin_name = "tun2socks.exe";
-        #[cfg(not(target_os = "windows"))]
-        let bin_name = "tun2socks";
+        // Determine binary name based on TARGET OS (not host)
+        let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
+        let bin_name = if target_os == "windows" { "tun2socks.exe" } else { "tun2socks" };
 
         let out_dir = env::var("OUT_DIR").unwrap();
         let bin_path = PathBuf::from(&out_dir).join(bin_name);
@@ -77,24 +76,38 @@ fn main() {
                     .expect("Failed to copy pre-built tun2socks");
                 println!("cargo:warning=tun2socks copied successfully");
             } else {
-                // Detect target OS for cross-compilation or native builds
-                let goos = if cfg!(target_os = "windows") {
-                    "windows"
-                } else if cfg!(target_os = "linux") {
-                    "linux"
-                } else if cfg!(target_os = "macos") {
-                    "darwin"
-                } else {
-                    "linux" // fallback
+                // Use Cargo target env vars (NOT cfg!() which reflects the host)
+                // This ensures cross-compilation works correctly
+                // e.g., when building for x86_64-pc-windows-gnu on a Linux runner
+                // target_os already read above for bin_name, re-read for clarity
+                let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
+                let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| String::from("unknown"));
+
+                // Map Rust target_os to GOOS
+                let goos = match target_os.as_str() {
+                    "windows" => "windows",
+                    "linux" => "linux",
+                    "macos" => "darwin",
+                    "android" => {
+                        // Android builds should have returned early above,
+                        // but handle gracefully just in case
+                        println!("cargo:warning=Android target detected; tun2socks not needed");
+                        return;
+                    }
+                    other => {
+                        println!("cargo:warning=Unknown target_os '{}', defaulting to linux", other);
+                        "linux"
+                    }
                 };
 
-                // Detect target architecture — always 64-bit
-                let goarch = if cfg!(target_arch = "x86_64") {
-                    "amd64"
-                } else if cfg!(target_arch = "aarch64") {
-                    "arm64"
-                } else {
-                    "amd64" // fallback to 64-bit
+                // Map Rust target_arch to GOARCH — always 64-bit
+                let goarch = match target_arch.as_str() {
+                    "x86_64" => "amd64",
+                    "aarch64" => "arm64",
+                    other => {
+                        println!("cargo:warning=Unknown target_arch '{}', defaulting to amd64", other);
+                        "amd64"
+                    }
                 };
 
                 println!("cargo:warning=Building tun2socks from source ({goos}/{goarch})...");
