@@ -27,7 +27,7 @@ type HevStatsFn = unsafe extern "C" fn(*mut usize, *mut usize, *mut usize, *mut 
 static mut HEV_MAIN: Option<HevMainFn> = None;
 static mut HEV_QUIT: Option<HevQuitFn> = None;
 static mut HEV_STATS: Option<HevStatsFn> = None;
-static mut LIB_LOADED: AtomicBool = AtomicBool::new(false);
+static LIB_LOADED: AtomicBool = AtomicBool::new(false);
 
 /// Try to load the hev-socks5-tunnel library dynamically
 fn load_hev_library() -> bool {
@@ -67,9 +67,7 @@ fn load_hev_library() -> bool {
                     HEV_MAIN.is_some() && HEV_QUIT.is_some()
                 };
                 if loaded {
-                    unsafe {
-                        LIB_LOADED.store(true, Ordering::SeqCst);
-                    }
+                    LIB_LOADED.store(true, Ordering::SeqCst);
                     log::info!("[tun_hev] Loaded hev-socks5-tunnel library: {}", name);
                     return true;
                 }
@@ -112,9 +110,7 @@ fn load_hev_library() -> bool {
                     HEV_MAIN.is_some() && HEV_QUIT.is_some()
                 };
                 if loaded {
-                    unsafe {
-                        LIB_LOADED.store(true, Ordering::SeqCst);
-                    }
+                    LIB_LOADED.store(true, Ordering::SeqCst);
                     log::info!("[tun_hev] Loaded hev-socks5-tunnel library: {}", name);
                     return true;
                 }
@@ -470,7 +466,7 @@ pub async fn run_hev_tun(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> Res
 /// Check if hev-socks5-tunnel library is available
 pub fn is_available() -> bool {
     // Try to load the library if not already loaded
-    let loaded = unsafe { LIB_LOADED.load(Ordering::SeqCst) };
+    let loaded = LIB_LOADED.load(Ordering::SeqCst);
     if !loaded {
         return load_hev_library();
     }
