@@ -466,7 +466,18 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         .unwrap_or_else(|| std::path::Path::new("."));
     log::debug!("[tun_t2s] Running: {} {:?} (cwd: {})", t2s_path.display(), args, tun_dir.display());
 
-    let mut child = Command::new(&t2s_path)
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let mut c = Command::new(&t2s_path);
+        c.creation_flags(CREATE_NO_WINDOW);
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = Command::new(&t2s_path);
+
+    let mut child = cmd
         .current_dir(tun_dir)
         .args(&args)
         .stdout(Stdio::piped())
@@ -501,18 +512,20 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         });
     }
 
-    // Wait for process in a blocking task
+    // Wait for process in a blocking task — child is moved here
     let wait_handle = tokio::task::spawn_blocking(move || child.wait());
     tokio::pin!(wait_handle);
 
     tokio::select! {
         _ = shutdown => {
             log::info!("[tun_t2s] Shutting down tun2socks");
-            // Kill the process
+            // Kill using taskkill on Windows (child is moved, can't call child.kill())
             #[cfg(target_os = "windows")]
             {
                 let _ = Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/F"])
+                    .args(["/PID", &pid.to_string(), "/F", "/T"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status();
             }
             #[cfg(not(target_os = "windows"))]
@@ -550,6 +563,21 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
                 }
             }
         }
+    }
+
+    // Extra safety: ensure child is killed on any exit path
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F", "/T"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Best-effort kill on non-Windows
+        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
     }
 
     log::info!("[tun_t2s] TUN shut down");
