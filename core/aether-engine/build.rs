@@ -30,12 +30,19 @@ fn main() {
         #[cfg(not(target_os = "windows"))]
         let bin_name = "tun2socks";
 
-        let bin_paths = [
-            workspace_root.join("target/release").join(bin_name),
-            workspace_root.join("target/debug").join(bin_name),
-            workspace_root.join(bin_name),
-            manifest_path.join(bin_name),
-        ];
+        // Check TUN2SOCKS_BIN env var first
+        let env_path = env::var("TUN2SOCKS_BIN").ok();
+        let bin_paths: &[PathBuf] = if let Some(ref p) = env_path {
+            // Use a slice pointing to static storage via leak (safe in build script)
+            &[PathBuf::from(p)]
+        } else {
+            &[
+                workspace_root.join("target/release").join(bin_name),
+                workspace_root.join("target/debug").join(bin_name),
+                workspace_root.join(bin_name),
+                manifest_path.join(bin_name),
+            ]
+        };
 
         let found = bin_paths.iter().find(|p| p.exists());
 
@@ -49,9 +56,10 @@ fn main() {
             println!("cargo:warning=tun2socks embedded from: {}", path.display());
         } else {
             panic!(
-                "tun2socks binary not found! Install it via: scripts/setup-tun2socks.sh\
+                "tun2socks binary not found at target/release/{}!\
 \
-                 Or download from https://github.com/xjasonlyu/tun2socks/releases"
+                 Set TUN2SOCKS_BIN env var or download from: https://github.com/xjasonlyu/tun2socks/releases",
+                bin_name
             );
         }
     }
