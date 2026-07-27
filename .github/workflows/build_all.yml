@@ -126,8 +126,8 @@ jobs:
         if: matrix.name == 'windows-x64'
         run: |
           # MSYS2 is pre-installed on GitHub Windows runners at C:\msys64
-          # Use the mingw64 environment directly
-          C:\msys64\usr\bin\bash -lc "cd $PWD/hev-socks5-tunnel && make shared"
+          # Use the mingw64 environment with proper path
+          /c/msys64/usr/bin/bash -lc "cd $PWD/hev-socks5-tunnel && make shared"
           # Copy to target directory
           mkdir -p ../target/release
           cp hev-socks5-tunnel/hev-socks5-tunnel.dll ../target/release/
@@ -147,8 +147,8 @@ jobs:
         if: matrix.name == 'linux-x64'
         run: |
           cd hev-socks5-tunnel
-          # Disable -Werror to avoid build failures
-          make shared CFLAGS="-Wno-error"
+          # Disable -Werror by modifying Makefile or using CFLAGS
+          make shared CFLAGS="-Wno-unused-result -Wno-error"
           # Copy to target directory for embedding
           mkdir -p ../target/release
           cp libhev-socks5-tunnel.so ../target/release/
@@ -420,42 +420,6 @@ jobs:
           done
           ls -lah release-zips/
           test $(ls -1 release-zips/*.zip | wc -l) -ge 1
-
-      - name: generate SHA256 checksums
-        if: inputs.prerelease == 'false' || inputs.prerelease == false
-        run: |
-          set -euo pipefail
-          cd release-zips
-          sha256sum *.zip > SHA256SUMS.txt
-          echo "=== SHA256 Checksums ==="
-          cat SHA256SUMS.txt
-
-      - name: GPG sign checksums
-        if: inputs.prerelease == 'false' || inputs.prerelease == false
-        run: |
-          set -euo pipefail
-          # Generate a fresh GPG key for CI signing
-          cat > /tmp/gpg-params <<EOF
-          %no-protection
-          Key-Type: RSA
-          Key-Length: 2048
-          Subkey-Type: RSA
-          Subkey-Length: 2048
-          Name-Real: FCAE VPN
-          Name-Email: fcae@users.noreply.github.com
-          Expire-Date: 0
-          %commit
-          EOF
-          gpg --batch --gen-key /tmp/gpg-params
-
-          # Export public key for verification
-          gpg --armor --export "FCAE VPN" > release-zips/SHA256SUMS.sig.asc
-          echo "Public key exported to release-zips/SHA256SUMS.sig.asc"
-
-          # Sign the checksums file
-          gpg --batch --yes --armor --detach-sign release-zips/SHA256SUMS.txt
-          echo "Checksums signed"
-          ls -la release-zips/
 
       - name: delete existing release + tag
         uses: actions/github-script@v7
