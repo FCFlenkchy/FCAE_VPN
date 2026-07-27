@@ -1,0 +1,91 @@
+===============================================================================
+  HOW WINTUN.DLL IS EMBEDDED IN AETHER ENGINE
+===============================================================================
+
+Overview:
+  tun2socks requires wintun.dll on Windows to create TUN devices.
+  The aether-engine build.rs script embeds wintun.dll into the Rust binary
+  at compile time, and the runtime (tun_t2s.rs) extracts it to a temp dir
+  alongside tun2socks.exe when needed.
+
+===============================================================================
+  BUILD-TIME: build.rs (core/aether-engine/build.rs)
+===============================================================================
+
+Flow:
+  1. build.rs detects the TARGET OS via CARGO_CFG_TARGET_OS env var.
+  2. If target_os == "windows", embed_wintun_dll() is called.
+  3. The function tries, in order:
+     a. Check if wintun.dll already exists in OUT_DIR (cached from previous build)
+     b. Search common locations:
+        - tun2socks/ subdirectory (project-relative)
+        - Parent of tun2socks/ directory
+        - C:\Windows\System32\ (Windows hosts only)
+     c. Download from https://www.wintun.net/builds/wintun-0.14.1.zip
+        - Windows hosts: tries PowerShell, then curl
+        - Linux hosts:   tries curl, then wget
+     d. Extract the zip:
+        - Windows: PowerShell Expand-Archive, fallback to tar
+        - Linux:   unzip, fallback to 7z
+     e. Copy wintun.dll to OUT_DIR
+  4. On success, sets:
+     - cfg flag:    cargo:rustc-cfg=wintun_embedded
+     - env var:     cargo:rustc-env=WINTUN_EMBEDDED=<path>
+
+Key Design Decision:
+  The embed_wintun_dll() function is NOT gated on host OS.
+  It is ALWAYS compiled and runs on all hosts. The decision to embed
+  is based on TARGET_OS (not HOST_OS). This is critical for cross-
+  compilation, e.g., GitHub Actions Linux runner building for Windows.
+
+  Previously, the function had #[cfg(target_os = "windows")] which
+  meant it would NEVER run on a Linux CI runner building a Windows
+  target — the wintun.dll embedding was silently skipped, and the
+  resulting binary would crash at runtime with "wintun.dll not found".
+
+===============================================================================
+  RUNTIME: tun_t2s.rs (core/aether-engine/src/tun_t2s.rs)
+===============================================================================
+
+Static embedding:
+  #[cfg(all(not(target_os = "android"), wintun_embedded))]
+  static WINTUN_DLL_BYTES: &[u8] = include_bytes!(env!("WINTUN_EMBEDDED"));
+
+  This embeds wintun.dll as raw bytes into the compiled binary.
+  Only compiled when the 'wintun_embedded' cfg flag is set (by build.rs).
+
+Extraction at runtime (get_tun2socks_path):
+  When get_tun2socks_path() is called:
+    1. Creates temp dir: %TEMP%/fcaevpn/
+    2. Writes embedded tun2socks.exe bytes to that dir
+    3. On Windows with wintun_embedded:
+       - Writes embedded wintun.dll bytes to the SAME directory
+       - tun2socks.exe finds wintun.dll automatically (same dir)
+    4. Returns the path to tun2socks.exe
+
+===============================================================================
+  TROUBLESHOOTING
+===============================================================================
+
+Q: Build fails with "wintun.dll not found" warning?
+   -> Download wintun.dll from https://www.wintun.net/
+   -> Place it in the project's tun2socks/ directory
+   -> Rebuild
+
+Q: Cross-compiling from Linux to Windows, wintun.dll not embedded?
+   -> This is the exact bug that was fixed!
+   -> The old code had #[cfg(target_os = "windows")] on the embed function
+   -> New code checks TARGET_OS at runtime and downloads on any host
+
+Q: Runtime error "wintun.dll not found"?
+   -> Check that build.rs successfully embedded the DLL
+   -> Look for cargo:warning lines about wintun.dll in build output
+   -> If not embedded, download manually and place in tun2socks/ directory
+
+===============================================================================
+  VERSION INFO
+===============================================================================
+
+wintun version: 0.14.1 (stable, used by WireGuard)
+Download URL:   https://www.wintun.net/builds/wintun-0.14.1.zip
+Official site:  https://www.wintun.net/
