@@ -64,7 +64,8 @@ fn load_hev_library() -> bool {
                 
                 // Check if functions were loaded - use unsafe to access static mut
                 let loaded = unsafe {
-                    HEV_MAIN.is_some() && HEV_QUIT.is_some()
+                    (*std::ptr::addr_of!(HEV_MAIN)).is_some() && 
+                    (*std::ptr::addr_of!(HEV_QUIT)).is_some()
                 };
                 if loaded {
                     LIB_LOADED.store(true, Ordering::SeqCst);
@@ -114,7 +115,8 @@ fn load_hev_library() -> bool {
                 }
                 
                 let loaded = unsafe {
-                    HEV_MAIN.is_some() && HEV_QUIT.is_some()
+                    (*std::ptr::addr_of!(HEV_MAIN)).is_some() && 
+                    (*std::ptr::addr_of!(HEV_QUIT)).is_some()
                 };
                 if loaded {
                     LIB_LOADED.store(true, Ordering::SeqCst);
