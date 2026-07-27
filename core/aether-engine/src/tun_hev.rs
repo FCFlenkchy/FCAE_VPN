@@ -39,6 +39,14 @@ fn load_hev_library() -> bool {
         }
     }
     
+    // Try to load from the embedded resource path (set by build.rs)
+    if let Ok(embedded_path) = std::env::var("HEV_LIB_PATH") {
+        log::info!("[tun_hev] Trying to load embedded library: {}", embedded_path);
+        if try_load_library(&embedded_path) {
+            return true;
+        }
+    }
+    
     // Try to load from the current executable directory
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(dir) = exe_path.parent() {
@@ -47,15 +55,23 @@ fn load_hev_library() -> bool {
                 dir.join("libhev-socks5-tunnel.so"),
                 dir.join("hev-socks5-tunnel.so"),
                 dir.join("../lib/libhev-socks5-tunnel.so"),
+                dir.join("../lib/libhev-socks5-tunnel.so.1"),
             ];
             
             #[cfg(target_os = "windows")]
             let lib_names = [
                 dir.join("hev-socks5-tunnel.dll"),
-                dir.join("hev-socks5-tunnel"),
+                dir.join("../hev-socks5-tunnel.dll"),
+                dir.join("../../hev-socks5-tunnel.dll"),
             ];
             
-            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            #[cfg(target_os = "macos")]
+            let lib_names = [
+                dir.join("libhev-socks5-tunnel.dylib"),
+                dir.join("../lib/libhev-socks5-tunnel.dylib"),
+            ];
+            
+            #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
             let lib_names: [std::path::PathBuf; 0] = [];
             
             for path in lib_names.iter() {
