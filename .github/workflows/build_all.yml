@@ -110,6 +110,42 @@ jobs:
               console.log(`Cleaned ${totalDeleted} caches for prefix '${prefix}'`);
             }
 
+      - name: build hev-socks5-tunnel (linux)
+        if: matrix.name == 'linux-x64'
+        run: |
+          cd hev-socks5-tunnel
+          make shared
+          # Copy to target directory for embedding
+          mkdir -p ../target/release
+          cp libhev-socks5-tunnel.so ../target/release/
+          cp libhev-socks5-tunnel.so ../target/debug/ 2>/dev/null || true
+          echo "HEV_SOCKS5_TUNNEL_LIB=$(pwd)/../target/release/libhev-socks5-tunnel.so" >> $GITHUB_ENV
+          ls -la ../target/release/libhev-socks5-tunnel.so
+
+      - name: build hev-socks5-tunnel (windows)
+        if: matrix.name == 'windows-x64'
+        run: |
+          # Install MSYS2
+          choco install msys2 --version=20240906.0.0 -y
+          # Add MSYS2 to PATH
+          export PATH="/c/tools/msys64/usr/bin:$PATH"
+          # Build using MSYS2
+          cd hev-socks5-tunnel
+          /c/tools/msys64/usr/bin/bash -c "make shared"
+          # Copy to target directory
+          mkdir -p ../target/release
+          cp hev-socks5-tunnel.dll ../target/release/
+          cp hev-socks5-tunnel.dll ../target/debug/ 2>/dev/null || true
+          echo "HEV_SOCKS5_TUNNEL_LIB=$(pwd)/../target/release/hev-socks5-tunnel.dll" >> $GITHUB_ENV
+          ls -la ../target/release/hev-socks5-tunnel.dll
+          # Download wintun.dll for Windows TUN
+          curl -L -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
+          unzip -j wintun.zip 'bin/amd64/wintun.dll' -d ../target/release/
+          unzip -j wintun.zip 'bin/amd64/wintun.dll' -d ../target/debug/ 2>/dev/null || true
+          ls -la ../target/release/wintun.dll
+        env:
+          MSYS2_PATH_TYPE: inherit
+
       - name: install deps (linux)
         if: matrix.name == 'linux-x64'
         env:
@@ -218,6 +254,7 @@ jobs:
             "$CC_aarch64_linux_android" --version | head -1
           fi
 
+          export HEV_SOCKS5_TUNNEL_LIB="$(pwd)/target/${{ matrix.target }}/release/libhev-socks5-tunnel.so"
           cargo build --manifest-path core/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
 
           DEST="$(pwd)/target/${{ matrix.target }}/release/libaether_ffi.a"
