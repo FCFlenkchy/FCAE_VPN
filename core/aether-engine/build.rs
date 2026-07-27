@@ -10,13 +10,15 @@ use std::process::Command;
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(tun2socks_available)");
-    println!("cargo:rustc-cfg=tun2socks_available");
 
+    // Android doesn't need tun2socks — it uses tun.rs natively
     #[cfg(target_os = "android")]
     {
         println!("cargo:warning=Android build: tun2socks not used (uses tun.rs)");
         return;
     }
+
+    println!("cargo:rustc-cfg=tun2socks_available");
 
     #[cfg(not(target_os = "android"))]
     {
@@ -75,12 +77,32 @@ fn main() {
                     .expect("Failed to copy pre-built tun2socks");
                 println!("cargo:warning=tun2socks copied successfully");
             } else {
-                println!("cargo:warning=Building tun2socks from source (windows/amd64)...");
+                // Detect target OS for cross-compilation or native builds
+                let goos = if cfg!(target_os = "windows") {
+                    "windows"
+                } else if cfg!(target_os = "linux") {
+                    "linux"
+                } else if cfg!(target_os = "macos") {
+                    "darwin"
+                } else {
+                    "linux" // fallback
+                };
+
+                // Detect target architecture — always 64-bit
+                let goarch = if cfg!(target_arch = "x86_64") {
+                    "amd64"
+                } else if cfg!(target_arch = "aarch64") {
+                    "arm64"
+                } else {
+                    "amd64" // fallback to 64-bit
+                };
+
+                println!("cargo:warning=Building tun2socks from source ({goos}/{goarch})...");
 
                 let status = Command::new("go")
                     .env("CGO_ENABLED", "0")
-                    .env("GOOS", "windows")
-                    .env("GOARCH", "amd64")
+                    .env("GOOS", goos)
+                    .env("GOARCH", goarch)
                     .args(["build", "-o"])
                     .arg(&bin_path)
                     .args(["-trimpath", "-ldflags=-s -w"])
@@ -89,7 +111,7 @@ fn main() {
 
                 match status {
                     Ok(s) if s.success() => {
-                        println!("cargo:warning=tun2socks built successfully");
+                        println!("cargo:warning=tun2socks built successfully for {goos}/{goarch}");
                     }
                     Ok(s) => {
                         // If go build failed, try pre-built binary
@@ -100,19 +122,25 @@ fn main() {
                                 .expect("Failed to copy pre-built tun2socks");
                         } else {
                             panic!(
-                                "Cannot build tun2socks!\n\
-                                 \n\
-                                 Build failed with exit code: {:?}\n\
-                                 \n\
-                                 To fix this on Windows:\n\
-                                 1. Install Go from https://go.dev/dl/\n\
-                                 2. Run: .\\fix_and_build.bat\n\
-                                 3. Then run: cargo build --release\n\
-                                 \n\
-                                 Or manually build tun2socks:\n\
-                                 cd tun2socks\n\
-                                 set GOOS=windows&& set GOARCH=amd64&& set CGO_ENABLED=0\n\
-                                 go build -o ..\\target\\release\\tun2socks.exe -trimpath -ldflags=\"-s -w\" .",
+                                "Cannot build tun2socks!\
+\
+                                 \
+\
+                                 Build failed with exit code: {:?}\
+\
+                                 Target: {goos}/{goarch}\
+\
+                                 \
+\
+                                 To fix this:\
+\
+                                 1. Install Go from https://go.dev/dl/\
+\
+                                 2. Build tun2socks manually:\
+\
+                                    cd tun2socks && CGO_ENABLED=0 GOOS={goos} GOARCH={goarch} go build -o ../target/release/{bin_name} -trimpath -ldflags=\"-s -w\" .\
+\
+                                 3. Then run: cargo build --release",
                                 s.code()
                             );
                         }
@@ -126,19 +154,25 @@ fn main() {
                             println!("cargo:warning=Using pre-built tun2socks from: {}", prebuilt_path.display());
                         } else {
                             panic!(
-                                "Cannot build tun2socks: Go is not installed and no pre-built binary found.\n\
-                                 \n\
-                                 Pre-built path checked: {}\n\
-                                 \n\
-                                 To fix this on Windows:\n\
-                                 1. Install Go from https://go.dev/dl/\n\
-                                 2. Run: .\\fix_and_build.bat\n\
-                                 3. Then run: cargo build --release\n\
-                                 \n\
-                                 Or manually build tun2socks:\n\
-                                 cd tun2socks\n\
-                                 set GOOS=windows&& set GOARCH=amd64&& set CGO_ENABLED=0\n\
-                                 go build -o ..\\target\\release\\tun2socks.exe -trimpath -ldflags=\"-s -w\" .",
+                                "Cannot build tun2socks: Go is not installed and no pre-built binary found.\
+\
+                                 \
+\
+                                 Pre-built path checked: {}\
+\
+                                 Target: {goos}/{goarch}\
+\
+                                 \
+\
+                                 To fix this:\
+\
+                                 1. Install Go from https://go.dev/dl/\
+\
+                                 2. Build tun2socks manually:\
+\
+                                    cd tun2socks && CGO_ENABLED=0 GOOS={goos} GOARCH={goarch} go build -o ../target/release/{bin_name} -trimpath -ldflags=\"-s -w\" .\
+\
+                                 3. Then run: cargo build --release",
                                 prebuilt_path.display()
                             );
                         }
