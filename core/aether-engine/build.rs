@@ -1,91 +1,81 @@
 // Build script for aether-engine
 // 
-// For hev-socks5-tunnel, we embed the pre-built binary as a resource
-// at build time. The binary is copied from the workspace.
+// For tun2socks (https://github.com/xjasonlyu/tun2socks),
+// we check for the binary at build time and set env vars.
+// The binary is downloaded/installed separately.
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    // Declare the hev_tun_available cfg option
-    println!("cargo::rustc-check-cfg=cfg(hev_tun_available)");
+    // Declare the tun2socks_available cfg option
+    println!("cargo::rustc-check-cfg=cfg(tun2socks_available)");
     
-    // We always mark hev_tun_available as true since we use embedded binaries
-    // The actual availability will be checked at runtime
-    println!("cargo:rustc-cfg=hev_tun_available");
+    // We always mark tun2socks_available as true since we check at runtime
+    println!("cargo:rustc-cfg=tun2socks_available");
     
     #[cfg(target_os = "android")]
     {
-        // On Android, we don't use hev-socks5-tunnel
+        // On Android, we don't use tun2socks
         // The Android implementation uses the existing tun.rs
-        println!("cargo:warning=Android build: hev-socks5-tunnel not used (uses tun.rs)");
+        println!("cargo:warning=Android build: tun2socks not used (uses tun.rs)");
     }
     
     #[cfg(not(target_os = "android"))]
     {
-        // Check if hev-socks5-tunnel binary exists in the workspace
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
         let manifest_path = PathBuf::from(&manifest_dir);
         
-        // Try to find hev-socks5-tunnel binary
         let workspace_root = manifest_path
             .parent()
             .and_then(|p| p.parent())
             .unwrap_or(&manifest_path);
         
-        let hev_src = workspace_root.join("hev-socks5-tunnel");
-        
-        // Determine the library name based on platform
+        // Determine the binary name based on platform
         #[cfg(target_os = "windows")]
-        let lib_name = "hev-socks5-tunnel.dll";
-        #[cfg(target_os = "linux")]
-        let lib_name = "libhev-socks5-tunnel.so";
-        #[cfg(target_os = "macos")]
-        let lib_name = "libhev-socks5-tunnel.dylib";
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        let lib_name = "";
+        let bin_name = "tun2socks.exe";
+        #[cfg(not(target_os = "windows"))]
+        let bin_name = "tun2socks";
         
-        // Check if the library exists in the workspace
-        let lib_paths = [
-            workspace_root.join("target/release").join(lib_name),
-            workspace_root.join("target/debug").join(lib_name),
-            workspace_root.join(lib_name),
-            hev_src.join(lib_name),
-            hev_src.join("src").join(lib_name),
+        // Check if the binary exists in common locations
+        let bin_paths = [
+            workspace_root.join("target/release").join(bin_name),
+            workspace_root.join("target/debug").join(bin_name),
+            workspace_root.join(bin_name),
+            workspace_root.join("tun2socks").join(bin_name),
+            manifest_path.join(bin_name),
         ];
         
-        let found_path = lib_paths.iter().find(|p| p.exists());
+        let found_path = bin_paths.iter().find(|p| p.exists());
         
         if let Some(path) = found_path {
-            println!("cargo:warning=hev-socks5-tunnel library found at: {}", path.display());
+            println!("cargo:warning=tun2socks binary found at: {}", path.display());
+            println!("cargo:rustc-env=TUN2SOCKS_PATH={}", path.display());
             
-            // Copy the library to the output directory so it can be embedded
+            // Copy the binary to the output directory
             let out_dir = env::var("OUT_DIR").unwrap();
-            let dest_path = PathBuf::from(&out_dir).join(lib_name);
+            let dest_path = PathBuf::from(&out_dir).join(bin_name);
             
             if let Err(e) = fs::copy(path, &dest_path) {
-                println!("cargo:warning=Failed to copy hev-socks5-tunnel library: {}", e);
+                println!("cargo:warning=Failed to copy tun2socks binary: {}", e);
             } else {
-                println!("cargo:warning=Copied hev-socks5-tunnel library to output directory");
-                // Tell cargo to include this file
-                println!("cargo:rustc-env=HEV_LIB_PATH={}", dest_path.display());
-                
-                // Also copy to the target directory where the executable will be
-                let target_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-                    .parent().unwrap().parent().unwrap()
-                    .join("target/release");
-                if let Err(e) = fs::copy(path, target_dir.join(lib_name)) {
-                    println!("cargo:warning=Failed to copy to target/release: {}", e);
-                } else {
-                    println!("cargo:warning=Also copied to target/release/");
-                }
+                println!("cargo:warning=Copied tun2socks binary to output directory");
+            }
+            
+            // Also copy to the target directory where the executable will be
+            let target_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+                .parent().unwrap().parent().unwrap()
+                .join("target/release");
+            if let Err(e) = fs::copy(path, target_dir.join(bin_name)) {
+                println!("cargo:warning=Failed to copy to target/release: {}", e);
+            } else {
+                println!("cargo:warning=Also copied to target/release/");
             }
         } else {
-            println!("cargo:warning=hev-socks5-tunnel library not found in workspace");
-            println!("cargo:warning=Please build it with: scripts/build-hev-library.sh");
-            println!("cargo:warning=or for Windows: scripts/embed-hev-resources.ps1");
-            println!("cargo:warning=TUN feature will be disabled at runtime");
+            println!("cargo:warning=tun2socks binary not found in workspace");
+            println!("cargo:warning=Install it from: https://github.com/xjasonlyu/tun2socks");
+            println!("cargo:warning=Or set TUN2SOCKS_BIN env var at runtime");
         }
     }
 }

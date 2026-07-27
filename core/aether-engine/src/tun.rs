@@ -3,8 +3,8 @@
 //! ⚠️ IMPORTANT: This file is for Android VpnService integration only.
 //! Do NOT modify this file for Linux/Windows TUN support.
 //! 
-//! For Linux/Windows TUN support, see `tun_hev.rs` which uses
-//! hev-socks5-tunnel as the TUN engine.
+//! For Linux/Windows TUN support, see `tun_t2s.rs` which uses
+//! tun2socks as the TUN engine.
 use tokio::sync::mpsc;
 
 use crate::error::{AetherError, Result};

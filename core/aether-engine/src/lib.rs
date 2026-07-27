@@ -22,7 +22,7 @@ mod tls;
 mod aethernoize;
 mod tunnelping;
 pub mod tun;
-mod tun_hev;
+mod tun_t2s;
 mod wireguard;
 mod wg_prober;
 
@@ -68,8 +68,8 @@ fn tun_mode_active() -> bool {
     ) && tun::resolve_fd().is_some()
 }
 
-/// Determine if we should use hev-socks5-tunnel for TUN (non-Android platforms)
-fn use_hev_tun() -> bool {
+/// Determine if we should use tun2socks for TUN (non-Android platforms)
+fn use_tun2socks() -> bool {
     // Check if we're on Android - always use tun.rs
     #[cfg(target_os = "android")]
     {
@@ -78,20 +78,20 @@ fn use_hev_tun() -> bool {
     
     #[cfg(not(target_os = "android"))]
     {
-        // Check if hev TUN is explicitly enabled
-        let explicitly_enabled = std::env::var("AETHER_HEV_TUN")
+        // Check if TUN2SOCKS is explicitly enabled
+        let explicitly_enabled = std::env::var("AETHER_TUN2SOCKS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
             .unwrap_or(false);
         
         // If explicitly enabled but not available, log a warning
-        if explicitly_enabled && !tun_hev::is_available() {
-            log::warn!("[lib] hev-socks5-tunnel explicitly enabled but library not available!");
+        if explicitly_enabled && !tun_t2s::is_available() {
+            log::warn!("[lib] tun2socks explicitly enabled but binary not available!");
             return false;
         }
         
-        // Auto-detect: use hev-tun on non-Android platforms when TUN mode is active
+        // Auto-detect: use tun2socks on non-Android platforms when TUN mode is active
         // and we don't have an fd from the environment (which would indicate Android)
-        if !tun_hev::is_available() {
+        if !tun_t2s::is_available() {
             return false;
         }
         
@@ -853,7 +853,7 @@ type TunBridge = (
 /// Wire tunnel channels to netstack. Only fan-out when a real TUN fd is present
 /// (Android VpnService). Proxy-only mode keeps the original direct path.
 /// 
-/// For non-Android platforms (Linux/Windows) with hev-socks5-tunnel,
+/// For non-Android platforms (Linux/Windows) with tun2socks,
 /// the TUN is managed externally and we don't need to bridge channels.
 fn split_dataplane(
     outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
@@ -863,13 +863,13 @@ fn split_dataplane(
     tokio::sync::mpsc::Receiver<bytes::Bytes>,
     Option<TunBridge>,
 ) {
-    // Check if we should use hev-socks5-tunnel (non-Android TUN mode)
-    let use_hev = use_hev_tun();
+    // Check if we should use tun2socks (non-Android TUN mode)
+    let use_t2s = use_tun2socks();
     
-    // For hev TUN, we don't bridge channels - hev handles the TUN completely
-    if use_hev {
-        log::info!("[lib] Using hev-socks5-tunnel for TUN (non-Android mode)");
-        // Direct: netstack ↔ tunnel (hev handles the TUN side)
+    // For tun2socks TUN, we don't bridge channels - tun2socks handles the TUN completely
+    if use_t2s {
+        log::info!("[lib] Using tun2socks for TUN (non-Android mode)");
+        // Direct: netstack ↔ tunnel (tun2socks handles the TUN side)
         return (outbound_tx, inbound_rx, None);
     }
     
@@ -997,10 +997,10 @@ async fn run_masque_tunnel(
 
     let mut tun_task = None;
     
-    // Check if we should use hev-socks5-tunnel for TUN (non-Android)
-    if use_hev_tun() {
-        log::info!("[+] TUN mode: using hev-socks5-tunnel (Linux/Windows)");
-        let hev_cfg = tun_hev::TunConfig {
+    // Check if we should use tun2socks for TUN (non-Android)
+    if use_tun2socks() {
+        log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
+        let t2s_cfg = tun_t2s::TunConfig {
             name: "aether-tun0".to_string(),
             mtu: TUNNEL_MTU as u32,
             ipv4: identity.ipv4.clone(),
@@ -1012,14 +1012,14 @@ async fn run_masque_tunnel(
         };
         
         let (_shutdown_tx, shutdown_rx) = oneshot::channel();
-        let hev_task = tokio::spawn(async move {
-            if let Err(e) = tun_hev::run_hev_tun(hev_cfg, shutdown_rx).await {
-                log::warn!("[-] hev-tun ended: {e}");
+        let t2s_task = tokio::spawn(async move {
+            if let Err(e) = tun_t2s::run_tun2socks(t2s_cfg, shutdown_rx).await {
+                log::warn!("[-] tun2socks ended: {e}");
             }
         });
         tun_task = Some(tokio::spawn(async move {
-            // Wait for the hev task to complete
-            let _ = hev_task.await;
+            // Wait for the tun2socks task to complete
+            let _ = t2s_task.await;
         }));
     } else if let Some((fd, ot, tun_rx)) = tun_bridge {
         log::info!("[+] TUN mode: bridging Android/system fd={fd}");
@@ -1374,10 +1374,10 @@ async fn run_wireguard_tunnel(
 
     let mut tun_task = None;
     
-    // Check if we should use hev-socks5-tunnel for TUN (non-Android)
-    if use_hev_tun() {
-        log::info!("[+] TUN mode: using hev-socks5-tunnel (Linux/Windows)");
-        let hev_cfg = tun_hev::TunConfig {
+    // Check if we should use tun2socks for TUN (non-Android)
+    if use_tun2socks() {
+        log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
+        let t2s_cfg = tun_t2s::TunConfig {
             name: "aether-tun0".to_string(),
             mtu: TUNNEL_MTU as u32,
             ipv4: identity.ipv4.clone(),
@@ -1389,13 +1389,13 @@ async fn run_wireguard_tunnel(
         };
         
         let (_shutdown_tx, shutdown_rx) = oneshot::channel();
-        let hev_task = tokio::spawn(async move {
-            if let Err(e) = tun_hev::run_hev_tun(hev_cfg, shutdown_rx).await {
-                log::warn!("[-] hev-tun ended: {e}");
+        let t2s_task = tokio::spawn(async move {
+            if let Err(e) = tun_t2s::run_tun2socks(t2s_cfg, shutdown_rx).await {
+                log::warn!("[-] tun2socks ended: {e}");
             }
         });
         tun_task = Some(tokio::spawn(async move {
-            let _ = hev_task.await;
+            let _ = t2s_task.await;
         }));
     } else if let Some((fd, ot, tun_rx)) = tun_bridge {
         log::info!("[+] TUN mode: bridging Android/system fd={fd}");
