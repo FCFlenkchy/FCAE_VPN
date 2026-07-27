@@ -15,8 +15,13 @@ use crate::error::{AetherError, Result};
 #[cfg(not(target_os = "android"))]
 static TUN2SOCKS_BYTES: &[u8] = include_bytes!(env!("TUN2SOCKS_EMBEDDED"));
 
+// Embed wintun.dll on Windows
+#[cfg(all(not(target_os = "android"), wintun_embedded))]
+static WINTUN_DLL_BYTES: &[u8] = include_bytes!(env!("WINTUN_EMBEDDED"));
+
 /// Extract and return path to the embedded tun2socks binary.
 /// On first call, writes the binary to a temp file and returns the path.
+/// On Windows, also ensures wintun.dll is extracted to the same directory.
 #[cfg(not(target_os = "android"))]
 fn get_tun2socks_path() -> Result<std::path::PathBuf> {
     use std::io::Write;
@@ -60,6 +65,23 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
                 .map_err(|e| AetherError::Other(format!("stat: {e}")))?.permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(&dest, perms).ok();
+        }
+    }
+
+    // ── Windows: ensure wintun.dll is in the same directory ─────────
+    #[cfg(all(target_os = "windows", wintun_embedded))]
+    {
+        let wintun_dest = dir.join("wintun.dll");
+        let needs_write = match std::fs::metadata(&wintun_dest) {
+            Ok(m) => m.len() != WINTUN_DLL_BYTES.len() as u64,
+            Err(_) => true,
+        };
+        if needs_write {
+            let mut f = std::fs::File::create(&wintun_dest)
+                .map_err(|e| AetherError::Other(format!("Failed to create wintun.dll: {e}")))?;
+            f.write_all(WINTUN_DLL_BYTES)
+                .map_err(|e| AetherError::Other(format!("Failed to write wintun.dll: {e}")))?;
+            log::info!("[tun_t2s] wintun.dll extracted to: {}", wintun_dest.display());
         }
     }
 
