@@ -345,6 +345,8 @@ pub struct TunConfig {
     pub socks_host: String,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// IP of the tunnel endpoint — must be excluded from TUN routes to avoid routing loops
+    pub tunnel_peer_ip: Option<String>,
 }
 
 impl Default for TunConfig {
@@ -354,10 +356,11 @@ impl Default for TunConfig {
             mtu: 1500,
             ipv4: "198.18.0.1/24".to_string(),
             ipv6: None,
-            socks_port: 1080,
+            socks_port: 1819,
             socks_host: "127.0.0.1".to_string(),
             username: None,
             password: None,
+            tunnel_peer_ip: None,
         }
     }
 }
@@ -418,6 +421,224 @@ fn is_admin() -> bool {
 fn is_admin() -> bool {
     // On Linux/macOS, check if we're root
     unsafe { libc::geteuid() == 0 }
+}
+
+// ── Windows TUN adapter route configuration ─────────────────────────────
+#[cfg(target_os = "windows")]
+fn configure_windows_tun(cfg: &TunConfig) {
+    use std::process::Command as StdCommand;
+
+    let name = &cfg.name;
+    // Extract IP without prefix (e.g., "172.16.0.2" from "172.16.0.2/24")
+    let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+    let dns = "1.1.1.1";
+
+    log::info!("[tun_t2s] Configuring Windows TUN adapter '{}' with IP {} DNS {}", name, ip, dns);
+
+    // 1. Set the adapter's IP address
+    let output = StdCommand::new("netsh")
+        .args(["interface", "ip", "set", "address", name, "static", ip, "255.255.255.0"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set address OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            log::warn!("[tun_t2s] netsh set address failed: {}", stderr.trim());
+        }
+        Err(e) => log::warn!("[tun_t2s] netsh set address error: {}", e),
+    }
+
+    // 2. Set DNS server on the adapter
+    let output = StdCommand::new("netsh")
+        .args(["interface", "ip", "set", "dns", name, "static", dns])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set dns OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            log::warn!("[tun_t2s] netsh set dns failed: {}", stderr.trim());
+        }
+        Err(e) => log::warn!("[tun_t2s] netsh set dns error: {}", e),
+    }
+
+    // 3. Find the interface index
+    let ifidx = match StdCommand::new("powershell")
+        .args(["-NoProfile", "-Command",
+            &format!("(Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue).ifIndex", name)])
+        .output()
+    {
+        Ok(o) => {
+            let idx_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            match idx_str.parse::<u32>() {
+                Ok(idx) => Some(idx),
+                Err(_) => {
+                    log::warn!("[tun_t2s] Could not parse interface index from: '{}'", idx_str);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("[tun_t2s] powershell get ifIndex error: {}", e);
+            None
+        }
+    };
+
+    if let Some(idx) = ifidx {
+        log::info!("[tun_t2s] Found adapter '{}' with ifIndex={}", name, idx);
+
+        // 4. Set interface metric low so it becomes the preferred route
+        let output = StdCommand::new("netsh")
+            .args(["interface", "ipv4", "set", "interface", &idx.to_string(), "metric=5"])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set metric OK"),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                log::warn!("[tun_t2s] netsh set metric failed: {}", stderr.trim());
+            }
+            Err(e) => log::warn!("[tun_t2s] netsh set metric error: {}", e),
+        }
+
+        // 5. Add route: 0.0.0.0/0 -> TUN adapter (redirect all traffic)
+        let output = StdCommand::new("route")
+            .args(["ADD", "0.0.0.0", "MASK", "0.0.0.0", ip, &format!("METRIC 5 IF {}", idx)])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => log::info!("[tun_t2s] route ADD 0.0.0.0/0 OK"),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                // "The object already exists" is fine (route already present)
+                if stderr.contains("already exists") || stdout.contains("already exists") {
+                    log::info!("[tun_t2s] route 0.0.0.0/0 already exists (OK)");
+                } else {
+                    log::warn!("[tun_t2s] route ADD failed: {} {}", stdout.trim(), stderr.trim());
+                }
+            }
+            Err(e) => log::warn!("[tun_t2s] route ADD error: {}", e),
+        }
+
+        // 6. Add route to exclude the tunnel peer from TUN (avoid routing loop)
+        if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
+            // Get current default gateway to route tunnel peer through it
+            if let Ok(gw_output) = StdCommand::new("powershell")
+                .args(["-NoProfile", "-Command",
+                    "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1).NextHop"])
+                .output()
+            {
+                let gw = String::from_utf8_lossy(&gw_output.stdout).trim().to_string();
+                if !gw.is_empty() {
+                    let output = StdCommand::new("route")
+                        .args(["ADD", peer_ip, "MASK", "255.255.255.255", &gw])
+                        .output();
+                    match output {
+                        Ok(o) if o.status.success() => log::info!("[tun_t2s] route ADD bypass {} via {} OK", peer_ip, gw),
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            if !stderr.contains("already exists") {
+                                log::warn!("[tun_t2s] route ADD bypass failed: {}", stderr.trim());
+                            }
+                        }
+                        Err(e) => log::warn!("[tun_t2s] route ADD bypass error: {}", e),
+                    }
+                }
+            }
+        }
+    } else {
+        log::warn!("[tun_t2s] Could not find interface index for '{}'; skipping route configuration", name);
+    }
+}
+
+// ── Linux TUN adapter route configuration ───────────────────────────────
+#[cfg(target_os = "linux")]
+fn configure_linux_tun(cfg: &TunConfig) {
+    use std::process::Command as StdCommand;
+
+    let name = &cfg.name;
+    let ip = &cfg.ipv4;
+
+    log::info!("[tun_t2s] Configuring Linux TUN adapter '{}' with IP {}", name, ip);
+
+    // Add IP to interface
+    let output = StdCommand::new("ip")
+        .args(["addr", "add", ip, "dev", name])
+        .status();
+    match output {
+        Ok(s) if s.success() => log::info!("[tun_t2s] ip addr add OK"),
+        Ok(s) => log::warn!("[tun_t2s] ip addr add failed with status {:?}", s.code()),
+        Err(e) => log::warn!("[tun_t2s] ip addr add error: {}", e),
+    }
+
+    // Bring interface up
+    let output = StdCommand::new("ip")
+        .args(["link", "set", name, "up"])
+        .status();
+    match output {
+        Ok(s) if s.success() => log::info!("[tun_t2s] ip link set up OK"),
+        Ok(s) => log::warn!("[tun_t2s] ip link set up failed with status {:?}", s.code()),
+        Err(e) => log::warn!("[tun_t2s] ip link set up error: {}", e),
+    }
+
+    // Add default route via TUN (higher metric = lower priority so existing routes stay)
+    // We use a separate routing table to avoid conflicts
+    let output = StdCommand::new("ip")
+        .args(["route", "add", "default", "dev", name, "metric", "100"])
+        .status();
+    match output {
+        Ok(s) if s.success() => log::info!("[tun_t2s] ip route add default OK"),
+        Ok(s) => log::warn!("[tun_t2s] ip route add default failed with status {:?}", s.code()),
+        Err(e) => log::warn!("[tun_t2s] ip route add default error: {}", e),
+    }
+}
+
+// ── Windows TUN cleanup (remove routes) ──────────────────────────────────
+#[cfg(target_os = "windows")]
+fn cleanup_windows_tun(cfg: &TunConfig) {
+    use std::process::Command as StdCommand;
+
+    let name = &cfg.name;
+    let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+
+    log::info!("[tun_t2s] Cleaning up Windows TUN routes for '{}'", name);
+
+    // Remove default route
+    let output = StdCommand::new("route")
+        .args(["DELETE", "0.0.0.0", "MASK", "0.0.0.0", ip])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] route DELETE OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.trim().is_empty() {
+                log::debug!("[tun_t2s] route DELETE: {}", stderr.trim());
+            }
+        }
+        Err(e) => log::debug!("[tun_t2s] route DELETE error: {}", e),
+    }
+
+    // Reset DNS to DHCP
+    let output = StdCommand::new("netsh")
+        .args(["interface", "ip", "set", "dns", name, "dhcp"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh dns reset to dhcp OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.trim().is_empty() {
+                log::debug!("[tun_t2s] netsh dns reset: {}", stderr.trim());
+            }
+        }
+        Err(e) => log::debug!("[tun_t2s] netsh dns reset error: {}", e),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_linux_tun(cfg: &TunConfig) {
+    use std::process::Command as StdCommand;
+    let name = &cfg.name;
+    log::info!("[tun_t2s] Cleaning up Linux TUN routes for '{}'", name);
+    let _ = StdCommand::new("ip").args(["route", "del", "default", "dev", name]).status();
+    let _ = StdCommand::new("ip").args(["link", "set", name, "down"]).status();
 }
 
 /// Run the TUN with tun2socks as a subprocess
@@ -488,6 +709,21 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     let pid = child.id();
     log::info!("[tun_t2s] tun2socks started (pid: {})", pid);
 
+    // ── Windows: configure TUN adapter routing ──────────────────────
+    #[cfg(target_os = "windows")]
+    {
+        // Give tun2socks a moment to create the adapter
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        configure_windows_tun(&cfg);
+    }
+
+    // ── Linux: configure TUN routing ───────────────────────────────
+    #[cfg(target_os = "linux")]
+    {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        configure_linux_tun(&cfg);
+    }
+
     // Read stdout/stderr in background threads
     if let Some(stdout) = child.stdout.take() {
         std::thread::spawn(move || {
@@ -527,10 +763,13 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
+                cleanup_windows_tun(&cfg);
             }
             #[cfg(not(target_os = "windows"))]
             {
                 unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                #[cfg(target_os = "linux")]
+                cleanup_linux_tun(&cfg);
             }
             // Wait for process to exit with timeout
             let _ = tokio::time::timeout(
@@ -573,11 +812,12 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        cleanup_windows_tun(&cfg);
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
-        // Best-effort kill on non-Windows
         unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+        cleanup_linux_tun(&cfg);
     }
 
     log::info!("[tun_t2s] TUN shut down");
@@ -594,7 +834,7 @@ mod tests {
         assert_eq!(cfg.name, "FCAE-VPN");
         assert_eq!(cfg.mtu, 1500);
         assert_eq!(cfg.ipv4, "198.18.0.1/24");
-        assert_eq!(cfg.socks_port, 1080);
+        assert_eq!(cfg.socks_port, 1819);
         assert_eq!(cfg.socks_host, "127.0.0.1");
     }
 }

@@ -124,6 +124,25 @@ cmake --build build --config Release
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — 即时模式 GUI 库，用于所有原生桌面渲染。
 - **[Quiche](https://github.com/cloudflare/quiche)** — Cloudflare 的 HTTP/3 和 QUIC 实现。作为 MASQUE 协议支持的 QUIC 传输后端。
 
+## 贡献
+
+欢迎贡献！无论是错误报告、功能请求、文档改进还是代码贡献 — 都可以提交 Issue 或 Pull Request。
+
+### 如何贡献
+
+1. Fork 本仓库
+2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
+3. 提交更改 (`git commit -m 'Add amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 创建 Pull Request
+
+### 需要帮助的领域
+
+- **macOS TUN 路由** — 当前 tun2socks 的 TUN 模式仅支持 Windows 和 Linux，需要实现 macOS 的路由配置。
+- **IPv6 端点扫描** — 扫描器目前主要关注 IPv4；IPv6 发现需要更多实际测试。
+- **界面翻译** — 为桌面端和 Android 界面添加更多语言支持。
+- **协议指纹改进** — 持续优化，使 MASQUE 和 WireGuard 流量看起来更像标准浏览器 HTTPS。
+
 ## 许可证
 
 请参阅各组件的相应许可证。

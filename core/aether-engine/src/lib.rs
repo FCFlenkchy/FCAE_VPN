@@ -1004,7 +1004,7 @@ async fn run_masque_tunnel(
         let socks_port: u16 = std::env::var("AETHER_SOCKS")
             .ok()
             .and_then(|s| s.rsplit(':').next()?.parse().ok())
-            .unwrap_or(1080);
+            .unwrap_or(1819);
         let t2s_cfg = tun_t2s::TunConfig {
             name: "FCAE-VPN".to_string(),
             mtu: TUNNEL_MTU as u32,
@@ -1014,6 +1014,7 @@ async fn run_masque_tunnel(
             socks_host: "127.0.0.1".to_string(),
             username: None,
             password: None,
+            tunnel_peer_ip: Some(peer.ip().to_string()),
         };
         
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -1387,7 +1388,7 @@ async fn run_wireguard_tunnel(
         let socks_port: u16 = std::env::var("AETHER_SOCKS")
             .ok()
             .and_then(|s| s.rsplit(':').next()?.parse().ok())
-            .unwrap_or(1080);
+            .unwrap_or(1819);
         let t2s_cfg = tun_t2s::TunConfig {
             name: "FCAE-VPN".to_string(),
             mtu: TUNNEL_MTU as u32,
@@ -1397,6 +1398,7 @@ async fn run_wireguard_tunnel(
             socks_host: "127.0.0.1".to_string(),
             username: None,
             password: None,
+            tunnel_peer_ip: Some(peer.ip().to_string()),
         };
         
         let (shutdown_tx, shutdown_rx) = oneshot::channel();

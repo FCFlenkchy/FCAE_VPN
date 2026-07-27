@@ -122,6 +122,25 @@ Open `android/` in Android Studio and build. The Gradle config invokes CMake wit
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — Immediate-mode GUI library Used for all native desktop rendering.
 - **[Quiche](https://github.com/cloudflare/quiche)** — Cloudflare's HTTP/3 and QUIC implementation. Used as the QUIC transport backend for MASQUE protocol support.
 
+## Contributing
+
+Contributions are welcome! Whether it's bug reports, feature requests, documentation improvements, or code contributions — feel free to open an issue or pull request.
+
+### How to Contribute
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+### Areas that need help
+
+- **TUN routing on macOS** — Current TUN mode with tun2socks only supports Windows and Linux. macOS routing needs implementation.
+- **IPv6 endpoint scanning** — Scanner currently focuses on IPv4; IPv6 discovery needs more real-world testing.
+- **GUI translations** — Adding more languages to the desktop and Android interfaces.
+- **Protocol fingerprinting improvements** — Always looking to make MASQUE and WireGuard traffic look more like standard browser HTTPS.
+
 ## License
 
 See the individual components for their respective licenses.
