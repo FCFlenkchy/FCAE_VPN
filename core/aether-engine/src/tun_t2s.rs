@@ -6,10 +6,7 @@
 //! 
 //! The Android implementation in tun.rs remains untouched.
 
-use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tokio::process::Command;
+use std::process::{Command, Stdio};
 use tokio::sync::oneshot;
 
 use crate::error::{AetherError, Result};
@@ -264,9 +261,14 @@ fn find_tun2socks_binary() -> Option<std::path::PathBuf> {
     #[cfg(not(target_os = "windows"))]
     let bin_name = "tun2socks";
 
-    if let Ok(path) = which::which(bin_name) {
-        log::info!("[tun_t2s] Found tun2socks in PATH: {}", path.display());
-        return Some(path);
+    if let Ok(paths) = std::env::var("PATH") {
+        for dir in paths.split(if cfg!(target_os = "windows") { ';' } else { ':' }) {
+            let p = std::path::PathBuf::from(dir).join(bin_name);
+            if p.exists() {
+                log::info!("[tun_t2s] Found tun2socks in PATH: {}", p.display());
+                return Some(p);
+            }
+        }
     }
 
     log::warn!("[tun_t2s] tun2socks binary not found");
@@ -291,11 +293,7 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
             "tun2socks binary not found. Please install tun2socks or set TUN2SOCKS_BIN env var.".into()
         ))?;
 
-    // Parse the IPv4 address (strip prefix)
-    let ipv4_addr = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
-
     // Build tun2socks arguments
-    // tun2socks -device tun://<name> -proxy socks5://<host>:<port> -loglevel info
     let device = format!("tun://{}", cfg.name);
     let proxy = if let (Some(user), Some(pass)) = (&cfg.username, &cfg.password) {
         format!("socks5://{}:{}@{}:{}", user, pass, cfg.socks_host, cfg.socks_port)
@@ -303,61 +301,65 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         format!("socks5://{}:{}", cfg.socks_host, cfg.socks_port)
     };
 
-    let mut cmd = Command::new(&t2s_path);
-    cmd.arg("-device").arg(&device)
-       .arg("-proxy").arg(&proxy)
-       .arg("-loglevel").arg("info")
-       .stdout(Stdio::piped())
-       .stderr(Stdio::piped());
-
-    // Set MTU if not default
+    let mut args = vec![
+        "-device", &device,
+        "-proxy", &proxy,
+        "-loglevel", "info",
+    ];
+    let mtu_str;
     if cfg.mtu != 1500 {
-        cmd.arg("-mtu").arg(cfg.mtu.to_string());
+        mtu_str = cfg.mtu.to_string();
+        args.push("-mtu");
+        args.push(&mtu_str);
     }
 
-    log::debug!("[tun_t2s] Command: {:?}", cmd);
+    log::debug!("[tun_t2s] Running: {} {:?}", t2s_path.display(), args);
 
-    let mut child = cmd.spawn()
+    let mut child = Command::new(&t2s_path)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| AetherError::Other(format!("Failed to spawn tun2socks: {e}")))?;
 
     let pid = child.id();
     log::info!("[tun_t2s] tun2socks started (pid: {:?})", pid);
 
-    // Spawn a task to capture output
+    // Read stdout/stderr in background threads
     if let Some(stdout) = child.stdout.take() {
-        tokio::spawn(async move {
-            use tokio::io::AsyncBufReadExt;
-            let reader = tokio::io::BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                log::info!("[tun2socks stdout] {}", line);
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    log::info!("[tun2socks stdout] {}", line);
+                }
             }
         });
     }
     if let Some(stderr) = child.stderr.take() {
-        tokio::spawn(async move {
-            use tokio::io::AsyncBufReadExt;
-            let reader = tokio::io::BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                log::info!("[tun2socks stderr] {}", line);
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    log::info!("[tun2socks stderr] {}", line);
+                }
             }
         });
     }
 
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
+    // Wait for process in a blocking task
+    let wait_handle = tokio::task::spawn_blocking(move || child.wait());
 
-    // Wait for shutdown signal or process exit
     tokio::select! {
         _ = shutdown => {
             log::info!("[tun_t2s] Shutting down tun2socks");
-            running_clone.store(false, Ordering::SeqCst);
-            // Send SIGTERM to the process
+            // Kill the process
             if let Some(id) = pid {
                 #[cfg(target_os = "windows")]
                 {
-                    let _ = std::process::Command::new("taskkill")
+                    let _ = Command::new("taskkill")
                         .args(["/PID", &id.to_string(), "/F"])
                         .status();
                 }
@@ -369,26 +371,30 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
             // Wait for process to exit with timeout
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                child.wait()
+                wait_handle
             ).await;
-            // Force kill if still running
-            let _ = child.kill().await;
         }
-        status = child.wait() => {
-            match status {
-                Ok(s) if s.success() => {
+        result = wait_handle => {
+            match result {
+                Ok(Ok(s)) if s.success() => {
                     log::info!("[tun_t2s] tun2socks exited normally");
                 }
-                Ok(s) => {
+                Ok(Ok(s)) => {
                     log::warn!("[tun_t2s] tun2socks exited with: {:?}", s.code());
                     return Err(AetherError::Other(format!(
                         "tun2socks exited with code {:?}", s.code()
                     )));
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     log::error!("[tun_t2s] tun2socks process error: {}", e);
                     return Err(AetherError::Other(format!(
                         "tun2socks process error: {}", e
+                    )));
+                }
+                Err(e) => {
+                    log::error!("[tun_t2s] tun2socks task join error: {}", e);
+                    return Err(AetherError::Other(format!(
+                        "tun2socks task join error: {}", e
                     )));
                 }
             }
