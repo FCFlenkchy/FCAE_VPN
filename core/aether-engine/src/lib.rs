@@ -1011,7 +1011,7 @@ async fn run_masque_tunnel(
             password: None,
         };
         
-        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let t2s_task = tokio::spawn(async move {
             if let Err(e) = tun_t2s::run_tun2socks(t2s_cfg, shutdown_rx).await {
                 log::warn!("[-] tun2socks ended: {e}");
@@ -1020,6 +1020,7 @@ async fn run_masque_tunnel(
         tun_task = Some(tokio::spawn(async move {
             // Wait for the tun2socks task to complete
             let _ = t2s_task.await;
+            drop(shutdown_tx);
         }));
     } else if let Some((fd, ot, tun_rx)) = tun_bridge {
         log::info!("[+] TUN mode: bridging Android/system fd={fd}");
@@ -1388,7 +1389,7 @@ async fn run_wireguard_tunnel(
             password: None,
         };
         
-        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let t2s_task = tokio::spawn(async move {
             if let Err(e) = tun_t2s::run_tun2socks(t2s_cfg, shutdown_rx).await {
                 log::warn!("[-] tun2socks ended: {e}");
@@ -1396,6 +1397,7 @@ async fn run_wireguard_tunnel(
         });
         tun_task = Some(tokio::spawn(async move {
             let _ = t2s_task.await;
+            drop(shutdown_tx);
         }));
     } else if let Some((fd, ot, tun_rx)) = tun_bridge {
         log::info!("[+] TUN mode: bridging Android/system fd={fd}");
