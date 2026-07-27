@@ -395,17 +395,24 @@ jobs:
           for dir in artifacts/*/; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
+            # For prereleases, include '-prerelease' in the zip name
+            if [ "${{ inputs.prerelease }}" = "true" ]; then
+              zip_name="${name}-prerelease.zip"
+            else
+              zip_name="${name}.zip"
+            fi
             (
               cd "$dir"
-              zip -9 -j "../../release-zips/${name}.zip" ./*
+              zip -9 -j "../../release-zips/${zip_name}" ./*
             )
-            echo "Created release-zips/${name}.zip"
-            unzip -l "release-zips/${name}.zip" | head -20
+            echo "Created release-zips/${zip_name}"
+            unzip -l "release-zips/${zip_name}" | head -20
           done
           ls -lah release-zips/
           test $(ls -1 release-zips/*.zip | wc -l) -ge 1
 
       - name: generate SHA256 checksums
+        if: inputs.prerelease != 'true'
         run: |
           set -euo pipefail
           cd release-zips
@@ -414,6 +421,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: GPG sign checksums
+        if: inputs.prerelease != 'true'
         run: |
           set -euo pipefail
           # Generate a fresh GPG key for CI signing
