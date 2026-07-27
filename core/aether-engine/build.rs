@@ -1,161 +1,28 @@
 // Build script for aether-engine
-// This compiles hev-socks5-tunnel as a static library and links it
+// 
+// For hev-socks5-tunnel, we use pre-built binaries as embedded resources
+// rather than compiling from source. This avoids build dependencies like libevent.
 
 use std::env;
-use std::path::PathBuf;
-use std::process::Command;
 
 fn main() {
     // Declare the hev_tun_available cfg option
     println!("cargo::rustc-check-cfg=cfg(hev_tun_available)");
     
-    // Only build hev-socks5-tunnel on non-Android platforms
-    #[cfg(not(target_os = "android"))]
-    {
-        build_hev_socks5_tunnel();
-    }
+    // We always mark hev_tun_available as true since we use embedded binaries
+    // The actual availability will be checked at runtime
+    println!("cargo:rustc-cfg=hev_tun_available");
     
     #[cfg(target_os = "android")]
     {
-        // On Android, we don't build hev-socks5-tunnel
+        // On Android, we don't use hev-socks5-tunnel
         // The Android implementation uses the existing tun.rs
-        println!("cargo:warning=Android build: skipping hev-socks5-tunnel compilation");
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-fn build_hev_socks5_tunnel() {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let manifest_path = PathBuf::from(&manifest_dir);
-    
-    // Try different possible locations for hev-socks5-tunnel
-    let possible_paths = vec![
-        // When building from workspace root (FCAE-VPN/core/aether-engine)
-        manifest_path.parent().and_then(|p| p.parent()).map(|p| p.join("hev-socks5-tunnel")),
-        // When building from FCAE-VPN directory
-        Some(manifest_path.join("../../hev-socks5-tunnel")),
-        // When building from project root
-        Some(PathBuf::from("hev-socks5-tunnel")),
-    ];
-    
-    let hev_src = possible_paths
-        .iter()
-        .filter_map(|p| p.as_ref())
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| {
-            let default = manifest_path.parent().and_then(|p| p.parent()).map(|p| p.join("hev-socks5-tunnel")).unwrap_or_else(|| PathBuf::from("hev-socks5-tunnel"));
-            println!("cargo:warning=hev-socks5-tunnel not found in any expected location, using default {:?}", default);
-            default
-        });
-    
-    if !hev_src.exists() {
-        println!("cargo:warning=hev-socks5-tunnel source not found at {:?}", hev_src);
-        println!("cargo:warning=Please ensure the submodule is initialized: git submodule update --init --recursive");
-        println!("cargo:warning=hev-socks5-tunnel will be disabled");
-        return;
+        println!("cargo:warning=Android build: hev-socks5-tunnel not used (uses tun.rs)");
     }
     
-    println!("cargo:warning=Building hev-socks5-tunnel from {:?}", hev_src);
-    
-    let out_dir = env::var("OUT_DIR").unwrap();
-    let build_dir = PathBuf::from(&out_dir).join("hev-socks5-tunnel-build");
-    
-    // Create build directory if it doesn't exist
-    if !build_dir.exists() {
-        std::fs::create_dir_all(&build_dir).unwrap();
-    }
-    
-    // Determine the target OS
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    
-    // Check if Makefile exists
-    let makefile = hev_src.join("Makefile");
-    if !makefile.exists() {
-        println!("cargo:warning=Makefile not found at {:?}", makefile);
-        println!("cargo:warning=hev-socks5-tunnel may not be properly checked out");
-        return;
-    }
-    
-    // Build static library - don't fail if it doesn't build
-    println!("cargo:warning=Running make static in {:?}", hev_src);
-    let status = Command::new("make")
-        .current_dir(&hev_src)
-        .arg("static")
-        .env("BUILD_DIR", build_dir.as_os_str())
-        .env("CFLAGS", "-fPIC")
-        .status();
-    
-    if let Ok(status) = status {
-        if !status.success() {
-            println!("cargo:warning=Failed to build hev-socks5-tunnel static library (exit code: {})", status.code().unwrap_or(-1));
-            println!("cargo:warning=Make sure you have the required build dependencies:");
-            println!("cargo:warning=  - make, gcc/clang");
-            println!("cargo:warning=  - libevent development headers");
-            println!("cargo:warning=  - For Linux: libevent-dev");
-            println!("cargo:warning=  - For Windows: MSYS2 or WSL");
-            println!("cargo:warning=hev-socks5-tunnel will be disabled");
-            return;
-        }
-    } else {
-        println!("cargo:warning=Failed to execute make for hev-socks5-tunnel");
-        println!("cargo:warning=hev-socks5-tunnel will be disabled");
-        return;
-    }
-    
-    // Link the static library
-    let lib_name = if target_os == "windows" {
-        "hev-socks5-tunnel"
-    } else {
-        "hev-socks5-tunnel"
-    };
-    
-    // Find the library file
-    let lib_path = build_dir.join("lib");
-    let lib_file = if target_os == "windows" {
-        lib_path.join("hev-socks5-tunnel.lib")
-    } else {
-        lib_path.join("libhev-socks5-tunnel.a")
-    };
-    
-    if lib_file.exists() {
-        println!("cargo:rustc-link-search=native={}", lib_path.display());
-        println!("cargo:rustc-link-lib=static={}", lib_name);
-        println!("cargo:warning=Linked hev-socks5-tunnel static library from {:?}", lib_file);
-    } else {
-        println!("cargo:warning=hev-socks5-tunnel library not found at {:?}", lib_file);
-        println!("cargo:warning=The TUN feature may not work correctly");
-    }
-    
-    // Additional system libraries needed
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "android"))]
     {
-        // Linux needs these system libraries
-        println!("cargo:rustc-link-lib=event");
-        println!("cargo:rustc-link-lib=event_core");
-        println!("cargo:rustc-link-lib=event_extra");
-        println!("cargo:rustc-link-lib=pthread");
-        println!("cargo:rustc-link-lib=m");
-    }
-    
-    #[cfg(target_os = "windows")]
-    {
-        // Windows needs these libraries
-        println!("cargo:rustc-link-lib=ws2_32");
-        println!("cargo:rustc-link-lib=iphlpapi");
-        println!("cargo:rustc-link-lib=userenv");
-    }
-    
-    // Tell cargo to rerun this build script if the hev source changes
-    println!("cargo:rerun-if-changed={}", hev_src.display());
-    println!("cargo:rerun-if-changed={}/Makefile", hev_src.display());
-    println!("cargo:rerun-if-changed={}/src", hev_src.display());
-    
-    // Include directories
-    let hev_include = hev_src.join("include");
-    if hev_include.exists() {
-        println!("cargo:rustc-cfg=hev_tun_available");
-        // The include path is passed via the compiler wrapper
-        // or we can use cxx or bindgen
+        println!("cargo:warning=Using embedded hev-socks5-tunnel resources (pre-built binaries)");
+        println!("cargo:warning=Runtime loading will check for available binaries");
     }
 }

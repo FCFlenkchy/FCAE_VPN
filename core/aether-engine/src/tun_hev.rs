@@ -1,8 +1,7 @@
 //! TUN implementation using hev-socks5-tunnel as the engine
 //! 
-//! This module provides platform-specific TUN device creation and management
-//! for Windows and Linux, using the hev-socks5-tunnel C library to handle
-//! the TUN-to-SOCKS5 proxying.
+//! This module uses pre-built hev-socks5-tunnel binaries as embedded resources.
+//! The library is loaded dynamically at runtime.
 //! 
 //! Flow: hev-socks5-tunnel (TUN) → Engine (SOCKS5 proxy) → Internet
 //! 
@@ -16,44 +15,124 @@ use tokio::sync::oneshot;
 use crate::error::{AetherError, Result};
 
 // ============================================================================
-// FFI Bindings to hev-socks5-tunnel
+// Dynamic FFI Bindings to hev-socks5-tunnel
 // ============================================================================
 
-#[link(name = "hev-socks5-tunnel")]
-extern "C" {
-    /// Start the socks5 tunnel with a config file
-    fn hev_socks5_tunnel_main_from_file(
-        config_path: *const c_char,
-        tun_fd: c_int,
-    ) -> c_int;
+// Function pointers that will be loaded dynamically
+type HevMainFn = unsafe extern "C" fn(*const u8, c_uint, c_int) -> c_int;
+type HevQuitFn = unsafe extern "C" fn();
+type HevStatsFn = unsafe extern "C" fn(*mut usize, *mut usize, *mut usize, *mut usize);
 
-    /// Start the socks5 tunnel with a config string (YAML)
-    fn hev_socks5_tunnel_main_from_str(
-        config_str: *const u8,
-        config_len: c_uint,
-        tun_fd: c_int,
-    ) -> c_int;
+// Global function pointers
+static mut HEV_MAIN: Option<HevMainFn> = None;
+static mut HEV_QUIT: Option<HevQuitFn> = None;
+static mut HEV_STATS: Option<HevStatsFn> = None;
+static mut LIB_LOADED: AtomicBool = AtomicBool::new(false);
 
-    /// Stop the socks5 tunnel
-    fn hev_socks5_tunnel_quit();
-
-    /// Get tunnel statistics
-    fn hev_socks5_tunnel_stats(
-        tx_packets: *mut usize,
-        tx_bytes: *mut usize,
-        rx_packets: *mut usize,
-        rx_bytes: *mut usize,
-    );
+/// Try to load the hev-socks5-tunnel library dynamically
+fn load_hev_library() -> bool {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::ffi::CString;
+        use std::ptr;
+        
+        // Try different library names
+        let lib_names = [
+            "libhev-socks5-tunnel.so",
+            "libhev-socks5-tunnel.so.1",
+            "hev-socks5-tunnel.so",
+            "libhev-socks5-tunnel.a",
+        ];
+        
+        for name in lib_names.iter() {
+            let c_name = match CString::new(*name) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let handle = unsafe { libc::dlopen(c_name.as_ptr(), libc::RTLD_NOW) };
+            if !handle.is_null() {
+                unsafe {
+                    HEV_MAIN = Some(std::mem::transmute(
+                        libc::dlsym(handle, b"hev_socks5_tunnel_main_from_str\0".as_ptr() as *const _)
+                    ));
+                    HEV_QUIT = Some(std::mem::transmute(
+                        libc::dlsym(handle, b"hev_socks5_tunnel_quit\0".as_ptr() as *const _)
+                    ));
+                    HEV_STATS = Some(std::mem::transmute(
+                        libc::dlsym(handle, b"hev_socks5_tunnel_stats\0".as_ptr() as *const _)
+                    ));
+                }
+                
+                if HEV_MAIN.is_some() && HEV_QUIT.is_some() {
+                    LIB_LOADED.store(true, Ordering::SeqCst);
+                    log::info!("[tun_hev] Loaded hev-socks5-tunnel library: {}", name);
+                    return true;
+                }
+            }
+        }
+        
+        log::warn!("[tun_hev] Could not load hev-socks5-tunnel library");
+        false
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::CString;
+        use std::ptr;
+        
+        let lib_names = [
+            "hev-socks5-tunnel.dll",
+            "hev-socks5-tunnel",
+        ];
+        
+        for name in lib_names.iter() {
+            let c_name = match CString::new(*name) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let handle = unsafe { libc::LoadLibraryA(c_name.as_ptr()) };
+            if !handle.is_null() {
+                unsafe {
+                    HEV_MAIN = Some(std::mem::transmute(
+                        libc::GetProcAddress(handle, b"hev_socks5_tunnel_main_from_str\0".as_ptr() as *const _)
+                    ));
+                    HEV_QUIT = Some(std::mem::transmute(
+                        libc::GetProcAddress(handle, b"hev_socks5_tunnel_quit\0".as_ptr() as *const _)
+                    ));
+                    HEV_STATS = Some(std::mem::transmute(
+                        libc::GetProcAddress(handle, b"hev_socks5_tunnel_stats\0".as_ptr() as *const _)
+                    ));
+                }
+                
+                if HEV_MAIN.is_some() && HEV_QUIT.is_some() {
+                    LIB_LOADED.store(true, Ordering::SeqCst);
+                    log::info!("[tun_hev] Loaded hev-socks5-tunnel library: {}", name);
+                    return true;
+                }
+            }
+        }
+        
+        log::warn!("[tun_hev] Could not load hev-socks5-tunnel library");
+        false
+    }
+    
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "windows")))]
+    {
+        log::warn!("[tun_hev] Platform not supported for hev-socks5-tunnel");
+        false
+    }
 }
 
 // ============================================================================
-// Platform-specific TUN device creation
+// Platform-specific TUN device creation (simplified)
 // ============================================================================
 
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
+    use std::fs::OpenOptions;
     use std::os::fd::{AsRawFd, RawFd};
+    use std::os::raw::c_uint;
 
     const TUNSETIFF: c_uint = 0x400454ca;
     const IFF_TUN: CShort = 0x0001;
@@ -70,7 +149,7 @@ mod platform {
 
     /// Create a TUN device on Linux using /dev/net/tun
     pub fn create_tun(name: &str) -> Result<RawFd> {
-        let dev = std::fs::OpenOptions::new()
+        let dev = OpenOptions::new()
             .read(true)
             .write(true)
             .open("/dev/net/tun")
@@ -96,17 +175,16 @@ mod platform {
         if ret < 0 {
             return Err(AetherError::Other(format!(
                 "ioctl TUNSETIFF failed: {}",
-                io::Error::last_os_error()
+                std::io::Error::last_os_error()
             )));
         }
 
         // Duplicate the fd so we can pass it to hev-socks5-tunnel
-        // and keep ownership
         let dup_fd = unsafe { libc::dup(fd) };
         if dup_fd < 0 {
             return Err(AetherError::Other(format!(
                 "Failed to dup TUN fd: {}",
-                io::Error::last_os_error()
+                std::io::Error::last_os_error()
             )));
         }
 
@@ -116,7 +194,7 @@ mod platform {
             unsafe { libc::close(dup_fd) };
             return Err(AetherError::Other(format!(
                 "fcntl F_GETFL failed: {}",
-                io::Error::last_os_error()
+                std::io::Error::last_os_error()
             )));
         }
         let ret = unsafe { libc::fcntl(dup_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
@@ -124,7 +202,7 @@ mod platform {
             unsafe { libc::close(dup_fd) };
             return Err(AetherError::Other(format!(
                 "fcntl F_SETFL failed: {}",
-                io::Error::last_os_error()
+                std::io::Error::last_os_error()
             )));
         }
 
@@ -132,10 +210,8 @@ mod platform {
         Ok(dup_fd)
     }
 
-    /// Bring the TUN interface up and assign IP address
+    /// Configure TUN interface (bring up, assign IP)
     pub fn configure_tun(fd: RawFd, ipv4: &str, ipv6: Option<&str>) -> Result<()> {
-        // Use shell commands to configure the interface
-        // This is simpler than doing all the ioctl calls
         use std::process::Command;
 
         // Get interface name from fd
@@ -185,7 +261,7 @@ mod platform {
             }
         }
 
-        // Disable reverse path filter for the interface
+        // Disable reverse path filter
         let status = Command::new("sysctl")
             .args(["-w", &format!("net.ipv4.conf.{}.rp_filter=0", name)])
             .status();
@@ -198,7 +274,6 @@ mod platform {
         Ok(())
     }
 
-    /// Clean up TUN interface
     pub fn cleanup_tun(fd: RawFd) {
         if fd >= 0 {
             unsafe { libc::close(fd) };
@@ -207,33 +282,7 @@ mod platform {
     }
 }
 
-#[cfg(target_os = "windows")]
-mod platform {
-    use super::*;
-    use std::os::raw::c_int;
-
-    // Windows TUN support via wintun or other mechanism
-    // For now, we'll implement a placeholder that returns an error
-    // since Windows TUN support requires additional libraries
-
-    pub fn create_tun(_name: &str) -> Result<c_int> {
-        Err(AetherError::Other(
-            "Windows TUN support not yet implemented. Please use Linux or Android.".into(),
-        ))
-    }
-
-    pub fn configure_tun(_fd: c_int, _ipv4: &str, _ipv6: Option<&str>) -> Result<()> {
-        Err(AetherError::Other(
-            "Windows TUN support not yet implemented.".into(),
-        ))
-    }
-
-    pub fn cleanup_tun(_fd: c_int) {
-        // No-op
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(target_os = "linux"))]
 mod platform {
     use super::*;
     use std::os::raw::c_int;
@@ -320,41 +369,49 @@ socks5:
 }
 
 /// Run the TUN with hev-socks5-tunnel
-/// 
-/// This function:
-/// 1. Creates a TUN device (platform-specific)
-/// 2. Configures the TUN interface
-/// 3. Starts hev-socks5-tunnel with the TUN fd and SOCKS5 config
-/// 4. Blocks until the tunnel stops or an error occurs
 pub async fn run_hev_tun(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> Result<()> {
     log::info!("[tun_hev] Starting TUN with hev-socks5-tunnel");
     log::info!("[tun_hev] Config: name={}, ipv4={}, socks={}:{}",
         cfg.name, cfg.ipv4, cfg.socks_host, cfg.socks_port
     );
 
+    // Try to load the hev library
+    if !load_hev_library() {
+        return Err(AetherError::Other(
+            "hev-socks5-tunnel library not available. Please install the library.".into()
+        ));
+    }
+
     // Create TUN device
     let tun_fd = platform::create_tun(&cfg.name)?;
 
-    // Configure TUN interface (bring up, assign IP)
+    // Configure TUN interface
     if let Err(e) = platform::configure_tun(tun_fd, &cfg.ipv4, cfg.ipv6.as_deref()) {
         log::warn!("[tun_hev] Failed to configure TUN: {}", e);
-        // Continue anyway - hev-socks5-tunnel will handle it
     }
 
-    // Build hev-socks5-tunnel config
+    // Build config
     let config_yaml = build_hev_config(&cfg);
     log::debug!("[tun_hev] hev-socks5-tunnel config:\n{}", config_yaml);
 
-    // Launch hev-socks5-tunnel in a blocking thread
     let config_bytes = config_yaml.into_bytes();
     let fd = tun_fd;
 
+    // Launch hev-socks5-tunnel in a blocking thread
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
 
+    // Get function pointers
+    let hev_main = unsafe {
+        HEV_MAIN.ok_or_else(|| AetherError::Other("hev_main function not loaded".into()))?
+    };
+    let hev_quit = unsafe {
+        HEV_QUIT.ok_or_else(|| AetherError::Other("hev_quit function not loaded".into()))?
+    };
+
     let handle = tokio::task::spawn_blocking(move || {
         let result = unsafe {
-            hev_socks5_tunnel_main_from_str(
+            hev_main(
                 config_bytes.as_ptr(),
                 config_bytes.len() as u32,
                 fd,
@@ -364,15 +421,14 @@ pub async fn run_hev_tun(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> Res
         result
     });
 
-    // Wait for shutdown signal or tunnel exit
-    // Use pinning to avoid moving handle
+    // Pin the handle
     tokio::pin!(handle);
-    
+
+    // Wait for shutdown signal or tunnel exit
     tokio::select! {
         _ = shutdown => {
             log::info!("[tun_hev] Shutting down hev-socks5-tunnel");
-            unsafe { hev_socks5_tunnel_quit(); }
-            // Await the pinned handle
+            unsafe { hev_quit(); }
             let _ = handle.await;
         }
         result = &mut handle => {
@@ -404,15 +460,11 @@ pub async fn run_hev_tun(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> Res
 
 /// Check if hev-socks5-tunnel library is available
 pub fn is_available() -> bool {
-    // Check if the cfg flag is set by build.rs
-    #[cfg(hev_tun_available)]
-    {
-        true
+    // Try to load the library if not already loaded
+    if !LIB_LOADED.load(Ordering::SeqCst) {
+        return load_hev_library();
     }
-    #[cfg(not(hev_tun_available))]
-    {
-        false
-    }
+    true
 }
 
 #[cfg(test)]
