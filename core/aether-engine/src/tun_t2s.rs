@@ -324,7 +324,7 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         .map_err(|e| AetherError::Other(format!("Failed to spawn tun2socks: {e}")))?;
 
     let pid = child.id();
-    log::info!("[tun_t2s] tun2socks started (pid: {:?})", pid);
+    log::info!("[tun_t2s] tun2socks started (pid: {})", pid);
 
     // Read stdout/stderr in background threads
     if let Some(stdout) = child.stdout.take() {
@@ -357,17 +357,15 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         _ = shutdown => {
             log::info!("[tun_t2s] Shutting down tun2socks");
             // Kill the process
-            if let Some(id) = pid {
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = Command::new("taskkill")
-                        .args(["/PID", &id.to_string(), "/F"])
-                        .status();
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    unsafe { libc::kill(id as i32, libc::SIGTERM); }
-                }
+            #[cfg(target_os = "windows")]
+            {
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/F"])
+                    .status();
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
             }
             // Wait for process to exit with timeout
             let _ = tokio::time::timeout(
