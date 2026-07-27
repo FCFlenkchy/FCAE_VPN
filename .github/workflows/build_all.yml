@@ -123,7 +123,7 @@ jobs:
             curl -L -o /tmp/tun2socks.zip https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-windows-amd64.zip
             unzip -o /tmp/tun2socks.zip -d /tmp/tun2socks
             mkdir -p target/release
-            cp /tmp/tun2socks/tun2socks.exe target/release/
+            cp /tmp/tun2socks/tun2socks-windows-amd64.exe target/release/tun2socks.exe
             echo "TUN2SOCKS_BIN=$(pwd)/target/release/tun2socks.exe" >> $GITHUB_ENV
             ls -la target/release/tun2socks.exe
           fi
