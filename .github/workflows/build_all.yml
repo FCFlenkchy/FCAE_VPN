@@ -19,6 +19,7 @@ permissions:
 
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+  CARGO_TERM_COLOR: always
 
 jobs:
   build:
