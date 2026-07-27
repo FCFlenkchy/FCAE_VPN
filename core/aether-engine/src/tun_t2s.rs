@@ -317,7 +317,6 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         "--device", &device,
         "--proxy", &proxy,
         "--loglevel", "info",
-        "--udp",
     ];
     let mtu_str;
     if cfg.mtu != 1500 {
