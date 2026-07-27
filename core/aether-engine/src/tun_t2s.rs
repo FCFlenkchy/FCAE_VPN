@@ -362,12 +362,83 @@ impl Default for TunConfig {
     }
 }
 
+/// Check if the current process has administrator privileges on Windows.
+#[cfg(target_os = "windows")]
+fn is_admin() -> bool {
+    use std::os::windows::ffi::OsStringExt;
+    use std::ffi::OsString;
+    
+    // Use Win32 CheckTokenMembership to check if running as admin
+    // This avoids needing the "windows" crate by using a minimal FFI call
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn OpenProcessToken(process_handle: isize, desired_access: u32, token_handle: *mut isize) -> i32;
+        fn GetTokenInformation(token_handle: isize, token_info_class: i32, token_info: *mut u8, token_info_len: u32, return_length: *mut u32) -> i32;
+        fn CloseHandle(handle: isize) -> i32;
+        fn AllocateAndInitializeSid(
+            identifier_authority: *const u8, sub_authority_count: u8,
+            sub_authority0: u32, sub_authority1: u32, sub_authority2: u32,
+            sub_authority3: u32, sub_authority4: u32, sub_authority5: u32,
+            sub_authority6: u32, sub_authority7: u32, sid: *mut isize
+        ) -> i32;
+        fn CheckTokenMembership(token_handle: isize, sid_to_check: isize, is_member: *mut i32) -> i32;
+        fn FreeSid(sid: isize) -> *mut std::ffi::c_void;
+    }
+    
+    const TOKEN_QUERY: u32 = 0x0008;
+    const SECURITY_NT_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 5];
+    const SECURITY_BUILTIN_DOMAIN_RID: u32 = 32;
+    const DOMAIN_ALIAS_RID_ADMINS: u32 = 544;
+    
+    unsafe {
+        let process = GetCurrentProcess();
+        let mut token: isize = 0;
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        
+        let mut admin_sid: isize = 0;
+        let result = AllocateAndInitializeSid(
+            SECURITY_NT_AUTHORITY.as_ptr(), 2,
+            SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+            0, 0, 0, 0, 0, 0, &mut admin_sid
+        );
+        if result == 0 {
+            CloseHandle(token);
+            return false;
+        }
+        
+        let mut is_member: i32 = 0;
+        let check_result = CheckTokenMembership(0, admin_sid, &mut is_member);
+        FreeSid(admin_sid);
+        CloseHandle(token);
+        
+        check_result != 0 && is_member != 0
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_admin() -> bool {
+    // On Linux/macOS, check if we're root
+    unsafe { libc::geteuid() == 0 }
+}
+
 /// Run the TUN with tun2socks as a subprocess
 pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> Result<()> {
     log::info!("[tun_t2s] Starting TUN with tun2socks");
     log::info!("[tun_t2s] Config: name={}, ipv4={}, socks={}:{}",
         cfg.name, cfg.ipv4, cfg.socks_host, cfg.socks_port
     );
+    
+    // Check for admin/root privileges (required to create TUN interface)
+    if !is_admin() {
+        log::error!("[tun_t2s] TUN requires administrator/root privileges!");
+        return Err(AetherError::Other(
+            "TUN mode requires administrator privileges. Please run the application as Administrator.\n\
+             On Windows: Right-click → 'Run as Administrator'\n\
+             On Linux/macOS: Use 'sudo'".into()
+        ));
+    }
 
     // Extract embedded binary
     let t2s_path = get_tun2socks_path()?;
