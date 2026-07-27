@@ -1,11 +1,12 @@
 // Build script for aether-engine
 //
-// Embeds tun2socks (https://github.com/xjasonlyu/tun2socks) binary
-// directly into the compiled executable at build time.
+// Builds tun2socks from source (Go) and embeds the binary
+// into the compiled executable at build time.
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(tun2socks_available)");
@@ -14,6 +15,7 @@ fn main() {
     #[cfg(target_os = "android")]
     {
         println!("cargo:warning=Android build: tun2socks not used (uses tun.rs)");
+        return;
     }
 
     #[cfg(not(target_os = "android"))]
@@ -23,44 +25,77 @@ fn main() {
         let workspace_root = manifest_path
             .parent()
             .and_then(|p| p.parent())
-            .unwrap_or(&manifest_path);
+            .unwrap_or(&manifest_path)
+            .to_path_buf();
+
+        let tun2socks_src = workspace_root.join("tun2socks");
+
+        if !tun2socks_src.join("main.go").exists() {
+            panic!("tun2socks submodule not found at {}! Run: git submodule update --init --recursive", tun2socks_src.display());
+        }
 
         #[cfg(target_os = "windows")]
         let bin_name = "tun2socks.exe";
         #[cfg(not(target_os = "windows"))]
         let bin_name = "tun2socks";
 
-        // Check TUN2SOCKS_BIN env var first
-        let env_path = env::var("TUN2SOCKS_BIN").ok();
-        let bin_paths: &[PathBuf] = if let Some(ref p) = env_path {
-            // Use a slice pointing to static storage via leak (safe in build script)
-            &[PathBuf::from(p)]
+        let out_dir = env::var("OUT_DIR").unwrap();
+        let bin_path = PathBuf::from(&out_dir).join(bin_name);
+
+        // Check if binary already exists (from a previous build)
+        // and if go.mod hasn't changed, skip rebuild
+        let go_mod = tun2socks_src.join("go.mod");
+        let needs_build = if bin_path.exists() {
+            let bin_meta = fs::metadata(&bin_path).ok();
+            let mod_meta = fs::metadata(&go_mod).ok();
+            match (bin_meta, mod_meta) {
+                (Some(b), Some(m)) => {
+                    b.modified().ok() > m.modified().ok()
+                }
+                _ => true,
+            }
         } else {
-            &[
-                workspace_root.join("target/release").join(bin_name),
-                workspace_root.join("target/debug").join(bin_name),
-                workspace_root.join(bin_name),
-                manifest_path.join(bin_name),
-            ]
+            true
         };
 
-        let found = bin_paths.iter().find(|p| p.exists());
+        if needs_build {
+            println!("cargo:warning=Building tun2socks from source...");
 
-        if let Some(path) = found {
-            let out_dir = env::var("OUT_DIR").unwrap();
-            let embedded_path = PathBuf::from(&out_dir).join(bin_name);
-            fs::copy(path, &embedded_path)
-                .expect("Failed to copy tun2socks binary to OUT_DIR");
+            let status = Command::new("go")
+                .args(["build", "-o"])
+                .arg(&bin_path)
+                .args(["-trimpath", "-ldflags=-s -w"])
+                .current_dir(&tun2socks_src)
+                .status();
 
-            println!("cargo:rustc-env=TUN2SOCKS_EMBEDDED={}", embedded_path.display());
-            println!("cargo:warning=tun2socks embedded from: {}", path.display());
-        } else {
-            panic!(
-                "tun2socks binary not found at target/release/{}!\
+            match status {
+                Ok(s) if s.success() => {
+                    println!("cargo:warning=tun2socks built successfully");
+                }
+                Ok(s) => {
+                    panic!("go build tun2socks failed with exit code: {:?}", s.code());
+                }
+                Err(e) => {
+                    // If go is not available, try pre-built binary
+                    println!("cargo:warning=go not found ({e}), checking for pre-built binary...");
+                    let prebuilt = workspace_root.join("target/release").join(bin_name);
+                    if prebuilt.exists() {
+                        fs::copy(&prebuilt, &bin_path)
+                            .expect("Failed to copy pre-built tun2socks");
+                        println!("cargo:warning=Using pre-built tun2socks from: {}", prebuilt.display());
+                    } else {
+                        panic!(
+                            "Cannot build tun2socks: go not found and no pre-built binary at {}.\
 \
-                 Set TUN2SOCKS_BIN env var or download from: https://github.com/xjasonlyu/tun2socks/releases",
-                bin_name
-            );
+                             Install Go or place the binary at that path.",
+                            prebuilt.display()
+                        );
+                    }
+                }
+            }
         }
+
+        println!("cargo:rustc-env=TUN2SOCKS_EMBEDDED={}", bin_path.display());
+        println!("cargo:warning=tun2socks embedded at: {}", bin_path.display());
     }
 }
