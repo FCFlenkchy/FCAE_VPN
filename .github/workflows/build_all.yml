@@ -397,7 +397,7 @@ jobs:
           tag_name: ${{ github.event.inputs.release_tag }}
           name: "FCAE VPN ${{ github.event.inputs.release_tag }}"
           draft: false
-          prerelease: ${{ inputs.prerelease == 'true' }}
+          prerelease: ${{ inputs.prerelease }}
           generate_release_notes: true
           files: release-zips/*
         env:
