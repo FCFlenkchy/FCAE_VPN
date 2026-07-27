@@ -314,15 +314,15 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     };
 
     let mut args = vec![
-        "-device", &device,
-        "-proxy", &proxy,
-        "-loglevel", "info",
-        "-udp",
+        "--device", &device,
+        "--proxy", &proxy,
+        "--loglevel", "info",
+        "--udp",
     ];
     let mtu_str;
     if cfg.mtu != 1500 {
         mtu_str = cfg.mtu.to_string();
-        args.push("-mtu");
+        args.push("--mtu");
         args.push(&mtu_str);
     }
 
