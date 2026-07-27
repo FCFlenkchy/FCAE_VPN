@@ -23,11 +23,13 @@ fn main() {
 #[cfg(not(target_os = "android"))]
 fn build_hev_socks5_tunnel() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let workspace_root = PathBuf::from(&manifest_dir)
+    let manifest_path = PathBuf::from(&manifest_dir);
+    let workspace_root = manifest_path
         .parent()
         .unwrap()
         .parent()
-        .unwrap(); // core/aether-engine -> core -> FCAE-VPN
+        .unwrap()
+        .to_path_buf(); // core/aether-engine -> core -> FCAE-VPN
     
     let hev_src = workspace_root.join("hev-socks5-tunnel");
     
