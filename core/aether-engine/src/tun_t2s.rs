@@ -11,6 +11,75 @@ use tokio::sync::oneshot;
 
 use crate::error::{AetherError, Result};
 
+// Embed tun2socks binary at compile time
+#[cfg(not(target_os = "android"))]
+static TUN2SOCKS_BYTES: &[u8] = include_bytes!(env!("TUN2SOCKS_EMBEDDED"));
+
+/// Extract and return path to the embedded tun2socks binary.
+/// On first call, writes the binary to a temp file and returns the path.
+#[cfg(not(target_os = "android"))]
+fn get_tun2socks_path() -> Result<std::path::PathBuf> {
+    use std::io::Write;
+
+    // Check TUN2SOCKS_BIN override first
+    if let Ok(path) = std::env::var("TUN2SOCKS_BIN") {
+        let p = std::path::PathBuf::from(&path);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+
+    // Use a fixed temp path so we don't recreate every time
+    let dir = std::env::temp_dir().join("fcaevpn");
+    std::fs::create_dir_all(&dir).ok();
+
+    #[cfg(target_os = "windows")]
+    let name = "tun2socks.exe";
+    #[cfg(not(target_os = "windows"))]
+    let name = "tun2socks";
+
+    let dest = dir.join(name);
+
+    // Only write if not already present (or size mismatch)
+    let needs_write = match std::fs::metadata(&dest) {
+        Ok(m) => m.len() != TUN2SOCKS_BYTES.len() as u64,
+        Err(_) => true,
+    };
+
+    if needs_write {
+        let mut f = std::fs::File::create(&dest)
+            .map_err(|e| AetherError::Other(format!("Failed to create tun2socks binary: {e}")))?;
+        f.write_all(TUN2SOCKS_BYTES)
+            .map_err(|e| AetherError::Other(format!("Failed to write tun2socks binary: {e}")))?;
+
+        // Set executable permission on Unix
+        #[cfg(not(target_os = "windows"))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&dest)
+                .map_err(|e| AetherError::Other(format!("stat: {e}")))?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&dest, perms).ok();
+        }
+    }
+
+    Ok(dest)
+}
+
+#[cfg(target_os = "android")]
+fn get_tun2socks_path() -> Result<std::path::PathBuf> {
+    Err(AetherError::Other("tun2socks not available on Android".into()))
+}
+
+/// Check if tun2socks is available
+pub fn is_available() -> bool {
+    #[cfg(target_os = "android")]
+    return false;
+
+    #[cfg(not(target_os = "android"))]
+    get_tun2socks_path().is_ok()
+}
+
 // ============================================================================
 // Platform-specific TUN device creation
 // ============================================================================
@@ -226,60 +295,6 @@ impl Default for TunConfig {
     }
 }
 
-/// Find the tun2socks binary
-fn find_tun2socks_binary() -> Option<std::path::PathBuf> {
-    // Check environment variable first
-    if let Ok(path) = std::env::var("TUN2SOCKS_BIN") {
-        let p = std::path::PathBuf::from(&path);
-        if p.exists() {
-            log::info!("[tun_t2s] Found tun2socks via TUN2SOCKS_BIN: {}", p.display());
-            return Some(p);
-        }
-    }
-
-    // Check executable directory
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(dir) = exe_path.parent() {
-            #[cfg(target_os = "windows")]
-            let names = ["tun2socks.exe"];
-            #[cfg(not(target_os = "windows"))]
-            let names = ["tun2socks"];
-
-            for name in names.iter() {
-                let p = dir.join(name);
-                if p.exists() {
-                    log::info!("[tun_t2s] Found tun2socks at: {}", p.display());
-                    return Some(p);
-                }
-            }
-        }
-    }
-
-    // Try PATH
-    #[cfg(target_os = "windows")]
-    let bin_name = "tun2socks.exe";
-    #[cfg(not(target_os = "windows"))]
-    let bin_name = "tun2socks";
-
-    if let Ok(paths) = std::env::var("PATH") {
-        for dir in paths.split(if cfg!(target_os = "windows") { ';' } else { ':' }) {
-            let p = std::path::PathBuf::from(dir).join(bin_name);
-            if p.exists() {
-                log::info!("[tun_t2s] Found tun2socks in PATH: {}", p.display());
-                return Some(p);
-            }
-        }
-    }
-
-    log::warn!("[tun_t2s] tun2socks binary not found");
-    None
-}
-
-/// Check if tun2socks is available
-pub fn is_available() -> bool {
-    find_tun2socks_binary().is_some()
-}
-
 /// Run the TUN with tun2socks as a subprocess
 pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> Result<()> {
     log::info!("[tun_t2s] Starting TUN with tun2socks");
@@ -287,11 +302,8 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         cfg.name, cfg.ipv4, cfg.socks_host, cfg.socks_port
     );
 
-    // Find tun2socks binary
-    let t2s_path = find_tun2socks_binary()
-        .ok_or_else(|| AetherError::Other(
-            "tun2socks binary not found. Please install tun2socks or set TUN2SOCKS_BIN env var.".into()
-        ))?;
+    // Extract embedded binary
+    let t2s_path = get_tun2socks_path()?;
 
     // Build tun2socks arguments
     let device = format!("tun://{}", cfg.name);
