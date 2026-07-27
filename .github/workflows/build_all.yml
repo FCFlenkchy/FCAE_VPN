@@ -134,26 +134,6 @@ jobs:
           targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android
           components: rust-src
 
-      - name: install tun2socks
-        if: matrix.name == 'linux-x64' || matrix.name == 'windows-x64'
-        run: |
-          if [ "${{ matrix.name }}" = "linux-x64" ]; then
-            curl -L -o /tmp/tun2socks.zip https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-linux-amd64.zip
-            unzip -o /tmp/tun2socks.zip -d /tmp/tun2socks
-            mkdir -p target/release
-            cp /tmp/tun2socks/tun2socks-linux-amd64 target/release/tun2socks
-            chmod +x target/release/tun2socks
-            echo "TUN2SOCKS_BIN=$(pwd)/target/release/tun2socks" >> $GITHUB_ENV
-            ls -la target/release/tun2socks
-          elif [ "${{ matrix.name }}" = "windows-x64" ]; then
-            curl -L -o /tmp/tun2socks.zip https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-windows-amd64.zip
-            unzip -o /tmp/tun2socks.zip -d /tmp/tun2socks
-            mkdir -p target/release
-            cp /tmp/tun2socks/tun2socks-windows-amd64.exe target/release/tun2socks.exe
-            echo "TUN2SOCKS_BIN=$(pwd)/target/release/tun2socks.exe" >> $GITHUB_ENV
-            ls -la target/release/tun2socks.exe
-          fi
-
       - name: cache rust
         uses: Swatinem/rust-cache@v2
         with:
@@ -203,6 +183,22 @@ jobs:
       - name: build rust (engine + ffi, in-process)
         run: |
           set -euo pipefail
+
+          # Download tun2socks before building (after caches are restored)
+          if [ "${{ matrix.name }}" = "linux-x64" ]; then
+            curl -L -o /tmp/tun2socks.zip https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-linux-amd64.zip
+            unzip -o /tmp/tun2socks.zip -d /tmp/tun2socks
+            mkdir -p target/release
+            cp /tmp/tun2socks/tun2socks-linux-amd64 target/release/tun2socks
+            chmod +x target/release/tun2socks
+            ls -la target/release/tun2socks
+          elif [ "${{ matrix.name }}" = "windows-x64" ]; then
+            curl -L -o /tmp/tun2socks.zip https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-windows-amd64.zip
+            unzip -o /tmp/tun2socks.zip -d /tmp/tun2socks
+            mkdir -p target/release
+            cp /tmp/tun2socks/tun2socks-windows-amd64.exe target/release/tun2socks.exe
+            ls -la target/release/tun2socks.exe
+          fi
 
           if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
             NDK="${ANDROID_NDK_HOME:-${{ steps.setup-ndk.outputs.ndk-path }}}"
