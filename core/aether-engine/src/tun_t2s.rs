@@ -69,23 +69,68 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
     }
 
     // ── Windows: ensure wintun.dll is in the same directory ─────────
-    #[cfg(all(target_os = "windows", wintun_embedded))]
+    #[cfg(target_os = "windows")]
     {
         let wintun_dest = dir.join("wintun.dll");
+        let expected_size = wintun_dll_expected_size();
         let needs_write = match std::fs::metadata(&wintun_dest) {
-            Ok(m) => m.len() != WINTUN_DLL_BYTES.len() as u64,
-            Err(_) => true,
+            Ok(m) => m.len() != expected_size as u64,
+            Err(_) => expected_size > 0,
         };
         if needs_write {
-            let mut f = std::fs::File::create(&wintun_dest)
-                .map_err(|e| AetherError::Other(format!("Failed to create wintun.dll: {e}")))?;
-            f.write_all(WINTUN_DLL_BYTES)
-                .map_err(|e| AetherError::Other(format!("Failed to write wintun.dll: {e}")))?;
-            log::info!("[tun_t2s] wintun.dll extracted to: {}", wintun_dest.display());
+            #[cfg(wintun_embedded)]
+            {
+                let mut f = std::fs::File::create(&wintun_dest)
+                    .map_err(|e| AetherError::Other(format!("Failed to create wintun.dll: {e}")))?;
+                f.write_all(WINTUN_DLL_BYTES)
+                    .map_err(|e| AetherError::Other(format!("Failed to write wintun.dll: {e}")))?;
+                log::info!("[tun_t2s] wintun.dll extracted (embedded) to: {}", wintun_dest.display());
+            }
+            #[cfg(not(wintun_embedded))]
+            {
+                // Fallback: try to find wintun.dll from common locations at runtime
+                let mut found = false;
+                let candidate_paths = [
+                    std::path::PathBuf::from("C:\\Windows\\System32\\wintun.dll"),
+                    std::env::current_exe().unwrap_or_default().parent().unwrap_or(std::path::Path::new(".")).join("wintun.dll"),
+                    std::path::PathBuf::from("wintun.dll"),
+                ];
+                for candidate in &candidate_paths {
+                    if candidate.exists() {
+                        log::info!("[tun_t2s] Found wintun.dll at: {}", candidate.display());
+                        match std::fs::copy(candidate, &wintun_dest) {
+                            Ok(_) => {
+                                log::info!("[tun_t2s] wintun.dll copied from {} to: {}", candidate.display(), wintun_dest.display());
+                                found = true;
+                                break;
+                            }
+                            Err(e) => {
+                                log::warn!("[tun_t2s] Failed to copy wintun.dll from {}: {}", candidate.display(), e);
+                            }
+                        }
+                    }
+                }
+                if !found {
+                    log::error!("[tun_t2s] wintun.dll NOT found! TUN will fail on Windows. Download wintun.dll from https://www.wintun.net/ and place it in: {}", dir.display());
+                    return Err(AetherError::Other(format!(
+                        "wintun.dll not found. Please download it from https://www.wintun.net/ and place it in: {}",
+                        dir.display()
+                    )));
+                }
+            }
         }
     }
 
     Ok(dest)
+}
+
+/// Returns the expected size of the embedded wintun.dll bytes (0 if not embedded).
+#[cfg(target_os = "windows")]
+fn wintun_dll_expected_size() -> usize {
+    #[cfg(wintun_embedded)]
+    { WINTUN_DLL_BYTES.len() }
+    #[cfg(not(wintun_embedded))]
+    { 0 }
 }
 
 #[cfg(target_os = "android")]
