@@ -426,7 +426,9 @@ fn is_admin() -> bool {
 // ── Windows TUN adapter route configuration ─────────────────────────────
 #[cfg(target_os = "windows")]
 fn configure_windows_tun(cfg: &TunConfig) {
+    use std::os::windows::process::CommandExt;
     use std::process::Command as StdCommand;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let name = &cfg.name;
     // Extract IP without prefix (e.g., "172.16.0.2" from "172.16.0.2/24")
@@ -435,10 +437,15 @@ fn configure_windows_tun(cfg: &TunConfig) {
 
     log::info!("[tun_t2s] Configuring Windows TUN adapter '{}' with IP {} DNS {}", name, ip, dns);
 
+    // Helper to run a command silently (no window popup)
+    let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut c = StdCommand::new(cmd);
+        c.creation_flags(CREATE_NO_WINDOW);
+        c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    };
+
     // 1. Set the adapter's IP address
-    let output = StdCommand::new("netsh")
-        .args(["interface", "ip", "set", "address", name, "static", ip, "255.255.255.0"])
-        .output();
+    let output = run_silent("netsh", &["interface", "ip", "set", "address", name, "static", ip, "255.255.255.0"]);
     match output {
         Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set address OK"),
         Ok(o) => {
@@ -449,9 +456,7 @@ fn configure_windows_tun(cfg: &TunConfig) {
     }
 
     // 2. Set DNS server on the adapter
-    let output = StdCommand::new("netsh")
-        .args(["interface", "ip", "set", "dns", name, "static", dns])
-        .output();
+    let output = run_silent("netsh", &["interface", "ip", "set", "dns", name, "static", dns]);
     match output {
         Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set dns OK"),
         Ok(o) => {
@@ -461,11 +466,9 @@ fn configure_windows_tun(cfg: &TunConfig) {
         Err(e) => log::warn!("[tun_t2s] netsh set dns error: {}", e),
     }
 
-    // 3. Find the interface index
-    let ifidx = match StdCommand::new("powershell")
-        .args(["-NoProfile", "-Command",
-            &format!("(Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue).ifIndex", name)])
-        .output()
+    // 3. Find the interface index (use CREATE_NO_WINDOW to avoid popup)
+    let ifidx = match run_silent("powershell", &["-NoProfile", "-Command",
+        &format!("(Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue).ifIndex", name)])
     {
         Ok(o) => {
             let idx_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -487,9 +490,7 @@ fn configure_windows_tun(cfg: &TunConfig) {
         log::info!("[tun_t2s] Found adapter '{}' with ifIndex={}", name, idx);
 
         // 4. Set interface metric low so it becomes the preferred route
-        let output = StdCommand::new("netsh")
-            .args(["interface", "ipv4", "set", "interface", &idx.to_string(), "metric=5"])
-            .output();
+        let output = run_silent("netsh", &["interface", "ipv4", "set", "interface", &idx.to_string(), "metric=5"]);
         match output {
             Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set metric OK"),
             Ok(o) => {
@@ -500,9 +501,8 @@ fn configure_windows_tun(cfg: &TunConfig) {
         }
 
         // 5. Add route: 0.0.0.0/0 -> TUN adapter (redirect all traffic)
-        let output = StdCommand::new("route")
-            .args(["ADD", "0.0.0.0", "MASK", "0.0.0.0", ip, &format!("METRIC 5 IF {}", idx)])
-            .output();
+        // Use separate METRIC and IF arguments (not combined) for route.exe compatibility
+        let output = run_silent("route", &["ADD", "0.0.0.0", "MASK", "0.0.0.0", ip, "METRIC", "5", "IF", &idx.to_string()]);
         match output {
             Ok(o) if o.status.success() => log::info!("[tun_t2s] route ADD 0.0.0.0/0 OK"),
             Ok(o) => {
@@ -521,16 +521,12 @@ fn configure_windows_tun(cfg: &TunConfig) {
         // 6. Add route to exclude the tunnel peer from TUN (avoid routing loop)
         if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
             // Get current default gateway to route tunnel peer through it
-            if let Ok(gw_output) = StdCommand::new("powershell")
-                .args(["-NoProfile", "-Command",
-                    "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1).NextHop"])
-                .output()
+            if let Ok(gw_output) = run_silent("powershell", &["-NoProfile", "-Command",
+                "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1).NextHop"])
             {
                 let gw = String::from_utf8_lossy(&gw_output.stdout).trim().to_string();
                 if !gw.is_empty() {
-                    let output = StdCommand::new("route")
-                        .args(["ADD", peer_ip, "MASK", "255.255.255.255", &gw])
-                        .output();
+                    let output = run_silent("route", &["ADD", peer_ip, "MASK", "255.255.255.255", &gw]);
                     match output {
                         Ok(o) if o.status.success() => log::info!("[tun_t2s] route ADD bypass {} via {} OK", peer_ip, gw),
                         Ok(o) => {
@@ -591,20 +587,26 @@ fn configure_linux_tun(cfg: &TunConfig) {
     }
 }
 
-// ── Windows TUN cleanup (remove routes) ──────────────────────────────────
+// ── Windows TUN cleanup (remove routes AND adapter) ────────────────────
 #[cfg(target_os = "windows")]
 fn cleanup_windows_tun(cfg: &TunConfig) {
+    use std::os::windows::process::CommandExt;
     use std::process::Command as StdCommand;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let name = &cfg.name;
     let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
 
-    log::info!("[tun_t2s] Cleaning up Windows TUN routes for '{}'", name);
+    log::info!("[tun_t2s] Cleaning up Windows TUN adapter '{}'", name);
+
+    let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut c = StdCommand::new(cmd);
+        c.creation_flags(CREATE_NO_WINDOW);
+        c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    };
 
     // Remove default route
-    let output = StdCommand::new("route")
-        .args(["DELETE", "0.0.0.0", "MASK", "0.0.0.0", ip])
-        .output();
+    let output = run_silent("route", &["DELETE", "0.0.0.0", "MASK", "0.0.0.0", ip]);
     match output {
         Ok(o) if o.status.success() => log::info!("[tun_t2s] route DELETE OK"),
         Ok(o) => {
@@ -617,9 +619,7 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
     }
 
     // Reset DNS to DHCP
-    let output = StdCommand::new("netsh")
-        .args(["interface", "ip", "set", "dns", name, "dhcp"])
-        .output();
+    let output = run_silent("netsh", &["interface", "ip", "set", "dns", name, "dhcp"]);
     match output {
         Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh dns reset to dhcp OK"),
         Ok(o) => {
@@ -629,6 +629,21 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
             }
         }
         Err(e) => log::debug!("[tun_t2s] netsh dns reset error: {}", e),
+    }
+
+    // Remove the TUN adapter itself (prevents "FCAE-VPN 2, 3, 4..." accumulation)
+    // Use netsh to delete the interface — this is the most reliable way.
+    let output = run_silent("netsh", &["interface", "ip", "delete", "interface", name]);
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh delete interface OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            // "No matching" is fine — adapter already gone
+            if !stderr.trim().is_empty() && !stderr.contains("No matching") {
+                log::debug!("[tun_t2s] netsh delete interface: {}", stderr.trim());
+            }
+        }
+        Err(e) => log::debug!("[tun_t2s] netsh delete interface error: {}", e),
     }
 }
 
@@ -754,12 +769,24 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
 
     tokio::select! {
         _ = shutdown => {
-            log::info!("[tun_t2s] Shutting down tun2socks");
-            // Kill using taskkill on Windows (child is moved, can't call child.kill())
+            log::info!("[tun_t2s] Shutting down tun2socks (pid={})", pid);
+            // Kill using taskkill on Windows — use /T to kill the whole process tree.
+            // Run silently with CREATE_NO_WINDOW to avoid console popup.
             #[cfg(target_os = "windows")]
             {
-                let _ = Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/F", "/T"])
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                // First attempt: graceful taskkill
+                let mut c = Command::new("taskkill");
+                c.creation_flags(CREATE_NO_WINDOW);
+                let _ = c.args(["/PID", &pid.to_string(), "/T"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                // Second attempt: force kill
+                let mut c = Command::new("taskkill");
+                c.creation_flags(CREATE_NO_WINDOW);
+                let _ = c.args(["/PID", &pid.to_string(), "/F", "/T"])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
@@ -804,11 +831,15 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         }
     }
 
-    // Extra safety: ensure child is killed on any exit path
+    // Extra safety: ensure child is killed on any exit path.
+    // Run silently to avoid console popup.
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F", "/T"])
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let mut c = Command::new("taskkill");
+        c.creation_flags(CREATE_NO_WINDOW);
+        let _ = c.args(["/PID", &pid.to_string(), "/F", "/T"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
