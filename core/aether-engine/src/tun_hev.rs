@@ -31,108 +31,166 @@ static LIB_LOADED: AtomicBool = AtomicBool::new(false);
 
 /// Try to load the hev-socks5-tunnel library dynamically
 fn load_hev_library() -> bool {
+    // First, try to get the path from environment variable
+    if let Ok(path) = std::env::var("HEV_SOCKS5_TUNNEL_LIB") {
+        log::info!("[tun_hev] Trying to load from env: {}", path);
+        if try_load_library(&path) {
+            return true;
+        }
+    }
+    
+    // Try to load from the current executable directory
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(dir) = exe_path.parent() {
+            #[cfg(target_os = "linux")]
+            let lib_names = [
+                dir.join("libhev-socks5-tunnel.so"),
+                dir.join("hev-socks5-tunnel.so"),
+                dir.join("../lib/libhev-socks5-tunnel.so"),
+            ];
+            
+            #[cfg(target_os = "windows")]
+            let lib_names = [
+                dir.join("hev-socks5-tunnel.dll"),
+                dir.join("hev-socks5-tunnel"),
+            ];
+            
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            let lib_names: [std::path::PathBuf; 0] = [];
+            
+            for path in lib_names.iter() {
+                if path.exists() {
+                    log::info!("[tun_hev] Found library at: {}", path.display());
+                    if let Some(path_str) = path.to_str() {
+                        if try_load_library(path_str) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Finally, try system library paths
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        use std::ffi::CString;
-        
-        // Try different library names
         let lib_names = [
             "libhev-socks5-tunnel.so",
             "libhev-socks5-tunnel.so.1",
             "hev-socks5-tunnel.so",
-            "libhev-socks5-tunnel.a",
         ];
         
         for name in lib_names.iter() {
-            let c_name = match CString::new(*name) {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            let handle = unsafe { libc::dlopen(c_name.as_ptr(), libc::RTLD_NOW) };
-            if !handle.is_null() {
-                unsafe {
-                    HEV_MAIN = Some(std::mem::transmute(
-                        libc::dlsym(handle, b"hev_socks5_tunnel_main_from_str\0".as_ptr() as *const _)
-                    ));
-                    HEV_QUIT = Some(std::mem::transmute(
-                        libc::dlsym(handle, b"hev_socks5_tunnel_quit\0".as_ptr() as *const _)
-                    ));
-                    HEV_STATS = Some(std::mem::transmute(
-                        libc::dlsym(handle, b"hev_socks5_tunnel_stats\0".as_ptr() as *const _)
-                    ));
-                }
-                
-                // Check if functions were loaded - use unsafe to access static mut
-                let loaded = unsafe {
-                    (*std::ptr::addr_of!(HEV_MAIN)).is_some() && 
-                    (*std::ptr::addr_of!(HEV_QUIT)).is_some()
-                };
-                if loaded {
-                    LIB_LOADED.store(true, Ordering::SeqCst);
-                    log::info!("[tun_hev] Loaded hev-socks5-tunnel library: {}", name);
-                    return true;
-                }
+            if try_load_library(name) {
+                return true;
             }
         }
-        
-        log::warn!("[tun_hev] Could not load hev-socks5-tunnel library");
-        false
     }
     
     #[cfg(target_os = "windows")]
     {
-        use std::ffi::CString;
-        
-        // Windows API functions
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn LoadLibraryA(lpFileName: *const std::os::raw::c_char) -> *mut std::os::raw::c_void;
-            fn GetProcAddress(hModule: *mut std::os::raw::c_void, lpProcName: *const std::os::raw::c_char) -> *mut std::os::raw::c_void;
-        }
-        
         let lib_names = [
             "hev-socks5-tunnel.dll",
             "hev-socks5-tunnel",
         ];
         
         for name in lib_names.iter() {
-            let c_name = match CString::new(*name) {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            let handle = unsafe { LoadLibraryA(c_name.as_ptr()) };
-            if !handle.is_null() {
-                unsafe {
-                    HEV_MAIN = Some(std::mem::transmute(
-                        GetProcAddress(handle, b"hev_socks5_tunnel_main_from_str\0".as_ptr() as *const _)
-                    ));
-                    HEV_QUIT = Some(std::mem::transmute(
-                        GetProcAddress(handle, b"hev_socks5_tunnel_quit\0".as_ptr() as *const _)
-                    ));
-                    HEV_STATS = Some(std::mem::transmute(
-                        GetProcAddress(handle, b"hev_socks5_tunnel_stats\0".as_ptr() as *const _)
-                    ));
-                }
-                
-                let loaded = unsafe {
-                    (*std::ptr::addr_of!(HEV_MAIN)).is_some() && 
-                    (*std::ptr::addr_of!(HEV_QUIT)).is_some()
-                };
-                if loaded {
-                    LIB_LOADED.store(true, Ordering::SeqCst);
-                    log::info!("[tun_hev] Loaded hev-socks5-tunnel library: {}", name);
-                    return true;
-                }
+            if try_load_library(name) {
+                return true;
             }
         }
+    }
+    
+    log::warn!("[tun_hev] Could not load hev-socks5-tunnel library from any location");
+    log::warn!("[tun_hev] Please ensure the library is installed or set HEV_SOCKS5_TUNNEL_LIB env var");
+    false
+}
+
+/// Try to load the library from a specific path
+fn try_load_library(path: &str) -> bool {
+    use std::ffi::CString;
+    
+    let c_path = match CString::new(path) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW) };
+        if handle.is_null() {
+            return false;
+        }
         
-        log::warn!("[tun_hev] Could not load hev-socks5-tunnel library");
-        false
+        unsafe {
+            HEV_MAIN = Some(std::mem::transmute(
+                libc::dlsym(handle, b"hev_socks5_tunnel_main_from_str\0".as_ptr() as *const _)
+            ));
+            HEV_QUIT = Some(std::mem::transmute(
+                libc::dlsym(handle, b"hev_socks5_tunnel_quit\0".as_ptr() as *const _)
+            ));
+            HEV_STATS = Some(std::mem::transmute(
+                libc::dlsym(handle, b"hev_socks5_tunnel_stats\0".as_ptr() as *const _)
+            ));
+        }
+        
+        let loaded = unsafe {
+            (*std::ptr::addr_of!(HEV_MAIN)).is_some() && 
+            (*std::ptr::addr_of!(HEV_QUIT)).is_some()
+        };
+        
+        if loaded {
+            LIB_LOADED.store(true, Ordering::SeqCst);
+            log::info!("[tun_hev] Successfully loaded hev-socks5-tunnel from: {}", path);
+            true
+        } else {
+            log::warn!("[tun_hev] Found library at {} but missing required symbols", path);
+            false
+        }
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn LoadLibraryA(lpFileName: *const std::os::raw::c_char) -> *mut std::os::raw::c_void;
+            fn GetProcAddress(hModule: *mut std::os::raw::c_void, lpProcName: *const std::os::raw::c_char) -> *mut std::os::raw::c_void;
+        }
+        
+        let handle = unsafe { LoadLibraryA(c_path.as_ptr()) };
+        if handle.is_null() {
+            return false;
+        }
+        
+        unsafe {
+            HEV_MAIN = Some(std::mem::transmute(
+                GetProcAddress(handle, b"hev_socks5_tunnel_main_from_str\0".as_ptr() as *const _)
+            ));
+            HEV_QUIT = Some(std::mem::transmute(
+                GetProcAddress(handle, b"hev_socks5_tunnel_quit\0".as_ptr() as *const _)
+            ));
+            HEV_STATS = Some(std::mem::transmute(
+                GetProcAddress(handle, b"hev_socks5_tunnel_stats\0".as_ptr() as *const _)
+            ));
+        }
+        
+        let loaded = unsafe {
+            (*std::ptr::addr_of!(HEV_MAIN)).is_some() && 
+            (*std::ptr::addr_of!(HEV_QUIT)).is_some()
+        };
+        
+        if loaded {
+            LIB_LOADED.store(true, Ordering::SeqCst);
+            log::info!("[tun_hev] Successfully loaded hev-socks5-tunnel from: {}", path);
+            true
+        } else {
+            log::warn!("[tun_hev] Found library at {} but missing required symbols", path);
+            false
+        }
     }
     
     #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "windows")))]
     {
-        log::warn!("[tun_hev] Platform not supported for hev-socks5-tunnel");
         false
     }
 }
