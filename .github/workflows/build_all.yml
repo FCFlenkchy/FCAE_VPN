@@ -378,6 +378,7 @@ jobs:
     name: release
     needs: build
     runs-on: ubuntu-latest
+    if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch'
     steps:
       - name: download all artifacts
         uses: actions/download-artifact@v4
