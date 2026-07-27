@@ -6,6 +6,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // Declare the hev_tun_available cfg option
+    println!("cargo::rustc-check-cfg=cfg(hev_tun_available)");
+    
     // Only build hev-socks5-tunnel on non-Android platforms
     #[cfg(not(target_os = "android"))]
     {

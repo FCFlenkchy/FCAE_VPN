@@ -8,9 +8,8 @@
 //! 
 //! The Android implementation in tun.rs remains untouched.
 
-use std::ffi::{CStr, CString};
 use std::io;
-use std::os::raw::{c_char, c_int, c_uint, c_void};
+use std::os::raw::{c_char, c_int, c_uint};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -55,11 +54,7 @@ extern "C" {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
-    use std::fs::File;
-    use std::io::{Read, Write};
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-    use std::os::unix::io::IntoRawFd;
-    use std::ptr;
+    use std::os::fd::{AsRawFd, RawFd};
 
     const TUNSETIFF: c_uint = 0x400454ca;
     const IFF_TUN: c_short = 0x0001;
@@ -96,7 +91,7 @@ mod platform {
         ifr.ifrn_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
 
         let ret = unsafe {
-            libc::ioctl(fd, TUNSETIFF, &ifr as *const IfReq)
+            libc::ioctl(fd, TUNSETIFF as u64, &ifr as *const IfReq)
         };
 
         if ret < 0 {
@@ -150,7 +145,7 @@ mod platform {
             ifru_flags: 0,
             pad: [0u8; 18],
         };
-        let ret = unsafe { libc::ioctl(fd, TUNSETIFF, &ifr as *const IfReq) };
+        let ret = unsafe { libc::ioctl(fd, TUNSETIFF as u64, &ifr as *const IfReq) };
         if ret < 0 {
             log::warn!("[tun_hev] Failed to get interface name from fd");
             return Err(AetherError::Other("Failed to get interface name".into()));

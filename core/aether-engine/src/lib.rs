@@ -1011,14 +1011,12 @@ async fn run_masque_tunnel(
             password: None,
         };
         
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
         let hev_task = tokio::spawn(async move {
             if let Err(e) = tun_hev::run_hev_tun(hev_cfg, shutdown_rx).await {
                 log::warn!("[-] hev-tun ended: {e}");
             }
         });
-        // Store shutdown_tx somewhere to clean up later
-        // We'll store it as an option in the tun_task closure
         tun_task = Some(tokio::spawn(async move {
             // Wait for the hev task to complete
             let _ = hev_task.await;
@@ -1390,7 +1388,7 @@ async fn run_wireguard_tunnel(
             password: None,
         };
         
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
         let hev_task = tokio::spawn(async move {
             if let Err(e) = tun_hev::run_hev_tun(hev_cfg, shutdown_rx).await {
                 log::warn!("[-] hev-tun ended: {e}");
