@@ -352,6 +352,7 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
 
     // Wait for process in a blocking task
     let wait_handle = tokio::task::spawn_blocking(move || child.wait());
+    tokio::pin!(wait_handle);
 
     tokio::select! {
         _ = shutdown => {
@@ -370,10 +371,10 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
             // Wait for process to exit with timeout
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                wait_handle
+                &mut wait_handle
             ).await;
         }
-        result = wait_handle => {
+        result = &mut wait_handle => {
             match result {
                 Ok(Ok(s)) if s.success() => {
                     log::info!("[tun_t2s] tun2socks exited normally");
