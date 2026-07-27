@@ -82,6 +82,13 @@ fn load_hev_library() -> bool {
     {
         use std::ffi::CString;
         
+        // Windows API functions
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn LoadLibraryA(lpFileName: *const std::os::raw::c_char) -> *mut std::os::raw::c_void;
+            fn GetProcAddress(hModule: *mut std::os::raw::c_void, lpProcName: *const std::os::raw::c_char) -> *mut std::os::raw::c_void;
+        }
+        
         let lib_names = [
             "hev-socks5-tunnel.dll",
             "hev-socks5-tunnel",
@@ -92,17 +99,17 @@ fn load_hev_library() -> bool {
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            let handle = unsafe { libc::LoadLibraryA(c_name.as_ptr()) };
+            let handle = unsafe { LoadLibraryA(c_name.as_ptr()) };
             if !handle.is_null() {
                 unsafe {
                     HEV_MAIN = Some(std::mem::transmute(
-                        libc::GetProcAddress(handle, b"hev_socks5_tunnel_main_from_str\0".as_ptr() as *const _)
+                        GetProcAddress(handle, b"hev_socks5_tunnel_main_from_str\0".as_ptr() as *const _)
                     ));
                     HEV_QUIT = Some(std::mem::transmute(
-                        libc::GetProcAddress(handle, b"hev_socks5_tunnel_quit\0".as_ptr() as *const _)
+                        GetProcAddress(handle, b"hev_socks5_tunnel_quit\0".as_ptr() as *const _)
                     ));
                     HEV_STATS = Some(std::mem::transmute(
-                        libc::GetProcAddress(handle, b"hev_socks5_tunnel_stats\0".as_ptr() as *const _)
+                        GetProcAddress(handle, b"hev_socks5_tunnel_stats\0".as_ptr() as *const _)
                     ));
                 }
                 
