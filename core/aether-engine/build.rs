@@ -3,8 +3,6 @@
 // For hev-socks5-tunnel, we use pre-built binaries as embedded resources
 // rather than compiling from source. This avoids build dependencies like libevent.
 
-use std::env;
-
 fn main() {
     // Declare the hev_tun_available cfg option
     println!("cargo::rustc-check-cfg=cfg(hev_tun_available)");

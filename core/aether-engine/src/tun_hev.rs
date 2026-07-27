@@ -7,7 +7,7 @@
 //! 
 //! The Android implementation in tun.rs remains untouched.
 
-use std::os::raw::{c_char, c_int, c_uint};
+use std::os::raw::{c_int, c_uint};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -34,7 +34,6 @@ fn load_hev_library() -> bool {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::ffi::CString;
-        use std::ptr;
         
         // Try different library names
         let lib_names = [
@@ -63,8 +62,14 @@ fn load_hev_library() -> bool {
                     ));
                 }
                 
-                if HEV_MAIN.is_some() && HEV_QUIT.is_some() {
-                    LIB_LOADED.store(true, Ordering::SeqCst);
+                // Check if functions were loaded - use unsafe to access static mut
+                let loaded = unsafe {
+                    HEV_MAIN.is_some() && HEV_QUIT.is_some()
+                };
+                if loaded {
+                    unsafe {
+                        LIB_LOADED.store(true, Ordering::SeqCst);
+                    }
                     log::info!("[tun_hev] Loaded hev-socks5-tunnel library: {}", name);
                     return true;
                 }
@@ -78,7 +83,6 @@ fn load_hev_library() -> bool {
     #[cfg(target_os = "windows")]
     {
         use std::ffi::CString;
-        use std::ptr;
         
         let lib_names = [
             "hev-socks5-tunnel.dll",
@@ -104,8 +108,13 @@ fn load_hev_library() -> bool {
                     ));
                 }
                 
-                if HEV_MAIN.is_some() && HEV_QUIT.is_some() {
-                    LIB_LOADED.store(true, Ordering::SeqCst);
+                let loaded = unsafe {
+                    HEV_MAIN.is_some() && HEV_QUIT.is_some()
+                };
+                if loaded {
+                    unsafe {
+                        LIB_LOADED.store(true, Ordering::SeqCst);
+                    }
                     log::info!("[tun_hev] Loaded hev-socks5-tunnel library: {}", name);
                     return true;
                 }
@@ -461,7 +470,8 @@ pub async fn run_hev_tun(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> Res
 /// Check if hev-socks5-tunnel library is available
 pub fn is_available() -> bool {
     // Try to load the library if not already loaded
-    if !LIB_LOADED.load(Ordering::SeqCst) {
+    let loaded = unsafe { LIB_LOADED.load(Ordering::SeqCst) };
+    if !loaded {
         return load_hev_library();
     }
     true
