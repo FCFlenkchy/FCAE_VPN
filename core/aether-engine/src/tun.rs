@@ -1,4 +1,10 @@
 //! Optional TUN fd bridge (Android VpnService). No-op on platforms without fd support.
+//! 
+//! ⚠️ IMPORTANT: This file is for Android VpnService integration only.
+//! Do NOT modify this file for Linux/Windows TUN support.
+//! 
+//! For Linux/Windows TUN support, see `tun_hev.rs` which uses
+//! hev-socks5-tunnel as the TUN engine.
 use tokio::sync::mpsc;
 
 use crate::error::{AetherError, Result};

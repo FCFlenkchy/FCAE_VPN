@@ -22,6 +22,7 @@ mod tls;
 mod aethernoize;
 mod tunnelping;
 pub mod tun;
+mod tun_hev;
 mod wireguard;
 mod wg_prober;
 
@@ -34,6 +35,7 @@ pub use stats::{
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use error::{AetherError, Result};
+use tokio::sync::oneshot;
 
 fn parse_local_v4(s: &str) -> Ipv4Addr {
     s.split('/')
@@ -64,6 +66,46 @@ fn tun_mode_active() -> bool {
             .as_str(),
         "tun" | "1" | "true" | "vpn"
     ) && tun::resolve_fd().is_some()
+}
+
+/// Determine if we should use hev-socks5-tunnel for TUN (non-Android platforms)
+fn use_hev_tun() -> bool {
+    // Check if we're on Android - always use tun.rs
+    #[cfg(target_os = "android")]
+    {
+        return false;
+    }
+    
+    #[cfg(not(target_os = "android"))]
+    {
+        // Check if hev TUN is explicitly enabled
+        let explicitly_enabled = std::env::var("AETHER_HEV_TUN")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+            .unwrap_or(false);
+        
+        // If explicitly enabled but not available, log a warning
+        if explicitly_enabled && !tun_hev::is_available() {
+            log::warn!("[lib] hev-socks5-tunnel explicitly enabled but library not available!");
+            return false;
+        }
+        
+        // Auto-detect: use hev-tun on non-Android platforms when TUN mode is active
+        // and we don't have an fd from the environment (which would indicate Android)
+        if !tun_hev::is_available() {
+            return false;
+        }
+        
+        // Check if TUN mode is active and we don't have a fd
+        let mode_active = matches!(
+            std::env::var("AETHER_MODE")
+                .unwrap_or_default()
+                .to_lowercase()
+                .as_str(),
+            "tun" | "1" | "true" | "vpn"
+        );
+        
+        mode_active && tun::resolve_fd().is_none()
+    }
 }
 
 /// Post-scan validation: ironclad = real HTTP through tunnel; handshake = probe only.
@@ -810,6 +852,9 @@ type TunBridge = (
 
 /// Wire tunnel channels to netstack. Only fan-out when a real TUN fd is present
 /// (Android VpnService). Proxy-only mode keeps the original direct path.
+/// 
+/// For non-Android platforms (Linux/Windows) with hev-socks5-tunnel,
+/// the TUN is managed externally and we don't need to bridge channels.
 fn split_dataplane(
     outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     inbound_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
@@ -818,6 +863,17 @@ fn split_dataplane(
     tokio::sync::mpsc::Receiver<bytes::Bytes>,
     Option<TunBridge>,
 ) {
+    // Check if we should use hev-socks5-tunnel (non-Android TUN mode)
+    let use_hev = use_hev_tun();
+    
+    // For hev TUN, we don't bridge channels - hev handles the TUN completely
+    if use_hev {
+        log::info!("[lib] Using hev-socks5-tunnel for TUN (non-Android mode)");
+        // Direct: netstack ↔ tunnel (hev handles the TUN side)
+        return (outbound_tx, inbound_rx, None);
+    }
+    
+    // Android-style TUN with fd from VpnService
     let Some(fd) = (if tun_mode_active() {
         tun::resolve_fd()
     } else {
@@ -940,7 +996,34 @@ async fn run_masque_tunnel(
     }
 
     let mut tun_task = None;
-    if let Some((fd, ot, tun_rx)) = tun_bridge {
+    
+    // Check if we should use hev-socks5-tunnel for TUN (non-Android)
+    if use_hev_tun() {
+        log::info!("[+] TUN mode: using hev-socks5-tunnel (Linux/Windows)");
+        let hev_cfg = tun_hev::TunConfig {
+            name: "aether-tun0".to_string(),
+            mtu: TUNNEL_MTU as u32,
+            ipv4: identity.ipv4.clone(),
+            ipv6: Some(identity.ipv6.clone()),
+            socks_port: 1080, // Engine's SOCKS5 port - should match AETHER_SOCKS
+            socks_host: "127.0.0.1".to_string(),
+            username: None,
+            password: None,
+        };
+        
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let hev_task = tokio::spawn(async move {
+            if let Err(e) = tun_hev::run_hev_tun(hev_cfg, shutdown_rx).await {
+                log::warn!("[-] hev-tun ended: {e}");
+            }
+        });
+        // Store shutdown_tx somewhere to clean up later
+        // We'll store it as an option in the tun_task closure
+        tun_task = Some(tokio::spawn(async move {
+            // Wait for the hev task to complete
+            let _ = hev_task.await;
+        }));
+    } else if let Some((fd, ot, tun_rx)) = tun_bridge {
         log::info!("[+] TUN mode: bridging Android/system fd={fd}");
         tun_task = Some(tokio::spawn(async move {
             if let Err(e) = tun::run(fd, ot, tun_rx).await {
@@ -1292,7 +1375,31 @@ async fn run_wireguard_tunnel(
     let tunnel_task = tokio::spawn(async move { tunnel.run(outbound_rx).await });
 
     let mut tun_task = None;
-    if let Some((fd, ot, tun_rx)) = tun_bridge {
+    
+    // Check if we should use hev-socks5-tunnel for TUN (non-Android)
+    if use_hev_tun() {
+        log::info!("[+] TUN mode: using hev-socks5-tunnel (Linux/Windows)");
+        let hev_cfg = tun_hev::TunConfig {
+            name: "aether-tun0".to_string(),
+            mtu: TUNNEL_MTU as u32,
+            ipv4: identity.ipv4.clone(),
+            ipv6: Some(identity.ipv6.clone()),
+            socks_port: 1080, // Engine's SOCKS5 port
+            socks_host: "127.0.0.1".to_string(),
+            username: None,
+            password: None,
+        };
+        
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let hev_task = tokio::spawn(async move {
+            if let Err(e) = tun_hev::run_hev_tun(hev_cfg, shutdown_rx).await {
+                log::warn!("[-] hev-tun ended: {e}");
+            }
+        });
+        tun_task = Some(tokio::spawn(async move {
+            let _ = hev_task.await;
+        }));
+    } else if let Some((fd, ot, tun_rx)) = tun_bridge {
         log::info!("[+] TUN mode: bridging Android/system fd={fd}");
         tun_task = Some(tokio::spawn(async move {
             if let Err(e) = tun::run(fd, ot, tun_rx).await {
