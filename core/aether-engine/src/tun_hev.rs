@@ -56,15 +56,15 @@ mod platform {
     use std::os::fd::{AsRawFd, RawFd};
 
     const TUNSETIFF: c_uint = 0x400454ca;
-    const IFF_TUN: c_short = 0x0001;
-    const IFF_NO_PI: c_short = 0x1000;
+    const IFF_TUN: CShort = 0x0001;
+    const IFF_NO_PI: CShort = 0x1000;
 
-    type c_short = std::os::raw::c_short;
+    type CShort = std::os::raw::c_short;
 
     #[repr(C)]
     struct IfReq {
         ifrn_name: [u8; 16],
-        ifru_flags: c_short,
+        ifru_flags: CShort,
         pad: [u8; 18],
     }
 
@@ -139,7 +139,7 @@ mod platform {
         use std::process::Command;
 
         // Get interface name from fd
-        let mut ifr = IfReq {
+        let ifr = IfReq {
             ifrn_name: [0u8; 16],
             ifru_flags: 0,
             pad: [0u8; 18],
@@ -364,35 +364,34 @@ pub async fn run_hev_tun(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> Res
         result
     });
 
-    // Wait for shutdown signal or tunnel exit using a different approach
-    let result = tokio::select! {
+    // Wait for shutdown signal or tunnel exit
+    // Use pinning to avoid moving handle
+    tokio::pin!(handle);
+    
+    tokio::select! {
         _ = shutdown => {
             log::info!("[tun_hev] Shutting down hev-socks5-tunnel");
             unsafe { hev_socks5_tunnel_quit(); }
-            // Wait for the task to complete after shutdown
-            Some(handle.await)
+            // Await the pinned handle
+            let _ = handle.await;
         }
-        result = handle => {
-            Some(result)
-        }
-    };
-
-    if let Some(result) = result {
-        match result {
-            Ok(0) => {
-                log::info!("[tun_hev] hev-socks5-tunnel exited normally");
-            }
-            Ok(code) => {
-                log::warn!("[tun_hev] hev-socks5-tunnel exited with code {}", code);
-                return Err(AetherError::Other(format!(
-                    "hev-socks5-tunnel exited with code {}", code
-                )));
-            }
-            Err(e) => {
-                log::error!("[tun_hev] hev-socks5-tunnel task failed: {}", e);
-                return Err(AetherError::Other(format!(
-                    "hev-socks5-tunnel task failed: {}", e
-                )));
+        result = &mut handle => {
+            match result {
+                Ok(0) => {
+                    log::info!("[tun_hev] hev-socks5-tunnel exited normally");
+                }
+                Ok(code) => {
+                    log::warn!("[tun_hev] hev-socks5-tunnel exited with code {}", code);
+                    return Err(AetherError::Other(format!(
+                        "hev-socks5-tunnel exited with code {}", code
+                    )));
+                }
+                Err(e) => {
+                    log::error!("[tun_hev] hev-socks5-tunnel task failed: {}", e);
+                    return Err(AetherError::Other(format!(
+                        "hev-socks5-tunnel task failed: {}", e
+                    )));
+                }
             }
         }
     }
