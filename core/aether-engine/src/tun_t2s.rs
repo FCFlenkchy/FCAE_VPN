@@ -350,7 +350,7 @@ pub struct TunConfig {
 impl Default for TunConfig {
     fn default() -> Self {
         Self {
-            name: "aether-tun0".to_string(),
+            name: "FCAE-VPN".to_string(),
             mtu: 1500,
             ipv4: "198.18.0.1/24".to_string(),
             ipv6: None,
@@ -566,7 +566,7 @@ mod tests {
     #[test]
     fn test_tun_config_defaults() {
         let cfg = TunConfig::default();
-        assert_eq!(cfg.name, "aether-tun0");
+        assert_eq!(cfg.name, "FCAE-VPN");
         assert_eq!(cfg.mtu, 1500);
         assert_eq!(cfg.ipv4, "198.18.0.1/24");
         assert_eq!(cfg.socks_port, 1080);

@@ -1000,12 +1000,17 @@ async fn run_masque_tunnel(
     // Check if we should use tun2socks for TUN (non-Android)
     if use_tun2socks() {
         log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
+        // Read SOCKS port from the env var set by FFI (AETHER_SOCKS = 127.0.0.1:PORT)
+        let socks_port: u16 = std::env::var("AETHER_SOCKS")
+            .ok()
+            .and_then(|s| s.rsplit(':').next()?.parse().ok())
+            .unwrap_or(1080);
         let t2s_cfg = tun_t2s::TunConfig {
-            name: "aether-tun0".to_string(),
+            name: "FCAE-VPN".to_string(),
             mtu: TUNNEL_MTU as u32,
             ipv4: identity.ipv4.clone(),
             ipv6: Some(identity.ipv6.clone()),
-            socks_port: 1080, // Engine's SOCKS5 port - should match AETHER_SOCKS
+            socks_port,
             socks_host: "127.0.0.1".to_string(),
             username: None,
             password: None,
@@ -1378,12 +1383,17 @@ async fn run_wireguard_tunnel(
     // Check if we should use tun2socks for TUN (non-Android)
     if use_tun2socks() {
         log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
+        // Read SOCKS port from the env var set by FFI (AETHER_SOCKS = 127.0.0.1:PORT)
+        let socks_port: u16 = std::env::var("AETHER_SOCKS")
+            .ok()
+            .and_then(|s| s.rsplit(':').next()?.parse().ok())
+            .unwrap_or(1080);
         let t2s_cfg = tun_t2s::TunConfig {
-            name: "aether-tun0".to_string(),
+            name: "FCAE-VPN".to_string(),
             mtu: TUNNEL_MTU as u32,
             ipv4: identity.ipv4.clone(),
             ipv6: Some(identity.ipv6.clone()),
-            socks_port: 1080, // Engine's SOCKS5 port
+            socks_port, // Engine's SOCKS5 port
             socks_host: "127.0.0.1".to_string(),
             username: None,
             password: None,
