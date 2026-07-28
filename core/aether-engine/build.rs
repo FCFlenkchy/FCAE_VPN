@@ -200,7 +200,7 @@ fn build_hev_linux(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
     let build_dir = src.join("build");
     fs::create_dir_all(&build_dir).expect("Failed to create build dir");
 
-    // cmake
+    // cmake configure
     let status = Command::new("cmake")
         .args(["..", "-DCMAKE_BUILD_TYPE=Release"])
         .current_dir(&build_dir)
@@ -210,29 +210,32 @@ fn build_hev_linux(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
         panic!("cmake configure failed with exit: {:?}", status.code());
     }
 
-    // make
-    let status = Command::new("make")
-        .args(["-j", &num_cpus().to_string()])
+    // Use cmake --build (more portable than raw make)
+    let status = Command::new("cmake")
+        .args(["--build", ".", "--config", "Release", "-j", &num_cpus().to_string()])
         .current_dir(&build_dir)
         .status()
-        .expect("Failed to run make");
+        .expect("Failed to run cmake --build");
     if !status.success() {
-        panic!("make failed with exit: {:?}", status.code());
+        // Fallback: try raw make
+        println!("cargo:warning=cmake --build failed, trying make directly...");
+        let status = Command::new("make")
+            .args(["-j", &num_cpus().to_string()])
+            .current_dir(&build_dir)
+            .status()
+            .expect("Failed to run make");
+        if !status.success() {
+            panic!("make failed with exit: {:?}", status.code());
+        }
     }
 
-    // Find the built binary
-    let built = build_dir.join("hev-socks5-tunnel");
-    if !built.exists() {
-        // Check common alternative locations
-        let alt = build_dir.join("src").join("hev-socks5-tunnel");
-        if alt.exists() {
-            fs::copy(&alt, dest).expect("Failed to copy hev-socks5-tunnel binary");
-        } else {
-            panic!("Built hev-socks5-tunnel not found at {}", built.display());
-        }
-    } else {
-        fs::copy(&built, dest).expect("Failed to copy hev-socks5-tunnel binary");
-    }
+    // Find the built binary (search multiple possible locations)
+    let candidates = [
+        build_dir.join("hev-socks5-tunnel"),
+        build_dir.join("src").join("hev-socks5-tunnel"),
+        build_dir.join("Release").join("hev-socks5-tunnel"),
+    ];
+    copy_built_binary(&candidates, dest);
 
     // Strip if possible to reduce size
     let _ = Command::new("strip").arg(dest).status();
