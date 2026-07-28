@@ -137,21 +137,55 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update -qq || true
+          # Full MinGW-w64 toolchain for 64-bit Windows cross-compilation:
+          # - mingw-w64-x86-64-dev: headers + import libs (winsock2.h, libws2_32.a, etc.)
+          # - gcc-mingw-w64-x86-64: C compiler (x86_64-w64-mingw32-gcc)
+          # - g++-mingw-w64-x86-64: C++ compiler (x86_64-w64-mingw32-g++)
+          # - binutils-mingw-w64-x86-64: cross-binutils (ar, ld, ranlib, dlltool, windres)
+          # - mingw-w64-common: common files shared across architectures
+          # - nasm: assembler for .s files in hev-task-system
           sudo apt-get install -y -qq --no-install-recommends \
             mingw-w64-x86-64-dev \
-            g++-mingw-w64-x86-64 \
             gcc-mingw-w64-x86-64 \
+            g++-mingw-w64-x86-64 \
             binutils-mingw-w64-x86-64 \
+            mingw-w64-common \
             nasm
-          # Verify MinGW installation
-          echo "=== MinGW compiler ==="
-          x86_64-w64-mingw32-gcc --version | head -1 || echo "MISSING!"
+          # Verify the installation is complete
+          echo "=== MinGW gcc ==="
+          x86_64-w64-mingw32-gcc --version | head -1 || { echo "FATAL: compiler missing!"; exit 1; }
+          echo "=== MinGW g++ ==="
+          x86_64-w64-mingw32-g++ --version | head -1 || echo "WARNING: g++ missing"
           echo "=== MinGW sysroot ==="
-          x86_64-w64-mingw32-gcc -print-sysroot || echo "NO SYSROOT"
+          SYSROOT=$(x86_64-w64-mingw32-gcc -print-sysroot 2>/dev/null || echo "")
+          echo "sysroot: ${SYSROOT:-none}"
           echo "=== winsock2.h ==="
           find /usr -name "winsock2.h" -path "*mingw*" 2>/dev/null | head -3 || echo "MISSING!"
-          echo "=== ws2_32 lib ==="
+          echo "=== libws2_32.a ==="
           find /usr -name "libws2_32.a" -path "*mingw*" 2>/dev/null | head -3 || echo "MISSING!"
+          echo "=== libiphlpapi.a ==="
+          find /usr -name "libiphlpapi.a" -path "*mingw*" 2>/dev/null | head -3 || echo "MISSING!"
+          echo "=== crt2.o ==="
+          find /usr -name "crt2.o" -path "*mingw*" 2>/dev/null | head -3 || echo "MISSING!"
+          # Quick compile+link test
+          echo "=== Compile+link test ==="
+          cat > /tmp/_mingw_test.c << 'EOF'
+#include <winsock2.h>
+#include <windows.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR c, int n) {
+    WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa); WSACleanup();
+    return 0;
+}
+EOF
+          if x86_64-w64-mingw32-gcc /tmp/_mingw_test.c -o /tmp/_mingw_test.exe -lws2_32 -liphlpapi -static 2>&1; then
+            echo "Compile+link: SUCCESS"
+            rm -f /tmp/_mingw_test.exe
+          else
+            echo "Compile+link: FAILED — cmake build will also fail"
+          fi
+          rm -f /tmp/_mingw_test.c
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
