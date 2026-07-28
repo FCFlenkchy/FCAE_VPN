@@ -425,21 +425,34 @@ fn build_hev_windows_native(src: &PathBuf, dest: &PathBuf, build_dir: &PathBuf) 
         }
     };
 
-    let make_cmd = if use_mingw { "mingw32-make" } else { "cmake" };
-    let num_cpus_str = num_cpus().to_string();
-    let make_args: Vec<&str> = if use_mingw {
-        vec!["-j", &num_cpus_str]
+    // Build using cmake --build (portable) or mingw32-make
+    if use_mingw {
+        let status = Command::new("mingw32-make")
+            .args(["-j", &num_cpus().to_string()])
+            .current_dir(build_dir)
+            .status()
+            .expect("Failed to run mingw32-make");
+        if !status.success() {
+            panic!("mingw32-make failed with exit: {:?}", status.code());
+        }
     } else {
-        vec!["--build", ".", "--config", "Release"]
-    };
-
-    let status = Command::new(make_cmd)
-        .args(&make_args)
-        .current_dir(build_dir)
-        .status()
-        .expect("Failed to run make/cmake --build");
-    if !status.success() {
-        panic!("build failed with exit: {:?}", status.code());
+        let status = Command::new("cmake")
+            .args(["--build", ".", "--config", "Release", "-j", &num_cpus().to_string()])
+            .current_dir(build_dir)
+            .status()
+            .expect("Failed to run cmake --build");
+        if !status.success() {
+            // Fallback: try raw make if cmake --build fails
+            println!("cargo:warning=cmake --build failed, trying make directly...");
+            let status = Command::new("make")
+                .args(["-j", &num_cpus().to_string()])
+                .current_dir(build_dir)
+                .status()
+                .expect("Failed to run make");
+            if !status.success() {
+                panic!("make failed with exit: {:?}", status.code());
+            }
+        }
     }
 
     let candidates = [
