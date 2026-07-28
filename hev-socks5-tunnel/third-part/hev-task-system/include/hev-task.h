@@ -10,7 +10,12 @@
 #ifndef __HEV_TASK_H__
 #define __HEV_TASK_H__
 
+#ifdef _WIN32
+#include <winsock2.h>
+/* Windows doesn't have poll.h; poll() emulation or winsock2 select() is expected */
+#else
 #include <poll.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {

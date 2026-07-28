@@ -10,8 +10,13 @@
 #ifndef __HEV_SOCKS5_H__
 #define __HEV_SOCKS5_H__
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <netinet/in.h>
 #include <sys/socket.h>
+#endif
 
 #include <hev-object.h>
 
