@@ -81,7 +81,7 @@ fn main() {
                     .args(["submodule", "update", "--init", "--recursive", "--depth", "1"])
                     .current_dir(&hev_src)
                     .status();
-                if s.is_err() || s.unwrap().success() {
+                if s.is_ok() && s.unwrap().success() {
                     // git might not be available or succeeded — check again
                 }
                 if !task_sys_header.exists() {
