@@ -221,15 +221,31 @@ endif()
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     enable_language(ASM)
     list(APPEND TASK_SOURCES third-part/hev-task-system/src/arch/x86/hev-task-execute-x86_64.s)
+    set_source_files_properties(
+        third-part/hev-task-system/src/arch/x86/hev-task-execute-x86_64.s
+        PROPERTIES COMPILE_FLAGS "-x assembler-with-cpp"
+    )
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "i386|i486|i586|i686|x86")
     enable_language(ASM)
     list(APPEND TASK_SOURCES third-part/hev-task-system/src/arch/x86/hev-task-execute-x86.s)
+    set_source_files_properties(
+        third-part/hev-task-system/src/arch/x86/hev-task-execute-x86.s
+        PROPERTIES COMPILE_FLAGS "-x assembler-with-cpp"
+    )
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|ARM64|arm64")
     enable_language(ASM)
     list(APPEND TASK_SOURCES third-part/hev-task-system/src/arch/arm/hev-task-execute-aarch64.s)
+    set_source_files_properties(
+        third-part/hev-task-system/src/arch/arm/hev-task-execute-aarch64.s
+        PROPERTIES COMPILE_FLAGS "-x assembler-with-cpp"
+    )
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
     enable_language(ASM)
     list(APPEND TASK_SOURCES third-part/hev-task-system/src/arch/arm/hev-task-execute-arm.s)
+    set_source_files_properties(
+        third-part/hev-task-system/src/arch/arm/hev-task-execute-arm.s
+        PROPERTIES COMPILE_FLAGS "-x assembler-with-cpp"
+    )
 endif()
 
 # ── Combine all sources ─────────────────────────────────────────────────
