@@ -279,6 +279,15 @@ target_compile_definitions(hev-socks5-tunnel PRIVATE
     YAML_VERSION_MAJOR=0
     YAML_VERSION_MINOR=2
     YAML_VERSION_PATCH=5
+    # hev-task-system configs (from configs.mk)
+    CONFIG_STACK_BACKEND=STACK_MMAP
+    CONFIG_STACK_OVERFLOW_DETECTION=1
+    CONFIG_MEMALLOC_SLICE_ALIGN=16
+    CONFIG_MEMALLOC_SLICE_MAX_SIZE=4096
+    CONFIG_MEMALLOC_SLICE_MAX_COUNT=1000
+    CONFIG_SCHED_CLOCK=CLOCK_NONE
+    ENABLE_MEMALLOC_SLICE
+    ENABLE_IO_SPLICE_SYSCALL
 )
 
 # ── Link libraries ──────────────────────────────────────────────────────
