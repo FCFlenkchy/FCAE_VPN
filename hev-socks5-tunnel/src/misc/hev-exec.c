@@ -28,11 +28,12 @@
 
 #include "hev-exec.h"
 
-#if TARGET_OS_TV
+#if TARGET_OS_TV || defined(_WIN32)
 void
 hev_exec_run (const char *script_path, const char *tun_name,
               const char *tun_index, int wait)
 {
+    LOG_E ("hev_exec_run not supported on this platform");
 }
 #else
 static void
