@@ -36,35 +36,17 @@ fn main() {
 
         let hev_src = workspace_root.join("hev-socks5-tunnel");
 
-        // Clone hev-socks5-tunnel if it doesn't exist
-        if !hev_src.join("CMakeLists.txt").exists() {
-            println!("cargo:warning=hev-socks5-tunnel not found, cloning from https://github.com/heiher/hev-socks5-tunnel...");
-            let status = Command::new("git")
-                .args(["clone", "--depth", "1", "https://github.com/heiher/hev-socks5-tunnel.git"])
-                .arg(&hev_src)
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    println!("cargo:warning=hev-socks5-tunnel cloned successfully");
-                }
-                Ok(s) => {
-                    panic!(
-                        "Failed to clone hev-socks5-tunnel (exit {:?}).\n\
-                         Clone it manually:\n\
-                         git clone --depth 1 https://github.com/heiher/hev-socks5-tunnel.git {}",
-                        s.code(),
-                        hev_src.display()
-                    );
-                }
-                Err(e) => {
-                    panic!(
-                        "git not found ({e}). Cannot clone hev-socks5-tunnel.\n\
-                         Clone it manually:\n\
-                         git clone --depth 1 https://github.com/heiher/hev-socks5-tunnel.git {}",
-                        hev_src.display()
-                    );
-                }
-            }
+        // hev-socks5-tunnel is included in-tree.
+        // It must be cloned with --recursive to pull in submodules:
+        //   git clone --depth 1 --recursive https://github.com/heiher/hev-socks5-tunnel.git
+        if !hev_src.join("src").join("hev-main.c").exists() {
+            panic!(
+                "hev-socks5-tunnel not found at {}!\n\
+                 Clone it into the repo root:\n\
+                 git clone --depth 1 --recursive https://github.com/heiher/hev-socks5-tunnel.git {}",
+                hev_src.display(),
+                hev_src.display()
+            );
         }
 
         // Determine binary name based on TARGET OS (not host)
