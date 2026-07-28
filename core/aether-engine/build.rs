@@ -478,14 +478,6 @@ fn copy_built_binary(candidates: &[PathBuf], dest: &PathBuf) {
     );
 }
 
-// ── Build: macOS ───────────────────────────────────────────────────────
-
-fn build_hev_macos(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
-    // macOS build is same as Linux (cmake + make)
-    build_hev_linux(src, dest, _out_dir);
-    println!("cargo:warning=hev-socks5-tunnel built for macOS");
-}
-
 // ── Helpers ────────────────────────────────────────────────────────────
 
 fn num_cpus() -> usize {
