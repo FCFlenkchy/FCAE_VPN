@@ -582,8 +582,11 @@ set(CMAKE_CXX_COMPILER {cross_gpp})
     }
 
     // Use the cross gcc also as assembler (for .s files in hev-task-system)
+    // Force ASM compiler detection like we do for C to avoid cmake probing
     toolchain.push_str(&format!(
         r#"set(CMAKE_ASM_COMPILER {cc})
+set(CMAKE_ASM_COMPILER_FORCED 1)
+set(CMAKE_ASM_COMPILER_WORKS 1)
 "#
     ));
 
@@ -619,14 +622,19 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
     ];
     let cmake_args_refs: Vec<&str> = cmake_args.iter().map(|s| s.as_str()).collect();
 
-    let status = Command::new("cmake")
+    let cmake_output = Command::new("cmake")
         .args(&cmake_args_refs)
         .current_dir(build_dir)
-        .status();
-    match status {
-        Ok(s) if s.success() => {},
-        Ok(s) => {
-            println!("cargo:warning=cmake configure failed with exit {:?} — skipping hev-socks5-tunnel build", s.code());
+        .output();
+    match &cmake_output {
+        Ok(out) if out.status.success() => {},
+        Ok(out) => {
+            println!("cargo:warning=cmake configure failed with exit {:?}", out.status.code());
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            for line in stderr.lines().rev().take(20) {
+                println!("cargo:warning=[cmake] {}", line);
+            }
+            println!("cargo:warning=hev-socks5-tunnel configure failed — skipping build");
             let _ = fs::remove_dir_all(build_dir);
             return;
         }
@@ -637,16 +645,25 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
         }
     }
 
-    // ── Build using cmake --build (do NOT fallback to raw make) ──────────
-    let status = Command::new("cmake")
-        .args(["--build", ".", "--config", "Release", "-j", &num_cpus().to_string()])
+    // ── Build using cmake --build with verbose output on failure ────────
+    let build_output = Command::new("cmake")
+        .args(["--build", ".", "--config", "Release", "-j", &num_cpus().to_string(), "--verbose"])
         .current_dir(build_dir)
-        .status();
+        .output();
 
-    let build_ok = match status {
-        Ok(s) if s.success() => true,
-        Ok(s) => {
-            println!("cargo:warning=cmake --build failed with exit {:?}", s.code());
+    let build_ok = match &build_output {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            println!("cargo:warning=cmake --build failed with exit {:?}", out.status.code());
+            // Print the last 40 lines of stderr+stdout for diagnostics
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let combined = format!("{}\n{}", stdout, stderr);
+            let lines: Vec<&str> = combined.lines().collect();
+            let start = if lines.len() > 40 { lines.len() - 40 } else { 0 };
+            for line in &lines[start..] {
+                println!("cargo:warning=[cmake] {}", line);
+            }
             false
         }
         Err(e) => {
