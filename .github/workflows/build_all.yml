@@ -86,6 +86,11 @@ jobs:
 
           # --- hev-task-system/include/hev-task-io-socket.h (sys/socket.h) ---
           sed -i 's|#include <sys/socket.h>|#ifdef _WIN32\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#else\n#include <sys/socket.h>\n#endif|' third-part/hev-task-system/include/hev-task-io-socket.h
+          # Patch struct msghdr for MinGW (often missing despite ws2tcpip.h)
+          sed -i 's|#endif$|#endif\n#if !defined(_WS2DEF_) || defined(__MINGW32__)\nstruct msghdr { void *msg_name; int msg_namelen; struct iovec *msg_iov; size_t msg_iovlen; void *msg_control; size_t msg_controllen; int msg_flags; };\n#endif|' third-part/hev-task-system/include/hev-task-io-socket.h
+          # Same for src/ copy
+          sed -i 's|#include <sys/socket.h>|#ifdef _WIN32\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#else\n#include <sys/socket.h>\n#endif|' third-part/hev-task-system/src/lib/io/socket/hev-task-io-socket.h
+          sed -i 's|#endif$|#endif\n#if !defined(_WS2DEF_) || defined(__MINGW32__)\nstruct msghdr { void *msg_name; int msg_namelen; struct iovec *msg_iov; size_t msg_iovlen; void *msg_control; size_t msg_controllen; int msg_flags; };\n#endif|' third-part/hev-task-system/src/lib/io/socket/hev-task-io-socket.h
 
           # --- hev-socks5-core/include/hev-socks5.h (netinet/in.h) ---
           sed -i 's|#include <netinet/in.h>|#ifdef _WIN32\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#else\n#include <netinet/in.h>\n#endif|' src/core/include/hev-socks5.h

@@ -16,9 +16,8 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
-/* On MinGW, struct msghdr may not be available even with ws2tcpip.h.
-   Provide a minimal definition if needed. */
-#ifndef _WS2DEF_
+/* On MinGW, struct msghdr may not be exposed. Provide a fallback. */
+#if !defined(_WS2DEF_) || defined(__MINGW32__)
 struct msghdr {
     void        *msg_name;
     int          msg_namelen;
