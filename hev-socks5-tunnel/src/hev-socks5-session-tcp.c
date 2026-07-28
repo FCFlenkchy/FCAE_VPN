@@ -12,6 +12,10 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
+/* Windows uses SD_SEND instead of SHUT_WR */
+#ifndef SHUT_WR
+#define SHUT_WR SD_SEND
+#endif
 #endif
 
 #include <lwip/tcp.h>
@@ -65,7 +69,16 @@ tcp_splice_f (HevSocks5SessionTCP *self)
     }
 
     if (iovc) {
+#ifdef _WIN32
+        /* Windows has no writev; use send on the first iovec buffer */
+        ssize_t s = send (HEV_SOCKS5 (self)->fd, iov[0].iov_base, iov[0].iov_len, 0);
+        if (s > 0 && iovc > 1) {
+            ssize_t s2 = send (HEV_SOCKS5 (self)->fd, iov[1].iov_base, iov[1].iov_len, 0);
+            if (s2 > 0) s += s2;
+        }
+#else
         ssize_t s = writev (HEV_SOCKS5 (self)->fd, iov, iovc);
+#endif
         if (0 >= s) {
             if ((0 > s) && (EAGAIN == errno))
                 res = 0;

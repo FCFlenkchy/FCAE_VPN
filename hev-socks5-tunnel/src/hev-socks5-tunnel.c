@@ -12,8 +12,8 @@
 #include <string.h>
 #include <stdatomic.h>
 #ifdef _WIN32
-#include <windows.h>
 #include <winsock2.h>
+#include <windows.h>
 #include <ws2tcpip.h>
 /* Windows lacks ioctl() on sockets -> use ioctlsocket() with cast */
 #define ioctl(s, cmd, arg) ioctlsocket(s, (long)(cmd), (u_long *)(arg))
