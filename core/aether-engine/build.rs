@@ -314,12 +314,19 @@ set(CMAKE_C_COMPILER_WORKS 1)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 "#
     );
-    // Add cross-linker if available
+    // Add cross-linker, ar, ranlib, and ASM compiler if available
     let toolchain_content = if cmd_exists(&cross_ld) {{
         format!("{toolchain_content}set(CMAKE_LINKER {cross_ld})\n")
     }} else {{
         toolchain_content
     }};
+    let toolchain_content = if cmd_exists(&cross_ar) {{
+        format!("{toolchain_content}set(CMAKE_AR {cross_ar})\n")
+    }} else {{
+        toolchain_content
+    }};
+    // Use the cross gcc also as assembler (for .s files)
+    let toolchain_content = format!("{toolchain_content}set(CMAKE_ASM_COMPILER {cc})\nset(CMAKE_ASM_COMPILER_FORCED 1)\nset(CMAKE_ASM_COMPILER_WORKS 1)\n");
     let _ = fs::write(&toolchain_file, toolchain_content);
 
     let mut cmake_args: Vec<String> = vec![
