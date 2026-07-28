@@ -169,16 +169,7 @@ jobs:
           find /usr -name "crt2.o" -path "*mingw*" 2>/dev/null | head -3 || echo "MISSING!"
           # Quick compile+link test
           echo "=== Compile+link test ==="
-          cat > /tmp/_mingw_test.c << 'EOF'
-#include <winsock2.h>
-#include <windows.h>
-#include <ws2tcpip.h>
-#include <iphlpapi.h>
-int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR c, int n) {
-    WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa); WSACleanup();
-    return 0;
-}
-EOF
+          printf '#include <winsock2.h>\n#include <windows.h>\n#include <ws2tcpip.h>\n#include <iphlpapi.h>\nint WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR c, int n) { WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa); WSACleanup(); return 0; }\n' > /tmp/_mingw_test.c
           if x86_64-w64-mingw32-gcc /tmp/_mingw_test.c -o /tmp/_mingw_test.exe -lws2_32 -liphlpapi -static 2>&1; then
             echo "Compile+link: SUCCESS"
             rm -f /tmp/_mingw_test.exe
