@@ -12,13 +12,13 @@ use tokio::sync::oneshot;
 
 use crate::error::{AetherError, Result};
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), hevsocks5_available))]
 static HEVSOCKS5_BYTES: &[u8] = include_bytes!(env!("HEVSOCKS5_EMBEDDED"));
 
 #[cfg(all(not(target_os = "android"), wintun_embedded))]
 static WINTUN_DLL_BYTES: &[u8] = include_bytes!(env!("WINTUN_EMBEDDED"));
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), hevsocks5_available))]
 fn get_hevsocks5_path() -> Result<std::path::PathBuf> {
     use std::io::Write;
     if let Ok(path) = std::env::var("HEVSOCKS5_BIN") {
@@ -98,14 +98,20 @@ fn wintun_dll_expected_size() -> usize {
     #[cfg(not(wintun_embedded))] { 0 }
 }
 
+#[cfg(all(not(target_os = "android"), not(hevsocks5_available)))]
+fn get_hevsocks5_path() -> Result<std::path::PathBuf> {
+    Err(AetherError::Other("hev-socks5-tunnel binary not embedded (build skipped)".into()))
+}
+
 #[cfg(target_os = "android")]
 fn get_hevsocks5_path() -> Result<std::path::PathBuf> {
     Err(AetherError::Other("hev-socks5-tunnel not available on Android".into()))
 }
 
 pub fn is_available() -> bool {
-    #[cfg(target_os = "android")] return false;
-    #[cfg(not(target_os = "android"))] get_hevsocks5_path().is_ok()
+    #[cfg(target_os = "android")] { return false; }
+    #[cfg(not(hevsocks5_available))] { return false; }
+    #[cfg(all(not(target_os = "android"), hevsocks5_available))] { get_hevsocks5_path().is_ok() }
 }
 
 #[cfg(target_os = "windows")]
@@ -206,7 +212,7 @@ fn configure_windows_tun(cfg: &TunConfig) {
     let _ = run("netsh", &["interface","ip","set","dns",name,"static","1.1.1.1"]);
     let name_h = name.replace('_', "-");
     if let Ok(o) = run("powershell", &["-NoProfile","-Command", &format!(
-        "$a=Get-NetAdapter -Name '{}','{}' -ErrorAction SilentlyContinue|Select -First 1;if($a){$a.ifIndex}", name, name_h)])
+        "$a=Get-NetAdapter -Name '{{}}','{{}}' -ErrorAction SilentlyContinue|Select -First 1;if($a){{$a.ifIndex}}", name, name_h)])
     {
         if let Ok(idx) = String::from_utf8_lossy(&o.stdout).trim().parse::<u32>() {
             let _ = run("netsh", &["interface","ipv4","set","interface", &idx.to_string(), "metric=5"]);
@@ -320,7 +326,8 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
                 const NO_WIN: u32 = 0x08000000;
                 for f in [false, true] {
                     let mut c = Command::new("taskkill"); c.creation_flags(NO_WIN);
-                    let mut args = vec!["/PID", &pid.to_string(), "/T"];
+                    let pid_str = pid.to_string();
+                    let mut args = vec!["/PID", &pid_str, "/T"];
                     if f { args.push("/F"); }
                     let _ = c.args(&args).stdout(Stdio::null()).stderr(Stdio::null()).status();
                 }
@@ -347,7 +354,8 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         use std::os::windows::process::CommandExt;
         const NO_WIN: u32 = 0x08000000;
         let mut c = Command::new("taskkill"); c.creation_flags(NO_WIN);
-        let _ = c.args(["/PID", &pid.to_string(), "/F", "/T"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let pid_str2 = pid.to_string();
+        let _ = c.args(["/PID", &pid_str2, "/F", "/T"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
         cleanup_windows_tun(&cfg);
     }
     #[cfg(target_os = "linux")]
