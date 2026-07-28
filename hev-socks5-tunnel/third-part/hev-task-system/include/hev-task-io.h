@@ -12,11 +12,14 @@
 
 #ifdef _WIN32
 #include <io.h>
+#ifndef _IOVEC_DEFINED
+#define _IOVEC_DEFINED
 /* struct iovec is not available on Windows; provide a minimal definition */
 struct iovec {
     void  *iov_base;
     size_t iov_len;
 };
+#endif
 #else
 #include <sys/uio.h>
 #endif

@@ -12,9 +12,15 @@
 #include <string.h>
 #include <stdatomic.h>
 #ifdef _WIN32
-#include <winsock2.h>
 #include <windows.h>
-/* ioctl() and FIONREAD etc. are in winsock2.h */
+#include <winsock2.h>
+#include <ws2tcpip.h>
+/* Windows lacks: ioctl() on sockets -> use ioctlsocket() */
+#define ioctl(s, cmd, arg) ioctlsocket(s, cmd, arg)
+/* Windows lacks socketpair() and PF_LOCAL */
+/* Windows lacks SIGPIPE */
+#define SIGPIPE 0
+#define SIG_IGN  ((void (*)(int))1)
 #else
 #include <sys/ioctl.h>
 #endif
@@ -536,7 +542,28 @@ event_task_init (void)
     int nonblock = 1;
     int res;
 
+#ifdef _WIN32
+    /* Windows has no socketpair; use a TCP loopback pair */
+    {
+        SOCKET listener = socket (AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in addr;
+        int addrlen = sizeof (addr);
+        memset (&addr, 0, sizeof (addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = inet_addr ("127.0.0.1");
+        addr.sin_port = 0;
+        bind (listener, (struct sockaddr *)&addr, sizeof (addr));
+        listen (listener, 1);
+        getsockname (listener, (struct sockaddr *)&addr, &addrlen);
+        event_fds[1] = socket (AF_INET, SOCK_STREAM, 0);
+        connect (event_fds[1], (struct sockaddr *)&addr, sizeof (addr));
+        event_fds[0] = accept (listener, NULL, NULL);
+        closesocket (listener);
+        res = (event_fds[0] != INVALID_SOCKET && event_fds[1] != INVALID_SOCKET) ? 0 : -1;
+    }
+#else
     res = socketpair (PF_LOCAL, SOCK_STREAM, 0, event_fds);
+#endif
     if (res < 0) {
         LOG_E ("socks5 tunnel event");
         return -1;

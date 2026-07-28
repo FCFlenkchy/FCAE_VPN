@@ -10,6 +10,10 @@
 #include <errno.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
+
 #include <lwip/tcp.h>
 
 #include <hev-task.h>
@@ -91,7 +95,17 @@ tcp_splice_b (HevSocks5SessionTCP *self)
 
     iovc = hev_ring_buffer_writing (self->buffer, iov);
     if (iovc) {
+#ifdef _WIN32
+        /* Windows has no readv; use recv on the first iovec buffer */
+        ssize_t s = recv (HEV_SOCKS5 (self)->fd, iov[0].iov_base, iov[0].iov_len, 0);
+        if (s > 0 && iovc > 1) {
+            /* Try reading more into second buffer if available */
+            ssize_t s2 = recv (HEV_SOCKS5 (self)->fd, iov[1].iov_base, iov[1].iov_len, 0);
+            if (s2 > 0) s += s2;
+        }
+#else
         ssize_t s = readv (HEV_SOCKS5 (self)->fd, iov, iovc);
+#endif
         if (0 >= s) {
             if ((0 > s) && (EAGAIN == errno))
                 res = 0;

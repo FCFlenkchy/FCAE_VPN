@@ -16,7 +16,10 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <winsock2.h>
+#ifndef _IOVEC_DEFINED
+#define _IOVEC_DEFINED
 struct iovec { void *iov_base; size_t iov_len; };
+#endif
 #else
 #include <fcntl.h>
 #include <unistd.h>

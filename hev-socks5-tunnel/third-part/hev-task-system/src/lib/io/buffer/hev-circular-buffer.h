@@ -12,7 +12,10 @@
 
 #ifdef _WIN32
 #include <stddef.h>
+#ifndef _IOVEC_DEFINED
+#define _IOVEC_DEFINED
 struct iovec { void *iov_base; size_t iov_len; };
+#endif
 #else
 #include <sys/uio.h>
 #include <sys/types.h>
