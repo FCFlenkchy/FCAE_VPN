@@ -1,9 +1,10 @@
-//! TUN implementation using tun2socks (https://github.com/xjasonlyu/tun2socks) as the engine
-//! 
-//! tun2socks is invoked as a subprocess with appropriate configuration.
-//! 
-//! Flow: tun2socks (TUN) → Engine (SOCKS5 proxy) → Internet
-//! 
+//! TUN implementation using hev-socks5-tunnel (https://github.com/heiher/hev-socks5-tunnel)
+//! as the TUN engine.
+//!
+//! hev-socks5-tunnel is invoked as a subprocess with appropriate configuration.
+//!
+//! Flow: hev-socks5-tunnel (TUN) → Engine (SOCKS5 proxy) → Internet
+//!
 //! The Android implementation in tun.rs remains untouched.
 
 use std::process::{Command, Stdio};
@@ -11,64 +12,45 @@ use tokio::sync::oneshot;
 
 use crate::error::{AetherError, Result};
 
-// Embed tun2socks binary at compile time
 #[cfg(not(target_os = "android"))]
-static TUN2SOCKS_BYTES: &[u8] = include_bytes!(env!("TUN2SOCKS_EMBEDDED"));
+static HEVSOCKS5_BYTES: &[u8] = include_bytes!(env!("HEVSOCKS5_EMBEDDED"));
 
-// Embed wintun.dll on Windows
 #[cfg(all(not(target_os = "android"), wintun_embedded))]
 static WINTUN_DLL_BYTES: &[u8] = include_bytes!(env!("WINTUN_EMBEDDED"));
 
-/// Extract and return path to the embedded tun2socks binary.
-/// On first call, writes the binary to a temp file and returns the path.
-/// On Windows, also ensures wintun.dll is extracted to the same directory.
 #[cfg(not(target_os = "android"))]
-fn get_tun2socks_path() -> Result<std::path::PathBuf> {
+fn get_hevsocks5_path() -> Result<std::path::PathBuf> {
     use std::io::Write;
-
-    // Check TUN2SOCKS_BIN override first
-    if let Ok(path) = std::env::var("TUN2SOCKS_BIN") {
+    if let Ok(path) = std::env::var("HEVSOCKS5_BIN") {
         let p = std::path::PathBuf::from(&path);
-        if p.exists() {
-            return Ok(p);
-        }
+        if p.exists() { return Ok(p); }
     }
-
-    // Use a fixed temp path so we don't recreate every time
     let dir = std::env::temp_dir().join("fcaevpn");
     std::fs::create_dir_all(&dir).ok();
-
     #[cfg(target_os = "windows")]
-    let name = "tun2socks.exe";
+    let name = "hev-socks5-tunnel.exe";
     #[cfg(not(target_os = "windows"))]
-    let name = "tun2socks";
-
+    let name = "hev-socks5-tunnel";
     let dest = dir.join(name);
-
-    // Only write if not already present (or size mismatch)
     let needs_write = match std::fs::metadata(&dest) {
-        Ok(m) => m.len() != TUN2SOCKS_BYTES.len() as u64,
+        Ok(m) => m.len() != HEVSOCKS5_BYTES.len() as u64,
         Err(_) => true,
     };
-
     if needs_write {
         let mut f = std::fs::File::create(&dest)
-            .map_err(|e| AetherError::Other(format!("Failed to create tun2socks binary: {e}")))?;
-        f.write_all(TUN2SOCKS_BYTES)
-            .map_err(|e| AetherError::Other(format!("Failed to write tun2socks binary: {e}")))?;
-
-        // Set executable permission on Unix
+            .map_err(|e| AetherError::Other(format!("Failed to create hev-socks5-tunnel binary: {e}")))?;
+        f.write_all(HEVSOCKS5_BYTES)
+            .map_err(|e| AetherError::Other(format!("Failed to write hev-socks5-tunnel binary: {e}")))?;
         #[cfg(not(target_os = "windows"))]
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&dest)
-                .map_err(|e| AetherError::Other(format!("stat: {e}")))?.permissions();
+                .map_err(|e| AetherError::Other(format!("stat: {e}")))?
+                .permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(&dest, perms).ok();
         }
     }
-
-    // ── Windows: ensure wintun.dll is in the same directory ─────────
     #[cfg(target_os = "windows")]
     {
         let wintun_dest = dir.join("wintun.dll");
@@ -84,894 +66,292 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
                     .map_err(|e| AetherError::Other(format!("Failed to create wintun.dll: {e}")))?;
                 f.write_all(WINTUN_DLL_BYTES)
                     .map_err(|e| AetherError::Other(format!("Failed to write wintun.dll: {e}")))?;
-                log::info!("[tun_t2s] wintun.dll extracted (embedded) to: {}", wintun_dest.display());
             }
             #[cfg(not(wintun_embedded))]
             {
-                // Fallback: try to find wintun.dll from common locations at runtime
                 let mut found = false;
-                let candidate_paths = [
+                for candidate in &[
                     std::path::PathBuf::from("C:\\Windows\\System32\\wintun.dll"),
-                    std::env::current_exe().unwrap_or_default().parent().unwrap_or(std::path::Path::new(".")).join("wintun.dll"),
+                    std::env::current_exe().unwrap_or_default().parent()
+                        .unwrap_or(std::path::Path::new(".")).join("wintun.dll"),
                     std::path::PathBuf::from("wintun.dll"),
-                ];
-                for candidate in &candidate_paths {
+                ] {
                     if candidate.exists() {
-                        log::info!("[tun_t2s] Found wintun.dll at: {}", candidate.display());
-                        match std::fs::copy(candidate, &wintun_dest) {
-                            Ok(_) => {
-                                log::info!("[tun_t2s] wintun.dll copied from {} to: {}", candidate.display(), wintun_dest.display());
-                                found = true;
-                                break;
-                            }
-                            Err(e) => {
-                                log::warn!("[tun_t2s] Failed to copy wintun.dll from {}: {}", candidate.display(), e);
-                            }
-                        }
+                        if std::fs::copy(candidate, &wintun_dest).is_ok() { found = true; break; }
                     }
                 }
                 if !found {
-                    log::error!("[tun_t2s] wintun.dll NOT found! TUN will fail on Windows. Download wintun.dll from https://www.wintun.net/ and place it in: {}", dir.display());
                     return Err(AetherError::Other(format!(
-                        "wintun.dll not found. Please download it from https://www.wintun.net/ and place it in: {}",
+                        "wintun.dll not found. Download from https://www.wintun.net/ and place in: {}",
                         dir.display()
                     )));
                 }
             }
         }
     }
-
     Ok(dest)
 }
 
-/// Returns the expected size of the embedded wintun.dll bytes (0 if not embedded).
 #[cfg(target_os = "windows")]
 fn wintun_dll_expected_size() -> usize {
-    #[cfg(wintun_embedded)]
-    { WINTUN_DLL_BYTES.len() }
-    #[cfg(not(wintun_embedded))]
-    { 0 }
+    #[cfg(wintun_embedded)] { WINTUN_DLL_BYTES.len() }
+    #[cfg(not(wintun_embedded))] { 0 }
 }
 
 #[cfg(target_os = "android")]
-fn get_tun2socks_path() -> Result<std::path::PathBuf> {
-    Err(AetherError::Other("tun2socks not available on Android".into()))
+fn get_hevsocks5_path() -> Result<std::path::PathBuf> {
+    Err(AetherError::Other("hev-socks5-tunnel not available on Android".into()))
 }
 
-/// Check if tun2socks is available
 pub fn is_available() -> bool {
-    #[cfg(target_os = "android")]
-    return false;
-
-    #[cfg(not(target_os = "android"))]
-    get_tun2socks_path().is_ok()
+    #[cfg(target_os = "android")] return false;
+    #[cfg(not(target_os = "android"))] get_hevsocks5_path().is_ok()
 }
 
-/// Force-kill any running tun2socks processes and clean up TUN adapters.
-/// This is the emergency cleanup — call from outside the tokio runtime
-/// (e.g., from aether_stop / aether_free) to ensure cleanup even when
-/// the runtime is being torn down and can't run async tasks.
 #[cfg(target_os = "windows")]
 pub fn force_cleanup_windows(name: &str) {
     use std::os::windows::process::CommandExt;
-    use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    // Kill all tun2socks processes
-    log::info!("[tun_t2s] Force-killing tun2socks processes");
-    let mut c = Command::new("taskkill");
-    c.creation_flags(CREATE_NO_WINDOW);
-    let _ = c.args(["/IM", "tun2socks.exe", "/F", "/T"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    // Also kill by name with wildcard to catch renamed instances
-    let mut c = Command::new("taskkill");
-    c.creation_flags(CREATE_NO_WINDOW);
-    let _ = c.args(["/FI", "IMAGENAME eq tun2socks.exe", "/F", "/T"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    // Clean up the TUN adapter — remove routes and delete interface
-    log::info!("[tun_t2s] Force-cleaning TUN adapter '{}'", name);
+    log::info!("[tun_t2s] Force-killing hev-socks5-tunnel processes");
+    for args in [vec!["/IM", "hev-socks5-tunnel.exe", "/F", "/T"],
+                  vec!["/FI", "IMAGENAME eq hev-socks5-tunnel.exe", "/F", "/T"]] {
+        let mut c = Command::new("taskkill");
+        c.creation_flags(CREATE_NO_WINDOW);
+        let _ = c.args(&args).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
     cleanup_adapter_by_name(name);
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn force_cleanup_windows(_name: &str) {
-    // No-op on non-Windows
-}
+pub fn force_cleanup_windows(_name: &str) {}
 
-/// Clean up a named TUN adapter — removes routes, resets DNS, deletes interface.
-/// Standalone function callable without a TunConfig.
 #[cfg(target_os = "windows")]
 fn cleanup_adapter_by_name(name: &str) {
     use std::os::windows::process::CommandExt;
-    use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
+    let run = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
         let mut c = Command::new(cmd);
         c.creation_flags(CREATE_NO_WINDOW);
         c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     };
-
-    // Use PowerShell to remove ALL adapters whose name starts with this name
-    // (handles "FCAE VPN", "FCAE VPN 1", "FCAE VPN 2", etc.)
-    // Also try with hyphen replacement since Windows/tun2socks may convert underscores to hyphens
-    // Remove-NetAdapter is the proper way to delete Wintun adapters from Windows
-    let name_hyphen = name.replace('_', "-");
-    let name_underscore = name.replace('-', "_");
-    let ps_script = format!(
-        "Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue; Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue",
-        name, name_hyphen
-    );
-    let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_script]);
-    match output {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            if !stdout.trim().is_empty() {
-                log::info!("[tun_t2s] PowerShell Remove-NetAdapter: {}", stdout.trim());
-            }
-        }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            if !stderr.trim().is_empty() {
-                log::debug!("[tun_t2s] PowerShell Remove-NetAdapter: {}", stderr.trim());
-            }
-        }
-        Err(e) => log::debug!("[tun_t2s] PowerShell Remove-NetAdapter error: {}", e),
-    }
-
-    // Also try netsh as fallback for older Windows versions
-    // Try both underscore and hyphen versions
-    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", name]);
-    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", &name_hyphen]);
-    if name_hyphen != name_underscore {
-        let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", &name_underscore]);
-    }
+    let name_h = name.replace('_', "-");
+    let name_u = name.replace('-', "_");
+    let _ = run("powershell", &["-NoProfile", "-Command", &format!(
+        "Get-NetAdapter -Name '{}*','{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false", name, name_h)]);
+    let _ = run("netsh", &["interface", "ip", "delete", "interface", name]);
+    let _ = run("netsh", &["interface", "ip", "delete", "interface", &name_h]);
+    if name_h != name_u { let _ = run("netsh", &["interface", "ip", "delete", "interface", &name_u]); }
     for i in 2..20 {
-        let numbered = format!("{} {}", name, i);
-        let numbered_hyphen = format!("{} {}", name_hyphen, i);
-        let output = run_silent("netsh", &["interface", "ip", "delete", "interface", &numbered]);
-        match output {
-            Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh deleted '{}'", numbered),
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                if stderr.contains("No matching") {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-        let output = run_silent("netsh", &["interface", "ip", "delete", "interface", &numbered_hyphen]);
-        match output {
-            Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh deleted '{}'", numbered_hyphen),
-            Ok(_) => {}
-            Err(_) => {}
-        }
+        let num = format!("{} {}", name, i);
+        if !run("netsh", &["interface", "ip", "delete", "interface", &num]).map(|o| o.status.success()).unwrap_or(false) { break; }
     }
-
-    log::info!("[tun_t2s] TUN adapter cleanup complete for '{}'", name);
 }
 
 #[cfg(not(target_os = "windows"))]
 fn cleanup_adapter_by_name(_name: &str) {}
 
-// ============================================================================
-// Platform-specific TUN device creation
-// ============================================================================
-
-#[cfg(target_os = "linux")]
-mod platform {
-    use super::*;
-    use std::os::raw::c_uint;
-    use std::os::fd::RawFd;
-
-    pub fn create_tun(name: &str) -> Result<RawFd> {
-        use std::fs::OpenOptions;
-        use std::os::fd::AsRawFd;
-
-        const TUNSETIFF: c_uint = 0x400454ca;
-        const IFF_TUN: std::os::raw::c_short = 0x0001;
-        const IFF_NO_PI: std::os::raw::c_short = 0x1000;
-
-        #[repr(C)]
-        struct IfReq {
-            ifrn_name: [u8; 16],
-            ifru_flags: std::os::raw::c_short,
-            pad: [u8; 18],
-        }
-
-        let dev = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/net/tun")
-            .map_err(|e| AetherError::Other(format!("Failed to open /dev/net/tun: {e}")))?;
-
-        let fd = dev.as_raw_fd();
-
-        let mut ifr = IfReq {
-            ifrn_name: [0u8; 16],
-            ifru_flags: IFF_TUN | IFF_NO_PI,
-            pad: [0u8; 18],
-        };
-
-        let name_bytes = name.as_bytes();
-        let copy_len = name_bytes.len().min(15);
-        ifr.ifrn_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-
-        let ret = unsafe {
-            libc::ioctl(fd, TUNSETIFF as u64, &ifr as *const IfReq)
-        };
-
-        if ret < 0 {
-            return Err(AetherError::Other(format!(
-                "ioctl TUNSETIFF failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        let dup_fd = unsafe { libc::dup(fd) };
-        if dup_fd < 0 {
-            return Err(AetherError::Other(format!(
-                "Failed to dup TUN fd: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        let flags = unsafe { libc::fcntl(dup_fd, libc::F_GETFL, 0) };
-        if flags < 0 {
-            unsafe { libc::close(dup_fd) };
-            return Err(AetherError::Other(format!(
-                "fcntl F_GETFL failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        let ret = unsafe { libc::fcntl(dup_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-        if ret < 0 {
-            unsafe { libc::close(dup_fd) };
-            return Err(AetherError::Other(format!(
-                "fcntl F_SETFL failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        log::info!("[tun_t2s] Linux TUN device '{}' created (fd={})", name, dup_fd);
-        Ok(dup_fd)
-    }
-
-    pub fn configure_tun(fd: RawFd, ipv4: &str, ipv6: Option<&str>) -> Result<()> {
-        use std::process::Command as StdCommand;
-
-        let ifr = super::IfReq {
-            ifrn_name: [0u8; 16],
-            ifru_flags: 0,
-            pad: [0u8; 18],
-        };
-        let ret = unsafe { libc::ioctl(fd, 0x400454ca, &ifr as *const super::IfReq) };
-        if ret < 0 {
-            log::warn!("[tun_t2s] Failed to get interface name from fd");
-            return Err(AetherError::Other("Failed to get interface name".into()));
-        }
-        let name = String::from_utf8_lossy(&ifr.ifrn_name)
-            .trim_matches('\0')
-            .to_string();
-
-        log::info!("[tun_t2s] Configuring interface '{}' with IP {}", name, ipv4);
-
-        let status = StdCommand::new("ip")
-            .args(["addr", "add", ipv4, "dev", &name])
-            .status();
-        if let Ok(status) = status {
-            if !status.success() {
-                log::warn!("[tun_t2s] Failed to assign IPv4 to {}: {:?}", name, status);
-            }
-        }
-
-        if let Some(ipv6_addr) = ipv6 {
-            let status = StdCommand::new("ip")
-                .args(["-6", "addr", "add", ipv6_addr, "dev", &name])
-                .status();
-            if let Ok(status) = status {
-                if !status.success() {
-                    log::warn!("[tun_t2s] Failed to assign IPv6 to {}: {:?}", name, status);
-                }
-            }
-        }
-
-        let status = StdCommand::new("ip")
-            .args(["link", "set", &name, "up"])
-            .status();
-        if let Ok(status) = status {
-            if !status.success() {
-                log::warn!("[tun_t2s] Failed to bring up {}: {:?}", name, status);
-            }
-        }
-
-        let status = StdCommand::new("sysctl")
-            .args(["-w", &format!("net.ipv4.conf.{}.rp_filter=0", name)])
-            .status();
-        if let Ok(status) = status {
-            if !status.success() {
-                log::debug!("[tun_t2s] Failed to disable rp_filter for {}", name);
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn cleanup_tun(fd: RawFd) {
-        if fd >= 0 {
-            unsafe { libc::close(fd) };
-            log::debug!("[tun_t2s] Closed TUN fd {}", fd);
-        }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-mod platform {
-    use super::*;
-    use std::os::raw::c_int;
-
-    pub fn create_tun(_name: &str) -> Result<c_int> {
-        Err(AetherError::Other(
-            format!(
-                "TUN not supported on this platform: {}",
-                std::env::consts::OS
-            )
-        ))
-    }
-
-    pub fn configure_tun(_fd: c_int, _ipv4: &str, _ipv6: Option<&str>) -> Result<()> {
-        Err(AetherError::Other("TUN not supported on this platform".into()))
-    }
-
-    pub fn cleanup_tun(_fd: c_int) {}
-}
-
-// ============================================================================
-// Helper struct for ioctl (used in platform::configure_tun above)
-// ============================================================================
-
-#[repr(C)]
-struct IfReq {
-    ifrn_name: [u8; 16],
-    ifru_flags: std::os::raw::c_short,
-    pad: [u8; 18],
-}
-
-// ============================================================================
-// Public API
-// ============================================================================
-
-/// Configuration for the TUN device
 #[derive(Clone)]
 pub struct TunConfig {
-    pub name: String,
-    pub mtu: u32,
-    pub ipv4: String,
-    pub ipv6: Option<String>,
-    pub socks_port: u16,
-    pub socks_host: String,
-    pub username: Option<String>,
-    pub password: Option<String>,
-    /// IP of the tunnel endpoint — must be excluded from TUN routes to avoid routing loops
-    pub tunnel_peer_ip: Option<String>,
+    pub name: String, pub mtu: u32, pub ipv4: String, pub ipv6: Option<String>,
+    pub socks_port: u16, pub socks_host: String, pub username: Option<String>,
+    pub password: Option<String>, pub tunnel_peer_ip: Option<String>,
 }
 
 impl Default for TunConfig {
     fn default() -> Self {
-        Self {
-            name: "FCAE_VPN".to_string(),
-            mtu: 1500,
-            ipv4: "198.18.0.1/24".to_string(),
-            ipv6: None,
-            socks_port: 1819,
-            socks_host: "127.0.0.1".to_string(),
-            username: None,
-            password: None,
-            tunnel_peer_ip: None,
-        }
+        Self { name: "FCAE_VPN".into(), mtu: 1500, ipv4: "198.18.0.1/24".into(),
+               ipv6: None, socks_port: 1819, socks_host: "127.0.0.1".into(),
+               username: None, password: None, tunnel_peer_ip: None }
     }
 }
 
-/// Check if the current process has administrator privileges on Windows.
 #[cfg(target_os = "windows")]
 fn is_admin() -> bool {
-    // Use Win32 CheckTokenMembership to check if running as admin
-    // This avoids needing the "windows" crate by using a minimal FFI call
     extern "system" {
         fn GetCurrentProcess() -> isize;
-        fn OpenProcessToken(process_handle: isize, desired_access: u32, token_handle: *mut isize) -> i32;
-        fn GetTokenInformation(token_handle: isize, token_info_class: i32, token_info: *mut u8, token_info_len: u32, return_length: *mut u32) -> i32;
-        fn CloseHandle(handle: isize) -> i32;
-        fn AllocateAndInitializeSid(
-            identifier_authority: *const u8, sub_authority_count: u8,
-            sub_authority0: u32, sub_authority1: u32, sub_authority2: u32,
-            sub_authority3: u32, sub_authority4: u32, sub_authority5: u32,
-            sub_authority6: u32, sub_authority7: u32, sid: *mut isize
-        ) -> i32;
-        fn CheckTokenMembership(token_handle: isize, sid_to_check: isize, is_member: *mut i32) -> i32;
-        fn FreeSid(sid: isize) -> *mut std::ffi::c_void;
+        fn OpenProcessToken(h: isize, a: u32, t: *mut isize) -> i32;
+        fn CloseHandle(h: isize) -> i32;
+        fn AllocateAndInitializeSid(a: *const u8, c: u8, s0: u32, s1: u32, s2: u32, s3: u32, s4: u32, s5: u32, s6: u32, s7: u32, s: *mut isize) -> i32;
+        fn CheckTokenMembership(t: isize, s: isize, m: *mut i32) -> i32;
+        fn FreeSid(s: isize) -> *mut std::ffi::c_void;
     }
-    
     const TOKEN_QUERY: u32 = 0x0008;
-    const SECURITY_NT_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 5];
-    const SECURITY_BUILTIN_DOMAIN_RID: u32 = 32;
-    const DOMAIN_ALIAS_RID_ADMINS: u32 = 544;
-    
+    const NT_AUTH: [u8; 6] = [0,0,0,0,0,5];
     unsafe {
-        let process = GetCurrentProcess();
         let mut token: isize = 0;
-        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
-            return false;
-        }
-        
-        let mut admin_sid: isize = 0;
-        let result = AllocateAndInitializeSid(
-            SECURITY_NT_AUTHORITY.as_ptr(), 2,
-            SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
-            0, 0, 0, 0, 0, 0, &mut admin_sid
-        );
-        if result == 0 {
-            CloseHandle(token);
-            return false;
-        }
-        
-        let mut is_member: i32 = 0;
-        let check_result = CheckTokenMembership(0, admin_sid, &mut is_member);
-        FreeSid(admin_sid);
-        CloseHandle(token);
-        
-        check_result != 0 && is_member != 0
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 { return false; }
+        let mut sid: isize = 0;
+        if AllocateAndInitializeSid(NT_AUTH.as_ptr(), 2, 32, 544, 0,0,0,0,0,0, &mut sid) == 0 { CloseHandle(token); return false; }
+        let mut member: i32 = 0;
+        let ok = CheckTokenMembership(0, sid, &mut member) != 0 && member != 0;
+        FreeSid(sid); CloseHandle(token); ok
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn is_admin() -> bool {
-    // On Linux/macOS, check if we're root
-    unsafe { libc::geteuid() == 0 }
-}
+fn is_admin() -> bool { unsafe { libc::geteuid() == 0 } }
 
-// ── Windows TUN adapter route configuration ─────────────────────────────
 #[cfg(target_os = "windows")]
 fn configure_windows_tun(cfg: &TunConfig) {
     use std::os::windows::process::CommandExt;
-    use std::process::Command as StdCommand;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let name = &cfg.name;
-    // Extract IP without prefix (e.g., "172.16.0.2" from "172.16.0.2/24")
-    let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
-    let dns = "1.1.1.1";
-
-    log::info!("[tun_t2s] Configuring Windows TUN adapter '{}' with IP {} DNS {}", name, ip, dns);
-
-    // Helper to run a command silently (no window popup)
-    let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
-        let mut c = StdCommand::new(cmd);
-        c.creation_flags(CREATE_NO_WINDOW);
+    use std::process::Command as Cmd;
+    const NO_WIN: u32 = 0x08000000;
+    let run = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut c = Cmd::new(cmd); c.creation_flags(NO_WIN);
         c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     };
-
-    // 1. Set the adapter's IP address
-    let output = run_silent("netsh", &["interface", "ip", "set", "address", name, "static", ip, "255.255.255.0"]);
-    match output {
-        Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set address OK"),
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            log::warn!("[tun_t2s] netsh set address failed: {}", stderr.trim());
-        }
-        Err(e) => log::warn!("[tun_t2s] netsh set address error: {}", e),
-    }
-
-    // 2. Set DNS server on the adapter
-    let output = run_silent("netsh", &["interface", "ip", "set", "dns", name, "static", dns]);
-    match output {
-        Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set dns OK"),
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            log::warn!("[tun_t2s] netsh set dns failed: {}", stderr.trim());
-        }
-        Err(e) => log::warn!("[tun_t2s] netsh set dns error: {}", e),
-    }
-
-    // 3. Find the interface index (use CREATE_NO_WINDOW to avoid popup)
-    // tun2socks may create the adapter with hyphens instead of underscores on Windows
-    let name_hyphen = name.replace('_', "-");
-    let ifidx = match run_silent("powershell", &["-NoProfile", "-Command",
-        &format!("$name = '{}'; $hname = '{}'; $adapter = Get-NetAdapter -Name $name -ErrorAction SilentlyContinue; if (-not $adapter) {{ $adapter = Get-NetAdapter -Name $hname -ErrorAction SilentlyContinue }}; if ($adapter) {{ $adapter.ifIndex }}", name, name_hyphen)])
+    let name = &cfg.name;
+    let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+    let _ = run("netsh", &["interface","ip","set","address",name,"static",ip,"255.255.255.0"]);
+    let _ = run("netsh", &["interface","ip","set","dns",name,"static","1.1.1.1"]);
+    let name_h = name.replace('_', "-");
+    if let Ok(o) = run("powershell", &["-NoProfile","-Command", &format!(
+        "$a=Get-NetAdapter -Name '{}','{}' -ErrorAction SilentlyContinue|Select -First 1;if($a){$a.ifIndex}", name, name_h)])
     {
-        Ok(o) => {
-            let idx_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            match idx_str.parse::<u32>() {
-                Ok(idx) => Some(idx),
-                Err(_) => {
-                    log::warn!("[tun_t2s] Could not parse interface index from: '{}'", idx_str);
-                    None
+        if let Ok(idx) = String::from_utf8_lossy(&o.stdout).trim().parse::<u32>() {
+            let _ = run("netsh", &["interface","ipv4","set","interface", &idx.to_string(), "metric=5"]);
+            let _ = run("route", &["ADD","0.0.0.0","MASK","0.0.0.0",ip,"METRIC","5","IF", &idx.to_string()]);
+            if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
+                if let Ok(o) = run("powershell", &["-NoProfile","-Command",
+                    "(Get-NetRoute -DestinationPrefix '0.0.0.0/0'|?{$_.NextHop -ne '0.0.0.0'}|Sort RouteMetric|Select -First 1).NextHop"])
+                {
+                    let gw = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if !gw.is_empty() { let _ = run("route", &["ADD",peer_ip,"MASK","255.255.255.255",&gw]); }
                 }
             }
         }
-        Err(e) => {
-            log::warn!("[tun_t2s] powershell get ifIndex error: {}", e);
-            None
-        }
-    };
-
-    if let Some(idx) = ifidx {
-        log::info!("[tun_t2s] Found adapter '{}' with ifIndex={}", name, idx);
-
-        // 4. Set interface metric low so it becomes the preferred route
-        let output = run_silent("netsh", &["interface", "ipv4", "set", "interface", &idx.to_string(), "metric=5"]);
-        match output {
-            Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set metric OK"),
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                log::warn!("[tun_t2s] netsh set metric failed: {}", stderr.trim());
-            }
-            Err(e) => log::warn!("[tun_t2s] netsh set metric error: {}", e),
-        }
-
-        // 5. Add route: 0.0.0.0/0 -> TUN adapter (redirect all traffic)
-        // Use separate METRIC and IF arguments (not combined) for route.exe compatibility
-        let output = run_silent("route", &["ADD", "0.0.0.0", "MASK", "0.0.0.0", ip, "METRIC", "5", "IF", &idx.to_string()]);
-        match output {
-            Ok(o) if o.status.success() => log::info!("[tun_t2s] route ADD 0.0.0.0/0 OK"),
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                // "The object already exists" is fine (route already present)
-                if stderr.contains("already exists") || stdout.contains("already exists") {
-                    log::info!("[tun_t2s] route 0.0.0.0/0 already exists (OK)");
-                } else {
-                    log::warn!("[tun_t2s] route ADD failed: {} {}", stdout.trim(), stderr.trim());
-                }
-            }
-            Err(e) => log::warn!("[tun_t2s] route ADD error: {}", e),
-        }
-
-        // 6. Add route to exclude the tunnel peer from TUN (avoid routing loop)
-        if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
-            // Get current default gateway to route tunnel peer through it
-            if let Ok(gw_output) = run_silent("powershell", &["-NoProfile", "-Command",
-                "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1).NextHop"])
-            {
-                let gw = String::from_utf8_lossy(&gw_output.stdout).trim().to_string();
-                if !gw.is_empty() {
-                    let output = run_silent("route", &["ADD", peer_ip, "MASK", "255.255.255.255", &gw]);
-                    match output {
-                        Ok(o) if o.status.success() => log::info!("[tun_t2s] route ADD bypass {} via {} OK", peer_ip, gw),
-                        Ok(o) => {
-                            let stderr = String::from_utf8_lossy(&o.stderr);
-                            if !stderr.contains("already exists") {
-                                log::warn!("[tun_t2s] route ADD bypass failed: {}", stderr.trim());
-                            }
-                        }
-                        Err(e) => log::warn!("[tun_t2s] route ADD bypass error: {}", e),
-                    }
-                }
-            }
-        }
-    } else {
-        log::warn!("[tun_t2s] Could not find interface index for '{}'; skipping route configuration", name);
     }
 }
 
-// ── Linux TUN adapter route configuration ───────────────────────────────
 #[cfg(target_os = "linux")]
 fn configure_linux_tun(cfg: &TunConfig) {
-    use std::process::Command as StdCommand;
-
-    let name = &cfg.name;
-    let ip = &cfg.ipv4;
-
-    log::info!("[tun_t2s] Configuring Linux TUN adapter '{}' with IP {}", name, ip);
-
-    // Add IP to interface
-    let output = StdCommand::new("ip")
-        .args(["addr", "add", ip, "dev", name])
-        .status();
-    match output {
-        Ok(s) if s.success() => log::info!("[tun_t2s] ip addr add OK"),
-        Ok(s) => log::warn!("[tun_t2s] ip addr add failed with status {:?}", s.code()),
-        Err(e) => log::warn!("[tun_t2s] ip addr add error: {}", e),
-    }
-
-    // Bring interface up
-    let output = StdCommand::new("ip")
-        .args(["link", "set", name, "up"])
-        .status();
-    match output {
-        Ok(s) if s.success() => log::info!("[tun_t2s] ip link set up OK"),
-        Ok(s) => log::warn!("[tun_t2s] ip link set up failed with status {:?}", s.code()),
-        Err(e) => log::warn!("[tun_t2s] ip link set up error: {}", e),
-    }
-
-    // Add default route via TUN (higher metric = lower priority so existing routes stay)
-    // We use a separate routing table to avoid conflicts
-    let output = StdCommand::new("ip")
-        .args(["route", "add", "default", "dev", name, "metric", "100"])
-        .status();
-    match output {
-        Ok(s) if s.success() => log::info!("[tun_t2s] ip route add default OK"),
-        Ok(s) => log::warn!("[tun_t2s] ip route add default failed with status {:?}", s.code()),
-        Err(e) => log::warn!("[tun_t2s] ip route add default error: {}", e),
-    }
+    use std::process::Command as Cmd;
+    let _ = Cmd::new("ip").args(["addr","add", &cfg.ipv4,"dev", &cfg.name]).status();
+    let _ = Cmd::new("ip").args(["link","set", &cfg.name,"up"]).status();
+    let _ = Cmd::new("ip").args(["route","add","default","dev", &cfg.name,"metric","100"]).status();
 }
 
-// ── Windows TUN cleanup (remove routes AND adapter) ────────────────────
 #[cfg(target_os = "windows")]
 fn cleanup_windows_tun(cfg: &TunConfig) {
     use std::os::windows::process::CommandExt;
-    use std::process::Command as StdCommand;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let name = &cfg.name;
-    let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
-
-    log::info!("[tun_t2s] Cleaning up Windows TUN adapter '{}'", name);
-
-    let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
-        let mut c = StdCommand::new(cmd);
-        c.creation_flags(CREATE_NO_WINDOW);
+    use std::process::Command as Cmd;
+    const NO_WIN: u32 = 0x08000000;
+    let run = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut c = Cmd::new(cmd); c.creation_flags(NO_WIN);
         c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     };
-
-    // Remove default route
-    let output = run_silent("route", &["DELETE", "0.0.0.0", "MASK", "0.0.0.0", ip]);
-    match output {
-        Ok(o) if o.status.success() => log::info!("[tun_t2s] route DELETE OK"),
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            if !stderr.trim().is_empty() {
-                log::debug!("[tun_t2s] route DELETE: {}", stderr.trim());
-            }
-        }
-        Err(e) => log::debug!("[tun_t2s] route DELETE error: {}", e),
-    }
-
-    // Use PowerShell to remove ALL adapters matching this name (including numbered variants)
-    // Also try hyphen variant since Windows/tun2socks may convert underscores to hyphens
-    let name_hyphen = name.replace('_', "-");
-    let ps_script = format!(
-        "Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue; Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue",
-        name, name_hyphen
-    );
-    let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_script]);
-    match output {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            if !stdout.trim().is_empty() {
-                log::info!("[tun_t2s] Remove-NetAdapter: {}", stdout.trim());
-            }
-        }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            if !stderr.trim().is_empty() {
-                log::debug!("[tun_t2s] Remove-NetAdapter: {}", stderr.trim());
-            }
-        }
-        Err(e) => log::debug!("[tun_t2s] Remove-NetAdapter error: {}", e),
-    }
-
-    // Fallback: netsh for older Windows — try both underscore and hyphen
-    let _ = run_silent("netsh", &["interface", "ip", "set", "dns", name, "dhcp"]);
-    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", name]);
-    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", &name_hyphen]);
+    let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+    let _ = run("route", &["DELETE","0.0.0.0","MASK","0.0.0.0",ip]);
+    let name_h = cfg.name.replace('_', "-");
+    let _ = run("powershell", &["-NoProfile","-Command", &format!(
+        "Get-NetAdapter -Name '{}*','{}*' -ErrorAction SilentlyContinue|Remove-NetAdapter -Confirm:$false", cfg.name, name_h)]);
+    let _ = run("netsh", &["interface","ip","set","dns", &cfg.name,"dhcp"]);
+    let _ = run("netsh", &["interface","ip","delete","interface", &cfg.name]);
 }
 
 #[cfg(target_os = "linux")]
 fn cleanup_linux_tun(cfg: &TunConfig) {
-    use std::process::Command as StdCommand;
-    let name = &cfg.name;
-    log::info!("[tun_t2s] Cleaning up Linux TUN routes for '{}'", name);
-    let _ = StdCommand::new("ip").args(["route", "del", "default", "dev", name]).status();
-    let _ = StdCommand::new("ip").args(["link", "set", name, "down"]).status();
+    use std::process::Command as Cmd;
+    let _ = Cmd::new("ip").args(["route","del","default","dev", &cfg.name]).status();
+    let _ = Cmd::new("ip").args(["link","set", &cfg.name,"down"]).status();
 }
 
-/// Run the TUN with tun2socks as a subprocess
 pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> Result<()> {
-    log::info!("[tun_t2s] Starting TUN with tun2socks");
-    log::info!("[tun_t2s] Config: name={}, ipv4={}, socks={}:{}",
-        cfg.name, cfg.ipv4, cfg.socks_host, cfg.socks_port
-    );
-    
-    // Check for admin/root privileges (required to create TUN interface)
+    log::info!("[tun_t2s] Starting TUN with hev-socks5-tunnel");
     if !is_admin() {
-        log::error!("[tun_t2s] TUN requires administrator/root privileges!");
         return Err(AetherError::Other(
-            "TUN mode requires administrator privileges. Please run the application as Administrator.\n\
-             On Windows: Right-click → 'Run as Administrator'\n\
-             On Linux/macOS: Use 'sudo'".into()
-        ));
+            "TUN mode requires administrator privileges. Run as Administrator (Windows) or with sudo (Linux).".into()));
     }
-
-    // ── Pre-startup cleanup: remove leftover TUN adapters from previous runs ──
-    // This prevents "FCAE-VPN 2, 3, 4..." accumulation across sessions.
     #[cfg(target_os = "windows")]
     cleanup_adapter_by_name(&cfg.name);
-
-    // Extract embedded binary
-    let t2s_path = get_tun2socks_path()?;
-
-    // Build tun2socks arguments
-    let device = format!("tun://{}", cfg.name);
-    let proxy = if let (Some(user), Some(pass)) = (&cfg.username, &cfg.password) {
-        format!("socks5://{}:{}@{}:{}", user, pass, cfg.socks_host, cfg.socks_port)
+    let hev_path = get_hevsocks5_path()?;
+    let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+    let prefix = cfg.ipv4.split('/').nth(1).and_then(|p| p.parse().ok()).unwrap_or(24);
+    let tun_url = format!("tun://{}?ipv4={}/{}&mtu={}", cfg.name, ip, prefix, cfg.mtu);
+    let socks_addr = if let (Some(ref u), Some(ref p)) = (&cfg.username, &cfg.password) {
+        format!("{}:{}@{}:{}", u, p, cfg.socks_host, cfg.socks_port)
     } else {
-        format!("socks5://{}:{}", cfg.socks_host, cfg.socks_port)
+        format!("{}:{}", cfg.socks_host, cfg.socks_port)
     };
-
-    let mut args = vec![
-        "--device", &device,
-        "--proxy", &proxy,
-        "--loglevel", "info",
-    ];
-    let mtu_str;
-    if cfg.mtu != 1500 {
-        mtu_str = cfg.mtu.to_string();
-        args.push("--mtu");
-        args.push(&mtu_str);
-    }
-
-    // Set the current directory to the directory containing tun2socks
-    // so that it can find wintun.dll (which we extracted there).
-    let tun_dir = t2s_path.parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    log::debug!("[tun_t2s] Running: {} {:?} (cwd: {})", t2s_path.display(), args, tun_dir.display());
-
+    let args = vec![tun_url, "--socks5-addr".to_string(), socks_addr];
     #[cfg(target_os = "windows")]
     let mut cmd = {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let mut c = Command::new(&t2s_path);
-        c.creation_flags(CREATE_NO_WINDOW);
-        c
+        const NO_WIN: u32 = 0x08000000;
+        let mut c = Command::new(&hev_path);
+        c.creation_flags(NO_WIN); c
     };
     #[cfg(not(target_os = "windows"))]
-    let mut cmd = Command::new(&t2s_path);
-
-    let mut child = cmd
-        .current_dir(tun_dir)
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| AetherError::Other(format!("Failed to spawn tun2socks: {e}")))?;
-
+    let mut cmd = Command::new(&hev_path);
+    let tun_dir = hev_path.parent().unwrap_or(std::path::Path::new("."));
+    let mut child = cmd.current_dir(tun_dir).args(&args)
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+        .map_err(|e| AetherError::Other(format!("Failed to spawn hev-socks5-tunnel: {e}")))?;
     let pid = child.id();
-    log::info!("[tun_t2s] tun2socks started (pid: {})", pid);
-
-    // ── Windows: configure TUN adapter routing ──────────────────────
+    log::info!("[tun_t2s] hev-socks5-tunnel started (pid={})", pid);
     #[cfg(target_os = "windows")]
-    {
-        // Give tun2socks a moment to create the adapter
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        configure_windows_tun(&cfg);
-    }
-
-    // ── Linux: configure TUN routing ───────────────────────────────
+    { std::thread::sleep(std::time::Duration::from_millis(1500)); configure_windows_tun(&cfg); }
     #[cfg(target_os = "linux")]
-    {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        configure_linux_tun(&cfg);
-    }
-
-    // Read stdout/stderr in background threads
+    { std::thread::sleep(std::time::Duration::from_millis(500)); configure_linux_tun(&cfg); }
     if let Some(stdout) = child.stdout.take() {
         std::thread::spawn(move || {
             use std::io::{BufRead, BufReader};
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    log::info!("[tun2socks stdout] {}", line);
-                }
+            for line in BufReader::new(stdout).lines().flatten() {
+                log::info!("[hev-socks5-tunnel] {}", line);
             }
         });
     }
     if let Some(stderr) = child.stderr.take() {
         std::thread::spawn(move || {
             use std::io::{BufRead, BufReader};
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    log::info!("[tun2socks stderr] {}", line);
-                }
+            for line in BufReader::new(stderr).lines().flatten() {
+                log::info!("[hev-socks5-tunnel] {}", line);
             }
         });
     }
-
-    // Wait for process in a blocking task — child is moved here
     let wait_handle = tokio::task::spawn_blocking(move || child.wait());
     tokio::pin!(wait_handle);
-
     tokio::select! {
         _ = shutdown => {
-            log::info!("[tun_t2s] Shutting down tun2socks (pid={})", pid);
-            // Kill using taskkill on Windows — use /T to kill the whole process tree.
-            // Run silently with CREATE_NO_WINDOW to avoid console popup.
+            log::info!("[tun_t2s] Shutting down hev-socks5-tunnel (pid={})", pid);
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x08000000;
-                // First attempt: graceful taskkill
-                let mut c = Command::new("taskkill");
-                c.creation_flags(CREATE_NO_WINDOW);
-                let _ = c.args(["/PID", &pid.to_string(), "/T"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-                // Second attempt: force kill
-                let mut c = Command::new("taskkill");
-                c.creation_flags(CREATE_NO_WINDOW);
-                let _ = c.args(["/PID", &pid.to_string(), "/F", "/T"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                const NO_WIN: u32 = 0x08000000;
+                for f in [false, true] {
+                    let mut c = Command::new("taskkill"); c.creation_flags(NO_WIN);
+                    let mut args = vec!["/PID", &pid.to_string(), "/T"];
+                    if f { args.push("/F"); }
+                    let _ = c.args(&args).stdout(Stdio::null()).stderr(Stdio::null()).status();
+                }
                 cleanup_windows_tun(&cfg);
             }
             #[cfg(not(target_os = "windows"))]
             {
                 unsafe { libc::kill(pid as i32, libc::SIGTERM); }
-                #[cfg(target_os = "linux")]
-                cleanup_linux_tun(&cfg);
+                #[cfg(target_os = "linux")] cleanup_linux_tun(&cfg);
             }
-            // Wait for process to exit with timeout
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                &mut wait_handle
-            ).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), &mut wait_handle).await;
         }
         result = &mut wait_handle => {
             match result {
-                Ok(Ok(s)) if s.success() => {
-                    log::info!("[tun_t2s] tun2socks exited normally");
-                }
-                Ok(Ok(s)) => {
-                    log::warn!("[tun_t2s] tun2socks exited with: {:?}", s.code());
-                    return Err(AetherError::Other(format!(
-                        "tun2socks exited with code {:?}", s.code()
-                    )));
-                }
-                Ok(Err(e)) => {
-                    log::error!("[tun_t2s] tun2socks process error: {}", e);
-                    return Err(AetherError::Other(format!(
-                        "tun2socks process error: {}", e
-                    )));
-                }
-                Err(e) => {
-                    log::error!("[tun_t2s] tun2socks task join error: {}", e);
-                    return Err(AetherError::Other(format!(
-                        "tun2socks task join error: {}", e
-                    )));
-                }
+                Ok(Ok(s)) if s.success() => log::info!("[tun_t2s] hev-socks5-tunnel exited normally"),
+                Ok(Ok(s)) => return Err(AetherError::Other(format!("hev-socks5-tunnel exited with code {:?}", s.code()))),
+                Ok(Err(e)) => return Err(AetherError::Other(format!("hev-socks5-tunnel process error: {}", e))),
+                Err(e) => return Err(AetherError::Other(format!("hev-socks5-tunnel join error: {}", e))),
             }
         }
     }
-
-    // Extra safety: ensure child is killed on any exit path.
-    // Run silently to avoid console popup.
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let mut c = Command::new("taskkill");
-        c.creation_flags(CREATE_NO_WINDOW);
-        let _ = c.args(["/PID", &pid.to_string(), "/F", "/T"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        const NO_WIN: u32 = 0x08000000;
+        let mut c = Command::new("taskkill"); c.creation_flags(NO_WIN);
+        let _ = c.args(["/PID", &pid.to_string(), "/F", "/T"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
         cleanup_windows_tun(&cfg);
     }
     #[cfg(target_os = "linux")]
-    {
-        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
-        cleanup_linux_tun(&cfg);
-    }
-
+    { unsafe { libc::kill(pid as i32, libc::SIGKILL); } cleanup_linux_tun(&cfg); }
     log::info!("[tun_t2s] TUN shut down");
     Ok(())
 }
@@ -979,7 +359,6 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn test_tun_config_defaults() {
         let cfg = TunConfig::default();
