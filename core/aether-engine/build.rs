@@ -347,6 +347,8 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
         "..".to_string(),
         format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain_file.display()),
         "-DCMAKE_BUILD_TYPE=Release".to_string(),
+        // Static link to avoid MinGW DLL dependencies at runtime
+        "-DCMAKE_EXE_LINKER_FLAGS=-static".to_string(),
     ];
 
     // If the cross-ar and ranlib exist, set them via cmdline too (belt-and-suspenders)
