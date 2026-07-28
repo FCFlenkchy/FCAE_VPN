@@ -315,7 +315,8 @@ fn build_hev_windows_cross(
     };
 
     // Verify the cross-compiler has required headers (arpa/inet.h, poll.h, etc.).
-    // If MinGW sysroot is incomplete, skip the build entirely rather than failing mid-way.
+    // MinGW-w64 on some CI runners has the compiler but not the full sysroot.
+    // Search for the MinGW include directory and add it to the compiler flags.
     let header_test = build_dir.join("_header_test.c");
     let header_test_obj = build_dir.join("_header_test.o");
     let _ = fs::write(&header_test, "#include <arpa/inet.h>\n#include <poll.h>\n#include <netinet/in.h>\nint main(){return 0;}\n");
@@ -326,11 +327,35 @@ fn build_hev_windows_cross(
         .status();
     let _ = fs::remove_file(&header_test);
     let _ = fs::remove_file(&header_test_obj);
+    
+    // If headers missing, try common MinGW sysroot paths
+    let mut extra_cflags = String::new();
     if !matches!(test_status, Ok(s) if s.success()) {
-        println!("cargo:warning=MinGW cross-compiler missing POSIX headers (arpa/inet.h, poll.h).");
-        println!("cargo:warning=Install full MinGW-w64: sudo apt-get install mingw-w64");
-        println!("cargo:warning=Skipping hev-socks5-tunnel build — Rust TUN will be used instead.");
-        return;
+        // Common MinGW-w64 include paths on Linux CI runners
+        let mingw_include_candidates = [
+            format!("/usr/{cross_prefix}include"),
+            format!("/usr/lib/gcc/{cross_prefix}13/include"),
+            format!("/usr/lib/gcc/{cross_prefix}12/include"),
+            format!("/usr/{cross_prefix}sys-root/mingw/include"),
+            "/usr/share/mingw-w64/include".to_string(),
+        ];
+        let mut found_include = None;
+        for inc in &mingw_include_candidates {
+            let test_path = std::path::PathBuf::from(inc).join("arpa").join("inet.h");
+            if test_path.exists() {
+                found_include = Some(inc.clone());
+                break;
+            }
+        }
+        if let Some(inc_path) = found_include {
+            println!("cargo:warning=Found MinGW headers at: {inc_path}");
+            extra_cflags = format!("-I{inc_path}");
+        } else {
+            println!("cargo:warning=MinGW cross-compiler missing POSIX headers (arpa/inet.h, poll.h).");
+            println!("cargo:warning=Install full MinGW-w64: sudo apt-get install mingw-w64");
+            println!("cargo:warning=Skipping hev-socks5-tunnel build — Rust TUN will be used instead.");
+            return;
+        }
     }
 
     // Build CMake arguments for cross-compilation.
@@ -364,7 +389,11 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
         toolchain_content
     }};
     // Use the cross gcc also as assembler (for .s files)
-    let toolchain_content = format!("{toolchain_content}set(CMAKE_ASM_COMPILER {cc})\nset(CMAKE_ASM_COMPILER_FORCED 1)\nset(CMAKE_ASM_COMPILER_WORKS 1)\n");
+    let toolchain_content = if !extra_cflags.is_empty() {{
+        format!("{toolchain_content}set(CMAKE_ASM_COMPILER {cc})\nset(CMAKE_ASM_COMPILER_FORCED 1)\nset(CMAKE_ASM_COMPILER_WORKS 1)\nset(CMAKE_C_FLAGS \"{extra_cflags}\")\n")
+    }} else {{
+        format!("{toolchain_content}set(CMAKE_ASM_COMPILER {cc})\nset(CMAKE_ASM_COMPILER_FORCED 1)\nset(CMAKE_ASM_COMPILER_WORKS 1)\n")
+    }};
     let _ = fs::write(&toolchain_file, toolchain_content);
 
     let mut cmake_args: Vec<String> = vec![
@@ -374,6 +403,11 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
         // Static link to avoid MinGW DLL dependencies at runtime
         "-DCMAKE_EXE_LINKER_FLAGS=-static".to_string(),
     ];
+
+    // Add extra CFLAGS if we found MinGW headers in a non-standard location
+    if !extra_cflags.is_empty() {
+        cmake_args.push(format!("-DCMAKE_C_FLAGS={extra_cflags}"));
+    }
 
     // If the cross-ar and ranlib exist, set them via cmdline too (belt-and-suspenders)
     // NOTE: CMake -D flags must use VAR=value format in a SINGLE argument
