@@ -171,7 +171,8 @@ fn main() {
                         println!("cargo:warning=hev-socks5-tunnel not built (cross-compiler unavailable). The Rust TUN implementation will be used instead.");
                         // Don't set HEVSOCKS5_EMBEDDED env var, and don't panic.
                         // Return early to skip the embedding step.
-                        return;
+                        // Write a dummy file so HEVSOCKS5_EMBEDDED always points to a valid path
+                        fs::write(&bin_path, b"").expect("Failed to write dummy binary");
                     } else {
                         panic!(
                             "Cannot build hev-socks5-tunnel!\n\
@@ -471,11 +472,10 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
             .status()
             .expect("Failed to run make");
         if !status.success() {
-            // Cross-compilation failed (e.g. missing MinGW headers like arpa/inet.h).
-            // Don't panic — the Rust binary can use built-in TUN without hev-socks5-tunnel.
-            println!("cargo:warning=Cross-compilation of hev-socks5-tunnel failed. The Rust TUN implementation will be used instead.");
-            println!("cargo:warning=To fix, install full MinGW-w64: sudo apt-get install mingw-w64");
-            // Remove partial build artifacts and return without writing dest
+            // Cross-compilation failed. Show the error for debugging, but don't panic.
+            // main() will write a dummy placeholder so the build can continue.
+            println!("cargo:warning=Cross-compilation of hev-socks5-tunnel failed.");
+            println!("cargo:warning=Install full MinGW-w64: sudo apt-get install mingw-w64");
             let _ = fs::remove_dir_all(build_dir);
             return;
         }
