@@ -15,16 +15,32 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(hevsocks5_available)");
     println!("cargo::rustc-check-cfg=cfg(wintun_embedded)");
 
-    // Android doesn't need hev-socks5-tunnel — it uses tun.rs natively
-    #[cfg(target_os = "android")]
-    {
-        println!("cargo:warning=Android build: hev-socks5-tunnel not used (uses tun.rs)");
+    // Determine target OS at runtime (CARGO_CFG_TARGET_OS tells us what we're building FOR)
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
+
+    // ── Android: hev-socks5-tunnel is NOT needed ───────────────────────
+    // Android uses tun.rs natively — no C tunnel binary to build or embed.
+    // Skip ALL hev-socks5-tunnel logic: no clone check, no build, no embed,
+    // and crucially do NOT set hevsocks5_available cfg.
+    if target_os == "android" {
+        println!("cargo:warning=Android target: hev-socks5-tunnel not built or embedded (uses tun.rs natively)");
         return;
     }
 
+    // ── Windows & Linux only: build/embed hev-socks5-tunnel ────────────
+    // hev-socks5-tunnel is only used on Windows and Linux targets.
+    // Other targets (macOS, iOS, etc.) also skip the C tunnel for now.
+    if target_os != "windows" && target_os != "linux" {
+        println!(
+            "cargo:warning=Target '{}' does not use hev-socks5-tunnel — skipping build/embed",
+            target_os
+        );
+        return;
+    }
+
+    // At this point we're building for Windows or Linux — enable the cfg flag
     println!("cargo:rustc-cfg=hevsocks5_available");
 
-    #[cfg(not(target_os = "android"))]
     {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
         let manifest_path = PathBuf::from(&manifest_dir);
@@ -82,7 +98,6 @@ fn main() {
         }
 
         // Determine binary name based on TARGET OS (not host)
-        let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
         let bin_name = if target_os == "windows" {
             "hev-socks5-tunnel.exe"
         } else {
@@ -124,9 +139,6 @@ fn main() {
                 println!("cargo:warning=hev-socks5-tunnel copied successfully");
             } else {
                 // Build from source using cmake + make
-                let target_os =
-                    env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
-
                 match target_os.as_str() {
                     "windows" => {
                         println!(
@@ -138,16 +150,9 @@ fn main() {
                         println!("cargo:warning=Building hev-socks5-tunnel for Linux...");
                         build_hev_linux(&hev_src, &bin_path, &out_dir);
                     }
-                    "macos" => {
-                        println!("cargo:warning=Building hev-socks5-tunnel for macOS...");
-                        build_hev_macos(&hev_src, &bin_path, &out_dir);
-                    }
-                    other => {
-                        println!(
-                            "cargo:warning=Unknown target_os '{}', defaulting to Linux build",
-                            other
-                        );
-                        build_hev_linux(&hev_src, &bin_path, &out_dir);
+                    _ => {
+                        // Already filtered to windows/linux above, unreachable here
+                        unreachable!("hev-socks5-tunnel build called for unsupported target: {target_os}");
                     }
                 }
 
@@ -177,8 +182,6 @@ fn main() {
         }
 
         // ── Windows: embed wintun.dll ───────────────────────────────────
-        let target_os =
-            env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
         if target_os == "windows" {
             embed_wintun_dll(&hev_src, &out_dir);
         }
