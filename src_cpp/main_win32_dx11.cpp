@@ -26,6 +26,11 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     switch (msg) {
         case WM_SIZE:
             if (g_pd3dDevice != nullptr && wParam != SIZE_MINIMIZED) {
+                // Release old RTV before ResizeBuffers invalidates its backing buffer
+                if (g_mainRenderTargetView) {
+                    g_mainRenderTargetView->Release();
+                    g_mainRenderTargetView = nullptr;
+                }
                 g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
                 ID3D11Texture2D* pBackBuffer;
                 g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
@@ -37,21 +42,7 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         case WM_SYSCOMMAND:
             if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
-            if ((wParam & 0xfff0) == SC_MAXIMIZE || (wParam & 0xfff0) == SC_SIZE) return 0;
             break;
-        case WM_GETMINMAXINFO: {
-            // Lock window size to creation size
-            RECT wr = {100, 100, 100 + 1024, 100 + 700};
-            AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
-            MINMAXINFO* mmi = (MINMAXINFO*)lParam;
-            mmi->ptMinTrackSize.x = wr.right - wr.left;
-            mmi->ptMinTrackSize.y = wr.bottom - wr.top;
-            mmi->ptMaxTrackSize.x = mmi->ptMinTrackSize.x;
-            mmi->ptMaxTrackSize.y = mmi->ptMinTrackSize.y;
-            mmi->ptMaxPosition.x = 100;
-            mmi->ptMaxPosition.y = 100;
-            return 0;
-        }
         case WM_CLOSE:
             // User clicked X button — trigger engine shutdown BEFORE
             // the window is destroyed.  This gives the engine time to
@@ -140,7 +131,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
     RegisterClassExW(&wc);
     HWND hWnd = CreateWindowW(wc.lpszClassName, L"FCAE VPN",
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         100, 100, 1024, 700, nullptr, nullptr, inst, nullptr);
 
     if (!CreateDeviceD3D(hWnd)) { CleanupDeviceD3D(); UnregisterClassW(wc.lpszClassName, wc.hInstance); return 1; }
