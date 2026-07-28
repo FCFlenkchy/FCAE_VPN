@@ -71,6 +71,97 @@ jobs:
           fi
         continue-on-error: true
 
+      - name: patch hev-socks5-tunnel submodules for MinGW cross-compile
+        if: matrix.name == 'windows-x64'
+        run: |
+          # Apply Windows compatibility patches to submodule files
+          # that git submodule update overwrites with upstream code.
+          cd hev-socks5-tunnel
+
+          # --- hev-task-system/include/hev-task.h (poll.h) ---
+          sed -i 's|#include <poll.h>|#ifdef _WIN32\n#include <winsock2.h>\n#else\n#include <poll.h>\n#endif|' third-part/hev-task-system/include/hev-task.h
+
+          # --- hev-task-system/include/hev-task-io.h (sys/uio.h) ---
+          sed -i 's|#include <sys/uio.h>|#ifdef _WIN32\n#include <io.h>\nstruct iovec { void *iov_base; size_t iov_len; };\n#else\n#include <sys/uio.h>\n#endif|' third-part/hev-task-system/include/hev-task-io.h
+
+          # --- hev-task-system/include/hev-task-io-socket.h (sys/socket.h) ---
+          sed -i 's|#include <sys/socket.h>|#ifdef _WIN32\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#else\n#include <sys/socket.h>\n#endif|' third-part/hev-task-system/include/hev-task-io-socket.h
+
+          # --- hev-socks5-core/include/hev-socks5.h (netinet/in.h) ---
+          sed -i 's|#include <netinet/in.h>|#ifdef _WIN32\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#else\n#include <netinet/in.h>\n#endif|' src/core/include/hev-socks5.h
+
+          # --- hev-socks5-core/include/hev-socks5-misc.h (netinet/in.h) ---
+          sed -i 's|#include <netinet/in.h>|#ifdef _WIN32\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#else\n#include <netinet/in.h>\n#endif|' src/core/include/hev-socks5-misc.h
+
+          # --- hev-socks5-core/include/hev-rbtree.h (unsigned long -> uintptr_t) ---
+          sed -i 's|#include <stddef.h>|#include <stddef.h>\n#include <stdint.h>|' src/core/include/hev-rbtree.h
+          sed -i 's|unsigned long __parent_color|uintptr_t __parent_color|' src/core/include/hev-rbtree.h
+          sed -i 's|(unsigned long)node|(uintptr_t)node|g' src/core/include/hev-rbtree.h
+          sed -i 's|(unsigned long)parent|(uintptr_t)parent|g' src/core/include/hev-rbtree.h
+
+          # --- hev-socks5-core/src/hev-socks5-logger.c (unistd.h, sys/uio.h, sys/stat.h) ---
+          sed -i 's|#include <fcntl.h>|#ifdef _WIN32\n#include <io.h>\n#include <fcntl.h>\n#include <sys/stat.h>\n#include <winsock2.h>\nstruct iovec { void *iov_base; size_t iov_len; };\n#else\n#include <fcntl.h>|' src/core/src/hev-socks5-logger.c
+          # The above replaces the first fcntl include; fix the rest
+          sed -i '/struct iovec.*iov_len.*};/!{ /#include <unistd.h>/d }' src/core/src/hev-socks5-logger.c 2>/dev/null || true
+          sed -i 's|#include <unistd.h>||' src/core/src/hev-socks5-logger.c 2>/dev/null || true
+          sed -i 's|#include <sys/uio.h>||' src/core/src/hev-socks5-logger.c 2>/dev/null || true
+          sed -i 's|#include <sys/stat.h>|#include <sys/stat.h>\n#endif|' src/core/src/hev-socks5-logger.c
+
+          # --- hev-task-system/src/kern/task/hev-task-stack-mmap.c (sys/mman.h) ---
+          sed -i 's|#include <unistd.h>|#ifdef _WIN32\n#include <io.h>\n#include <windows.h>\n#else\n#include <unistd.h>|' third-part/hev-task-system/src/kern/task/hev-task-stack-mmap.c
+          sed -i 's|#include <sys/mman.h>|#include <sys/mman.h>\n#endif|' third-part/hev-task-system/src/kern/task/hev-task-stack-mmap.c
+
+          # --- hev-task-system/src/lib/io/socket/hev-task-io-socket.c ---
+          sed -i 's|#include <unistd.h>|#ifdef _WIN32\n#include <io.h>\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#else\n#include <unistd.h>|' third-part/hev-task-system/src/lib/io/socket/hev-task-io-socket.c
+          sed -i 's|#include <sys/socket.h>|#include <sys/socket.h>\n#include <sys/ioctl.h>\n#endif|' third-part/hev-task-system/src/lib/io/socket/hev-task-io-socket.c
+          sed -i '/#include <sys\/ioctl.h>/,/endif/ { /sys\/ioctl.h/d }' third-part/hev-task-system/src/lib/io/socket/hev-task-io-socket.c 2>/dev/null || true
+          # Fix double-include issue: remove standalone sys/ioctl.h after we've already handled it
+          sed -i '/^#include <sys\/ioctl.h>$/d' third-part/hev-task-system/src/lib/io/socket/hev-task-io-socket.c
+
+          # --- hev-task-system/src/lib/io/basic/hev-task-io.c ---
+          sed -i 's|#include <fcntl.h>|#ifdef _WIN32\n#include <io.h>\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#else\n#include <fcntl.h>|' third-part/hev-task-system/src/lib/io/basic/hev-task-io.c
+          sed -i '/struct iovec/,+5{ /#include <unistd.h>/d }' third-part/hev-task-system/src/lib/io/basic/hev-task-io.c 2>/dev/null || true
+          sed -i 's|#include <unistd.h>||' third-part/hev-task-system/src/lib/io/basic/hev-task-io.c 2>/dev/null || true
+          sed -i 's|#include <sys/types.h>||' third-part/hev-task-system/src/lib/io/basic/hev-task-io.c 2>/dev/null || true
+          sed -i 's|#include <sys/stat.h>||' third-part/hev-task-system/src/lib/io/basic/hev-task-io.c 2>/dev/null || true
+          sed -i 's|#include <sys/ioctl.h>||' third-part/hev-task-system/src/lib/io/basic/hev-task-io.c 2>/dev/null || true
+          sed -i 's|#include <sys/socket.h>|#endif|' third-part/hev-task-system/src/lib/io/basic/hev-task-io.c
+
+          # --- hev-task-system/src/lib/io/pipe/hev-task-io-pipe.c ---
+          sed -i 's|#include <unistd.h>|#ifdef _WIN32\n#include <io.h>\n#include <fcntl.h>\n#include <winsock2.h>\n#else\n#include <unistd.h>|' third-part/hev-task-system/src/lib/io/pipe/hev-task-io-pipe.c
+          sed -i 's|#include <sys/ioctl.h>|#include <sys/ioctl.h>\n#endif|' third-part/hev-task-system/src/lib/io/pipe/hev-task-io-pipe.c
+
+          # --- hev-task-system/src/lib/io/buffer/hev-circular-buffer.h ---
+          sed -i 's|#include <sys/uio.h>|#ifdef _WIN32\n#include <stddef.h>\nstruct iovec { void *iov_base; size_t iov_len; };\n#else\n#include <sys/uio.h>|' third-part/hev-task-system/src/lib/io/buffer/hev-circular-buffer.h
+          sed -i 's|#include <sys/types.h>|#include <sys/types.h>\n#endif|' third-part/hev-task-system/src/lib/io/buffer/hev-circular-buffer.h
+
+          # --- hev-task-system/src/lib/io/basic/hev-task-io.h ---
+          sed -i 's|#include <sys/uio.h>|#ifdef _WIN32\n#include <io.h>\n#include <stddef.h>\nstruct iovec { void *iov_base; size_t iov_len; };\n#else\n#include <sys/uio.h>|' third-part/hev-task-system/src/lib/io/basic/hev-task-io.h
+          sed -i 's|#include <sys/types.h>|#include <sys/types.h>\n#endif|' third-part/hev-task-system/src/lib/io/basic/hev-task-io.h
+
+          # --- hev-task-system/src/lib/io/socket/hev-task-io-socket.h ---
+          sed -i 's|#include <sys/socket.h>|#ifdef _WIN32\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#else\n#include <sys/socket.h>\n#endif|' third-part/hev-task-system/src/lib/io/socket/hev-task-io-socket.h
+
+          # --- hev-task-system/src/kern/itc/hev-task-channel.h ---
+          sed -i 's|#include <sys/types.h>|#ifdef _WIN32\n#include <stddef.h>\n#else\n#include <sys/types.h>\n#endif|' third-part/hev-task-system/src/kern/itc/hev-task-channel.h
+
+          # --- hev-task-system/src/kern/itc/hev-task-channel-select.h ---
+          sed -i 's|#include <sys/types.h>|#ifdef _WIN32\n#include <stddef.h>\n#else\n#include <sys/types.h>\n#endif|' third-part/hev-task-system/src/kern/itc/hev-task-channel-select.h
+
+          # --- hev-task-system/src/lib/dns/hev-task-dns.h ---
+          sed -i 's|#include <netdb.h>|#ifdef _WIN32\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#else\n#include <netdb.h>|' third-part/hev-task-system/src/lib/dns/hev-task-dns.h
+          sed -i 's|#include <sys/types.h>||' third-part/hev-task-system/src/lib/dns/hev-task-dns.h
+          sed -i 's|#include <sys/socket.h>|#include <sys/socket.h>\n#endif|' third-part/hev-task-system/src/lib/dns/hev-task-dns.h
+
+          # --- hev-task-system/src/lib/dns/hev-task-dns-proxy.h ---
+          sed -i 's|#include <netdb.h>|#ifdef _WIN32\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#else\n#include <netdb.h>|' third-part/hev-task-system/src/lib/dns/hev-task-dns-proxy.h
+          sed -i 's|#include <sys/types.h>||' third-part/hev-task-system/src/lib/dns/hev-task-dns-proxy.h
+          sed -i 's|#include <sys/socket.h>|#include <sys/socket.h>\n#endif|' third-part/hev-task-system/src/lib/dns/hev-task-dns-proxy.h
+
+          cd ..
+          echo "Submodule patches applied for Windows cross-compilation."
+        continue-on-error: true
+
       - name: cleanup old caches
         uses: actions/github-script@v7
         continue-on-error: true
