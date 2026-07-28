@@ -215,7 +215,9 @@ fn build_hev_linux(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
         .status()
         .expect("Failed to run cmake");
     if !status.success() {
-        panic!("cmake configure failed with exit: {:?}", status.code());
+        println!("cargo:warning=cmake configure failed — skipping hev-socks5-tunnel build");
+        let _ = fs::remove_dir_all(build_dir);
+        return;
     }
 
     // Use cmake --build (more portable than raw make)
@@ -233,7 +235,10 @@ fn build_hev_linux(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
             .status()
             .expect("Failed to run make");
         if !status.success() {
-            panic!("make failed with exit: {:?}", status.code());
+            // Build failed — don't panic. The Rust binary may still work without the C tunnel.
+            println!("cargo:warning=hev-socks5-tunnel build failed. Rust TUN will be used instead.");
+            let _ = fs::remove_dir_all(build_dir);
+            return;
         }
     }
 
@@ -313,7 +318,7 @@ fn build_hev_windows_cross(
     // If MinGW sysroot is incomplete, skip the build entirely rather than failing mid-way.
     let header_test = build_dir.join("_header_test.c");
     let header_test_obj = build_dir.join("_header_test.o");
-    let _ = fs::write(&header_test, "#include <arpa/inet.h>\n#include <poll.h>\nint main(){return 0;}\n");
+    let _ = fs::write(&header_test, "#include <arpa/inet.h>\n#include <poll.h>\n#include <netinet/in.h>\nint main(){return 0;}\n");
     let test_status = Command::new(cc)
         .args(["-c", header_test.to_str().unwrap_or(""), "-o", header_test_obj.to_str().unwrap_or("")])
         .stdout(std::process::Stdio::null())
