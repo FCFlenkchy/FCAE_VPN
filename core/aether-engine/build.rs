@@ -241,30 +241,156 @@ fn build_hev_linux(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
 
 fn build_hev_windows(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
     let build_dir = src.join("build");
-    fs::create_dir_all(&build_dir).expect("Failed to create build dir");
 
-    // Try MinGW Makefiles first (common for cross-compilation), then fall back to default
+    // Determine if we're cross-compiling (host != Windows)
+    let host_os = std::env::consts::OS;
+    let is_cross = host_os != "windows";
+
+    if is_cross {
+        // Try to find a MinGW cross-compiler
+        let mingw_cc = find_mingw_cross_compiler();
+        match mingw_cc {
+            Some(ref cc) => {
+                println!("cargo:warning=Cross-compiling hev-socks5-tunnel with: {cc}");
+                build_hev_windows_cross(src, dest, cc, &build_dir);
+            }
+            None => {
+                // No cross-compiler available — skip the C tunnel build.
+                // The Rust Windows binary can still use built-in TUN via other means.
+                println!("cargo:warning=No MinGW cross-compiler found — skipping hev-socks5-tunnel build for Windows target");
+                println!("cargo:warning=Install mingw-w64: sudo apt-get install mingw-w64 g++-mingw-w64-x86-64");
+                // Create a stub so the build doesn't panic
+                let _ = fs::write(dest, b"");
+            }
+        }
+    } else {
+        // Native Windows build — use default cmake
+        build_hev_windows_native(src, dest, &build_dir);
+    }
+}
+
+/// Cross-compile from Linux to Windows using MinGW
+fn build_hev_windows_cross(
+    src: &PathBuf,
+    dest: &PathBuf,
+    cc: &str,
+    build_dir: &PathBuf,
+) {
+    fs::create_dir_all(build_dir).expect("Failed to create build dir");
+
+    // Extract the cross-compiler prefix (e.g., "x86_64-w64-mingw32-" from "x86_64-w64-mingw32-gcc")
+    let cross_prefix = cc.trim_end_matches("gcc");
+    let cross_ar = format!("{cross_prefix}ar");
+    let cross_ld = format!("{cross_prefix}ld");
+    let cross_ranlib = format!("{cross_prefix}ranlib");
+
+    // Helper to check if a command exists in PATH
+    let cmd_exists = |cmd: &str| -> bool {
+        Command::new(cmd)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+
+    // Build CMake arguments for cross-compilation.
+    // Key insight: CMake's compiler detection runs a link test that fails
+    // because MinGW gcc invokes the host GNU ld (which doesn't understand
+    // Windows PE flags like --major-image-version). We fix this by:
+    // 1. Forcing the compiler with CMAKE_C_COMPILER_FORCED=1
+    // 2. Skipping the broken compile+link test with CMAKE_C_COMPILER_WORKS=1
+    // 3. Using TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY to bypass linker test
+    // 4. Explicitly setting the cross-linker if available
+    // 5. Writing a toolchain file for more robust cross-compilation
+    let toolchain_file = build_dir.join("toolchain.cmake");
+    let toolchain_content = format!(
+        r#"set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+set(CMAKE_C_COMPILER {cc})
+set(CMAKE_C_COMPILER_FORCED 1)
+set(CMAKE_C_COMPILER_WORKS 1)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+"#
+    );
+    // Add cross-linker if available
+    let toolchain_content = if cmd_exists(&cross_ld) {{
+        format!("{toolchain_content}set(CMAKE_LINKER {cross_ld})\n")
+    }} else {{
+        toolchain_content
+    }};
+    let _ = fs::write(&toolchain_file, toolchain_content);
+
+    let mut cmake_args: Vec<String> = vec![
+        "..".to_string(),
+        format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain_file.display()),
+        "-DCMAKE_BUILD_TYPE=Release".to_string(),
+    ];
+
+    // If the cross-ar and ranlib exist, set them via cmdline too (belt-and-suspenders)
+    if cmd_exists(&cross_ar) {
+        cmake_args.push("-DCMAKE_AR".to_string());
+        cmake_args.push(cross_ar);
+    }
+    if cmd_exists(&cross_ranlib) {
+        cmake_args.push("-DCMAKE_RANLIB".to_string());
+        cmake_args.push(cross_ranlib);
+    }
+
+    // Convert to &str references for Command::new
+    let cmake_args_refs: Vec<&str> = cmake_args.iter().map(|s| s.as_str()).collect();
+
+    let status = Command::new("cmake")
+        .args(&cmake_args_refs)
+        .current_dir(build_dir)
+        .status()
+        .expect("Failed to run cmake");
+    if !status.success() {
+        panic!("cmake configure failed with exit: {:?}", status.code());
+    }
+
+    let status = Command::new("make")
+        .args(["-j", &num_cpus().to_string()])
+        .current_dir(build_dir)
+        .status()
+        .expect("Failed to run make");
+    if !status.success() {
+        panic!("make failed with exit: {:?}", status.code());
+    }
+
+    // The cross-compiler may or may not add .exe extension
+    let candidates = [
+        build_dir.join("hev-socks5-tunnel.exe"),
+        build_dir.join("hev-socks5-tunnel"),
+    ];
+    copy_built_binary(&candidates, dest);
+}
+
+/// Native Windows build (MSVC or MinGW on Windows host)
+fn build_hev_windows_native(src: &PathBuf, dest: &PathBuf, build_dir: &PathBuf) {
+    fs::create_dir_all(build_dir).expect("Failed to create build dir");
+
+    // Try MinGW Makefiles first, then fall back to default
     let status = Command::new("cmake")
         .args([
             "..",
             "-DCMAKE_BUILD_TYPE=Release",
-            "-DCMAKE_SYSTEM_NAME=Windows",
             "-G",
             "MinGW Makefiles",
         ])
-        .current_dir(&build_dir)
+        .current_dir(build_dir)
         .status();
 
     let use_mingw = match &status {
         Ok(s) if s.success() => true,
         _ => {
             println!("cargo:warning=MinGW Makefiles not available, trying default generator...");
-            // Remove partial cmake artifacts and retry with default
-            let _ = fs::remove_dir_all(&build_dir);
-            fs::create_dir_all(&build_dir).expect("Failed to create build dir");
+            let _ = fs::remove_dir_all(build_dir);
+            fs::create_dir_all(build_dir).expect("Failed to create build dir");
             let status = Command::new("cmake")
-                .args(["..", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_SYSTEM_NAME=Windows"])
-                .current_dir(&build_dir)
+                .args(["..", "-DCMAKE_BUILD_TYPE=Release"])
+                .current_dir(build_dir)
                 .status()
                 .expect("Failed to run cmake");
             if !status.success() {
@@ -274,52 +400,60 @@ fn build_hev_windows(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
         }
     };
 
-    let make_cmd = if use_mingw { "mingw32-make" } else { "make" };
+    let make_cmd = if use_mingw { "mingw32-make" } else { "cmake" };
     let num_cpus_str = num_cpus().to_string();
     let make_args: Vec<&str> = if use_mingw {
         vec!["-j", &num_cpus_str]
     } else {
-        vec!["-j", &num_cpus_str]
+        vec!["--build", ".", "--config", "Release"]
     };
 
     let status = Command::new(make_cmd)
         .args(&make_args)
-        .current_dir(&build_dir)
+        .current_dir(build_dir)
         .status()
         .expect("Failed to run make/cmake --build");
     if !status.success() {
         panic!("build failed with exit: {:?}", status.code());
     }
 
-    // Find the built binary
-    // When cross-compiling from Linux with Unix Makefiles, the output
-    // may be named without .exe extension even for Windows target.
     let candidates = [
         build_dir.join("hev-socks5-tunnel.exe"),
         build_dir.join("Release").join("hev-socks5-tunnel.exe"),
         build_dir.join("src").join("hev-socks5-tunnel.exe"),
-        build_dir.join("hev-socks5-tunnel"),
-        build_dir.join("Release").join("hev-socks5-tunnel"),
-        build_dir.join("src").join("hev-socks5-tunnel"),
     ];
+    copy_built_binary(&candidates, dest);
+}
 
-    let mut found = false;
-    for c in &candidates {
-        if c.exists() {
-            fs::copy(c, dest).expect("Failed to copy hev-socks5-tunnel binary");
-            found = true;
-            break;
+/// Try to locate a MinGW-w64 cross-compiler
+fn find_mingw_cross_compiler() -> Option<String> {
+    let candidates = [
+        "x86_64-w64-mingw32-gcc",
+        "x86_64-w64-mingw32-gcc-posix",
+        "x86_64-w64-mingw32-gcc-win32",
+    ];
+    for cc in &candidates {
+        let status = Command::new(cc).arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        if matches!(status, Ok(s) if s.success()) {
+            return Some(cc.to_string());
         }
     }
+    None
+}
 
-    if !found {
-        panic!(
-            "Built hev-socks5-tunnel(.exe) not found. Searched: {:?}",
-            candidates
-        );
+/// Copy the first existing candidate binary to dest
+fn copy_built_binary(candidates: &[PathBuf], dest: &PathBuf) {
+    for c in candidates {
+        if c.exists() {
+            fs::copy(c, dest)
+                .unwrap_or_else(|e| panic!("Failed to copy {} to {}: {e}", c.display(), dest.display()));
+            return;
+        }
     }
-
-    println!("cargo:warning=hev-socks5-tunnel built for Windows");
+    panic!(
+        "Built hev-socks5-tunnel not found. Searched: {:?}",
+        candidates
+    );
 }
 
 // ── Build: macOS ───────────────────────────────────────────────────────
