@@ -200,10 +200,13 @@ fn cleanup_adapter_by_name(name: &str) {
 
     // Use PowerShell to remove ALL adapters whose name starts with this name
     // (handles "FCAE VPN", "FCAE VPN 1", "FCAE VPN 2", etc.)
+    // Also try with hyphen replacement since Windows/tun2socks may convert underscores to hyphens
     // Remove-NetAdapter is the proper way to delete Wintun adapters from Windows
+    let name_hyphen = name.replace('_', "-");
+    let name_underscore = name.replace('-', "_");
     let ps_script = format!(
-        "Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue",
-        name
+        "Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue; Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue",
+        name, name_hyphen
     );
     let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_script]);
     match output {
@@ -223,9 +226,15 @@ fn cleanup_adapter_by_name(name: &str) {
     }
 
     // Also try netsh as fallback for older Windows versions
+    // Try both underscore and hyphen versions
     let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", name]);
+    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", &name_hyphen]);
+    if name_hyphen != name_underscore {
+        let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", &name_underscore]);
+    }
     for i in 2..20 {
         let numbered = format!("{} {}", name, i);
+        let numbered_hyphen = format!("{} {}", name_hyphen, i);
         let output = run_silent("netsh", &["interface", "ip", "delete", "interface", &numbered]);
         match output {
             Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh deleted '{}'", numbered),
@@ -236,6 +245,12 @@ fn cleanup_adapter_by_name(name: &str) {
                 }
             }
             Err(_) => break,
+        }
+        let output = run_silent("netsh", &["interface", "ip", "delete", "interface", &numbered_hyphen]);
+        match output {
+            Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh deleted '{}'", numbered_hyphen),
+            Ok(_) => {}
+            Err(_) => {}
         }
     }
 
@@ -565,8 +580,10 @@ fn configure_windows_tun(cfg: &TunConfig) {
     }
 
     // 3. Find the interface index (use CREATE_NO_WINDOW to avoid popup)
+    // tun2socks may create the adapter with hyphens instead of underscores on Windows
+    let name_hyphen = name.replace('_', "-");
     let ifidx = match run_silent("powershell", &["-NoProfile", "-Command",
-        &format!("(Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue).ifIndex", name)])
+        &format!("$name = '{}'; $hname = '{}'; $adapter = Get-NetAdapter -Name $name -ErrorAction SilentlyContinue; if (-not $adapter) {{ $adapter = Get-NetAdapter -Name $hname -ErrorAction SilentlyContinue }}; if ($adapter) {{ $adapter.ifIndex }}", name, name_hyphen)])
     {
         Ok(o) => {
             let idx_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -717,9 +734,11 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
     }
 
     // Use PowerShell to remove ALL adapters matching this name (including numbered variants)
+    // Also try hyphen variant since Windows/tun2socks may convert underscores to hyphens
+    let name_hyphen = name.replace('_', "-");
     let ps_script = format!(
-        "Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue",
-        name
+        "Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue; Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue",
+        name, name_hyphen
     );
     let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_script]);
     match output {
@@ -738,9 +757,10 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
         Err(e) => log::debug!("[tun_t2s] Remove-NetAdapter error: {}", e),
     }
 
-    // Fallback: netsh for older Windows
+    // Fallback: netsh for older Windows — try both underscore and hyphen
     let _ = run_silent("netsh", &["interface", "ip", "set", "dns", name, "dhcp"]);
     let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", name]);
+    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", &name_hyphen]);
 }
 
 #[cfg(target_os = "linux")]
