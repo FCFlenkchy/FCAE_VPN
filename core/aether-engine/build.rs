@@ -350,13 +350,12 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
     ];
 
     // If the cross-ar and ranlib exist, set them via cmdline too (belt-and-suspenders)
+    // NOTE: CMake -D flags must use VAR=value format in a SINGLE argument
     if cmd_exists(&cross_ar) {
-        cmake_args.push("-DCMAKE_AR".to_string());
-        cmake_args.push(cross_ar);
+        cmake_args.push(format!("-DCMAKE_AR={cross_ar}"));
     }
     if cmd_exists(&cross_ranlib) {
-        cmake_args.push("-DCMAKE_RANLIB".to_string());
-        cmake_args.push(cross_ranlib);
+        cmake_args.push(format!("-DCMAKE_RANLIB={cross_ranlib}"));
     }
 
     // Convert to &str references for Command::new
