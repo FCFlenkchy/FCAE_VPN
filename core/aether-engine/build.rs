@@ -387,21 +387,40 @@ fn build_hev_windows_cross(
         }
     }
 
-    // If gcc didn't report a sysroot, search common locations
+    // If gcc didn't report a sysroot, search common locations.
+    // Must verify BOTH include/winsock2.h AND lib/libws2_32.a exist.
     if mingw_sysroot.is_empty() {
-        let sysroot_candidates = [
-            format!("/usr/{cross_prefix}"),
-            format!("/usr/{cross_prefix}sys-root/mingw"),
-            "/usr/share/mingw-w64".to_string(),
+        let sysroot_candidates: &[(&str, &[&str])] = &[
+            // (prefix path, possible lib subdirectories)
+            (&"/usr/x86_64-w64-mingw32", &["lib"] as &[&str]),
+            (&"/usr/share/mingw-w64", &["lib", "../x86_64-w64-mingw32/lib"]),
         ];
-        for candidate in &sysroot_candidates {
+        for (candidate, lib_subdirs) in sysroot_candidates {
             let include_path = std::path::PathBuf::from(candidate).join("include");
-            let winsock2_h = include_path.join("winsock2.h");
-            if winsock2_h.exists() {
-                mingw_sysroot = candidate.clone();
+            if !include_path.join("winsock2.h").exists() {
+                continue;
+            }
+            // Find a valid lib directory
+            let mut found_lib = String::new();
+            for subdir in *lib_subdirs {
+                let lib_path = std::path::PathBuf::from(candidate).join(subdir);
+                if lib_path.join("libws2_32.a").exists() || lib_path.join("libws2_32.dll.a").exists() {
+                    found_lib = lib_path.to_string_lossy().to_string();
+                    break;
+                }
+            }
+            // Also check if lib is at /usr/x86_64-w64-mingw32/lib while headers are elsewhere
+            if found_lib.is_empty() {
+                let alt_lib = std::path::PathBuf::from("/usr/x86_64-w64-mingw32/lib");
+                if alt_lib.join("libws2_32.a").exists() || alt_lib.join("libws2_32.dll.a").exists() {
+                    found_lib = alt_lib.to_string_lossy().to_string();
+                }
+            }
+            if !found_lib.is_empty() {
+                mingw_sysroot = candidate.to_string();
                 mingw_include = include_path.to_string_lossy().to_string();
-                mingw_lib = std::path::PathBuf::from(candidate).join("lib").to_string_lossy().to_string();
-                println!("cargo:warning=MinGW sysroot (found): {}", mingw_sysroot);
+                mingw_lib = found_lib;
+                println!("cargo:warning=MinGW sysroot (found): sysroot={}, lib={}", mingw_sysroot, mingw_lib);
                 break;
             }
         }
@@ -440,23 +459,31 @@ fn build_hev_windows_cross(
 
     // If we still couldn't find the sysroot, try additional candidate paths
     if mingw_sysroot.is_empty() {
-        // Brute-force search common locations for winsock2.h
-        let candidates = [
-            format!("/usr/{cross_prefix}include"),
-            format!("/usr/lib/gcc/{cross_prefix}13/include"),
-            format!("/usr/lib/gcc/{cross_prefix}12/include"),
-            "/usr/share/mingw-w64/include".to_string(),
+        // Brute-force search common locations for winsock2.h AND libws2_32.a
+        let include_candidates = [
+            "/usr/x86_64-w64-mingw32/include",
+            "/usr/share/mingw-w64/include",
         ];
-        for inc in &candidates {
+        let lib_candidates = [
+            "/usr/x86_64-w64-mingw32/lib",
+        ];
+        for inc in &include_candidates {
             let test_path = std::path::PathBuf::from(inc).join("winsock2.h");
             if test_path.exists() {
-                mingw_include = inc.clone();
-                // lib is usually at the same level as include
-                let lib_path = std::path::PathBuf::from(inc).parent().unwrap_or(std::path::Path::new("/usr")).join("lib");
-                mingw_lib = lib_path.to_string_lossy().to_string();
-                println!("cargo:warning=MinGW headers found at: {}", mingw_include);
+                mingw_include = inc.to_string();
                 break;
             }
+        }
+        for lib in &lib_candidates {
+            let lib_path = std::path::PathBuf::from(lib);
+            if lib_path.join("libws2_32.a").exists() || lib_path.join("libws2_32.dll.a").exists() {
+                mingw_lib = lib.to_string();
+                break;
+            }
+        }
+        if !mingw_include.is_empty() && !mingw_lib.is_empty() {
+            mingw_sysroot = mingw_include.trim_end_matches("/include").to_string();
+            println!("cargo:warning=MinGW headers found at: {}, lib at: {}", mingw_include, mingw_lib);
         }
     }
 
