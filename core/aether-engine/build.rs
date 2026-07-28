@@ -248,6 +248,7 @@ fn build_hev_windows(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
         .args([
             "..",
             "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_SYSTEM_NAME=Windows",
             "-G",
             "MinGW Makefiles",
         ])
@@ -262,7 +263,7 @@ fn build_hev_windows(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
             let _ = fs::remove_dir_all(&build_dir);
             fs::create_dir_all(&build_dir).expect("Failed to create build dir");
             let status = Command::new("cmake")
-                .args(["..", "-DCMAKE_BUILD_TYPE=Release"])
+                .args(["..", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_SYSTEM_NAME=Windows"])
                 .current_dir(&build_dir)
                 .status()
                 .expect("Failed to run cmake");
@@ -273,12 +274,12 @@ fn build_hev_windows(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
         }
     };
 
-    let make_cmd = if use_mingw { "mingw32-make" } else { "cmake" };
+    let make_cmd = if use_mingw { "mingw32-make" } else { "make" };
     let num_cpus_str = num_cpus().to_string();
     let make_args: Vec<&str> = if use_mingw {
         vec!["-j", &num_cpus_str]
     } else {
-        vec!["--build", ".", "--config", "Release"]
+        vec!["-j", &num_cpus_str]
     };
 
     let status = Command::new(make_cmd)
@@ -291,10 +292,15 @@ fn build_hev_windows(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
     }
 
     // Find the built binary
+    // When cross-compiling from Linux with Unix Makefiles, the output
+    // may be named without .exe extension even for Windows target.
     let candidates = [
         build_dir.join("hev-socks5-tunnel.exe"),
         build_dir.join("Release").join("hev-socks5-tunnel.exe"),
         build_dir.join("src").join("hev-socks5-tunnel.exe"),
+        build_dir.join("hev-socks5-tunnel"),
+        build_dir.join("Release").join("hev-socks5-tunnel"),
+        build_dir.join("src").join("hev-socks5-tunnel"),
     ];
 
     let mut found = false;
@@ -308,7 +314,7 @@ fn build_hev_windows(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
 
     if !found {
         panic!(
-            "Built hev-socks5-tunnel.exe not found. Searched: {:?}",
+            "Built hev-socks5-tunnel(.exe) not found. Searched: {:?}",
             candidates
         );
     }
