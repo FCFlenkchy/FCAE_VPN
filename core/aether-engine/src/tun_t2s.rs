@@ -212,7 +212,7 @@ fn configure_windows_tun(cfg: &TunConfig) {
     let _ = run("netsh", &["interface","ip","set","dns",name,"static","1.1.1.1"]);
     let name_h = name.replace('_', "-");
     if let Ok(o) = run("powershell", &["-NoProfile","-Command", &format!(
-        "$a=Get-NetAdapter -Name '{{}}','{{}}' -ErrorAction SilentlyContinue|Select -First 1;if($a){{$a.ifIndex}}", name, name_h)])
+        "$a=Get-NetAdapter -Name '{}','{}' -ErrorAction SilentlyContinue|Select -First 1;if($a){{$a.ifIndex}}", name, name_h)])
     {
         if let Ok(idx) = String::from_utf8_lossy(&o.stdout).trim().parse::<u32>() {
             let _ = run("netsh", &["interface","ipv4","set","interface", &idx.to_string(), "metric=5"]);
