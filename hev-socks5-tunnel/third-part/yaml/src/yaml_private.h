@@ -8,6 +8,20 @@
 #include <limits.h>
 #include <stddef.h>
 
+/* Fallback version macros if not defined by build system */
+#ifndef YAML_VERSION_STRING
+#define YAML_VERSION_STRING "0.2.5"
+#endif
+#ifndef YAML_VERSION_MAJOR
+#define YAML_VERSION_MAJOR 0
+#endif
+#ifndef YAML_VERSION_MINOR
+#define YAML_VERSION_MINOR 2
+#endif
+#ifndef YAML_VERSION_PATCH
+#define YAML_VERSION_PATCH 5
+#endif
+
 /*
  * Memory management.
  */

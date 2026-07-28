@@ -757,7 +757,7 @@ retry:
     if (res & SYNC_SEND) {
         res = atomic_fetch_or (&tsync, SYNC_SENT);
         if (!(res & SYNC_SENT))
-            write (event_fds[1], &res, 1);
+            (void) write (event_fds[1], &res, 1);
     } else {
         atomic_fetch_or (&tsync, SYNC_STOP);
     }
