@@ -38,8 +38,8 @@ fn main() {
         return;
     }
 
-    // At this point we're building for Windows or Linux — enable the cfg flag
-    println!("cargo:rustc-cfg=hevsocks5_available");
+    // At this point we're building for Windows or Linux.
+    // The cfg flag will be set ONLY if the binary is actually built/available.
 
     {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -57,8 +57,10 @@ fn main() {
         //   git clone --depth 1 --recursive https://github.com/heiher/hev-socks5-tunnel.git
         if !hev_src.join("src").join("hev-main.c").exists() {
             panic!(
-                "hev-socks5-tunnel not found at {}!\n\
-                 Clone it into the repo root:\n\
+                "hev-socks5-tunnel not found at {}!\
+\
+                 Clone it into the repo root:\
+\
                  git clone --depth 1 --recursive https://github.com/heiher/hev-socks5-tunnel.git {}",
                 hev_src.display(),
                 hev_src.display()
@@ -110,6 +112,15 @@ fn main() {
         // Also check workspace target/release for pre-built binary
         let prebuilt_path = workspace_root.join("target").join("release").join(bin_name);
 
+        // Remove any stale dummy/empty file from previous failed builds
+        if bin_path.exists() {
+            if let Ok(meta) = fs::metadata(&bin_path) {
+                if meta.len() == 0 {
+                    let _ = fs::remove_file(&bin_path);
+                }
+            }
+        }
+
         // Check if binary already exists (from a previous build)
         // and if CMakeLists.txt hasn't changed, skip rebuild
         let cmake_file = hev_src.join("CMakeLists.txt");
@@ -129,15 +140,34 @@ fn main() {
 
         if needs_build {
             // First check if pre-built binary exists in target/release
+            let mut prebuilt_valid = false;
             if prebuilt_path.exists() {
-                println!(
-                    "cargo:warning=Copying pre-built hev-socks5-tunnel from: {}",
-                    prebuilt_path.display()
-                );
-                fs::copy(&prebuilt_path, &bin_path)
-                    .expect("Failed to copy pre-built hev-socks5-tunnel");
-                println!("cargo:warning=hev-socks5-tunnel copied successfully");
-            } else {
+                // Validate the pre-built binary before using it
+                let pe_ok = if target_os == "windows" {
+                    is_valid_pe(&prebuilt_path)
+                } else {
+                    true // On Linux, no PE check needed
+                };
+                if pe_ok {
+                    println!(
+                        "cargo:warning=Copying pre-built hev-socks5-tunnel from: {}",
+                        prebuilt_path.display()
+                    );
+                    match fs::copy(&prebuilt_path, &bin_path) {
+                        Ok(_) => {
+                            println!("cargo:warning=hev-socks5-tunnel copied successfully");
+                            prebuilt_valid = true;
+                        }
+                        Err(e) => {
+                            println!("cargo:warning=Failed to copy pre-built binary: {e}");
+                        }
+                    }
+                } else {
+                    println!("cargo:warning=Pre-built binary is NOT a valid Windows PE — ignoring");
+                }
+            }
+
+            if !prebuilt_valid {
                 // Build from source using cmake + make
                 match target_os.as_str() {
                     "windows" => {
@@ -157,49 +187,68 @@ fn main() {
                 }
 
                 if !bin_path.exists() {
+                    // Build produced no binary. Try the pre-built fallback one more time
+                    // but only if it's a valid binary.
                     if prebuilt_path.exists() {
-                        println!(
-                            "cargo:warning=Build failed, falling back to pre-built: {}",
-                            prebuilt_path.display()
-                        );
-                        fs::copy(&prebuilt_path, &bin_path)
-                            .expect("Failed to copy pre-built hev-socks5-tunnel");
-                    } else if target_os == "windows" {
-                        // On Windows cross-compile, the build may have been skipped
-                        // due to missing MinGW cross-compiler. This is acceptable —
-                        // the Rust binary can use built-in TUN without the C tunnel.
-                        println!("cargo:warning=hev-socks5-tunnel not built (cross-compiler unavailable). The Rust TUN implementation will be used instead.");
-                        // Don't set HEVSOCKS5_EMBEDDED env var, and don't panic.
-                        // Return early to skip the embedding step.
-                        // Write a dummy file so HEVSOCKS5_EMBEDDED always points to a valid path
-                        fs::write(&bin_path, b"").expect("Failed to write dummy binary");
+                        let pe_ok = if target_os == "windows" {
+                            is_valid_pe(&prebuilt_path)
+                        } else {
+                            true
+                        };
+                        if pe_ok {
+                            println!(
+                                "cargo:warning=Build failed, falling back to pre-built: {}",
+                                prebuilt_path.display()
+                            );
+                            let _ = fs::copy(&prebuilt_path, &bin_path);
+                        } else {
+                            println!("cargo:warning=Build failed and pre-built binary is invalid — skipping");
+                        }
                     } else {
-                        panic!(
-                            "Cannot build hev-socks5-tunnel!\n\
-                             Build failed for target: {target_os}\n\
-                             To fix this:\n\
-                             1. Install cmake and a C compiler (gcc/clang)\n\
-                             2. Build manually:\n\
-                                cd {} && mkdir build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --build .\n\
-                             3. Copy hev-socks5-tunnel to ../target/release/{bin_name}\n\
-                             4. Then run: cargo build --release",
-                            hev_src.display()
-                        );
+                        // Build failed and no pre-built fallback.
+                        // Skip embedding — the Rust TUN implementation will be used instead.
+                        println!("cargo:warning=hev-socks5-tunnel build failed. The Rust TUN implementation will be used instead.");
+                        println!("cargo:warning=To enable C tunnel: build hev-socks5-tunnel manually and place it in target/release/{}", bin_name);
                     }
                 }
             }
+        }
+
+        // Only set cfg and embed if the binary actually exists, is non-empty,
+        // and (for Windows targets) is a valid PE executable.
+        let mut valid_binary = false;
+        if bin_path.exists() {
+            if let Ok(meta) = fs::metadata(&bin_path) {
+                if meta.len() > 0 {
+                    // On Windows target, validate the binary is a real PE
+                    if target_os == "windows" && !is_valid_pe(&bin_path) {
+                        println!("cargo:warning=hev-socks5-tunnel binary is NOT a valid Windows PE — discarding and using Rust TUN fallback");
+                        let _ = fs::remove_file(&bin_path);
+                    } else {
+                        valid_binary = true;
+                    }
+                } else {
+                    println!("cargo:warning=hev-socks5-tunnel binary is empty — skipping embed");
+                    let _ = fs::remove_file(&bin_path);
+                }
+            }
+        }
+
+        if valid_binary {
+            println!("cargo:rustc-cfg=hevsocks5_available");
+            println!("cargo:rustc-env=HEVSOCKS5_EMBEDDED={}", bin_path.display());
+            println!(
+                "cargo:warning=hev-socks5-tunnel embedded at: {}",
+                bin_path.display()
+            );
+        } else {
+            println!("cargo:warning=hev-socks5-tunnel not available — Rust TUN will be used");
         }
 
         // ── Windows: embed wintun.dll ───────────────────────────────────
         if target_os == "windows" {
             embed_wintun_dll(&hev_src, &out_dir);
         }
-
-        println!("cargo:rustc-env=HEVSOCKS5_EMBEDDED={}", bin_path.display());
-        println!(
-            "cargo:warning=hev-socks5-tunnel embedded at: {}",
-            bin_path.display()
-        );
     }
 }
 
@@ -279,8 +328,7 @@ fn build_hev_windows(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
                 // The Rust Windows binary can still use built-in TUN via other means.
                 println!("cargo:warning=No MinGW cross-compiler found — skipping hev-socks5-tunnel build for Windows target");
                 println!("cargo:warning=Install mingw-w64: sudo apt-get install mingw-w64 g++-mingw-w64-x86-64");
-                // Don't create an empty stub (it would cause runtime failures when executed).
-                // Instead, just don't write anything — the caller will handle missing binary.
+                // Don't create an empty stub. Just return — the caller handles missing binary.
             }
         }
     } else {
@@ -300,9 +348,11 @@ fn build_hev_windows_cross(
 
     // Extract the cross-compiler prefix (e.g., "x86_64-w64-mingw32-" from "x86_64-w64-mingw32-gcc")
     let cross_prefix = cc.trim_end_matches("gcc");
+    let cross_gpp = format!("{cross_prefix}g++");
     let cross_ar = format!("{cross_prefix}ar");
-    let cross_ld = format!("{cross_prefix}ld");
     let cross_ranlib = format!("{cross_prefix}ranlib");
+    let cross_dlltool = format!("{cross_prefix}dlltool");
+    let cross_windres = format!("{cross_prefix}windres");
 
     // Helper to check if a command exists in PATH
     let cmd_exists = |cmd: &str| -> bool {
@@ -315,180 +365,331 @@ fn build_hev_windows_cross(
             .unwrap_or(false)
     };
 
-    // Verify the cross-compiler has required headers (arpa/inet.h, poll.h, etc.).
-    // MinGW-w64 on some CI runners has the compiler but not the full sysroot.
-    // Search for the MinGW include directory and add it to the compiler flags.
-    let header_test = build_dir.join("_header_test.c");
-    let header_test_obj = build_dir.join("_header_test.o");
-    let _ = fs::write(&header_test, "#include <arpa/inet.h>\n#include <poll.h>\n#include <netinet/in.h>\nint main(){return 0;}\n");
-    let test_status = Command::new(cc)
-        .args(["-c", header_test.to_str().unwrap_or(""), "-o", header_test_obj.to_str().unwrap_or("")])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    let _ = fs::remove_file(&header_test);
-    let _ = fs::remove_file(&header_test_obj);
-    
-    // If headers missing, try common MinGW sysroot paths
-    let mut extra_cflags = String::new();
-    if !matches!(test_status, Ok(s) if s.success()) {
-        // Common MinGW-w64 include paths on Linux CI runners
-        let mingw_include_candidates = [
-            format!("/usr/{cross_prefix}include"),
-            format!("/usr/lib/gcc/{cross_prefix}13/include"),
-            format!("/usr/lib/gcc/{cross_prefix}12/include"),
-            format!("/usr/{cross_prefix}sys-root/mingw/include"),
-            "/usr/share/mingw-w64/include".to_string(),
+    // ── Find the MinGW sysroot (includes + libs) ────────────────────────
+    // MinGW-w64 on Linux CI runners installs to /usr/x86_64-w64-mingw32/
+    // but the compiler doesn't always auto-detect its sysroot.
+    // We locate it by asking gcc for its search paths.
+    let mut mingw_sysroot = String::new();
+    let mut mingw_include = String::new();
+    let mut mingw_lib = String::new();
+
+    // Try to extract sysroot from gcc's built-in search paths
+    if let Ok(output) = Command::new(cc)
+        .args(["-print-sysroot"])
+        .output()
+    {
+        let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !sysroot.is_empty() && std::path::PathBuf::from(&sysroot).exists() {
+            mingw_sysroot = sysroot;
+            mingw_include = format!("{}/include", mingw_sysroot);
+            mingw_lib = format!("{}/lib", mingw_sysroot);
+            println!("cargo:warning=MinGW sysroot (from gcc): {}", mingw_sysroot);
+        }
+    }
+
+    // If gcc didn't report a sysroot, search common locations
+    if mingw_sysroot.is_empty() {
+        let sysroot_candidates = [
+            format!("/usr/{cross_prefix}"),
+            format!("/usr/{cross_prefix}sys-root/mingw"),
+            "/usr/share/mingw-w64".to_string(),
         ];
-        let mut found_include = None;
-        for inc in &mingw_include_candidates {
-            let test_path = std::path::PathBuf::from(inc).join("arpa").join("inet.h");
-            if test_path.exists() {
-                found_include = Some(inc.clone());
+        for candidate in &sysroot_candidates {
+            let include_path = std::path::PathBuf::from(candidate).join("include");
+            let winsock2_h = include_path.join("winsock2.h");
+            if winsock2_h.exists() {
+                mingw_sysroot = candidate.clone();
+                mingw_include = include_path.to_string_lossy().to_string();
+                mingw_lib = std::path::PathBuf::from(candidate).join("lib").to_string_lossy().to_string();
+                println!("cargo:warning=MinGW sysroot (found): {}", mingw_sysroot);
                 break;
             }
         }
-        
-        // Create compatibility headers for POSIX APIs missing in MinGW
-        // poll.h is not available on Windows/MinGW, but hev-task.h includes it.
-        // Provide a stub that defines the needed structures.
-        let compat_dir = build_dir.join("compat_headers");
-        let _ = fs::create_dir_all(&compat_dir);
-        let poll_h = compat_dir.join("poll.h");
-        let _ = fs::write(&poll_h, r#"/* Minimal poll.h for MinGW cross-compilation */
-#ifndef _COMPAT_POLL_H
-#define _COMPAT_POLL_H
-#include <winsock2.h>
-#define POLLIN     0x0001
-#define POLLPRI    0x0002
-#define POLLOUT    0x0004
-#define POLLERR    0x0008
-#define POLLHUP    0x0010
-#define POLLNVAL   0x0020
-typedef unsigned long nfds_t;
-struct pollfd {
-    int fd;
-    short events;
-    short revents;
-};
-#define poll(fds, nfds, timeout)  WSAPoll(fds, nfds, timeout)
-#endif
-"#);
-        
-        if let Some(ref inc_path) = found_include {
-            println!("cargo:warning=Found MinGW headers at: {inc_path}");
-            extra_cflags = format!("-I{inc_path} -I{}", compat_dir.display());
-        } else {
-            // Even without full MinGW sysroot, try with just our compat headers
-            println!("cargo:warning=MinGW sysroot not found — using compatibility headers for poll.h");
-            extra_cflags = format!("-I{}", compat_dir.display());
+    }
+
+    // Also search for the mingw CRT includes (stddef.h, stdarg.h, etc.)
+    // which are in a gcc-version-specific directory
+    let mut gcc_include = String::new();
+    if let Ok(output) = Command::new(cc)
+        .args(["-E", "-x", "c", "-", "-v"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+    {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Parse the "#include <...> search starts here:" section
+        let mut in_search_list = false;
+        for line in stderr.lines() {
+            if line.contains("search starts here") {
+                in_search_list = true;
+                continue;
+            }
+            if in_search_list && line.contains("End of search list") {
+                break;
+            }
+            if in_search_list {
+                let path = line.trim();
+                // Look for a gcc-version-specific include dir
+                if path.contains("/lib/gcc/") && path.ends_with("/include") {
+                    gcc_include = path.to_string();
+                    break;
+                }
+            }
         }
     }
 
-    // Build CMake arguments for cross-compilation.
-    // Key insight: CMake's compiler detection runs a link test that fails
-    // because MinGW gcc invokes the host GNU ld (which doesn't understand
-    // Windows PE flags like --major-image-version). We fix this by:
-    // 1. Forcing the compiler with CMAKE_C_COMPILER_FORCED=1
-    // 2. Skipping the broken compile+link test with CMAKE_C_COMPILER_WORKS=1
-    // 3. Using TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY to bypass linker test
-    // 4. Explicitly setting the cross-linker if available
-    // 5. Writing a toolchain file for more robust cross-compilation
+    // If we still couldn't find the sysroot, try additional candidate paths
+    if mingw_sysroot.is_empty() {
+        // Brute-force search common locations for winsock2.h
+        let candidates = [
+            format!("/usr/{cross_prefix}include"),
+            format!("/usr/lib/gcc/{cross_prefix}13/include"),
+            format!("/usr/lib/gcc/{cross_prefix}12/include"),
+            "/usr/share/mingw-w64/include".to_string(),
+        ];
+        for inc in &candidates {
+            let test_path = std::path::PathBuf::from(inc).join("winsock2.h");
+            if test_path.exists() {
+                mingw_include = inc.clone();
+                // lib is usually at the same level as include
+                let lib_path = std::path::PathBuf::from(inc).parent().unwrap_or(std::path::Path::new("/usr")).join("lib");
+                mingw_lib = lib_path.to_string_lossy().to_string();
+                println!("cargo:warning=MinGW headers found at: {}", mingw_include);
+                break;
+            }
+        }
+    }
+
+    // Build the full include flags: sysroot include + gcc built-in includes
+    let mut extra_cflags = String::new();
+    if !mingw_include.is_empty() {
+        extra_cflags.push_str(&format!("-I{}", mingw_include));
+    }
+    if !gcc_include.is_empty() {
+        extra_cflags.push_str(&format!(" -I{}", gcc_include));
+    }
+
+    // Build library search path flags
+    let mut extra_ldflags = String::new();
+    if !mingw_lib.is_empty() {
+        extra_ldflags.push_str(&format!("-L{}", mingw_lib));
+    }
+
+    // ── Verify the toolchain works: try compiling a real Windows program ──
+    let test_c = build_dir.join("_cross_test.c");
+    let test_exe = build_dir.join("_cross_test.exe");
+    let _ = fs::write(&test_c, r#"#include <winsock2.h>
+#include <windows.h>
+#include <ws2tcpip.h>
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmdLine, int nShow) {
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2,2), &wsa);
+    WSACleanup();
+    return 0;
+}
+"#);
+    let mut test_cmd = Command::new(cc);
+    test_cmd.args([test_c.to_str().unwrap_or(""), "-o", test_exe.to_str().unwrap_or("")]);
+    if !extra_cflags.is_empty() {
+        test_cmd.arg(&extra_cflags);
+    }
+    if !extra_ldflags.is_empty() {
+        test_cmd.arg(&extra_ldflags);
+    }
+    test_cmd.arg("-lws2_32").arg("-static");
+    let test_ok = test_cmd.status().map(|s| s.success()).unwrap_or(false);
+
+    // Verify the output is a valid PE
+    let pe_ok = if test_ok && test_exe.exists() {
+        is_valid_pe(&test_exe)
+    } else {
+        false
+    };
+
+    // Clean up test artifacts
+    let _ = fs::remove_file(&test_c);
+    let _ = fs::remove_file(&test_exe);
+
+    if !test_ok || !pe_ok {
+        println!("cargo:warning=MinGW cross-compiler failed to produce a valid Windows PE binary.");
+        println!("cargo:warning=Install full MinGW-w64: sudo apt-get install mingw-w64 g++-mingw-w64-x86-64");
+        println!("cargo:warning=hev-socks5-tunnel not built (cross-compiler broken).");
+        let _ = fs::remove_dir_all(build_dir);
+        return;
+    }
+    println!("cargo:warning=MinGW cross-compiler verified — produces valid Windows PE");
+
+    // ── Create a robust toolchain file ───────────────────────────────────
+    // The key difference from the broken approach: we do NOT set
+    // CMAKE_C_COMPILER_WORKS=1 which bypasses all detection.
+    // Instead, we provide enough information for CMake's detection to succeed.
     let toolchain_file = build_dir.join("toolchain.cmake");
-    let toolchain_content = format!(
-        r#"set(CMAKE_SYSTEM_NAME Windows)
+    let mut toolchain = String::new();
+    toolchain.push_str(&format!(
+        r#"# Cross-compilation toolchain for Windows via MinGW-w64
+set(CMAKE_SYSTEM_NAME Windows)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)
 set(CMAKE_C_COMPILER {cc})
-set(CMAKE_C_COMPILER_FORCED 1)
-set(CMAKE_C_COMPILER_WORKS 1)
-set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+set(CMAKE_CXX_COMPILER {cross_gpp})
 "#
-    );
-    // Add cross-linker, ar, ranlib, and ASM compiler if available
-    let toolchain_content = if cmd_exists(&cross_ld) {{
-        format!("{toolchain_content}set(CMAKE_LINKER {cross_ld})\n")
-    }} else {{
-        toolchain_content
-    }};
-    let toolchain_content = if cmd_exists(&cross_ar) {{
-        format!("{toolchain_content}set(CMAKE_AR {cross_ar})\n")
-    }} else {{
-        toolchain_content
-    }};
-    // Use the cross gcc also as assembler (for .s files)
-    let toolchain_content = if !extra_cflags.is_empty() {{
-        format!("{toolchain_content}set(CMAKE_ASM_COMPILER {cc})\nset(CMAKE_ASM_COMPILER_FORCED 1)\nset(CMAKE_ASM_COMPILER_WORKS 1)\nset(CMAKE_C_FLAGS \"{extra_cflags}\")\n")
-    }} else {{
-        format!("{toolchain_content}set(CMAKE_ASM_COMPILER {cc})\nset(CMAKE_ASM_COMPILER_FORCED 1)\nset(CMAKE_ASM_COMPILER_WORKS 1)\n")
-    }};
-    let _ = fs::write(&toolchain_file, toolchain_content);
+    ));
 
-    let mut cmake_args: Vec<String> = vec![
+    // Set sysroot if we found one
+    if !mingw_sysroot.is_empty() {
+        toolchain.push_str(&format!("set(CMAKE_SYSROOT {mingw_sysroot})\n"));
+        toolchain.push_str(&format!("set(CMAKE_FIND_ROOT_PATH {mingw_sysroot})\n"));
+    }
+
+    // Set cross-tools explicitly
+    if cmd_exists(&cross_ar) {
+        toolchain.push_str(&format!("set(CMAKE_AR {cross_ar})\n"));
+    }
+    if cmd_exists(&cross_ranlib) {
+        toolchain.push_str(&format!("set(CMAKE_RANLIB {cross_ranlib})\n"));
+    }
+    if cmd_exists(&cross_dlltool) {
+        toolchain.push_str(&format!("set(CMAKE_DLLTOOL {cross_dlltool})\n"));
+    }
+    if cmd_exists(&cross_windres) {
+        toolchain.push_str(&format!("set(CMAKE_RC_COMPILER {cross_windres})\n"));
+    }
+
+    // Use the cross gcc also as assembler (for .s files in hev-task-system)
+    toolchain.push_str(&format!(
+        r#"set(CMAKE_ASM_COMPILER {cc})
+"#
+    ));
+
+    // Set find mode to ONLY search in the sysroot (cross-compilation safety)
+    toolchain.push_str(r#"set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+"#);
+
+    // Add C flags: static link, include paths, define WIN32
+    let mut cflags = "-static -DWIN32 -D_WIN32 -D__MSYS__".to_string();
+    if !extra_cflags.is_empty() {
+        cflags.push_str(&format!(" {}", extra_cflags));
+    }
+    toolchain.push_str(&format!("set(CMAKE_C_FLAGS_INIT \"{cflags}\")\n"));
+
+    // Add linker flags
+    let mut ldflags = "-static -lws2_32 -liphlpapi".to_string();
+    if !extra_ldflags.is_empty() {
+        ldflags.push_str(&format!(" {}", extra_ldflags));
+    }
+    toolchain.push_str(&format!("set(CMAKE_EXE_LINKER_FLAGS_INIT \"{ldflags}\")\n"));
+
+    let _ = fs::write(&toolchain_file, &toolchain);
+    println!("cargo:warning=Toolchain file written with sysroot={mingw_sysroot}");
+
+    // ── Run cmake configure ─────────────────────────────────────────────
+    let cmake_args: Vec<String> = vec![
         "..".to_string(),
         format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain_file.display()),
         "-DCMAKE_BUILD_TYPE=Release".to_string(),
-        // Static link to avoid MinGW DLL dependencies at runtime
-        "-DCMAKE_EXE_LINKER_FLAGS=-static".to_string(),
     ];
-
-    // Add extra CFLAGS if we found MinGW headers in a non-standard location
-    if !extra_cflags.is_empty() {
-        cmake_args.push(format!("-DCMAKE_C_FLAGS={extra_cflags}"));
-    }
-
-    // If the cross-ar and ranlib exist, set them via cmdline too (belt-and-suspenders)
-    // NOTE: CMake -D flags must use VAR=value format in a SINGLE argument
-    if cmd_exists(&cross_ar) {
-        cmake_args.push(format!("-DCMAKE_AR={cross_ar}"));
-    }
-    if cmd_exists(&cross_ranlib) {
-        cmake_args.push(format!("-DCMAKE_RANLIB={cross_ranlib}"));
-    }
-
-    // Convert to &str references for Command::new
     let cmake_args_refs: Vec<&str> = cmake_args.iter().map(|s| s.as_str()).collect();
 
     let status = Command::new("cmake")
         .args(&cmake_args_refs)
         .current_dir(build_dir)
-        .status()
-        .expect("Failed to run cmake");
-    if !status.success() {
-        panic!("cmake configure failed with exit: {:?}", status.code());
-    }
-
-    // Use cmake --build which is more portable than raw make
-    let status = Command::new("cmake")
-        .args(["--build", ".", "--config", "Release", "-j", &num_cpus().to_string()])
-        .current_dir(build_dir)
-        .status()
-        .expect("Failed to run cmake --build");
-    if !status.success() {
-        // Fallback: try raw make in case cmake --build doesn't work
-        println!("cargo:warning=cmake --build failed, trying make directly...");
-        let status = Command::new("make")
-            .args(["-j", &num_cpus().to_string()])
-            .current_dir(build_dir)
-            .status()
-            .expect("Failed to run make");
-        if !status.success() {
-            // Cross-compilation failed. Show the error for debugging, but don't panic.
-            // main() will write a dummy placeholder so the build can continue.
-            println!("cargo:warning=Cross-compilation of hev-socks5-tunnel failed.");
-            println!("cargo:warning=Install full MinGW-w64: sudo apt-get install mingw-w64");
+        .status();
+    match status {
+        Ok(s) if s.success() => {},
+        Ok(s) => {
+            println!("cargo:warning=cmake configure failed with exit {:?} — skipping hev-socks5-tunnel build", s.code());
+            let _ = fs::remove_dir_all(build_dir);
+            return;
+        }
+        Err(e) => {
+            println!("cargo:warning=Failed to run cmake: {e} — skipping hev-socks5-tunnel build");
             let _ = fs::remove_dir_all(build_dir);
             return;
         }
     }
 
-    // The cross-compiler may or may not add .exe extension
+    // ── Build using cmake --build (do NOT fallback to raw make) ──────────
+    let status = Command::new("cmake")
+        .args(["--build", ".", "--config", "Release", "-j", &num_cpus().to_string()])
+        .current_dir(build_dir)
+        .status();
+
+    let build_ok = match status {
+        Ok(s) if s.success() => true,
+        Ok(s) => {
+            println!("cargo:warning=cmake --build failed with exit {:?}", s.code());
+            false
+        }
+        Err(e) => {
+            println!("cargo:warning=cmake --build error: {e}");
+            false
+        }
+    };
+
+    if !build_ok {
+        // Cross-compilation failed. Clean up and return.
+        println!("cargo:warning=Cross-compilation of hev-socks5-tunnel failed.");
+        println!("cargo:warning=Install full MinGW-w64: sudo apt-get install mingw-w64 g++-mingw-w64-x86-64");
+        let _ = fs::remove_dir_all(build_dir);
+        return;
+    }
+
+    // ── Find the built binary ───────────────────────────────────────────
     let candidates = [
         build_dir.join("hev-socks5-tunnel.exe"),
         build_dir.join("hev-socks5-tunnel"),
         build_dir.join("Release").join("hev-socks5-tunnel.exe"),
         build_dir.join("src").join("hev-socks5-tunnel.exe"),
     ];
-    copy_built_binary(&candidates, dest);
+
+    // Find the first existing candidate
+    let mut found_binary: Option<PathBuf> = None;
+    for c in &candidates {
+        if c.exists() {
+            if let Ok(meta) = fs::metadata(c) {
+                if meta.len() > 0 {
+                    found_binary = Some(c.clone());
+                    break;
+                }
+            }
+        }
+    }
+
+    match found_binary {
+        Some(ref built) => {
+            // Validate it's a real Windows PE before copying
+            if !is_valid_pe(built) {
+                println!("cargo:warning=Built binary is NOT a valid Windows PE — discarding");
+                println!("cargo:warning=Cross-compilation produced an invalid binary (likely host ELF).");
+                let _ = fs::remove_dir_all(build_dir);
+                return;
+            }
+            fs::copy(built, dest)
+                .unwrap_or_else(|e| panic!("Failed to copy {} to {}: {e}", built.display(), dest.display()));
+            println!("cargo:warning=hev-socks5-tunnel cross-compiled successfully (valid PE)");
+        }
+        None => {
+            println!("cargo:warning=hev-socks5-tunnel built but binary not found. Searched: {:?}", candidates);
+            let _ = fs::remove_dir_all(build_dir);
+        }
+    }
+}
+
+/// Check if a file is a valid Windows PE (Portable Executable) binary.
+/// PE files start with "MZ" magic bytes.
+fn is_valid_pe(path: &PathBuf) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    match fs::read(path) {
+        Ok(bytes) if bytes.len() >= 2 => {
+            // PE files start with MZ (0x4D 0x5A)
+            bytes[0] == 0x4D && bytes[1] == 0x5A
+        }
+        _ => false,
+    }
 }
 
 /// Native Windows build (MSVC or MinGW on Windows host)

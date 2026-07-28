@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 
 use crate::error::{AetherError, Result};
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), hevsocks5_available))]
 static HEVSOCKS5_BYTES: &[u8] = include_bytes!(env!("HEVSOCKS5_EMBEDDED"));
 
 #[cfg(all(not(target_os = "android"), wintun_embedded))]

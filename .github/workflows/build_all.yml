@@ -138,7 +138,8 @@ jobs:
         run: |
           sudo apt-get update -qq || true
           sudo apt-get install -y -qq --no-install-recommends \
-            mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 nasm
+            mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 \
+            binutils-mingw-w64-x86-64 nasm
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
