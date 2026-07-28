@@ -309,6 +309,25 @@ fn build_hev_windows_cross(
             .unwrap_or(false)
     };
 
+    // Verify the cross-compiler has required headers (arpa/inet.h, poll.h, etc.).
+    // If MinGW sysroot is incomplete, skip the build entirely rather than failing mid-way.
+    let header_test = build_dir.join("_header_test.c");
+    let header_test_obj = build_dir.join("_header_test.o");
+    let _ = fs::write(&header_test, "#include <arpa/inet.h>\n#include <poll.h>\nint main(){return 0;}\n");
+    let test_status = Command::new(cc)
+        .args(["-c", header_test.to_str().unwrap_or(""), "-o", header_test_obj.to_str().unwrap_or("")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = fs::remove_file(&header_test);
+    let _ = fs::remove_file(&header_test_obj);
+    if !matches!(test_status, Ok(s) if s.success()) {
+        println!("cargo:warning=MinGW cross-compiler missing POSIX headers (arpa/inet.h, poll.h).");
+        println!("cargo:warning=Install full MinGW-w64: sudo apt-get install mingw-w64");
+        println!("cargo:warning=Skipping hev-socks5-tunnel build — Rust TUN will be used instead.");
+        return;
+    }
+
     // Build CMake arguments for cross-compilation.
     // Key insight: CMake's compiler detection runs a link test that fails
     // because MinGW gcc invokes the host GNU ld (which doesn't understand
