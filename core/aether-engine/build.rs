@@ -242,8 +242,9 @@ fn build_hev_windows(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
     };
 
     let make_cmd = if use_mingw { "mingw32-make" } else { "cmake" };
+    let num_cpus_str = num_cpus().to_string();
     let make_args: Vec<&str> = if use_mingw {
-        vec!["-j", &num_cpus().to_string()]
+        vec!["-j", &num_cpus_str]
     } else {
         vec!["--build", ".", "--config", "Release"]
     };
