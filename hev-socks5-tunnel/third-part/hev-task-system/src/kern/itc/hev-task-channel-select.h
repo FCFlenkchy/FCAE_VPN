@@ -10,7 +10,11 @@
 #ifndef __HEV_TASK_CHANNEL_SELECT_H__
 #define __HEV_TASK_CHANNEL_SELECT_H__
 
+#ifdef _WIN32
+#include <stddef.h>
+#else
 #include <sys/types.h>
+#endif
 
 #include "hev-task-channel.h"
 

@@ -9,8 +9,14 @@
 
 #include <stdlib.h>
 #include <signal.h>
+#ifdef _WIN32
+#include <io.h>
+#include <process.h>
+/* unistd.h and sys/wait.h are POSIX-only; Windows uses process.h */
+#else
 #include <unistd.h>
 #include <sys/wait.h>
+#endif
 
 #if defined(__APPLE__)
 #include <Availability.h>

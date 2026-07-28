@@ -10,7 +10,12 @@
 #ifndef __HEV_TASK_IO_SOCKET_H__
 #define __HEV_TASK_IO_SOCKET_H__
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {

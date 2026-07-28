@@ -10,8 +10,14 @@
 #ifndef __HEV_TASK_IO_H__
 #define __HEV_TASK_IO_H__
 
+#ifdef _WIN32
+#include <io.h>
+#include <stddef.h>
+struct iovec { void *iov_base; size_t iov_len; };
+#else
 #include <sys/uio.h>
 #include <sys/types.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {

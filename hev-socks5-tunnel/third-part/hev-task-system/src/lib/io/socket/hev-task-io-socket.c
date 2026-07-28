@@ -9,9 +9,15 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#ifdef _WIN32
+#include <io.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#endif
 
 #include "kern/task/hev-task.h"
 #include "lib/io/basic/hev-task-io.h"

@@ -17,12 +17,18 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <stdarg.h>
+#ifdef _WIN32
+#include <io.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#endif
 
 #include "kern/task/hev-task.h"
 #include "lib/io/buffer/hev-circular-buffer.h"

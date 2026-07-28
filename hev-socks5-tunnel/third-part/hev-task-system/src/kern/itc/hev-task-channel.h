@@ -10,7 +10,12 @@
 #ifndef __HEV_TASK_CHANNEL_H__
 #define __HEV_TASK_CHANNEL_H__
 
+#ifdef _WIN32
+#include <stddef.h>
+/* ssize_t is in <stddef.h> on Windows */
+#else
 #include <sys/types.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {

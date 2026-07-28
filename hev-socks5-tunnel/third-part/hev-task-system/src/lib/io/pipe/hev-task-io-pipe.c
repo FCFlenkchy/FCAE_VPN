@@ -7,8 +7,15 @@
  ============================================================================
  */
 
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#include <winsock2.h>
+/* Windows doesn't have POSIX pipe(); this file will need _pipe() emulation */
+#else
 #include <unistd.h>
 #include <sys/ioctl.h>
+#endif
 
 #include "lib/misc/hev-compiler.h"
 

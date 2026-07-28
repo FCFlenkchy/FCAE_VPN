@@ -11,8 +11,13 @@
 #define __HEV_RING_BUFFER_H__
 
 #include <stdlib.h>
+#ifdef _WIN32
+#include <stddef.h>
+struct iovec { void *iov_base; size_t iov_len; };
+#else
 #include <sys/uio.h>
 #include <sys/types.h>
+#endif
 
 typedef struct _HevRingBuffer HevRingBuffer;
 

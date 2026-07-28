@@ -11,7 +11,13 @@
 #include <signal.h>
 #include <string.h>
 #include <stdatomic.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <windows.h>
+/* ioctl() and FIONREAD etc. are in winsock2.h */
+#else
 #include <sys/ioctl.h>
+#endif
 
 #include <lwip/tcp.h>
 #include <lwip/udp.h>

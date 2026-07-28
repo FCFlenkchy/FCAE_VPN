@@ -8,13 +8,21 @@
  */
 
 #include <time.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <winsock2.h>
+struct iovec { void *iov_base; size_t iov_len; };
+#else
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/uio.h>
 #include <sys/stat.h>
+#endif
 
 #include "hev-socks5-logger.h"
 #include "hev-socks5-logger-priv.h"

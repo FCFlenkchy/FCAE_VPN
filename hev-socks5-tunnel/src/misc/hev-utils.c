@@ -8,10 +8,17 @@
  */
 
 #include <stdio.h>
-#include <unistd.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+/* sys/resource.h is POSIX-only; Windows doesn't have RLIMIT */
+#else
+#include <unistd.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
+#endif
 
 #if defined(__APPLE__)
 #include <Availability.h>

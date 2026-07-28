@@ -7,8 +7,14 @@
  ============================================================================
  */
 
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+/* Windows uses VirtualAlloc instead of mmap */
+#else
 #include <unistd.h>
 #include <sys/mman.h>
+#endif
 
 #include "lib/misc/hev-compiler.h"
 #include "mem/api/hev-memory-allocator-api.h"
