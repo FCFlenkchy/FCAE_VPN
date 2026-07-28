@@ -188,12 +188,12 @@ set(TASK_SOURCES
     third-part/hev-task-system/src/lib/io/pipe/hev-task-io-pipe.c
     third-part/hev-task-system/src/lib/io/poll/hev-task-io-poll.c
     third-part/hev-task-system/src/lib/io/socket/hev-task-io-socket.c
-    third-part/hev-task-system/src/lib/list/hev-list.c
+    # hev-list.c removed (duplicate of src/misc/hev-list.c in MAIN_SOURCES)
     third-part/hev-task-system/src/lib/misc/hev-debugger.c
     third-part/hev-task-system/src/lib/misc/hev-task-stack-detector.c
     third-part/hev-task-system/src/lib/object/hev-object.c
     third-part/hev-task-system/src/lib/object/hev-object-atomic.c
-    third-part/hev-task-system/src/lib/rbtree/hev-rbtree.c
+    # hev-rbtree.c removed (duplicate of src/core/src/hev-rbtree.c in CORE_SOURCES)
     third-part/hev-task-system/src/lib/rbtree/hev-rbtree-cached.c
     third-part/hev-task-system/src/mem/api/hev-memory-allocator-api.c
     third-part/hev-task-system/src/mem/base/hev-memory-allocator.c
