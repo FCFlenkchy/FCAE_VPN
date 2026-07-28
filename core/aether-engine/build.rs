@@ -347,14 +347,40 @@ fn build_hev_windows_cross(
                 break;
             }
         }
-        if let Some(inc_path) = found_include {
+        
+        // Create compatibility headers for POSIX APIs missing in MinGW
+        // poll.h is not available on Windows/MinGW, but hev-task.h includes it.
+        // Provide a stub that defines the needed structures.
+        let compat_dir = build_dir.join("compat_headers");
+        let _ = fs::create_dir_all(&compat_dir);
+        let poll_h = compat_dir.join("poll.h");
+        let _ = fs::write(&poll_h, r#"/* Minimal poll.h for MinGW cross-compilation */
+#ifndef _COMPAT_POLL_H
+#define _COMPAT_POLL_H
+#include <winsock2.h>
+#define POLLIN     0x0001
+#define POLLPRI    0x0002
+#define POLLOUT    0x0004
+#define POLLERR    0x0008
+#define POLLHUP    0x0010
+#define POLLNVAL   0x0020
+typedef unsigned long nfds_t;
+struct pollfd {
+    int fd;
+    short events;
+    short revents;
+};
+#define poll(fds, nfds, timeout)  WSAPoll(fds, nfds, timeout)
+#endif
+"#);
+        
+        if let Some(ref inc_path) = found_include {
             println!("cargo:warning=Found MinGW headers at: {inc_path}");
-            extra_cflags = format!("-I{inc_path}");
+            extra_cflags = format!("-I{inc_path} -I{}", compat_dir.display());
         } else {
-            println!("cargo:warning=MinGW cross-compiler missing POSIX headers (arpa/inet.h, poll.h).");
-            println!("cargo:warning=Install full MinGW-w64: sudo apt-get install mingw-w64");
-            println!("cargo:warning=Skipping hev-socks5-tunnel build — Rust TUN will be used instead.");
-            return;
+            // Even without full MinGW sysroot, try with just our compat headers
+            println!("cargo:warning=MinGW sysroot not found — using compatibility headers for poll.h");
+            extra_cflags = format!("-I{}", compat_dir.display());
         }
     }
 
