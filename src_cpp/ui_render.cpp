@@ -2,6 +2,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <memory>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -400,7 +401,15 @@ void render_ui() {
                     std::string noize, peer, path, sni;
                     AetherConfig c{};
                 };
-                auto* o = new Owned();
+                // Use unique_ptr with a custom deleter that handles the
+                // case where aether_start throws or the thread is killed.
+                auto o = std::unique_ptr<Owned, void(*)(Owned*)>(
+                    new Owned(),
+                    [](Owned* p) {
+                        g_app.start_busy.store(false);
+                        delete p;
+                    }
+                );
                 o->noize = g_app.noize_profile;
                 o->peer  = g_app.force_peer;
                 o->path  = g_app.config_path;
@@ -410,10 +419,17 @@ void render_ui() {
                 o->c.force_peer    = o->peer.empty() ? nullptr : o->peer.c_str();
                 o->c.config_path   = o->path.c_str();
                 o->c.sni           = o->sni.empty() ? nullptr : o->sni.c_str();
-                std::thread([o] {
-                    (void)aether_start(&o->c);
-                    g_app.start_busy.store(false);
-                    delete o;
+                auto* raw = o.release(); // transfer ownership to the thread
+                std::thread([raw] {
+                    // Wrap in a unique_ptr again so the custom deleter
+                    // fires on scope exit (even if aether_start throws).
+                    std::unique_ptr<Owned, void(*)(Owned*)> guard(
+                        raw, [](Owned* p) {
+                            g_app.start_busy.store(false);
+                            delete p;
+                        }
+                    );
+                    (void)aether_start(&guard->c);
                 }).detach();
             }
         }
@@ -664,8 +680,13 @@ void render_ui() {
             // Selectable multi-line log view (click lines to select; Ctrl+C via ImGui input)
             ImGui::BeginChild("##log", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 4), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
 
+            // Take a thread-safe snapshot of the logs for rendering.
+            // This avoids a data race with the FFI callback thread which
+            // calls add_log() concurrently.
+            auto logs_snapshot = g_app.copy_logs();
+
             // Check if we should auto-scroll BEFORE rendering (scroll height not yet known)
-            int cur_count = (int)g_app.logs.size();
+            int cur_count = (int)logs_snapshot.size();
             bool should_scroll = false;
             if (g_app.auto_scroll && cur_count > g_app.prev_log_count) {
                 float scroll_y = ImGui::GetScrollY();
@@ -676,10 +697,10 @@ void render_ui() {
             g_app.prev_log_count = cur_count;
 
             ImGuiListClipper clipper;
-            clipper.Begin((int)g_app.logs.size());
+            clipper.Begin((int)logs_snapshot.size());
             while (clipper.Step()) {
                 for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
-                    auto& [lvl, msg] = g_app.logs[(size_t)i];
+                    auto& [lvl, msg] = logs_snapshot[(size_t)i];
                     ImVec4 c;
                     switch (lvl) {
                         case 1:  c = ImVec4(1.0f, 0.35f, 0.35f, 1.0f); break;

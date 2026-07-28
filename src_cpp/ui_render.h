@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <chrono>
 
@@ -58,6 +59,7 @@ struct AppState {
     AetherTelemetry telem = {};
     double last_telem_t = 0.0;
 
+    mutable std::mutex logs_mutex;
     std::vector<std::pair<int, std::string>> logs;
     int  max_logs    = 200;
     bool auto_scroll = true;
@@ -66,10 +68,12 @@ struct AppState {
     char save_status[128] = {};
     char copy_status[64] = {};
 
+    // Thread-safe: called from Rust FFI callback thread.
     void add_log(int level, const char* msg) {
         if (!msg) return;
         std::string s(msg);
         if (s.size() > 256) s.resize(256);
+        std::lock_guard<std::mutex> lock(logs_mutex);
         logs.emplace_back(level, std::move(s));
         if ((int)logs.size() > max_logs) {
             const int drop = (int)logs.size() - max_logs;
@@ -78,6 +82,7 @@ struct AppState {
     }
 
     std::string logs_as_text() const {
+        std::lock_guard<std::mutex> lock(logs_mutex);
         std::string out;
         out.reserve(logs.size() * 64);
         for (const auto& e : logs) {
@@ -85,6 +90,12 @@ struct AppState {
             out.push_back('\n');
         }
         return out;
+    }
+
+    // Thread-safe copy for UI rendering: returns snapshot and size.
+    std::vector<std::pair<int, std::string>> copy_logs() const {
+        std::lock_guard<std::mutex> lock(logs_mutex);
+        return logs;
     }
 
     AetherConfig to_config() const {
