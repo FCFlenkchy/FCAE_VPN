@@ -59,6 +59,18 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 
+      - name: ensure hev-socks5-tunnel submodules
+        run: |
+          if [ -f hev-socks5-tunnel/.gitmodules ]; then
+            echo "Initializing hev-socks5-tunnel submodules..."
+            cd hev-socks5-tunnel
+            git init
+            git submodule sync --recursive 2>/dev/null || true
+            git submodule update --init --recursive --depth 1 2>/dev/null || true
+            cd ..
+          fi
+        continue-on-error: true
+
       - name: cleanup old caches
         uses: actions/github-script@v7
         continue-on-error: true

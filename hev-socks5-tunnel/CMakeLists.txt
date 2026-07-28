@@ -257,6 +257,7 @@ target_include_directories(hev-socks5-tunnel PRIVATE
     ${CMAKE_SOURCE_DIR}/third-part/lwip/src/include
     ${CMAKE_SOURCE_DIR}/third-part/lwip/src/ports/include
     ${CMAKE_SOURCE_DIR}/third-part/hev-task-system/include
+    ${CMAKE_SOURCE_DIR}/third-part/hev-task-system/src
 )
 
 # Platform-specific lwip port includes
@@ -274,6 +275,10 @@ endif()
 
 target_compile_definitions(hev-socks5-tunnel PRIVATE
     COMMIT_ID="unknown"
+    YAML_VERSION_STRING="0.2.5"
+    YAML_VERSION_MAJOR=0
+    YAML_VERSION_MINOR=2
+    YAML_VERSION_PATCH=5
 )
 
 # ── Link libraries ──────────────────────────────────────────────────────

@@ -49,6 +49,38 @@ fn main() {
             );
         }
 
+        // Ensure hev-socks5-tunnel submodules are initialized.
+        // hev-socks5-tunnel has its own .gitmodules for third-party deps
+        // (hev-task-system, yaml, lwip, hev-socks5-core).
+        // If these directories are empty stubs, the cmake build will fail.
+        if hev_src.join(".gitmodules").exists() {
+            // Check if submodule dirs are empty (missing files)
+            let task_sys_header = hev_src.join(
+                "third-part/hev-task-system/src/lib/misc/hev-compiler.h"
+            );
+            if !task_sys_header.exists() {
+                println!("cargo:warning=hev-socks5-tunnel submodules missing — initializing...");
+                // Try git submodule init (works if hev-socks5-tunnel is a git repo or part of one)
+                let s = Command::new("git")
+                    .args(["submodule", "update", "--init", "--recursive", "--depth", "1"])
+                    .current_dir(&hev_src)
+                    .status();
+                if s.is_err() || s.unwrap().success() {
+                    // git might not be available or succeeded — check again
+                }
+                if !task_sys_header.exists() {
+                    // If still missing, try running git from workspace root
+                    let s2 = Command::new("git")
+                        .args(["-C", hev_src.to_str().unwrap_or("."), "submodule", "update", "--init", "--recursive", "--depth", "1"])
+                        .current_dir(&workspace_root)
+                        .status();
+                    if s2.is_ok() && !s2.unwrap().success() {
+                        println!("cargo:warning=Failed to init hev-socks5-tunnel submodules via git");
+                    }
+                }
+            }
+        }
+
         // Determine binary name based on TARGET OS (not host)
         let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
         let bin_name = if target_os == "windows" {
