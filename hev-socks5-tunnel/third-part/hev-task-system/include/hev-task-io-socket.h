@@ -16,7 +16,19 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
-/* winsock2.h + ws2tcpip.h provide struct msghdr and struct iovec */
+/* On MinGW, struct msghdr may not be available even with ws2tcpip.h.
+   Provide a minimal definition if needed. */
+#ifndef _WS2DEF_
+struct msghdr {
+    void        *msg_name;
+    int          msg_namelen;
+    struct iovec *msg_iov;
+    size_t       msg_iovlen;
+    void        *msg_control;
+    size_t       msg_controllen;
+    int          msg_flags;
+};
+#endif
 #else
 #include <sys/socket.h>
 #endif
