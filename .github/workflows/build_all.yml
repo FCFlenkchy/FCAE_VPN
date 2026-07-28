@@ -138,8 +138,20 @@ jobs:
         run: |
           sudo apt-get update -qq || true
           sudo apt-get install -y -qq --no-install-recommends \
-            mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 \
-            binutils-mingw-w64-x86-64 nasm
+            mingw-w64-x86-64-dev \
+            g++-mingw-w64-x86-64 \
+            gcc-mingw-w64-x86-64 \
+            binutils-mingw-w64-x86-64 \
+            nasm
+          # Verify MinGW installation
+          echo "=== MinGW compiler ==="
+          x86_64-w64-mingw32-gcc --version | head -1 || echo "MISSING!"
+          echo "=== MinGW sysroot ==="
+          x86_64-w64-mingw32-gcc -print-sysroot || echo "NO SYSROOT"
+          echo "=== winsock2.h ==="
+          find /usr -name "winsock2.h" -path "*mingw*" 2>/dev/null | head -3 || echo "MISSING!"
+          echo "=== ws2_32 lib ==="
+          find /usr -name "libws2_32.a" -path "*mingw*" 2>/dev/null | head -3 || echo "MISSING!"
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
