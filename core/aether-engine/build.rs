@@ -285,7 +285,7 @@ fn build_hev_windows(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
 
 /// Cross-compile from Linux to Windows using MinGW
 fn build_hev_windows_cross(
-    src: &PathBuf,
+    _src: &PathBuf,
     dest: &PathBuf,
     cc: &str,
     build_dir: &PathBuf,
@@ -400,7 +400,7 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 }
 
 /// Native Windows build (MSVC or MinGW on Windows host)
-fn build_hev_windows_native(src: &PathBuf, dest: &PathBuf, build_dir: &PathBuf) {
+fn build_hev_windows_native(_src: &PathBuf, dest: &PathBuf, build_dir: &PathBuf) {
     fs::create_dir_all(build_dir).expect("Failed to create build dir");
 
     // Try MinGW Makefiles first, then fall back to default
