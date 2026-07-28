@@ -15,12 +15,11 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-/* Windows lacks: ioctl() on sockets -> use ioctlsocket() */
-#define ioctl(s, cmd, arg) ioctlsocket(s, cmd, arg)
+/* Windows lacks ioctl() on sockets -> use ioctlsocket() with cast */
+#define ioctl(s, cmd, arg) ioctlsocket(s, (long)(cmd), (u_long *)(arg))
 /* Windows lacks socketpair() and PF_LOCAL */
-/* Windows lacks SIGPIPE */
+/* Windows lacks SIGPIPE (but has SIG_IGN from signal.h) */
 #define SIGPIPE 0
-#define SIG_IGN  ((void (*)(int))1)
 #else
 #include <sys/ioctl.h>
 #endif

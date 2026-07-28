@@ -14,6 +14,11 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+/* IFNAMSIZ is not defined on Windows; use the standard value */
+#ifndef IFNAMSIZ
+#define IFNAMSIZ 16
+#endif
 #else
 #include <arpa/inet.h>
 #endif
