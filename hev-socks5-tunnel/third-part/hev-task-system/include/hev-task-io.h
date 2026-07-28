@@ -10,7 +10,16 @@
 #ifndef __HEV_TASK_IO_H__
 #define __HEV_TASK_IO_H__
 
+#ifdef _WIN32
+#include <io.h>
+/* struct iovec is not available on Windows; provide a minimal definition */
+struct iovec {
+    void  *iov_base;
+    size_t iov_len;
+};
+#else
 #include <sys/uio.h>
+#endif
 #include <sys/types.h>
 
 #ifdef __cplusplus
