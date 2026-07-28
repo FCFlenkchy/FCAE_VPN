@@ -198,22 +198,40 @@ fn cleanup_adapter_by_name(name: &str) {
         c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     };
 
-    // Reset DNS to DHCP
-    let _ = run_silent("netsh", &["interface", "ip", "set", "dns", name, "dhcp"]);
+    // Use PowerShell to remove ALL adapters whose name starts with this name
+    // (handles "FCAE VPN", "FCAE VPN 1", "FCAE VPN 2", etc.)
+    // Remove-NetAdapter is the proper way to delete Wintun adapters from Windows
+    let ps_script = format!(
+        "Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue",
+        name
+    );
+    let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_script]);
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if !stdout.trim().is_empty() {
+                log::info!("[tun_t2s] PowerShell Remove-NetAdapter: {}", stdout.trim());
+            }
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.trim().is_empty() {
+                log::debug!("[tun_t2s] PowerShell Remove-NetAdapter: {}", stderr.trim());
+            }
+        }
+        Err(e) => log::debug!("[tun_t2s] PowerShell Remove-NetAdapter error: {}", e),
+    }
 
-    // Delete the interface itself (prevents adapter name accumulation)
-    // Try multiple times with both the original name and numbered variants
+    // Also try netsh as fallback for older Windows versions
     let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", name]);
-    // Also try removing numbered variants (FCAE-VPN 2, FCAE-VPN 3, etc.)
     for i in 2..20 {
         let numbered = format!("{} {}", name, i);
         let output = run_silent("netsh", &["interface", "ip", "delete", "interface", &numbered]);
         match output {
-            Ok(o) if o.status.success() => log::info!("[tun_t2s] Deleted leftover adapter '{}'", numbered),
+            Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh deleted '{}'", numbered),
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 if stderr.contains("No matching") {
-                    // No more numbered adapters — stop looking
                     break;
                 }
             }
@@ -432,7 +450,7 @@ pub struct TunConfig {
 impl Default for TunConfig {
     fn default() -> Self {
         Self {
-            name: "fcae_vpn".to_string(),
+            name: "FCAE VPN".to_string(),
             mtu: 1500,
             ipv4: "198.18.0.1/24".to_string(),
             ipv6: None,
@@ -698,33 +716,31 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
         Err(e) => log::debug!("[tun_t2s] route DELETE error: {}", e),
     }
 
-    // Reset DNS to DHCP
-    let output = run_silent("netsh", &["interface", "ip", "set", "dns", name, "dhcp"]);
+    // Use PowerShell to remove ALL adapters matching this name (including numbered variants)
+    let ps_script = format!(
+        "Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue",
+        name
+    );
+    let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_script]);
     match output {
-        Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh dns reset to dhcp OK"),
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if !stdout.trim().is_empty() {
+                log::info!("[tun_t2s] Remove-NetAdapter: {}", stdout.trim());
+            }
+        }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             if !stderr.trim().is_empty() {
-                log::debug!("[tun_t2s] netsh dns reset: {}", stderr.trim());
+                log::debug!("[tun_t2s] Remove-NetAdapter: {}", stderr.trim());
             }
         }
-        Err(e) => log::debug!("[tun_t2s] netsh dns reset error: {}", e),
+        Err(e) => log::debug!("[tun_t2s] Remove-NetAdapter error: {}", e),
     }
 
-    // Remove the TUN adapter itself (prevents "FCAE-VPN 2, 3, 4..." accumulation)
-    // Use netsh to delete the interface — this is the most reliable way.
-    let output = run_silent("netsh", &["interface", "ip", "delete", "interface", name]);
-    match output {
-        Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh delete interface OK"),
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            // "No matching" is fine — adapter already gone
-            if !stderr.trim().is_empty() && !stderr.contains("No matching") {
-                log::debug!("[tun_t2s] netsh delete interface: {}", stderr.trim());
-            }
-        }
-        Err(e) => log::debug!("[tun_t2s] netsh delete interface error: {}", e),
-    }
+    // Fallback: netsh for older Windows
+    let _ = run_silent("netsh", &["interface", "ip", "set", "dns", name, "dhcp"]);
+    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", name]);
 }
 
 #[cfg(target_os = "linux")]
@@ -947,7 +963,7 @@ mod tests {
     #[test]
     fn test_tun_config_defaults() {
         let cfg = TunConfig::default();
-        assert_eq!(cfg.name, "fcae_vpn");
+        assert_eq!(cfg.name, "FCAE VPN");
         assert_eq!(cfg.mtu, 1500);
         assert_eq!(cfg.ipv4, "198.18.0.1/24");
         assert_eq!(cfg.socks_port, 1819);

@@ -1006,7 +1006,7 @@ async fn run_masque_tunnel(
             .and_then(|s| s.rsplit(':').next()?.parse().ok())
             .unwrap_or(1819);
         let t2s_cfg = tun_t2s::TunConfig {
-            name: "fcae_vpn".to_string(),
+            name: "FCAE VPN".to_string(),
             mtu: TUNNEL_MTU as u32,
             ipv4: identity.ipv4.clone(),
             ipv6: Some(identity.ipv6.clone()),
@@ -1390,7 +1390,7 @@ async fn run_wireguard_tunnel(
             .and_then(|s| s.rsplit(':').next()?.parse().ok())
             .unwrap_or(1819);
         let t2s_cfg = tun_t2s::TunConfig {
-            name: "fcae_vpn".to_string(),
+            name: "FCAE VPN".to_string(),
             mtu: TUNNEL_MTU as u32,
             ipv4: identity.ipv4.clone(),
             ipv6: Some(identity.ipv6.clone()),
