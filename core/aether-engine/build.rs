@@ -387,7 +387,13 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
             .status()
             .expect("Failed to run make");
         if !status.success() {
-            panic!("make failed with exit: {:?}", status.code());
+            // Cross-compilation failed (e.g. missing MinGW headers like arpa/inet.h).
+            // Don't panic — the Rust binary can use built-in TUN without hev-socks5-tunnel.
+            println!("cargo:warning=Cross-compilation of hev-socks5-tunnel failed. The Rust TUN implementation will be used instead.");
+            println!("cargo:warning=To fix, install full MinGW-w64: sudo apt-get install mingw-w64");
+            // Remove partial build artifacts and return without writing dest
+            let _ = fs::remove_dir_all(build_dir);
+            return;
         }
     }
 
