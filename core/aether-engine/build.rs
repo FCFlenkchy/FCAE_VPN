@@ -357,19 +357,31 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
         panic!("cmake configure failed with exit: {:?}", status.code());
     }
 
-    let status = Command::new("make")
-        .args(["-j", &num_cpus().to_string()])
+    // Use cmake --build which is more portable than raw make
+    let status = Command::new("cmake")
+        .args(["--build", ".", "--config", "Release", "-j", &num_cpus().to_string()])
         .current_dir(build_dir)
         .status()
-        .expect("Failed to run make");
+        .expect("Failed to run cmake --build");
     if !status.success() {
-        panic!("make failed with exit: {:?}", status.code());
+        // Fallback: try raw make in case cmake --build doesn't work
+        println!("cargo:warning=cmake --build failed, trying make directly...");
+        let status = Command::new("make")
+            .args(["-j", &num_cpus().to_string()])
+            .current_dir(build_dir)
+            .status()
+            .expect("Failed to run make");
+        if !status.success() {
+            panic!("make failed with exit: {:?}", status.code());
+        }
     }
 
     // The cross-compiler may or may not add .exe extension
     let candidates = [
         build_dir.join("hev-socks5-tunnel.exe"),
         build_dir.join("hev-socks5-tunnel"),
+        build_dir.join("Release").join("hev-socks5-tunnel.exe"),
+        build_dir.join("src").join("hev-socks5-tunnel.exe"),
     ];
     copy_built_binary(&candidates, dest);
 }
