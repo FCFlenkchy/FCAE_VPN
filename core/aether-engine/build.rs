@@ -164,6 +164,14 @@ fn main() {
                         );
                         fs::copy(&prebuilt_path, &bin_path)
                             .expect("Failed to copy pre-built hev-socks5-tunnel");
+                    } else if target_os == "windows" {
+                        // On Windows cross-compile, the build may have been skipped
+                        // due to missing MinGW cross-compiler. This is acceptable —
+                        // the Rust binary can use built-in TUN without the C tunnel.
+                        println!("cargo:warning=hev-socks5-tunnel not built (cross-compiler unavailable). The Rust TUN implementation will be used instead.");
+                        // Don't set HEVSOCKS5_EMBEDDED env var, and don't panic.
+                        // Return early to skip the embedding step.
+                        return;
                     } else {
                         panic!(
                             "Cannot build hev-socks5-tunnel!\n\
@@ -265,8 +273,8 @@ fn build_hev_windows(src: &PathBuf, dest: &PathBuf, _out_dir: &str) {
                 // The Rust Windows binary can still use built-in TUN via other means.
                 println!("cargo:warning=No MinGW cross-compiler found — skipping hev-socks5-tunnel build for Windows target");
                 println!("cargo:warning=Install mingw-w64: sudo apt-get install mingw-w64 g++-mingw-w64-x86-64");
-                // Create a stub so the build doesn't panic
-                let _ = fs::write(dest, b"");
+                // Don't create an empty stub (it would cause runtime failures when executed).
+                // Instead, just don't write anything — the caller will handle missing binary.
             }
         }
     } else {
