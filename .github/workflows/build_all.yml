@@ -149,7 +149,7 @@ jobs:
       - name: install deps (macOS)
         if: startsWith(matrix.name, 'macos-')
         run: |
-          brew install glfw cmake ninja nasm protobuf
+          brew install glfw cmake ninja nasm protobuf go
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
