@@ -768,7 +768,7 @@ fn configure_macos_tun(cfg: &TunConfig) {
 /// tun2socks creates a utun device with a name like "utun3" but we request "FCAE_VPN".
 /// We need to find which utun was actually assigned.
 #[cfg(target_os = "macos")]
-fn find_macos_utun(requested_name: &str) -> Option<String> {
+fn find_macos_utun(_requested_name: &str) -> Option<String> {
     use std::process::Command as StdCommand;
     // List all interfaces and find the one with our requested name or the most recent utun
     let output = StdCommand::new("ifconfig")
