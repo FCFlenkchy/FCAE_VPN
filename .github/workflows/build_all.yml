@@ -24,19 +24,21 @@ env:
 jobs:
   build:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             name: linux-x64
+            os: ubuntu-latest
             cmake_args: >-
               -DCMAKE_BUILD_TYPE=Release
               -DAETHER_TARGET=LINUX_X64
 
           - target: x86_64-pc-windows-gnu
             name: windows-x64
+            os: ubuntu-latest
             cmake_args: >-
               -DCMAKE_BUILD_TYPE=Release
               -DCMAKE_SYSTEM_NAME=Windows
@@ -46,7 +48,22 @@ jobs:
 
           - target: aarch64-linux-android
             name: android-arm64-v8a
+            os: ubuntu-latest
             cmake_args: "-DAETHER_TARGET=ANDROID_ARM64"
+
+          - target: aarch64-apple-darwin
+            name: macos-arm64
+            os: macos-latest
+            cmake_args: >-
+              -DCMAKE_BUILD_TYPE=Release
+              -DAETHER_TARGET=MACOS_ARM64
+
+          - target: x86_64-apple-darwin
+            name: macos-x64
+            os: macos-13
+            cmake_args: >-
+              -DCMAKE_BUILD_TYPE=Release
+              -DAETHER_TARGET=MACOS_X64
 
     steps:
       - name: checkout
@@ -129,10 +146,15 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends \
             mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 nasm
 
+      - name: install deps (macOS)
+        if: startsWith(matrix.name, 'macos-')
+        run: |
+          brew install glfw cmake ninja nasm protobuf
+
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android
+          targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android, aarch64-apple-darwin, x86_64-apple-darwin
           components: rust-src
 
       - name: cache cmake
@@ -249,6 +271,14 @@ jobs:
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
           cmake --build . --config Release
 
+      - name: build frontend (macOS)
+        if: startsWith(matrix.name, 'macos-')
+        run: |
+          mkdir -p build && cd build
+          cmake .. -G Ninja \
+            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
+          cmake --build . --config Release
+
       - name: build apk
         if: matrix.name == 'android-arm64-v8a'
         env:
@@ -297,7 +327,7 @@ jobs:
           echo "APK signed successfully"
 
       - name: package
-        if: matrix.name != 'android-arm64-v8a'
+        if: matrix.name != 'android-arm64-v8a' && !startsWith(matrix.name, 'macos-')
         run: |
           set -euo pipefail
           mkdir -p package
@@ -323,6 +353,55 @@ jobs:
           cp android/app/build/outputs/apk/release/*.apk package/FCAE_VPN-android-arm64-v8a.apk 2>/dev/null || true
           test -f package/FCAE_VPN-android-arm64-v8a.apk
           ls -lah package/
+
+      - name: package (macOS)
+        if: startsWith(matrix.name, 'macos-')
+        run: |
+          set -euo pipefail
+          mkdir -p package
+
+          # Create .app bundle structure
+          APP="package/FCAE VPN.app"
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+
+          # Copy binary
+          cp build/fcaevpn "$APP/Contents/MacOS/fcaevpn"
+          chmod +x "$APP/Contents/MacOS/fcaevpn"
+
+          # Create minimal Info.plist
+          cat > "$APP/Contents/Info.plist" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>fcaevpn</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.fc.fcaevpn</string>
+    <key>CFBundleName</key>
+    <string>FCAE VPN</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+          # Ad-hoc sign
+          codesign --force --deep --sign - "$APP"
+
+          # Create .dmg
+          DMG_NAME="FCAE_VPN-${{ matrix.name }}.dmg"
+          hdiutil create -volname "FCAE VPN" -srcfolder package/ -ov -format UDZO "package/${DMG_NAME}"
+
+          ls -lah package/
+          test -f "package/${DMG_NAME}"
 
       - name: upload
         uses: actions/upload-artifact@v4

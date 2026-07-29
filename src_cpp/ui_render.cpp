@@ -42,6 +42,16 @@ static std::string exe_dir() {
     std::string u8((size_t)len - 1, '\0');
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &u8[0], len, nullptr, nullptr);
     return u8;
+#elif defined(__APPLE__)
+    char buf[PATH_MAX];
+    uint32_t size = PATH_MAX;
+    if (_NSGetExecutablePath(buf, &size) == 0) {
+        std::string p(buf);
+        size_t slash = p.find_last_of('/');
+        if (slash != std::string::npos) p.resize(slash);
+        return p;
+    }
+    return {};
 #else
     char buf[4096];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);

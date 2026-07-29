@@ -136,6 +136,59 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         )
     endif()
 
+elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "MACOS_X64")
+
+    find_package(glfw3 3.3 REQUIRED)
+    find_package(OpenGL REQUIRED)
+
+    add_executable(fcaevpn
+        ${IMGUI_SOURCES}
+        ${IMGUI_BACKEND_DIR}/imgui_impl_glfw.cpp
+        ${IMGUI_BACKEND_DIR}/imgui_impl_opengl3.cpp
+        ${CMAKE_SOURCE_DIR}/src_cpp/main_macos_glfw.cpp
+        ${UI_SOURCES}
+    )
+
+    target_include_directories(fcaevpn PRIVATE
+        ${IMGUI_DIR} ${IMGUI_BACKEND_DIR}
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src_cpp
+    )
+
+    target_compile_definitions(fcaevpn PRIVATE
+        IMGUI_IMPL_OPENGL_LOADER_GL3W
+        AETHER_TARGET_MACOS
+    )
+
+    if(AETHER_TARGET STREQUAL "MACOS_ARM64")
+        aether_ffi_lib_path(AETHER_FFI_A aarch64-apple-darwin)
+    elseif(AETHER_TARGET STREQUAL "MACOS_X64")
+        aether_ffi_lib_path(AETHER_FFI_A x86_64-apple-darwin)
+    else()
+        # Native build on macOS host — detect arch
+        if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+            aether_ffi_lib_path(AETHER_FFI_A aarch64-apple-darwin)
+        else()
+            aether_ffi_lib_path(AETHER_FFI_A x86_64-apple-darwin)
+        endif()
+    endif()
+    aether_link_ffi(fcaevpn "${AETHER_FFI_A}")
+
+    target_link_libraries(fcaevpn PRIVATE
+        glfw OpenGL::GL
+        "-framework Cocoa"
+        "-framework IOKit"
+        "-framework CoreFoundation"
+        "-framework CoreVideo"
+        pthread dl m
+        z bz2 lzma
+    )
+
+    # macOS-specific linker flags
+    target_link_options(fcaevpn PRIVATE
+        -Wl,-dead_strip
+    )
+
 elseif(UNIX)
 
     find_package(glfw3 3.3 REQUIRED)
