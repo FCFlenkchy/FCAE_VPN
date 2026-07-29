@@ -466,7 +466,7 @@ pub struct TunConfig {
 impl Default for TunConfig {
     fn default() -> Self {
         Self {
-            name: "FCAE VPN".to_string(),
+            name: "FCAE_VPN".to_string(),
             mtu: 1500,
             ipv4: "198.18.0.1/24".to_string(),
             ipv6: None,
@@ -788,9 +788,7 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     let t2s_path = get_tun2socks_path()?;
 
     // Build tun2socks arguments
-    // tun2socks device URL doesn't allow spaces — replace with underscore
-    let device_name_for_url = cfg.name.replace(' ', "_");
-    let device = format!("tun://{}", device_name_for_url);
+    let device = format!("tun://{}", cfg.name);
     let proxy = if let (Some(user), Some(pass)) = (&cfg.username, &cfg.password) {
         format!("socks5://{}:{}@{}:{}", user, pass, cfg.socks_host, cfg.socks_port)
     } else {
@@ -975,7 +973,7 @@ mod tests {
     #[test]
     fn test_tun_config_defaults() {
         let cfg = TunConfig::default();
-        assert_eq!(cfg.name, "FCAE VPN");
+        assert_eq!(cfg.name, "FCAE_VPN");
         assert_eq!(cfg.mtu, 1500);
         assert_eq!(cfg.ipv4, "198.18.0.1/24");
         assert_eq!(cfg.socks_port, 1819);
