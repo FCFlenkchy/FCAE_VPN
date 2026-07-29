@@ -6,7 +6,7 @@
 
 A censorship circumvention client designed for heavily restricted networks. It automatically discovers reachable routes, establishes an encrypted tunnel, and exposes a local SOCKS5/HTTP proxy for your applications.
 
-Built on top of **[Aether](https://github.com/CluvexStudio/aether)** with native GUI frontends for Windows, Linux, and Android.
+Built on top of **[Aether](https://github.com/CluvexStudio/aether)** with native GUI frontends for Windows, Linux, macOS, and Android.
 
 ## How It Works
 
@@ -85,6 +85,7 @@ All traffic between the client and Cloudflare is encrypted. From Cloudflare onwa
 |----------|---------|----|
 | Windows | DirectX 11 | ImGui |
 | Linux | GLFW + OpenGL | ImGui |
+| macOS | GLFW + OpenGL | ImGui |
 | Android | Kotlin Material VpnService + JNI bridge | Kotlin Material UI |
 
 ## Building
@@ -110,7 +111,7 @@ cmake -B build -DAETHER_TARGET=LINUX_X64
 cmake --build build --config Release
 ```
 
-Targets: `LINUX_X64`, `WIN_X64`, `ANDROID_ARM64`.
+Targets: `LINUX_X64`, `WIN_X64`, `MACOS_ARM64`, `MACOS_X64`, `ANDROID_ARM64`.
 
 ### Android
 

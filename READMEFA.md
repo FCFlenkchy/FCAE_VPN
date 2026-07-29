@@ -8,7 +8,7 @@
 
 یک فیلترشکنی که برای دور زدن سانسور طراحی‌شده، حتی برای شبکه‌های به‌شدت محدود! این ابزار به‌طور خودکار مسیرهای قابل‌دسترس را کشف می‌کند، و یک تونل رمزگذاری‌شده برقرار می‌کند و یک پروکسی محلی SOCKS5/HTTP برای برنامه‌های شما فراهم می‌کند.
 
-ساخته‌شده بر پایه **[Aether](https://github.com/CluvexStudio/aether)** با رابط گرافیکی بومی برای ویندوز، لینوکس و اندروید.
+ساخته‌شده بر پایه **[Aether](https://github.com/CluvexStudio/aether)** با رابط گرافیکی بومی برای ویندوز، لینوکس، مک و اندروید.
 
 ## نحوه کار
 
@@ -87,6 +87,7 @@ FCAE VPN به **شبکه WARP کلادفلر** متصل می‌شود — هما
 |----------|---------|----|
 | ویندوز | DirectX 11 | ImGui |
 | لینوکس | GLFW + OpenGL | ImGui |
+| مک | GLFW + OpenGL | ImGui |
 | اندروید | Kotlin Material VpnService + پل JNI | Kotlin Material UI |
 
 ## ساخت
@@ -112,7 +113,7 @@ cmake -B build -DAETHER_TARGET=LINUX_X64
 cmake --build build --config Release
 ```
 
- Targets: `LINUX_X64`, `WIN_X64`, `ANDROID_ARM64`.
+ Targets: `LINUX_X64`, `WIN_X64`, `MACOS_ARM64`, `MACOS_X64`, `ANDROID_ARM64`.
 
 ### اندروید
 

@@ -8,7 +8,7 @@
 
 一款为高度受限网络设计的审查绕过客户端。它会自动发现可达路由，建立加密隧道，并为您的应用程序暴露本地 SOCKS5/HTTP 代理。
 
-基于 **[Aether](https://github.com/CluvexStudio/aether)** 构建，提供 Windows、Linux 和 Android 的原生 GUI 前端。
+基于 **[Aether](https://github.com/CluvexStudio/aether)** 构建，提供 Windows、Linux、macOS 和 Android 的原生 GUI 前端。
 
 ## 工作原理
 
@@ -87,6 +87,7 @@ FCAE VPN 连接到 **Cloudflare 的 WARP 网络** — 与 Cloudflare 1.1.1.1 DNS
 |----------|---------|----|
 | Windows | DirectX 11 | ImGui |
 | Linux | GLFW + OpenGL | ImGui |
+| macOS | GLFW + OpenGL | ImGui |
 | Android | Kotlin Material VpnService + JNI 桥接 | Kotlin Material UI |
 
 ## 构建
@@ -112,7 +113,7 @@ cmake -B build -DAETHER_TARGET=LINUX_X64
 cmake --build build --config Release
 ```
 
-目标平台：`LINUX_X64`、`WIN_X64`、`ANDROID_ARM64`。
+目标平台：`LINUX_X64`、`WIN_X64`、`MACOS_ARM64`、`MACOS_X64`、`ANDROID_ARM64`。
 
 ### Android
 
