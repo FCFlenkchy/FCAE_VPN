@@ -60,9 +60,11 @@ jobs:
 
           - target: x86_64-apple-darwin
             name: macos-x64
-            os: macos-13
+            os: macos-latest
             cmake_args: >-
               -DCMAKE_BUILD_TYPE=Release
+              -DCMAKE_OSX_ARCHITECTURES=x86_64
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
               -DAETHER_TARGET=MACOS_X64
 
     steps:
@@ -253,6 +255,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.name == 'macos-x64' && '13.0' || '' }}
           RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libgcc -C link-args=-static-libstdc++ -C link-args=-Wl,-Bstatic -C link-args=-lpthread -C link-args=-lwinpthread -C link-args=-Wl,-Bdynamic' || '' }}
 
       - name: build frontend (linux)
