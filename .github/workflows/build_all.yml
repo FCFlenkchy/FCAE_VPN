@@ -151,7 +151,25 @@ jobs:
       - name: install deps (macOS)
         if: startsWith(matrix.name, 'macos-')
         run: |
-          brew install glfw cmake ninja nasm protobuf go
+          brew install cmake ninja nasm protobuf go
+          # Install GLFW: for macos-x64 cross-compile, build from source for x86_64.
+          # For macos-arm64, brew's native ARM64 GLFW is fine.
+          if [ "${{ matrix.name }}" = "macos-x64" ]; then
+            curl -fsSL https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
+            tar xzf glfw.tar.gz
+            cd glfw-3.4
+            cmake -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+              -DCMAKE_INSTALL_PREFIX=/usr/local/glfw_x64 \
+              -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF
+            cmake --build build
+            sudo cmake --install build
+            cd ..
+          else
+            brew install glfw
+          fi
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
@@ -281,6 +299,9 @@ jobs:
         if: startsWith(matrix.name, 'macos-')
         run: |
           mkdir -p build && cd build
+          if [ "${{ matrix.name }}" = "macos-x64" ]; then
+            export CMAKE_PREFIX_PATH=/usr/local/glfw_x64
+          fi
           cmake .. -G Ninja \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
           cmake --build . --config Release
