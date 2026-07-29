@@ -3,8 +3,10 @@
 // Builds tun2socks from source (Go) and embeds the binary
 // into the compiled executable at build time.
 //
-// On Windows, also embeds wintun.dll which is required by tun2socks
-// for TUN device creation via the WireGuard wintun package.
+// On Windows, also downloads and embeds wintun.dll from wintun.net
+// at build time. The DLL is required by tun2socks for TUN device
+// creation via the WireGuard wintun package. It is NOT stored in
+// the repository — it's fetched fresh during the build.
 
 use std::env;
 use std::fs;
@@ -182,15 +184,21 @@ fn main() {
 
 // ── Windows: wintun.dll embedding ───────────────────────────────────────
 
-/// Locate or download wintun.dll and copy it to the output dir.
+/// Download wintun.dll from wintun.net and embed it for the build.
 ///
 /// NOTE: This function is ALWAYS compiled (for all host OS). The decision
 /// whether to embed wintun.dll is made at build time based on the TARGET OS
 /// (CARGO_CFG_TARGET_OS), not the host OS. This is critical for cross-
 /// compilation scenarios, e.g., building for Windows from a Linux CI runner.
-fn embed_wintun_dll(tun2socks_src: &PathBuf, out_dir: &str) {
+///
+/// wintun.dll is NO LONGER stored in the tun2socks/ directory — it is
+/// downloaded at build time from the official wintun.net release and
+/// embedded into the binary. This keeps the repo clean and ensures
+/// the correct version is always used.
+fn embed_wintun_dll(_tun2socks_src: &PathBuf, out_dir: &str) {
     let wintun_dll_out = PathBuf::from(out_dir).join("wintun.dll");
 
+    // If already present from a previous build, skip download
     if wintun_dll_out.exists() {
         println!("cargo:rustc-cfg=wintun_embedded");
         println!("cargo:rustc-env=WINTUN_EMBEDDED={}", wintun_dll_out.display());
@@ -198,42 +206,7 @@ fn embed_wintun_dll(tun2socks_src: &PathBuf, out_dir: &str) {
         return;
     }
 
-    // Strategy 1: Check common locations for an existing wintun.dll
-    let host_os = std::env::consts::OS;
-    let candidate_paths: Vec<PathBuf> = if host_os == "windows" {
-        vec![
-            tun2socks_src.join("wintun.dll"),
-            tun2socks_src.parent().unwrap_or(tun2socks_src).join("wintun.dll"),
-            PathBuf::from("C:\\Windows\\System32\\wintun.dll"),
-        ]
-    } else {
-        // On non-Windows hosts, only check the project-relative paths
-        vec![
-            tun2socks_src.join("wintun.dll"),
-            tun2socks_src.parent().unwrap_or(tun2socks_src).join("wintun.dll"),
-        ]
-    };
-
-    for p in &candidate_paths {
-        if p.exists() {
-            println!("cargo:warning=Found wintun.dll at: {}", p.display());
-            match fs::copy(p, &wintun_dll_out) {
-                Ok(_) => {
-                    println!("cargo:rustc-cfg=wintun_embedded");
-                    println!("cargo:rustc-env=WINTUN_EMBEDDED={}", wintun_dll_out.display());
-                    println!("cargo:warning=wintun.dll copied to: {}", wintun_dll_out.display());
-                }
-                Err(e) => {
-                    println!("cargo:warning=Failed to copy wintun.dll from {}: {e}", p.display());
-                    // Don't return — fall through to try download
-                    continue;
-                }
-            }
-            return;
-        }
-    }
-
-    // Strategy 2: Try to download wintun.dll from wintun.net
+    // Download wintun.dll from wintun.net (official WireGuard project)
     if download_wintun_dll(&wintun_dll_out) {
         println!("cargo:rustc-cfg=wintun_embedded");
         println!("cargo:rustc-env=WINTUN_EMBEDDED={}", wintun_dll_out.display());
@@ -242,7 +215,7 @@ fn embed_wintun_dll(tun2socks_src: &PathBuf, out_dir: &str) {
     }
 
     println!("cargo:warning=wintun.dll NOT found and could not be downloaded — TUN will fail on Windows!");
-    println!("cargo:warning=Download manually from https://www.wintun.net/ and place wintun.dll in the tun2socks directory.");
+    println!("cargo:warning=Download manually from https://www.wintun.net/ and place wintun.dll in the same directory as the built executable.");
 }
 
 /// Download wintun.dll from the official WireGuard wintun releases.

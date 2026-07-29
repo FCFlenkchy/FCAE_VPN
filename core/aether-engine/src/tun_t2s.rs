@@ -88,12 +88,13 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
             }
             #[cfg(not(wintun_embedded))]
             {
-                // Fallback: try to find wintun.dll from common locations at runtime
+                // Fallback: try to find wintun.dll from system locations at runtime.
+                // This should rarely be needed since build.rs downloads and embeds it,
+                // but provides a safety net for custom builds.
                 let mut found = false;
                 let candidate_paths = [
                     std::path::PathBuf::from("C:\\Windows\\System32\\wintun.dll"),
                     std::env::current_exe().unwrap_or_default().parent().unwrap_or(std::path::Path::new(".")).join("wintun.dll"),
-                    std::path::PathBuf::from("wintun.dll"),
                 ];
                 for candidate in &candidate_paths {
                     if candidate.exists() {
@@ -113,7 +114,7 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
                 if !found {
                     log::error!("[tun_t2s] wintun.dll NOT found! TUN will fail on Windows. Download wintun.dll from https://www.wintun.net/ and place it in: {}", dir.display());
                     return Err(AetherError::Other(format!(
-                        "wintun.dll not found. Please download it from https://www.wintun.net/ and place it in: {}",
+                        "wintun.dll not found. Download it from https://www.wintun.net/ and place it in: {}",
                         dir.display()
                     )));
                 }
@@ -182,6 +183,68 @@ pub fn force_cleanup_windows(name: &str) {
 #[cfg(not(target_os = "windows"))]
 pub fn force_cleanup_windows(_name: &str) {
     // No-op on non-Windows
+}
+
+/// Clean up only numbered variants of the adapter (e.g., "FCAE-VPN 2", "FCAE-VPN 3")
+/// while preserving the primary adapter (e.g., "FCAE-VPN" or "FCAE_VPN").
+/// This prevents accumulation of leftover numbered adapters from aborted runs
+/// without destroying a perfectly good existing adapter that can be reused.
+#[cfg(target_os = "windows")]
+fn cleanup_numbered_adapters(name: &str) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut c = Command::new(cmd);
+        c.creation_flags(CREATE_NO_WINDOW);
+        c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    };
+
+    let name_hyphen = name.replace('_', "-");
+    let name_underscore = name.replace('-', "_");
+
+    // Use PowerShell to remove numbered variants but keep the primary (exact name)
+    // Pattern: "FCAE_VPN *" or "FCAE-VPN *" but NOT the exact primary name
+    let ps_script = format!(
+        "$primaryNames = @('{}', '{}', '{}', '{}'); Get-NetAdapter | Where-Object {{ ($_.Name -like '{}*' -or $_.Name -like '{}*') -and $_.Name -notin $primaryNames }} | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue",
+        name, name_hyphen, name_underscore, name.replace(' ', ""),  // also exact match of the config name
+        name, name_hyphen
+    );
+    let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_script]);
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if !stdout.trim().is_empty() {
+                log::info!("[tun_t2s] Cleaned up numbered adapter variants: {}", stdout.trim());
+            }
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.trim().is_empty() {
+                log::debug!("[tun_t2s] Numbered adapter cleanup: {}", stderr.trim());
+            }
+        }
+        Err(e) => log::debug!("[tun_t2s] Numbered adapter cleanup error: {}", e),
+    }
+
+    // Fallback: netsh for numbered variants
+    for i in 2..20 {
+        let numbered = format!("{} {}", name, i);
+        let numbered_hyphen = format!("{} {}", name_hyphen, i);
+        let output = run_silent("netsh", &["interface", "ip", "delete", "interface", &numbered]);
+        match output {
+            Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh deleted '{}'", numbered),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                if stderr.contains("No matching") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+        let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", &numbered_hyphen]);
+    }
 }
 
 /// Clean up a named TUN adapter — removes routes, resets DNS, deletes interface.
@@ -702,7 +765,10 @@ fn configure_linux_tun(cfg: &TunConfig) {
     }
 }
 
-// ── Windows TUN cleanup (remove routes AND adapter) ────────────────────
+// ── Windows TUN cleanup (remove routes, reset DNS, delete adapter) ─────
+// On normal shutdown we remove routes, reset DNS, and delete the TUN adapter.
+// This ensures a clean slate. On next startup, the pre-startup check will
+// create a fresh adapter without conflicts.
 #[cfg(target_os = "windows")]
 fn cleanup_windows_tun(cfg: &TunConfig) {
     use std::os::windows::process::CommandExt;
@@ -720,7 +786,7 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
         c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     };
 
-    // Remove default route
+    // Remove default route via the TUN adapter
     let output = run_silent("route", &["DELETE", "0.0.0.0", "MASK", "0.0.0.0", ip]);
     match output {
         Ok(o) if o.status.success() => log::info!("[tun_t2s] route DELETE OK"),
@@ -733,34 +799,15 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
         Err(e) => log::debug!("[tun_t2s] route DELETE error: {}", e),
     }
 
-    // Use PowerShell to remove ALL adapters matching this name (including numbered variants)
-    // Also try hyphen variant since Windows/tun2socks may convert underscores to hyphens
+    // Reset DNS on the adapter to DHCP
     let name_hyphen = name.replace('_', "-");
-    let ps_script = format!(
-        "Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue; Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue",
-        name, name_hyphen
-    );
-    let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_script]);
-    match output {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            if !stdout.trim().is_empty() {
-                log::info!("[tun_t2s] Remove-NetAdapter: {}", stdout.trim());
-            }
-        }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            if !stderr.trim().is_empty() {
-                log::debug!("[tun_t2s] Remove-NetAdapter: {}", stderr.trim());
-            }
-        }
-        Err(e) => log::debug!("[tun_t2s] Remove-NetAdapter error: {}", e),
-    }
-
-    // Fallback: netsh for older Windows — try both underscore and hyphen
     let _ = run_silent("netsh", &["interface", "ip", "set", "dns", name, "dhcp"]);
-    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", name]);
-    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", &name_hyphen]);
+    let _ = run_silent("netsh", &["interface", "ip", "set", "dns", &name_hyphen, "dhcp"]);
+
+    // Delete the TUN adapter — full cleanup so next start is fresh
+    cleanup_adapter_by_name(name);
+
+    log::info!("[tun_t2s] TUN adapter '{}' deleted", name);
 }
 
 #[cfg(target_os = "linux")]
@@ -789,10 +836,48 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         ));
     }
 
-    // ── Pre-startup cleanup: remove leftover TUN adapters from previous runs ──
-    // This prevents "FCAE-VPN 2, 3, 4..." accumulation across sessions.
+    // ── Pre-startup: check if adapter already exists and reuse it ──
+    // If FCAE_VPN (or FCAE-VPN) adapter exists from a previous run, reuse it
+    // instead of creating a new numbered adapter (FCAE-VPN 2, 3, 4...).
+    // Only clean up leftover adapters (numbered variants) from aborted runs.
     #[cfg(target_os = "windows")]
-    cleanup_adapter_by_name(&cfg.name);
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command as StdCommand;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        // Check if the primary adapter name exists (either FCAE_VPN or FCAE-VPN)
+        let name_hyphen = cfg.name.replace('_', "-");
+        let name_underscore = cfg.name.replace('-', "_");
+        let check_ps = format!(
+            "$adapter = Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue; if (-not $adapter) {{ $adapter = Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue }}; if ($adapter) {{ Write-Output $adapter.Name }}",
+            cfg.name, name_hyphen
+        );
+        let mut check_cmd = StdCommand::new("powershell");
+        check_cmd.creation_flags(CREATE_NO_WINDOW);
+        let primary_exists = match check_cmd
+            .args(["-NoProfile", "-Command", &check_ps])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+        {
+            Ok(o) => {
+                let name = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                !name.is_empty()
+            }
+            Err(_) => false,
+        };
+
+        if primary_exists {
+            log::info!("[tun_t2s] Adapter '{}' already exists, reusing it", cfg.name);
+            // Clean up numbered variants (FCAE-VPN 2, 3, ...) but keep the primary
+            cleanup_numbered_adapters(&cfg.name);
+        } else {
+            // No primary adapter exists, do a full cleanup to start fresh
+            log::info!("[tun_t2s] No existing adapter '{}', cleaning up before creation", cfg.name);
+            cleanup_adapter_by_name(&cfg.name);
+        }
+    }
 
     // Extract embedded binary
     let t2s_path = get_tun2socks_path()?;
