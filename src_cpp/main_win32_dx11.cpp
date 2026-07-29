@@ -4,6 +4,7 @@
 #endif
 #include <windows.h>
 #include <d3d11.h>
+#include <dwmapi.h>
 #include <tchar.h>
 
 #include "imgui.h"
@@ -133,6 +134,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     HWND hWnd = CreateWindowW(wc.lpszClassName, L"FCAE VPN",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         100, 100, 1024, 700, nullptr, nullptr, inst, nullptr);
+
+    // Enable dark title bar on Windows 10/11 (requires 1809+)
+    {
+        BOOL use_dark = TRUE;
+        // DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (before 20H1) or 19 (20H1+)
+        // Try both values for compatibility
+        DwmSetWindowAttribute(hWnd, 20, &use_dark, sizeof(use_dark));
+        DwmSetWindowAttribute(hWnd, 19, &use_dark, sizeof(use_dark));
+    }
 
     if (!CreateDeviceD3D(hWnd)) { CleanupDeviceD3D(); UnregisterClassW(wc.lpszClassName, wc.hInstance); return 1; }
 

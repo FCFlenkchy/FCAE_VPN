@@ -7,6 +7,14 @@
 #define GL_GLEXT_PROTOTYPES 1
 #include <GLFW/glfw3.h>
 
+// X11 dark title bar support
+#ifdef __linux__
+#define GLFW_EXPOSE_NATIVE_X11
+#include <GLFW/glfw3native.h>
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
+#endif
+
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
@@ -29,6 +37,9 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
+    // Request dark window decorations (GNOME/KDE Wayland & X11 dark title bar)
+    glfwWindowHintString(GLFW_WAYLAND_APP_ID, "fcaevpn");
+
     GLFWwindow* window = glfwCreateWindow(1024, 700, "FCAE VPN", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
@@ -36,6 +47,24 @@ int main(int argc, char** argv) {
     }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+
+    // Set dark title bar on X11 via _GTK_THEME_VARIANT hint
+    // This tells GNOME/XFCE/Cinnamon etc. to render the window frame in dark mode
+    {
+        Display* x11_dpy = glfwGetX11Display();
+        if (x11_dpy) {
+            GLFWwindow* win = glfwGetCurrentContext() ? window : nullptr;
+            if (win) {
+                Atom atom = XInternAtom(x11_dpy, "_GTK_THEME_VARIANT", False);
+                if (atom != None) {
+                    const char dark[] = "dark";
+                    XChangeProperty(x11_dpy, glfwGetX11Window(window),
+                                    atom, XA_STRING, 8, PropModeReplace,
+                                    (unsigned char*)dark, (int)sizeof(dark) - 1);
+                }
+            }
+        }
+    }
 
     // Disable maximize (define constant if GLFW < 3.3 doesn't provide it)
 #ifndef GLFW_MAXIMIZABLE

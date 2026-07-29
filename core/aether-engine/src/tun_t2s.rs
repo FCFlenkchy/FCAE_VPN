@@ -782,6 +782,8 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     {
         log::info!("[tun_t2s] Cleaning up any existing '{}' adapter before start", cfg.name);
         cleanup_adapter_by_name(&cfg.name);
+        // Wait for Windows to fully release adapter names to avoid suffix numbering
+        std::thread::sleep(std::time::Duration::from_millis(1000));
     }
 
     // Extract embedded binary
