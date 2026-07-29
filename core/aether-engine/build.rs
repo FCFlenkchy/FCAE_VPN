@@ -208,16 +208,19 @@ fn main() {
 fn embed_wintun_dll(_tun2socks_src: &PathBuf, out_dir: &str, wintun_arch: &str) {
     let wintun_dll_out = PathBuf::from(out_dir).join("wintun.dll");
 
-    // Always re-download if the architecture might have changed.
-    // The OUT_DIR is keyed by build script contents, but the target arch
-    // can change between CI runs using the same cache. Delete stale DLL.
-    let _ = fs::remove_file(&wintun_dll_out);
+    // If already present from a previous build, skip download
+    if wintun_dll_out.exists() {
+        println!("cargo:rustc-cfg=wintun_embedded");
+        println!("cargo:rustc-env=WINTUN_EMBEDDED={}", wintun_dll_out.display());
+        println!("cargo:warning=wintun.dll already present at: {}", wintun_dll_out.display());
+        return;
+    }
 
     // Download wintun.dll from wintun.net (official WireGuard project)
     if download_wintun_dll(&wintun_dll_out, wintun_arch) {
         println!("cargo:rustc-cfg=wintun_embedded");
         println!("cargo:rustc-env=WINTUN_EMBEDDED={}", wintun_dll_out.display());
-        println!("cargo:warning=wintun.dll ({}) embedded at: {}", wintun_arch, wintun_dll_out.display());
+        println!("cargo:warning=wintun.dll ({}) downloaded to: {}", wintun_arch, wintun_dll_out.display());
         return;
     }
 
