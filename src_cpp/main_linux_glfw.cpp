@@ -38,7 +38,9 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
     // Request dark window decorations (GNOME/KDE Wayland & X11 dark title bar)
+#ifdef GLFW_WAYLAND_APP_ID
     glfwWindowHintString(GLFW_WAYLAND_APP_ID, "fcaevpn");
+#endif
 
     GLFWwindow* window = glfwCreateWindow(1024, 700, "FCAE VPN", nullptr, nullptr);
     if (!window) {
