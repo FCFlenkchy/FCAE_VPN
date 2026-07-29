@@ -204,6 +204,10 @@ jobs:
           # Clean stale build script cache so build.rs always recompiles
           rm -rf target/release/build/aether-engine-* target/debug/build/aether-engine-* 2>/dev/null || true
 
+          if [ "${{ matrix.name }}" = "macos-x64" ]; then
+            export MACOSX_DEPLOYMENT_TARGET=13.0
+          fi
+
           if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
             NDK="${ANDROID_NDK_HOME:-${{ steps.setup-ndk.outputs.ndk-path }}}"
             if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
@@ -255,7 +259,6 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.name == 'macos-x64' && '13.0' || '' }}
           RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libgcc -C link-args=-static-libstdc++ -C link-args=-Wl,-Bstatic -C link-args=-lpthread -C link-args=-lwinpthread -C link-args=-Wl,-Bdynamic' || '' }}
 
       - name: build frontend (linux)
