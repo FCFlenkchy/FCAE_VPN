@@ -848,7 +848,7 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
 
         // Check if the primary adapter name exists (either FCAE_VPN or FCAE-VPN)
         let name_hyphen = cfg.name.replace('_', "-");
-        let name_underscore = cfg.name.replace('-', "_");
+        let _name_underscore = cfg.name.replace('-', "_");
         let check_ps = format!(
             "$adapter = Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue; if (-not $adapter) {{ $adapter = Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue }}; if ($adapter) {{ Write-Output $adapter.Name }}",
             cfg.name, name_hyphen

@@ -174,7 +174,17 @@ fn main() {
         // cross-compiling from Linux CI runners.
         let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
         if target_os == "windows" {
-            embed_wintun_dll(&tun2socks_src, &out_dir);
+            let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| String::from("x86_64"));
+            let wintun_arch = match target_arch.as_str() {
+                "x86_64" => "amd64",
+                "aarch64" => "arm64",
+                "x86" => "x86",
+                other => {
+                    println!("cargo:warning=Unknown target_arch '{}' for wintun, defaulting to amd64", other);
+                    "amd64"
+                }
+            };
+            embed_wintun_dll(&tun2socks_src, &out_dir, wintun_arch);
         }
 
         println!("cargo:rustc-env=TUN2SOCKS_EMBEDDED={}", bin_path.display());
@@ -195,7 +205,7 @@ fn main() {
 /// downloaded at build time from the official wintun.net release and
 /// embedded into the binary. This keeps the repo clean and ensures
 /// the correct version is always used.
-fn embed_wintun_dll(_tun2socks_src: &PathBuf, out_dir: &str) {
+fn embed_wintun_dll(_tun2socks_src: &PathBuf, out_dir: &str, wintun_arch: &str) {
     let wintun_dll_out = PathBuf::from(out_dir).join("wintun.dll");
 
     // If already present from a previous build, skip download
@@ -207,10 +217,10 @@ fn embed_wintun_dll(_tun2socks_src: &PathBuf, out_dir: &str) {
     }
 
     // Download wintun.dll from wintun.net (official WireGuard project)
-    if download_wintun_dll(&wintun_dll_out) {
+    if download_wintun_dll(&wintun_dll_out, wintun_arch) {
         println!("cargo:rustc-cfg=wintun_embedded");
         println!("cargo:rustc-env=WINTUN_EMBEDDED={}", wintun_dll_out.display());
-        println!("cargo:warning=wintun.dll downloaded to: {}", wintun_dll_out.display());
+        println!("cargo:warning=wintun.dll ({}) downloaded to: {}", wintun_arch, wintun_dll_out.display());
         return;
     }
 
@@ -225,11 +235,11 @@ fn embed_wintun_dll(_tun2socks_src: &PathBuf, out_dir: &str) {
 /// - Linux/macOS: tries curl, then wget
 ///
 /// Returns true on success.
-fn download_wintun_dll(dest: &PathBuf) -> bool {
+fn download_wintun_dll(dest: &PathBuf, wintun_arch: &str) -> bool {
     // wintun 0.14.1 — the stable version used by WireGuard
     let url = "https://www.wintun.net/builds/wintun-0.14.1.zip";
 
-    println!("cargo:warning=Downloading wintun.dll from {url}...");
+    println!("cargo:warning=Downloading wintun.dll ({}) from {url}...", wintun_arch);
 
     let tmp_zip = std::env::temp_dir().join("wintun_build.zip");
     let extract_dir = std::env::temp_dir().join("wintun_extract");
@@ -280,7 +290,7 @@ fn download_wintun_dll(dest: &PathBuf) -> bool {
     }
 
     // ── Extract ────────────────────────────────────────────────────
-    let extract_success = extract_wintun_dll(&tmp_zip, &extract_dir, dest);
+    let extract_success = extract_wintun_dll(&tmp_zip, &extract_dir, dest, wintun_arch);
 
     // Cleanup temp files
     let _ = fs::remove_file(&tmp_zip);
@@ -324,18 +334,24 @@ fn try_wget_download(url: &str, dest: &PathBuf) -> bool {
 
 /// Extract wintun.dll from the downloaded zip archive.
 /// Works on both Windows (PowerShell / tar) and Linux (unzip).
+/// `wintun_arch` is "amd64", "arm64", or "x86" — the correct
+/// architecture-specific DLL inside the zip is selected.
 /// Returns true on success.
-fn extract_wintun_dll(zip_path: &PathBuf, extract_dir: &PathBuf, dest: &PathBuf) -> bool {
+fn extract_wintun_dll(zip_path: &PathBuf, extract_dir: &PathBuf, dest: &PathBuf, wintun_arch: &str) -> bool {
     let host_os = std::env::consts::OS;
 
     if host_os == "windows" {
         // Try PowerShell Expand-Archive first
+        // Pick the architecture-specific wintun.dll from wintun/bin/{arch}/wintun.dll
         let ps_script = format!(
             "Expand-Archive -Path '{}' -DestinationPath '{}' -Force; \
-             $dll = Get-ChildItem -Path '{}' -Recurse -Filter 'wintun.dll' | Select-Object -First 1; \
+             $dll = Get-ChildItem -Path '{}' -Recurse -Filter 'wintun.dll' | Where-Object {{ $_.DirectoryName -like '*\\bin\\{}*' }} | Select-Object -First 1; \
+             if (-not $dll) {{ $dll = Get-ChildItem -Path '{}' -Recurse -Filter 'wintun.dll' | Select-Object -First 1 }}; \
              if ($dll) {{ Copy-Item $dll.FullName '{}' }}",
             zip_path.display(),
             extract_dir.display(),
+            extract_dir.display(),
+            wintun_arch,
             extract_dir.display(),
             dest.display()
         );
@@ -355,8 +371,8 @@ fn extract_wintun_dll(zip_path: &PathBuf, extract_dir: &PathBuf, dest: &PathBuf)
             .arg(extract_dir.to_str().unwrap_or(""))
             .status();
         if matches!(tar_status, Ok(s) if s.success()) {
-            // Find wintun.dll recursively
-            if let Some(found) = find_file_in_dir(extract_dir, "wintun.dll") {
+            // Find wintun.dll preferring the correct architecture
+            if let Some(found) = find_wintun_in_dir(extract_dir, wintun_arch) {
                 return fs::copy(&found, dest).is_ok();
             }
         }
@@ -370,7 +386,7 @@ fn extract_wintun_dll(zip_path: &PathBuf, extract_dir: &PathBuf, dest: &PathBuf)
             .arg(extract_dir.to_str().unwrap_or(""))
             .status();
         if matches!(unzip_status, Ok(s) if s.success()) {
-            if let Some(found) = find_file_in_dir(extract_dir, "wintun.dll") {
+            if let Some(found) = find_wintun_in_dir(extract_dir, wintun_arch) {
                 return fs::copy(&found, dest).is_ok();
             }
         }
@@ -384,7 +400,7 @@ fn extract_wintun_dll(zip_path: &PathBuf, extract_dir: &PathBuf, dest: &PathBuf)
             .arg("-y")
             .status();
         if matches!(sz_status, Ok(s) if s.success()) {
-            if let Some(found) = find_file_in_dir(extract_dir, "wintun.dll") {
+            if let Some(found) = find_wintun_in_dir(extract_dir, wintun_arch) {
                 return fs::copy(&found, dest).is_ok();
             }
         }
@@ -393,9 +409,28 @@ fn extract_wintun_dll(zip_path: &PathBuf, extract_dir: &PathBuf, dest: &PathBuf)
     false
 }
 
+/// Recursively search for wintun.dll, preferring the architecture-specific
+/// path (e.g., wintun/bin/amd64/wintun.dll). Falls back to any wintun.dll
+/// if the architecture-specific one isn't found.
+fn find_wintun_in_dir(dir: &PathBuf, wintun_arch: &str) -> Option<PathBuf> {
+    if !dir.exists() {
+        return None;
+    }
+
+    // First pass: look for architecture-specific path pattern
+    // wintun-0.14.1.zip extracts as: wintun/bin/{arch}/wintun.dll
+    let arch_path = dir.join("wintun").join("bin").join(wintun_arch).join("wintun.dll");
+    if arch_path.exists() {
+        return Some(arch_path);
+    }
+
+    // Second pass: fallback — any wintun.dll
+    find_any_file(dir, "wintun.dll")
+}
+
 /// Recursively search a directory for a file with the given name.
 /// Returns the full path if found.
-fn find_file_in_dir(dir: &PathBuf, filename: &str) -> Option<PathBuf> {
+fn find_any_file(dir: &PathBuf, filename: &str) -> Option<PathBuf> {
     if !dir.exists() {
         return None;
     }
@@ -404,7 +439,7 @@ fn find_file_in_dir(dir: &PathBuf, filename: &str) -> Option<PathBuf> {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    if let Some(found) = find_file_in_dir(&path, filename) {
+                    if let Some(found) = find_any_file(&path, filename) {
                         return Some(found);
                     }
                 } else if path.file_name().map_or(false, |n| n == filename) {
