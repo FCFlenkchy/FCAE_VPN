@@ -418,16 +418,18 @@ mod platform {
     use std::os::raw::c_int;
 
     pub fn create_tun(_name: &str) -> Result<c_int> {
+        // On macOS (and other non-Linux Unix), TUN is created by the tun2socks subprocess.
+        // tun2socks uses utun on macOS, which requires no manual fd creation.
         Err(AetherError::Other(
             format!(
-                "TUN not supported on this platform: {}",
+                "Direct TUN fd creation not supported on this platform: {}. Use tun2socks subprocess instead.",
                 std::env::consts::OS
             )
         ))
     }
 
     pub fn configure_tun(_fd: c_int, _ipv4: &str, _ipv6: Option<&str>) -> Result<()> {
-        Err(AetherError::Other("TUN not supported on this platform".into()))
+        Err(AetherError::Other("Direct TUN configuration not supported on this platform".into()))
     }
 
     pub fn cleanup_tun(_fd: c_int) {}
@@ -661,6 +663,154 @@ fn configure_windows_tun(cfg: &TunConfig) {
     }
 }
 
+// ── macOS TUN adapter route configuration ─────────────────────────────
+#[cfg(target_os = "macos")]
+fn configure_macos_tun(cfg: &TunConfig) {
+    use std::process::Command as StdCommand;
+
+    let name = &cfg.name;
+    let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+    let netmask = "255.255.255.0"; // hardcoded for /24
+
+    log::info!("[tun_t2s] Configuring macOS TUN adapter '{}' with IP {} netmask {}", name, ip, netmask);
+
+    // Find the utun interface that tun2socks created
+    // tun2socks creates utun with the name we specified; on macOS this becomes a utunX device.
+    // We need to find the actual utun number assigned.
+    let iface = find_macos_utun(name);
+    let iface = iface.as_deref().unwrap_or(name);
+    log::info!("[tun_t2s] Using macOS interface: {}", iface);
+
+    // 1. Assign IP address to the interface
+    let output = StdCommand::new("ifconfig")
+        .args([iface, "inet", ip, netmask, ip])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] ifconfig assign IP OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            log::warn!("[tun_t2s] ifconfig assign IP: {}", stderr.trim());
+        }
+        Err(e) => log::warn!("[tun_t2s] ifconfig error: {}", e),
+    }
+
+    // 2. Bring interface up
+    let output = StdCommand::new("ifconfig")
+        .args([iface, "up"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] ifconfig up OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            log::warn!("[tun_t2s] ifconfig up: {}", stderr.trim());
+        }
+        Err(e) => log::warn!("[tun_t2s] ifconfig up error: {}", e),
+    }
+
+    // 3. Add default route via the TUN interface
+    let output = StdCommand::new("route")
+        .args(["add", "default", "-interface", iface])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] route add default OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.contains("already in table") && !stderr.contains("File exists") {
+                log::warn!("[tun_t2s] route add default: {}", stderr.trim());
+            } else {
+                log::info!("[tun_t2s] default route already exists (OK)");
+            }
+        }
+        Err(e) => log::warn!("[tun_t2s] route add error: {}", e),
+    }
+
+    // 4. Add route to bypass tunnel peer (avoid routing loop)
+    if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
+        // Get current default gateway to route tunnel peer through it
+        if let Ok(gw_output) = StdCommand::new("sh")
+            .args(["-c", "route -n get default | grep gateway | head -1 | awk '{print $2}'"])
+            .output()
+        {
+            let gw = String::from_utf8_lossy(&gw_output.stdout).trim().to_string();
+            if !gw.is_empty() {
+                let output = StdCommand::new("route")
+                    .args(["add", peer_ip, &gw])
+                    .output();
+                match output {
+                    Ok(o) if o.status.success() => log::info!("[tun_t2s] route bypass {} via {} OK", peer_ip, gw),
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        if !stderr.contains("already in table") && !stderr.contains("File exists") {
+                            log::warn!("[tun_t2s] route bypass failed: {}", stderr.trim());
+                        }
+                    }
+                    Err(e) => log::warn!("[tun_t2s] route bypass error: {}", e),
+                }
+            }
+        }
+    }
+
+    // 5. Set DNS servers
+    let output = StdCommand::new("networksetup")
+        .args(["-setdnsservers", "Wi-Fi", "1.1.1.1", "1.0.0.1"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] networksetup DNS OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            log::debug!("[tun_t2s] networksetup DNS: {}", stderr.trim());
+        }
+        Err(e) => log::debug!("[tun_t2s] networksetup DNS error: {}", e),
+    }
+}
+
+/// Find the actual macOS utun interface name that tun2socks created.
+/// tun2socks creates a utun device with a name like "utun3" but we request "FCAE_VPN".
+/// We need to find which utun was actually assigned.
+#[cfg(target_os = "macos")]
+fn find_macos_utun(requested_name: &str) -> Option<String> {
+    use std::process::Command as StdCommand;
+    // List all interfaces and find the one with our requested name or the most recent utun
+    let output = StdCommand::new("ifconfig")
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Look for utun interfaces that are up with an inet address (indicates tun2socks configured it)
+    let mut current_utun: Option<String> = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.starts_with("utun") {
+            let iface = line.split(':').next().unwrap_or("").to_string();
+            if !iface.is_empty() {
+                current_utun = Some(iface);
+            }
+        }
+        // If this utun has an inet address, it's likely the one tun2socks configured
+        if line.starts_with("inet ") && current_utun.is_some() {
+            let utun = current_utun.take().unwrap();
+            log::info!("[tun_t2s] Found configured utun: {}", utun);
+            return Some(utun);
+        }
+    }
+
+    // Fallback: try common utun names
+    for i in 0..20 {
+        let name = format!("utun{}", i);
+        let output = StdCommand::new("ifconfig")
+            .arg(&name)
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("inet ") {
+            log::info!("[tun_t2s] Found active utun by scanning: {}", name);
+            return Some(name);
+        }
+    }
+
+    None
+}
+
 // ── Linux TUN adapter route configuration ───────────────────────────────
 #[cfg(target_os = "linux")]
 fn configure_linux_tun(cfg: &TunConfig) {
@@ -755,6 +905,34 @@ fn cleanup_linux_tun(cfg: &TunConfig) {
     log::info!("[tun_t2s] Cleaning up Linux TUN routes for '{}'", name);
     let _ = StdCommand::new("ip").args(["route", "del", "default", "dev", name]).status();
     let _ = StdCommand::new("ip").args(["link", "set", name, "down"]).status();
+}
+
+#[cfg(target_os = "macos")]
+fn cleanup_macos_tun(cfg: &TunConfig) {
+    use std::process::Command as StdCommand;
+    let name = &cfg.name;
+    log::info!("[tun_t2s] Cleaning up macOS TUN routes for '{}'", name);
+
+    // Find the actual utun interface
+    let iface = find_macos_utun(name);
+    let iface = iface.as_deref().unwrap_or(name);
+
+    // Remove default route
+    let _ = StdCommand::new("route")
+        .args(["delete", "default", "-interface", iface])
+        .status();
+
+    // Bring interface down
+    let _ = StdCommand::new("ifconfig")
+        .args([iface, "down"])
+        .status();
+
+    // Reset DNS to automatic
+    let _ = StdCommand::new("networksetup")
+        .args(["-setdnsservers", "Wi-Fi", "Empty"])
+        .status();
+
+    log::info!("[tun_t2s] macOS TUN cleanup complete for '{}'", name);
 }
 
 /// Run the TUN with tun2socks as a subprocess
@@ -852,6 +1030,13 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         configure_linux_tun(&cfg);
     }
 
+    // ── macOS: configure TUN routing ───────────────────────────────
+    #[cfg(target_os = "macos")]
+    {
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        configure_macos_tun(&cfg);
+    }
+
     // Read stdout/stderr in background threads
     if let Some(stdout) = child.stdout.take() {
         std::thread::spawn(move || {
@@ -910,6 +1095,8 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
                 unsafe { libc::kill(pid as i32, libc::SIGTERM); }
                 #[cfg(target_os = "linux")]
                 cleanup_linux_tun(&cfg);
+                #[cfg(target_os = "macos")]
+                cleanup_macos_tun(&cfg);
             }
             // Wait for process to exit with timeout
             let _ = tokio::time::timeout(
@@ -962,6 +1149,11 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     {
         unsafe { libc::kill(pid as i32, libc::SIGKILL); }
         cleanup_linux_tun(&cfg);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+        cleanup_macos_tun(&cfg);
     }
 
     log::info!("[tun_t2s] TUN shut down");
