@@ -788,7 +788,9 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     let t2s_path = get_tun2socks_path()?;
 
     // Build tun2socks arguments
-    let device = format!("tun://{}", cfg.name);
+    // tun2socks device URL doesn't allow spaces — replace with underscore
+    let device_name_for_url = cfg.name.replace(' ', "_");
+    let device = format!("tun://{}", device_name_for_url);
     let proxy = if let (Some(user), Some(pass)) = (&cfg.username, &cfg.password) {
         format!("socks5://{}:{}@{}:{}", user, pass, cfg.socks_host, cfg.socks_port)
     } else {
