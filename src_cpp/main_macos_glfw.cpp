@@ -4,6 +4,7 @@
 #include <thread>
 #include <chrono>
 
+#define GL_SILENCE_DEPRECATION
 #define GL_GLEXT_PROTOTYPES 1
 #include <GLFW/glfw3.h>
 
