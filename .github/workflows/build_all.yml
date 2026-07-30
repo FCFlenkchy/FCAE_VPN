@@ -160,6 +160,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr/local/glfw_static \
             -DBUILD_SHARED_LIBS=OFF \
+            -DGLFW_BUILD_WAYLAND=OFF \
             -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF
           cmake --build build
           sudo cmake --install build
