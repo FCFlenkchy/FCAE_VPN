@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="cursor"></div>
+    <div class="cursor-main"></div>
     <div class="cursor-dot"></div>
 
     <nav>
@@ -32,7 +32,6 @@
             <h1>FCAE VPN</h1>
             <p class="sub">Break through censorship with automatic endpoint discovery, encrypted MASQUE / WireGuard tunneling, and local SOCKS5 &amp; HTTP proxy. Built for heavily restricted networks.</p>
             <div class="badges">
-                <span class="badge"><span class="dot g"></span> v1.0.8.8</span>
                 <span class="badge"><span class="dot p"></span> Windows · Linux · macOS · Android</span>
                 <span class="badge"><span class="dot c"></span> MIT License</span>
             </div>
@@ -56,37 +55,54 @@
         <!-- Architecture -->
         <section>
             <div class="sh"><h2>🏗️ Architecture</h2></div>
-            <div class="arch">
-                <img src="https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/mountain.png" alt="FCAE VPN Architecture" onerror="this.style.display='none'">
-                <pre>
-  YOUR APPLICATION
-       |  SOCKS5 :1819 / HTTP :1820
-       v
-  ┌────────────────────────────────────┐
-  │        FCAE VPN CLIENT            │
-  │  · Netstack (TCP/IP)              │
-  │  · Scanner (endpoint discovery)   │
-  │  · Obfuscation (aether-noize)     │
-  │  · Health Monitor (auto-reconnect)│
-  └────────────┬───────────────────────┘
-               │
-               v
-  ┌────────────────────────────────────┐
-  │       ENCRYPTED TUNNEL            │
-  │  · MASQUE HTTP/3 (QUIC)           │
-  │  · MASQUE HTTP/2 (TLS)            │
-  │  · WireGuard (UDP)                │
-  │  · WARP-in-WARP (nested WG)       │
-  └────────────┬───────────────────────┘
-               │
-               v
-  ┌────────────────────────────────────┐
-  │    CLOUDFLARE WARP EDGE           │
-  │    (162.159.192.x auto-discovery)  │
-  └────────────┬───────────────────────┘
-               │
-               v
-         PUBLIC INTERNET</pre>
+            <div class="arch-flow">
+                <!-- Your App -->
+                <div class="arch-box">
+                    <div class="arch-label">Your Device</div>
+                    <div class="arch-title">Any Application</div>
+                    <div class="arch-sub">Browser, CLI, or system-wide TUN</div>
+                </div>
+                <div class="arch-arrow">↓</div>
+                <!-- Proxy -->
+                <div class="arch-box" style="border-color:rgba(124,92,252,0.4)">
+                    <div class="arch-label">Local Proxies</div>
+                    <div class="arch-title">SOCKS5 :1819 · HTTP :1820</div>
+                </div>
+                <div class="arch-arrow">↓</div>
+                <!-- FCAE Client -->
+                <div class="arch-box">
+                    <div class="arch-label">FCAE VPN Client</div>
+                    <div class="arch-row" style="margin-top:10px">
+                        <div class="arch-box-sm"><div class="arch-sm-title">Netstack</div><div class="arch-sm-sub">TCP/IP Stack</div></div>
+                        <div class="arch-box-sm"><div class="arch-sm-title">Scanner</div><div class="arch-sm-sub">Endpoint Discovery</div></div>
+                        <div class="arch-box-sm"><div class="arch-sm-title">Obfuscation</div><div class="arch-sm-sub">aether-noize</div></div>
+                        <div class="arch-box-sm"><div class="arch-sm-title">Health</div><div class="arch-sm-sub">Auto-Reconnect</div></div>
+                    </div>
+                </div>
+                <div class="arch-arrow">↓</div>
+                <!-- Tunnels -->
+                <div class="arch-box">
+                    <div class="arch-label">Encrypted Tunnels</div>
+                    <div class="arch-row" style="margin-top:10px">
+                        <div class="arch-box-sm"><div class="arch-sm-title">MASQUE</div><div class="arch-sm-sub">HTTP/3 · QUIC</div></div>
+                        <div class="arch-box-sm"><div class="arch-sm-title">MASQUE</div><div class="arch-sm-sub">HTTP/2 · TLS</div></div>
+                        <div class="arch-box-sm"><div class="arch-sm-title">WireGuard</div><div class="arch-sm-sub">UDP</div></div>
+                        <div class="arch-box-sm"><div class="arch-sm-title">WARP-in-WARP</div><div class="arch-sm-sub">Double WG</div></div>
+                    </div>
+                </div>
+                <div class="arch-arrow">↓</div>
+                <!-- Edge -->
+                <div class="arch-box">
+                    <div class="arch-label">Cloudflare WARP Edge</div>
+                    <div class="arch-title">162.159.192.x</div>
+                    <div class="arch-sub">Automatic endpoint discovery</div>
+                </div>
+                <div class="arch-arrow">↓</div>
+                <!-- Internet -->
+                <div class="arch-box">
+                    <div class="arch-label">Freedom</div>
+                    <div class="arch-title">🌐 Public Internet</div>
+                </div>
             </div>
         </section>
 
@@ -211,27 +227,45 @@ cmake --build build --config Release</code></pre>
     </div>
 
     <script>
-        // Custom cursor
-        const cursor = document.querySelector('.cursor');
+        // === Cool Custom Cursor with Trail ===
+        const cursorMain = document.querySelector('.cursor-main');
         const cursorDot = document.querySelector('.cursor-dot');
-        
+        let mouseX = 0, mouseY = 0;
+        let cursorX = 0, cursorY = 0;
+
         document.addEventListener('mousemove', (e) => {
-            cursor.style.left = e.clientX + 'px';
-            cursor.style.top = e.clientY + 'px';
-            cursorDot.style.left = e.clientX + 'px';
-            cursorDot.style.top = e.clientY + 'px';
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+            cursorDot.style.left = mouseX + 'px';
+            cursorDot.style.top = mouseY + 'px';
+
+            // Create trail dot
+            const trail = document.createElement('div');
+            trail.className = 'cursor-trail';
+            trail.style.left = mouseX + 'px';
+            trail.style.top = mouseY + 'px';
+            trail.style.width = '12px';
+            trail.style.height = '12px';
+            document.body.appendChild(trail);
+            setTimeout(() => trail.remove(), 600);
         });
 
-        // Add hover effect on interactive elements
-        const hoverTargets = document.querySelectorAll('a, button, .btn, .dl-card, .contrib-card, .credit-card, .step-card, .p-card, .fi, .link-card');
+        // Smooth follow for main cursor
+        function animateCursor() {
+            cursorX += (mouseX - cursorX) * 0.15;
+            cursorY += (mouseY - cursorY) * 0.15;
+            cursorMain.style.left = cursorX + 'px';
+            cursorMain.style.top = cursorY + 'px';
+            requestAnimationFrame(animateCursor);
+        }
+        animateCursor();
+
+        // Hover effect
+        const hoverTargets = document.querySelectorAll('a, button, .btn, .link-card, .contrib-card, .credit-card, .step-card, .p-card, .fi, .arch-box, .arch-box-sm');
         hoverTargets.forEach(el => {
-            el.addEventListener('mouseenter', () => cursor.classList.add('hover'));
-            el.addEventListener('mouseleave', () => cursor.classList.remove('hover'));
+            el.addEventListener('mouseenter', () => cursorMain.classList.add('hover'));
+            el.addEventListener('mouseleave', () => cursorMain.classList.remove('hover'));
         });
-
-        // Hide default cursor
-        document.body.style.cursor = 'none';
-        hoverTargets.forEach(el => el.style.cursor = 'none');
     </script>
 </body>
 </html>
