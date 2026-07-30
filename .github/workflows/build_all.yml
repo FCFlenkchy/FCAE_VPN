@@ -152,24 +152,28 @@ jobs:
         if: startsWith(matrix.name, 'macos-')
         run: |
           brew install cmake ninja nasm protobuf go
-          # Install GLFW: for macos-x64 cross-compile, build from source for x86_64.
-          # For macos-arm64, brew's native ARM64 GLFW is fine.
+          # Build GLFW from source for both archs (static libs, no x11/wayland deps on macOS).
+          # For macos-x64 cross-compile, build for x86_64.
+          # For macos-arm64, build for arm64.
           if [ "${{ matrix.name }}" = "macos-x64" ]; then
-            curl -fsSL https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
-            tar xzf glfw.tar.gz
-            cd glfw-3.4
-            cmake -B build -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
-              -DCMAKE_INSTALL_PREFIX=/usr/local/glfw_x64 \
-              -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF
-            cmake --build build
-            sudo cmake --install build
-            cd ..
+            ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
+            GLFW_PREFIX=/usr/local/glfw_x64
           else
-            brew install glfw
+            ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
+            GLFW_PREFIX=/usr/local/glfw_arm64
           fi
+          curl -fsSL https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
+          tar xzf glfw.tar.gz
+          cd glfw-3.4
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            ${ARCH_ARGS} \
+            -DCMAKE_INSTALL_PREFIX=${GLFW_PREFIX} \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF
+          cmake --build build
+          sudo cmake --install build
+          cd ..
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
@@ -301,6 +305,8 @@ jobs:
           mkdir -p build && cd build
           if [ "${{ matrix.name }}" = "macos-x64" ]; then
             export CMAKE_PREFIX_PATH=/usr/local/glfw_x64
+          else
+            export CMAKE_PREFIX_PATH=/usr/local/glfw_arm64
           fi
           cmake .. -G Ninja \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
@@ -360,15 +366,43 @@ jobs:
           mkdir -p package
           cp build/fcaevpn* package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
+
+          # For Linux: copy dependent shared libs for portability
+          if [ "${{ matrix.name }}" = "linux-x64" ]; then
+            mkdir -p package/lib
+            BIN=build/fcaevpn
+            if [ -f "$BIN" ]; then
+              for lib in $(ldd "$BIN" 2>/dev/null | grep -E 'libglfw|libGL|libX' | awk '{print $3}' || true); do
+                if [ -f "$lib" ]; then
+                  cp "$lib" package/lib/
+                fi
+              done
+              # Create a wrapper script that sets LD_LIBRARY_PATH
+              cat > package/fcaevpn.sh << 'WRAPPER'
+#!/bin/sh
+DIR="$(cd "$(dirname "$0")" && pwd)"
+export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"
+exec "$DIR/fcaevpn" "$@"
+WRAPPER
+              chmod +x package/fcaevpn.sh
+            fi
+          fi
+
           cd package
           for f in fcaevpn*; do
             [ -f "$f" ] || continue
             if [[ "$f" == *.exe ]]; then
               mv "$f" "FCAE_VPN-${{ matrix.name }}.exe"
-            else
-              mv "$f" "FCAE_VPN-${{ matrix.name }}"
+            elif [[ "$f" == *.sh ]]; then
+              mv "$f" "FCAE_VPN-${{ matrix.name }}.sh"
+            elif [[ "$f" != *.so* ]] && [[ "$f" != fcaevpn ]]; then
+              : # skip libs, already in lib/
             fi
           done
+          # Rename the main binary if not already moved
+          if [ -f fcaevpn ]; then
+            mv fcaevpn "FCAE_VPN-${{ matrix.name }}"
+          fi
           ls -la
           test $(ls -1 | wc -l) -ge 1
 
@@ -390,16 +424,48 @@ jobs:
           # Create .app bundle structure
           APP="package/FCAE VPN.app"
           mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Frameworks"
           mkdir -p "$APP/Contents/Resources"
 
           # Copy binary
           cp build/fcaevpn "$APP/Contents/MacOS/fcaevpn"
           chmod +x "$APP/Contents/MacOS/fcaevpn"
 
-          # Create minimal Info.plist (printf avoids heredoc YAML issues)
-          printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n    <key>CFBundleExecutable</key>\n    <string>fcaevpn</string>\n    <key>CFBundleIdentifier</key>\n    <string>com.fc.fcaevpn</string>\n    <key>CFBundleName</key>\n    <string>FCAE VPN</string>\n    <key>CFBundleVersion</key>\n    <string>1.0.0</string>\n    <key>CFBundleShortVersionString</key>\n    <string>1.0.0</string>\n    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n    <key>NSHighResolutionCapable</key>\n    <true/>\n</dict>\n</plist>\n' > "$APP/Contents/Info.plist"
+          # Copy icon if available
+          if [ -f src_cpp/icon_512.png ]; then
+            cp src_cpp/icon_512.png "$APP/Contents/Resources/AppIcon.png"
+          fi
 
-          # Ad-hoc sign
+          # Copy GLFW dylib into bundle (if linked dynamically)
+          # Find where glfw was installed and copy the dylib
+          if [ "${{ matrix.name }}" = "macos-x64" ]; then
+            GLFW_LIB_DIR=/usr/local/glfw_x64/lib
+          else
+            GLFW_LIB_DIR=/usr/local/glfw_arm64/lib
+          fi
+          if [ -f "${GLFW_LIB_DIR}/libglfw.3.4.dylib" ]; then
+            cp "${GLFW_LIB_DIR}/libglfw.3.4.dylib" "$APP/Contents/Frameworks/"
+            # Update the binary's install name for glfw to use @rpath
+            install_name_tool -change "${GLFW_LIB_DIR}/libglfw.3.4.dylib" \
+              "@rpath/libglfw.3.4.dylib" "$APP/Contents/MacOS/fcaevpn" 2>/dev/null || true
+            # Also fix the dylib's own install name
+            install_name_tool -id "@rpath/libglfw.3.4.dylib" \
+              "$APP/Contents/Frameworks/libglfw.3.4.dylib" 2>/dev/null || true
+          elif [ -f "${GLFW_LIB_DIR}/libglfw.3.dylib" ]; then
+            cp "${GLFW_LIB_DIR}/libglfw.3.dylib" "$APP/Contents/Frameworks/"
+            install_name_tool -change "${GLFW_LIB_DIR}/libglfw.3.dylib" \
+              "@rpath/libglfw.3.dylib" "$APP/Contents/MacOS/fcaevpn" 2>/dev/null || true
+            install_name_tool -id "@rpath/libglfw.3.dylib" \
+              "$APP/Contents/Frameworks/libglfw.3.dylib" 2>/dev/null || true
+          fi
+
+          # Create minimal Info.plist
+          printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n    <key>CFBundleExecutable</key>\n    <string>fcaevpn</string>\n    <key>CFBundleIdentifier</key>\n    <string>com.fc.fcaevpn</string>\n    <key>CFBundleName</key>\n    <string>FCAE VPN</string>\n    <key>CFBundleVersion</key>\n    <string>1.0.0</string>\n    <key>CFBundleShortVersionString</key>\n    <string>1.0.0</string>\n    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n    <key>CFBundleIconFile</key>\n    <string>AppIcon</string>\n    <key>NSHighResolutionCapable</key>\n    <true/>\n    <key>LSMinimumSystemVersion</key>\n    <string>13.0</string>\n</dict>\n</plist>\n' > "$APP/Contents/Info.plist"
+
+          # Ad-hoc sign (Frameworks first, then the app)
+          if [ -d "$APP/Contents/Frameworks" ] && [ "$(ls -A "$APP/Contents/Frameworks" 2>/dev/null)" ]; then
+            codesign --force --deep --sign - "$APP/Contents/Frameworks/"*.dylib 2>/dev/null || true
+          fi
           codesign --force --deep --sign - "$APP"
 
           # Create .dmg

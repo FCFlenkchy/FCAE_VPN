@@ -138,7 +138,19 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
 elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "MACOS_X64")
 
-    find_package(glfw3 3.3 REQUIRED)
+    # Prefer static GLFW (CMAKE_PREFIX_PATH can point to a custom build).
+    # Fall back to system/dynamic GLFW if not found.
+    find_package(glfw3 3.3 QUIET)
+    if(NOT glfw3_FOUND)
+        # Try pkg-config for static GLFW
+        find_package(PkgConfig QUIET)
+        if(PKG_CONFIG_FOUND)
+            pkg_check_modules(GLFW glfw3)
+        endif()
+    endif()
+    if(NOT glfw3_FOUND AND NOT GLFW_FOUND)
+        message(FATAL_ERROR "GLFW 3.3+ not found. Install glfw or set CMAKE_PREFIX_PATH")
+    endif()
     find_package(OpenGL REQUIRED)
 
     add_executable(fcaevpn
@@ -174,8 +186,15 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
     endif()
     aether_link_ffi(fcaevpn "${AETHER_FFI_A}")
 
+    # Link GLFW: use target if available (static), otherwise fall back to lib name
+    if(TARGET glfw)
+        target_link_libraries(fcaevpn PRIVATE glfw)
+    else()
+        target_link_libraries(fcaevpn PRIVATE ${GLFW_LIBRARIES})
+    endif()
+
     target_link_libraries(fcaevpn PRIVATE
-        glfw OpenGL::GL
+        OpenGL::GL
         "-framework Cocoa"
         "-framework IOKit"
         "-framework CoreFoundation"
@@ -187,6 +206,8 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
     # macOS-specific linker flags
     target_link_options(fcaevpn PRIVATE
         -Wl,-dead_strip
+        -Wl,-rpath,@executable_path/../Frameworks
+        -Wl,-rpath,@executable_path
     )
 
 elseif(UNIX)
