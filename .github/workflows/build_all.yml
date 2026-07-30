@@ -662,14 +662,14 @@ jobs:
             const body = extraNotes ? `${changelog}\n\n${extraNotes}` : changelog;
 
             const release = await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: tag,
-              target_commitish: context.sha,
-              name: tag,
-              body,
-              prerelease: isPrerelease,
-              draft: false,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            tag_name: tag,
+            target_commitish: context.sha,
+            name: `FCAE VPN ${tag}`,
+            body,
+            prerelease: isPrerelease,
+            draft: false,
             });
             console.log(`Created release ${release.data.id} for tag ${tag} (prerelease=${isPrerelease})`);
 
