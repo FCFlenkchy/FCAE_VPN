@@ -66,6 +66,12 @@ jobs:
             abi: armeabi-v7a
             cmake_args: "-DAETHER_TARGET=ANDROID_ARM32"
 
+          - target: x86_64-linux-android
+            name: android-x86_64
+            os: ubuntu-latest
+            abi: x86_64
+            cmake_args: "-DAETHER_TARGET=ANDROID_X86_64"
+
           - target: aarch64-apple-darwin
             name: macos-arm64
             os: macos-latest
@@ -210,7 +216,7 @@ jobs:
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android, armv7-linux-androideabi, aarch64-apple-darwin, x86_64-apple-darwin
+          targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, aarch64-apple-darwin, x86_64-apple-darwin
           components: rust-src
 
       - name: cache rust
@@ -286,6 +292,10 @@ jobs:
               NDK_CLANG_PREFIX=aarch64-linux-android
               RUST_ENV_LOWER=aarch64_linux_android
               RUST_ENV_UPPER=AARCH64_LINUX_ANDROID
+            elif [ "${{ matrix.name }}" = "android-x86_64" ]; then
+              NDK_CLANG_PREFIX=x86_64-linux-android
+              RUST_ENV_LOWER=x86_64_linux_android
+              RUST_ENV_UPPER=X86_64_LINUX_ANDROID
             else
               NDK_CLANG_PREFIX=armv7a-linux-androideabi
               RUST_ENV_LOWER=armv7_linux_androideabi

@@ -115,6 +115,34 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_ARM32")
     )
     target_link_options(fcaevpn_native PRIVATE -Wl,--export-dynamic)
 
+elseif(AETHER_TARGET STREQUAL "ANDROID_X86_64")
+
+    # Kotlin UI + JNI bridge for x86_64 (Chromebook / emulator)
+    add_library(fcaevpn_native SHARED
+        ${CMAKE_SOURCE_DIR}/src_cpp/android_jni.cpp
+    )
+
+    target_include_directories(fcaevpn_native PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src_cpp
+    )
+
+    target_compile_definitions(fcaevpn_native PRIVATE
+        ANDROID
+        AETHER_TARGET_ANDROID_X86_64
+    )
+
+    find_library(log-lib log)
+    find_library(android-lib android)
+
+    aether_ffi_lib_path(AETHER_FFI_A x86_64-linux-android)
+    aether_link_ffi(fcaevpn_native "${AETHER_FFI_A}")
+
+    target_link_libraries(fcaevpn_native PRIVATE
+        ${log-lib} ${android-lib} m
+    )
+    target_link_options(fcaevpn_native PRIVATE -Wl,--export-dynamic)
+
 elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     add_executable(fcaevpn
@@ -308,7 +336,7 @@ elseif(UNIX)
 endif()
 
 # ── Common compile flags ─────────────────────────────────────────────────
-if(AETHER_TARGET STREQUAL "ANDROID_ARM64" OR AETHER_TARGET STREQUAL "ANDROID_ARM32")
+if(AETHER_TARGET STREQUAL "ANDROID_ARM64" OR AETHER_TARGET STREQUAL "ANDROID_ARM32" OR AETHER_TARGET STREQUAL "ANDROID_X86_64")
     set(AETHER_COMPILE_TARGET fcaevpn_native)
 else()
     set(AETHER_COMPILE_TARGET fcaevpn)
