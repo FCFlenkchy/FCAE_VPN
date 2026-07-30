@@ -160,7 +160,6 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr/local/glfw_static \
             -DBUILD_SHARED_LIBS=OFF \
-            -DGLFW_BUILD_WAYLAND=OFF \
             -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF
           cmake --build build
           sudo cmake --install build
@@ -613,3 +612,63 @@ jobs:
                 owner: context.repo.owner, repo: context.repo.repo, ref: `tags/${tag}`
               });
             } catch (e) { console.log(`No existing tag: ${e.message}`); }
+
+      - name: create release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const tag = ${{ toJSON(inputs.release_tag) }};
+            const isPrerelease = ${{ inputs.prerelease }};
+            const extraNotes = ${{ toJSON(inputs.extra_notes) }};
+
+            // Auto-generate a changelog for this tag (commits/PRs since the last release)
+            let changelog = '';
+            try {
+              const notes = await github.rest.repos.generateReleaseNotes({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tag,
+                target_commitish: context.sha,
+              });
+              changelog = notes.data.body;
+            } catch (e) {
+              console.log(`Could not generate release notes: ${e.message}`);
+            }
+
+            const body = extraNotes ? `${changelog}\n\n${extraNotes}` : changelog;
+
+            const release = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              target_commitish: context.sha,
+              name: tag,
+              body,
+              prerelease: isPrerelease,
+              draft: false,
+            });
+            console.log(`Created release ${release.data.id} for tag ${tag} (prerelease=${isPrerelease})`);
+
+            // Upload every zip as a release asset
+            const dir = 'release-zips';
+            for (const file of fs.readdirSync(dir)) {
+              if (!file.endsWith('.zip')) continue;
+              const filePath = path.join(dir, file);
+              const data = fs.readFileSync(filePath);
+              console.log(`Uploading ${file} (${data.length} bytes)...`);
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.data.id,
+                name: file,
+                data,
+                headers: {
+                  'content-type': 'application/zip',
+                  'content-length': data.length,
+                },
+              });
+            }
+            console.log('All assets uploaded.');
