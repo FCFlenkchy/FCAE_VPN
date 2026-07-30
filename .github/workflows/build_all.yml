@@ -554,7 +554,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FCAE_VPN-${{ matrix.name }}
-          path: package/*
+          path: ${{ startsWith(matrix.name, 'macos-') && 'package/*.dmg' || 'package/*' }}
           if-no-files-found: error
 
   release:
@@ -579,19 +579,29 @@ jobs:
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
             if [ "${{ inputs.prerelease }}" = "true" ]; then
-              zip_name="${name}-prerelease.zip"
+              suffix="-prerelease"
             else
-              zip_name="${name}.zip"
+              suffix=""
             fi
-            (
-              cd "$dir"
-              zip -9 -j "../../release-zips/${zip_name}" ./*
-            )
-            echo "Created release-zips/${zip_name}"
-            unzip -l "release-zips/${zip_name}" | head -20
+            # macOS artifacts contain only the .dmg — copy it directly (already compressed)
+            if ls "$dir"/*.dmg 1>/dev/null 2>&1; then
+              for dmg in "$dir"/*.dmg; do
+                dmg_base=$(basename "$dmg" .dmg)
+                cp "$dmg" "release-zips/${dmg_base}${suffix}.dmg"
+                echo "Copied release-zips/${dmg_base}${suffix}.dmg"
+              done
+            else
+              zip_name="${name}${suffix}.zip"
+              (
+                cd "$dir"
+                zip -9 -j "../../release-zips/${zip_name}" ./*
+              )
+              echo "Created release-zips/${zip_name}"
+              unzip -l "release-zips/${zip_name}" | head -20
+            fi
           done
           ls -lah release-zips/
-          test $(ls -1 release-zips/*.zip | wc -l) -ge 1
+          test $(ls -1 release-zips/* 2>/dev/null | wc -l) -ge 1
 
       - name: delete existing release + tag
         uses: actions/github-script@v7
@@ -653,13 +663,16 @@ jobs:
             });
             console.log(`Created release ${release.data.id} for tag ${tag} (prerelease=${isPrerelease})`);
 
-            // Upload every zip as a release asset
+            // Upload every file in release-zips as a release asset
             const dir = 'release-zips';
             for (const file of fs.readdirSync(dir)) {
-              if (!file.endsWith('.zip')) continue;
               const filePath = path.join(dir, file);
               const data = fs.readFileSync(filePath);
-              console.log(`Uploading ${file} (${data.length} bytes)...`);
+              const ext = path.extname(file).toLowerCase();
+              const contentType = ext === '.dmg' ? 'application/x-apple-diskimage'
+                                : ext === '.zip' ? 'application/zip'
+                                : 'application/octet-stream';
+              console.log(`Uploading ${file} (${data.length} bytes, type=${contentType})...`);
               await github.rest.repos.uploadReleaseAsset({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -667,7 +680,7 @@ jobs:
                 name: file,
                 data,
                 headers: {
-                  'content-type': 'application/zip',
+                  'content-type': contentType,
                   'content-length': data.length,
                 },
               });
