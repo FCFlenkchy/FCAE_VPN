@@ -153,7 +153,6 @@ jobs:
             libxrandr-dev libxinerama-dev libxxf86vm-dev \
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
             libevent-dev protobuf-compiler nasm golang-go cmake ninja-build
-          # Build GLFW from source as static library for portability
           curl -fsSL https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
           tar xzf glfw.tar.gz
           cd glfw-3.4
@@ -187,9 +186,6 @@ jobs:
         if: startsWith(matrix.name, 'macos-')
         run: |
           brew install cmake ninja nasm protobuf go
-          # Build GLFW from source for both archs (static libs, no x11/wayland deps on macOS).
-          # For macos-x64 cross-compile, build for x86_64.
-          # For macos-arm64, build for arm64.
           if [ "${{ matrix.name }}" = "macos-x64" ]; then
             ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
             GLFW_PREFIX=/usr/local/glfw_x64
@@ -216,12 +212,6 @@ jobs:
           targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android, armv7-linux-androideabi, aarch64-apple-darwin, x86_64-apple-darwin
           components: rust-src
 
-      # Caches ~/.cargo/registry, ~/.cargo/git, and the target dir. Keyed
-      # off Cargo.lock so it's reused as long as dependencies haven't
-      # changed, and automatically evicts its own stale entries -- this
-      # is what was actually missing before, which is why every run was
-      # redownloading crates from scratch regardless of what "cleanup old
-      # caches" below did.
       - name: cache rust
         uses: Swatinem/rust-cache@v2
         with:
@@ -272,7 +262,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Clean stale build script cache so build.rs always recompiles
           rm -rf target/release/build/aether-engine-* target/debug/build/aether-engine-* 2>/dev/null || true
 
           if [ "${{ matrix.name }}" = "macos-x64" ]; then
@@ -292,9 +281,6 @@ jobs:
             export ANDROID_NDK_HOME="$NDK"
             export ANDROID_NDK_ROOT="$NDK"
 
-            # NDK clang executables and Rust's env-var target suffix use
-            # different naming per ABI (armv7's clang prefix has an extra
-            # 'a' that the cargo target triple doesn't), so branch here.
             if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
               NDK_CLANG_PREFIX=aarch64-linux-android
               RUST_ENV_LOWER=aarch64_linux_android
@@ -399,12 +385,6 @@ jobs:
           gradle wrapper --gradle-version 9.0
           ./gradlew assembleRelease -PNDK_ABI=${{ matrix.abi }}
 
-      # Signs with the STATIC keystore from repo secrets (generated via
-      # the generate-signing-keys workflow) -- the same keystore/identity
-      # used for arm64-v8a, reused here for armeabi-v7a too. Do NOT
-      # generate a fresh keystore per run/per ABI: Android requires the
-      # same signing key across releases (and across ABIs of the same
-      # app) for users to install updates.
       - name: sign apk
         if: startsWith(matrix.name, 'android-')
         env:
@@ -429,15 +409,6 @@ jobs:
           echo "APK signed successfully"
           rm -f /tmp/release.keystore
 
-      # Imports the STATIC self-signed macOS codesigning cert from repo
-      # secrets (generated via the generate-signing-keys workflow) into a
-      # temporary keychain on the runner, so codesign uses the same
-      # identity every release instead of an implicit ad-hoc one. Note:
-      # self-signed still does NOT satisfy Gatekeeper — users still need
-      # to right-click -> Open (or clear the quarantine flag) the first
-      # time, same as ad-hoc. This only buys a consistent signing identity
-      # across releases, not Gatekeeper trust; real Gatekeeper trust needs
-      # a paid Apple Developer ID cert + notarization.
       - name: import macos codesigning cert
         if: startsWith(matrix.name, 'macos-')
         env:
@@ -471,22 +442,17 @@ jobs:
           cp build/fcaevpn* package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
 
-          # For Linux: GLFW is linked statically, but verify and copy any remaining
-          # shared deps that aren't standard system libs (OpenGL, X11 are assumed present).
           if [ "${{ matrix.name }}" = "linux-x64" ]; then
             mkdir -p package/lib
             BIN=build/fcaevpn
             if [ -f "$BIN" ]; then
-              # Check if there are any non-standard shared deps
               echo "Checking dynamic dependencies:"
               ldd "$BIN" 2>/dev/null | grep -v -E 'linux-vdso|ld-linux|libc\.|libm\.|libdl\.|librt\.|libpthread\.|libstdc\+\+\.|libgcc_s\.|libX11\.|libXi\.|libGL\.|libGLX\.|libGLdispatch\.|libxcb\.|libXau\.|libXdmcp\.|libbsd\.|libmd\.' || true
-              # Still provide a wrapper for flexibility
-              cat > package/fcaevpn.sh << 'WRAPPER'
-#!/bin/sh
-DIR="$(cd "$(dirname "$0")" && pwd)"
-export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"
-exec "$DIR/fcaevpn" "$@"
-WRAPPER
+              printf '%s\n' \
+                '#!/bin/sh' \
+                'DIR="$(cd "$(dirname "$0")" && pwd)"' \
+                'export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"' \
+                'exec "$DIR/fcaevpn" "$@"' > package/fcaevpn.sh
               chmod +x package/fcaevpn.sh
             fi
           fi
@@ -502,7 +468,6 @@ WRAPPER
               : # skip libs, already in lib/
             fi
           done
-          # Rename the main binary if not already moved
           if [ -f fcaevpn ]; then
             mv fcaevpn "FCAE_VPN-${{ matrix.name }}"
           fi
@@ -524,54 +489,47 @@ WRAPPER
           set -euo pipefail
           mkdir -p package
 
-          # Create .app bundle structure
           APP="package/FCAE VPN.app"
           mkdir -p "$APP/Contents/MacOS"
           mkdir -p "$APP/Contents/Frameworks"
           mkdir -p "$APP/Contents/Resources"
 
-          # Copy binary
           cp build/fcaevpn "$APP/Contents/MacOS/fcaevpn"
           chmod +x "$APP/Contents/MacOS/fcaevpn"
 
-          # Copy icon if available
           if [ -f src_cpp/icon_512.png ]; then
             cp src_cpp/icon_512.png "$APP/Contents/Resources/AppIcon.png"
           fi
 
-          # GLFW is built as static library (BUILD_SHARED_LIBS=OFF), so no dylibs to bundle.
-          # Check what the binary links against for debugging
           echo "Binary dynamic dependencies:"
           otool -L "$APP/Contents/MacOS/fcaevpn" || true
 
-          # Create minimal Info.plist
-          printf '<?xml version="1.0" encoding="UTF-8"?>\
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\
-<plist version="1.0">\
-<dict>\
-    <key>CFBundleExecutable</key>\
-    <string>fcaevpn</string>\
-    <key>CFBundleIdentifier</key>\
-    <string>com.fc.fcaevpn</string>\
-    <key>CFBundleName</key>\
-    <string>FCAE VPN</string>\
-    <key>CFBundleVersion</key>\
-    <string>1.0.0</string>\
-    <key>CFBundleShortVersionString</key>\
-    <string>1.0.0</string>\
-    <key>CFBundlePackageType</key>\
-    <string>APPL</string>\
-    <key>CFBundleIconFile</key>\
-    <string>AppIcon</string>\
-    <key>NSHighResolutionCapable</key>\
-    <true/>\
-    <key>LSMinimumSystemVersion</key>\
-    <string>13.0</string>\
-</dict>\
-</plist>\
-' > "$APP/Contents/Info.plist"
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0">' \
+            '<dict>' \
+            '    <key>CFBundleExecutable</key>' \
+            '    <string>fcaevpn</string>' \
+            '    <key>CFBundleIdentifier</key>' \
+            '    <string>com.fc.fcaevpn</string>' \
+            '    <key>CFBundleName</key>' \
+            '    <string>FCAE VPN</string>' \
+            '    <key>CFBundleVersion</key>' \
+            '    <string>1.0.0</string>' \
+            '    <key>CFBundleShortVersionString</key>' \
+            '    <string>1.0.0</string>' \
+            '    <key>CFBundlePackageType</key>' \
+            '    <string>APPL</string>' \
+            '    <key>CFBundleIconFile</key>' \
+            '    <string>AppIcon</string>' \
+            '    <key>NSHighResolutionCapable</key>' \
+            '    <true/>' \
+            '    <key>LSMinimumSystemVersion</key>' \
+            '    <string>13.0</string>' \
+            '</dict>' \
+            '</plist>' > "$APP/Contents/Info.plist"
 
-          # Sign with the static self-signed identity if available, otherwise ad-hoc sign
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
           if [ -f "$KEYCHAIN_PATH" ]; then
             codesign --force --deep --sign "FC" --keychain "$KEYCHAIN_PATH" "$APP"
@@ -580,7 +538,6 @@ WRAPPER
             codesign --force --deep --sign - "$APP"
           fi
 
-          # Create .dmg
           DMG_NAME="FCAE_VPN-${{ matrix.name }}.dmg"
           hdiutil create -volname "FCAE VPN" -srcfolder package/ -ov -format UDZO "package/${DMG_NAME}"
 
@@ -620,7 +577,6 @@ WRAPPER
           for dir in artifacts/*/; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
-            # For prereleases, include '-prerelease' in the zip name
             if [ "${{ inputs.prerelease }}" = "true" ]; then
               zip_name="${name}-prerelease.zip"
             else
@@ -642,7 +598,6 @@ WRAPPER
         with:
           script: |
             const tag = '${{ github.event.inputs.release_tag }}';
-            // Delete release if it exists
             try {
               const rel = await github.rest.repos.getReleaseByTag({
                 owner: context.repo.owner, repo: context.repo.repo, tag
@@ -652,7 +607,8 @@ WRAPPER
               });
               console.log(`Deleted release ${rel.data.id} for tag ${tag}`);
             } catch (e) { console.log(`No existing release: ${e.message}`); }
-            // Delete tag ref if it exists
             try {
               await github.rest.git.deleteRef({
                 owner: context.repo.owner, repo: context.repo.repo, ref: `tags/${tag}`
+              });
+            } catch (e) { console.log(`No existing tag: ${e.message}`); }
