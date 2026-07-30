@@ -1,6 +1,6 @@
 # FCAE VPN - Site Source Code
 
-This is the source code for the [FCAE VPN GitHub Pages site](https://fcflenkchy.github.io/FCAE_VPN/).
+This is the source code for the [FCAE VPN site](https://fcaevpn.fluxcast.dev/).
 
 Built with pure **HTML + CSS + vanilla JavaScript** (custom cursor animation only).
 
@@ -13,4 +13,4 @@ Built with pure **HTML + CSS + vanilla JavaScript** (custom cursor animation onl
 
 ## View Live
 
-Visit: [fcflenkchy.github.io/FCAE_VPN](https://fcflenkchy.github.io/FCAE_VPN/)
+Visit: [fcaevpn.fluxcast.dev](https://fcaevpn.fluxcast.dev/)
