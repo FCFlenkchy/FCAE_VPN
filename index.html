@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FCAE VPN - Censorship Circumvention Client</title>
+    <link rel="icon" type="image/png" href="icon_48.png">
+    <style>
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent: #58a6ff;
+            --accent-hover: #79c0ff;
+            --green: #3fb950;
+            --orange: #d2991d;
+            --purple: #a371f7;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        /* Hero */
+        .hero {
+            text-align: center;
+            padding: 60px 20px 40px;
+        }
+
+        .hero img {
+            width: 100%;
+            max-width: 700px;
+            border-radius: 12px;
+            margin-bottom: 24px;
+        }
+
+        .hero h1 {
+            font-size: 2.8rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #58a6ff, #a371f7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 12px;
+        }
+
+        .hero .subtitle {
+            font-size: 1.15rem;
+            color: var(--text-secondary);
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .badges {
+            margin-top: 20px;
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .badges a {
+            display: inline-block;
+        }
+
+        .badges img {
+            height: 20px;
+        }
+
+        /* Sections */
+        section {
+            margin: 40px 0;
+        }
+
+        h2 {
+            font-size: 1.6rem;
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            color: #f0f6fc;
+        }
+
+        h3 {
+            font-size: 1.2rem;
+            color: #f0f6fc;
+            margin: 20px 0 10px;
+        }
+
+        p {
+            margin-bottom: 14px;
+            color: var(--text);
+        }
+
+        /* How it works */
+        .steps {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 16px;
+            margin: 20px 0;
+        }
+
+        .step-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            transition: border-color 0.2s;
+        }
+
+        .step-card:hover {
+            border-color: var(--accent);
+        }
+
+        .step-card .step-num {
+            display: inline-block;
+            width: 36px;
+            height: 36px;
+            line-height: 36px;
+            border-radius: 50%;
+            background: var(--accent);
+            color: #fff;
+            font-weight: 700;
+            font-size: 1rem;
+            margin-bottom: 12px;
+        }
+
+        .step-card h4 {
+            font-size: 0.95rem;
+            margin-bottom: 6px;
+            color: #f0f6fc;
+        }
+
+        .step-card p {
+            font-size: 0.82rem;
+            color: var(--text-secondary);
+        }
+
+        /* Architecture */
+        .architecture {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 20px;
+            overflow-x: auto;
+        }
+
+        .architecture pre {
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 0.8rem;
+            color: var(--text);
+            line-height: 1.5;
+            white-space: pre;
+        }
+
+        /* Protocol Table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            font-size: 0.9rem;
+        }
+
+        th, td {
+            padding: 10px 14px;
+            text-align: left;
+            border: 1px solid var(--border);
+        }
+
+        th {
+            background: var(--surface);
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+
+        td {
+            background: var(--bg);
+        }
+
+        tr:hover td {
+            background: var(--surface);
+        }
+
+        /* Feature grid */
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 12px;
+        }
+
+        .feature-item {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px 16px;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+        }
+
+        .feature-item .icon {
+            font-size: 1.3rem;
+            flex-shrink: 0;
+        }
+
+        .feature-item span {
+            font-size: 0.9rem;
+        }
+
+        /* Code blocks */
+        pre {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px 18px;
+            overflow-x: auto;
+            margin: 12px 0;
+            font-size: 0.85rem;
+        }
+
+        code {
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 0.85rem;
+            color: #e6edf3;
+        }
+
+        /* Platform grid */
+        .platform-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+        }
+
+        .platform-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .platform-card .platform-name {
+            font-weight: 600;
+            color: #f0f6fc;
+            margin-bottom: 4px;
+        }
+
+        .platform-card .platform-ui {
+            font-size: 0.82rem;
+            color: var(--text-secondary);
+        }
+
+        /* Credits Section */
+        .credits-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 14px;
+        }
+
+        .credit-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 18px;
+            transition: border-color 0.2s, transform 0.2s;
+        }
+
+        .credit-card:hover {
+            border-color: var(--accent);
+            transform: translateY(-2px);
+        }
+
+        .credit-card h4 {
+            font-size: 1rem;
+            margin-bottom: 6px;
+            color: #f0f6fc;
+        }
+
+        .credit-card h4 a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .credit-card h4 a:hover {
+            text-decoration: underline;
+        }
+
+        .credit-card .credit-by {
+            font-size: 0.8rem;
+            color: var(--accent);
+            margin-bottom: 6px;
+        }
+
+        .credit-card p {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        /* Links */
+        a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+            color: var(--accent-hover);
+        }
+
+        /* Footer */
+        footer {
+            margin-top: 60px;
+            padding: 30px 0;
+            border-top: 1px solid var(--border);
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        footer .heart {
+            color: #f85149;
+        }
+
+        footer .license {
+            margin-top: 8px;
+        }
+
+        .cta {
+            text-align: center;
+            margin: 30px 0;
+        }
+
+        .cta a {
+            display: inline-block;
+            padding: 12px 28px;
+            background: linear-gradient(135deg, #238636, #2ea043);
+            color: #fff;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 1rem;
+            text-decoration: none;
+            transition: opacity 0.2s;
+        }
+
+        .cta a:hover {
+            opacity: 0.9;
+            text-decoration: none;
+        }
+
+        /* Responsive */
+        @media (max-width: 600px) {
+            .hero h1 {
+                font-size: 2rem;
+            }
+            .steps {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Hero -->
+        <div class="hero">
+            <img src="../FCAE-VPN(tun2socksGO)/mountain.png" alt="FCAE VPN Mountain" onerror="this.style.display='none'">
+            <h1>FCAE VPN</h1>
+            <p class="subtitle">
+                A censorship circumvention client for heavily restricted networks. 
+                Automatic endpoint discovery, encrypted tunneling, and local SOCKS5/HTTP proxy.
+            </p>
+            <div class="badges">
+                <a href="https://github.com/FCFlenkchy/FCAE_VPN">
+                    <img src="https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social" alt="GitHub Stars">
+                </a>
+                <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">
+                    <img src="https://img.shields.io/github/license/FCFlenkchy/FCAE_VPN" alt="License">
+                </a>
+                <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-blue" alt="Platforms">
+            </div>
+        </div>
+
+        <!-- How It Works -->
+        <section>
+            <h2>🔧 How It Works</h2>
+            <p>FCAE VPN connects to <strong>Cloudflare's WARP network</strong> — the same infrastructure behind 1.1.1.1 DNS. Here's the flow:</p>
+            <div class="steps">
+                <div class="step-card">
+                    <div class="step-num">1</div>
+                    <h4>Account Provisioning</h4>
+                    <p>Creates WARP device identity & obtains dedicated IPv4/IPv6 + WireGuard keypairs</p>
+                </div>
+                <div class="step-card">
+                    <div class="step-num">2</div>
+                    <h4>Endpoint Scanning</h4>
+                    <p>Probes Cloudflare edge IPs across multiple ports to find reachable gateways</p>
+                </div>
+                <div class="step-card">
+                    <div class="step-num">3</div>
+                    <h4>Tunnel Establishment</h4>
+                    <p>Encrypted MASQUE, WireGuard, or WARP-in-WARP tunnels to the best edge</p>
+                </div>
+                <div class="step-card">
+                    <div class="step-num">4</div>
+                    <h4>Local Proxy</h4>
+                    <p>SOCKS5 (:1819) & HTTP (:1820) proxies for your applications</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Architecture -->
+        <section>
+            <h2>🏗️ Architecture</h2>
+            <div class="architecture">
+<pre>
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Your Application                             │
+│              (browser, app, or system traffic via TUN)              │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ SOCKS5 :1819 / HTTP :1820
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       FCAE VPN Client                               │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌──────────────┐   │
+│  │  Netstack  │  │  Scanner   │  │  Obfuscat. │  │  Health Mon. │   │
+│  │ (TCP/IP)   │  │ (endpoint  │  │  (aether-  │  │  (reconnect  │   │
+│  │            │  │  discovery)│  │   noize)   │  │   on fail)   │   │
+│  └──────┬─────┘  └────────────┘  └────────────┘  └──────────────┘   │
+│         │                                                           │
+│         ▼                                                           │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │                    Encrypted Tunnel                          │   │
+│  │   ┌───────────┐   ┌──────────────┐   ┌──────────────────┐    │   │
+│  │   │  MASQUE   │   │  WireGuard   │   │  WARP-in-WARP    │    │   │
+│  │   │ HTTP/3/2  │   │   (UDP)      │   │  (WG inside WG)  │    │   │
+│  │   └─────┬─────┘   └──────┬───────┘   └────────┬─────────┘    │   │
+│  └─────────┼────────────────┼────────────────────┼──────────────┘   │
+└────────────┼────────────────┼────────────────────┼──────────────────┘
+             │                │                    │
+             ▼                ▼                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                   Cloudflare WARP Edge                              │
+│          (162.159.192.x — automatic discovery)                      │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       Public Internet                               │
+└─────────────────────────────────────────────────────────────────────┘
+</pre>
+            </div>
+        </section>
+
+        <!-- Protocol Comparison -->
+        <section>
+            <h2>📊 Protocol Comparison</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Protocol</th>
+                        <th>Transport</th>
+                        <th>DPI Resistance</th>
+                        <th>Speed</th>
+                        <th>Use Case</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>MASQUE (HTTP/3)</strong></td>
+                        <td>QUIC over UDP</td>
+                        <td>Best — looks like HTTPS</td>
+                        <td>Fast</td>
+                        <td>Default, most censorship-resistant</td>
+                    </tr>
+                    <tr>
+                        <td><strong>MASQUE (HTTP/2)</strong></td>
+                        <td>TLS over TCP</td>
+                        <td>Best — looks like HTTPS</td>
+                        <td>Fast</td>
+                        <td>Fallback when QUIC is blocked</td>
+                    </tr>
+                    <tr>
+                        <td><strong>WireGuard</strong></td>
+                        <td>UDP</td>
+                        <td>Moderate — encrypted but detectable</td>
+                        <td>Fastest</td>
+                        <td>When UDP is allowed</td>
+                    </tr>
+                    <tr>
+                        <td><strong>WARP-in-WARP</strong></td>
+                        <td>Nested UDP</td>
+                        <td>High — double encryption</td>
+                        <td>Moderate</td>
+                        <td>Extra layer when WG alone is blocked</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Features -->
+        <section>
+            <h2>✨ Features</h2>
+            <div class="features">
+                <div class="feature-item">
+                    <span class="icon">🔍</span>
+                    <span>Automatic endpoint discovery with end-to-end data-plane validation</span>
+                </div>
+                <div class="feature-item">
+                    <span class="icon">🔐</span>
+                    <span>MASQUE (HTTP/3 QUIC / HTTP/2), WireGuard, and WARP-in-WARP support</span>
+                </div>
+                <div class="feature-item">
+                    <span class="icon">🎭</span>
+                    <span>Traffic obfuscation with configurable profiles</span>
+                </div>
+                <div class="feature-item">
+                    <span class="icon">🔄</span>
+                    <span>Automatic reconnection with quick-reconnect</span>
+                </div>
+                <div class="feature-item">
+                    <span class="icon">🔌</span>
+                    <span>Local SOCKS5 and HTTP proxies</span>
+                </div>
+                <div class="feature-item">
+                    <span class="icon">🖥️</span>
+                    <span>Native GUI on all platforms (ImGui + DirectX11 / OpenGL / Material UI)</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Platforms -->
+        <section>
+            <h2>💻 Supported Platforms</h2>
+            <div class="platform-grid">
+                <div class="platform-card">
+                    <div class="platform-name">🪟 Windows</div>
+                    <div class="platform-ui">DirectX 11 + ImGui</div>
+                </div>
+                <div class="platform-card">
+                    <div class="platform-name">🐧 Linux</div>
+                    <div class="platform-ui">GLFW + OpenGL + ImGui</div>
+                </div>
+                <div class="platform-card">
+                    <div class="platform-name">🍎 macOS</div>
+                    <div class="platform-ui">GLFW + OpenGL + ImGui</div>
+                </div>
+                <div class="platform-card">
+                    <div class="platform-name">📱 Android</div>
+                    <div class="platform-ui">Kotlin Material UI</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Building -->
+        <section>
+            <h2>🔨 Building</h2>
+            <h3>Requirements</h3>
+            <ul>
+                <li>Rust (latest stable)</li>
+                <li>C/C++ compiler (GCC/Clang/MSVC)</li>
+                <li>CMake ≥ 3.22</li>
+                <li>Vulkan SDK or DirectX SDK (Windows)</li>
+                <li>For Android: NDK, Android SDK, Kotlin</li>
+            </ul>
+            <h3>Build the Rust engine first</h3>
+            <pre><code>cargo build --manifest-path core/Cargo.toml -p aether-ffi --release</code></pre>
+            <h3>Build the native GUI</h3>
+            <pre><code>cmake -B build -DAETHER_TARGET=LINUX_X64
+cmake --build build --config Release</code></pre>
+            <p>Targets: <code>LINUX_X64</code>, <code>WIN_X64</code>, <code>MACOS_ARM64</code>, <code>MACOS_X64</code>, <code>ANDROID_ARM64</code>.</p>
+            <h3>Android</h3>
+            <p>Open <code>android/</code> in Android Studio and build. The Gradle config invokes CMake with <code>ANDROID_ARM64</code> automatically.</p>
+        </section>
+
+        <!-- Credits -->
+        <section>
+            <h2>🙏 Credits</h2>
+            <p>FCAE VPN is built on the shoulders of amazing open-source projects. Huge thanks to all contributors!</p>
+            <div class="credits-grid">
+                <div class="credit-card">
+                    <h4><a href="https://github.com/CluvexStudio/aether" target="_blank" rel="noopener">Aether</a></h4>
+                    <div class="credit-by">by CluvexStudio</div>
+                    <p>The core censorship circumvention engine. Provides MASQUE, WireGuard, and WARP-in-WARP protocols.</p>
+                </div>
+                <div class="credit-card">
+                    <h4><a href="https://github.com/ocornut/imgui" target="_blank" rel="noopener">Dear ImGui</a></h4>
+                    <div class="credit-by">by ocornut</div>
+                    <p>Immediate-mode GUI library used for all native desktop rendering.</p>
+                </div>
+                <div class="credit-card">
+                    <h4><a href="https://github.com/cloudflare/quiche" target="_blank" rel="noopener">Quiche</a></h4>
+                    <div class="credit-by">by Cloudflare</div>
+                    <p>Cloudflare's HTTP/3 and QUIC implementation. Used as the QUIC transport backend for MASQUE protocol support.</p>
+                </div>
+                <div class="credit-card">
+                    <h4><a href="https://www.wintun.net/" target="_blank" rel="noopener">Wintun</a></h4>
+                    <div class="credit-by">by WireGuard</div>
+                    <p>A TUN driver for Windows. Provides a high-performance network interface at Layer 3 for tunneling traffic.</p>
+                </div>
+                <div class="credit-card">
+                    <h4><a href="https://github.com/xjasonlyu/tun2socks" target="_blank" rel="noopener">tun2socks</a></h4>
+                    <div class="credit-by">by xjasonlyu</div>
+                    <p>A Go library that transparently routes TUN device traffic through a SOCKS5 proxy. Powers system-wide VPN TUN mode.</p>
+                </div>
+                <div class="credit-card">
+                    <h4><a href="https://github.com/FCFlenkchy/FCAE_VPN" target="_blank" rel="noopener">FCAE VPN</a></h4>
+                    <div class="credit-by">by Plangto (FCFlenkchy)</div>
+                    <p>The FCAE VPN client itself — bringing all these components together into a censorship circumvention tool.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- CTA -->
+        <div class="cta">
+            <a href="https://github.com/FCFlenkchy/FCAE_VPN" target="_blank" rel="noopener">⭐ View on GitHub</a>
+        </div>
+
+        <!-- Footer -->
+        <footer>
+            <p>Made with <span class="heart">❤️</span> for a free and open internet</p>
+            <p class="license">
+                Licensed under <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a> 
+                · Copyright © 2026 <a href="https://github.com/Plangto" target="_blank" rel="noopener">Plangto</a>
+            </p>
+            <p style="margin-top: 12px;">
+                Also available in: <a href="../FCAE-VPN(tun2socksGO)/READMEFA.md">فارسی</a> · <a href="../FCAE-VPN(tun2socksGO)/READMECH.md">中文</a>
+            </p>
+        </footer>
+    </div>
+</body>
+</html>
