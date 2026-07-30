@@ -12,10 +12,18 @@ on:
         required: false
         default: 'true'
         type: boolean
+      extra_notes:
+        description: 'extra release notes (optional, appended below the changelog)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
   actions: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
 
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
@@ -49,7 +57,14 @@ jobs:
           - target: aarch64-linux-android
             name: android-arm64-v8a
             os: ubuntu-latest
+            abi: arm64-v8a
             cmake_args: "-DAETHER_TARGET=ANDROID_ARM64"
+
+          - target: armv7-linux-androideabi
+            name: android-armeabi-v7a
+            os: ubuntu-latest
+            abi: armeabi-v7a
+            cmake_args: "-DAETHER_TARGET=ANDROID_ARM32"
 
           - target: aarch64-apple-darwin
             name: macos-arm64
@@ -83,8 +98,8 @@ jobs:
         continue-on-error: true
         with:
           script: |
-            const fifteenHoursAgo = Date.now() - 15 * 60 * 60 * 1000;
-            const prefixes = ['cmake-', 'gradle-', 'sccache-'];
+            const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+            const prefixes = ['cmake-', 'gradle-', 'sccache-', 'glfw-'];
             // Rust caches are managed by Swatinem/rust-cache — skip those.
 
             for (const prefix of prefixes) {
@@ -101,10 +116,10 @@ jobs:
                 const caches = res.data.actions_caches || [];
                 if (caches.length === 0) break;
 
-                // Delete anything older than 7 days
-                const old = caches.filter(c => new Date(c.created_at).getTime() < fifteenHoursAgo);
+                // Delete anything older than 1 day
+                const old = caches.filter(c => new Date(c.created_at).getTime() < oneDayAgo);
                 // Also cap at 3 most recent per prefix
-                const recent = caches.filter(c => new Date(c.created_at).getTime() >= fifteenHoursAgo);
+                const recent = caches.filter(c => new Date(c.created_at).getTime() >= oneDayAgo);
                 const excess = recent.slice(3);
                 const toDelete = [...old, ...excess];
 
@@ -134,10 +149,22 @@ jobs:
         run: |
           sudo apt-get update -qq || true
           sudo apt-get install -y -qq --no-install-recommends \
-            libglfw3-dev libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
+            libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
             libxrandr-dev libxinerama-dev libxxf86vm-dev \
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
-            libevent-dev protobuf-compiler nasm golang-go
+            libevent-dev protobuf-compiler nasm golang-go cmake ninja-build
+          # Build GLFW from source as static library for portability
+          curl -fsSL https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
+          tar xzf glfw.tar.gz
+          cd glfw-3.4
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local/glfw_static \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF
+          cmake --build build
+          sudo cmake --install build
+          cd ..
 
       - name: install deps (windows cross)
         if: matrix.name == 'windows-x64'
@@ -147,6 +174,14 @@ jobs:
           sudo apt-get update -qq || true
           sudo apt-get install -y -qq --no-install-recommends \
             mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 nasm
+
+      - name: cache macos glfw build
+        if: matrix.name == 'macos-x64'
+        id: cache-glfw
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/glfw_x64
+          key: glfw-x64-3.4
 
       - name: install deps (macOS)
         if: startsWith(matrix.name, 'macos-')
@@ -178,11 +213,25 @@ jobs:
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android, aarch64-apple-darwin, x86_64-apple-darwin
+          targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android, armv7-linux-androideabi, aarch64-apple-darwin, x86_64-apple-darwin
           components: rust-src
 
+      # Caches ~/.cargo/registry, ~/.cargo/git, and the target dir. Keyed
+      # off Cargo.lock so it's reused as long as dependencies haven't
+      # changed, and automatically evicts its own stale entries -- this
+      # is what was actually missing before, which is why every run was
+      # redownloading crates from scratch regardless of what "cleanup old
+      # caches" below did.
+      - name: cache rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+          workspaces: |
+            core -> target
+          cache-on-failure: true
+
       - name: cache cmake
-        if: matrix.name != 'android-arm64-v8a'
+        if: "!startsWith(matrix.name, 'android-')"
         uses: actions/cache@v4
         with:
           path: build
@@ -190,7 +239,7 @@ jobs:
           restore-keys: cmake-${{ matrix.name }}-
 
       - name: cache gradle
-        if: matrix.name == 'android-arm64-v8a'
+        if: startsWith(matrix.name, 'android-')
         uses: actions/cache@v4
         with:
           path: |
@@ -201,7 +250,7 @@ jobs:
 
       - name: setup ndk
         id: setup-ndk
-        if: matrix.name == 'android-arm64-v8a'
+        if: startsWith(matrix.name, 'android-')
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
@@ -230,7 +279,7 @@ jobs:
             export MACOSX_DEPLOYMENT_TARGET=13.0
           fi
 
-          if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
+          if [[ "${{ matrix.name }}" == android-* ]]; then
             NDK="${ANDROID_NDK_HOME:-${{ steps.setup-ndk.outputs.ndk-path }}}"
             if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
               echo "ANDROID_NDK_HOME not set or missing: $NDK"
@@ -243,23 +292,39 @@ jobs:
             export ANDROID_NDK_HOME="$NDK"
             export ANDROID_NDK_ROOT="$NDK"
 
-            export CC_aarch64_linux_android="$BIN/aarch64-linux-android24-clang"
-            export CXX_aarch64_linux_android="$BIN/aarch64-linux-android24-clang++"
-            export AR_aarch64_linux_android="$BIN/llvm-ar"
-            export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android24-clang"
-            export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$BIN/llvm-ar"
-            ln -sf "$BIN/aarch64-linux-android24-clang" "$BIN/aarch64-linux-android-clang"
-            ln -sf "$BIN/aarch64-linux-android24-clang++" "$BIN/aarch64-linux-android-clang++"
-            export CC=aarch64-linux-android24-clang
-            export CXX=aarch64-linux-android24-clang++
+            # NDK clang executables and Rust's env-var target suffix use
+            # different naming per ABI (armv7's clang prefix has an extra
+            # 'a' that the cargo target triple doesn't), so branch here.
+            if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
+              NDK_CLANG_PREFIX=aarch64-linux-android
+              RUST_ENV_LOWER=aarch64_linux_android
+              RUST_ENV_UPPER=AARCH64_LINUX_ANDROID
+            else
+              NDK_CLANG_PREFIX=armv7a-linux-androideabi
+              RUST_ENV_LOWER=armv7_linux_androideabi
+              RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
+            fi
+
+            CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
+            CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
+
+            export "CC_${RUST_ENV_LOWER}"="$CLANG"
+            export "CXX_${RUST_ENV_LOWER}"="$CLANGXX"
+            export "AR_${RUST_ENV_LOWER}"="$BIN/llvm-ar"
+            export "CARGO_TARGET_${RUST_ENV_UPPER}_LINKER"="$CLANG"
+            export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
+            ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
+            ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
+            export CC="${NDK_CLANG_PREFIX}24-clang"
+            export CXX="${NDK_CLANG_PREFIX}24-clang++"
             export AR=llvm-ar
 
-            export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$PREBUILT/sysroot"
-            export CFLAGS_aarch64_linux_android="--sysroot=$PREBUILT/sysroot"
-            export CXXFLAGS_aarch64_linux_android="--sysroot=$PREBUILT/sysroot"
+            export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+            export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+            export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
 
             echo "Using NDK: $NDK"
-            "$CC_aarch64_linux_android" --version | head -1
+            "$CLANG" --version | head -1
           fi
 
           cargo build --manifest-path core/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
@@ -288,6 +353,7 @@ jobs:
         run: |
           mkdir -p build && cd build
           cmake .. -G Ninja -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_PREFIX_PATH=/usr/local/glfw_static \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
           cmake --build . --config Release
 
@@ -313,7 +379,7 @@ jobs:
           cmake --build . --config Release
 
       - name: build apk
-        if: matrix.name == 'android-arm64-v8a'
+        if: startsWith(matrix.name, 'android-')
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_HOME: /usr/local/lib/android/sdk
@@ -331,53 +397,90 @@ jobs:
 
           cd android
           gradle wrapper --gradle-version 9.0
-          ./gradlew assembleRelease -PNDK_ABI=arm64-v8a
+          ./gradlew assembleRelease -PNDK_ABI=${{ matrix.abi }}
 
+      # Signs with the STATIC keystore from repo secrets (generated via
+      # the generate-signing-keys workflow) -- the same keystore/identity
+      # used for arm64-v8a, reused here for armeabi-v7a too. Do NOT
+      # generate a fresh keystore per run/per ABI: Android requires the
+      # same signing key across releases (and across ABIs of the same
+      # app) for users to install updates.
       - name: sign apk
-        if: matrix.name == 'android-arm64-v8a'
+        if: startsWith(matrix.name, 'android-')
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          # Generate a fresh keystore for CI signing
-          keytool -genkeypair -v \
-            -keystore /tmp/release.keystore \
-            -alias fcae \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass android -keypass android \
-            -dname "CN=FCAE VPN, OU=Dev, O=FCAE, L=Unknown, ST=Unknown, C=US"
+          echo "$KEYSTORE_BASE64" | base64 -d > /tmp/release.keystore
 
-          # Find build-tools
           BT=$(ls -d /usr/local/lib/android/sdk/build-tools/*/ | sort -V | tail -1)
           "${BT}apksigner" sign \
             --ks /tmp/release.keystore \
-            --ks-pass pass:android \
-            --key-pass pass:android \
-            --ks-key-alias fcae \
+            --ks-pass "pass:${KEYSTORE_PASSWORD}" \
+            --key-pass "pass:${KEY_PASSWORD}" \
+            --ks-key-alias "${KEY_ALIAS}" \
             android/app/build/outputs/apk/release/*.apk
 
-          # Verify signature
           "${BT}apksigner" verify --verbose \
             android/app/build/outputs/apk/release/*.apk || true
           echo "APK signed successfully"
+          rm -f /tmp/release.keystore
+
+      # Imports the STATIC self-signed macOS codesigning cert from repo
+      # secrets (generated via the generate-signing-keys workflow) into a
+      # temporary keychain on the runner, so codesign uses the same
+      # identity every release instead of an implicit ad-hoc one. Note:
+      # self-signed still does NOT satisfy Gatekeeper — users still need
+      # to right-click -> Open (or clear the quarantine flag) the first
+      # time, same as ad-hoc. This only buys a consistent signing identity
+      # across releases, not Gatekeeper trust; real Gatekeeper trust needs
+      # a paid Apple Developer ID cert + notarization.
+      - name: import macos codesigning cert
+        if: startsWith(matrix.name, 'macos-')
+        env:
+          MACOS_CERT_BASE64: ${{ secrets.MACOS_CERT_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+
+          echo "$MACOS_CERT_BASE64" | base64 -d > "$RUNNER_TEMP/macoscert.p12"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$RUNNER_TEMP/macoscert.p12" -P "$MACOS_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          rm -f "$RUNNER_TEMP/macoscert.p12"
 
       - name: package
-        if: matrix.name != 'android-arm64-v8a' && !startsWith(matrix.name, 'macos-')
+        if: "!startsWith(matrix.name, 'android-') && !startsWith(matrix.name, 'macos-')"
         run: |
           set -euo pipefail
           mkdir -p package
           cp build/fcaevpn* package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
 
-          # For Linux: copy dependent shared libs for portability
+          # For Linux: GLFW is linked statically, but verify and copy any remaining
+          # shared deps that aren't standard system libs (OpenGL, X11 are assumed present).
           if [ "${{ matrix.name }}" = "linux-x64" ]; then
             mkdir -p package/lib
             BIN=build/fcaevpn
             if [ -f "$BIN" ]; then
-              for lib in $(ldd "$BIN" 2>/dev/null | grep -E 'libglfw|libGL|libX' | awk '{print $3}' || true); do
-                if [ -f "$lib" ]; then
-                  cp "$lib" package/lib/
-                fi
-              done
-              # Create a wrapper script that sets LD_LIBRARY_PATH
+              # Check if there are any non-standard shared deps
+              echo "Checking dynamic dependencies:"
+              ldd "$BIN" 2>/dev/null | grep -v -E 'linux-vdso|ld-linux|libc\.|libm\.|libdl\.|librt\.|libpthread\.|libstdc\+\+\.|libgcc_s\.|libX11\.|libXi\.|libGL\.|libGLX\.|libGLdispatch\.|libxcb\.|libXau\.|libXdmcp\.|libbsd\.|libmd\.' || true
+              # Still provide a wrapper for flexibility
               cat > package/fcaevpn.sh << 'WRAPPER'
 #!/bin/sh
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -407,12 +510,12 @@ WRAPPER
           test $(ls -1 | wc -l) -ge 1
 
       - name: package (android)
-        if: matrix.name == 'android-arm64-v8a'
+        if: startsWith(matrix.name, 'android-')
         run: |
           set -euo pipefail
           mkdir -p package
-          cp android/app/build/outputs/apk/release/*.apk package/FCAE_VPN-android-arm64-v8a.apk 2>/dev/null || true
-          test -f package/FCAE_VPN-android-arm64-v8a.apk
+          cp android/app/build/outputs/apk/release/*.apk "package/FCAE_VPN-${{ matrix.name }}.apk" 2>/dev/null || true
+          test -f "package/FCAE_VPN-${{ matrix.name }}.apk"
           ls -lah package/
 
       - name: package (macOS)
@@ -436,37 +539,46 @@ WRAPPER
             cp src_cpp/icon_512.png "$APP/Contents/Resources/AppIcon.png"
           fi
 
-          # Copy GLFW dylib into bundle (if linked dynamically)
-          # Find where glfw was installed and copy the dylib
-          if [ "${{ matrix.name }}" = "macos-x64" ]; then
-            GLFW_LIB_DIR=/usr/local/glfw_x64/lib
-          else
-            GLFW_LIB_DIR=/usr/local/glfw_arm64/lib
-          fi
-          if [ -f "${GLFW_LIB_DIR}/libglfw.3.4.dylib" ]; then
-            cp "${GLFW_LIB_DIR}/libglfw.3.4.dylib" "$APP/Contents/Frameworks/"
-            # Update the binary's install name for glfw to use @rpath
-            install_name_tool -change "${GLFW_LIB_DIR}/libglfw.3.4.dylib" \
-              "@rpath/libglfw.3.4.dylib" "$APP/Contents/MacOS/fcaevpn" 2>/dev/null || true
-            # Also fix the dylib's own install name
-            install_name_tool -id "@rpath/libglfw.3.4.dylib" \
-              "$APP/Contents/Frameworks/libglfw.3.4.dylib" 2>/dev/null || true
-          elif [ -f "${GLFW_LIB_DIR}/libglfw.3.dylib" ]; then
-            cp "${GLFW_LIB_DIR}/libglfw.3.dylib" "$APP/Contents/Frameworks/"
-            install_name_tool -change "${GLFW_LIB_DIR}/libglfw.3.dylib" \
-              "@rpath/libglfw.3.dylib" "$APP/Contents/MacOS/fcaevpn" 2>/dev/null || true
-            install_name_tool -id "@rpath/libglfw.3.dylib" \
-              "$APP/Contents/Frameworks/libglfw.3.dylib" 2>/dev/null || true
-          fi
+          # GLFW is built as static library (BUILD_SHARED_LIBS=OFF), so no dylibs to bundle.
+          # Check what the binary links against for debugging
+          echo "Binary dynamic dependencies:"
+          otool -L "$APP/Contents/MacOS/fcaevpn" || true
 
           # Create minimal Info.plist
-          printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n    <key>CFBundleExecutable</key>\n    <string>fcaevpn</string>\n    <key>CFBundleIdentifier</key>\n    <string>com.fc.fcaevpn</string>\n    <key>CFBundleName</key>\n    <string>FCAE VPN</string>\n    <key>CFBundleVersion</key>\n    <string>1.0.0</string>\n    <key>CFBundleShortVersionString</key>\n    <string>1.0.0</string>\n    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n    <key>CFBundleIconFile</key>\n    <string>AppIcon</string>\n    <key>NSHighResolutionCapable</key>\n    <true/>\n    <key>LSMinimumSystemVersion</key>\n    <string>13.0</string>\n</dict>\n</plist>\n' > "$APP/Contents/Info.plist"
+          printf '<?xml version="1.0" encoding="UTF-8"?>\
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\
+<plist version="1.0">\
+<dict>\
+    <key>CFBundleExecutable</key>\
+    <string>fcaevpn</string>\
+    <key>CFBundleIdentifier</key>\
+    <string>com.fc.fcaevpn</string>\
+    <key>CFBundleName</key>\
+    <string>FCAE VPN</string>\
+    <key>CFBundleVersion</key>\
+    <string>1.0.0</string>\
+    <key>CFBundleShortVersionString</key>\
+    <string>1.0.0</string>\
+    <key>CFBundlePackageType</key>\
+    <string>APPL</string>\
+    <key>CFBundleIconFile</key>\
+    <string>AppIcon</string>\
+    <key>NSHighResolutionCapable</key>\
+    <true/>\
+    <key>LSMinimumSystemVersion</key>\
+    <string>13.0</string>\
+</dict>\
+</plist>\
+' > "$APP/Contents/Info.plist"
 
-          # Ad-hoc sign (Frameworks first, then the app)
-          if [ -d "$APP/Contents/Frameworks" ] && [ "$(ls -A "$APP/Contents/Frameworks" 2>/dev/null)" ]; then
-            codesign --force --deep --sign - "$APP/Contents/Frameworks/"*.dylib 2>/dev/null || true
+          # Sign with the static self-signed identity if available, otherwise ad-hoc sign
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            codesign --force --deep --sign "FC" --keychain "$KEYCHAIN_PATH" "$APP"
+          else
+            echo "No signing keychain found, falling back to ad-hoc signing"
+            codesign --force --deep --sign - "$APP"
           fi
-          codesign --force --deep --sign - "$APP"
 
           # Create .dmg
           DMG_NAME="FCAE_VPN-${{ matrix.name }}.dmg"
@@ -474,6 +586,11 @@ WRAPPER
 
           ls -lah package/
           test -f "package/${DMG_NAME}"
+
+      - name: cleanup macos keychain
+        if: always() && startsWith(matrix.name, 'macos-')
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
 
       - name: upload
         uses: actions/upload-artifact@v4
@@ -539,18 +656,3 @@ WRAPPER
             try {
               await github.rest.git.deleteRef({
                 owner: context.repo.owner, repo: context.repo.repo, ref: `tags/${tag}`
-              });
-              console.log(`Deleted tag ref ${tag}`);
-            } catch (e) { console.log(`No existing tag: ${e.message}`); }
-
-      - name: create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.release_tag }}
-          name: "FCAE VPN ${{ github.event.inputs.release_tag }}"
-          draft: false
-          prerelease: ${{ inputs.prerelease }}
-          generate_release_notes: true
-          files: release-zips/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

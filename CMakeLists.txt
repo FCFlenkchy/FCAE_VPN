@@ -61,7 +61,7 @@ endfunction()
 # ── Target-specific configuration ────────────────────────────────────────
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
 
-    # Kotlin UI + JNI bridge only (no ImGui / NativeActivity — that path was blank)
+    # Kotlin UI + JNI bridge only (no ImGui / NativeActivity)
     add_library(fcaevpn_native SHARED
         ${CMAKE_SOURCE_DIR}/src_cpp/android_jni.cpp
     )
@@ -80,6 +80,34 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
     find_library(android-lib android)
 
     aether_ffi_lib_path(AETHER_FFI_A aarch64-linux-android)
+    aether_link_ffi(fcaevpn_native "${AETHER_FFI_A}")
+
+    target_link_libraries(fcaevpn_native PRIVATE
+        ${log-lib} ${android-lib} m
+    )
+    target_link_options(fcaevpn_native PRIVATE -Wl,--export-dynamic)
+
+elseif(AETHER_TARGET STREQUAL "ANDROID_ARM32")
+
+    # Kotlin UI + JNI bridge for armeabi-v7a
+    add_library(fcaevpn_native SHARED
+        ${CMAKE_SOURCE_DIR}/src_cpp/android_jni.cpp
+    )
+
+    target_include_directories(fcaevpn_native PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src_cpp
+    )
+
+    target_compile_definitions(fcaevpn_native PRIVATE
+        ANDROID
+        AETHER_TARGET_ANDROID_ARM32
+    )
+
+    find_library(log-lib log)
+    find_library(android-lib android)
+
+    aether_ffi_lib_path(AETHER_FFI_A armv7-linux-androideabi)
     aether_link_ffi(fcaevpn_native "${AETHER_FFI_A}")
 
     target_link_libraries(fcaevpn_native PRIVATE
@@ -138,11 +166,25 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
 elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "MACOS_X64")
 
-    # Prefer static GLFW (CMAKE_PREFIX_PATH can point to a custom build).
-    # Fall back to system/dynamic GLFW if not found.
+    # Find GLFW: look for static lib in custom prefixes first (from CI build),
+    # then fall back to system/dynamic GLFW.
+    # Prefer glfw3Config.cmake which handles IMPORTED targets properly.
+    set(GLFW_PREFIX_HINT "")
+    if(AETHER_TARGET STREQUAL "MACOS_X64" OR (APPLE AND NOT AETHER_TARGET STREQUAL "MACOS_ARM64" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64"))
+        set(GLFW_PREFIX_HINT /usr/local/glfw_x64)
+    elseif(AETHER_TARGET STREQUAL "MACOS_ARM64" OR (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64"))
+        set(GLFW_PREFIX_HINT /usr/local/glfw_arm64)
+    endif()
+
+    if(GLFW_PREFIX_HINT AND EXISTS "${GLFW_PREFIX_HINT}")
+        # Add the prefix to CMAKE_PREFIX_PATH so find_package finds our static build
+        list(APPEND CMAKE_PREFIX_PATH "${GLFW_PREFIX_HINT}")
+        message(STATUS "GLFW hint prefix: ${GLFW_PREFIX_HINT}")
+    endif()
+
     find_package(glfw3 3.3 QUIET)
     if(NOT glfw3_FOUND)
-        # Try pkg-config for static GLFW
+        # Try pkg-config for GLFW
         find_package(PkgConfig QUIET)
         if(PKG_CONFIG_FOUND)
             pkg_check_modules(GLFW glfw3)
@@ -212,7 +254,17 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
 
 elseif(UNIX)
 
-    find_package(glfw3 3.3 REQUIRED)
+    # Find GLFW with static library preference for portability
+    find_package(glfw3 3.3 QUIET)
+    if(NOT glfw3_FOUND)
+        find_package(PkgConfig QUIET)
+        if(PKG_CONFIG_FOUND)
+            pkg_check_modules(GLFW glfw3)
+        endif()
+    endif()
+    if(NOT glfw3_FOUND AND NOT GLFW_FOUND)
+        message(FATAL_ERROR "GLFW 3.3+ not found. Install glfw3-dev or set CMAKE_PREFIX_PATH")
+    endif()
     find_package(OpenGL REQUIRED)
     find_package(X11 REQUIRED)
 
@@ -238,16 +290,25 @@ elseif(UNIX)
     aether_ffi_lib_path(AETHER_FFI_A x86_64-unknown-linux-gnu)
     aether_link_ffi(fcaevpn "${AETHER_FFI_A}")
 
+    # Link GLFW: use imported target if available, otherwise raw lib name
+    if(TARGET glfw)
+        target_link_libraries(fcaevpn PRIVATE glfw)
+    elseif(GLFW_LIBRARIES)
+        target_link_libraries(fcaevpn PRIVATE ${GLFW_LIBRARIES})
+    else()
+        target_link_libraries(fcaevpn PRIVATE glfw)
+    endif()
+
     # Do not link system OpenSSL (ssl/crypto) — BoringSSL is already in libaether_ffi.a
     target_link_libraries(fcaevpn PRIVATE
-        glfw OpenGL::GL X11::X11 X11::Xi pthread dl m
+        OpenGL::GL X11::X11 X11::Xi pthread dl m
         z bz2 lzma
     )
 
 endif()
 
 # ── Common compile flags ─────────────────────────────────────────────────
-if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
+if(AETHER_TARGET STREQUAL "ANDROID_ARM64" OR AETHER_TARGET STREQUAL "ANDROID_ARM32")
     set(AETHER_COMPILE_TARGET fcaevpn_native)
 else()
     set(AETHER_COMPILE_TARGET fcaevpn)
