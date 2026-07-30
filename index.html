@@ -24,10 +24,9 @@
         *{margin:0;padding:0;box-sizing:border-box}
         html{scroll-behavior:smooth}
         body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;overflow-x:hidden}
-        #particles{position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none}
-        .container{max-width:1000px;margin:0 auto;padding:0 24px;position:relative;z-index:1}
+        .container{max-width:1000px;margin:0 auto;padding:0 24px}
 
-        nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(6,6,13,0.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding:10px 0;transition:all .3s}
+        nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(6,6,13,0.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding:10px 0}
         .nav-inner{max-width:1000px;margin:0 auto;padding:0 24px;display:flex;align-items:center;justify-content:space-between}
         .nav-logo{font-size:1.25rem;font-weight:800;background:linear-gradient(135deg,var(--acc),var(--cya));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
         .nav-links{display:flex;gap:20px;list-style:none}
@@ -35,7 +34,6 @@
         .nav-links a:hover{color:var(--acc2)}
 
         .hero{text-align:center;padding:120px 20px 60px;position:relative}
-        .hero::before{content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:600px;height:600px;background:radial-gradient(circle,rgba(124,92,252,.06) 0%,transparent 70%);pointer-events:none}
         .hero-logo{width:96px;height:96px;margin-bottom:28px;animation:float 4s ease-in-out infinite;filter:drop-shadow(var(--glow))}
         @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
         .hero h1{font-size:clamp(2.2rem,5vw,3.5rem);font-weight:900;background:linear-gradient(135deg,#b4a4ff,#7c5cfc,#00e5ff);background-size:200% 200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:gradShift 4s ease infinite;margin-bottom:16px;letter-spacing:-1px}
@@ -86,23 +84,23 @@
         .fi span{font-size:.88rem;line-height:1.5}
 
         .p-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
-        .p-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px 18px;text-align:center;transition:all .3s;cursor:default}
+        .p-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px 18px;text-align:center;transition:all .3s}
         .p-card:hover{border-color:var(--acc);transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.4),var(--glow)}
         .p-ic{font-size:2.4rem;margin-bottom:10px}
         .p-nm{font-weight:700;color:#d8d8f0;margin-bottom:4px;font-size:1rem}
         .p-ui{font-size:.78rem;color:var(--text2)}
 
         .dl-section{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:32px 28px}
-        .dl-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px}
-        .dl-tab{padding:8px 18px;border-radius:20px;background:var(--surface2);border:1px solid var(--border);color:var(--text2);cursor:pointer;font-size:.83rem;font-weight:600;transition:all .2s;font-family:inherit}
-        .dl-tab:hover{border-color:var(--acc);color:#d8d8f0}
-        .dl-tab.act{background:linear-gradient(135deg,var(--acc),rgba(124,92,252,.6));border-color:var(--acc);color:#fff}
-        .dl-info{display:flex;align-items:center;gap:14px;margin-bottom:16px;flex-wrap:wrap}
+        .dl-release{margin-bottom:32px;padding-bottom:28px;border-bottom:1px solid var(--border)}
+        .dl-release:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0}
+        .dl-header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wrap}
+        .dl-tag{font-size:1.2rem;font-weight:800;color:#e8e8ff}
         .dl-badge{display:inline-block;padding:4px 12px;border-radius:12px;font-size:.73rem;font-weight:700}
         .dl-stable{background:rgba(0,230,118,.15);color:var(--grn)}
         .dl-pre{background:rgba(255,145,0,.15);color:var(--org)}
         .dl-date{color:var(--text2);font-size:.83rem}
-        .dl-body{color:var(--text2);font-size:.85rem;margin-bottom:18px;line-height:1.6}
+        .dl-body{color:var(--text2);font-size:.85rem;margin-bottom:14px;line-height:1.6}
+        .dl-body a{color:var(--acc2)}
         .dl-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
         .dl-card{display:flex;align-items:center;gap:12px;background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px 16px;text-decoration:none;color:var(--text);transition:all .2s}
         .dl-card:hover{border-color:var(--acc);background:rgba(124,92,252,.08);box-shadow:var(--glow);text-decoration:none}
@@ -138,7 +136,7 @@
         .btn{display:inline-block;padding:14px 36px;background:linear-gradient(135deg,var(--acc),#5a3fd4);color:#fff;border-radius:12px;font-weight:700;font-size:1rem;text-decoration:none;transition:all .3s;box-shadow:0 4px 20px rgba(124,92,252,.4);letter-spacing:.3px}
         .btn:hover{transform:translateY(-2px);box-shadow:0 8px 35px rgba(124,92,252,.6);text-decoration:none}
 
-        footer{margin-top:80px;padding:32px 0;border-top:1px solid var(--border);text-align:center;color:var(--text2);font-size:.83rem;position:relative;z-index:1}
+        footer{margin-top:80px;padding:32px 0;border-top:1px solid var(--border);text-align:center;color:var(--text2);font-size:.83rem}
         footer .heart{color:var(--red);animation:pulse 1.5s ease infinite;display:inline-block}
         @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.3)}}
         footer .license{margin-top:8px}
@@ -159,30 +157,400 @@
         ::-webkit-scrollbar-track{background:var(--bg)}
         ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
         ::-webkit-scrollbar-thumb:hover{background:#3a3a55}
+    </style>
+</head>
+<body>
 
-        .skeleton{background:linear-gradient(90deg,var(--surface2) 25%,#1e1e3a 50%,var(--surface2) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:8px}
-        @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}                </div>
+    <nav>
+        <div class="nav-inner">
+            <span class="nav-logo">âš¡ FCAE VPN</span>
+            <ul class="nav-links">
+                <li><a href="#how">How</a></li>
+                <li><a href="#download">Download</a></li>
+                <li><a href="#features">Features</a></li>
+                <li><a href="#platforms">Platforms</a></li>
+                <li><a href="#credits">Credits</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- Hero -->
+        <div class="hero">
+            <img class="hero-logo" src="icon_48.png" alt="FCAE VPN">
+            <h1>FCAE VPN</h1>
+            <p class="sub">Break through censorship with automatic endpoint discovery, encrypted MASQUE / WireGuard tunneling, and local SOCKS5 &amp; HTTP proxy. Built for heavily restricted networks.</p>
+            <div class="badges">
+                <span class="badge"><span class="dot g"></span> v1.0.8.8 Stable</span>
+                <span class="badge"><span class="dot p"></span> Windows &middot; Linux &middot; macOS &middot; Android</span>
+                <span class="badge"><span class="dot c"></span> MIT License</span>
+            </div>
+        </div>
+
+        <!-- How It Works -->
+        <section id="how">
+            <div class="sh"><h2>ðŸ”§ How It Works</h2><p>Connects to Cloudflare's WARP network â€” the infrastructure behind 1.1.1.1</p></div>
+            <div class="steps">
+                <div class="step-card"><div class="step-num">1</div><h4>Account Provisioning</h4><p>Creates WARP device identity &amp; obtains dedicated IPv4/IPv6 + WireGuard keypairs</p></div>
+                <div class="step-card"><div class="step-num">2</div><h4>Endpoint Scanning</h4><p>Probes Cloudflare edge IPs across multiple ports to find reachable gateways</p></div>
+                <div class="step-card"><div class="step-num">3</div><h4>Tunnel Establishment</h4><p>Encrypted MASQUE, WireGuard, or WARP-in-WARP tunnels to the best edge</p></div>
+                <div class="step-card"><div class="step-num">4</div><h4>Local Proxy</h4><p>SOCKS5 (:1819) &amp; HTTP (:1820) proxies for all your apps</p></div>
             </div>
         </section>
 
-        <div class=cta>
-            <a class=btn href=https://github.com/FCFlenkchy/FCAE_VPN target=_blank rel=noopener>? Star on GitHub</a>
-        </div>
+        <!-- Architecture -->
+        <section>
+            <div class="sh"><h2>ðŸ—ï¸ Architecture</h2></div>
+            <div class="arch"><pre>
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                        Your Application                             â”‚
+â”‚              (browser, app, or system traffic via TUN)              â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                               â”‚ SOCKS5 :1819 / HTTP :1820
+                               â–¼
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                       FCAE VPN Client                               â”‚
+â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+â”‚  â”‚  Netstack  â”‚  â”‚  Scanner   â”‚  â”‚  Obfuscat. â”‚  â”‚  Health Mon. â”‚   â”‚
+â”‚  â”‚ (TCP/IP)   â”‚  â”‚ (endpoint  â”‚  â”‚  (aether-  â”‚  â”‚  (reconnect  â”‚   â”‚
+â”‚  â”‚            â”‚  â”‚  discovery)â”‚  â”‚   noize)   â”‚  â”‚   on fail)   â”‚   â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”˜  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+â”‚         â”‚                                                           â”‚
+â”‚         â–¼                                                           â”‚
+â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+â”‚  â”‚                    Encrypted Tunnel                          â”‚   â”‚
+â”‚  â”‚   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”    â”‚   â”‚
+â”‚  â”‚   â”‚  MASQUE   â”‚   â”‚  WireGuard   â”‚   â”‚  WARP-in-WARP    â”‚    â”‚   â”‚
+â”‚  â”‚   â”‚ HTTP/3/2  â”‚   â”‚   (UDP)      â”‚   â”‚  (WG inside WG)  â”‚    â”‚   â”‚
+â”‚  â”‚   â””â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”˜   â””â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”˜   â””â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜    â”‚   â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+             â”‚                â”‚                    â”‚
+             â–¼                â–¼                    â–¼
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                   Cloudflare WARP Edge                              â”‚
+â”‚          (162.159.192.x â€” automatic discovery)                      â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                               â”‚
+                               â–¼
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                       Public Internet                               â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜</pre></div>
+        </section>
 
-        <footer>
-            <p>Made with <span class=heart>??</span> for a free and open internet</p>
-            <p class=license>Licensed under <a href=https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE target=_blank rel=noopener>MIT License</a> ï¿½ Copyright ï¿½ 2026 <a href=https://github.com/Plangto target=_blank rel=noopener>Plangto</a></p>
-        </footer>
-    </div>
-    <script src=app.js></script>
-</body>
-</html>                    <p>The FCAE VPN client itself Ã¢â‚¬â€ bringing all these components together into a powerful censorship circumvention tool.</p>
+        <!-- Protocol Table -->
+        <section>
+            <div class="sh"><h2>ðŸ“Š Protocol Comparison</h2></div>
+            <div class="twrap"><table>
+                <thead><tr><th>Protocol</th><th>Transport</th><th>DPI Resistance</th><th>Speed</th><th>Use Case</th></tr></thead>
+                <tbody>
+                    <tr><td><strong>MASQUE (HTTP/3)</strong></td><td>QUIC over UDP</td><td><span class="tag tbg">Best â€” looks like HTTPS</span></td><td><span class="tag tfs">Fast</span></td><td>Default, most censorship-resistant</td></tr>
+                    <tr><td><strong>MASQUE (HTTP/2)</strong></td><td>TLS over TCP</td><td><span class="tag tbg">Best â€” looks like HTTPS</span></td><td><span class="tag tfs">Fast</span></td><td>Fallback when QUIC is blocked</td></tr>
+                    <tr><td><strong>WireGuard</strong></td><td>UDP</td><td><span class="tag tmo">Moderate â€” detectable</span></td><td><span class="tag tfs">Fastest</span></td><td>When UDP is allowed</td></tr>
+                    <tr><td><strong>WARP-in-WARP</strong></td><td>Nested UDP</td><td><span class="tag thg">High â€” double encryption</span></td><td><span class="tag tmo">Moderate</span></td><td>Extra layer when WG alone blocked</td></tr>
+                </tbody>
+            </table></div>
+        </section>
+
+        <!-- Download Section -->
+        <section id="download">
+            <div class="sh"><h2>â¬‡ï¸ Download</h2><p>Latest releases from GitHub</p></div>
+            <div class="dl-section">
+                <div class="dl-release">
+                    <div class="dl-header">
+                        <span class="dl-tag">v1.0.8.8</span>
+                        <span class="dl-badge dl-stable">Stable</span>
+                        <span class="dl-date">Released Jul 30, 2026</span>
+                    </div>
+                    <div class="dl-body">**Full Changelog**: <a href="https://github.com/FCFlenkchy/FCAE_VPN/compare/v1.0.8.7...v1.0.8.8" target="_blank">https://github.com/FCFlenkchy/FCAE_VPN/compare/v1.0.8.7...v1.0.8.8</a><br><br>support for Chromebook/emulator (ANDROID_X86_64 target)</div>
+                    <div class="dl-grid">                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.8/FCAE_VPN-android-arm64-v8a.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ“±</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-android-arm64-v8a.zip</span>
+                        <span class="dlsz">5.1 MB Â· â†“ 2</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.8/FCAE_VPN-android-armeabi-v7a.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ“±</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-android-armeabi-v7a.zip</span>
+                        <span class="dlsz">4.5 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.8/FCAE_VPN-android-x86_64.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ“±</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-android-x86_64.zip</span>
+                        <span class="dlsz">5.4 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.8/FCAE_VPN-linux-x64.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ§</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-linux-x64.zip</span>
+                        <span class="dlsz">10.3 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.8/FCAE_VPN-macos-arm64.dmg" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸŽ</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-macos-arm64.dmg</span>
+                        <span class="dlsz">8.9 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.8/FCAE_VPN-macos-x64.dmg" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸŽ</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-macos-x64.dmg</span>
+                        <span class="dlsz">9.9 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.8/FCAE_VPN-windows-x64.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸªŸ</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-windows-x64.zip</span>
+                        <span class="dlsz">9 MB Â· â†“ 2</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a></div>
+                </div>                <div class="dl-release">
+                    <div class="dl-header">
+                        <span class="dl-tag">v1.0.8.7</span>
+                        <span class="dl-badge dl-pre">Pre-release</span>
+                        <span class="dl-date">Released Jul 29, 2026</span>
+                    </div>
+                    <div class="dl-body">**Full Changelog**: <a href="https://github.com/FCFlenkchy/FCAE_VPN/compare/v1.0.8.6...v1.0.8.7" target="_blank">https://github.com/FCFlenkchy/FCAE_VPN/compare/v1.0.8.6...v1.0.8.7</a><br>macos support</div>
+                    <div class="dl-grid">                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.7/FCAE_VPN-android-arm64-v8a-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ“±</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-android-arm64-v8a-prerelease.zip</span>
+                        <span class="dlsz">5.1 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.7/FCAE_VPN-linux-x64-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ§</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-linux-x64-prerelease.zip</span>
+                        <span class="dlsz">10.2 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.7/FCAE_VPN-macos-arm64-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸŽ</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-macos-arm64-prerelease.zip</span>
+                        <span class="dlsz">8.7 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.7/FCAE_VPN-macos-x64-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸŽ</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-macos-x64-prerelease.zip</span>
+                        <span class="dlsz">9.8 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.7/FCAE_VPN-windows-x64-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸªŸ</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-windows-x64-prerelease.zip</span>
+                        <span class="dlsz">9 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a></div>
+                </div>                <div class="dl-release">
+                    <div class="dl-header">
+                        <span class="dl-tag">v1.0.8.6</span>
+                        <span class="dl-badge dl-pre">Pre-release</span>
+                        <span class="dl-date">Released Jul 29, 2026</span>
+                    </div>
+                    <div class="dl-body">**Full Changelog**: <a href="https://github.com/FCFlenkchy/FCAE_VPN/compare/v1.0.8.5...v1.0.8.6" target="_blank">https://github.com/FCFlenkchy/FCAE_VPN/compare/v1.0.8.5...v1.0.8.6</a></div>
+                    <div class="dl-grid">                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.6/FCAE_VPN-android-arm64-v8a-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ“±</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-android-arm64-v8a-prerelease.zip</span>
+                        <span class="dlsz">5.1 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.6/FCAE_VPN-linux-x64-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ§</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-linux-x64-prerelease.zip</span>
+                        <span class="dlsz">10.2 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.6/FCAE_VPN-windows-x64-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸªŸ</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-windows-x64-prerelease.zip</span>
+                        <span class="dlsz">9 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a></div>
+                </div>                <div class="dl-release">
+                    <div class="dl-header">
+                        <span class="dl-tag">v1.0.8.5</span>
+                        <span class="dl-badge dl-pre">Pre-release</span>
+                        <span class="dl-date">Released Jul 28, 2026</span>
+                    </div>
+                    <div class="dl-body">**Full Changelog**: <a href="https://github.com/FCFlenkchy/FCAE_VPN/compare/v1.0.8.4...v1.0.8.5" target="_blank">https://github.com/FCFlenkchy/FCAE_VPN/compare/v1.0.8.4...v1.0.8.5</a><br>tun mode for linux and windows (tun mode currently has so much memory leak on windows and i dont know about linux version</div>
+                    <div class="dl-grid">                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.5/FCAE_VPN-android-arm64-v8a-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ“±</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-android-arm64-v8a-prerelease.zip</span>
+                        <span class="dlsz">5.1 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.5/FCAE_VPN-linux-x64-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ§</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-linux-x64-prerelease.zip</span>
+                        <span class="dlsz">10.2 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.5/FCAE_VPN-windows-x64-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸªŸ</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-windows-x64-prerelease.zip</span>
+                        <span class="dlsz">9 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a></div>
+                </div>                <div class="dl-release">
+                    <div class="dl-header">
+                        <span class="dl-tag">v1.0.8.4</span>
+                        <span class="dl-badge dl-pre">Pre-release</span>
+                        <span class="dl-date">Released Jul 28, 2026</span>
+                    </div>
+                    <div class="dl-body">**Full Changelog**: <a href="https://github.com/FCFlenkchy/FCAE_VPN/compare/v1.0.8.3...v1.0.8.4" target="_blank">https://github.com/FCFlenkchy/FCAE_VPN/compare/v1.0.8.3...v1.0.8.4</a></div>
+                    <div class="dl-grid">                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.4/FCAE_VPN-android-arm64-v8a-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ“±</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-android-arm64-v8a-prerelease.zip</span>
+                        <span class="dlsz">5.1 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.4/FCAE_VPN-linux-x64-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸ§</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-linux-x64-prerelease.zip</span>
+                        <span class="dlsz">10.2 MB Â· â†“ 0</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a>                <a class="dl-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases/download/v1.0.8.4/FCAE_VPN-windows-x64-prerelease.zip" target="_blank" rel="noopener">
+                    <span class="dlic">ðŸªŸ</span>
+                    <span class="dlinfo">
+                        <span class="dlnm">FCAE_VPN-windows-x64-prerelease.zip</span>
+                        <span class="dlsz">9 MB Â· â†“ 2</span>
+                    </span>
+                    <span class="dlarr">â†“</span>
+                </a></div>
+                </div>
+                <a class="dl-all" href="https://github.com/FCFlenkchy/FCAE_VPN/releases" target="_blank" rel="noopener">View all releases on GitHub â†’</a>
+            </div>
+        </section>
+
+        <!-- Features -->
+        <section id="features">
+            <div class="sh"><h2>âœ¨ Features</h2></div>
+            <div class="features">
+                <div class="fi"><span class="ic">ðŸ”</span><span>Automatic endpoint discovery with end-to-end data-plane validation</span></div>
+                <div class="fi"><span class="ic">ðŸ”</span><span>MASQUE (HTTP/3 QUIC / HTTP/2), WireGuard, and WARP-in-WARP support</span></div>
+                <div class="fi"><span class="ic">ðŸŽ­</span><span>Traffic obfuscation with configurable profiles (aether-noize)</span></div>
+                <div class="fi"><span class="ic">ðŸ”„</span><span>Automatic reconnection with quick-reconnect on failure</span></div>
+                <div class="fi"><span class="ic">ðŸ”Œ</span><span>Local SOCKS5 and HTTP proxies for any application</span></div>
+                <div class="fi"><span class="ic">ðŸ–¥ï¸</span><span>Native GUI on all platforms (ImGui + DX11 / OpenGL / Material UI)</span></div>
+            </div>
+        </section>
+
+        <!-- Platforms -->
+        <section id="platforms">
+            <div class="sh"><h2>ðŸ’» Supported Platforms</h2></div>
+            <div class="p-grid">
+                <div class="p-card"><div class="p-ic">ðŸªŸ</div><div class="p-nm">Windows</div><div class="p-ui">DirectX 11 + ImGui</div></div>
+                <div class="p-card"><div class="p-ic">ðŸ§</div><div class="p-nm">Linux</div><div class="p-ui">GLFW + OpenGL + ImGui</div></div>
+                <div class="p-card"><div class="p-ic">ðŸŽ</div><div class="p-nm">macOS</div><div class="p-ui">GLFW + OpenGL + ImGui</div></div>
+                <div class="p-card"><div class="p-ic">ðŸ“±</div><div class="p-nm">Android</div><div class="p-ui">Kotlin Material UI</div></div>
+            </div>
+        </section>
+
+        <!-- Building -->
+        <section>
+            <div class="sh"><h2>ðŸ”¨ Building from Source</h2></div>
+            <h3>Requirements</h3>
+            <ul style="color:var(--text2);margin-left:20px;font-size:.9rem;line-height:2">
+                <li>Rust (latest stable)</li>
+                <li>C/C++ compiler (GCC/Clang/MSVC)</li>
+                <li>CMake â‰¥ 3.22</li>
+                <li>Vulkan SDK or DirectX SDK (Windows)</li>
+                <li>For Android: NDK, Android SDK, Kotlin</li>
+            </ul>
+            <h3>Rust engine</h3>
+            <pre><code>cargo build --manifest-path core/Cargo.toml -p aether-ffi --release</code></pre>
+            <h3>Native GUI</h3>
+            <pre><code>cmake -B build -DAETHER_TARGET=LINUX_X64
+cmake --build build --config Release</code></pre>
+            <p style="color:var(--text2);font-size:.85rem">Targets: <code>LINUX_X64</code>, <code>WIN_X64</code>, <code>MACOS_ARM64</code>, <code>MACOS_X64</code>, <code>ANDROID_ARM64</code>.</p>
+        </section>
+
+        <!-- Contributors -->
+        <section>
+            <div class="sh"><h2>ðŸ‘¥ Contributors</h2><p>Amazing people who built FCAE VPN</p></div>
+            <div class="contrib-grid">
+                <a class="contrib-card" href="https://github.com/Plangto" target="_blank" rel="noopener">
+                    <img class="contrib-av" src="https://avatars.githubusercontent.com/u/208489752?v=4&s=104" alt="Plangto" loading="lazy">
+                    <span class="contrib-info">
+                        <span class="contrib-nm">@Plangto</span>
+                        <span class="contrib-cm">348 commits</span>
+                    </span>
+                </a>                <a class="contrib-card" href="https://github.com/Bat-Script" target="_blank" rel="noopener">
+                    <img class="contrib-av" src="https://avatars.githubusercontent.com/u/124243547?v=4&s=104" alt="Bat-Script" loading="lazy">
+                    <span class="contrib-info">
+                        <span class="contrib-nm">@Bat-Script</span>
+                        <span class="contrib-cm">1 commit</span>
+                    </span>
+                </a>
+            </div>
+        </section>
+
+        <!-- Credits -->
+        <section id="credits">
+            <div class="sh"><h2>ðŸ™ Credits</h2><p>Standing on the shoulders of open-source giants</p></div>
+            <div class="credits-grid">
+                <div class="credit-card">
+                    <h4><a href="https://github.com/CluvexStudio/aether" target="_blank" rel="noopener">Aether</a></h4>
+                    <div class="cby">by CluvexStudio</div>
+                    <p>The core censorship circumvention engine. Provides MASQUE, WireGuard, and WARP-in-WARP protocols.</p>
+                </div>
+                <div class="credit-card">
+                    <h4><a href="https://github.com/ocornut/imgui" target="_blank" rel="noopener">Dear ImGui</a></h4>
+                    <div class="cby">by ocornut</div>
+                    <p>Immediate-mode GUI library used for all native desktop rendering.</p>
+                </div>
+                <div class="credit-card">
+                    <h4><a href="https://github.com/cloudflare/quiche" target="_blank" rel="noopener">Quiche</a></h4>
+                    <div class="cby">by Cloudflare</div>
+                    <p>Cloudflare's HTTP/3 and QUIC implementation. Used as the QUIC transport backend.</p>
+                </div>
+                <div class="credit-card">
+                    <h4><a href="https://www.wintun.net/" target="_blank" rel="noopener">Wintun</a></h4>
+                    <div class="cby">by WireGuard</div>
+                    <p>A TUN driver for Windows. Provides high-performance Layer 3 network interface for tunneling.</p>
+                </div>
+                <div class="credit-card">
+                    <h4><a href="https://github.com/xjasonlyu/tun2socks" target="_blank" rel="noopener">tun2socks</a></h4>
+                    <div class="cby">by xjasonlyu</div>
+                    <p>Go library that transparently routes TUN device traffic through SOCKS5 proxy. Powers TUN mode.</p>
+                </div>
+                <div class="credit-card">
+                    <h4><a href="https://github.com/FCFlenkchy/FCAE_VPN" target="_blank" rel="noopener">FCAE VPN</a></h4>
+                    <div class="cby">by Plangto (FCFlenkchy)</div>
+                    <p>The FCAE VPN client itself â€” bringing all these components together into a powerful censorship circumvention tool.</p>
                 </div>
             </div>
         </section>
 
+        <!-- CTA -->
         <div class="cta">
-            <a class="btn" href="https://github.com/FCFlenkchy/FCAE_VPN" target="_blank" rel="noopener">Ã¢Â­Â Star on GitHub</a>
+            <a class="btn" href="https://github.com/FCFlenkchy/FCAE_VPN" target="_blank" rel="noopener">â­ Star on GitHub</a>
         </div>
 
         <footer>
@@ -191,6 +559,5 @@
         </footer>
     </div>
 
-    <script src="app.js"></script>
 </body>
 </html>
