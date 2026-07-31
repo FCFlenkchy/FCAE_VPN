@@ -367,13 +367,9 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(poll)
         handler.removeCallbacks(disconnectFallback)
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
-        // If we're in proxy mode and the engine is running, stop it.
-        // Don't leave the engine running in the background without the UI.
-        if (engineRunning && spinnerMode.selectedItemPosition == 0) {
-            Thread({
-                try { NativeEngine.nativeStop() } catch (_: Throwable) {}
-            }, "NativeStop-OnDestroy").start()
-        }
+        // In proxy mode, the engine is kept alive by ProxyNotification foreground service.
+        // Do NOT stop it here — the proxy should continue running in the background.
+        // In TUN mode, FCAEVpnService manages its own lifecycle.
         activityAlive = false
         super.onDestroy()
     }

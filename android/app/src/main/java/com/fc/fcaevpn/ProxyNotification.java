@@ -120,11 +120,49 @@ public class ProxyNotification extends Service {
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
         Log.i(TAG, "ProxyNotification stopped");
+
+        // Stop the native engine on a background thread
+        new Thread(() -> {
+            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+            try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
+
+            // If the Activity is not alive (user closed app or swiped it away),
+            // kill the process so the stopped engine doesn't linger as a zombie.
+            // If the Activity IS alive, leave the process — the user may want
+            // to reconnect from the UI.
+            if (!MainActivity.activityAlive) {
+                Log.i(TAG, "Activity not alive after proxy stop — killing process");
+                android.os.Process.killProcess(android.os.Process.myPid());
+            }
+        }, "FCAE-ProxyStop").start();
     }
 
     @Override
     public void onDestroy() {
         handler.removeCallbacks(statsRunnable);
+        Log.i(TAG, "ProxyNotification onDestroy");
+
+        // If the service is destroyed unexpectedly (e.g. system killed it),
+        // and the Activity is not alive, kill the process to clean up.
+        // This prevents orphaned native engine state.
+        if (!MainActivity.activityAlive) {
+            new Thread(() -> {
+                try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+                try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
+                android.os.Process.killProcess(android.os.Process.myPid());
+            }, "FCAE-ProxyDestroy").start();
+        }
+
         super.onDestroy();
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        // Called when the user swipes the app away from recent tasks.
+        // Do NOT stop the proxy — it should continue running in the background.
+        // The proxy will keep running until the user explicitly disconnects
+        // via the notification action.
+        Log.i(TAG, "App removed from recent tasks — proxy continues in background");
     }
 }
