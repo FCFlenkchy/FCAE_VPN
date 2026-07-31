@@ -37,5 +37,4 @@ object NativeEngine {
     @JvmStatic external fun nativeGetStatusJson(): String
     @JvmStatic external fun nativeGetLogs(): String
     @JvmStatic external fun nativeClearLogs()
-    @JvmStatic external fun nativeGetTrafficStats(): LongArray?
 }

@@ -94,7 +94,7 @@ public class ProxyNotification extends Service {
     private void updateNotification() {
         long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
         try {
-            long[] stats = NativeEngine.nativeGetTrafficStats();
+            long[] stats = FCAEVpnService.nativeGetTrafficStats();
             if (stats != null && stats.length >= 4) {
                 rx = stats[0];
                 tx = stats[1];
