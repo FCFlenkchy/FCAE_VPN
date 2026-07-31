@@ -2,7 +2,7 @@
 
 This is the source code for the [FCAE VPN site](https://fcaevpn.fluxcast.dev/).
 
-Built with pure **HTML + CSS + vanilla JavaScript** (custom cursor animation only).
+Built with pure **HTML + CSS** — no JavaScript at all.
 
 ## Files
 
