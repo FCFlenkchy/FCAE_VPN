@@ -8,6 +8,8 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <div class="cursor-main"></div>
+    <div class="cursor-dot"></div>
 
     <nav>
         <div class="nav-inner">
@@ -212,6 +214,7 @@ cmake --build build --config Release</code></pre>
                 <div class="credit-card"><h4><a href="https://github.com/cloudflare/quiche" target="_blank">Quiche</a></h4><div class="cby">by Cloudflare</div><p>Cloudflare HTTP/3 and QUIC implementation. Used as the QUIC transport backend.</p></div>
                 <div class="credit-card"><h4><a href="https://www.wintun.net/" target="_blank">Wintun</a></h4><div class="cby">by WireGuard</div><p>A TUN driver for Windows. High-performance Layer 3 network interface for tunneling.</p></div>
                 <div class="credit-card"><h4><a href="https://github.com/xjasonlyu/tun2socks" target="_blank">tun2socks</a></h4><div class="cby">by xjasonlyu</div><p>Go library that transparently routes TUN device traffic through SOCKS5 proxy. Powers TUN mode.</p></div>
+                <div class="credit-card"><h4><a href="https://github.com/FCFlenkchy/FCAE_VPN" target="_blank">FCAE VPN</a></h4><div class="cby">by Plangto (FCFlenkchy)</div><p>The FCAE VPN client itself — bringing all components together.</p></div>
             </div>
         </section>
 
@@ -223,4 +226,45 @@ cmake --build build --config Release</code></pre>
 
     </div>
 
+    <script>
+        // Custom cursor with trail
+        const cursorMain = document.querySelector('.cursor-main');
+        const cursorDot = document.querySelector('.cursor-dot');
+        let mouseX = 0, mouseY = 0;
+        let cursorX = 0, cursorY = 0;
+
+        document.addEventListener('mousemove', (e) => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+            cursorDot.style.left = mouseX + 'px';
+            cursorDot.style.top = mouseY + 'px';
+
+            // Trail particle
+            const trail = document.createElement('div');
+            trail.className = 'cursor-trail';
+            trail.style.left = mouseX + 'px';
+            trail.style.top = mouseY + 'px';
+            trail.style.width = '12px';
+            trail.style.height = '12px';
+            document.body.appendChild(trail);
+            setTimeout(() => trail.remove(), 600);
+        });
+
+        function animateCursor() {
+            cursorX += (mouseX - cursorX) * 0.15;
+            cursorY += (mouseY - cursorY) * 0.15;
+            cursorMain.style.left = cursorX + 'px';
+            cursorMain.style.top = cursorY + 'px';
+            requestAnimationFrame(animateCursor);
+        }
+        animateCursor();
+
+        // Hover expand
+        const hoverEls = document.querySelectorAll('a, button, .btn, .link-card, .contrib-card, .credit-card, .step-card, .p-card, .fi, .arch-box, .arch-box-sm');
+        hoverEls.forEach(el => {
+            el.addEventListener('mouseenter', () => cursorMain.classList.add('hover'));
+            el.addEventListener('mouseleave', () => cursorMain.classList.remove('hover'));
+        });
+    </script>
+</body>
 </html>
