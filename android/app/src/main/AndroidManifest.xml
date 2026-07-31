@@ -39,5 +39,14 @@
                 android:value="vpn" />
         </service>
 
+        <service
+            android:name=".ProxyNotification"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="proxy" />
+        </service>
+
     </application>
 </manifest>

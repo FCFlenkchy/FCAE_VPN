@@ -76,6 +76,16 @@ public class FCAEVpnService extends VpnService {
                     pauseVpn();
                     return START_STICKY;
                 case ACTION_DISCONNECT:
+                    // Guard: if the service was never started with a VPN config
+                    // (i.e. proxy mode scenario where disconnectAll() still
+                    // sends ACTION_DISCONNECT), just stop self gracefully.
+                    if (vpnInterface == null && vpnThread == null && !running) {
+                        handler.removeCallbacks(statsRunnable);
+                        notification.dismiss();
+                        stopForeground(STOP_FOREGROUND_REMOVE);
+                        stopSelf();
+                        return START_NOT_STICKY;
+                    }
                     fullShutdown();
                     return START_NOT_STICKY;
                 case ACTION_START:

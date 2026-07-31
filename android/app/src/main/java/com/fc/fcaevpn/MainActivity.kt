@@ -151,11 +151,10 @@ class MainActivity : AppCompatActivity() {
             }
             bgExecutor.execute {
                 try {
-                    // Triple guard: vpnActive (UI thread), engineRunning (set by
-                    // broadcast after nativeStart succeeds), and a second
-                    // vpnActive check on the bg thread to close the race window
-                    // between disconnectAll() and this task executing.
-                    if (!vpnActive || !engineRunning) {
+                    // Guard: vpnActive (UI thread).  Also check engineRunning
+                    // for TUN mode, but in proxy mode engineRunning is set
+                    // optimistically — rely on native state to update it.
+                    if (!vpnActive) {
                         handler.post { pollBusy.set(false) }
                         return@execute
                     }
@@ -263,7 +262,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Init native engine on background thread, then check if VPN is already
-        // running (e.g. service started from notification while app was closed).
+        // running (e.g. service started from notification while app was closed,
+        // or proxy mode engine was left running from a previous session).
         bgExecutor.execute {
             try {
                 NativeEngine.nativeInit()
@@ -281,16 +281,32 @@ class MainActivity : AppCompatActivity() {
             try {
                 val json = JSONObject(NativeEngine.nativeGetStatusJson())
                 val state = json.optInt("state", 0)
-                if (state > 0) {
+                if (state in 1..4) {
                     handler.post {
                         vpnActive = true
-                        engineRunning = state in 1..4
+                        engineRunning = true
                         connecting = state in 1..3
                         updateButton()
                         handler.post(poll)
                     }
+                } else if (state == 0) {
+                    // Engine is not running — ensure UI reflects that
+                    handler.post {
+                        vpnActive = false
+                        engineRunning = false
+                        connecting = false
+                        updateButton()
+                    }
                 }
-            } catch (_: Throwable) {}
+            } catch (_: Throwable) {
+                // If we can't query state, assume disconnected
+                handler.post {
+                    vpnActive = false
+                    engineRunning = false
+                    connecting = false
+                    updateButton()
+                }
+            }
         }
     }
 
@@ -310,10 +326,40 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         inForeground = true
         // Resume polling immediately if a tunnel is active, instead of
-        // waiting up to 5s for the next tick or for a broadcast.
-        if (vpnActive) {
-            handler.removeCallbacks(poll)
-            handler.post(poll)
+        // waiting up to the next tick or for a broadcast.
+        // Check both vpnActive AND check native state to catch proxy mode
+        // connections that are still alive after backgrounding.
+        if (vpnActive || engineRunning) {
+            // Verify the engine is actually still running before resuming poll
+            bgExecutor.execute {
+                try {
+                    val json = JSONObject(NativeEngine.nativeGetStatusJson())
+                    val state = json.optInt("state", 0)
+                    handler.post {
+                        if (state in 1..4) {
+                            vpnActive = true
+                            engineRunning = true
+                            connecting = state in 1..3
+                            handler.removeCallbacks(poll)
+                            handler.post(poll)
+                        } else {
+                            // Engine died while we were in background
+                            vpnActive = false
+                            engineRunning = false
+                            connecting = false
+                            updateButton()
+                            statusText.text = "DISCONNECTED"
+                            statusText.setTextColor(Color.parseColor("#8A93A6"))
+                        }
+                    }
+                } catch (_: Throwable) {
+                    handler.post {
+                        vpnActive = false
+                        engineRunning = false
+                        updateButton()
+                    }
+                }
+            }
         }
     }
 
@@ -321,6 +367,13 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(poll)
         handler.removeCallbacks(disconnectFallback)
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
+        // If we're in proxy mode and the engine is running, stop it.
+        // Don't leave the engine running in the background without the UI.
+        if (engineRunning && spinnerMode.selectedItemPosition == 0) {
+            Thread({
+                try { NativeEngine.nativeStop() } catch (_: Throwable) {}
+            }, "NativeStop-OnDestroy").start()
+        }
         activityAlive = false
         super.onDestroy()
     }
@@ -433,8 +486,14 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(disconnectFallback)
         connecting = true
         vpnActive = true
+        engineRunning = false  // will become true once poll confirms connected
         updateButton()
         saveSettings()
+
+        // Start proxy notification foreground service for bandwidth stats
+        val proxyIntent = Intent(this, ProxyNotification::class.java)
+        proxyIntent.action = ProxyNotification.ACTION_START
+        startForegroundService(proxyIntent)
 
         val protocol = spinnerProtocol.selectedItemPosition
         val mode = spinnerMode.selectedItemPosition
@@ -497,10 +556,18 @@ class MainActivity : AppCompatActivity() {
                 if (!ok) {
                     connecting = false
                     vpnActive = false
+                    engineRunning = false
+                    // Stop proxy notification service since engine failed
+                    try { stopService(Intent(this@MainActivity, ProxyNotification::class.java)) } catch (_: Throwable) {}
                     Toast.makeText(this, "Failed to start engine", Toast.LENGTH_SHORT).show()
+                } else {
+                    // In proxy mode, there's no service broadcast to set engineRunning=true.
+                    // Set it optimistically so the poll starts. The poll itself will
+                    // update engineRunning based on actual native state.
+                    engineRunning = true
+                    handler.post(poll)
                 }
                 updateButton()
-                if (ok) handler.post(poll)
             }
         }
     }
@@ -511,6 +578,7 @@ class MainActivity : AppCompatActivity() {
         // races where the user taps CONNECT while the old broadcast is
         // still in-flight.
         userInitiatedDisconnect = true
+        val currentMode = spinnerMode.selectedItemPosition
         vpnActive = false
         engineRunning = false
         connecting = false
@@ -528,13 +596,28 @@ class MainActivity : AppCompatActivity() {
             try { NativeEngine.nativeStop() } catch (_: Throwable) {}
         }, "NativeStop-Disconnect").start()
 
-        try {
-            val i = Intent(this, FCAEVpnService::class.java)
-            i.action = FCAEVpnService.ACTION_DISCONNECT
-            startForegroundService(i)
-        } catch (_: Throwable) {
-            // Fallback: stopService works even from background on all APIs
-            try { stopService(Intent(this, FCAEVpnService::class.java)) } catch (_: Throwable) {}
+        // Only try to interact with the VPN service if we're in TUN mode.
+        // In proxy mode (mode=0), the VPN service is not running and
+        // starting it just to send DISCONNECT would create an unnecessary
+        // service instance that could interfere with the engine.
+        if (currentMode == 1) {
+            try {
+                val i = Intent(this, FCAEVpnService::class.java)
+                i.action = FCAEVpnService.ACTION_DISCONNECT
+                startForegroundService(i)
+            } catch (_: Throwable) {
+                // Fallback: stopService works even from background on all APIs
+                try { stopService(Intent(this, FCAEVpnService::class.java)) } catch (_: Throwable) {}
+            }
+        } else {
+            // Proxy mode: stop the proxy notification foreground service
+            try {
+                val i = Intent(this, ProxyNotification::class.java)
+                i.action = ProxyNotification.ACTION_STOP
+                startService(i)
+            } catch (_: Throwable) {
+                try { stopService(Intent(this, ProxyNotification::class.java)) } catch (_: Throwable) {}
+            }
         }
 
         // After a brief delay, force UI to DISCONNECTED even if no
@@ -573,9 +656,21 @@ class MainActivity : AppCompatActivity() {
             val totalRx = json.optLong("totalRx", 0)
             val totalTx = json.optLong("totalTx", 0)
 
+            // Update engine state based on native telemetry.
+            // In proxy mode, this is the ONLY source of truth — there are no
+            // service broadcasts. In TUN mode, broadcasts may also update
+            // these, but the poll always has the freshest data.
             if (vpnActive) {
                 engineRunning = state in 1..4
                 connecting = state in 1..3
+                // Detect engine stopped while we thought it was active
+                if (state == 0 && !userInitiatedDisconnect) {
+                    // Engine died on its own — reset state
+                    vpnActive = false
+                    engineRunning = false
+                    connecting = false
+                    handler.removeCallbacks(poll)
+                }
             }
 
             val label = when (state) {
