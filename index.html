@@ -8,8 +8,6 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="cursor-main"></div>
-    <div class="cursor-dot"></div>
 
     <nav>
         <div class="nav-inner">
@@ -226,45 +224,5 @@ cmake --build build --config Release</code></pre>
 
     </div>
 
-    <script>
-        // Custom cursor with trail
-        const cursorMain = document.querySelector('.cursor-main');
-        const cursorDot = document.querySelector('.cursor-dot');
-        let mouseX = 0, mouseY = 0;
-        let cursorX = 0, cursorY = 0;
-
-        document.addEventListener('mousemove', (e) => {
-            mouseX = e.clientX;
-            mouseY = e.clientY;
-            cursorDot.style.left = mouseX + 'px';
-            cursorDot.style.top = mouseY + 'px';
-
-            // Trail particle
-            const trail = document.createElement('div');
-            trail.className = 'cursor-trail';
-            trail.style.left = mouseX + 'px';
-            trail.style.top = mouseY + 'px';
-            trail.style.width = '12px';
-            trail.style.height = '12px';
-            document.body.appendChild(trail);
-            setTimeout(() => trail.remove(), 600);
-        });
-
-        function animateCursor() {
-            cursorX += (mouseX - cursorX) * 0.15;
-            cursorY += (mouseY - cursorY) * 0.15;
-            cursorMain.style.left = cursorX + 'px';
-            cursorMain.style.top = cursorY + 'px';
-            requestAnimationFrame(animateCursor);
-        }
-        animateCursor();
-
-        // Hover expand
-        const hoverEls = document.querySelectorAll('a, button, .btn, .link-card, .contrib-card, .credit-card, .step-card, .p-card, .fi, .arch-box, .arch-box-sm');
-        hoverEls.forEach(el => {
-            el.addEventListener('mouseenter', () => cursorMain.classList.add('hover'));
-            el.addEventListener('mouseleave', () => cursorMain.classList.remove('hover'));
-        });
-    </script>
 </body>
 </html>
