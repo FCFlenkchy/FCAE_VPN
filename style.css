@@ -19,7 +19,7 @@ html { scroll-behavior: smooth; }
 
 body {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: var(--bg);
+    background: transparent;
     color: var(--text);
     line-height: 1.7;
     overflow-x: hidden;
@@ -41,7 +41,7 @@ body::before {
     pointer-events: none;
 }
 
-/* Dark overlay on top of mountain */
+/* Dark overlay on top of mountain - this is our actual background */
 body::after {
     content: '';
     position: fixed;
@@ -49,9 +49,14 @@ body::after {
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgba(6, 6, 13, 0.55);
+    background: rgba(6, 6, 13, 0.5);
     z-index: -1;
     pointer-events: none;
+}
+
+/* Page content wrapper needs bg */
+html {
+    background: #06060d;
 }
 
 /* === Custom Cursor === */
