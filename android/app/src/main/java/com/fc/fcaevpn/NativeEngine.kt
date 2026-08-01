@@ -31,6 +31,7 @@ object NativeEngine {
         healthMaxFails: Int,
         healthTimeoutSecs: Int,
         liveValidateSecs: Int,
+        sysProfile: Int,
     ): Boolean
     @JvmStatic external fun nativeStop()
     @JvmStatic external fun nativeFree()

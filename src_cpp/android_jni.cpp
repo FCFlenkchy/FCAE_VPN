@@ -88,7 +88,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jint healthIntervalSecs,
     jint healthMaxFails,
     jint healthTimeoutSecs,
-    jint liveValidateSecs
+    jint liveValidateSecs,
+    jint sysProfile
 ) {
     ensure_init();
 
@@ -124,6 +125,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.health_max_fails = healthMaxFails > 0 ? (uint32_t)healthMaxFails : 0;
     cfg.health_timeout_secs = healthTimeoutSecs > 0 ? (uint32_t)healthTimeoutSecs : 0;
     cfg.live_validate_secs = liveValidateSecs > 0 ? (uint32_t)liveValidateSecs : 0;
+    cfg.sys_profile = (int)sysProfile;
 
     bool ok = aether_start(&cfg);
     LOGI("aether_start -> %s", ok ? "ok" : "fail");

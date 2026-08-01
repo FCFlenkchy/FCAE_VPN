@@ -55,6 +55,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchLogging: SwitchMaterial
     private lateinit var switchSocks: SwitchMaterial
     private lateinit var switchHttp: SwitchMaterial
+    private lateinit var spinnerSysprofile: Spinner
     private lateinit var editSni: android.widget.EditText
     private lateinit var editForcePeer: android.widget.EditText
     private lateinit var editHealthInterval: android.widget.EditText
@@ -197,6 +198,7 @@ class MainActivity : AppCompatActivity() {
         switchLogging = findViewById(R.id.switchLogging)
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
+        spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
         editSni = findViewById(R.id.editSni)
         editForcePeer = findViewById(R.id.editForcePeer)
         editHealthInterval = findViewById(R.id.editHealthInterval)
@@ -218,6 +220,10 @@ class MainActivity : AppCompatActivity() {
         spinnerNoize.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
             listOf("off", "firewall", "balanced", "gfw", "chrome", "voice", "streaming"),
+        )
+        spinnerSysprofile.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            listOf("Auto", "Low", "Medium", "High"),
         )
         loadSettings()
 
@@ -392,6 +398,7 @@ class MainActivity : AppCompatActivity() {
             putString("forcePeer", editForcePeer.text.toString().trim())
             putString("healthInterval", editHealthInterval.text.toString())
             putString("healthMaxFails", editHealthMaxFails.text.toString())
+            putInt("sysprofile", spinnerSysprofile.selectedItemPosition)
             apply()
         }
     }
@@ -413,6 +420,7 @@ class MainActivity : AppCompatActivity() {
         editForcePeer.setText(prefs.getString("forcePeer", ""))
         editHealthInterval.setText(prefs.getString("healthInterval", "20"))
         editHealthMaxFails.setText(prefs.getString("healthMaxFails", "2"))
+        spinnerSysprofile.setSelection(prefs.getInt("sysprofile", 0))
     }
 
     private fun connectClicked() {
@@ -470,6 +478,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("httpPort", if (switchHttp.isChecked) 1820 else 0)
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
         i.putExtra("forcePeer", editForcePeer.text.toString().trim())
+        i.putExtra("sysProfile", spinnerSysprofile.selectedItemPosition)
         startForegroundService(i)
         // Poll is started by the VPN_STATE_CHANGED broadcast from the service
         // AFTER nativeStart() succeeds — NOT here, to avoid calling native
@@ -508,6 +517,7 @@ class MainActivity : AppCompatActivity() {
         val socksPort = if (switchSocks.isChecked) 1819 else 0
         val httpPort = if (switchHttp.isChecked) 1820 else 0
         val forcePeer = editForcePeer.text.toString().trim()
+        val sysProfile = spinnerSysprofile.selectedItemPosition
 
         bgExecutor.execute {
             // Ensure previous engine is fully stopped before starting.
@@ -543,6 +553,7 @@ class MainActivity : AppCompatActivity() {
                     healthMaxFails = hf,
                     healthTimeoutSecs = 5,
                     liveValidateSecs = liveValidateSecs(),
+                    sysProfile = sysProfile,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }
