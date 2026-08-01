@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
+    Auto,
     Low,
     Medium,
     High,
@@ -123,6 +124,17 @@ fn total_mem_mb() -> Option<u64> {
 }
 
 fn detect_tier(cpus: usize, mem_mb: Option<u64>) -> Tier {
+    // AETHER_SYSPROFILE env var takes precedence: Auto | Low | Medium | High
+    if let Ok(v) = std::env::var("AETHER_SYSPROFILE") {
+        match v.trim().to_lowercase().as_str() {
+            "auto" => return Tier::Auto,
+            "low" => return Tier::Low,
+            "medium" | "mid" => return Tier::Medium,
+            "high" => return Tier::High,
+            _ => {}
+        }
+    }
+    // Fallback: legacy AETHER_PERF_PROFILE (no Auto support)
     if let Ok(v) = std::env::var("AETHER_PERF_PROFILE") {
         match v.trim().to_lowercase().as_str() {
             "low" => return Tier::Low,
@@ -132,6 +144,7 @@ fn detect_tier(cpus: usize, mem_mb: Option<u64>) -> Tier {
         }
     }
 
+    // Auto-detect based on hardware
     let mem_low = mem_mb.map(|m| m <= 384).unwrap_or(false);
     let mem_medium = mem_mb.map(|m| m <= 1536).unwrap_or(false);
 
@@ -148,9 +161,26 @@ fn build_tuning() -> Tuning {
     let cpus = detected_cpus();
     let mem_mb = total_mem_mb();
     let tier = detect_tier(cpus, mem_mb);
+    // Resolve Auto to actual tier based on hardware
+    let effective = match tier {
+        Tier::Auto => {
+            // Run auto-detection without env override (env already consumed)
+            let mem_low = mem_mb.map(|m| m <= 384).unwrap_or(false);
+            let mem_medium = mem_mb.map(|m| m <= 1536).unwrap_or(false);
+            if cpus <= 2 || mem_low {
+                Tier::Low
+            } else if cpus <= 4 || mem_medium {
+                Tier::Medium
+            } else {
+                Tier::High
+            }
+        }
+        other => other,
+    };
 
     let (scan_concurrency_cap, udp_socket_buf, netstack_tcp_buf, netstack_udp_buf, channel_capacity) =
-        match tier {
+        match effective {
+            Tier::Auto => unreachable!(),
             Tier::Low => (4usize, 256 * 1024, 128 * 1024, 32 * 1024, 128usize),
             Tier::Medium => (10usize, 2 * 1024 * 1024, 256 * 1024, 64 * 1024, 512usize),
             Tier::High => (usize::MAX, 7 * 1024 * 1024, 512 * 1024, 128 * 1024, 1024usize),

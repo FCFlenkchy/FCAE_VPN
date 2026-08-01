@@ -142,6 +142,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "live_validate_secs") g_app.live_validate_secs = atoi(val.c_str());
     else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
+    else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
 }
 
 static void save_config() {
@@ -181,6 +182,7 @@ static void save_config() {
     fprintf(f, "live_validate_secs=%d\n", g_app.live_validate_secs);
     fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
     fprintf(f, "auto_scroll=%d\n", g_app.auto_scroll ? 1 : 0);
+    fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
     fclose(f);
     snprintf(g_app.save_status, sizeof(g_app.save_status), "Config saved!");
     g_app.add_log(4, ("[ui] config saved: " + path).c_str());
@@ -606,6 +608,10 @@ void render_ui() {
             ImGui::InputTextWithHint("##force_peer", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));
             ImGui::InputText("Identity file (aether.toml)", g_app.config_path, sizeof(g_app.config_path));
             ImGui::TextDisabled("UI settings: FCAE_VPN.cfg (next to app). Identity: Cloudflare device certs.");
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("Sysprofile (performance tuning)");
+            const char* sysprofiles[] = { "Auto", "Low", "Medium", "High" };
+            ImGui::Combo("Sysprofile", &g_app.sys_profile, sysprofiles, 4);
             ImGui::EndChild();
             ImGui::EndTabItem();
         }

@@ -55,6 +55,7 @@ struct AppState {
     int health_max_fails     = 2;
     int health_timeout_secs  = 5;
     int live_validate_secs   = 20;
+    int sys_profile       = 0;   // 0=Auto, 1=Low, 2=Medium, 3=High
 
     AetherTelemetry telem = {};
     double last_telem_t = 0.0;
@@ -130,6 +131,7 @@ struct AppState {
         c.health_max_fails      = (uint32_t)(health_max_fails > 0 ? health_max_fails : 0);
         c.health_timeout_secs   = (uint32_t)(health_timeout_secs > 0 ? health_timeout_secs : 0);
         c.live_validate_secs    = (uint32_t)(live_validate_secs > 0 ? live_validate_secs : 0);
+        c.sys_profile           = sys_profile;
         return c;
     }
 };

@@ -111,6 +111,7 @@ pub struct AetherCfgRaw {
     pub health_max_fails: u32,
     pub health_timeout_secs: u32,
     pub live_validate_secs: u32,
+    pub sys_profile: i32,   // 0=Auto, 1=Low, 2=Medium, 3=High
 }
 
 #[repr(C)]
@@ -543,6 +544,13 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
         );
     } else {
         std::env::remove_var("AETHER_LIVE_VALIDATE_SECS");
+    }
+    // Sysprofile: 0=Auto, 1=Low, 2=Medium, 3=High
+    match cfg.sys_profile {
+        1 => std::env::set_var("AETHER_SYSPROFILE", "low"),
+        2 => std::env::set_var("AETHER_SYSPROFILE", "medium"),
+        3 => std::env::set_var("AETHER_SYSPROFILE", "high"),
+        _ => std::env::set_var("AETHER_SYSPROFILE", "auto"),
     }
     // TUN mode flag for engine (Android sets fd separately via aether_set_android_tun_fd)
     if cfg.mode == 1 {

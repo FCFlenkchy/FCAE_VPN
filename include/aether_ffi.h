@@ -60,6 +60,9 @@ typedef struct {
     uint32_t health_max_fails;     // consecutive fails before reconnect (default 2)
     uint32_t health_timeout_secs;  // per health probe timeout (default 5)
     uint32_t live_validate_secs;   // pre-SOCKS live validation timeout (default 20)
+
+    // Sysprofile: 0 = Auto, 1 = Low, 2 = Medium, 3 = High
+    int sys_profile;
 } AetherConfig;
 
 typedef struct {
