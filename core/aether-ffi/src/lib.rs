@@ -1038,7 +1038,7 @@ pub extern "C" fn aether_check_update_async(current_version: *const c_char) {
     // Spawn async check in background thread (reqwest needs tokio runtime)
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
         {
             Ok(r) => r,
