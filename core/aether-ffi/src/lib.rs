@@ -351,7 +351,13 @@ fn ip_version_to_env(v: i32) -> &'static str {
 fn parse_inline_routes(input: &str) -> (String, String) {
     let mut block = String::new();
     let mut direct = String::new();
-    let mut current: Option<&mut String> = None;
+    // Use an enum to track current section instead of a mutable reference,
+    // avoiding borrow-checker conflicts between `current` and `direct`/`block`.
+    enum Section {
+        Block,
+        Direct,
+    }
+    let mut current_section: Option<Section> = None;
 
     // Split by comma first, then by newline within each segment to handle both formats
     for segment in input.split(',') {
@@ -362,29 +368,25 @@ fn parse_inline_routes(input: &str) -> (String, String) {
             }
             let lowered = trimmed.to_lowercase();
             if lowered == "[block]" {
-                current = Some(&mut block);
+                current_section = Some(Section::Block);
                 continue;
             }
             if lowered == "[direct]" {
-                current = Some(&mut direct);
+                current_section = Some(Section::Direct);
                 continue;
             }
             if lowered.starts_with('[') {
-                current = None;
+                current_section = None;
                 continue;
             }
-            if let Some(target) = current.as_deref_mut() {
-                if !target.is_empty() {
-                    target.push('\n');
-                }
-                target.push_str(trimmed);
-            } else {
-                // No section header yet — treat as direct by default (least surprising)
-                if !direct.is_empty() {
-                    direct.push('\n');
-                }
-                direct.push_str(trimmed);
+            let target = match current_section {
+                Some(Section::Block) => &mut block,
+                _ => &mut direct, // Default to direct if no section specified
+            };
+            if !target.is_empty() {
+                target.push('\n');
             }
+            target.push_str(trimmed);
         }
     }
     (block, direct)
