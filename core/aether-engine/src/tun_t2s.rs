@@ -198,17 +198,19 @@ fn cleanup_adapter_by_name(name: &str) {
     // This replaces 200+ synchronous netsh calls that took 5-10 seconds.
     let name_hyphen = name.replace('_', "-");
     let name_underscore = name.replace('-', "_");
+    // Also strip any numeric suffix for matching (e.g. "FCAE_VPN 2" -> "FCAE_VPN")
+    let base_name = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == ' ');
 
     let ps_script = format!(
         "$ErrorActionPreference='SilentlyContinue';\
-         $names = @('{0}*','{1}*','{2}*');\
-         foreach($n in $names) {{ \
-             Get-NetAdapter -Name $n -IncludeHidden | Remove-NetAdapter -Confirm:$false; \
-             Get-PnpDevice -Class Net -FriendlyName $n | ?{{$_.InstanceId -like '*WINTUN*'}} | Remove-PnpDevice -Confirm:$false \
-         }};\
-         Get-NetRoute -InterfaceAlias '{0}*','{1}*' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue;\
+         $base = '{0}';\
+         $patterns = @(($base + '*'), ('{1}*'), ('{2}*'));\
+         Get-NetAdapter -IncludeHidden | ?{{ $_.Name -like ($base + '*') -or $_.Name -like ('{1}*') -or $_.Name -like ('{2}*') }} | Remove-NetAdapter -Confirm:$false;\
+         Get-PnpDevice -Class Net | ?{{ ($_.FriendlyName -like ($base + '*') -or $_.FriendlyName -like ('{1}*')) -and $_.InstanceId -like '*WINTUN*' }} | Remove-PnpDevice -Confirm:$false;\
+         Get-NetRoute -InterfaceAlias ($base + '*') -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue;\
+         Get-NetRoute -InterfaceAlias ('{1}*') -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue;\
          Write-Host 'cleanup_done'",
-        name, name_hyphen, name_underscore
+        base_name, name_hyphen, name_underscore
     );
 
     let mut c = Command::new("powershell");
@@ -959,6 +961,11 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     let t2s_path = get_tun2socks_path()?;
 
     // Build tun2socks arguments
+    // Use a persistent GUID on Windows so the adapter name doesn't get a
+    // numeric suffix on reconnect (FCAE_VPN 2, FCAE_VPN 3, ...).
+    #[cfg(target_os = "windows")]
+    let device = format!("tun://{}?guid={{7FE5A4A1-1326-40E2-974C-EF617156ACA8}}", cfg.name);
+    #[cfg(not(target_os = "windows"))]
     let device = format!("tun://{}", cfg.name);
     let proxy = if let (Some(user), Some(pass)) = (&cfg.username, &cfg.password) {
         format!("socks5://{}:{}@{}:{}", user, pass, cfg.socks_host, cfg.socks_port)
