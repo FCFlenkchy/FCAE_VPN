@@ -354,6 +354,19 @@ void ui_frame() {
 void ui_shutdown() {
     aether_stop();
     aether_free();
+    // On Windows, ensure we don't linger as a zombie process.
+    // aether_free() joins the engine thread with cleanup, but if anything
+    // is still stuck, TerminateProcess ensures we exit immediately.
+    // The OS will reclaim TUN adapters; antivirus won't see a lingering process.
+#if defined(_WIN32)
+    // Give cleanup a brief window (already done above), then force exit.
+    // ExitProcess is immediate — no DLL_PROCESS_DETACH, no static destructors.
+    // This is safe because we've already:
+    //   - Killed tun2socks.exe (via force_cleanup_windows)
+    //   - Removed TUN adapters (via cleanup_adapter_by_name)
+    //   - Closed TUN file descriptors (via close_all_fds)
+    ExitProcess(0);
+#endif
 }
 
 void render_ui() {

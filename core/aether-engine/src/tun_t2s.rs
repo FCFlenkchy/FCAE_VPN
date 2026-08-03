@@ -193,53 +193,60 @@ fn cleanup_adapter_by_name(name: &str) {
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
-        let mut c = Command::new(cmd);
-        c.creation_flags(CREATE_NO_WINDOW);
-        c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
-    };
-
-    // Use PowerShell to remove ALL adapters including hidden/ghost (Wintun PnP nodes)
-    // that persist after crashes. Also try with hyphen/underscore replacements.
+    // Fast path: single PowerShell script that removes all adapters matching
+    // our name (including hidden/ghost Wintun devices) and deletes routes.
+    // This replaces 200+ synchronous netsh calls that took 5-10 seconds.
     let name_hyphen = name.replace('_', "-");
     let name_underscore = name.replace('-', "_");
 
-    // PATCH: Include -IncludeHidden to catch ghost Wintun adapters, and remove PnP device nodes
     let ps_script = format!(
-        "$names = @('{0}*', '{1}*', '{2}*'); \
-         foreach ($n in $names) {{ \
-             Get-NetAdapter -Name $n -IncludeHidden -ErrorAction SilentlyContinue | \
-                 Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue; \
-             Get-PnpDevice -Class Net -FriendlyName $n -ErrorAction SilentlyContinue | \
-                 Where-Object {{ $_.InstanceId -like '*WINTUN*' }} | \
-                 Remove-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue \
-         }}",
+        "$ErrorActionPreference='SilentlyContinue';\
+         $names = @('{0}*','{1}*','{2}*');\
+         foreach($n in $names) {{ \
+             Get-NetAdapter -Name $n -IncludeHidden | Remove-NetAdapter -Confirm:$false; \
+             Get-PnpDevice -Class Net -FriendlyName $n | ?{{$_.InstanceId -like '*WINTUN*'}} | Remove-PnpDevice -Confirm:$false \
+         }};\
+         Get-NetRoute -InterfaceAlias '{0}*','{1}*' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue;\
+         Write-Host 'cleanup_done'",
         name, name_hyphen, name_underscore
     );
 
-    let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_script]);
-    if let Ok(o) = output {
-        let stdout = String::from_utf8_lossy(&o.stdout);
-        if !stdout.trim().is_empty() {
-            log::info!("[tun_t2s] PowerShell Wintun PnP cleanup: {}", stdout.trim());
+    let mut c = Command::new("powershell");
+    c.creation_flags(CREATE_NO_WINDOW);
+    let output = c.args(["-NoProfile", "-Command", &ps_script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if stdout.contains("cleanup_done") {
+                log::info!("[tun_t2s] Fast PowerShell cleanup complete for '{}'", name);
+            } else if !stdout.trim().is_empty() {
+                log::info!("[tun_t2s] PowerShell cleanup: {}", stdout.trim());
+            }
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.trim().is_empty() {
+                log::debug!("[tun_t2s] PowerShell stderr: {}", stderr.trim());
+            }
+        }
+        Err(e) => {
+            log::warn!("[tun_t2s] PowerShell cleanup failed ({}); falling back to netsh", e);
+            // Fallback: quick netsh delete for a few common numbered variants
+            let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
+                let mut c = Command::new(cmd);
+                c.creation_flags(CREATE_NO_WINDOW);
+                c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+            };
+            for i in 1..=10 {
+                let numbered = format!("{} {}", name, i);
+                let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", &numbered]);
+            }
         }
     }
 
-    // PATCH: Start from index 1 instead of 2, and check up to 50
-    for i in 1..=50 {
-        let numbered = format!("{} {}", name, i);
-        let numbered_hyphen = format!("{} {}", name_hyphen, i);
-        let numbered_hash = format!("{} #{}", name, i);
-        let numbered_hash_hyphen = format!("{} #{}", name_hyphen, i);
-
-        for target in &[&numbered, &numbered_hyphen, &numbered_hash, &numbered_hash_hyphen] {
-            let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", target]);
-        }
-    }
-
-    // PATCH: Allow Windows PnP Manager 20ms to flush device registry keys
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    log::info!("[tun_t2s] Complete TUN adapter & ghost PnP node cleanup for '{}'", name);
+    log::info!("[tun_t2s] TUN adapter cleanup complete for '{}'", name);
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -944,8 +951,8 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     {
         log::info!("[tun_t2s] Cleaning up any existing '{}' adapter before start", cfg.name);
         cleanup_adapter_by_name(&cfg.name);
-        // Wait for Windows to fully release adapter names to avoid suffix numbering
-        std::thread::sleep(std::time::Duration::from_millis(1000));
+        // Brief wait for Windows to release adapter names
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
     // Extract embedded binary
@@ -998,6 +1005,45 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
 
     let pid = child.id();
     log::info!("[tun_t2s] tun2socks started (pid: {})", pid);
+
+    // RAII guard: ensure the child process is killed when this future is
+    // dropped (e.g. by tokio task abort).  Without this, the spawn_blocking
+    // wait task below would hang forever on drop(rt), keeping the process
+    // alive consuming CPU and triggering antivirus.
+    struct ChildGuard {
+        pid: u32,
+        killed: bool,
+    }
+    impl ChildGuard {
+        fn kill(&mut self) {
+            if self.killed { return; }
+            self.killed = true;
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                let mut c = Command::new("taskkill");
+                c.creation_flags(CREATE_NO_WINDOW);
+                let _ = c.args(["/PID", &self.pid.to_string(), "/F", "/T"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                unsafe { libc::kill(self.pid as i32, libc::SIGKILL); }
+            }
+        }
+    }
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if !self.killed {
+                log::warn!("[tun_t2s] ChildGuard: tun2socks (pid={}) still alive on drop — force killing", self.pid);
+                self.kill();
+            }
+        }
+    }
+    let mut child_guard = ChildGuard { pid, killed: false };
 
     // ── Windows: configure TUN adapter routing ──────────────────────
     #[cfg(target_os = "windows")]
@@ -1052,6 +1098,8 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     tokio::select! {
         _ = shutdown => {
             log::info!("[tun_t2s] Shutting down tun2socks (pid={})", pid);
+            // Kill the child process
+            child_guard.kill();
             // Kill using taskkill on Windows — use /T to kill the whole process tree.
             // Run silently with CREATE_NO_WINDOW to avoid console popup.
             #[cfg(target_os = "windows")]
@@ -1089,6 +1137,8 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
             ).await;
         }
         result = &mut wait_handle => {
+            // Child exited on its own — mark as killed so Drop guard is a no-op
+            child_guard.killed = true;
             match result {
                 Ok(Ok(s)) if s.success() => {
                     log::info!("[tun_t2s] tun2socks exited normally");
@@ -1117,6 +1167,7 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
 
     // Extra safety: ensure child is killed on any exit path.
     // Run silently to avoid console popup.
+    child_guard.kill();
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
