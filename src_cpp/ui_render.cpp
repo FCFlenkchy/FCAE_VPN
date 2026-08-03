@@ -506,25 +506,47 @@ void render_ui() {
             g_app.save_status[0] = '\0';
         }
 
-        // ── Check for Updates button ─────────────────────────────────
-        ImGui::SameLine(0, 12);
+        ImGui::Spacing();
+        // ── Check for Updates button (centered) ─────────────────────
         {
-            static bool update_checked = false;
-            static bool update_available = false;
-            static char update_status[128] = {};
-            static char update_latest[32] = {};
-            static char update_notes[1024] = {};
-            static char update_dl_url[512] = {};
-            static bool update_popup_open = false;
+            float btn_width = 160.0f;
+            float avail = ImGui::GetContentRegionAvail().x;
+            ImGui::SetCursorPosX((avail - btn_width) * 0.5f);
+        static bool update_checked = false;
+        static bool update_available = false;
+        static char update_status[128] = {};
+        static char update_latest[32] = {};
+        static char update_notes[1024] = {};
+        static char update_dl_url[512] = {};
+        static bool update_popup_open = false;
+        static auto check_start_time = std::chrono::steady_clock::now();
 
-            AetherUpdateInfo info = {};
-            bool done = aether_poll_update(&info);
+        AetherUpdateInfo info = {};
+        bool done = aether_poll_update(&info);
 
-            if (info.check_in_progress) {
+        if (info.check_in_progress) {
+            // Safety timeout: if check takes >15s, show timeout message
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - check_start_time).count();
+            if (elapsed > 15) {
+                // Show timeout — the FFI check_in_progress is stuck, but we override the display
+                update_checked = true;
+                update_available = false;
+                snprintf(update_status, sizeof(update_status), "Check timed out (network unreachable?)");
+                if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
+                    aether_check_update_async(FCAE_VERSION);
+                    update_checked = false;
+                    check_start_time = std::chrono::steady_clock::now();
+                }
+            } else {
                 ImGui::BeginDisabled();
-                ImGui::Button("Checking...", ImVec2(130, 34));
+                ImGui::Button("Checking...", ImVec2(btn_width, 34));
                 ImGui::EndDisabled();
-            } else if (done && info.update_available) {
+                // Show elapsed time
+                ImGui::SameLine(0, 6);
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(%llds)", (long long)elapsed);
+            }
+        } else if (done && info.update_available) {
                 update_available = true;
                 update_checked = true;
                 snprintf(update_latest, sizeof(update_latest), "%s", info.latest_version);
@@ -534,7 +556,7 @@ void render_ui() {
 
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
-                if (ImGui::Button("Update Available!", ImVec2(130, 34))) {
+                if (ImGui::Button("Update Available!", ImVec2(btn_width, 34))) {
                     update_popup_open = true;
                 }
                 ImGui::PopStyleColor(2);
@@ -543,33 +565,35 @@ void render_ui() {
                 update_available = false;
                 update_checked = true;
                 snprintf(update_status, sizeof(update_status), "%s", info.status_message);
-                if (ImGui::Button("Check for Updates", ImVec2(130, 34))) {
+                if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
                     aether_check_update_async(FCAE_VERSION);
                     update_checked = false;
                     update_available = false;
+                    check_start_time = std::chrono::steady_clock::now();
                 }
             } else {
-                if (ImGui::Button("Check for Updates", ImVec2(130, 34))) {
+                if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
                     aether_check_update_async(FCAE_VERSION);
                     update_checked = false;
                     update_available = false;
+                    check_start_time = std::chrono::steady_clock::now();
                 }
             }
 
             // Status text
-            if (done && !update_available && update_checked) {
-                ImGui::SameLine(0, 6);
-                // Detect error messages
-                bool is_error = strstr(update_status, "Failed") != nullptr ||
-                                strstr(update_status, "HTTP") != nullptr ||
-                                strstr(update_status, "error") != nullptr ||
-                                strstr(update_status, "timed out") != nullptr;
-                if (is_error) {
-                    ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "%s", update_status);
-                } else {
-                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", update_status);
-                }
+        if ((done || (info.check_in_progress && update_checked)) && !update_available && update_checked) {
+            ImGui::SetCursorPosX((avail - btn_width) * 0.5f);
+            // Detect error messages
+            bool is_error = strstr(update_status, "Failed") != nullptr ||
+                            strstr(update_status, "HTTP") != nullptr ||
+                            strstr(update_status, "error") != nullptr ||
+                            strstr(update_status, "timed out") != nullptr;
+            if (is_error) {
+                ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "%s", update_status);
+            } else {
+                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", update_status);
             }
+        }
 
             // Update popup modal
             if (update_popup_open) {

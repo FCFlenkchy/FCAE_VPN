@@ -33,7 +33,8 @@ pub struct UpdateCheckResult {
 /// Fetch version.json from GitHub (async, non-blocking).
 pub async fn fetch_latest_version() -> Result<VersionInfo, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
