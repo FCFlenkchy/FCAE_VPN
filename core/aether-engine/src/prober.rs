@@ -11,38 +11,77 @@ use crate::noize::NoizeConfig;
 use crate::quic;
 
 pub const MASQUE_CIDRS_V4: &[&str] = &[
-    "162.159.36.0/24",
-    "162.159.46.0/24",
-    "162.159.192.0/24",
-    "162.159.193.0/24",
-    "162.159.195.0/24",
-    "162.159.196.0/24",
     "162.159.197.0/24",
     "162.159.198.0/24",
+    "162.159.196.0/24",
+    "162.159.195.0/24",
+    "162.159.192.0/24",
+    "162.159.193.0/24",
     "162.159.204.0/24",
     "172.65.251.0/24",
     "188.114.96.0/24",
     "188.114.97.0/24",
     "188.114.98.0/24",
     "188.114.99.0/24",
+    "162.159.36.0/24",
+    "162.159.46.0/24",
 ];
 
 pub const MASQUE_SEEDS: &[&str] = &[
+    "162.159.197.3",
+    "162.159.197.1",
     "162.159.198.2",
     "162.159.198.1",
+    "162.159.196.1",
+    "162.159.195.1",
     "162.159.192.1",
     "162.159.193.1",
-    "162.159.195.1",
-    "162.159.196.1",
 ];
 
-pub const MASQUE_PORTS: &[u16] = &[443, 500, 1701, 4443, 8443, 8095];
+pub const MASQUE_PORTS: &[u16] = &[443, 500, 1701, 4500, 4443, 8443, 8095];
 
 pub const MASQUE_CIDRS_V6: &[&str] = &[
+    "2606:4700:102::/48",
     "2606:4700:d0::/48",
     "2606:4700:d1::/48",
-    "2606:4700:102::/48",
 ];
+
+pub const MASQUE_ZT_CIDRS_V4: &[&str] = &["162.159.197.0/24"];
+
+pub const MASQUE_ZT_CIDRS_V6: &[&str] = &["2606:4700:102::/48"];
+
+pub fn zero_trust_mode() -> bool {
+    std::env::var("AETHER_TEAM")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+pub fn prioritize(all: &[&'static str], first: &[&'static str]) -> Vec<&'static str> {
+    if !zero_trust_mode() {
+        return all.to_vec();
+    }
+
+    let mut out: Vec<&'static str> = Vec::with_capacity(all.len());
+    for entry in first {
+        if all.contains(entry) {
+            out.push(entry);
+        }
+    }
+    for entry in all {
+        if !out.contains(entry) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+pub fn masque_cidrs_v4() -> Vec<&'static str> {
+    prioritize(MASQUE_CIDRS_V4, MASQUE_ZT_CIDRS_V4)
+}
+
+pub fn masque_cidrs_v6() -> Vec<&'static str> {
+    prioritize(MASQUE_CIDRS_V6, MASQUE_ZT_CIDRS_V6)
+}
 
 pub const MASQUE_SEEDS_V6: &[&str] = &["2606:4700:d0::a29f:c602", "2606:4700:d1::a29f:c602", "2606:4700:d0::a29f:c601", "2606:4700:d0::a29f:c001"];
 
@@ -101,13 +140,7 @@ impl ScanMode {
             "turbo" | "fast" => ScanMode::Turbo,
             "thorough" | "deep" | "pro" => ScanMode::Thorough,
             "stealth" | "quiet" => ScanMode::Stealth,
-            // Legacy: ironclad was a scan mode — treat as balanced discovery.
-            "ironclad" | "real" | "verify" | "guaranteed" => {
-                if std::env::var("AETHER_VALIDATE").is_err() {
-                    std::env::set_var("AETHER_VALIDATE", "ironclad");
-                }
-                ScanMode::Balanced
-            }
+            "ironclad" | "real" | "verify" | "guaranteed" => ScanMode::Ironclad,
             _ => ScanMode::Balanced,
         }
     }
@@ -123,11 +156,11 @@ impl ScanMode {
     }
 
     fn strategy(&self) -> Strategy {
-        let base = match self {
+        match self {
             ScanMode::Turbo => Strategy {
                 concurrency: 20,
-                per_probe_timeout: Duration::from_millis(3000),
-                overall_deadline: Duration::from_secs(20),
+                per_probe_timeout: Duration::from_millis(6000),
+                overall_deadline: Duration::from_secs(45),
                 quiet_after_first: Duration::from_secs(0),
                 target_successes: 1,
                 early_exit_first: true,
@@ -164,22 +197,17 @@ impl ScanMode {
                 full_subnet: false,
                 sample_per_cidr: 64,
             },
-            // Kept for type completeness; parse() maps ironclad → Balanced + AETHER_VALIDATE.
             ScanMode::Ironclad => Strategy {
-                concurrency: 16,
-                per_probe_timeout: Duration::from_millis(6000),
-                overall_deadline: Duration::from_secs(120),
-                quiet_after_first: Duration::from_secs(20),
-                target_successes: 6,
+                concurrency: 4,
+                per_probe_timeout: Duration::from_millis(15000),
+                overall_deadline: Duration::from_secs(180),
+                quiet_after_first: Duration::from_secs(15),
+                target_successes: 3,
                 early_exit_first: false,
                 full_subnet: false,
                 sample_per_cidr: 140,
             },
-        };
-        // Let the performance profile cap concurrency on low-end devices.
-        let mut s = base;
-        s.concurrency = crate::sysprofile::cap_concurrency(s.concurrency);
-        s
+        }
     }
 }
 
@@ -218,7 +246,8 @@ pub async fn host_has_ipv6() -> bool {
 }
 
 pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<ProbeResult> {
-    let st = mode.strategy();
+    let mut st = mode.strategy();
+    st.concurrency = crate::sysprofile::cap_concurrency(st.concurrency);
     let timeout = st.per_probe_timeout;
     let mut effective_ip = probe.ip;
     if probe.ip.want_v6() && !host_has_ipv6().await {
@@ -243,20 +272,12 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
         st.overall_deadline,
     );
 
-    let ironclad = std::env::var("AETHER_VALIDATE")
-        .map(|v| {
-            let v = v.to_lowercase();
-            matches!(
-                v.as_str(),
-                "ironclad" | "http" | "real" | "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false);
+    let ironclad = mode == ScanMode::Ironclad;
 
     let stream = futures::stream::iter(
         candidates
             .into_iter()
-            .map(|(ip, port)| verify_one(probe, ip, port, timeout, false)),
+            .map(|(ip, port)| verify_one(probe, ip, port, timeout, ironclad)),
     )
     .buffer_unordered(st.concurrency);
     tokio::pin!(stream);
@@ -265,8 +286,6 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
     let mut best: Option<ProbeResult> = None;
     let mut found = 0usize;
     let mut quiet_until: Option<Instant> = None;
-    // Collect handshake-ok candidates for optional ironclad post-validation.
-    let mut candidates_ok: Vec<ProbeResult> = Vec::new();
 
     loop {
         let effective = match quiet_until {
@@ -275,7 +294,7 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
         };
         let remaining = effective.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            if best.is_some() || !candidates_ok.is_empty() {
+            if best.is_some() {
                 if quiet_until.is_some() {
                     log::info!("[+] no new gateways recently, finalizing selection");
                 } else {
@@ -294,14 +313,15 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
                     Some(None) => continue,
                     Some(Some(pr)) => {
                         log::info!("[+] candidate ok {}:{} rtt={:?}", pr.ip, pr.port, pr.rtt);
-                        if st.early_exit_first && !ironclad {
+                        if st.early_exit_first {
                             return Ok(pr);
                         }
-                        candidates_ok.push(pr);
-                        candidates_ok.sort_by_key(|p| p.rtt);
-                        best = candidates_ok.first().copied();
+                        best = Some(match best {
+                            Some(cur) if cur.rtt <= pr.rtt => cur,
+                            _ => pr,
+                        });
                         found += 1;
-
+                        
                         if st.target_successes > 0 && found >= st.target_successes && quiet_until.is_none() {
                             log::info!("[+] reached target of {} gateways, selecting best", st.target_successes);
                             if !st.quiet_after_first.is_zero() {
@@ -314,7 +334,7 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
                 }
             }
             _ = tokio::time::sleep(remaining) => {
-                if best.is_some() || !candidates_ok.is_empty() {
+                if best.is_some() {
                     if quiet_until.is_some() {
                         log::info!("[+] no new gateways recently, finalizing selection");
                     } else {
@@ -326,31 +346,6 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
                 break;
             }
         }
-    }
-
-    if ironclad && !candidates_ok.is_empty() {
-        log::info!(
-            "[*] ironclad validation on top {} handshake candidates (not full scan)",
-            candidates_ok.len().min(8)
-        );
-        for pr in candidates_ok.iter().take(8) {
-            if let Some(ok) = verify_one(probe, pr.ip, pr.port, IRONCLAD_TCPING_TIMEOUT, true).await
-            {
-                log::info!(
-                    "[+] ironclad-validated gateway {}:{} rtt={:?}",
-                    ok.ip,
-                    ok.port,
-                    ok.rtt
-                );
-                return Ok(ok);
-            }
-            log::warn!(
-                "[-] ironclad rejected {}:{} — trying next candidate",
-                pr.ip,
-                pr.port
-            );
-        }
-        return Err(AetherError::NoCleanEndpoint);
     }
 
     match best {
@@ -388,7 +383,7 @@ async fn verify_one(
                 Some(ProbeResult { ip, port, rtt })
             }
             Err(e) => {
-                log::debug!("[-] ironclad {ip}:{port} failed real http check: {e}");
+                log::trace!("[-] ironclad {ip}:{port} failed real http check: {e}");
                 None
             }
         };
@@ -404,11 +399,13 @@ async fn verify_one(
             key_pem: probe.key_pem.to_vec(),
             local_ipv4: probe.local_ipv4,
             quiet: true,
+            pin_endpoint: true,
+            expected_pins: crate::consts::MASQUE_PINS.iter().map(|p| p.to_vec()).collect(),
         };
         return match crate::masque_h2::verify_h2(&cfg, timeout).await {
             Ok(rtt) => Some(ProbeResult { ip, port, rtt }),
             Err(e) => {
-                log::debug!("h2 probe {ip}:{port} -> {e}");
+                log::trace!("h2 probe {ip}:{port} -> {e}");
                 None
             }
         };
@@ -430,7 +427,7 @@ async fn verify_one(
     match quic::verify_masque(&vp).await {
         Ok(rtt) => Some(ProbeResult { ip, port, rtt }),
         Err(e) => {
-            log::debug!("probe {ip}:{port} -> {e}");
+            log::trace!("probe {ip}:{port} -> {e}");
             None
         }
     }
@@ -450,7 +447,7 @@ fn build_candidates(st: &Strategy, ports: &[u16], ip: IpScan) -> Vec<(IpAddr, u1
                 out.push((IpAddr::V4(*a), primary));
             }
         }
-        let cidr_hosts: Vec<Vec<Ipv4Addr>> = MASQUE_CIDRS_V4
+        let cidr_hosts: Vec<Vec<Ipv4Addr>> = masque_cidrs_v4()
             .iter()
             .map(|c| {
                 if st.full_subnet {
@@ -479,7 +476,7 @@ fn build_candidates(st: &Strategy, ports: &[u16], ip: IpScan) -> Vec<(IpAddr, u1
             }
         }
         let per = if st.sample_per_cidr == 0 { 96 } else { st.sample_per_cidr };
-        let cidr6: Vec<Vec<Ipv6Addr>> = MASQUE_CIDRS_V6
+        let cidr6: Vec<Vec<Ipv6Addr>> = masque_cidrs_v6()
             .iter()
             .map(|c| sample_cidr_v6(c, per, MASQUE_CIDRS_V4))
             .collect();
@@ -600,4 +597,97 @@ fn sample_cidr_v6(cidr: &str, n: usize, v4_cidrs: &[&str]) -> Vec<Ipv6Addr> {
         out.push(Ipv6Addr::from(base | embedded));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_documented_zero_trust_masque_ingress_range_is_scanned() {
+        assert!(MASQUE_CIDRS_V4.contains(&"162.159.197.0/24"));
+        assert!(MASQUE_CIDRS_V6.contains(&"2606:4700:102::/48"));
+    }
+
+    #[test]
+    fn the_documented_masque_ingress_range_is_swept_first() {
+        assert_eq!(MASQUE_CIDRS_V4.first(), Some(&"162.159.197.0/24"));
+        assert_eq!(MASQUE_CIDRS_V6.first(), Some(&"2606:4700:102::/48"));
+    }
+
+    #[test]
+    fn the_dns_over_https_ranges_are_swept_last_because_they_never_serve_masque() {
+        let doh = ["162.159.36.0/24", "162.159.46.0/24"];
+        let tail = &MASQUE_CIDRS_V4[MASQUE_CIDRS_V4.len() - doh.len()..];
+        for entry in doh {
+            assert!(tail.contains(&entry), "{entry} should be at the end");
+        }
+    }
+
+    #[test]
+    fn the_documented_default_masque_port_leads_the_sweep() {
+        assert_eq!(MASQUE_PORTS.first(), Some(&443));
+    }
+
+    #[test]
+    fn the_documented_masque_fallback_ports_keep_their_documented_order() {
+        assert_eq!(MASQUE_PORTS, &[443, 500, 1701, 4500, 4443, 8443, 8095]);
+    }
+
+    #[test]
+    fn a_live_documented_address_is_the_first_seed() {
+        assert_eq!(MASQUE_SEEDS.first(), Some(&"162.159.197.3"));
+    }
+
+    #[test]
+    fn without_a_team_the_range_order_is_left_alone() {
+        std::env::remove_var("AETHER_TEAM");
+        assert_eq!(prioritize(MASQUE_CIDRS_V4, MASQUE_ZT_CIDRS_V4), MASQUE_CIDRS_V4.to_vec());
+    }
+
+    #[test]
+    fn prioritize_moves_the_wanted_entries_to_the_front_without_losing_any() {
+        let all = ["a", "b", "c", "d"];
+        let out = {
+            let mut out: Vec<&'static str> = vec!["c"];
+            for entry in all {
+                if !out.contains(&entry) {
+                    out.push(entry);
+                }
+            }
+            out
+        };
+        assert_eq!(out, vec!["c", "a", "b", "d"]);
+        assert_eq!(out.len(), all.len());
+    }
+
+    #[test]
+    fn the_documented_masque_fallback_ports_are_all_covered() {
+        for port in [443u16, 500, 1701, 4443, 4500, 8443, 8095] {
+            assert!(
+                MASQUE_PORTS.contains(&port),
+                "documented fallback port {port} should be scanned"
+            );
+        }
+    }
+
+    #[test]
+    fn every_masque_prefix_and_seed_parses() {
+        for entry in MASQUE_CIDRS_V4 {
+            let (addr, bits) = entry.split_once('/').expect("cidr");
+            assert!(addr.parse::<Ipv4Addr>().is_ok(), "{entry}");
+            assert!(bits.parse::<u8>().is_ok(), "{entry}");
+        }
+        for entry in MASQUE_CIDRS_V6 {
+            let (addr, bits) = entry.split_once('/').expect("cidr");
+            assert!(addr.parse::<Ipv6Addr>().is_ok(), "{entry}");
+            assert!(bits.parse::<u8>().is_ok(), "{entry}");
+        }
+        for seed in MASQUE_SEEDS {
+            assert!(seed.parse::<Ipv4Addr>().is_ok(), "{seed}");
+        }
+        for seed in MASQUE_SEEDS_V6 {
+            assert!(seed.parse::<Ipv6Addr>().is_ok(), "{seed}");
+        }
+    }
 }

@@ -16,21 +16,20 @@ use crate::{consts, error::AetherError, error::Result};
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
-fn net_queue() -> usize { crate::sysprofile::channel_capacity() }
+fn net_queue() -> usize {
+    crate::sysprofile::channel_capacity()
+}
 
 async fn bind_udp_fast(bind_addr: SocketAddr) -> Result<UdpSocket> {
     use socket2::{Socket, Domain, Type};
     let domain = if bind_addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
     let sock = Socket::new(domain, Type::DGRAM, None).map_err(AetherError::Io)?;
     sock.set_nonblocking(true).map_err(AetherError::Io)?;
-
-    // Use AETHER_UDP_BUF_KB env override, then fall back to the
-    // performance profile's tuned value for the detected hardware tier.
-    let kb = std::env::var("AETHER_UDP_BUF_KB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&k| (64..=8192).contains(&k)).unwrap_or_else(|| crate::sysprofile::udp_socket_buf_bytes() / 1024);
-    let buf_size = kb * 1024;
+    
+    let buf_size = crate::sysprofile::udp_socket_buf_bytes();
     let _ = sock.set_recv_buffer_size(buf_size);
     let _ = sock.set_send_buffer_size(buf_size);
-
+    
     sock.bind(&bind_addr.into()).map_err(AetherError::Io)?;
     UdpSocket::from_std(sock.into()).map_err(AetherError::Io)
 }
@@ -78,7 +77,7 @@ const DATA_PROBE_REQUIRED_SUCCESSES: u32 = 2;
 
 pub struct Channels {
     pub outbound_tx: mpsc::Sender<Vec<u8>>,
-    pub inbound_rx: mpsc::Receiver<bytes::Bytes>,
+    pub inbound_rx: mpsc::Receiver<Vec<u8>>,
     pub ctrl_tx: mpsc::Sender<Control>,
 }
 
@@ -103,7 +102,7 @@ pub fn channels() -> (Channels, Internals) {
 
 pub struct Internals {
     outbound_rx: mpsc::Receiver<Vec<u8>>,
-    inbound_tx: mpsc::Sender<bytes::Bytes>,
+    inbound_tx: mpsc::Sender<Vec<u8>>,
     ctrl_rx: mpsc::Receiver<Control>,
 }
 
@@ -112,7 +111,7 @@ impl Internals {
         self,
     ) -> (
         mpsc::Receiver<Vec<u8>>,
-        mpsc::Sender<bytes::Bytes>,
+        mpsc::Sender<Vec<u8>>,
         mpsc::Receiver<Control>,
     ) {
         (self.outbound_rx, self.inbound_tx, self.ctrl_rx)
@@ -135,13 +134,32 @@ fn random_scid() -> [u8; 16] {
     scid
 }
 
-fn spawn_reader(sock: Arc<UdpSocket>, local: SocketAddr, tx: mpsc::Sender<NetPacket>) {
+#[derive(Default)]
+struct ReaderGuard {
+    handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl ReaderGuard {
+    fn push(&mut self, h: tokio::task::JoinHandle<()>) {
+        self.handles.push(h);
+    }
+}
+
+impl Drop for ReaderGuard {
+    fn drop(&mut self) {
+        for h in self.handles.drain(..) {
+            h.abort();
+        }
+    }
+}
+
+fn spawn_reader(sock: Arc<UdpSocket>, local: SocketAddr, tx: mpsc::Sender<NetPacket>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut buf = vec![0u8; 2048];
+        let mut buf = vec![0u8; 65535];
         loop {
             match sock.recv_from(&mut buf).await {
                 Ok((n, from)) => {
-                    log::debug!("recv {n} bytes from {from}");
+                    log::trace!("recv {n} bytes from {from}");
                     if tx.send((local, from, buf[..n].to_vec())).await.is_err() {
                         break;
                     }
@@ -152,7 +170,7 @@ fn spawn_reader(sock: Arc<UdpSocket>, local: SocketAddr, tx: mpsc::Sender<NetPac
                 }
             }
         }
-    });
+    })
 }
 
 pub async fn run(
@@ -178,13 +196,14 @@ pub async fn run(
 
     let mut sockets: HashMap<SocketAddr, Arc<UdpSocket>> = HashMap::new();
     sockets.insert(local, init_sock.clone());
-    spawn_reader(init_sock, local, net_tx.clone());
+    let mut readers = ReaderGuard::default();
+    readers.push(spawn_reader(init_sock, local, net_tx.clone()));
 
     let mut config = tls::build_config(&TlsParams {
         cert_pem: &cfg.cert_pem,
         key_pem: &cfg.key_pem,
         pin_endpoint: true,
-        expected_pins: &consts::MASQUE_PINS,
+        expected_pins: consts::MASQUE_PINS,
     })?;
 
     let mut current_ech = cfg.ech_config_list.clone();
@@ -210,20 +229,17 @@ pub async fn run(
         noize::pre_handshake(sock.as_ref(), peer, &cfg.noize).await;
     }
 
-    {
-        let mut tmp = vec![0u8; MAX_DATAGRAM_SIZE];
-        flush(&mut conn, &sockets, &mut tmp).await?;
-    }
+    flush(&mut conn, &sockets).await?;
 
-    let mut h3_body = vec![0u8; 16384];
-
-    let mut out_buf = vec![0u8; 16384];
-    let mut flush_buf = vec![0u8; MAX_DATAGRAM_SIZE];
+    let mut out_buf = vec![0u8; 65535];
     let mut keepalive_interval = tokio::time::interval(Duration::from_secs(20));
     keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut probe_interval = tokio::time::interval(Duration::from_millis(700));
     probe_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut ctrl_open = true;
+    let mut outbound_open = true;
 
     loop {
         if data_check && !ready_fired {
@@ -258,55 +274,59 @@ pub async fn run(
                     match masque::encode_ip_datagram(sid, &probe_packet) {
                         Ok(framed) => {
                             if let Err(e) = conn.dgram_send(&framed) {
-                                log::debug!("data-plane probe send: {e}");
+                                log::trace!("data-plane probe send: {e}");
                             }
                         }
-                        Err(e) => log::debug!("data-plane probe encode: {e}"),
+                        Err(e) => log::trace!("data-plane probe encode: {e}"),
                     }
                 }
             }
 
             Some((to_local, from, mut data)) = net_rx.recv() => {
-                if log::log_enabled!(log::Level::Debug) {
-                    let mut hdr_buf = data.clone();
-                    if let Ok(hdr) = quiche::Header::from_slice(&mut hdr_buf, quiche::MAX_CONN_ID_LEN) {
-                        log::debug!("recv {} bytes type={:?} version=0x{:x} from {}", data.len(), hdr.ty, hdr.version, from);
-                    }
+                let mut hdr_buf = data.clone();
+                if let Ok(hdr) = quiche::Header::from_slice(&mut hdr_buf, quiche::MAX_CONN_ID_LEN) {
+                    log::trace!("recv {} bytes type={:?} version=0x{:x} from {}", data.len(), hdr.ty, hdr.version, from);
                 }
                 let info = quiche::RecvInfo { from, to: to_local };
                 if let Err(e) = conn.recv(&mut data, info) {
-                    log::debug!("recv error: {e}");
+                    log::trace!("recv error: {e}");
                 }
             }
 
-            ctrl = internals.ctrl_rx.recv() => {
+            ctrl = internals.ctrl_rx.recv(), if ctrl_open => {
                 match ctrl {
                     Some(Control::Migrate) => {
-                        if let Err(e) = do_migrate(&mut conn, peer, &mut sockets, &net_tx).await {
+                        if let Err(e) = do_migrate(&mut conn, peer, &mut sockets, &net_tx, &mut readers).await {
                             log::warn!("migration failed: {e}");
                         }
                     }
-                    Some(Control::Close) | None => {
+                    Some(Control::Close) => {
+                        ctrl_open = false;
+                        let _ = conn.close(true, 0x00, b"bye");
+                    }
+                    None => {
+                        ctrl_open = false;
                         let _ = conn.close(true, 0x00, b"bye");
                     }
                 }
             }
 
-            pkt = internals.outbound_rx.recv() => {
+            pkt = internals.outbound_rx.recv(), if outbound_open => {
                 match pkt {
                     Some(ip_packet) => {
                         if let Some(sid) = req_stream {
                             match masque::encode_ip_datagram(sid, &ip_packet) {
                                 Ok(framed) => {
                                     if let Err(e) = conn.dgram_send(&framed) {
-                                        log::debug!("dgram_send: {e}");
+                                        log::trace!("dgram_send: {e}");
                                     }
                                 }
-                                Err(e) => log::debug!("encap: {e}"),
+                                Err(e) => log::trace!("encap: {e}"),
                             }
                         }
                     }
                     None => {
+                        outbound_open = false;
                         let _ = conn.close(true, 0x00, b"eof");
                     }
                 }
@@ -342,11 +362,11 @@ pub async fn run(
         }
 
         if let (Some(h3c), Some(sid)) = (h3_conn.as_mut(), req_stream) {
-            poll_h3(&mut conn, h3c, sid, &mut capsules, &addr_tx, quiet, &mut h3_body)?;
+            poll_h3(&mut conn, h3c, sid, &mut capsules, &addr_tx, quiet)?;
         }
 
         let got_data =
-            drain_datagrams(&mut conn, req_stream, &internals.inbound_tx, &mut out_buf).await;
+            drain_datagrams(&mut conn, req_stream, &internals.inbound_tx, &mut out_buf);
 
         if got_data && !ready_fired {
             validate_successes += 1;
@@ -364,7 +384,7 @@ pub async fn run(
             }
         }
 
-        flush(&mut conn, &sockets, &mut flush_buf).await?;
+        flush(&mut conn, &sockets).await?;
 
         if conn.is_closed() {
             if !established_ever && !ech_retried && current_ech.is_some() {
@@ -386,7 +406,7 @@ pub async fn run(
                     h3_conn = None;
                     req_stream = None;
                     capsules = CapsuleParser::new();
-                    flush(&mut conn, &sockets, &mut flush_buf).await?;
+                    flush(&mut conn, &sockets).await?;
                     continue;
                 }
             }
@@ -435,8 +455,8 @@ fn poll_h3(
     capsules: &mut CapsuleParser,
     addr_tx: &Option<mpsc::Sender<AssignedAddr>>,
     quiet: bool,
-    body: &mut Vec<u8>,
 ) -> Result<()> {
+    let mut body = vec![0u8; 65535];
 
     loop {
         match h3c.poll(conn) {
@@ -452,7 +472,7 @@ fn poll_h3(
                 if stream_id != req_stream {
                     continue;
                 }
-                while let Ok(n) = h3c.recv_body(conn, stream_id, &mut *body) {
+                while let Ok(n) = h3c.recv_body(conn, stream_id, &mut body) {
                     if n == 0 {
                         break;
                     }
@@ -495,7 +515,7 @@ fn drain_capsules(capsules: &mut CapsuleParser, addr_tx: &Option<mpsc::Sender<As
             Ok(Some(_)) => {}
             Ok(None) => break,
             Err(e) => {
-                log::debug!("capsule parse: {e}");
+                log::trace!("capsule parse: {e}");
                 break;
             }
         }
@@ -516,10 +536,10 @@ fn bytes_to_ip(version: u8, bytes: &[u8]) -> Option<IpAddr> {
     }
 }
 
-async fn drain_datagrams(
+fn drain_datagrams(
     conn: &mut quiche::Connection,
     req_stream: Option<u64>,
-    inbound_tx: &mpsc::Sender<bytes::Bytes>,
+    inbound_tx: &mpsc::Sender<Vec<u8>>,
     buf: &mut [u8],
 ) -> bool {
     let sid = match req_stream {
@@ -533,16 +553,20 @@ async fn drain_datagrams(
             Ok(n) => match masque::decode_ip_datagram(&buf[..n], sid) {
                 Ok(Some(ip_packet)) => {
                     delivered = true;
-                    if inbound_tx.send(bytes::Bytes::from(ip_packet)).await.is_err() {
-                        return delivered;
+                    match inbound_tx.try_send(ip_packet) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            log::trace!("inbound queue full, dropping datagram");
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => return delivered,
                     }
                 }
                 Ok(None) => {}
-                Err(e) => log::debug!("decap: {e}"),
+                Err(e) => log::trace!("decap: {e}"),
             },
             Err(quiche::Error::Done) => break,
             Err(e) => {
-                log::debug!("dgram_recv: {e}");
+                log::trace!("dgram_recv: {e}");
                 break;
             }
         }
@@ -553,10 +577,11 @@ async fn drain_datagrams(
 async fn flush(
     conn: &mut quiche::Connection,
     sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
-    out: &mut [u8],
 ) -> Result<()> {
+    let mut out = vec![0u8; MAX_DATAGRAM_SIZE];
+
     loop {
-        match conn.send(out) {
+        match conn.send(&mut out) {
             Ok((write, send_info)) => {
                 if let Some(sock) = sockets.get(&send_info.from) {
                     sock.send_to(&out[..write], send_info.to).await?;
@@ -577,6 +602,7 @@ async fn do_migrate(
     peer: SocketAddr,
     sockets: &mut HashMap<SocketAddr, Arc<UdpSocket>>,
     net_tx: &mpsc::Sender<NetPacket>,
+    readers: &mut ReaderGuard,
 ) -> Result<()> {
     if conn.available_dcids() == 0 {
         return Err(AetherError::Other("no spare dcids for migration".into()));
@@ -587,7 +613,7 @@ async fn do_migrate(
     let new_sock = Arc::new(new_sock);
 
     sockets.insert(new_local, new_sock.clone());
-    spawn_reader(new_sock, new_local, net_tx.clone());
+    readers.push(spawn_reader(new_sock, new_local, net_tx.clone()));
 
     conn.probe_path(new_local, peer)?;
     let seq = conn.migrate_source(new_local)?;
@@ -604,12 +630,8 @@ pub fn default_path() -> &'static str {
     "/"
 }
 
-pub fn default_sni() -> String {
-    std::env::var("AETHER_SNI")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| consts::CONNECT_SNI.to_string())
+pub fn default_sni() -> &'static str {
+    consts::CONNECT_SNI
 }
 
 #[derive(Clone)]
@@ -636,7 +658,7 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
         cert_pem: &p.cert_pem,
         key_pem: &p.key_pem,
         pin_endpoint: true,
-        expected_pins: &consts::MASQUE_PINS,
+        expected_pins: consts::MASQUE_PINS,
     })?;
 
     let scid_bytes = random_scid();
@@ -655,7 +677,7 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
     let probe_packet = masque::build_dns_probe_packet(p.local_ipv4);
     let mut connect_ip_ok = false;
     let mut last_probe = Instant::now();
-    let mut dgram_buf = vec![0u8; 16384];
+    let mut dgram_buf = vec![0u8; 65535];
     let mut probe_successes: u32 = 0;
 
     let start = Instant::now();
@@ -665,7 +687,7 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
 
     flush_connected(&mut conn, &sock).await?;
 
-    let mut buf = vec![0u8; 16384];
+    let mut buf = vec![0u8; 65535];
 
     loop {
         if Instant::now() >= deadline {
@@ -688,11 +710,11 @@ pub async fn verify_masque(p: &VerifyParams) -> Result<Duration> {
                     Ok(n) => {
                         let mut hdr_buf = buf[..n].to_vec();
                         if let Ok(hdr) = quiche::Header::from_slice(&mut hdr_buf, quiche::MAX_CONN_ID_LEN) {
-                            log::debug!("verify recv {} bytes type={:?} version=0x{:x} from {}", n, hdr.ty, hdr.version, p.peer);
+                            log::trace!("verify recv {} bytes type={:?} version=0x{:x} from {}", n, hdr.ty, hdr.version, p.peer);
                         }
                         let info = quiche::RecvInfo { from: p.peer, to: local };
                         if let Err(e) = conn.recv(&mut buf[..n], info) {
-                            log::debug!("verify recv error from {}: {e}", p.peer);
+                            log::trace!("verify recv error from {}: {e}", p.peer);
                         }
                     }
                     Err(e) => return Err(AetherError::Io(e)),

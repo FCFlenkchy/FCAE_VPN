@@ -1,7 +1,7 @@
-use std::ffi::{c_int, c_void};
+use std::ffi::c_void;
+use std::os::raw::c_int;
 use std::ptr;
 
-use base64::Engine;
 use boring::pkey::PKey;
 use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyError, SslVerifyMode, SslVersion};
 use boring::x509::X509;
@@ -84,7 +84,7 @@ pub fn install_verification(
 
             let matched = pins.iter().any(|pin| pin.as_slice() == hash.as_slice());
             if !matched {
-                log::warn!(
+                log::debug!(
                     "tls pin: server cert SPKI hash {:02x?} does not match any pinned hash",
                     hash
                 );
@@ -95,10 +95,10 @@ pub fn install_verification(
             log::debug!("tls pin: SPKI hash match OK");
             Ok(())
         });
-        log::info!(
+        announce_once(format!(
             "tls verification: pin-based ({} pins loaded)",
             expected_pins.len()
-        );
+        ));
     } else {
         // No pin-based verification configured — disable server cert verification.
         // This is required because Aether connects to Cloudflare edge IPs with
@@ -107,9 +107,19 @@ pub fn install_verification(
         // Standard CA validation fails in this context. The security model relies on
         // the encrypted MASQUE tunnel and ECH rather than TLS cert verification.
         builder.set_verify(SslVerifyMode::NONE);
-        log::info!("tls verification: disabled (no pin configured)");
+        announce_once("tls verification: disabled (no pin configured)".to_string());
     }
     Ok(())
+}
+
+fn announce_once(message: String) {
+    use std::sync::OnceLock;
+    static ANNOUNCED: OnceLock<()> = OnceLock::new();
+    if ANNOUNCED.set(()).is_ok() {
+        log::info!("{message}");
+    } else {
+        log::debug!("{message}");
+    }
 }
 
 pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
@@ -125,17 +135,10 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
 
     builder.set_grease_enabled(true);
     let groups = std::env::var("AETHER_TLS_GROUPS").ok();
-    let groups = groups
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(CHROME_GROUPS);
-    if builder.set_curves_list(groups).is_err() {
-        log::warn!("[-] AETHER_TLS_GROUPS={groups:?} rejected; using default curves");
-        builder
-            .set_curves_list(CHROME_GROUPS)
-            .map_err(|e| AetherError::Tls(e.to_string()))?;
-    }
+    let groups = groups.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(CHROME_GROUPS);
+    builder
+        .set_curves_list(groups)
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
 
     let mut alpn = Vec::with_capacity(consts::ALPN_H3.len() + 1);
     alpn.push(consts::ALPN_H3.len() as u8);
@@ -179,49 +182,6 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
     Ok(config)
 }
 
-/// Build a TLS config for HTTP/2 (masque_h2.rs).
-pub fn build_h2_config(
-    cert_pem: &[u8],
-    key_pem: &[u8],
-) -> Result<boring::ssl::SslConnector> {
-    use boring::ssl::SslConnector;
-
-    let mut builder = SslConnector::builder(SslMethod::tls_client())
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    builder
-        .set_min_proto_version(Some(SslVersion::TLS1_2))
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    let groups = std::env::var("AETHER_TLS_GROUPS").ok();
-    let groups = groups
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(CHROME_GROUPS);
-    let _ = builder.set_curves_list(groups);
-
-    let h2_alpn = b"\x02h2";
-    builder
-        .set_alpn_protos(h2_alpn)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    let cert = X509::from_pem(cert_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
-    let key =
-        PKey::private_key_from_pem(key_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
-    builder
-        .set_certificate(&cert)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-    builder
-        .set_private_key(&key)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
-
-    // Cloudflare edges serve different certs per SNI.
-    builder.set_verify(SslVerifyMode::NONE);
-
-    Ok(builder.build())
-}
-
 pub fn inject_ech(conn: &mut quiche::Connection, ech_config_list: &[u8]) -> Result<()> {
     if ech_config_list.is_empty() {
         return Err(AetherError::Ech("empty ech config list".into()));
@@ -263,6 +223,7 @@ pub fn extract_ech_retry_configs(conn: &mut quiche::Connection) -> Option<Vec<u8
 }
 
 pub fn decode_ech_config_list(b64: &str) -> Result<Vec<u8>> {
+    use base64::Engine;
     base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
         .map_err(|e| AetherError::Ech(e.to_string()))

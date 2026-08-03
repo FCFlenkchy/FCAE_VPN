@@ -3,6 +3,9 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use boring::pkey::PKey;
+use boring::ssl::{SslConnector, SslMethod, SslVersion};
+use boring::x509::X509;
 use bytes::Bytes;
 use http::Method;
 use tokio::net::TcpStream;
@@ -13,8 +16,18 @@ use crate::error::{AetherError, Result};
 use crate::fragment::{FragmentConfig, FragmentingStream};
 use crate::masque::{self, Capsule, CapsuleParser};
 use crate::quic::{AssignedAddr, Control, Internals};
+use crate::tls;
 
 const H2_ALPN: &[u8] = b"\x02h2";
+const CHROME_GROUPS: &str = "P-256:X25519:P-384";
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 pub struct H2TunnelConfig {
     pub peer: SocketAddr,
@@ -25,6 +38,8 @@ pub struct H2TunnelConfig {
     pub key_pem: Vec<u8>,
     pub local_ipv4: Ipv4Addr,
     pub quiet: bool,
+    pub pin_endpoint: bool,
+    pub expected_pins: Vec<Vec<u8>>,
 }
 
 fn log_or_debug(quiet: bool, msg: String) {
@@ -88,13 +103,60 @@ pub fn h2_peer(quic_peer: SocketAddr) -> SocketAddr {
 }
 
 fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> {
-    use crate::tls;
-    let connector = tls::build_h2_config(&cfg.cert_pem, &cfg.key_pem)?;
+    let mut builder =
+        SslConnector::builder(SslMethod::tls()).map_err(|e| AetherError::Tls(e.to_string()))?;
+
+    builder
+        .set_min_proto_version(Some(SslVersion::TLS1_2))
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
+    builder
+        .set_max_proto_version(Some(SslVersion::TLS1_3))
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
+
+    builder.set_grease_enabled(true);
+
+    let groups = std::env::var("AETHER_TLS_GROUPS").ok();
+    let groups = groups
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(CHROME_GROUPS);
+    builder
+        .set_curves_list(groups)
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
+
+    builder
+        .set_alpn_protos(H2_ALPN)
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
+
+    let cert = X509::from_pem(&cfg.cert_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
+    let key =
+        PKey::private_key_from_pem(&cfg.key_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
+    builder
+        .set_certificate(&cert)
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
+    builder
+        .set_private_key(&key)
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
+
+    // Install TLS verification:
+    // pin_endpoint=true with pins: pin-based verification (SNI can be spoofed)
+    // pin_endpoint=false: SslVerifyMode::NONE (default, required for Cloudflare MASQUE edges)
+    let pin_refs: Vec<&[u8]> = cfg.expected_pins.iter().map(|p| p.as_slice()).collect();
+    tls::install_verification(&mut *builder, cfg.pin_endpoint, &pin_refs)?;
+
+    let connector = builder.build();
     let mut config = connector
         .configure()
         .map_err(|e| AetherError::Tls(e.to_string()))?;
-    config.set_verify_hostname(false);
+
+    // When using pin-based verification, SNI may be spoofed for DPI bypass,
+    // so hostname verification against the cert's CN/SAN is not applicable.
+    // Standard CA verification requires hostname matching.
+    let use_pin_verification = cfg.pin_endpoint && !cfg.expected_pins.is_empty();
+    config.set_verify_hostname(!use_pin_verification);
     config.set_use_server_name_indication(true);
+
     Ok(config)
 }
 
@@ -256,11 +318,12 @@ pub async fn run(
         AetherError::Masque("h2 connection does not support ping".into())
     })?;
 
-    tokio::spawn(async move {
+    let driver_handle = tokio::spawn(async move {
         if let Err(e) = connection.await {
             log::debug!("[h2] connection driver ended: {e}");
         }
     });
+    let _driver_guard = AbortOnDrop(driver_handle);
 
     let mut h2 = h2
         .ready()
@@ -372,7 +435,7 @@ pub async fn run(
             _ = probe_interval.tick(), if data_check && !ready_fired => {
                 let framed = masque::encode_datagram_capsule(&probe_packet);
                 if let Err(e) = send_capsule(&mut send_stream, Bytes::from(framed)).await {
-                    log::debug!("[h2] data-plane probe resend: {e}");
+                    log::trace!("[h2] data-plane probe resend: {e}");
                 }
             }
 
@@ -408,7 +471,7 @@ pub async fn run(
                     Some(Ok(chunk)) => {
                         let _ = recv_body.flow_control().release_capacity(chunk.len());
                         capsules.push(&chunk);
-                        let got_data = drain_capsules(&mut capsules, &inbound_tx, &addr_tx).await;
+                        let got_data = drain_capsules(&mut capsules, &inbound_tx, &addr_tx);
                         if got_data && !ready_fired {
                             validate_successes += 1;
                             log::debug!(
@@ -427,7 +490,7 @@ pub async fn run(
                                 if let Err(e) =
                                     send_capsule(&mut send_stream, Bytes::from(framed)).await
                                 {
-                                    log::debug!("[h2] follow-up data-plane probe: {e}");
+                                    log::trace!("[h2] follow-up data-plane probe: {e}");
                                 }
                             }
                         }
@@ -453,13 +516,9 @@ async fn send_capsule(send: &mut h2::SendStream<Bytes>, data: Bytes) -> Result<(
     }
 
     send.reserve_capacity(len);
-    loop {
+    while send.capacity() < len {
         match futures::future::poll_fn(|cx| send.poll_capacity(cx)).await {
-            Some(Ok(n)) => {
-                if n >= len {
-                    break;
-                }
-            }
+            Some(Ok(_)) => {}
             Some(Err(e)) => return Err(AetherError::Masque(format!("h2 capacity: {e}"))),
             None => return Err(AetherError::Masque("h2 stream closed".into())),
         }
@@ -470,18 +529,29 @@ async fn send_capsule(send: &mut h2::SendStream<Bytes>, data: Bytes) -> Result<(
     Ok(())
 }
 
-async fn drain_capsules(
+fn drain_capsules(
     capsules: &mut CapsuleParser,
-    inbound_tx: &mpsc::Sender<bytes::Bytes>,
+    inbound_tx: &mpsc::Sender<Vec<u8>>,
     addr_tx: &Option<mpsc::Sender<AssignedAddr>>,
 ) -> bool {
     let mut delivered = false;
     loop {
         match capsules.next() {
-            Ok(Some(Capsule::Datagram(pkt))) => {
+            Ok(Some(Capsule::Datagram(payload))) => {
+                let pkt = match masque::strip_datagram_context(&payload) {
+                    Some(inner) => inner,
+                    None => {
+                        log::trace!("[h2] discarding a datagram that is not an ip packet");
+                        continue;
+                    }
+                };
                 delivered = true;
-                if inbound_tx.send(bytes::Bytes::from(pkt)).await.is_err() {
-                    return delivered;
+                match inbound_tx.try_send(pkt) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        log::trace!("[h2] inbound queue full, dropping datagram");
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => return delivered,
                 }
             }
             Ok(Some(Capsule::AddressAssign(addrs))) => {
@@ -503,7 +573,7 @@ async fn drain_capsules(
             Ok(Some(_)) => {}
             Ok(None) => break,
             Err(e) => {
-                log::debug!("[h2] capsule parse: {e}");
+                log::trace!("[h2] capsule parse: {e}");
                 break;
             }
         }

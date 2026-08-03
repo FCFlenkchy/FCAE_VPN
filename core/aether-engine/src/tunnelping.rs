@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
@@ -31,105 +31,63 @@ fn http_probe_port() -> u16 {
         .unwrap_or(80)
 }
 
-async fn http_probe_to(stack: &netstack::StackHandle, dst: SocketAddr, host: &str) -> Result<()> {
+async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
+    let ip = socks::dns_resolve(stack, HTTP_PROBE_HOST).await?;
+    let dst = SocketAddr::new(ip, http_probe_port());
+
     let conn = stack.open_tcp(dst).await?;
     let (sender, mut from_stack) = conn.into_split();
 
     let request = format!(
-        "GET {HTTP_PROBE_PATH} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: aether-ironclad\r\n\r\n"
+        "GET {HTTP_PROBE_PATH} HTTP/1.1\r\nHost: {HTTP_PROBE_HOST}\r\nConnection: close\r\nUser-Agent: aether-ironclad\r\n\r\n"
     );
     sender.send(request.into_bytes()).await?;
 
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
     let mut buf = Vec::new();
+    let mut timed_out = false;
+
     loop {
-        match tokio::time::timeout(Duration::from_secs(8), from_stack.recv()).await {
+        match tokio::time::timeout_at(deadline, from_stack.recv()).await {
             Ok(Some(chunk)) => {
                 buf.extend_from_slice(&chunk);
-                if buf.len() >= 12 {
+                if buf.windows(2).any(|w| w == b"\r\n") || buf.len() >= 128 {
                     break;
                 }
             }
             Ok(None) => break,
-            Err(_) => return Err(AetherError::Other("http probe response timeout".into())),
+            Err(_) => {
+                timed_out = true;
+                break;
+            }
         }
     }
 
     sender.close().await;
 
-    let status_line = String::from_utf8_lossy(&buf);
-    // 204 (gstatic) or any 2xx/3xx proves the tunnel carries TCP.
-    if status_line.contains(" 20") || status_line.contains(" 30") || status_line.contains("204") {
+    if timed_out {
+        return Err(AetherError::Other("http probe response timeout".into()));
+    }
+
+    let response = String::from_utf8_lossy(&buf);
+    let status_line = response.lines().next().unwrap_or("").trim();
+
+    if http_status_code(status_line) == Some(204) {
         Ok(())
-    } else if buf.is_empty() {
-        Err(AetherError::Other("http probe empty response".into()))
     } else {
-        let first_line = status_line.lines().next().unwrap_or("").trim();
         Err(AetherError::Other(format!(
-            "unexpected http probe response: {first_line}"
+            "unexpected http probe response: {status_line}"
         )))
     }
 }
 
-async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
-    let ip = socks::dns_resolve(stack, HTTP_PROBE_HOST).await?;
-    http_probe_to(stack, SocketAddr::new(ip, http_probe_port()), HTTP_PROBE_HOST).await
-}
-
-/// TCP connectivity without DNS — works even when resolver path is flaky.
-async fn tcp_ip_probe(stack: &netstack::StackHandle) -> Result<()> {
-    // Cloudflare anycast HTTP (returns 301/400-ish but proves data plane).
-    const TARGETS: &[(IpAddr, u16, &str)] = &[
-        (IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 80, "1.1.1.1"),
-        (IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)), 80, "1.0.0.1"),
-        (IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53, "dns.google"),
-    ];
-    let mut last = AetherError::Other("tcp ip probe failed".into());
-    for &(ip, port, host) in TARGETS {
-        let dst = SocketAddr::new(ip, port);
-        if port == 80 {
-            match http_probe_to(stack, dst, host).await {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    log::debug!("[health] tcp http to {dst}: {e}");
-                    last = e;
-                }
-            }
-        } else {
-            // Port 53: just establish TCP (DoT-ish connectivity check).
-            match tokio::time::timeout(Duration::from_secs(6), stack.open_tcp(dst)).await {
-                Ok(Ok(conn)) => {
-                    conn.close().await;
-                    return Ok(());
-                }
-                Ok(Err(e)) => {
-                    log::debug!("[health] tcp connect {dst}: {e}");
-                    last = e;
-                }
-                Err(_) => {
-                    last = AetherError::Other(format!("tcp connect timeout {dst}"));
-                }
-            }
-        }
+fn http_status_code(status_line: &str) -> Option<u16> {
+    let mut parts = status_line.split(' ');
+    let version = parts.next()?;
+    if !version.starts_with("HTTP/") {
+        return None;
     }
-    Err(last)
-}
-
-/// End-to-end probe on an already-running netstack.
-/// Prefer IP-literal TCP (no DNS) so cold WireGuard tunnels still pass.
-pub async fn live_stack_probe(stack: &netstack::StackHandle) -> Result<()> {
-    match tcp_ip_probe(stack).await {
-        Ok(()) => return Ok(()),
-        Err(e) => log::debug!("[health] ip-literal probe failed ({e}); trying DNS+HTTP"),
-    }
-    match http_probe(stack).await {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            log::debug!("[health] named http probe failed ({e}); trying DNS-only");
-            // Last resort: UDP DNS A query for a short name.
-            let _ip = socks::dns_resolve(stack, "cloudflare.com").await?;
-            Ok(())
-        }
-    }
+    parts.next()?.parse().ok()
 }
 
 pub struct MasquePingParams {
@@ -174,6 +132,8 @@ pub async fn masque_http_ping(p: &MasquePingParams, timeout: Duration) -> Result
                 key_pem: p.key_pem.clone(),
                 local_ipv4: p.local_ipv4,
                 quiet: true,
+                pin_endpoint: true,
+                expected_pins: crate::consts::MASQUE_PINS.iter().map(|p| p.to_vec()).collect(),
             };
             AbortGuard(tokio::spawn(masque_h2::run(h2cfg, internals, None, Some(ready_tx))))
         } else {
@@ -225,13 +185,14 @@ pub async fn wg_http_ping_established(
     timeout: Duration,
 ) -> Result<Duration> {
     let attempt = async {
-        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1024);
-        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(1024);
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(crate::sysprofile::channel_capacity());
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(crate::sysprofile::channel_capacity());
 
         let tunnel = wireguard::WgTunnel::from_established(
             session,
             std::sync::Arc::new(p.aethernoize.clone()),
             inbound_tx,
+            p.local_ipv4,
         );
 
         let local_ipv4_str = p.local_ipv4.to_string();
@@ -257,5 +218,32 @@ pub async fn wg_http_ping_established(
         Ok(Ok(rtt)) => Ok(rtt),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(AetherError::Other("ironclad http probe timeout".into())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::http_status_code;
+
+    #[test]
+    fn reads_the_status_code_from_the_status_line() {
+        assert_eq!(http_status_code("HTTP/1.1 204 No Content"), Some(204));
+        assert_eq!(http_status_code("HTTP/1.1 200 OK"), Some(200));
+        assert_eq!(http_status_code("HTTP/1.0 403 Forbidden"), Some(403));
+    }
+
+    #[test]
+    fn a_header_that_merely_contains_204_is_not_a_success() {
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 204\r\n\r\n";
+        let status_line = response.lines().next().unwrap().trim();
+        assert_ne!(http_status_code(status_line), Some(204));
+    }
+
+    #[test]
+    fn rejects_lines_that_are_not_http_status_lines() {
+        assert_eq!(http_status_code(""), None);
+        assert_eq!(http_status_code("204"), None);
+        assert_eq!(http_status_code("GET / HTTP/1.1"), None);
+        assert_eq!(http_status_code("HTTP/1.1 abc"), None);
     }
 }

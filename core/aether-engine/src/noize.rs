@@ -53,51 +53,6 @@ impl NoizeConfig {
         }
     }
 
-    /// Chrome TLS fingerprint — blends with legitimate Chrome traffic
-    pub fn chrome() -> Self {
-        Self {
-            jc_before_hs: 3,
-            jc_after_i1: 2,
-            jmin: 128,
-            jmax: 512,
-            // TLS ClientHello: record type 0x16, version TLS 1.2, 2-byte record length,
-            // handshake type 0x01 (ClientHello), 3-byte handshake length,
-            // client version TLS 1.2, 32-byte random.
-            // Uses <r> (binary random) for length fields — NOT <rd> which generates ASCII digits.
-            i1: Some("<b 16030300><r 2><b 010000><r 3><b 0303><r 32>".to_string()),
-            i2: Some("<b 504f5354><rc 20-30><rd 10-20>".to_string()),
-            junk_interval: Duration::from_millis(2),
-        }
-    }
-
-    /// VoIP-like — fixed-size packets at 20ms intervals
-    pub fn voice() -> Self {
-        Self {
-            jc_before_hs: 1,
-            jc_after_i1: 1,
-            jmin: 120,
-            jmax: 180,
-            // Fixed-size packets mimicking VoIP cadence (20ms interval is the key signal).
-            // No fake RTP headers — generic payloads that match VoIP packet sizes.
-            i1: Some("<r 160>".to_string()),
-            i2: Some("<r 128>".to_string()),
-            junk_interval: Duration::from_millis(20),
-        }
-    }
-
-    /// Streaming — large burst packets
-    pub fn streaming() -> Self {
-        Self {
-            jc_before_hs: 2,
-            jc_after_i1: 3,
-            jmin: 256,
-            jmax: 1400,
-            i1: Some("<b 16030300><r 2><b 010000><r 3><b 0303><r 64-128>".to_string()),
-            i2: Some("<b 0000000000><r 256-512>".to_string()),
-            junk_interval: Duration::from_millis(1),
-        }
-    }
-
     pub fn is_enabled(&self) -> bool {
         self.jc_before_hs > 0 || self.jc_after_i1 > 0 || self.i1.is_some()
     }
@@ -107,10 +62,6 @@ pub fn from_profile(name: &str) -> NoizeConfig {
     match name {
         "off" | "none" => NoizeConfig::off(),
         "gfw" => NoizeConfig::gfw(),
-        "chrome" => NoizeConfig::chrome(),
-        "voice" => NoizeConfig::voice(),
-        "streaming" => NoizeConfig::streaming(),
-        "balanced" | "firewall" => NoizeConfig::firewall(),
         _ => NoizeConfig::firewall(),
     }
 }
@@ -126,18 +77,6 @@ fn junk_packet(cfg: &NoizeConfig) -> Vec<u8> {
     let mut buf = vec![0u8; size];
     rand::thread_rng().fill_bytes(&mut buf);
     buf
-}
-
-fn parse_range(data: &str) -> usize {
-    let mut parts = data.split('-');
-    if let (Some(min_str), Some(max_str)) = (parts.next(), parts.next()) {
-        let min: usize = min_str.trim().parse().unwrap_or(0);
-        let max: usize = max_str.trim().parse().unwrap_or(0);
-        if max > min && min > 0 {
-            return rand::thread_rng().gen_range(min..=max).min(1024);
-        }
-    }
-    data.trim().parse().unwrap_or(0).min(1024)
 }
 
 fn parse_cps(spec: &str) -> Vec<u8> {
@@ -177,32 +116,10 @@ fn parse_cps(spec: &str) -> Vec<u8> {
                 out.extend_from_slice(&nonce.to_be_bytes());
             },
             "r" => {
-                let len = parse_range(data);
+                let len: usize = data.parse().unwrap_or(0).min(1024);
                 if len > 0 {
                     let mut r = vec![0u8; len];
                     rand::thread_rng().fill_bytes(&mut r);
-                    out.extend_from_slice(&r);
-                }
-            },
-            "rc" => {
-                let len = parse_range(data);
-                if len > 0 {
-                    let charset = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-                    let mut r = vec![0u8; len];
-                    for b in r.iter_mut() {
-                        *b = charset[rand::thread_rng().gen_range(0..charset.len())];
-                    }
-                    out.extend_from_slice(&r);
-                }
-            },
-            "rd" => {
-                let len = parse_range(data);
-                if len > 0 {
-                    let charset = b"0123456789";
-                    let mut r = vec![0u8; len];
-                    for b in r.iter_mut() {
-                        *b = charset[rand::thread_rng().gen_range(0..charset.len())];
-                    }
                     out.extend_from_slice(&r);
                 }
             },
@@ -219,12 +136,12 @@ pub async fn pre_handshake(sock: &UdpSocket, peer: SocketAddr, cfg: &NoizeConfig
         return;
     }
 
-    log::debug!("sending {} junk packets before handshake", cfg.jc_before_hs);
+    log::trace!("sending {} junk packets before handshake", cfg.jc_before_hs);
 
     for i in 0..cfg.jc_before_hs {
         let pkt = junk_packet(cfg);
         match sock.send_to(&pkt, peer).await {
-            Ok(n) => log::debug!("junk[{i}] sent {n} bytes"),
+            Ok(n) => log::trace!("junk[{i}] sent {n} bytes"),
             Err(e) => log::debug!("junk[{i}] send failed: {e}"),
         }
         if !cfg.junk_interval.is_zero() {
@@ -236,7 +153,7 @@ pub async fn pre_handshake(sock: &UdpSocket, peer: SocketAddr, cfg: &NoizeConfig
         let pkt = parse_cps(i1);
         if !pkt.is_empty() {
             match sock.send_to(&pkt, peer).await {
-                Ok(n) => log::debug!("signature i1 sent {n} bytes"),
+                Ok(n) => log::trace!("signature i1 sent {n} bytes"),
                 Err(e) => log::debug!("signature i1 send failed: {e}"),
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -246,7 +163,7 @@ pub async fn pre_handshake(sock: &UdpSocket, peer: SocketAddr, cfg: &NoizeConfig
     for i in 0..cfg.jc_after_i1 {
         let pkt = junk_packet(cfg);
         match sock.send_to(&pkt, peer).await {
-            Ok(n) => log::debug!("junk_after[{i}] sent {n} bytes"),
+            Ok(n) => log::trace!("junk_after[{i}] sent {n} bytes"),
             Err(e) => log::debug!("junk_after[{i}] send failed: {e}"),
         }
         if !cfg.junk_interval.is_zero() {
@@ -258,11 +175,11 @@ pub async fn pre_handshake(sock: &UdpSocket, peer: SocketAddr, cfg: &NoizeConfig
         let pkt = parse_cps(i2);
         if !pkt.is_empty() {
             match sock.send_to(&pkt, peer).await {
-                Ok(n) => log::debug!("signature i2 sent {n} bytes"),
+                Ok(n) => log::trace!("signature i2 sent {n} bytes"),
                 Err(e) => log::debug!("signature i2 send failed: {e}"),
             }
         }
     }
-    
-    log::debug!("obfuscation pre-handshake complete");
+
+    log::trace!("obfuscation pre-handshake complete");
 }

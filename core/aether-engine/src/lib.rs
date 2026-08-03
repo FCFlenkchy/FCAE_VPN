@@ -1,11 +1,14 @@
 #![allow(dead_code)]
 mod account;
+mod apifront;
+mod aethernoize;
 mod buffer_pool;
 mod config;
 mod consts;
 mod dns;
 pub mod error;
 mod fragment;
+mod http_proxy;
 mod lastconn;
 mod masque;
 mod masque_h2;
@@ -13,17 +16,17 @@ mod netstack;
 mod noize;
 mod prober;
 mod quic;
+mod routing;
 mod socks;
-mod sysprofile;
-mod http_proxy;
 mod stats;
+mod sysprofile;
 mod tls;
-mod aethernoize;
-mod tunnelping;
 pub mod tun;
 pub mod tun_t2s;
-mod wireguard;
+mod tunnelping;
 mod wg_prober;
+mod wireguard;
+mod zerotrust;
 
 /// Public traffic counters for the FFI / GUI.
 pub use stats::{

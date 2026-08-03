@@ -33,13 +33,7 @@ impl WgScanMode {
             "turbo" | "fast" => WgScanMode::Turbo,
             "thorough" | "deep" | "pro" => WgScanMode::Thorough,
             "stealth" | "quiet" => WgScanMode::Stealth,
-            // Legacy scan-mode name → balanced discovery + ironclad validation.
-            "ironclad" | "real" | "verify" | "guaranteed" => {
-                if std::env::var("AETHER_VALIDATE").is_err() {
-                    std::env::set_var("AETHER_VALIDATE", "ironclad");
-                }
-                WgScanMode::Balanced
-            }
+            "ironclad" | "real" | "verify" | "guaranteed" => WgScanMode::Ironclad,
             _ => WgScanMode::Balanced,
         }
     }
@@ -55,11 +49,11 @@ impl WgScanMode {
     }
 
     fn strategy(&self) -> WgStrategy {
-        let base = match self {
+        match self {
             WgScanMode::Turbo => WgStrategy {
                 concurrency: 12,
-                per_probe_timeout: Duration::from_millis(2000),
-                overall_deadline: Duration::from_secs(15),
+                per_probe_timeout: Duration::from_millis(5000),
+                overall_deadline: Duration::from_secs(30),
                 quiet_after_first: Duration::from_secs(0),
                 target_successes: 1,
                 early_exit_first: true,
@@ -106,10 +100,7 @@ impl WgScanMode {
                 full_subnet: false,
                 sample_per_cidr: 120,
             },
-        };
-        let mut s = base;
-        s.concurrency = crate::sysprofile::cap_concurrency(s.concurrency);
-        s
+        }
     }
 }
 
@@ -138,7 +129,8 @@ pub struct WgProbe {
 }
 
 pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<WgProbeResult> {
-    let st = mode.strategy();
+    let mut st = mode.strategy();
+    st.concurrency = crate::sysprofile::cap_concurrency(st.concurrency);
     let timeout = st.per_probe_timeout;
     let mut effective_ip = probe.ip;
     if probe.ip.want_v6() && !crate::prober::host_has_ipv6().await {
@@ -163,20 +155,12 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
         st.overall_deadline,
     );
 
-    let ironclad = std::env::var("AETHER_VALIDATE")
-        .map(|v| {
-            let v = v.to_lowercase();
-            matches!(
-                v.as_str(),
-                "ironclad" | "http" | "real" | "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false);
+    let ironclad = mode == WgScanMode::Ironclad;
 
     let stream = futures::stream::iter(
         candidates
             .into_iter()
-            .map(|(ip, port)| verify_one_wg(probe, ip, port, timeout, false)),
+            .map(|(ip, port)| verify_one_wg(probe, ip, port, timeout, ironclad)),
     )
     .buffer_unordered(st.concurrency);
     tokio::pin!(stream);
@@ -185,7 +169,6 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
     let mut best: Option<WgProbeResult> = None;
     let mut found = 0usize;
     let mut quiet_until: Option<Instant> = None;
-    let mut candidates_ok: Vec<WgProbeResult> = Vec::new();
 
     loop {
         let effective = match quiet_until {
@@ -194,7 +177,7 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
         };
         let remaining = effective.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            if best.is_some() || !candidates_ok.is_empty() {
+            if best.is_some() {
                 if quiet_until.is_some() {
                     log::info!("[+] no new endpoints recently, finalizing selection");
                 } else {
@@ -213,12 +196,13 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
                     Some(None) => continue,
                     Some(Some(pr)) => {
                         log::info!("[+] wg candidate ok {}:{} rtt={:?}", pr.ip, pr.port, pr.rtt);
-                        if st.early_exit_first && !ironclad {
+                        if st.early_exit_first {
                             return Ok(pr);
                         }
-                        candidates_ok.push(pr);
-                        candidates_ok.sort_by_key(|p| p.rtt);
-                        best = candidates_ok.first().copied();
+                        best = Some(match best {
+                            Some(cur) if cur.rtt <= pr.rtt => cur,
+                            _ => pr,
+                        });
                         found += 1;
 
                         if st.target_successes > 0 && found >= st.target_successes && quiet_until.is_none() {
@@ -233,7 +217,7 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
                 }
             }
             _ = tokio::time::sleep(remaining) => {
-                if best.is_some() || !candidates_ok.is_empty() {
+                if best.is_some() {
                     if quiet_until.is_some() {
                         log::info!("[+] no new endpoints recently, finalizing selection");
                     } else {
@@ -245,32 +229,6 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
                 break;
             }
         }
-    }
-
-    if ironclad && !candidates_ok.is_empty() {
-        log::info!(
-            "[*] ironclad validation on top {} handshake WG candidates",
-            candidates_ok.len().min(8)
-        );
-        for pr in candidates_ok.iter().take(8) {
-            if let Some(ok) =
-                verify_one_wg(probe, pr.ip, pr.port, WG_IRONCLAD_TCPING_TIMEOUT, true).await
-            {
-                log::info!(
-                    "[+] ironclad-validated wg {}:{} rtt={:?}",
-                    ok.ip,
-                    ok.port,
-                    ok.rtt
-                );
-                return Ok(ok);
-            }
-            log::warn!(
-                "[-] ironclad rejected wg {}:{} — trying next",
-                pr.ip,
-                pr.port
-            );
-        }
-        return Err(AetherError::NoCleanEndpoint);
     }
 
     match best {
@@ -305,7 +263,7 @@ async fn verify_one_wg(
     {
         Ok(v) => v,
         Err(e) => {
-            log::debug!("wg probe {ip}:{port} -> {e}");
+            log::trace!("wg probe {ip}:{port} -> {e}");
             return None;
         }
     };
@@ -328,7 +286,7 @@ async fn verify_one_wg(
             Some(WgProbeResult { ip, port, rtt: http_rtt })
         }
         Err(e) => {
-            log::debug!("[-] ironclad wg {ip}:{port} failed real http check: {e}");
+            log::trace!("[-] ironclad wg {ip}:{port} failed real http check: {e}");
             None
         }
     }
@@ -349,12 +307,12 @@ fn build_wg_candidates(st: &WgStrategy, ports: &[u16], ip: IpScan) -> Vec<(IpAdd
     let mut pool: Vec<IpAddr> = Vec::new();
 
     if ip.want_v4() {
-        for s in wireguard::WG_SEEDS_V4 {
+        for s in wireguard::wg_seeds_v4() {
             if let Ok(a) = s.parse::<Ipv4Addr>() {
                 anchors.push(IpAddr::V4(a));
             }
         }
-        let cidr_hosts: Vec<Vec<Ipv4Addr>> = wireguard::WG_PREFIXES_V4
+        let cidr_hosts: Vec<Vec<Ipv4Addr>> = wireguard::wg_prefixes_v4()
             .iter()
             .map(|c| {
                 if st.full_subnet {
@@ -381,7 +339,7 @@ fn build_wg_candidates(st: &WgStrategy, ports: &[u16], ip: IpScan) -> Vec<(IpAdd
             }
         }
         let per = if st.sample_per_cidr == 0 { 80 } else { st.sample_per_cidr };
-        let cidr6: Vec<Vec<Ipv6Addr>> = wireguard::WG_PREFIXES_V6
+        let cidr6: Vec<Vec<Ipv6Addr>> = wireguard::wg_prefixes_v6()
             .iter()
             .map(|c| sample_cidr_v6(c, per, wireguard::WG_PREFIXES_V4))
             .collect();
