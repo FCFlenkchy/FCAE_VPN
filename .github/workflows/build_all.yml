@@ -572,7 +572,14 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
     steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
       - name: download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -612,6 +619,41 @@ jobs:
           done
           ls -lah release-zips/
           test $(ls -1 release-zips/* 2>/dev/null | wc -l) -ge 1
+
+      - name: update version.json
+        run: |
+          set -euo pipefail
+          export TAG="${{ github.event.inputs.release_tag }}"
+          export DATE=$(date +%Y-%m-%d)
+          export NOTES="${{ github.event.inputs.extra_notes }}"
+          export DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases"
+
+          python3 << 'PYEOF'
+import json, os
+tag = os.environ['TAG']
+date = os.environ['DATE']
+notes = os.environ.get('NOTES', '')
+download_url = os.environ['DOWNLOAD_URL']
+data = {
+    'version': tag,
+    'release_date': date,
+    'release_notes': notes,
+    'download_url': download_url
+}
+with open('version.json', 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+print('Updated version.json:')
+print(open('version.json').read())
+PYEOF
+
+      - name: commit version.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.json
+          git commit -m "chore: bump version.json to ${{ github.event.inputs.release_tag }}" || echo "No changes to commit"
+          git push origin main
 
       - name: delete existing release + tag
         uses: actions/github-script@v7

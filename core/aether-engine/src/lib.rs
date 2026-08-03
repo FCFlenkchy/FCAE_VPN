@@ -27,6 +27,7 @@ mod tunnelping;
 mod wg_prober;
 mod wireguard;
 mod zerotrust;
+pub mod version_checker;
 
 /// Public traffic counters for the FFI / GUI.
 pub use stats::{

@@ -43,6 +43,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
     private lateinit var logScroll: ScrollView
     private lateinit var btnConnect: MaterialButton
+    private lateinit var btnCheckUpdates: MaterialButton
+    private lateinit var updateStatus: TextView
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
     private lateinit var spinnerScan: Spinner
@@ -193,6 +195,8 @@ class MainActivity : AppCompatActivity() {
         logText = findViewById(R.id.logText)
         logScroll = findViewById(R.id.logScroll)
         btnConnect = findViewById(R.id.btnConnect)
+        btnCheckUpdates = findViewById(R.id.btnCheckUpdates)
+        updateStatus = findViewById(R.id.updateStatus)
         spinnerProtocol = findViewById(R.id.spinnerProtocol)
         spinnerMode = findViewById(R.id.spinnerMode)
         spinnerScan = findViewById(R.id.spinnerScan)
@@ -259,6 +263,10 @@ class MainActivity : AppCompatActivity() {
             val clip = ClipData.newPlainText("FCAE Logs", logText.text)
             clipboard.setPrimaryClip(clip)
             Toast.makeText(this, "Logs copied", Toast.LENGTH_SHORT).show()
+        }
+
+        btnCheckUpdates.setOnClickListener {
+            checkForUpdates()
         }
 
         updateButton()
@@ -691,6 +699,81 @@ class MainActivity : AppCompatActivity() {
             statsText.text = ""
             peerText.text = ""
         }
+    }
+
+    private fun checkForUpdates() {
+        btnCheckUpdates.isEnabled = false
+        btnCheckUpdates.text = "Checking..."
+        updateStatus.visibility = android.view.View.VISIBLE
+        updateStatus.text = "Checking for updates..."
+
+        // Start async check via native engine (current version from version.json bundled in APK)
+        bgExecutor.execute {
+            try {
+                NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION)
+                // Poll until done (max ~10 seconds)
+                var done = false
+                var info: AetherUpdateInfo? = null
+                for (i in 0..50) {
+                    Thread.sleep(200)
+                    info = NativeEngine.nativePollUpdate()
+                    if (info.checkDone) {
+                        done = true
+                        break
+                    }
+                }
+                val finalInfo = info
+                val finalDone = done
+                handler.post {
+                    btnCheckUpdates.isEnabled = true
+                    if (!finalDone || finalInfo == null) {
+                        btnCheckUpdates.text = "Check for Updates"
+                        updateStatus.text = "Update check timed out"
+                    } else if (finalInfo.updateAvailable) {
+                        btnCheckUpdates.text = "Update Available!"
+                        updateStatus.text = "${finalInfo.statusMessage}"
+                        showUpdateDialog(finalInfo)
+                    } else {
+                        btnCheckUpdates.text = "Check for Updates"
+                        updateStatus.text = "Up to date (${finalInfo.statusMessage})"
+                    }
+                }
+            } catch (e: Throwable) {
+                handler.post {
+                    btnCheckUpdates.isEnabled = true
+                    btnCheckUpdates.text = "Check for Updates"
+                    updateStatus.text = "Update check failed: ${e.message}"
+                }
+            }
+        }
+    }
+
+    private fun showUpdateDialog(info: AetherUpdateInfo) {
+        val msg = buildString {
+            append("Current: ${BuildConfig.APP_VERSION}\n")
+            append("Latest: ${info.latestVersion}\n\n")
+            if (info.releaseNotes.isNotEmpty()) {
+                append("Release Notes:\n${info.releaseNotes}\n\n")
+            }
+            if (info.downloadUrl.isNotEmpty()) {
+                append("Download: ${info.downloadUrl}")
+            }
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Update Available")
+            .setMessage(msg)
+            .setPositiveButton("Open Releases Page") { _, _ ->
+                if (info.downloadUrl.isNotEmpty()) {
+                    try {
+                        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(info.downloadUrl))
+                        startActivity(intent)
+                    } catch (_: Throwable) {
+                        Toast.makeText(this, "Cannot open URL", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     private fun applyStatus(statusJson: String, logs: String) {

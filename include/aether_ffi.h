@@ -92,6 +92,18 @@ typedef struct {
 
 typedef void (*AetherLogCallback)(int level, const char* message, void* user_data);
 
+// ── Version checker ────────────────────────────────────────────────────
+
+typedef struct {
+    bool update_available;
+    bool check_in_progress;
+    bool check_done;
+    char latest_version[32];
+    char release_notes[1024];
+    char download_url[512];
+    char status_message[256];
+} AetherUpdateInfo;
+
 // C-FFI Lifecycle & Controller API
 void aether_init(AetherLogCallback log_cb, void* user_data);
 bool aether_start(const AetherConfig* config);
@@ -100,6 +112,12 @@ void aether_get_telemetry(AetherTelemetry* out_telemetry);
 void aether_get_cached_telemetry(AetherTelemetry* out_telemetry);
 void aether_set_android_tun_fd(int tun_fd); // Pass Android VpnService file descriptor across JNI
 void aether_free(void);
+
+// Version checker – start async check (non-blocking). Call aether_poll_update() to get result.
+void aether_check_update_async(const char* current_version);
+
+// Poll update check status. Fills info struct. Returns true if check completed.
+bool aether_poll_update(AetherUpdateInfo* out_info);
 
 #ifdef __cplusplus
 }

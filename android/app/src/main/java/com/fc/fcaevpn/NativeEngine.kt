@@ -43,4 +43,22 @@ object NativeEngine {
     @JvmStatic external fun nativeGetStatusJson(): String
     @JvmStatic external fun nativeGetLogs(): String
     @JvmStatic external fun nativeClearLogs()
+
+    // ── version checker ─────────────────────────────────────────────
+    @JvmStatic external fun nativeCheckForUpdates(currentVersion: String)
+    @JvmStatic external fun nativePollUpdate(): AetherUpdateInfo
 }
+
+/**
+ * Mirrors the C AetherUpdateInfo struct in aether_ffi.h.
+ * Returned by [NativeEngine.nativePollUpdate].
+ */
+data class AetherUpdateInfo(
+    val updateAvailable: Boolean = false,
+    val checkInProgress: Boolean = false,
+    val checkDone: Boolean = false,
+    val latestVersion: String = "",
+    val releaseNotes: String = "",
+    val downloadUrl: String = "",
+    val statusMessage: String = ""
+)

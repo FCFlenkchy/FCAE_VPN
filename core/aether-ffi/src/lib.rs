@@ -76,6 +76,28 @@ impl TelemetryState {
 
 static TELEMETRY: Mutex<TelemetryState> = Mutex::new(TelemetryState::new());
 
+// ── Version check state ─────────────────────────────────────────────────
+
+struct UpdateState {
+    check_in_progress: bool,
+    check_done: bool,
+    result: Option<aether_engine::version_checker::UpdateCheckResult>,
+    status_message: String,
+}
+
+impl UpdateState {
+    const fn new() -> Self {
+        Self {
+            check_in_progress: false,
+            check_done: false,
+            result: None,
+            status_message: String::new(),
+        }
+    }
+}
+
+static UPDATE_STATE: Mutex<UpdateState> = Mutex::new(UpdateState::new());
+
 use std::ffi::c_void;
 
 #[repr(C)]
@@ -982,6 +1004,113 @@ pub extern "C" fn aether_set_android_tun_fd(tun_fd: i32) {
     }
     std::env::set_var("AETHER_TUN_FD", tun_fd.to_string());
     aether_engine::tun::set_fd(tun_fd);
+}
+
+// ── Version checker FFI ──────────────────────────────────────────────────
+
+#[repr(C)]
+pub struct AetherUpdateInfoOut {
+    pub update_available: bool,
+    pub check_in_progress: bool,
+    pub check_done: bool,
+    pub latest_version: [u8; 32],
+    pub release_notes: [u8; 1024],
+    pub download_url: [u8; 512],
+    pub status_message: [u8; 256],
+}
+
+#[no_mangle]
+pub extern "C" fn aether_check_update_async(current_version: *const c_char) {
+    let cur_ver = cstr_opt(current_version).unwrap_or_else(|| "dev".to_string());
+
+    // Mark check as in progress
+    {
+        let mut state = UPDATE_STATE.lock();
+        if state.check_in_progress {
+            return; // already running
+        }
+        state.check_in_progress = true;
+        state.check_done = false;
+        state.result = None;
+        state.status_message = "Checking for updates...".to_string();
+    }
+
+    // Spawn async check in background thread (reqwest needs tokio runtime)
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let mut state = UPDATE_STATE.lock();
+                state.check_in_progress = false;
+                state.check_done = true;
+                state.status_message = format!("Failed: {e}");
+                return;
+            }
+        };
+
+        let result = rt.block_on(async {
+            match aether_engine::version_checker::fetch_latest_version().await {
+                Ok(info) => {
+                    let r = aether_engine::version_checker::compare_versions(&cur_ver, &info);
+                    Ok(r)
+                }
+                Err(e) => Err(e),
+            }
+        });
+
+        let mut state = UPDATE_STATE.lock();
+        state.check_in_progress = false;
+        state.check_done = true;
+        match result {
+            Ok(r) => {
+                if r.update_available {
+                    state.status_message =
+                        format!("Update available: {}", r.latest_version);
+                } else {
+                    state.status_message = format!("Up to date ({})", r.current_version);
+                }
+                state.result = Some(r);
+            }
+            Err(e) => {
+                state.status_message = e;
+            }
+        }
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn aether_poll_update(out: *mut AetherUpdateInfoOut) -> bool {
+    if out.is_null() {
+        return false;
+    }
+
+    let state = UPDATE_STATE.lock();
+    unsafe {
+        (*out).check_in_progress = state.check_in_progress;
+        (*out).check_done = state.check_done;
+    }
+
+    if let Some(ref r) = state.result {
+        unsafe {
+            (*out).update_available = r.update_available;
+            copy_str_to_buf(&mut (*out).latest_version, &r.latest_version);
+            copy_str_to_buf(&mut (*out).release_notes, &r.release_notes);
+            copy_str_to_buf(&mut (*out).download_url, &r.download_url);
+        }
+    } else {
+        unsafe {
+            (*out).update_available = false;
+        }
+    }
+
+    unsafe {
+        copy_str_to_buf(&mut (*out).status_message, &state.status_message);
+    }
+
+    state.check_done
 }
 
 #[no_mangle]

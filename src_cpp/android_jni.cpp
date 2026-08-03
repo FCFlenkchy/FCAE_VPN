@@ -237,3 +237,50 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeGetTrafficStats(JNIEnv* env, jclass) {
     env->SetLongArrayRegion(out, 0, 4, vals);
     return out;
 }
+
+// ── Version checker JNI ──────────────────────────────────────────────────
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeCheckForUpdates(JNIEnv* env, jclass, jstring currentVersion) {
+    ensure_init();
+    const char* ver = env->GetStringUTFChars(currentVersion, nullptr);
+    aether_check_update_async(ver);
+    env->ReleaseStringUTFChars(currentVersion, ver);
+    LOGI("Version check started (current=%s)", ver);
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
+    ensure_init();
+
+    // Find the AetherUpdateInfo class
+    jclass cls = env->FindClass("com/fc/fcaevpn/AetherUpdateInfo");
+    if (!cls) return nullptr;
+
+    // Get field IDs
+    jfieldID fid_available = env->GetFieldID(cls, "updateAvailable", "Z");
+    jfieldID fid_inProgress = env->GetFieldID(cls, "checkInProgress", "Z");
+    jfieldID fid_done = env->GetFieldID(cls, "checkDone", "Z");
+    jfieldID fid_latest = env->GetFieldID(cls, "latestVersion", "Ljava/lang/String;");
+    jfieldID fid_notes = env->GetFieldID(cls, "releaseNotes", "Ljava/lang/String;");
+    jfieldID fid_dl = env->GetFieldID(cls, "downloadUrl", "Ljava/lang/String;");
+    jfieldID fid_status = env->GetFieldID(cls, "statusMessage", "Ljava/lang/String;");
+
+    // Create object
+    jobject obj = env->AllocObject(cls);
+
+    AetherUpdateInfo info = {};
+    aether_poll_update(&info);
+
+    env->SetBooleanField(obj, fid_available, info.update_available ? JNI_TRUE : JNI_FALSE);
+    env->SetBooleanField(obj, fid_inProgress, info.check_in_progress ? JNI_TRUE : JNI_FALSE);
+    env->SetBooleanField(obj, fid_done, info.check_done ? JNI_TRUE : JNI_FALSE);
+    env->SetObjectField(obj, fid_latest, env->NewStringUTF(info.latest_version));
+    env->SetObjectField(obj, fid_notes, env->NewStringUTF(info.release_notes));
+    env->SetObjectField(obj, fid_dl, env->NewStringUTF(info.download_url));
+    env->SetObjectField(obj, fid_status, env->NewStringUTF(info.status_message));
+
+    return obj;
+}
+
+} // extern "C"

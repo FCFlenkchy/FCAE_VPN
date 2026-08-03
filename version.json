@@ -1,1 +1,6 @@
-
+{
+  "version": "v0.2.0-beta",
+  "release_date": "2026-07-28",
+  "release_notes": "- Initial beta release with MASQUE QUIC + HTTP/2 fallback support.\n- WireGuard and WARP-in-WARP (Gool) protocols.\n- Cross-platform: Android, Windows, Linux, macOS.\n- Zero Trust (Cloudflare Teams) support.",
+  "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
+}

@@ -3,6 +3,21 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Read version from repo-root version.json (single source of truth)
+fun readVersionFromJson(): String {
+    val versionFile = file("${rootProject.projectDir}/../version.json")
+    if (!versionFile.exists()) return "dev"
+    try {
+        val content = versionFile.readText()
+        // Extract "version" field with regex (avoids needing json lib at build time)
+        val regex = Regex(""""version"\s*:\s*"([^"]+)"""")
+        return regex.find(content)?.groupValues?.getOrNull(1) ?: "dev"
+    } catch (_: Exception) {
+        return "dev"
+    }
+}
+val appVersion = readVersionFromJson()
+
 android {
     namespace = "com.fc.fcaevpn"
     compileSdk = 34
@@ -12,7 +27,10 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0.0"
+        versionName = appVersion
+
+        // Expose version to Kotlin via BuildConfig
+        buildConfigField("String", "APP_VERSION", "\"${appVersion}\"")
 
         // Support arm64-v8a, armeabi-v7a, and x86_64 (Chromebook/emulator).
         // The CI workflow passes -PNDK_ABI="arm64-v8a", "armeabi-v7a", or "x86_64" as project property;
@@ -39,6 +57,10 @@ android {
                 )
             }
         }
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {

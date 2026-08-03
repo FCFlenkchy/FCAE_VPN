@@ -9,6 +9,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <unistd.h>
@@ -503,6 +504,97 @@ void render_ui() {
             ImGui::SameLine(0, 6);
             ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", g_app.save_status);
             g_app.save_status[0] = '\0';
+        }
+
+        // ── Check for Updates button ─────────────────────────────────
+        ImGui::SameLine(0, 12);
+        {
+            static bool update_checked = false;
+            static bool update_available = false;
+            static char update_status[128] = {};
+            static char update_latest[32] = {};
+            static char update_notes[1024] = {};
+            static char update_dl_url[512] = {};
+            static bool update_popup_open = false;
+
+            AetherUpdateInfo info = {};
+            bool done = aether_poll_update(&info);
+
+            if (info.check_in_progress) {
+                ImGui::BeginDisabled();
+                ImGui::Button("Checking...", ImVec2(130, 34));
+                ImGui::EndDisabled();
+            } else if (done && info.update_available) {
+                update_available = true;
+                update_checked = true;
+                snprintf(update_latest, sizeof(update_latest), "%s", info.latest_version);
+                snprintf(update_notes, sizeof(update_notes), "%s", info.release_notes);
+                snprintf(update_dl_url, sizeof(update_dl_url), "%s", info.download_url);
+                snprintf(update_status, sizeof(update_status), "%s", info.status_message);
+
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
+                if (ImGui::Button("Update Available!", ImVec2(130, 34))) {
+                    update_popup_open = true;
+                }
+                ImGui::PopStyleColor(2);
+            } else if (done && !info.update_available) {
+                // Check finished — no update needed
+                update_available = false;
+                update_checked = true;
+                snprintf(update_status, sizeof(update_status), "%s", info.status_message);
+                ImGui::Button("Check for Updates", ImVec2(130, 34));
+            } else {
+                if (ImGui::Button("Check for Updates", ImVec2(130, 34))) {
+                    aether_check_update_async(FCAE_VERSION);
+                    update_checked = false;
+                    update_available = false;
+                }
+            }
+
+            // Status text
+            if (done && !update_available && update_checked) {
+                ImGui::SameLine(0, 6);
+                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", update_status);
+            }
+
+            // Update popup modal
+            if (update_popup_open) {
+                ImGui::OpenPopup("##update_popup");
+                update_popup_open = false;
+            }
+            if (ImGui::BeginPopupModal("##update_popup", nullptr,
+                    ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Text("Update Available");
+                ImGui::Spacing();
+                ImGui::Text("Current: " FCAE_VERSION);
+                ImGui::Text("Latest:  %s", update_latest);
+                ImGui::Spacing();
+                if (update_notes[0]) {
+                    ImGui::Text("Release Notes:");
+                    ImGui::TextWrapped("%s", update_notes);
+                }
+                ImGui::Spacing();
+                if (update_dl_url[0]) {
+                    ImGui::Text("Download: %s", update_dl_url);
+                    ImGui::Spacing();
+                    if (ImGui::Button("Open Releases Page")) {
+#if defined(_WIN32)
+                        ShellExecuteA(nullptr, "open", update_dl_url, nullptr, nullptr, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+                        std::string cmd = "open '" + std::string(update_dl_url) + "'";
+                        system(cmd.c_str());
+#elif !defined(ANDROID)
+                        std::string cmd = "xdg-open '" + std::string(update_dl_url) + "' 2>/dev/null";
+                        system(cmd.c_str());
+#endif
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Close"))
+                    ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+            }
         }
 
         ImGui::PopStyleVar(2);

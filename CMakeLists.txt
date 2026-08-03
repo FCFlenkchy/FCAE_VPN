@@ -7,6 +7,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ── Options ───────────────────────────────────────────────────────────────
 option(AETHER_TARGET "Build target" "LINUX_X64")
 
+# ── Extract version from version.json (used by desktop UI for update check) ─
+if(EXISTS "${CMAKE_SOURCE_DIR}/version.json")
+  file(READ "${CMAKE_SOURCE_DIR}/version.json" _ver_json)
+  string(REGEX MATCH "\"version\"[ ]*:[ ]*\"([^\"]+)\"" _ver_match "${_ver_json}")
+  if(CMAKE_MATCH_1)
+    set(FCAE_VERSION "${CMAKE_MATCH_1}")
+  else()
+    set(FCAE_VERSION "dev")
+  endif()
+else()
+  set(FCAE_VERSION "dev")
+endif()
+message(STATUS "FCAE_VERSION = ${FCAE_VERSION}")
+
 # ── Source files ──────────────────────────────────────────────────────────
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
 set(IMGUI_BACKEND_DIR ${IMGUI_DIR}/backends)
@@ -164,6 +178,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         UNICODE _UNICODE
         IMGUI_IMPL_WIN32_DISABLE_GAMEPAD
         AETHER_TARGET_WIN_X64
+        FCAE_VERSION="${FCAE_VERSION}"
     )
 
     target_compile_options(fcaevpn PRIVATE -municode)
@@ -240,6 +255,7 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
     target_compile_definitions(fcaevpn PRIVATE
         IMGUI_IMPL_OPENGL_LOADER_GL3W
         AETHER_TARGET_MACOS
+        FCAE_VERSION="${FCAE_VERSION}"
     )
 
     if(AETHER_TARGET STREQUAL "MACOS_ARM64")
@@ -313,6 +329,7 @@ elseif(UNIX)
     target_compile_definitions(fcaevpn PRIVATE
         IMGUI_IMPL_OPENGL_LOADER_GL3W
         AETHER_TARGET_LINUX_X64
+        FCAE_VERSION="${FCAE_VERSION}"
     )
 
     aether_ffi_lib_path(AETHER_FFI_A x86_64-unknown-linux-gnu)
