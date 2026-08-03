@@ -206,7 +206,7 @@ fn cleanup_adapter_by_name(name: &str) {
 
     // PATCH: Include -IncludeHidden to catch ghost Wintun adapters, and remove PnP device nodes
     let ps_script = format!(
-        "$names = @('{{0}}*', '{{1}}*', '{{2}}*'); \
+        "$names = @('{0}*', '{1}*', '{2}*'); \
          foreach ($n in $names) {{ \
              Get-NetAdapter -Name $n -IncludeHidden -ErrorAction SilentlyContinue | \
                  Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue; \
