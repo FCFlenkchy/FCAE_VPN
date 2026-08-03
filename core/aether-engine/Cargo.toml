@@ -8,14 +8,8 @@ rust-version = "1.88"
 name = "aether_engine"
 path = "src/lib.rs"
 
-[[bin]]
-name = "aether"
-path = "src/main.rs"
-required-features = ["cli"]
-
 [features]
 default = []
-cli = []
 
 [dependencies]
 # Use root quiche submodule; workspace for these crates is quiche/Cargo.toml

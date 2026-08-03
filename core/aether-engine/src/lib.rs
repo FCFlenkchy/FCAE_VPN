@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 mod account;
 mod buffer_pool;
-mod cli;
 mod config;
 mod consts;
 mod dns;
@@ -265,24 +264,6 @@ async fn spawn_local_proxies(
     });
     (socks_task, http_task)
 }
-/// Blocking CLI entry used by the optional binary target.
-pub fn run_cli() -> Result<()> {
-    cli::parse_and_apply()?;
-    let default_filter = if std::env::var("AETHER_VERBOSE").is_ok() {
-        "info,aether=debug"
-    } else {
-        "info"
-    };
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
-        .format_timestamp_millis()
-        .try_init();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| AetherError::Other(format!("tokio runtime: {e}")))?;
-    rt.block_on(run_from_env())
-}
-
 /// Run the engine using AETHER_* environment variables (set by CLI or FFI).
 /// Does not parse argv or initialize the global logger (caller owns that).
 pub async fn run_from_env() -> Result<()> {
