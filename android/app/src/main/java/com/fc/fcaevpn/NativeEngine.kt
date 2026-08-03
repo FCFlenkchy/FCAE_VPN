@@ -36,6 +36,7 @@ object NativeEngine {
         accessToken: String,
         accessEmail: String,
         routesFile: String,
+        routesInline: String,
     ): Boolean
     @JvmStatic external fun nativeStop()
     @JvmStatic external fun nativeFree()

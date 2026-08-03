@@ -79,6 +79,39 @@ All traffic between the client and Cloudflare is encrypted. From Cloudflare onwa
 - Local SOCKS5 and HTTP proxies
 - Native GUI on all platforms (ImGui + DirectX11 / OpenGL on desktop, Kotlin Material UI on Android)
 
+## Inline Routing Rules
+
+You can define custom routing rules directly in the UI (Routes tab) without needing an external file. Rules use a simple format:
+
+```
+[direct]ip:190.9.2.4,192.33.45.6:400,example.com
+[block]gazo.com,10.0.0.0/8,keyword:ads
+```
+
+**Format:**
+- `[direct]` — traffic matching these rules bypasses the VPN (direct connection)
+- `[block]` — traffic matching these rules is blocked entirely
+- Entries are comma or newline separated
+- Unprefixed entries default to `[direct]`
+
+**Supported rule types:**
+| Type | Example | Description |
+|------|---------|-------------|
+| Bare domain | `example.com` | Matches domain and all subdomains |
+| Full domain | `full:example.com` | Exact domain match only |
+| Keyword | `keyword:ads` | Matches if domain contains keyword |
+| Regex | `regexp:^ad[0-9]+\.` | Regex pattern match |
+| IP / CIDR | `10.0.0.0/8`, `1.2.3.4` | IP address or CIDR range |
+| Port | `port:25`, `port:3000-3010` | Port or port range |
+| Private | `private` | All LAN/private IPs |
+| IP with port | `192.33.45.6:400` | IP address with specific port |
+
+**On Desktop:** Open the **Routes** tab and paste rules into the "Inline Routing Rules" text box.
+
+**On Android:** Scroll to "Inline routing rules" and enter your rules. Tap **CONNECT** to apply.
+
+Rules set via inline input take priority and are merged with any rules file specified in the "Routing Rules File" field.
+
 ## Platforms
 
 | Platform | Backend | UI |

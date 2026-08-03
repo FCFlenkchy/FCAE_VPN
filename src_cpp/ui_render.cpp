@@ -155,6 +155,8 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         snprintf(g_app.access_email, sizeof(g_app.access_email), "%s", val.c_str());
     else if (key == "routes_file")
         snprintf(g_app.routes_file, sizeof(g_app.routes_file), "%s", val.c_str());
+    else if (key == "routes_inline")
+        snprintf(g_app.routes_inline, sizeof(g_app.routes_inline), "%s", val.c_str());
 }
 
 static void save_config() {
@@ -201,6 +203,7 @@ static void save_config() {
     fprintf(f, "access_client_secret=%s\n", g_app.access_client_secret);
     fprintf(f, "access_email=%s\n", g_app.access_email);
     fprintf(f, "routes_file=%s\n", g_app.routes_file);
+    fprintf(f, "routes_inline=%s\n", g_app.routes_inline);
     fclose(f);
     snprintf(g_app.save_status, sizeof(g_app.save_status), "Config saved!");
     g_app.add_log(4, ("[ui] config saved: " + path).c_str());
@@ -431,7 +434,7 @@ void render_ui() {
                 g_app.start_busy.store(true);
                 // Snapshot config + own string storage for the worker thread.
                 struct Owned {
-                    std::string noize, peer, path, sni, team, token, email, routes;
+                    std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
                     AetherConfig c{};
                 };
                 // Use unique_ptr with a custom deleter that handles the
@@ -451,6 +454,7 @@ void render_ui() {
                 o->token = g_app.access_token;
                 o->email = g_app.access_email;
                 o->routes = g_app.routes_file;
+                o->routes_inline = g_app.routes_inline;
                 o->c = g_app.to_config();
                 o->c.noize_profile = o->noize.c_str();
                 o->c.force_peer    = o->peer.empty() ? nullptr : o->peer.c_str();
@@ -460,6 +464,7 @@ void render_ui() {
                 o->c.access_token  = o->token.empty() ? nullptr : o->token.c_str();
                 o->c.access_email  = o->email.empty() ? nullptr : o->email.c_str();
                 o->c.routes_file   = o->routes.empty() ? nullptr : o->routes.c_str();
+                o->c.routes_inline = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
                 auto* raw = o.release(); // transfer ownership to the thread
                 std::thread([raw] {
                     // Wrap in a unique_ptr again so the custom deleter
@@ -670,6 +675,15 @@ void render_ui() {
             ImGui::Text("Routing Rules File");
             ImGui::InputTextWithHint("##routes_file", "path/to/routes.txt", g_app.routes_file, sizeof(g_app.routes_file));
             ImGui::TextDisabled("Format: [block] / [direct] sections with domain, IP, CIDR, port rules.");
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::Text("Inline Routing Rules (comma-separated)");
+            ImGui::PushItemWidth(-1);
+            ImGui::InputTextMultiline("##routes_inline", g_app.routes_inline, sizeof(g_app.routes_inline),
+                ImVec2(0, 100), ImGuiInputTextFlags_AllowTabInput);
+            ImGui::PopItemWidth();
+            ImGui::TextDisabled("Format: [direct]ip:190.9.2.4,192.33.45.6:400,domain.com [block]gazo.com,10.0.0.0/8,...");
             ImGui::Spacing();
             ImGui::TextWrapped("Example:\n[block]\nads.example\nkeyword:tracker\n\n[direct]\nprivate\n10.0.0.0/8\nport:3000-3010");
             ImGui::EndChild();

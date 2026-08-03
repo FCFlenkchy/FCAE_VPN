@@ -112,6 +112,8 @@ pub struct AetherCfgRaw {
     pub health_timeout_secs: u32,
     pub live_validate_secs: u32,
     pub sys_profile: i32,   // 0=Auto, 1=Low, 2=Medium, 3=High
+    pub routes_file: *const c_char,
+    pub routes_inline: *const c_char,
 }
 
 #[repr(C)]
@@ -344,6 +346,50 @@ fn ip_version_to_env(v: i32) -> &'static str {
     }
 }
 
+/// Parse inline routes string in format: [direct]ip1,cidr2,domain3 [block]entry4,...
+/// Entries are comma or newline separated. Returns (block_list, direct_list) as newline-separated.
+fn parse_inline_routes(input: &str) -> (String, String) {
+    let mut block = String::new();
+    let mut direct = String::new();
+    let mut current: Option<&mut String> = None;
+
+    // Split by comma first, then by newline within each segment to handle both formats
+    for segment in input.split(',') {
+        for line in segment.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let lowered = trimmed.to_lowercase();
+            if lowered == "[block]" {
+                current = Some(&mut block);
+                continue;
+            }
+            if lowered == "[direct]" {
+                current = Some(&mut direct);
+                continue;
+            }
+            if lowered.starts_with('[') {
+                current = None;
+                continue;
+            }
+            if let Some(target) = current.as_deref_mut() {
+                if !target.is_empty() {
+                    target.push('\n');
+                }
+                target.push_str(trimmed);
+            } else {
+                // No section header yet — treat as direct by default (least surprising)
+                if !direct.is_empty() {
+                    direct.push('\n');
+                }
+                direct.push_str(trimmed);
+            }
+        }
+    }
+    (block, direct)
+}
+
 fn apply_config_env(cfg: &AetherCfgRaw) {
     std::env::set_var("AETHER_PROTOCOL", protocol_to_env(cfg.protocol));
     std::env::set_var("AETHER_SCAN", scan_mode_to_env(cfg.scan_mode));
@@ -564,6 +610,30 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
         std::env::set_var("AETHER_LAN_SHARING", "1");
     } else {
         std::env::remove_var("AETHER_LAN_SHARING");
+    }
+    // Routing rules: file path and inline rules (comma-separated [direct]/[block] format)
+    if let Some(rf) = cstr_opt(cfg.routes_file) {
+        std::env::set_var("AETHER_ROUTES_FILE", rf);
+    } else {
+        std::env::remove_var("AETHER_ROUTES_FILE");
+    }
+    if let Some(ri) = cstr_opt(cfg.routes_inline) {
+        // Parse inline format: [direct]entry1,entry2,... [block]entry3,...
+        // Split into block and direct lists, set AETHER_ROUTE_BLOCK / AETHER_ROUTE_DIRECT
+        let (block, direct) = parse_inline_routes(&ri);
+        if !block.is_empty() {
+            std::env::set_var("AETHER_ROUTE_BLOCK", &block);
+        } else {
+            std::env::remove_var("AETHER_ROUTE_BLOCK");
+        }
+        if !direct.is_empty() {
+            std::env::set_var("AETHER_ROUTE_DIRECT", &direct);
+        } else {
+            std::env::remove_var("AETHER_ROUTE_DIRECT");
+        }
+    } else {
+        std::env::remove_var("AETHER_ROUTE_BLOCK");
+        std::env::remove_var("AETHER_ROUTE_DIRECT");
     }
 }
 

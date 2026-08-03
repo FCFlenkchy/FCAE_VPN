@@ -414,6 +414,28 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
+                android:text="Inline routing rules"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editRoutesInline"
+                android:layout_width="match_parent"
+                android:layout_height="120dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:gravity="top|start"
+                android:hint="[direct]ip:190.9.2.4,domain.com [block]gazo.com,10.0.0.0/8"
+                android:inputType="textMultiLine|textVisiblePassword"
+                android:padding="12dp"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF5A6478"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
                 android:text="Sysprofile (performance)"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />

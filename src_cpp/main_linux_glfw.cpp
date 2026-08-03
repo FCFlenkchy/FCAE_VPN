@@ -115,6 +115,9 @@ int main(int argc, char** argv) {
 
     // Event-driven render loop: use glfwWaitEventsTimeout to sleep when idle.
     // Only renders on input events or a 1 Hz timer for stats updates.
+    // Explicit 60 FPS cap via frame timing even when VSync is off or on high-refresh monitors.
+    auto last_frame_time = std::chrono::steady_clock::now();
+    constexpr auto min_frame_interval = std::chrono::milliseconds(16); // ~60 FPS cap
     while (!glfwWindowShouldClose(window) && g_app.running.load()) {
         // Wait for events with a 1-second timeout for stats refresh.
         // glfwWaitEventsTimeout sleeps the thread when idle, consuming ~0% CPU.
@@ -123,6 +126,13 @@ int main(int argc, char** argv) {
 
         // Only render if the window is still alive after processing events.
         if (glfwWindowShouldClose(window)) break;
+
+        // Throttle to 60 FPS max — skip frame if less than 16ms since last render
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_frame_time < min_frame_interval) {
+            continue;
+        }
+        last_frame_time = now;
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();

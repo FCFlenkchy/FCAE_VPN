@@ -58,6 +58,8 @@ struct AppState {
     char access_email[128] = {};
     // Routing rules file
     char routes_file[256] = {};
+    // Inline routing rules (comma-separated, takes precedence over file)
+    char routes_inline[2048] = {};
     // Tunnel health
     int health_interval_secs = 20;
     int health_max_fails     = 2;
@@ -144,6 +146,7 @@ struct AppState {
         c.access_token  = access_token[0] ? access_token : nullptr;
         c.access_email  = access_email[0] ? access_email : nullptr;
         c.routes_file   = routes_file[0] ? routes_file : nullptr;
+        c.routes_inline = routes_inline[0] ? routes_inline : nullptr;
         return c;
     }
 };

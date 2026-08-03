@@ -81,6 +81,39 @@ FCAE VPN 连接到 **Cloudflare 的 WARP 网络** — 与 Cloudflare 1.1.1.1 DNS
 - 本地 SOCKS5 和 HTTP 代理
 - 所有平台原生 GUI（桌面端 ImGui + DirectX11/OpenGL，Android 端 Kotlin Material UI）
 
+## 内联路由规则
+
+您可以直接在 UI（Routes 选项卡）中定义自定义路由规则，无需外部文件。规则使用简单格式：
+
+```
+[direct]ip:190.9.2.4,192.33.45.6:400,example.com
+[block]gazo.com,10.0.0.0/8,keyword:ads
+```
+
+**格式说明：**
+- `[direct]` — 匹配的流量绕过 VPN（直连）
+- `[block]` — 匹配的流量完全阻止
+- 条目可用逗号或换行分隔
+- 无前缀条目默认为 `[direct]`
+
+**支持的规则类型：**
+| 类型 | 示例 | 说明 |
+|------|---------|-------------|
+| 普通域名 | `example.com` | 匹配域名及所有子域名 |
+| 完整域名 | `full:example.com` | 仅精确匹配域名 |
+| 关键词 | `keyword:ads` | 域名包含关键词即匹配 |
+| 正则表达式 | `regexp:^ad[0-9]+\.` | 正则模式匹配 |
+| IP / CIDR | `10.0.0.0/8`, `1.2.3.4` | IP 地址或 CIDR 范围 |
+| 端口 | `port:25`, `port:3000-3010` | 端口或端口范围 |
+| 私有地址 | `private` | 所有局域网/私有 IP |
+| IP 带端口 | `192.33.45.6:400` | 带指定端口的 IP 地址 |
+
+**桌面端：** 打开 **Routes** 选项卡，将规则粘贴到 "Inline Routing Rules" 文本框中。
+
+**Android 端：** 滚动到 "Inline routing rules" 并输入您的规则。点击 **CONNECT** 应用。
+
+通过内联输入设置的规则优先级更高，并与 "Routing Rules File" 字段中指定的任何规则文件合并。
+
 ## 支持平台
 
 | 平台 | 后端 | UI |

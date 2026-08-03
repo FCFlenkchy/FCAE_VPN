@@ -71,6 +71,8 @@ typedef struct {
 
     // Routing rules file path (sets AETHER_ROUTES_FILE)
     const char* routes_file;
+    // Inline routing rules (comma-separated [direct]/[block] format, sets AETHER_ROUTE_BLOCK/DIRECT)
+    const char* routes_inline;
 } AetherConfig;
 
 typedef struct {

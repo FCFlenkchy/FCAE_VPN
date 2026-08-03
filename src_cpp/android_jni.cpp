@@ -93,7 +93,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jstring teamName,
     jstring accessToken,
     jstring accessEmail,
-    jstring routesFile
+    jstring routesFile,
+    jstring routesInline
 ) {
     ensure_init();
 
@@ -107,6 +108,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     std::string tokenOwned = jstr(env, accessToken);
     std::string emailOwned = jstr(env, accessEmail);
     std::string routesOwned = jstr(env, routesFile);
+    std::string routesInlineOwned = jstr(env, routesInline);
 
     AetherConfig cfg = {};
     cfg.protocol = protocol;
@@ -138,6 +140,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.access_token = tokenOwned.empty() ? nullptr : tokenOwned.c_str();
     cfg.access_email = emailOwned.empty() ? nullptr : emailOwned.c_str();
     cfg.routes_file = routesOwned.empty() ? nullptr : routesOwned.c_str();
+    cfg.routes_inline = routesInlineOwned.empty() ? nullptr : routesInlineOwned.c_str();
 
     bool ok = aether_start(&cfg);
     LOGI("aether_start -> %s", ok ? "ok" : "fail");

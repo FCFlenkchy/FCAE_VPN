@@ -66,6 +66,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editAccessToken: android.widget.EditText
     private lateinit var editAccessEmail: android.widget.EditText
     private lateinit var editRoutesFile: android.widget.EditText
+    private lateinit var editRoutesInline: android.widget.EditText
     private lateinit var outerScroll: ScrollView
 
     private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
@@ -215,6 +216,7 @@ class MainActivity : AppCompatActivity() {
         editAccessToken = findViewById(R.id.editAccessToken)
         editAccessEmail = findViewById(R.id.editAccessEmail)
         editRoutesFile = findViewById(R.id.editRoutesFile)
+        editRoutesInline = findViewById(R.id.editRoutesInline)
         outerScroll = findViewById(R.id.outerScroll)
 
         spinnerProtocol.adapter = ArrayAdapter(
@@ -417,6 +419,7 @@ class MainActivity : AppCompatActivity() {
             putString("accessToken", editAccessToken.text.toString().trim())
             putString("accessEmail", editAccessEmail.text.toString().trim())
             putString("routesFile", editRoutesFile.text.toString().trim())
+            putString("routesInline", editRoutesInline.text.toString().trim())
             apply()
         }
     }
@@ -445,6 +448,7 @@ class MainActivity : AppCompatActivity() {
         editAccessToken.setText(prefs.getString("accessToken", ""))
         editAccessEmail.setText(prefs.getString("accessEmail", ""))
         editRoutesFile.setText(prefs.getString("routesFile", ""))
+        editRoutesInline.setText(prefs.getString("routesInline", ""))
     }
 
     private fun connectClicked() {
@@ -507,6 +511,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("accessToken", editAccessToken.text.toString().trim())
         i.putExtra("accessEmail", editAccessEmail.text.toString().trim())
         i.putExtra("routesFile", editRoutesFile.text.toString().trim())
+        i.putExtra("routesInline", editRoutesInline.text.toString().trim())
         startForegroundService(i)
         // Poll is started by the VPN_STATE_CHANGED broadcast from the service
         // AFTER nativeStart() succeeds — NOT here, to avoid calling native
@@ -550,6 +555,7 @@ class MainActivity : AppCompatActivity() {
         val accessToken = editAccessToken.text.toString().trim()
         val accessEmail = editAccessEmail.text.toString().trim()
         val routesFile = editRoutesFile.text.toString().trim()
+        val routesInline = editRoutesInline.text.toString().trim()
 
         bgExecutor.execute {
             // Ensure previous engine is fully stopped before starting.
@@ -590,6 +596,7 @@ class MainActivity : AppCompatActivity() {
                     accessToken = accessToken,
                     accessEmail = accessEmail,
                     routesFile = routesFile,
+                    routesInline = routesInline,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }

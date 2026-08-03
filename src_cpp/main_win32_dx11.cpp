@@ -6,6 +6,7 @@
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <tchar.h>
+#include <chrono>
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -182,7 +183,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     // Event-driven render loop: only render when input arrives or 1 Hz stats refresh.
     // Eliminates continuous 60 FPS GPU/CPU waste when idle.
+    // Explicit 60 FPS cap via frame timing even when VSync is off or on high-refresh monitors.
     bool done = false;
+    auto last_frame_time = std::chrono::steady_clock::now();
+    constexpr auto min_frame_interval = std::chrono::milliseconds(16); // ~60 FPS cap
     while (!done && g_app.running.load()) {
         // Wait up to 1000ms for user input or window events before waking up.
         // When the VPN is running, wake every 1000ms to update stats.
@@ -197,6 +201,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             if (msg.message == WM_QUIT) { done = true; break; }
         }
         if (done) break;
+
+        // Throttle to 60 FPS max — skip frame if less than 16ms since last render
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_frame_time < min_frame_interval) {
+            continue;
+        }
+        last_frame_time = now;
 
         // Only render when VPN is running (stats updates) or input arrived.
         if (g_app.running.load() || wait_result == WAIT_OBJECT_0) {
