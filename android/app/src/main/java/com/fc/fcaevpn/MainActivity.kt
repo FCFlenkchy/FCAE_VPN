@@ -707,39 +707,41 @@ class MainActivity : AppCompatActivity() {
         updateStatus.visibility = android.view.View.VISIBLE
         updateStatus.text = "Checking for updates..."
 
-        // Fetch version.json via Android's HttpURLConnection (works reliably on Android)
-        // instead of Rust/reqwest which has DNS issues in native threads on Android.
+        // Use the core's native async update checker (reqwest-based HTTP fetch).
+        // The core spawns a background tokio runtime, fetches version.json from
+        // GitHub, parses it, and stores the result. We poll with nativePollUpdate().
+        NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION)
+
+        // Poll for result on a background thread
         Thread {
             try {
-                val url = java.net.URL("https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/version.json")
-                val conn = url.openConnection() as java.net.HttpURLConnection
-                conn.connectTimeout = 8000
-                conn.readTimeout = 10000
-                conn.setRequestProperty("User-Agent", "FCAE-VPN/1.0")
-                val json = conn.inputStream.bufferedReader().use { it.readText() }
-                conn.disconnect()
-
-                // Parse via native engine
-                val ok = NativeEngine.nativeCheckUpdateFromJson(BuildConfig.APP_VERSION, json)
-                if (ok) {
-                    val info = NativeEngine.nativePollUpdate()
-                    handler.post {
-                        btnCheckUpdates.isEnabled = true
-                        if (info.updateAvailable) {
-                            btnCheckUpdates.text = "Update Available!"
-                            updateStatus.text = info.statusMessage
-                            showUpdateDialog(info)
-                        } else {
-                            btnCheckUpdates.text = "Check for Updates"
-                            updateStatus.text = "Up to date (${info.statusMessage})"
-                        }
+                // Wait up to 15 seconds for the check to complete
+                var info: AetherUpdateInfo? = null
+                for (i in 0..30) {
+                    Thread.sleep(500)
+                    val poll = NativeEngine.nativePollUpdate()
+                    if (poll.checkDone) {
+                        info = poll
+                        break
                     }
-                } else {
-                    val info = NativeEngine.nativePollUpdate()
-                    handler.post {
-                        btnCheckUpdates.isEnabled = true
+                }
+                if (info == null) {
+                    val poll = NativeEngine.nativePollUpdate()
+                    info = poll
+                }
+
+                handler.post {
+                    btnCheckUpdates.isEnabled = true
+                    if (info.updateAvailable) {
+                        btnCheckUpdates.text = "Update Available!"
+                        updateStatus.text = info.statusMessage
+                        showUpdateDialog(info)
+                    } else if (info.checkDone) {
                         btnCheckUpdates.text = "Check for Updates"
-                        updateStatus.text = "Failed: ${info.statusMessage}"
+                        updateStatus.text = "Up to date (${info.statusMessage})"
+                    } else {
+                        btnCheckUpdates.text = "Check for Updates"
+                        updateStatus.text = "Check timed out"
                     }
                 }
             } catch (e: Throwable) {
@@ -763,7 +765,7 @@ class MainActivity : AppCompatActivity() {
                 append("Download: ${info.downloadUrl}")
             }
         }
-        androidx.appcompat.app.AlertDialog.Builder(this)
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Update Available")
             .setMessage(msg)
             .setPositiveButton("Open Releases Page") { _, _ ->
@@ -776,8 +778,21 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+            .setNeutralButton("Open Link") { _, _ ->
+                if (info.downloadUrl.isNotEmpty()) {
+                    try {
+                        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(info.downloadUrl))
+                        startActivity(intent)
+                    } catch (_: Throwable) {
+                        Toast.makeText(this, "Cannot open URL", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
             .setNegativeButton("Close", null)
-            .show()
+            .create()
+        // Allow dismissing by tapping outside the dialog
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.show()
     }
 
     private fun applyStatus(statusJson: String, logs: String) {
