@@ -237,8 +237,8 @@ fn cleanup_adapter_by_name(name: &str) {
         }
     }
 
-    // PATCH: Allow Windows PnP Manager 500ms to flush device registry keys
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // PATCH: Allow Windows PnP Manager 20ms to flush device registry keys
+    std::thread::sleep(std::time::Duration::from_millis(20));
     log::info!("[tun_t2s] Complete TUN adapter & ghost PnP node cleanup for '{}'", name);
 }
 
