@@ -180,39 +180,40 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     ui_init();
 
+    // Event-driven render loop: only render when input arrives or 1 Hz stats refresh.
+    // Eliminates continuous 60 FPS GPU/CPU waste when idle.
     bool done = false;
     while (!done && g_app.running.load()) {
+        // Wait up to 1000ms for user input or window events before waking up.
+        // When the VPN is running, wake every 1000ms to update stats.
+        DWORD timeout = g_app.running.load() ? 1000 : INFINITE;
+        DWORD wait_result = MsgWaitForMultipleObjects(0, nullptr, FALSE, timeout, QS_ALLINPUT);
+
+        // Drain all pending window messages.
         MSG msg;
-        bool has_msg = false;
         while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
-            if (msg.message == WM_QUIT) done = true;
-            has_msg = true;
+            if (msg.message == WM_QUIT) { done = true; break; }
         }
         if (done) break;
 
-        // Yield CPU when no messages pending (VSync alone isn't enough on some GPUs)
-        if (!has_msg) {
-            MsgWaitForMultipleObjects(0, nullptr, FALSE, 16, QS_ALLINPUT);
+        // Only render when VPN is running (stats updates) or input arrived.
+        if (g_app.running.load() || wait_result == WAIT_OBJECT_0) {
+            ImGui_ImplDX11_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
+
+            ui_frame();
+
+            ImGui::Render();
+            const float clear_color[4] = { 0.05f, 0.05f, 0.08f, 1.0f };
+            g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+            g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+            g_pSwapChain->Present(1, 0);
         }
-
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-
-        ui_frame();
-
-        ImGui::Render();
-        const float clear_color[4] = { 0.05f, 0.05f, 0.08f, 1.0f };
-        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
-        g_pSwapChain->Present(1, 0);
-
-        // Cap at ~60 FPS without VSync (VSync causes white screen on some GPUs)
-        Sleep(16);
     }
 
     ui_shutdown();

@@ -89,8 +89,12 @@ int main(int argc, char** argv) {
 
     ui_init();
 
+    // Event-driven render loop: use glfwWaitEventsTimeout to sleep when idle.
     while (!glfwWindowShouldClose(window) && g_app.running.load()) {
-        glfwPollEvents();
+        double timeout = g_app.running.load() ? 1.0 : 1e10;
+        glfwWaitEventsTimeout(timeout);
+
+        if (glfwWindowShouldClose(window)) break;
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -107,9 +111,6 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(window);
-
-        // Cap at ~60 FPS
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
 
     ui_shutdown();

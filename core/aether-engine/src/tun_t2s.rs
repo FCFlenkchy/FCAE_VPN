@@ -199,63 +199,47 @@ fn cleanup_adapter_by_name(name: &str) {
         c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     };
 
-    // Use PowerShell to remove ALL adapters whose name starts with this name
-    // (handles "FCAE VPN", "FCAE VPN 1", "FCAE VPN 2", etc.)
-    // Also try with hyphen replacement since Windows/tun2socks may convert underscores to hyphens
-    // Remove-NetAdapter is the proper way to delete Wintun adapters from Windows
+    // Use PowerShell to remove ALL adapters including hidden/ghost (Wintun PnP nodes)
+    // that persist after crashes. Also try with hyphen/underscore replacements.
     let name_hyphen = name.replace('_', "-");
     let name_underscore = name.replace('-', "_");
+
+    // PATCH: Include -IncludeHidden to catch ghost Wintun adapters, and remove PnP device nodes
     let ps_script = format!(
-        "Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue; Get-NetAdapter -Name '{}*' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue",
-        name, name_hyphen
+        "$names = @('{{0}}*', '{{1}}*', '{{2}}*'); \
+         foreach ($n in $names) {{ \
+             Get-NetAdapter -Name $n -IncludeHidden -ErrorAction SilentlyContinue | \
+                 Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue; \
+             Get-PnpDevice -Class Net -FriendlyName $n -ErrorAction SilentlyContinue | \
+                 Where-Object {{ $_.InstanceId -like '*WINTUN*' }} | \
+                 Remove-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue \
+         }}",
+        name, name_hyphen, name_underscore
     );
+
     let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_script]);
-    match output {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            if !stdout.trim().is_empty() {
-                log::info!("[tun_t2s] PowerShell Remove-NetAdapter: {}", stdout.trim());
-            }
+    if let Ok(o) = output {
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        if !stdout.trim().is_empty() {
+            log::info!("[tun_t2s] PowerShell Wintun PnP cleanup: {}", stdout.trim());
         }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            if !stderr.trim().is_empty() {
-                log::debug!("[tun_t2s] PowerShell Remove-NetAdapter: {}", stderr.trim());
-            }
-        }
-        Err(e) => log::debug!("[tun_t2s] PowerShell Remove-NetAdapter error: {}", e),
     }
 
-    // Also try netsh as fallback for older Windows versions
-    // Try both underscore and hyphen versions
-    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", name]);
-    let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", &name_hyphen]);
-    if name_hyphen != name_underscore {
-        let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", &name_underscore]);
-    }
-    for i in 2..20 {
+    // PATCH: Start from index 1 instead of 2, and check up to 50
+    for i in 1..=50 {
         let numbered = format!("{} {}", name, i);
         let numbered_hyphen = format!("{} {}", name_hyphen, i);
-        let output = run_silent("netsh", &["interface", "ip", "delete", "interface", &numbered]);
-        match output {
-            Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh deleted '{}'", numbered),
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                if stderr.contains("No matching") {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-        let output = run_silent("netsh", &["interface", "ip", "delete", "interface", &numbered_hyphen]);
-        match output {
-            Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh deleted '{}'", numbered_hyphen),
-            Ok(_) => {}
-            Err(_) => {}
+        let numbered_hash = format!("{} #{}", name, i);
+        let numbered_hash_hyphen = format!("{} #{}", name_hyphen, i);
+
+        for target in &[&numbered, &numbered_hyphen, &numbered_hash, &numbered_hash_hyphen] {
+            let _ = run_silent("netsh", &["interface", "ip", "delete", "interface", target]);
         }
     }
 
-    log::info!("[tun_t2s] TUN adapter cleanup complete for '{}'", name);
+    // PATCH: Allow Windows PnP Manager 500ms to flush device registry keys
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    log::info!("[tun_t2s] Complete TUN adapter & ghost PnP node cleanup for '{}'", name);
 }
 
 #[cfg(not(target_os = "windows"))]
