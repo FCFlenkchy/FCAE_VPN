@@ -350,7 +350,8 @@ jobs:
           mkdir -p build && cd build
           cmake .. -G Ninja -DCMAKE_CXX_COMPILER=g++ \
             -DCMAKE_PREFIX_PATH=/usr/local/glfw_static \
-            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
+            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
+            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}"
           cmake --build . --config Release
 
       - name: build frontend (windows)
@@ -358,7 +359,8 @@ jobs:
         run: |
           mkdir -p build && cd build
           cmake .. -G Ninja \
-            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
+            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
+            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}"
           cmake --build . --config Release
 
       - name: build frontend (macOS)
@@ -371,7 +373,8 @@ jobs:
             export CMAKE_PREFIX_PATH=/usr/local/glfw_arm64
           fi
           cmake .. -G Ninja \
-            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }}
+            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
+            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}"
           cmake --build . --config Release
 
       - name: build apk
@@ -514,6 +517,11 @@ jobs:
           echo "Binary dynamic dependencies:"
           otool -L "$APP/Contents/MacOS/fcaevpn" || true
 
+          # Strip leading 'v' from release_tag for macOS version (must be x.y.z format)
+          RAW_TAG="${{ github.event.inputs.release_tag }}"
+          MACOS_VER="${RAW_TAG#v}"
+          # If MACOS_VER has more than 3 dots (e.g. 1.0.9.4), use only first 3 components
+          MACOS_VER=$(echo "$MACOS_VER" | awk -F. '{if(NF>3) print $1"."$2"."$3; else print $0}')
           printf '%s\n' \
             '<?xml version="1.0" encoding="UTF-8"?>' \
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
@@ -526,9 +534,9 @@ jobs:
             '    <key>CFBundleName</key>' \
             '    <string>FCAE VPN</string>' \
             '    <key>CFBundleVersion</key>' \
-            '    <string>1.0.0</string>' \
+            '    <string>'"${MACOS_VER}"'</string>' \
             '    <key>CFBundleShortVersionString</key>' \
-            '    <string>1.0.0</string>' \
+            '    <string>'"${MACOS_VER}"'</string>' \
             '    <key>CFBundlePackageType</key>' \
             '    <string>APPL</string>' \
             '    <key>CFBundleIconFile</key>' \

@@ -1,4 +1,5 @@
 #include <windows.h>
+#include "version_rc.h"
 
 // Resource id 101 — must match MAKEINTRESOURCE(IDI_ICON1) in main_win32_dx11.cpp
 101 ICON "icon.ico"
@@ -8,8 +9,8 @@
 
 // Version Info
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION FCAE_VERSION_MAJOR,FCAE_VERSION_MINOR,FCAE_VERSION_PATCH,FCAE_VERSION_BUILD
+PRODUCTVERSION FCAE_VERSION_MAJOR,FCAE_VERSION_MINOR,FCAE_VERSION_PATCH,FCAE_VERSION_BUILD
 FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
 FILEFLAGS 0x1L
@@ -26,12 +27,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "FC"
             VALUE "FileDescription", "FCAE VPN - Secure Tunnel Client"
-            VALUE "FileVersion", "1.0.0.0"
+            VALUE "FileVersion", FCAE_VERSION_STR
             VALUE "InternalName", "FCAE_VPN"
             VALUE "LegalCopyright", "Copyright (C) FC"
             VALUE "OriginalFilename", "FCAE_VPN.exe"
             VALUE "ProductName", "FCAE VPN"
-            VALUE "ProductVersion", "1.0.0.0"
+            VALUE "ProductVersion", FCAE_VERSION_STR
         END
     END
     BLOCK "VarFileInfo"

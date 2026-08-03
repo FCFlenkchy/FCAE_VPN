@@ -964,7 +964,7 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     // Use a persistent GUID on Windows so the adapter name doesn't get a
     // numeric suffix on reconnect (FCAE_VPN 2, FCAE_VPN 3, ...).
     #[cfg(target_os = "windows")]
-    let device = format!("tun://{}?guid={{7FE5A4A1-1326-40E2-974C-EF617156ACA8}}", cfg.name);
+    let device = format!("tun://{}?guid={{24198F4C-7895-434C-AD65-9E29A92DDC61}}", cfg.name);
     #[cfg(not(target_os = "windows"))]
     let device = format!("tun://{}", cfg.name);
     let proxy = if let (Some(user), Some(pass)) = (&cfg.username, &cfg.password) {

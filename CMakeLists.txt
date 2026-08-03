@@ -7,8 +7,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ── Options ───────────────────────────────────────────────────────────────
 option(AETHER_TARGET "Build target" "LINUX_X64")
 
-# ── Extract version from version.json (used by desktop UI for update check) ─
-if(EXISTS "${CMAKE_SOURCE_DIR}/version.json")
+# ── Determine version (override from workflow → version.json → fallback) ─
+if(DEFINED FCAE_VERSION_OVERRIDE AND NOT FCAE_VERSION_OVERRIDE STREQUAL "")
+  set(FCAE_VERSION "${FCAE_VERSION_OVERRIDE}")
+  message(STATUS "FCAE_VERSION (override) = ${FCAE_VERSION}")
+elseif(EXISTS "${CMAKE_SOURCE_DIR}/version.json")
   file(READ "${CMAKE_SOURCE_DIR}/version.json" _ver_json)
   string(REGEX MATCH "\"version\"[ ]*:[ ]*\"([^\"]+)\"" _ver_match "${_ver_json}")
   if(CMAKE_MATCH_1)
@@ -16,10 +19,45 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/version.json")
   else()
     set(FCAE_VERSION "dev")
   endif()
+  message(STATUS "FCAE_VERSION (from version.json) = ${FCAE_VERSION}")
 else()
   set(FCAE_VERSION "dev")
+  message(STATUS "FCAE_VERSION (fallback) = ${FCAE_VERSION}")
 endif()
-message(STATUS "FCAE_VERSION = ${FCAE_VERSION}")
+
+# ── Parse version into MAJOR.MINOR.PATCH.BUILD for Windows RC ────────────
+# FCAE_VERSION is e.g. "v0.2.0-beta", "v1.4.1", or "v1.0.9.4"
+set(FCAE_VERSION_MAJOR 0)
+set(FCAE_VERSION_MINOR 0)
+set(FCAE_VERSION_PATCH 0)
+set(FCAE_VERSION_BUILD 0)
+# Try 4-component first (v1.0.9.4), then 3-component (v1.4.1)
+string(REGEX MATCH "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)\\.([0-9]+)" _v4_match "${FCAE_VERSION}")
+if(CMAKE_MATCH_1)
+  set(FCAE_VERSION_MAJOR "${CMAKE_MATCH_1}")
+  set(FCAE_VERSION_MINOR "${CMAKE_MATCH_2}")
+  set(FCAE_VERSION_PATCH "${CMAKE_MATCH_3}")
+  set(FCAE_VERSION_BUILD "${CMAKE_MATCH_4}")
+else()
+  string(REGEX MATCH "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)" _v3_match "${FCAE_VERSION}")
+  if(CMAKE_MATCH_1)
+    set(FCAE_VERSION_MAJOR "${CMAKE_MATCH_1}")
+    set(FCAE_VERSION_MINOR "${CMAKE_MATCH_2}")
+    set(FCAE_VERSION_PATCH "${CMAKE_MATCH_3}")
+  endif()
+endif()
+message(STATUS "FCAE_VERSION_WIN = ${FCAE_VERSION_MAJOR}.${FCAE_VERSION_MINOR}.${FCAE_VERSION_PATCH}.${FCAE_VERSION_BUILD}")
+
+# Generate version header for Windows .rc file
+configure_file(
+  "${CMAKE_SOURCE_DIR}/src_cpp/version_rc.h.in"
+  "${CMAKE_BINARY_DIR}/version_rc.h"
+  @ONLY
+)
+# Add binary dir to include path so icon.rc can find version_rc.h
+if(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
+  include_directories("${CMAKE_BINARY_DIR}")
+endif()
 
 # ── Source files ──────────────────────────────────────────────────────────
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
@@ -172,6 +210,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         ${IMGUI_DIR} ${IMGUI_BACKEND_DIR}
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src_cpp
+        ${CMAKE_BINARY_DIR}
     )
 
     target_compile_definitions(fcaevpn PRIVATE
@@ -250,6 +289,7 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         ${IMGUI_DIR} ${IMGUI_BACKEND_DIR}
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src_cpp
+        ${CMAKE_BINARY_DIR}
     )
 
     target_compile_definitions(fcaevpn PRIVATE
@@ -324,6 +364,7 @@ elseif(UNIX)
         ${IMGUI_DIR} ${IMGUI_BACKEND_DIR}
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src_cpp
+        ${CMAKE_BINARY_DIR}
     )
 
     target_compile_definitions(fcaevpn PRIVATE
