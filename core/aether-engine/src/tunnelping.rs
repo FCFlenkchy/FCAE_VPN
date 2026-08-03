@@ -31,7 +31,7 @@ fn http_probe_port() -> u16 {
         .unwrap_or(80)
 }
 
-async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
+pub async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
     let ip = socks::dns_resolve(stack, HTTP_PROBE_HOST).await?;
     let dst = SocketAddr::new(ip, http_probe_port());
 
@@ -88,6 +88,11 @@ fn http_status_code(status_line: &str) -> Option<u16> {
         return None;
     }
     parts.next()?.parse().ok()
+}
+
+/// Public alias — used by the health monitor and live validation in lib.rs
+pub async fn live_stack_probe(stack: &netstack::StackHandle) -> Result<()> {
+    http_probe(stack).await
 }
 
 pub struct MasquePingParams {

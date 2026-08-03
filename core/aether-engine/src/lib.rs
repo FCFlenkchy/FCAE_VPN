@@ -447,16 +447,16 @@ async fn load_or_provision_masque(config_path: &str) -> Result<account::Identity
             return Ok(identity);
         }
         log::info!("[+] masque identity missing credentials; enrolling masque key");
-        let (cert_pem, key_pem) = account::ensure_masque_enrolled(&identity).await?;
-        let identity = account::Identity { cert_pem, key_pem, ..identity };
+        let enrollment = account::ensure_masque_enrolled(&identity).await?;
+        let identity = account::Identity { cert_pem: enrollment.cert_pem, key_pem: enrollment.key_pem, ..identity };
         config::save(config_path, &identity)?;
         return Ok(identity);
     }
 
     log::info!("[+] no masque identity found; provisioning dedicated masque account");
     let identity = account::provision_wg(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, None).await?;
-    let (cert_pem, key_pem) = account::ensure_masque_enrolled(&identity).await?;
-    let identity = account::Identity { cert_pem, key_pem, ..identity };
+    let enrollment = account::ensure_masque_enrolled(&identity).await?;
+    let identity = account::Identity { cert_pem: enrollment.cert_pem, key_pem: enrollment.key_pem, ..identity };
     config::save(config_path, &identity)?;
     log::info!("[+] provisioned and saved new masque identity to {config_path}");
     Ok(identity)
@@ -684,6 +684,8 @@ async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr
             key_pem: identity.key_pem.clone(),
             local_ipv4: parse_local_v4(&identity.ipv4),
             quiet: true,
+            pin_endpoint: false,
+            expected_pins: Vec::new(),
         };
         return masque_h2::verify_h2(&cfg, std::time::Duration::from_secs(5))
             .await
@@ -831,7 +833,7 @@ async fn run_masque(
 type TunBridge = (
     i32,
     tokio::sync::mpsc::Sender<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    tokio::sync::mpsc::Receiver<Vec<u8>>,
 );
 
 /// Wire tunnel channels to netstack. Only fan-out when a real TUN fd is present
@@ -841,10 +843,10 @@ type TunBridge = (
 /// the TUN is managed externally and we don't need to bridge channels.
 fn split_dataplane(
     outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
-    inbound_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    inbound_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) -> (
     tokio::sync::mpsc::Sender<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    tokio::sync::mpsc::Receiver<Vec<u8>>,
     Option<TunBridge>,
 ) {
     // Check if we should use tun2socks (non-Android TUN mode)
@@ -868,8 +870,8 @@ fn split_dataplane(
     };
 
     let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
-    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(512);
-    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(512);
+    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
 
     let ot_ns = outbound_tx.clone();
     tokio::spawn(async move {
@@ -880,12 +882,12 @@ fn split_dataplane(
         }
     });
 
-    // Tunnel → netstack + TUN (zero-copy via Bytes refcount).
+    // Tunnel → netstack + TUN.
     let mut inbound_rx = inbound_rx;
     tokio::spawn(async move {
-        while let Some(b) = inbound_rx.recv().await {
-            let _ = ns_in_tx.send(b.clone()).await;
-            let _ = tun_in_tx.send(b).await;
+        while let Some(pkt) = inbound_rx.recv().await {
+            let _ = ns_in_tx.send(pkt.clone()).await;
+            let _ = tun_in_tx.send(pkt).await;
         }
     });
 
@@ -958,6 +960,8 @@ async fn run_masque_tunnel(
             key_pem: identity.key_pem.clone(),
             local_ipv4: parse_local_v4(&identity.ipv4),
             quiet: false,
+            pin_endpoint: false,
+            expected_pins: Vec::new(),
         };
         log::info!("[+] MASQUE transport: HTTP/2 (TCP) to {}", h2cfg.peer);
         tokio::spawn(masque_h2::run(h2cfg, internals, Some(addr_tx), Some(ready_tx)))
@@ -1347,7 +1351,7 @@ async fn run_wireguard_tunnel(
     };
 
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(512);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(256);
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
 
@@ -1491,7 +1495,7 @@ async fn establish_wg(
     };
 
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(512);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(256);
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
     let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;

@@ -87,7 +87,7 @@ pub fn resolve_fd() -> Option<i32> {
 pub async fn run(
     fd: i32,
     outbound_tx: mpsc::Sender<Vec<u8>>,
-    mut inbound_rx: mpsc::Receiver<bytes::Bytes>,
+    mut inbound_rx: mpsc::Receiver<Vec<u8>>,
 ) -> Result<()> {
     let dup = unsafe { libc::dup(fd) };
     if dup < 0 {
@@ -195,7 +195,7 @@ pub async fn run(
 pub async fn run(
     _fd: i32,
     _outbound_tx: mpsc::Sender<Vec<u8>>,
-    _inbound_rx: mpsc::Receiver<bytes::Bytes>,
+    _inbound_rx: mpsc::Receiver<Vec<u8>>,
 ) -> Result<()> {
     Err(AetherError::Other("TUN not supported on this platform".into()))
 }
