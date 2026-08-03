@@ -109,23 +109,37 @@ pub async fn run(
 
     let read_task = tokio::task::spawn_blocking(move || {
         let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
-        let mut buf = vec![0u8; 16384];
         loop {
-            match file.read(&mut buf) {
+            // Read directly into a pooled buffer — avoids a 16 KB memcpy
+            // per packet compared to the old read-into-stack-then-copy
+            // approach. The pool recycles allocations so we don't churn
+            // the allocator on every packet either.
+            let mut pkt = crate::buffer_pool::take(16384);
+            let cap = pkt.capacity();
+            // SAFETY: we set len to capacity so read() has valid mutable
+            // space to write into. The buffer was just taken from the pool
+            // (or freshly allocated), so the memory is initialized enough
+            // for read() to overwrite. We immediately truncate to the
+            // actual bytes read afterwards.
+            unsafe { pkt.set_len(cap); }
+            match file.read(&mut pkt) {
                 Ok(0) => {
                     let _ = err_tx_r.blocking_send("tun eof".into());
                     break;
                 }
                 Ok(n) => {
+                    unsafe { pkt.set_len(n); }
                     crate::stats::add_tx(n as u64);
-                    let mut pkt = crate::buffer_pool::take(n);
-                    pkt.extend_from_slice(&buf[..n]);
                     if out_tx.blocking_send(pkt).is_err() {
                         break;
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    crate::buffer_pool::recycle(pkt);
+                    continue;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    crate::buffer_pool::recycle(pkt);
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 Err(e) => {
