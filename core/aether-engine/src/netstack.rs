@@ -10,6 +10,7 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address,
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{AetherError, Result};
+use crate::stats;
 
 fn tcp_buf() -> usize {
     crate::sysprofile::netstack_tcp_buf_bytes()
@@ -471,11 +472,12 @@ async fn run(
             maybe = inbound_rx.recv() => {
                 match maybe {
                     Some(pkt) => {
+                        stats::add_rx(pkt.len() as u64);
                         s.device.rx.push_back(pkt);
                         let mut n = 0;
                         while n < MAX_INGEST_PER_TICK {
                             match inbound_rx.try_recv() {
-                                Ok(p) => { s.device.rx.push_back(p); n += 1; }
+                                Ok(p) => { stats::add_rx(p.len() as u64); s.device.rx.push_back(p); n += 1; }
                                 Err(_) => break,
                             }
                         }
@@ -760,6 +762,7 @@ fn service_udp(s: &mut NetStack) -> bool {
 fn flush_tx(s: &mut NetStack, outbound_tx: &mpsc::Sender<Vec<u8>>) -> usize {
     let mut dropped = 0;
     while let Some(pkt) = s.device.tx.pop_front() {
+        stats::add_tx(pkt.len() as u64);
         match outbound_tx.try_send(pkt) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => dropped += 1,
