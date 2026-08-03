@@ -148,12 +148,13 @@ pub fn is_available() -> bool {
     get_tun2socks_path().is_ok()
 }
 
-/// Force-kill any running tun2socks processes and clean up TUN adapters.
+/// Force-kill any running tun2socks processes.
 /// This is the emergency cleanup — call from outside the tokio runtime
-/// (e.g., from aether_stop / aether_free) to ensure cleanup even when
-/// the runtime is being torn down and can't run async tasks.
+/// (e.g., from aether_stop / aether_free) to ensure the process is killed
+/// even when the runtime is being torn down and can't run async tasks.
+/// Does NOT delete the adapter — that's handled by the normal shutdown path.
 #[cfg(target_os = "windows")]
-pub fn force_cleanup_windows(name: &str) {
+pub fn force_cleanup_windows(_name: &str) {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -166,23 +167,26 @@ pub fn force_cleanup_windows(name: &str) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-
-    // Also kill by name with wildcard to catch renamed instances
-    let mut c = Command::new("taskkill");
-    c.creation_flags(CREATE_NO_WINDOW);
-    let _ = c.args(["/FI", "IMAGENAME eq tun2socks.exe", "/F", "/T"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    // Clean up the TUN adapter — remove routes and delete interface
-    log::info!("[tun_t2s] Force-cleaning TUN adapter '{}'", name);
-    cleanup_adapter_by_name(name);
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn force_cleanup_windows(_name: &str) {
     // No-op on non-Windows
+}
+
+/// Quick removal of the default route pointing to a given TUN IP.
+/// Fast alternative to full adapter deletion for pre-startup cleanup.
+#[cfg(target_os = "windows")]
+fn remove_default_route_windows(tun_ip: &str) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let mut c = Command::new("route");
+    c.creation_flags(CREATE_NO_WINDOW);
+    let _ = c.args(["DELETE", "0.0.0.0", "MASK", "0.0.0.0", tun_ip])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Clean up a named TUN adapter — removes routes, resets DNS, deletes interface.
@@ -945,16 +949,15 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         ));
     }
 
-    // ── Pre-startup: always clean up any existing TUN adapter ──
-    // Tun2socks cannot reliably reuse an adapter from a previous run.
-    // If an adapter with our name already exists, delete it so tun2socks
-    // creates a fresh one without numbering (FCAE-VPN 2, 3, etc.).
+    // ── Pre-startup: remove routes from any leftover adapter (fast) ──
+    // The persistent GUID ensures tun2socks reuses the same adapter.
+    // We just clear stale routes — no need to delete the adapter before start
+    // which was slow (PowerShell + netsh loops + 200ms wait).
     #[cfg(target_os = "windows")]
     {
-        log::info!("[tun_t2s] Cleaning up any existing '{}' adapter before start", cfg.name);
-        cleanup_adapter_by_name(&cfg.name);
-        // Brief wait for Windows to release adapter names
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        log::info!("[tun_t2s] Removing any stale routes on '{}'", cfg.name);
+        let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+        remove_default_route_windows(ip);
     }
 
     // Extract embedded binary
@@ -1105,28 +1108,10 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     tokio::select! {
         _ = shutdown => {
             log::info!("[tun_t2s] Shutting down tun2socks (pid={})", pid);
-            // Kill the child process
+            // Kill the child process (child_guard handles taskkill /F /T)
             child_guard.kill();
-            // Kill using taskkill on Windows — use /T to kill the whole process tree.
-            // Run silently with CREATE_NO_WINDOW to avoid console popup.
             #[cfg(target_os = "windows")]
             {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x08000000;
-                // First attempt: graceful taskkill
-                let mut c = Command::new("taskkill");
-                c.creation_flags(CREATE_NO_WINDOW);
-                let _ = c.args(["/PID", &pid.to_string(), "/T"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-                // Second attempt: force kill
-                let mut c = Command::new("taskkill");
-                c.creation_flags(CREATE_NO_WINDOW);
-                let _ = c.args(["/PID", &pid.to_string(), "/F", "/T"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
                 cleanup_windows_tun(&cfg);
             }
             #[cfg(not(target_os = "windows"))]
@@ -1172,31 +1157,10 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
         }
     }
 
-    // Extra safety: ensure child is killed on any exit path.
-    // Run silently to avoid console popup.
+    // ── Final safety: ensure child process is dead ──
+    // The select branches above already handle cleanup on shutdown/exit.
+    // This is a last-resort safety net if something went wrong.
     child_guard.kill();
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let mut c = Command::new("taskkill");
-        c.creation_flags(CREATE_NO_WINDOW);
-        let _ = c.args(["/PID", &pid.to_string(), "/F", "/T"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        cleanup_windows_tun(&cfg);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
-        cleanup_linux_tun(&cfg);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
-        cleanup_macos_tun(&cfg);
-    }
 
     log::info!("[tun_t2s] TUN shut down");
     Ok(())
