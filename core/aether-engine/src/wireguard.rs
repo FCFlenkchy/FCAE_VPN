@@ -291,11 +291,19 @@ impl WgTunnel {
 
         let stale_timeout = wg_stale_timeout();
         let health_task = tokio::spawn(async move {
+            // Grace period: skip health checks for the first 15s to allow
+            // handshake + initial data-plane validation to complete.
+            let health_start = std::time::Instant::now() + std::time::Duration::from_secs(15);
             let mut interval = tokio::time::interval(WG_HEALTHCHECK_INTERVAL);
             let probe = build_dataplane_probe(local_ipv4);
             let mut out_buf = vec![0u8; MAX_PACKET];
             loop {
                 interval.tick().await;
+
+                // Don't enforce staleness during the grace period.
+                if std::time::Instant::now() < health_start {
+                    continue;
+                }
 
                 let idle = last_valid_rx_h.lock().unwrap().elapsed();
                 if idle >= stale_timeout {
@@ -350,14 +358,14 @@ impl WgTunnel {
     }
 }
 
-const WG_HEALTHCHECK_INTERVAL: Duration = Duration::from_secs(3);
+const WG_HEALTHCHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 fn wg_stale_timeout() -> Duration {
     let secs = std::env::var("AETHER_WG_STALE_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(10);
+        .unwrap_or(25);
     Duration::from_secs(secs)
 }
 
@@ -409,7 +417,7 @@ fn build_dataplane_probe(src: Ipv4Addr) -> Vec<u8> {
     pkt.push(17);
     pkt.extend_from_slice(&[0x00, 0x00]);
     pkt.extend_from_slice(&src.octets());
-    pkt.extend_from_slice(&Ipv4Addr::new(8, 8, 8, 8).octets());
+    pkt.extend_from_slice(&Ipv4Addr::new(1, 1, 1, 1).octets());
     let csum = ipv4_checksum(&pkt[0..20]);
     pkt[10..12].copy_from_slice(&csum.to_be_bytes());
     let sport: u16 = rand::thread_rng().gen_range(20000..60000);
