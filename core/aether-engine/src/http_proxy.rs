@@ -6,7 +6,6 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::error::{AetherError, Result};
 use crate::netstack::StackHandle;
 use crate::socks;
-use crate::stats;
 
 /// Minimal HTTP CONNECT proxy (and absolute-URI GET/POST for plain HTTP).
 /// Used by the GUI "HTTP" port (default 1820).
@@ -90,7 +89,7 @@ async fn handle_client(sock: TcpStream, stack: StackHandle) -> Result<()> {
         let path = absolute_uri_path(target);
         let rebuilt = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
         let (sender, mut from_stack) = conn.into_split();
-        stats::add_tx(rebuilt.len() as u64);
+        // NOTE: no add_tx here — netstack.rs counts all tunnel-bound traffic.
         if sender.send(rebuilt.into_bytes()).await.is_err() {
             return Err(AetherError::Other("tunnel send failed".into()));
         }
@@ -105,7 +104,6 @@ async fn handle_client(sock: TcpStream, stack: StackHandle) -> Result<()> {
                         break;
                     }
                     Ok(n) => {
-                        stats::add_tx(n as u64);
                         if sender.send(buf[..n].to_vec()).await.is_err() {
                             break;
                         }
@@ -119,7 +117,7 @@ async fn handle_client(sock: TcpStream, stack: StackHandle) -> Result<()> {
         });
 
         while let Some(chunk) = from_stack.recv().await {
-            stats::add_rx(chunk.len() as u64);
+            // NOTE: no add_rx here — netstack.rs counts all tunnel-inbound traffic.
             if wr.write_all(&chunk).await.is_err() {
                 break;
             }
@@ -143,7 +141,7 @@ async fn relay_bidirectional(sock: TcpStream, conn: crate::netstack::TcpConn) ->
                     break;
                 }
                 Ok(n) => {
-                    stats::add_tx(n as u64);
+                    // NOTE: no add_tx here — netstack.rs counts all tunnel-bound traffic.
                     if sender.send(buf[..n].to_vec()).await.is_err() {
                         break;
                     }
@@ -157,7 +155,7 @@ async fn relay_bidirectional(sock: TcpStream, conn: crate::netstack::TcpConn) ->
     });
 
     while let Some(chunk) = from_stack.recv().await {
-        stats::add_rx(chunk.len() as u64);
+        // NOTE: no add_rx here — netstack.rs counts all tunnel-inbound traffic.
         if wr.write_all(&chunk).await.is_err() {
             break;
         }
