@@ -714,7 +714,8 @@ class MainActivity : AppCompatActivity() {
                 // Poll until done (max ~10 seconds)
                 var done = false
                 var info: AetherUpdateInfo? = null
-                for (i in 0..50) {
+                // Poll for up to 15 seconds (matches Rust reqwest timeout)
+                for (i in 0..75) {
                     Thread.sleep(200)
                     info = NativeEngine.nativePollUpdate()
                     if (info.checkDone) {

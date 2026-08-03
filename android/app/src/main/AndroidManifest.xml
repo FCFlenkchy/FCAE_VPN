@@ -13,6 +13,7 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:theme="@style/Theme.FCAEVPN"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:hasCode="true">
 
         <activity
