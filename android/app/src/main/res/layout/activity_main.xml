@@ -74,6 +74,10 @@
                 android:layout_marginTop="8dp"
                 android:text="Check for Updates"
                 android:textAllCaps="false"
+                android:textSize="14sp"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:minHeight="44dp"
                 android:textColor="#FF60A5FA" />
 
             <TextView

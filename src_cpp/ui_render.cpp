@@ -539,11 +539,15 @@ void render_ui() {
                 }
                 ImGui::PopStyleColor(2);
             } else if (done && !info.update_available) {
-                // Check finished — no update needed
+                // Check finished — no update needed, but allow re-check
                 update_available = false;
                 update_checked = true;
                 snprintf(update_status, sizeof(update_status), "%s", info.status_message);
-                ImGui::Button("Check for Updates", ImVec2(130, 34));
+                if (ImGui::Button("Check for Updates", ImVec2(130, 34))) {
+                    aether_check_update_async(FCAE_VERSION);
+                    update_checked = false;
+                    update_available = false;
+                }
             } else {
                 if (ImGui::Button("Check for Updates", ImVec2(130, 34))) {
                     aether_check_update_async(FCAE_VERSION);
@@ -555,7 +559,16 @@ void render_ui() {
             // Status text
             if (done && !update_available && update_checked) {
                 ImGui::SameLine(0, 6);
-                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", update_status);
+                // Detect error messages
+                bool is_error = strstr(update_status, "Failed") != nullptr ||
+                                strstr(update_status, "HTTP") != nullptr ||
+                                strstr(update_status, "error") != nullptr ||
+                                strstr(update_status, "timed out") != nullptr;
+                if (is_error) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "%s", update_status);
+                } else {
+                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", update_status);
+                }
             }
 
             // Update popup modal

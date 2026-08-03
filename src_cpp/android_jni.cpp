@@ -282,5 +282,3 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
 
     return obj;
 }
-
-} // extern "C"
