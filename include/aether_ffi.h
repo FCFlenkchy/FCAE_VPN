@@ -116,6 +116,10 @@ void aether_free(void);
 // Version checker – start async check (non-blocking). Call aether_poll_update() to get result.
 void aether_check_update_async(const char* current_version);
 
+// Version checker for Android – pass JSON fetched by Kotlin (avoids DNS/network issues in native threads).
+// Returns true on success, fills result accessible via aether_poll_update().
+bool aether_check_update_from_json(const char* current_version, const char* json);
+
 // Poll update check status. Fills info struct. Returns true if check completed.
 bool aether_poll_update(AetherUpdateInfo* out_info);
 

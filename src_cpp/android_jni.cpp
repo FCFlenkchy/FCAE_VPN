@@ -282,3 +282,18 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
 
     return obj;
 }
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeCheckUpdateFromJson(JNIEnv* env, jclass, jstring currentVersion, jstring json) {
+    ensure_init();
+    const char* ver = env->GetStringUTFChars(currentVersion, nullptr);
+    const char* js = env->GetStringUTFChars(json, nullptr);
+
+    bool ok = aether_check_update_from_json(ver, js);
+
+    env->ReleaseStringUTFChars(currentVersion, ver);
+    env->ReleaseStringUTFChars(json, js);
+
+    LOGI("Version check from JSON: %s", ok ? "OK" : "FAIL");
+    return ok ? JNI_TRUE : JNI_FALSE;
+}

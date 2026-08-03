@@ -1113,6 +1113,50 @@ pub extern "C" fn aether_poll_update(out: *mut AetherUpdateInfoOut) -> bool {
     state.check_done
 }
 
+/// Parse version JSON fetched by Kotlin/Android (which handles HTTP natively).
+/// This avoids reqwest/DNS issues in native threads on Android.
+#[no_mangle]
+pub extern "C" fn aether_check_update_from_json(
+    current_version: *const c_char,
+    json: *const c_char,
+) -> bool {
+    let cur = cstr_opt(current_version).unwrap_or_else(|| "dev".to_string());
+    let json_str = match cstr_opt(json) {
+        Some(s) => s,
+        None => {
+            let mut state = UPDATE_STATE.lock();
+            state.check_in_progress = false;
+            state.check_done = true;
+            state.result = None;
+            state.status_message = "No JSON provided".to_string();
+            return false;
+        }
+    };
+
+    match aether_engine::version_checker::check_from_json(&cur, &json_str) {
+        Ok(r) => {
+            let mut state = UPDATE_STATE.lock();
+            state.check_in_progress = false;
+            state.check_done = true;
+            if r.update_available {
+                state.status_message = format!("Update available: {}", r.latest_version);
+            } else {
+                state.status_message = format!("Up to date ({})", r.current_version);
+            }
+            state.result = Some(r);
+            true
+        }
+        Err(e) => {
+            let mut state = UPDATE_STATE.lock();
+            state.check_in_progress = false;
+            state.check_done = true;
+            state.result = None;
+            state.status_message = e;
+            false
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn aether_free() {
     // Acquire STOP_GUARD ONLY to safely take the engine thread handle.

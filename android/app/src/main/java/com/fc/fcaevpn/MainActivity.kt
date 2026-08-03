@@ -707,36 +707,39 @@ class MainActivity : AppCompatActivity() {
         updateStatus.visibility = android.view.View.VISIBLE
         updateStatus.text = "Checking for updates..."
 
-        // Start async check via native engine (current version from version.json bundled in APK)
-        bgExecutor.execute {
+        // Fetch version.json via Android's HttpURLConnection (works reliably on Android)
+        // instead of Rust/reqwest which has DNS issues in native threads on Android.
+        Thread {
             try {
-                NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION)
-                // Poll until done (max ~10 seconds)
-                var done = false
-                var info: AetherUpdateInfo? = null
-                // Poll for up to 15 seconds (matches Rust reqwest timeout)
-                for (i in 0..75) {
-                    Thread.sleep(200)
-                    info = NativeEngine.nativePollUpdate()
-                    if (info.checkDone) {
-                        done = true
-                        break
+                val url = java.net.URL("https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/version.json")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 8000
+                conn.readTimeout = 10000
+                conn.setRequestProperty("User-Agent", "FCAE-VPN/1.0")
+                val json = conn.inputStream.bufferedReader().use { it.readText() }
+                conn.disconnect()
+
+                // Parse via native engine
+                val ok = NativeEngine.nativeCheckUpdateFromJson(BuildConfig.APP_VERSION, json)
+                if (ok) {
+                    val info = NativeEngine.nativePollUpdate()
+                    handler.post {
+                        btnCheckUpdates.isEnabled = true
+                        if (info.updateAvailable) {
+                            btnCheckUpdates.text = "Update Available!"
+                            updateStatus.text = info.statusMessage
+                            showUpdateDialog(info)
+                        } else {
+                            btnCheckUpdates.text = "Check for Updates"
+                            updateStatus.text = "Up to date (${info.statusMessage})"
+                        }
                     }
-                }
-                val finalInfo = info
-                val finalDone = done
-                handler.post {
-                    btnCheckUpdates.isEnabled = true
-                    if (!finalDone || finalInfo == null) {
+                } else {
+                    val info = NativeEngine.nativePollUpdate()
+                    handler.post {
+                        btnCheckUpdates.isEnabled = true
                         btnCheckUpdates.text = "Check for Updates"
-                        updateStatus.text = "Update check timed out"
-                    } else if (finalInfo.updateAvailable) {
-                        btnCheckUpdates.text = "Update Available!"
-                        updateStatus.text = "${finalInfo.statusMessage}"
-                        showUpdateDialog(finalInfo)
-                    } else {
-                        btnCheckUpdates.text = "Check for Updates"
-                        updateStatus.text = "Up to date (${finalInfo.statusMessage})"
+                        updateStatus.text = "Failed: ${info.statusMessage}"
                     }
                 }
             } catch (e: Throwable) {
@@ -746,7 +749,7 @@ class MainActivity : AppCompatActivity() {
                     updateStatus.text = "Update check failed: ${e.message}"
                 }
             }
-        }
+        }.start()
     }
 
     private fun showUpdateDialog(info: AetherUpdateInfo) {

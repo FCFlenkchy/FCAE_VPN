@@ -47,6 +47,7 @@ object NativeEngine {
     // ── version checker ─────────────────────────────────────────────
     @JvmStatic external fun nativeCheckForUpdates(currentVersion: String)
     @JvmStatic external fun nativePollUpdate(): AetherUpdateInfo
+    @JvmStatic external fun nativeCheckUpdateFromJson(currentVersion: String, json: String): Boolean
 }
 
 /**

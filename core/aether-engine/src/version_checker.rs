@@ -77,6 +77,15 @@ pub fn compare_versions(
     }
 }
 
+/// Parse version.json content and compare with current version.
+/// This is used from Android/Kotlin which handles the HTTP fetch natively
+/// (more reliable than reqwest in native threads on Android).
+pub fn check_from_json(current: &str, json: &str) -> Result<UpdateCheckResult, String> {
+    let info: VersionInfo = serde_json::from_str(json)
+        .map_err(|e| format!("Failed to parse version.json: {e}"))?;
+    Ok(compare_versions(current, &info))
+}
+
 fn strip_v(s: &str) -> String {
     s.strip_prefix('v').unwrap_or(s).to_string()
 }
