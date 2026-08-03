@@ -153,6 +153,14 @@ public class FCAEVpnService extends VpnService {
         final String noizeVal = (noize == null || noize.isEmpty()) ? "balanced" : noize;
         final String peerVal  = (peer == null) ? "" : peer;
         final int sysProfile  = intent.getIntExtra("sysProfile", 0);
+        final String teamName  = intent.getStringExtra("teamName");
+        final String accessTok = intent.getStringExtra("accessToken");
+        final String accessEm  = intent.getStringExtra("accessEmail");
+        final String routesF   = intent.getStringExtra("routesFile");
+        final String teamVal   = (teamName == null) ? "" : teamName;
+        final String tokenVal  = (accessTok == null) ? "" : accessTok;
+        final String emailVal  = (accessEm == null) ? "" : accessEm;
+        final String routesVal = (routesF == null) ? "" : routesF;
 
         vpnThread = new Thread(() -> {
             try {
@@ -188,7 +196,8 @@ public class FCAEVpnService extends VpnService {
                     ipVersion, quick, noizeVal,
                     false, 16, 32, 2, 10, socks, http,
                     peerVal, cfgPath, h2, ech,
-                    sniVal, iron, hi, hf, ht, lv, sysProfile
+                    sniVal, iron, hi, hf, ht, lv, sysProfile,
+                    teamVal, tokenVal, emailVal, routesVal
                 );
                 if (!ok) {
                     Log.e(TAG, "nativeStart failed");
