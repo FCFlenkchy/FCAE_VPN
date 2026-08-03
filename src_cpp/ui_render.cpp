@@ -143,6 +143,18 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
     else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
+    else if (key == "team_name")
+        snprintf(g_app.team_name, sizeof(g_app.team_name), "%s", val.c_str());
+    else if (key == "access_token")
+        snprintf(g_app.access_token, sizeof(g_app.access_token), "%s", val.c_str());
+    else if (key == "access_client_id")
+        snprintf(g_app.access_client_id, sizeof(g_app.access_client_id), "%s", val.c_str());
+    else if (key == "access_client_secret")
+        snprintf(g_app.access_client_secret, sizeof(g_app.access_client_secret), "%s", val.c_str());
+    else if (key == "access_email")
+        snprintf(g_app.access_email, sizeof(g_app.access_email), "%s", val.c_str());
+    else if (key == "routes_file")
+        snprintf(g_app.routes_file, sizeof(g_app.routes_file), "%s", val.c_str());
 }
 
 static void save_config() {
@@ -183,6 +195,12 @@ static void save_config() {
     fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
     fprintf(f, "auto_scroll=%d\n", g_app.auto_scroll ? 1 : 0);
     fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
+    fprintf(f, "team_name=%s\n", g_app.team_name);
+    fprintf(f, "access_token=%s\n", g_app.access_token);
+    fprintf(f, "access_client_id=%s\n", g_app.access_client_id);
+    fprintf(f, "access_client_secret=%s\n", g_app.access_client_secret);
+    fprintf(f, "access_email=%s\n", g_app.access_email);
+    fprintf(f, "routes_file=%s\n", g_app.routes_file);
     fclose(f);
     snprintf(g_app.save_status, sizeof(g_app.save_status), "Config saved!");
     g_app.add_log(4, ("[ui] config saved: " + path).c_str());
@@ -413,7 +431,7 @@ void render_ui() {
                 g_app.start_busy.store(true);
                 // Snapshot config + own string storage for the worker thread.
                 struct Owned {
-                    std::string noize, peer, path, sni;
+                    std::string noize, peer, path, sni, team, token, email, routes;
                     AetherConfig c{};
                 };
                 // Use unique_ptr with a custom deleter that handles the
@@ -429,11 +447,19 @@ void render_ui() {
                 o->peer  = g_app.force_peer;
                 o->path  = g_app.config_path;
                 o->sni   = g_app.sni;
+                o->team  = g_app.team_name;
+                o->token = g_app.access_token;
+                o->email = g_app.access_email;
+                o->routes = g_app.routes_file;
                 o->c = g_app.to_config();
                 o->c.noize_profile = o->noize.c_str();
                 o->c.force_peer    = o->peer.empty() ? nullptr : o->peer.c_str();
                 o->c.config_path   = o->path.c_str();
                 o->c.sni           = o->sni.empty() ? nullptr : o->sni.c_str();
+                o->c.team_name     = o->team.empty() ? nullptr : o->team.c_str();
+                o->c.access_token  = o->token.empty() ? nullptr : o->token.c_str();
+                o->c.access_email  = o->email.empty() ? nullptr : o->email.c_str();
+                o->c.routes_file   = o->routes.empty() ? nullptr : o->routes.c_str();
                 auto* raw = o.release(); // transfer ownership to the thread
                 std::thread([raw] {
                     // Wrap in a unique_ptr again so the custom deleter
@@ -612,6 +638,40 @@ void render_ui() {
             ImGui::Text("Sysprofile (performance tuning)");
             const char* sysprofiles[] = { "Auto", "Low", "Medium", "High" };
             ImGui::Combo("Sysprofile", &g_app.sys_profile, sysprofiles, 4);
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Zero Trust")) {
+            ImGui::BeginChild("##zt_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            ImGui::Spacing();
+            ImGui::Text("Cloudflare Zero Trust (Teams)");
+            ImGui::InputTextWithHint("##team_name", "team-name", g_app.team_name, sizeof(g_app.team_name));
+            ImGui::SameLine();
+            ImGui::Text("Team");
+            ImGui::Spacing();
+            ImGui::Text("Authentication (choose one):");
+            ImGui::InputTextWithHint("##access_token", "JWT token from enrolment page", g_app.access_token, sizeof(g_app.access_token));
+            ImGui::TextDisabled("Access Token (copy token=... from login page)");
+            ImGui::Spacing();
+            ImGui::Text("--- or Service Token ---");
+            ImGui::InputTextWithHint("##access_client_id", "Client ID", g_app.access_client_id, sizeof(g_app.access_client_id));
+            ImGui::InputTextWithHint("##access_client_secret", "Client Secret", g_app.access_client_secret, sizeof(g_app.access_client_secret));
+            ImGui::Spacing();
+            ImGui::Text("--- or Email OTP ---");
+            ImGui::InputTextWithHint("##access_email", "user@example.com", g_app.access_email, sizeof(g_app.access_email));
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Routes")) {
+            ImGui::BeginChild("##routes_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            ImGui::Spacing();
+            ImGui::Text("Routing Rules File");
+            ImGui::InputTextWithHint("##routes_file", "path/to/routes.txt", g_app.routes_file, sizeof(g_app.routes_file));
+            ImGui::TextDisabled("Format: [block] / [direct] sections with domain, IP, CIDR, port rules.");
+            ImGui::Spacing();
+            ImGui::TextWrapped("Example:\n[block]\nads.example\nkeyword:tracker\n\n[direct]\nprivate\n10.0.0.0/8\nport:3000-3010");
             ImGui::EndChild();
             ImGui::EndTabItem();
         }

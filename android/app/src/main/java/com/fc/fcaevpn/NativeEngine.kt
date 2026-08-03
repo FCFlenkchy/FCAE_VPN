@@ -32,6 +32,10 @@ object NativeEngine {
         healthTimeoutSecs: Int,
         liveValidateSecs: Int,
         sysProfile: Int,
+        teamName: String,
+        accessToken: String,
+        accessEmail: String,
+        routesFile: String,
     ): Boolean
     @JvmStatic external fun nativeStop()
     @JvmStatic external fun nativeFree()

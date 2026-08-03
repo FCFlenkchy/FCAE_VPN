@@ -50,6 +50,14 @@ struct AppState {
     char sni[128] = {};
     // Post-scan ironclad validation
     bool ironclad_validate = false;
+    // Zero Trust (Cloudflare Teams)
+    char team_name[128] = {};
+    char access_token[256] = {};
+    char access_client_id[128] = {};
+    char access_client_secret[128] = {};
+    char access_email[128] = {};
+    // Routing rules file
+    char routes_file[256] = {};
     // Tunnel health
     int health_interval_secs = 20;
     int health_max_fails     = 2;
@@ -132,6 +140,10 @@ struct AppState {
         c.health_timeout_secs   = (uint32_t)(health_timeout_secs > 0 ? health_timeout_secs : 0);
         c.live_validate_secs    = (uint32_t)(live_validate_secs > 0 ? live_validate_secs : 0);
         c.sys_profile           = sys_profile;
+        c.team_name     = team_name[0] ? team_name : nullptr;
+        c.access_token  = access_token[0] ? access_token : nullptr;
+        c.access_email  = access_email[0] ? access_email : nullptr;
+        c.routes_file   = routes_file[0] ? routes_file : nullptr;
         return c;
     }
 };

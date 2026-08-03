@@ -89,7 +89,11 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jint healthMaxFails,
     jint healthTimeoutSecs,
     jint liveValidateSecs,
-    jint sysProfile
+    jint sysProfile,
+    jstring teamName,
+    jstring accessToken,
+    jstring accessEmail,
+    jstring routesFile
 ) {
     ensure_init();
 
@@ -99,6 +103,10 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     std::string cfgOwned = jstr(env, configPath);
     if (cfgOwned.empty()) cfgOwned = "aether.toml";
     std::string sniOwned = jstr(env, sni);
+    std::string teamOwned = jstr(env, teamName);
+    std::string tokenOwned = jstr(env, accessToken);
+    std::string emailOwned = jstr(env, accessEmail);
+    std::string routesOwned = jstr(env, routesFile);
 
     AetherConfig cfg = {};
     cfg.protocol = protocol;
@@ -126,6 +134,10 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.health_timeout_secs = healthTimeoutSecs > 0 ? (uint32_t)healthTimeoutSecs : 0;
     cfg.live_validate_secs = liveValidateSecs > 0 ? (uint32_t)liveValidateSecs : 0;
     cfg.sys_profile = (int)sysProfile;
+    cfg.team_name = teamOwned.empty() ? nullptr : teamOwned.c_str();
+    cfg.access_token = tokenOwned.empty() ? nullptr : tokenOwned.c_str();
+    cfg.access_email = emailOwned.empty() ? nullptr : emailOwned.c_str();
+    cfg.routes_file = routesOwned.empty() ? nullptr : routesOwned.c_str();
 
     bool ok = aether_start(&cfg);
     LOGI("aether_start -> %s", ok ? "ok" : "fail");

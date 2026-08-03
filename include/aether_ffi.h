@@ -63,6 +63,14 @@ typedef struct {
 
     // Sysprofile: 0 = Auto, 1 = Low, 2 = Medium, 3 = High
     int sys_profile;
+
+    // Zero Trust (Cloudflare Teams)
+    const char* team_name;      // e.g. "my-team" (sets AETHER_TEAM)
+    const char* access_token;   // JWT enrolment token (sets AETHER_ACCESS_TOKEN)
+    const char* access_email;   // Email for OTP login (sets AETHER_ACCESS_EMAIL)
+
+    // Routing rules file path (sets AETHER_ROUTES_FILE)
+    const char* routes_file;
 } AetherConfig;
 
 typedef struct {

@@ -60,6 +60,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editForcePeer: android.widget.EditText
     private lateinit var editHealthInterval: android.widget.EditText
     private lateinit var editHealthMaxFails: android.widget.EditText
+    private lateinit var editSocksPort: android.widget.EditText
+    private lateinit var editHttpPort: android.widget.EditText
+    private lateinit var editTeam: android.widget.EditText
+    private lateinit var editAccessToken: android.widget.EditText
+    private lateinit var editAccessEmail: android.widget.EditText
+    private lateinit var editRoutesFile: android.widget.EditText
     private lateinit var outerScroll: ScrollView
 
     private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
@@ -203,6 +209,12 @@ class MainActivity : AppCompatActivity() {
         editForcePeer = findViewById(R.id.editForcePeer)
         editHealthInterval = findViewById(R.id.editHealthInterval)
         editHealthMaxFails = findViewById(R.id.editHealthMaxFails)
+        editSocksPort = findViewById(R.id.editSocksPort)
+        editHttpPort = findViewById(R.id.editHttpPort)
+        editTeam = findViewById(R.id.editTeam)
+        editAccessToken = findViewById(R.id.editAccessToken)
+        editAccessEmail = findViewById(R.id.editAccessEmail)
+        editRoutesFile = findViewById(R.id.editRoutesFile)
         outerScroll = findViewById(R.id.outerScroll)
 
         spinnerProtocol.adapter = ArrayAdapter(
@@ -399,6 +411,12 @@ class MainActivity : AppCompatActivity() {
             putString("healthInterval", editHealthInterval.text.toString())
             putString("healthMaxFails", editHealthMaxFails.text.toString())
             putInt("sysprofile", spinnerSysprofile.selectedItemPosition)
+            putString("socksPort", editSocksPort.text.toString())
+            putString("httpPort", editHttpPort.text.toString())
+            putString("team", editTeam.text.toString().trim())
+            putString("accessToken", editAccessToken.text.toString().trim())
+            putString("accessEmail", editAccessEmail.text.toString().trim())
+            putString("routesFile", editRoutesFile.text.toString().trim())
             apply()
         }
     }
@@ -421,6 +439,12 @@ class MainActivity : AppCompatActivity() {
         editHealthInterval.setText(prefs.getString("healthInterval", "20"))
         editHealthMaxFails.setText(prefs.getString("healthMaxFails", "2"))
         spinnerSysprofile.setSelection(prefs.getInt("sysprofile", 0))
+        editSocksPort.setText(prefs.getString("socksPort", "1819"))
+        editHttpPort.setText(prefs.getString("httpPort", "1820"))
+        editTeam.setText(prefs.getString("team", ""))
+        editAccessToken.setText(prefs.getString("accessToken", ""))
+        editAccessEmail.setText(prefs.getString("accessEmail", ""))
+        editRoutesFile.setText(prefs.getString("routesFile", ""))
     }
 
     private fun connectClicked() {
@@ -474,11 +498,15 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("healthMaxFails", healthMaxFails())
         i.putExtra("healthTimeout", 5)
         i.putExtra("liveValidate", liveValidateSecs())
-        i.putExtra("socksPort", if (switchSocks.isChecked) 1819 else 0)
-        i.putExtra("httpPort", if (switchHttp.isChecked) 1820 else 0)
+        i.putExtra("socksPort", if (switchSocks.isChecked) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0)
+        i.putExtra("httpPort", if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0)
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
         i.putExtra("forcePeer", editForcePeer.text.toString().trim())
         i.putExtra("sysProfile", spinnerSysprofile.selectedItemPosition)
+        i.putExtra("teamName", editTeam.text.toString().trim())
+        i.putExtra("accessToken", editAccessToken.text.toString().trim())
+        i.putExtra("accessEmail", editAccessEmail.text.toString().trim())
+        i.putExtra("routesFile", editRoutesFile.text.toString().trim())
         startForegroundService(i)
         // Poll is started by the VPN_STATE_CHANGED broadcast from the service
         // AFTER nativeStart() succeeds — NOT here, to avoid calling native
@@ -514,10 +542,14 @@ class MainActivity : AppCompatActivity() {
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
         // Extract ALL UI values on the main thread — never read Views from bg.
         val noizeProfile = spinnerNoize.selectedItem.toString()
-        val socksPort = if (switchSocks.isChecked) 1819 else 0
-        val httpPort = if (switchHttp.isChecked) 1820 else 0
+        val socksPort = if (switchSocks.isChecked) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0
+        val httpPort = if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0
         val forcePeer = editForcePeer.text.toString().trim()
         val sysProfile = spinnerSysprofile.selectedItemPosition
+        val teamName = editTeam.text.toString().trim()
+        val accessToken = editAccessToken.text.toString().trim()
+        val accessEmail = editAccessEmail.text.toString().trim()
+        val routesFile = editRoutesFile.text.toString().trim()
 
         bgExecutor.execute {
             // Ensure previous engine is fully stopped before starting.
@@ -554,6 +586,10 @@ class MainActivity : AppCompatActivity() {
                     healthTimeoutSecs = 5,
                     liveValidateSecs = liveValidateSecs(),
                     sysProfile = sysProfile,
+                    teamName = teamName,
+                    accessToken = accessToken,
+                    accessEmail = accessEmail,
+                    routesFile = routesFile,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }
