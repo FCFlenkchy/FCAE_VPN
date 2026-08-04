@@ -147,6 +147,33 @@ jobs:
               console.log(`Cleaned ${totalDeleted} caches for prefix '${prefix}'`);
             }
 
+      - name: update version.json for build
+        run: |
+          set -euo pipefail
+          export TAG="${{ github.event.inputs.release_tag }}"
+          export DATE=$(date +%Y-%m-%d)
+          export NOTES="${{ github.event.inputs.extra_notes }}"
+          export DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases"
+
+          python3 << 'PYEOF'
+          import json, os
+          tag = os.environ['TAG']
+          date = os.environ['DATE']
+          notes = os.environ.get('NOTES', '')
+          download_url = os.environ['DOWNLOAD_URL']
+          data = {
+              'version': tag,
+              'release_date': date,
+              'release_notes': notes,
+              'download_url': download_url
+          }
+          with open('version.json', 'w') as f:
+              json.dump(data, f, indent=2)
+              f.write('\n')
+          print('Updated version.json for build:')
+          print(open('version.json').read())
+          PYEOF
+
       - name: install deps (linux)
         if: matrix.name == 'linux-x64'
         env:
@@ -654,7 +681,7 @@ jobs:
           print(open('version.json').read())
           PYEOF
 
-      - name: commit version.json
+      - name: commit and push version.json
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

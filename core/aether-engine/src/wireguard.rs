@@ -363,16 +363,16 @@ impl WgTunnel {
 
         let result = tokio::select! {
             _ = recv_task => {
-                log::error!("wireguard recv task ended — tunnel is dead");
+                log::info!("wireguard recv task ended — tunnel is dead");
                 Err(AetherError::Other("wireguard recv task ended".into()))
             }
             _ = send_task => {
-                log::error!("wireguard send task ended — outbound channel closed");
-                Err(AetherError::Other("wireguard send task ended".into()))
+                log::info!("wireguard send task ended");
+                Ok(())
             }
             _ = timer_task => {
-                log::error!("wireguard timer task ended");
-                Err(AetherError::Other("wireguard timer task ended".into()))
+                log::info!("wireguard timer task ended");
+                Ok(())
             }
             r = health_task => {
                 match r {
