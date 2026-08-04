@@ -324,13 +324,13 @@ impl WgTunnel {
             loop {
                 interval.tick().await;
 
-                let in_grace = std::time::Instant::now() < health_start;
-
-                // During grace period, only send keepalive probes to help
-                // establish the data-plane. Don't enforce staleness yet.
-                if in_grace {
-                    let mut tunn = tunn_h.lock().await;
-                    let _ = send_dataplane_probe(&sock_h, &mut tunn, &client_id_h, &probe, &mut out_buf).await;
+                // Don't enforce staleness, and don't send probes, during the
+                // grace period. Sending a data-plane probe before the
+                // handshake session exists makes boringtun emit an extra,
+                // competing handshake-initiation packet (racing the one
+                // timer_task already retransmits), which can prevent the
+                // handshake from ever completing cleanly. Just wait.
+                if std::time::Instant::now() < health_start {
                     continue;
                 }
 
