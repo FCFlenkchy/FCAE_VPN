@@ -225,41 +225,51 @@ impl WgTunnel {
 
         let send_task = tokio::spawn(async move {
             while let Some(ip_packet) = outbound_rx.recv().await {
-                let mut tunn = tunn_w.lock().await;
-                let mut out_buf = vec![0u8; MAX_PACKET];
+                // Hold the tunn lock only for the encapsulate call, then drop it
+                // before doing I/O (obfuscation, socket send).
+                let (pkt_to_send, need_obf) = {
+                    let mut tunn = tunn_w.lock().await;
+                    let mut out_buf = vec![0u8; MAX_PACKET];
 
-                match tunn.encapsulate(&ip_packet, &mut out_buf) {
-                    TunnResult::Done => {}
-                    TunnResult::Err(e) => {
-                        log::trace!("encapsulate error: {e:?}");
-                    }
-                    TunnResult::WriteToNetwork(pkt) => {
-                        let mut pkt_vec = pkt.to_vec();
-                        inject_client_id(&mut pkt_vec, &client_id);
-                        drop(tunn);
-
-                        {
-                            let mut sent = obf_sent.lock().await;
-                            if !*sent && aethernoize.is_enabled() {
-                                *sent = true;
-                                drop(sent);
-                                aethernoize::apply_obfuscation(&sock_w, peer, &aethernoize).await;
-                            }
+                    match tunn.encapsulate(&ip_packet, &mut out_buf) {
+                        TunnResult::Done => (None, false),
+                        TunnResult::Err(e) => {
+                            log::trace!("encapsulate error: {e:?}");
+                            (None, false)
                         }
-
-                        let _ = sock_w.send(&pkt_vec).await;
-
-                        if aethernoize.jc_after_hs > 0
-                            && !post_hs_junk_sent.swap(true, Ordering::SeqCst)
-                        {
-                            let sock_clone = sock_w.clone();
-                            let cfg_clone = aethernoize.clone();
-                            tokio::spawn(async move {
-                                aethernoize::send_post_handshake_junk(&sock_clone, peer, &cfg_clone).await;
-                            });
+                        TunnResult::WriteToNetwork(pkt) => {
+                            let mut pkt_vec = pkt.to_vec();
+                            inject_client_id(&mut pkt_vec, &client_id);
+                            (Some(pkt_vec), true)
+                        }
+                        TunnResult::WriteToTunnelV4(_, _) | TunnResult::WriteToTunnelV6(_, _) => {
+                            (None, false)
                         }
                     }
-                    TunnResult::WriteToTunnelV4(_, _) | TunnResult::WriteToTunnelV6(_, _) => {}
+                }; // tunn lock dropped here
+
+                if let Some(pkt_vec) = pkt_to_send {
+                    // Apply obfuscation without holding the tunn lock.
+                    if need_obf {
+                        let mut sent = obf_sent.lock().await;
+                        if !*sent && aethernoize.is_enabled() {
+                            *sent = true;
+                            drop(sent);
+                            aethernoize::apply_obfuscation(&sock_w, peer, &aethernoize).await;
+                        }
+                    }
+
+                    let _ = sock_w.send(&pkt_vec).await;
+
+                    if aethernoize.jc_after_hs > 0
+                        && !post_hs_junk_sent.swap(true, Ordering::SeqCst)
+                    {
+                        let sock_clone = sock_w.clone();
+                        let cfg_clone = aethernoize.clone();
+                        tokio::spawn(async move {
+                            aethernoize::send_post_handshake_junk(&sock_clone, peer, &cfg_clone).await;
+                        });
+                    }
                 }
             }
         });
@@ -268,13 +278,20 @@ impl WgTunnel {
             let mut interval = tokio::time::interval(TIMER_TICK);
             loop {
                 interval.tick().await;
-                let mut tunn = tunn_t.lock().await;
-                let mut tmp = vec![0u8; MAX_PACKET];
-                if let TunnResult::WriteToNetwork(pkt) = tunn.update_timers(&mut tmp) {
-                    let mut pkt_vec = pkt.to_vec();
-                    inject_client_id(&mut pkt_vec, &client_id);
-                    drop(tunn);
+                // Extract the packet to send without holding the lock across I/O.
+                let pkt_opt = {
+                    let mut tunn = tunn_t.lock().await;
+                    let mut tmp = vec![0u8; MAX_PACKET];
+                    if let TunnResult::WriteToNetwork(pkt) = tunn.update_timers(&mut tmp) {
+                        let mut pkt_vec = pkt.to_vec();
+                        inject_client_id(&mut pkt_vec, &client_id);
+                        Some(pkt_vec)
+                    } else {
+                        None
+                    }
+                }; // tunn lock dropped here
 
+                if let Some(pkt_vec) = pkt_opt {
                     if aethernoize_t.is_enabled() {
                         let sock_j = sock_t.clone();
                         let cfg_j = aethernoize_t.clone();
@@ -290,18 +307,30 @@ impl WgTunnel {
         });
 
         let stale_timeout = wg_stale_timeout();
+        // Use a longer grace period when AETHER_WG_HEALTH_GRACE_SECS is set
+        // (useful for warp-in-warp where the outer tunnel must stay alive while
+        // the inner tunnel handshakes).
+        let grace_secs: u64 = std::env::var("AETHER_WG_HEALTH_GRACE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15);
         let health_task = tokio::spawn(async move {
-            // Grace period: skip health checks for the first 15s to allow
-            // handshake + initial data-plane validation to complete.
-            let health_start = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            // Grace period: skip health checks to allow handshake + initial
+            // data-plane validation to complete.
+            let health_start = std::time::Instant::now() + std::time::Duration::from_secs(grace_secs);
             let mut interval = tokio::time::interval(WG_HEALTHCHECK_INTERVAL);
             let probe = build_dataplane_probe(local_ipv4);
             let mut out_buf = vec![0u8; MAX_PACKET];
             loop {
                 interval.tick().await;
 
-                // Don't enforce staleness during the grace period.
-                if std::time::Instant::now() < health_start {
+                let in_grace = std::time::Instant::now() < health_start;
+
+                // During grace period, only send keepalive probes to help
+                // establish the data-plane. Don't enforce staleness yet.
+                if in_grace {
+                    let mut tunn = tunn_h.lock().await;
+                    let _ = send_dataplane_probe(&sock_h, &mut tunn, &client_id_h, &probe, &mut out_buf).await;
                     continue;
                 }
 
@@ -334,21 +363,21 @@ impl WgTunnel {
 
         let result = tokio::select! {
             _ = recv_task => {
-                log::info!("wireguard recv task ended");
-                Ok(())
+                log::error!("wireguard recv task ended — tunnel is dead");
+                Err(AetherError::Other("wireguard recv task ended".into()))
             }
             _ = send_task => {
-                log::info!("wireguard send task ended");
-                Ok(())
+                log::error!("wireguard send task ended — outbound channel closed");
+                Err(AetherError::Other("wireguard send task ended".into()))
             }
             _ = timer_task => {
-                log::info!("wireguard timer task ended");
-                Ok(())
+                log::error!("wireguard timer task ended");
+                Err(AetherError::Other("wireguard timer task ended".into()))
             }
             r = health_task => {
                 match r {
                     Ok(Err(e)) => Err(e),
-                    Ok(Ok(())) => Ok(()),
+                    Ok(Ok(())) => Err(AetherError::Other("health task exited unexpectedly".into())),
                     Err(e) => Err(AetherError::Other(format!("health task panicked: {e}"))),
                 }
             }

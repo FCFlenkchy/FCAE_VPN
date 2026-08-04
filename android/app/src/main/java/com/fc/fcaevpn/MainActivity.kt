@@ -44,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnConnect: MaterialButton
     private lateinit var btnCheckUpdates: MaterialButton
     private lateinit var updateStatus: TextView
+    private var updateAvailableInfo: AetherUpdateInfo? = null
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
     private lateinit var spinnerScan: Spinner
@@ -293,7 +294,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnCheckUpdates.setOnClickListener {
-            checkForUpdates()
+            // If update check already completed and update is available,
+            // show the dialog instead of checking again.
+            val cached = updateAvailableInfo
+            if (cached != null && cached.updateAvailable) {
+                showUpdateDialog(cached)
+            } else {
+                checkForUpdates()
+            }
         }
 
         updateButton()
@@ -731,6 +739,7 @@ class MainActivity : AppCompatActivity() {
         btnCheckUpdates.text = "Checking..."
         updateStatus.visibility = android.view.View.VISIBLE
         updateStatus.text = "Checking for updates..."
+        updateAvailableInfo = null  // Clear cached info on new check
 
         // Use the core's native async update checker (reqwest-based HTTP fetch).
         // The core spawns a background tokio runtime, fetches version.json from
@@ -760,13 +769,17 @@ class MainActivity : AppCompatActivity() {
                     if (info.updateAvailable) {
                         btnCheckUpdates.text = "Update Available!"
                         updateStatus.text = info.statusMessage
-                        showUpdateDialog(info)
+                        // Don't auto-show dialog — just update the button.
+                        // User clicks the button to open the dialog.
+                        updateAvailableInfo = info
                     } else if (info.checkDone) {
                         btnCheckUpdates.text = "Check for Updates"
                         updateStatus.text = "Up to date (${info.statusMessage})"
+                        updateAvailableInfo = null
                     } else {
                         btnCheckUpdates.text = "Check for Updates"
                         updateStatus.text = "Check timed out"
+                        updateAvailableInfo = null
                     }
                 }
             } catch (e: Throwable) {
@@ -793,17 +806,7 @@ class MainActivity : AppCompatActivity() {
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Update Available")
             .setMessage(msg)
-            .setPositiveButton("Open Releases Page") { _, _ ->
-                if (info.downloadUrl.isNotEmpty()) {
-                    try {
-                        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(info.downloadUrl))
-                        startActivity(intent)
-                    } catch (_: Throwable) {
-                        Toast.makeText(this, "Cannot open URL", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-            .setNeutralButton("Open Link") { _, _ ->
+            .setPositiveButton("Open Release Page") { _, _ ->
                 if (info.downloadUrl.isNotEmpty()) {
                     try {
                         val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(info.downloadUrl))
