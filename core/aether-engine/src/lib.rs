@@ -993,12 +993,24 @@ async fn run_masque_tunnel(
         }
     }
 
+    // Re-validate on the live stack before SOCKS (avoids false positives after reconnect).
+    if let Err(e) = validate_live_stack(&stack, "MASQUE").await {
+        tunnel_task.abort();
+        return Err(e);
+    }
+
+    let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
+    // Keep a StackHandle clone alive so the netstack task is NOT dropped
+    // when socks/http/health tasks are aborted on health-check failure.
+    let _stack_keepalive = stack.clone();
+    let health_task = spawn_health_monitor(stack.clone(), health_tx);
+    let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
+
+    // Start TUN adapter (tun2socks or Android fd) ONLY after SOCKS5 is listening.
+    // tun2socks connects to the SOCKS5 proxy, so it must wait until the proxy is ready.
     let mut tun_task = None;
-    
-    // Check if we should use tun2socks for TUN (non-Android)
     if use_tun2socks() {
         log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
-        // Read SOCKS port from the env var set by FFI (AETHER_SOCKS = 127.0.0.1:PORT)
         let socks_port: u16 = std::env::var("AETHER_SOCKS")
             .ok()
             .and_then(|s| s.rsplit(':').next()?.parse().ok())
@@ -1034,22 +1046,6 @@ async fn run_masque_tunnel(
             }
         }));
     }
-
-    // Re-validate on the live stack before SOCKS (avoids false positives after reconnect).
-    if let Err(e) = validate_live_stack(&stack, "MASQUE").await {
-        tunnel_task.abort();
-        if let Some(t) = tun_task {
-            t.abort();
-        }
-        return Err(e);
-    }
-
-    let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
-    // Keep a StackHandle clone alive so the netstack task is NOT dropped
-    // when socks/http/health tasks are aborted on health-check failure.
-    let _stack_keepalive = stack.clone();
-    let health_task = spawn_health_monitor(stack.clone(), health_tx);
-    let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
 
     enum End {
         Tunnel(std::result::Result<Result<()>, tokio::task::JoinError>),
@@ -1377,12 +1373,29 @@ async fn run_wireguard_tunnel(
     // Run tunnel first so live validation can pass traffic.
     let tunnel_task = tokio::spawn(async move { tunnel.run(outbound_rx).await });
 
+    // Brief settle for WG handshake + keepalive path.  The health-check grace
+    // period (2x interval) handles the rest — no need for a long sleep here.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // WireGuard was verified on a throwaway session; re-check the LIVE stack
+    // before SOCKS (fixes false positives on quick-reconnect / Ironclad).
+    if let Err(e) = validate_live_stack(&stack, "WireGuard").await {
+        tunnel_task.abort();
+        return Err(e);
+    }
+
+    let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
+    // Keep a StackHandle clone alive so the netstack task is NOT dropped
+    // when socks/http/health tasks are aborted on health-check failure.
+    let _stack_keepalive = stack.clone();
+    let health_task = spawn_health_monitor(stack.clone(), health_tx);
+    let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
+
+    // Start TUN adapter (tun2socks or Android fd) ONLY after SOCKS5 is listening.
+    // tun2socks connects to the SOCKS5 proxy, so it must wait until the proxy is ready.
     let mut tun_task = None;
-    
-    // Check if we should use tun2socks for TUN (non-Android)
     if use_tun2socks() {
         log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
-        // Read SOCKS port from the env var set by FFI (AETHER_SOCKS = 127.0.0.1:PORT)
         let socks_port: u16 = std::env::var("AETHER_SOCKS")
             .ok()
             .and_then(|s| s.rsplit(':').next()?.parse().ok())
@@ -1392,7 +1405,7 @@ async fn run_wireguard_tunnel(
             mtu: TUNNEL_MTU as u32,
             ipv4: identity.ipv4.clone(),
             ipv6: Some(identity.ipv6.clone()),
-            socks_port, // Engine's SOCKS5 port
+            socks_port,
             socks_host: "127.0.0.1".to_string(),
             username: None,
             password: None,
@@ -1417,27 +1430,6 @@ async fn run_wireguard_tunnel(
             }
         }));
     }
-
-    // Brief settle for WG handshake + keepalive path.  The health-check grace
-    // period (2x interval) handles the rest — no need for a long sleep here.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // WireGuard was verified on a throwaway session; re-check the LIVE stack
-    // before SOCKS (fixes false positives on quick-reconnect / Ironclad).
-    if let Err(e) = validate_live_stack(&stack, "WireGuard").await {
-        tunnel_task.abort();
-        if let Some(t) = tun_task {
-            t.abort();
-        }
-        return Err(e);
-    }
-
-    let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
-    // Keep a StackHandle clone alive so the netstack task is NOT dropped
-    // when socks/http/health tasks are aborted on health-check failure.
-    let _stack_keepalive = stack.clone();
-    let health_task = spawn_health_monitor(stack.clone(), health_tx);
-    let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
 
     enum End {
         Tunnel(std::result::Result<Result<()>, tokio::task::JoinError>),
