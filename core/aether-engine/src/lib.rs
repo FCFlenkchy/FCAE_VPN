@@ -1629,40 +1629,23 @@ async fn run_warp_in_warp(
     // This validation sends real DNS+HTTP traffic through the full
     // inner-WG → forwarder → outer-netstack → outer-WG chain.
     {
-        let mut inner_validated = false;
-        let mut last_inner_err = AetherError::Other("inner WARP-in-WARP validation failed".into());
-        for attempt in 1..=4u32 {
-            // Check if the inner tunnel task died while we were validating.
-            if inner_tunnel_handle.is_finished() {
-                let msg = match inner_tunnel_handle.await {
-                    Ok(()) => "inner WG tunnel task completed unexpectedly".to_string(),
-                    Err(e) => format!("inner WG tunnel task panicked: {e}"),
-                };
-                return Err(AetherError::Other(msg));
-            }
-            // Also check outer tunnel health during inner validation.
-            if outer_tunnel_handle.is_finished() {
-                let msg = match outer_tunnel_handle.await {
-                    Ok(()) => "outer WG tunnel task completed during inner validation".to_string(),
-                    Err(e) => format!("outer WG tunnel task panicked during inner validation: {e}"),
-                };
-                return Err(AetherError::Other(msg));
-            }
-            match validate_live_stack(&inner_stack, "WARP-in-WARP").await {
-                Ok(()) => {
-                    inner_validated = true;
-                    break;
-                }
-                Err(e) => {
-                    last_inner_err = e;
-                    log::warn!("[-] WARP-in-WARP inner validation attempt {attempt}/4 failed; retrying...");
-                    tokio::time::sleep(std::time::Duration::from_millis(2000 * attempt as u64)).await;
-                }
-            }
+        // Check if the inner tunnel task died while we were validating.
+        if inner_tunnel_handle.is_finished() {
+            let msg = match inner_tunnel_handle.await {
+                Ok(()) => "inner WG tunnel task completed unexpectedly".to_string(),
+                Err(e) => format!("inner WG tunnel task panicked: {e}"),
+            };
+            return Err(AetherError::Other(msg));
         }
-        if !inner_validated {
-            return Err(last_inner_err);
+        // Also check outer tunnel health during inner validation.
+        if outer_tunnel_handle.is_finished() {
+            let msg = match outer_tunnel_handle.await {
+                Ok(()) => "outer WG tunnel task completed during inner validation".to_string(),
+                Err(e) => format!("outer WG tunnel task panicked during inner validation: {e}"),
+            };
+            return Err(AetherError::Other(msg));
         }
+        validate_live_stack(&inner_stack, "WARP-in-WARP").await?;
     }
 
     log::info!("[+] WARP-in-WARP tunnel is fully established and validated");
