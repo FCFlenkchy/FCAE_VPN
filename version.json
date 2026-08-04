@@ -1,6 +1,6 @@
 {
-  "version": "v1.0.9.8",
+  "version": "v1.0.9.9",
   "release_date": "2026-08-04",
-  "release_notes": "fix tun mode wireguard destkops(linux/macos/windows)",
+  "release_notes": "fix sysprofile",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
