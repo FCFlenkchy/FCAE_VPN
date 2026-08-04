@@ -83,17 +83,47 @@ public class VpnNotification {
         return new Notification.Action.Builder(null, label, pi).build();
     }
 
+    // Manual formatting — avoids java.util.Formatter allocation on every
+    // notification update tick (once per second).  The old String.format()
+    // created a Formatter + StringBuilder internally per call.
     static String fmtBytes(long b) {
-        if (b >= 1073741824L) return String.format("%.1f GB", b / 1073741824.0);
-        if (b >= 1048576L)    return String.format("%.1f MB", b / 1048576.0);
-        if (b >= 1024L)       return String.format("%.0f KB", b / 1024.0);
+        if (b >= 1073741824L) {
+            double v = b / 1073741824.0;
+            long whole = (long) v;
+            long frac = (long) ((v - whole) * 10.0);
+            return whole + "." + frac + " GB";
+        }
+        if (b >= 1048576L) {
+            double v = b / 1048576.0;
+            long whole = (long) v;
+            long frac = (long) ((v - whole) * 10.0);
+            return whole + "." + frac + " MB";
+        }
+        if (b >= 1024L) {
+            return (b / 1024L) + " KB";
+        }
         return b + " B";
     }
 
     static String fmtRate(long bps) {
-        if (bps >= 1073741824L) return String.format("%.1f GB/s", bps / 1073741824.0);
-        if (bps >= 1048576L)    return String.format("%.1f MB/s", bps / 1048576.0);
-        if (bps >= 1024L)       return String.format("%.1f KB/s", bps / 1024.0);
+        if (bps >= 1073741824L) {
+            double v = bps / 1073741824.0;
+            long whole = (long) v;
+            long frac = (long) ((v - whole) * 10.0);
+            return whole + "." + frac + " GB/s";
+        }
+        if (bps >= 1048576L) {
+            double v = bps / 1048576.0;
+            long whole = (long) v;
+            long frac = (long) ((v - whole) * 10.0);
+            return whole + "." + frac + " MB/s";
+        }
+        if (bps >= 1024L) {
+            double v = bps / 1024.0;
+            long whole = (long) v;
+            long frac = (long) ((v - whole) * 10.0);
+            return whole + "." + frac + " KB/s";
+        }
         return bps + " B/s";
     }
 }

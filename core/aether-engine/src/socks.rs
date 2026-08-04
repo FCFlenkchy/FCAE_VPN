@@ -513,19 +513,28 @@ async fn handle_connect(
     }
 
     let up = tokio::spawn(async move {
-        let mut buf = vec![0u8; 16384];
         loop {
+            // Use buffer_pool to avoid a 16 KB allocation + memcpy per TCP read.
+            // The pool recycles buffers so the allocator isn't churned on every
+            // chunk.  We take a fresh buffer each iteration, send it into the
+            // mpsc channel (where it becomes owned by the receiver), and take
+            // another from the pool for the next read.
+            let mut buf = crate::buffer_pool::take(16384);
+            let cap = buf.capacity();
+            unsafe { buf.set_len(cap); }
             match rd.read(&mut buf).await {
                 Ok(0) => {
                     sender.close().await;
                     break;
                 }
                 Ok(n) => {
-                    if sender.send(buf[..n].to_vec()).await.is_err() {
+                    unsafe { buf.set_len(n); }
+                    if sender.send(buf).await.is_err() {
                         break;
                     }
                 }
                 Err(_) => {
+                    crate::buffer_pool::recycle(buf);
                     sender.close().await;
                     break;
                 }
@@ -829,11 +838,20 @@ fn parse_udp_request(buf: &[u8]) -> Option<(Target, (u16, Vec<u8>))> {
     }
     let port = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
     pos += 2;
-    Some((target, (port, buf[pos..].to_vec())))
+    // Use buffer_pool to avoid allocating a fresh Vec for the UDP payload.
+    // The relay's cbuf is 65535 bytes; we copy just the payload portion into
+    // a pooled buffer, which gets recycled after the sender.send_to() call.
+    let payload_len = buf.len() - pos;
+    let mut payload = crate::buffer_pool::take(payload_len);
+    payload.extend_from_slice(&buf[pos..]);
+    Some((target, (port, payload)))
 }
 
 fn build_udp_reply(src: SocketAddr, data: &[u8]) -> Vec<u8> {
-    let mut pkt = vec![0x00, 0x00, 0x00];
+    // Use buffer_pool for the reply packet to reduce allocator pressure.
+    let cap = 3 + 1 + 16 + 2 + data.len();
+    let mut pkt = crate::buffer_pool::take(cap);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00]);
     match src.ip() {
         IpAddr::V4(v4) => {
             pkt.push(ATYP_V4);

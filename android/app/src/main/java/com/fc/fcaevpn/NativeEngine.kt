@@ -40,9 +40,20 @@ object NativeEngine {
     ): Boolean
     @JvmStatic external fun nativeStop()
     @JvmStatic external fun nativeFree()
-    @JvmStatic external fun nativeGetStatusJson(): String
     @JvmStatic external fun nativeGetLogs(): String
     @JvmStatic external fun nativeClearLogs()
+
+    // ── Structured telemetry getters ──
+    @JvmStatic external fun nativeGetState(): Int
+    @JvmStatic external fun nativeGetRxBps(): Long
+    @JvmStatic external fun nativeGetTxBps(): Long
+    @JvmStatic external fun nativeGetTotalRx(): Long
+    @JvmStatic external fun nativeGetTotalTx(): Long
+    @JvmStatic external fun nativeGetRttMs(): Int
+    @JvmStatic external fun nativeGetPeer(): String
+    @JvmStatic external fun nativeGetLanIp(): String
+    @JvmStatic external fun nativeGetStatusMsg(): String
+    @JvmStatic external fun nativeGetLastError(): String
 
     // ── version checker ─────────────────────────────────────────────
     @JvmStatic external fun nativeCheckForUpdates(currentVersion: String)

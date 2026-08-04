@@ -68,8 +68,13 @@ impl RxToken for StackRxToken {
 
 impl<'a> TxToken for StackTxToken<'a> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let mut buf = vec![0u8; len];
+        // Use buffer_pool to avoid a fresh allocation on every transmitted
+        // packet.  smoltcp calls this for every TCP segment (ACK, SYN, data)
+        // and every UDP datagram — continuous allocator churn on the hot path.
+        let mut buf = crate::buffer_pool::take(len);
+        unsafe { buf.set_len(len); }
         let r = f(&mut buf);
+        unsafe { buf.set_len(len); }  // reset in case f() truncated
         self.0.push_back(buf);
         r
     }

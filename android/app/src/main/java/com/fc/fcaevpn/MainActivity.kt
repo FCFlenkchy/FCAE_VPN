@@ -22,7 +22,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.switchmaterial.SwitchMaterial
-import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -156,7 +155,7 @@ class MainActivity : AppCompatActivity() {
         override fun run() {
             if (!vpnActive) return
             if (!pollBusy.compareAndSet(false, true)) {
-                handler.postDelayed(this, POLL_INTERVAL_MS)
+                handler.postDelayed(this, currentPollInterval())
                 return
             }
             bgExecutor.execute {
@@ -168,9 +167,29 @@ class MainActivity : AppCompatActivity() {
                         handler.post { pollBusy.set(false) }
                         return@execute
                     }
-                    val statusJson = NativeEngine.nativeGetStatusJson()
+                    // Use structured getters instead of JSON round-trip.
+                    // Saves ~1 KB alloc per poll tick.
+                    val state = NativeEngine.nativeGetState()
+                    val rtt = NativeEngine.nativeGetRttMs()
+                    val rx = NativeEngine.nativeGetRxBps()
+                    val tx = NativeEngine.nativeGetTxBps()
+                    val totalRx = NativeEngine.nativeGetTotalRx()
+                    val totalTx = NativeEngine.nativeGetTotalTx()
+                    val peer = NativeEngine.nativeGetPeer()
+                    val lan = NativeEngine.nativeGetLanIp()
+                    val statusMsg = NativeEngine.nativeGetStatusMsg()
+                    val errMsg = NativeEngine.nativeGetLastError()
                     val logs = if (switchLogging.isChecked) NativeEngine.nativeGetLogs() else ""
-                    handler.post { applyStatus(statusJson, logs) }
+
+                    // Adaptive polling: if idle (no traffic) for 5+ consecutive
+                    // ticks, slow down from 1s to 2s to save JNI crossings.
+                    if (rx == 0L && tx == 0L) {
+                        idleTicks++
+                    } else {
+                        idleTicks = 0
+                    }
+
+                    handler.post { applyStatus(state, rtt, rx, tx, totalRx, totalTx, peer, lan, statusMsg, errMsg, logs) }
                 } catch (e: Throwable) {
                     handler.post {
                         statusText.text = "UI error: ${e.message}"
@@ -179,8 +198,16 @@ class MainActivity : AppCompatActivity() {
                     pollBusy.set(false)
                 }
             }
-            handler.postDelayed(this, POLL_INTERVAL_MS)
+            handler.postDelayed(this, currentPollInterval())
         }
+    }
+
+    private var idleTicks = 0
+
+    private fun currentPollInterval(): Long {
+        // After 5 idle ticks at 1s, switch to 2s to reduce JNI overhead.
+        // Resets to 1s as soon as traffic resumes.
+        return if (idleTicks >= 5) 2000L else POLL_INTERVAL_MS
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -307,8 +334,7 @@ class MainActivity : AppCompatActivity() {
             // engine alive we must NOT kill it, and if the engine is truly
             // stale the user can disconnect from the UI.
             try {
-                val json = JSONObject(NativeEngine.nativeGetStatusJson())
-                val state = json.optInt("state", 0)
+                val state = NativeEngine.nativeGetState()
                 if (state in 1..4) {
                     handler.post {
                         vpnActive = true
@@ -361,8 +387,7 @@ class MainActivity : AppCompatActivity() {
             // Verify the engine is actually still running before resuming poll
             bgExecutor.execute {
                 try {
-                    val json = JSONObject(NativeEngine.nativeGetStatusJson())
-                    val state = json.optInt("state", 0)
+                    val state = NativeEngine.nativeGetState()
                     handler.post {
                         if (state in 1..4) {
                             vpnActive = true
@@ -795,19 +820,20 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun applyStatus(statusJson: String, logs: String) {
+    private fun applyStatus(
+        state: Int,
+        rtt: Int,
+        rx: Long,
+        tx: Long,
+        totalRx: Long,
+        totalTx: Long,
+        peer: String,
+        lan: String,
+        statusMsg: String,
+        errMsg: String,
+        logs: String
+    ) {
         try {
-            val json = JSONObject(statusJson)
-            val state = json.optInt("state", 0)
-            val status = json.optString("status", "")
-            val err = json.optString("error", "")
-            val peer = json.optString("peer", "")
-            val rtt = json.optInt("rtt", 0)
-            val rx = json.optLong("rx", 0)
-            val tx = json.optLong("tx", 0)
-            val totalRx = json.optLong("totalRx", 0)
-            val totalTx = json.optLong("totalTx", 0)
-
             // Update engine state based on native telemetry.
             // In proxy mode, this is the ONLY source of truth — there are no
             // service broadcasts. In TUN mode, broadcasts may also update
@@ -834,7 +860,7 @@ class MainActivity : AppCompatActivity() {
                 5 -> "ERROR"
                 else -> "UNKNOWN"
             }
-            statusText.text = if (status.isNotEmpty()) "$label \u2014 $status" else label
+            statusText.text = if (statusMsg.isNotEmpty()) "$label \u2014 $statusMsg" else label
             statusText.setTextColor(
                 when (state) {
                     4 -> COLOR_CONNECTED
@@ -847,7 +873,6 @@ class MainActivity : AppCompatActivity() {
                 "\u2193 ${fmt(rx)}/s (${fmt(totalRx)})  |  \u2191 ${fmt(tx)}/s (${fmt(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "\u2014"}"
 
             // Build peer line — include LAN proxy addresses when sharing is on
-            val lan = json.optString("lan", "")
             val peerLine = StringBuilder()
             peerLine.append("Peer: ${peer.ifEmpty { " \u2014 " }}")
             if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") {
@@ -861,7 +886,7 @@ class MainActivity : AppCompatActivity() {
                     peerLine.append("\nLAN: $ports")
                 }
             }
-            if (err.isNotEmpty()) peerLine.append("\nError: $err")
+            if (errMsg.isNotEmpty()) peerLine.append("\nError: $errMsg")
             peerText.text = peerLine.toString()
 
             // Fast change detection: length + first/last chars is cheaper
@@ -908,11 +933,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Manual formatting avoids String.format() which creates a Formatter +
+    // StringBuilder internally on every call — this runs 4× per poll tick.
     private fun fmt(bps: Long): String {
         return when {
-            bps >= 1_073_741_824L -> String.format("%.1f GB", bps / 1_073_741_824.0)
-            bps >= 1_048_576L -> String.format("%.1f MB", bps / 1_048_576.0)
-            bps >= 1024L -> String.format("%.0f KB", bps / 1024.0)
+            bps >= 1_073_741_824L -> {
+                val v = bps / 1_073_741_824.0
+                val whole = v.toLong()
+                val frac = ((v - whole) * 10.0).toLong()
+                "$whole.$frac GB"
+            }
+            bps >= 1_048_576L -> {
+                val v = bps / 1_048_576.0
+                val whole = v.toLong()
+                val frac = ((v - whole) * 10.0).toLong()
+                "$whole.$frac MB"
+            }
+            bps >= 1024L -> {
+                val v = bps / 1024.0
+                "${v.toLong()} KB"
+            }
             else -> "$bps B"
         }
     }

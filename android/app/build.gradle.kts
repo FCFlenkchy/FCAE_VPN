@@ -44,7 +44,7 @@ android {
 
         externalNativeBuild {
             cmake {
-                cppFlags += listOf("-std=c++17", "-O2", "-fPIC")
+                cppFlags += listOf("-std=c++17", "-O3", "-fPIC", "-flto", "-DNDEBUG")
                 val cmakeTarget = when (ndkAbi) {
                     "arm64-v8a" -> "ANDROID_ARM64"
                     "armeabi-v7a" -> "ANDROID_ARM32"

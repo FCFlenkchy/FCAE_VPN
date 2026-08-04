@@ -167,28 +167,86 @@ Java_com_fc_fcaevpn_NativeEngine_nativeFree(JNIEnv*, jclass) {
     LOGI("aether_free");
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeGetStatusJson(JNIEnv* env, jclass) {
+// ── Structured telemetry: individual getters replace the old JSON round-trip ──
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeGetState(JNIEnv*, jclass) {
     ensure_init();
     AetherTelemetry t = {};
-    aether_get_telemetry(&t);
+    aether_get_cached_telemetry(&t);
+    return (jint)t.state;
+}
 
-    char buf[768];
-    snprintf(buf, sizeof(buf),
-        "{\"state\":%u,\"rtt\":%u,\"rx\":%llu,\"tx\":%llu,\"totalRx\":%llu,\"totalTx\":%llu,"
-        "\"peer\":\"%s\",\"lan\":\"%s\",\"status\":\"%s\",\"error\":\"%s\"}",
-        (unsigned)t.state,
-        (unsigned)t.rtt_ms,
-        (unsigned long long)t.rx_bytes_sec,
-        (unsigned long long)t.tx_bytes_sec,
-        (unsigned long long)t.total_rx,
-        (unsigned long long)t.total_tx,
-        t.connected_peer[0] ? t.connected_peer : "",
-        t.lan_ip[0] ? t.lan_ip : "",
-        t.status_message[0] ? t.status_message : "",
-        t.last_error[0] ? t.last_error : ""
-    );
-    return env->NewStringUTF(buf);
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeGetRxBps(JNIEnv*, jclass) {
+    ensure_init();
+    AetherTelemetry t = {};
+    aether_get_cached_telemetry(&t);
+    return (jlong)t.rx_bytes_sec;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeGetTxBps(JNIEnv*, jclass) {
+    ensure_init();
+    AetherTelemetry t = {};
+    aether_get_cached_telemetry(&t);
+    return (jlong)t.tx_bytes_sec;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeGetTotalRx(JNIEnv*, jclass) {
+    ensure_init();
+    AetherTelemetry t = {};
+    aether_get_cached_telemetry(&t);
+    return (jlong)t.total_rx;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeGetTotalTx(JNIEnv*, jclass) {
+    ensure_init();
+    AetherTelemetry t = {};
+    aether_get_cached_telemetry(&t);
+    return (jlong)t.total_tx;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeGetRttMs(JNIEnv*, jclass) {
+    ensure_init();
+    AetherTelemetry t = {};
+    aether_get_cached_telemetry(&t);
+    return (jint)t.rtt_ms;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeGetPeer(JNIEnv* env, jclass) {
+    ensure_init();
+    AetherTelemetry t = {};
+    aether_get_cached_telemetry(&t);
+    return env->NewStringUTF(t.connected_peer[0] ? t.connected_peer : "");
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeGetLanIp(JNIEnv* env, jclass) {
+    ensure_init();
+    AetherTelemetry t = {};
+    aether_get_cached_telemetry(&t);
+    return env->NewStringUTF(t.lan_ip[0] ? t.lan_ip : "");
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeGetStatusMsg(JNIEnv* env, jclass) {
+    ensure_init();
+    AetherTelemetry t = {};
+    aether_get_cached_telemetry(&t);
+    return env->NewStringUTF(t.status_message[0] ? t.status_message : "");
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeGetLastError(JNIEnv* env, jclass) {
+    ensure_init();
+    AetherTelemetry t = {};
+    aether_get_cached_telemetry(&t);
+    return env->NewStringUTF(t.last_error[0] ? t.last_error : "");
 }
 
 extern "C" JNIEXPORT jstring JNICALL

@@ -1409,8 +1409,7 @@ async fn run_wireguard_tunnel(
         }));
     }
 
-    // Brief settle for WG handshake + keepalive path.  The health-check grace
-    // period (2x interval) handles the rest — no need for a long sleep here.
+    // Brief settle for WG handshake + keepalive path.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // WireGuard was verified on a throwaway session; re-check the LIVE stack
@@ -1567,12 +1566,12 @@ async fn run_warp_in_warp(
     let outer_stack = establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
 
     // Outer needs time for handshake + first data before inner can forward.
-    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+    // WG handshake with obfuscation can take several seconds on slow networks.
+    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
 
     // Validate the outer tunnel before building the inner tunnel on top of it.
-    if let Err(e) = validate_live_stack(&outer_stack, "outer WARP").await {
-        log::warn!("[-] outer WARP validation failed: {e}; inner tunnel may not work");
-    }
+    // If outer validation fails, abort — inner WILL fail without a working outer.
+    validate_live_stack(&outer_stack, "outer WARP").await?;
 
     let forwarder = spawn_udp_forwarder(&outer_stack, peer).await?;
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
@@ -1580,11 +1579,16 @@ async fn run_warp_in_warp(
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
     let inner_stack = establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
 
-    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
 
-    if let Err(e) = validate_live_stack(&inner_stack, "WARP-in-WARP").await {
-        return Err(e);
-    }
+    validate_live_stack(&inner_stack, "WARP-in-WARP").await?;
+
+    // Pin both stacks so their netstack tasks stay alive as long as the
+    // socks/http tasks are running.  Without these keepalives, the outer
+    // stack's cmd_tx could be dropped by the compiler during the select!
+    // below, killing the outer netstack and cascading to the inner one.
+    let _outer_keepalive = outer_stack;
+    let _inner_keepalive = inner_stack.clone();
 
     let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
     let health_task = spawn_health_monitor(inner_stack.clone(), health_tx);
