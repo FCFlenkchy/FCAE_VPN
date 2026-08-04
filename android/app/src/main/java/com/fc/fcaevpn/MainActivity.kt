@@ -821,6 +821,10 @@ class MainActivity : AppCompatActivity() {
         // Allow dismissing by tapping outside the dialog
         dialog.setCanceledOnTouchOutside(true)
         dialog.show()
+        // Force the message and button text to white (theme default was dark blue)
+        dialog.findViewById<TextView>(android.R.id.message)?.setTextColor(Color.WHITE)
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.WHITE)
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.WHITE)
     }
 
     private fun applyStatus(
