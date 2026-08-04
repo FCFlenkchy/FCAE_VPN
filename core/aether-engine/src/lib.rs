@@ -152,11 +152,20 @@ fn health_max_fails() -> u32 {
 fn live_validate_timeout() -> std::time::Duration {
     // Pre-SOCKS validation needs some headroom over health probes
     // (handshake settle + DNS + HTTP through a cold tunnel).
+    //
+    // This has to comfortably contain the steps it wraps sequentially:
+    // DNS resolution (socks::dns_exchange allows up to 5s per resolver,
+    // with a second resolver as fallback) + a TCP handshake + an HTTP
+    // request/response (tunnelping::http_probe allows up to 6s just to
+    // read the response). A 5s outer budget was smaller than either of
+    // those inner steps alone, so on a cold/still-settling tunnel the
+    // probe was being cut off before DNS even finished, let alone TCP
+    // and HTTP — failing validation even when the endpoint was fine.
     let secs = std::env::var("AETHER_LIVE_VALIDATE_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(5);
+        .unwrap_or(15);
     std::time::Duration::from_secs(secs)
 }
 
@@ -1409,7 +1418,8 @@ async fn run_wireguard_tunnel(
         }));
     }
 
-    // Brief settle for WG handshake + keepalive path.
+    // Brief settle for WG handshake + keepalive path.  The health-check grace
+    // period (2x interval) handles the rest — no need for a long sleep here.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // WireGuard was verified on a throwaway session; re-check the LIVE stack
@@ -1463,7 +1473,7 @@ async fn establish_wg(
     obfuscate: bool,
     keepalive: u16,
     label: &'static str,
-) -> Result<(netstack::StackHandle, tokio::task::JoinHandle<()>)> {
+) -> Result<netstack::StackHandle> {
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
 
@@ -1500,14 +1510,13 @@ async fn establish_wg(
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
     let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
 
-    let tunnel_handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         if let Err(e) = tunnel.run(outbound_rx).await {
             log::error!("[{label}] wireguard tunnel exited: {e}");
         }
-        log::info!("[{label}] wireguard tunnel task completed");
     });
 
-    Ok((stack, tunnel_handle))
+    Ok(stack)
 }
 
 async fn spawn_udp_forwarder(
@@ -1563,131 +1572,51 @@ async fn run_warp_in_warp(
     listen: Option<SocketAddr>,
     http_listen: Option<SocketAddr>,
 ) -> Result<()> {
-    // Extend the outer WG health grace period so the outer tunnel doesn't
-    // get killed by its internal health task while the inner tunnel is still
-    // handshaking. The inner tunnel needs ~10-15s to establish on top of the
-    // outer tunnel.
-    if std::env::var("AETHER_WG_HEALTH_GRACE_SECS").is_err() {
-        std::env::set_var("AETHER_WG_HEALTH_GRACE_SECS", "45");
-    }
-
     log::info!("[*] establishing outer WARP tunnel to {peer}...");
-    let (outer_stack, outer_tunnel_handle) = establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
+    let outer_stack = establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
 
     // Outer needs time for handshake + first data before inner can forward.
-    // WG handshake with obfuscation can take several seconds on slow networks.
-    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
 
     // Validate the outer tunnel before building the inner tunnel on top of it.
-    // Retry a few times — cold WG with obfuscation often needs multiple attempts.
-    // If outer validation fails, abort — inner WILL fail without a working outer.
-    {
-        let mut outer_validated = false;
-        let mut last_outer_err = AetherError::Other("outer validation failed".into());
-        for attempt in 1..=4u32 {
-            // Check if the outer tunnel task died while we were waiting.
-            if outer_tunnel_handle.is_finished() {
-                let msg = match outer_tunnel_handle.await {
-                    Ok(()) => "outer WG tunnel task completed unexpectedly".to_string(),
-                    Err(e) => format!("outer WG tunnel task panicked: {e}"),
-                };
-                return Err(AetherError::Other(msg));
-            }
-            match validate_live_stack(&outer_stack, "outer WARP").await {
-                Ok(()) => {
-                    outer_validated = true;
-                    break;
-                }
-                Err(e) => {
-                    last_outer_err = e;
-                    log::warn!("[-] outer WARP validation attempt {attempt}/4 failed; retrying...");
-                    tokio::time::sleep(std::time::Duration::from_millis(1500 * attempt as u64)).await;
-                }
-            }
-        }
-        if !outer_validated {
-            return Err(last_outer_err);
-        }
+    if let Err(e) = validate_live_stack(&outer_stack, "outer WARP").await {
+        log::warn!("[-] outer WARP validation failed: {e}; inner tunnel may not work");
     }
-
-    // Start health monitoring on the outer stack so we can detect if the outer
-    // WG tunnel dies while the inner tunnel is running.
-    let (outer_health_tx, outer_health_rx) = tokio::sync::oneshot::channel::<()>();
-    let outer_health_task = spawn_health_monitor(outer_stack.clone(), outer_health_tx);
 
     let forwarder = spawn_udp_forwarder(&outer_stack, peer).await?;
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
-    let (inner_stack, inner_tunnel_handle) = establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
+    let inner_stack = establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
 
-    // Brief settle for the inner WG handshake to complete through the outer tunnel.
-    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
 
-    // Validate the inner tunnel BEFORE exposing SOCKS. This is the final
-    // data-plane check — we must not claim "connected" until this passes.
-    // This validation sends real DNS+HTTP traffic through the full
-    // inner-WG → forwarder → outer-netstack → outer-WG chain.
-    {
-        // Check if the inner tunnel task died while we were validating.
-        if inner_tunnel_handle.is_finished() {
-            let msg = match inner_tunnel_handle.await {
-                Ok(()) => "inner WG tunnel task completed unexpectedly".to_string(),
-                Err(e) => format!("inner WG tunnel task panicked: {e}"),
-            };
-            return Err(AetherError::Other(msg));
-        }
-        // Also check outer tunnel health during inner validation.
-        if outer_tunnel_handle.is_finished() {
-            let msg = match outer_tunnel_handle.await {
-                Ok(()) => "outer WG tunnel task completed during inner validation".to_string(),
-                Err(e) => format!("outer WG tunnel task panicked during inner validation: {e}"),
-            };
-            return Err(AetherError::Other(msg));
-        }
-        validate_live_stack(&inner_stack, "WARP-in-WARP").await?;
+    if let Err(e) = validate_live_stack(&inner_stack, "WARP-in-WARP").await {
+        return Err(e);
     }
 
-    log::info!("[+] WARP-in-WARP tunnel is fully established and validated");
-
-    // Both stacks are now validated. Pin them so their netstack tasks stay
-    // alive as long as the socks/http tasks are running.
-    let _outer_keepalive = outer_stack;
-    let _inner_keepalive = inner_stack.clone();
-    // Keep tunnel handles alive so we can detect early termination.
-    let _outer_tunnel_guard = outer_tunnel_handle;
-    let _inner_tunnel_guard = inner_tunnel_handle;
-
-    let (inner_health_tx, inner_health_rx) = tokio::sync::oneshot::channel::<()>();
-    let inner_health_task = spawn_health_monitor(inner_stack.clone(), inner_health_tx);
+    let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
+    let health_task = spawn_health_monitor(inner_stack.clone(), health_tx);
     let (socks_task, http_task) = spawn_local_proxies(inner_stack, listen, http_listen).await;
 
     enum End {
         Socks(std::result::Result<Result<()>, tokio::task::JoinError>),
-        InnerHealth,
-        OuterHealth,
+        Health,
     }
     let end = if let Some(task) = socks_task {
         tokio::select! {
             r = task => End::Socks(r),
-            _ = inner_health_rx => End::InnerHealth,
-            _ = outer_health_rx => End::OuterHealth,
+            _ = health_rx => End::Health,
         }
     } else {
-        // No SOCKS task — still monitor both health channels
-        tokio::select! {
-            _ = inner_health_rx => End::InnerHealth,
-            _ = outer_health_rx => End::OuterHealth,
-        }
+        End::Health
     };
-    inner_health_task.abort();
-    outer_health_task.abort();
+    health_task.abort();
     if let Some(t) = http_task {
         t.abort();
     }
     match end {
-        End::InnerHealth => Err(AetherError::Other("inner tunnel health check failed".into())),
-        End::OuterHealth => Err(AetherError::Other("outer tunnel health check failed".into())),
+        End::Health => Err(AetherError::Other("tunnel health check failed".into())),
         End::Socks(Ok(Ok(()))) => Ok(()),
         End::Socks(Ok(Err(e))) => Err(e),
         End::Socks(Err(e)) => Err(AetherError::Other(format!("socks task join: {e}"))),
