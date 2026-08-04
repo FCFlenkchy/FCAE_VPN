@@ -617,10 +617,10 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
     }
     // Sysprofile: 0=Auto, 1=Low, 2=Medium, 3=High
     match cfg.sys_profile {
-        1 => std::env::set_var("AETHER_SYSPROFILE", "low"),
-        2 => std::env::set_var("AETHER_SYSPROFILE", "medium"),
-        3 => std::env::set_var("AETHER_SYSPROFILE", "high"),
-        _ => std::env::set_var("AETHER_SYSPROFILE", "auto"),
+        1 => std::env::set_var("AETHER_PERF_PROFILE", "low"),
+        2 => std::env::set_var("AETHER_PERF_PROFILE", "medium"),
+        3 => std::env::set_var("AETHER_PERF_PROFILE", "high"),
+        _ => std::env::set_var("AETHER_PERF_PROFILE", "auto"),
     }
     // TUN mode flag for engine (Android sets fd separately via aether_set_android_tun_fd)
     if cfg.mode == 1 {
