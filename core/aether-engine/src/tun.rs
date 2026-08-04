@@ -98,6 +98,22 @@ pub async fn run(
     }
     log::info!("[tun] bridging fd={fd} (dup={dup})");
 
+    // Android hands us a non-blocking fd (VpnService's ParcelFileDescriptor),
+    // which made the read loop below fall back to its WouldBlock branch —
+    // sleep 50ms and retry — as its steady-state behavior for the entire
+    // connection, even at idle. That's a ~20Hz wakeup loop running for
+    // hours, which keeps the CPU from reaching deeper idle states and
+    // shows up as background battery drain. We own this dup'd copy, so
+    // clear O_NONBLOCK on it: reads then genuinely block in the kernel
+    // until a packet arrives, at zero CPU cost, and the WouldBlock arm
+    // below becomes a rare defensive fallback instead of the common case.
+    unsafe {
+        let flags = libc::fcntl(dup, libc::F_GETFL, 0);
+        if flags >= 0 {
+            libc::fcntl(dup, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+        }
+    }
+
     let (err_tx, mut err_rx) = mpsc::channel::<String>(4);
 
     let out_tx = outbound_tx;
