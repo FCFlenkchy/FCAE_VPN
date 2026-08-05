@@ -131,7 +131,6 @@ struct AppState {
         c.tls_groups       = nullptr;
         c.udp_buf_kb       = 0;
         c.sni              = sni[0] ? sni : nullptr;
-        c.ironclad_validate     = ironclad_validate;
         c.sys_profile           = sys_profile;
         c.team_name     = team_name[0] ? team_name : nullptr;
         c.access_token  = access_token[0] ? access_token : nullptr;

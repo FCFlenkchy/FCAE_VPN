@@ -126,7 +126,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.h2_enabled = h2Enabled == JNI_TRUE;
     cfg.ech_enabled = echEnabled == JNI_TRUE;
     cfg.sni = sniOwned.empty() ? nullptr : sniOwned.c_str();
-    cfg.ironclad_validate = ironcladValidate == JNI_TRUE;
     cfg.sys_profile = (int)sysProfile;
     cfg.team_name = teamOwned.empty() ? nullptr : teamOwned.c_str();
     cfg.access_token = tokenOwned.empty() ? nullptr : tokenOwned.c_str();
