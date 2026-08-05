@@ -150,6 +150,7 @@ async fn spawn_local_proxies(
 /// Does not parse argv or initialize the global logger (caller owns that).
 pub async fn run_from_env() -> Result<()> {
     log::info!("Aether v{}", env!("CARGO_PKG_VERSION"));
+    sysprofile::reset();
     sysprofile::log_summary();
     install_netstack_panic_guard();
 
@@ -748,9 +749,10 @@ fn split_dataplane(
         return (outbound_tx, inbound_rx, None);
     };
 
-    let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
-    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
-    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+    let cap = sysprofile::channel_capacity(); //it was hardcoded to 512
+    let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
+    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
+    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
 
     let ot_ns = outbound_tx.clone();
     tokio::spawn(async move {
