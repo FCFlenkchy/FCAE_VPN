@@ -793,8 +793,8 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
         // Force the message and button text to white (theme default was dark blue)
         dialog.findViewById<TextView>(android.R.id.message)?.setTextColor(Color.WHITE)
-        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.WHITE)
-        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.WHITE)
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.CYAN)
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
     }
 
     private fun applyStatus(
