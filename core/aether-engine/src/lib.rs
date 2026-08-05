@@ -905,6 +905,11 @@ async fn run_masque_tunnel(
         }));
     }
 
+    // Signal the FFI/GUI that the tunnel is fully connected.
+    // In TUN mode without LAN sharing, SOCKS5 is not started so the
+    // usual "socks5 server listening" log trigger never fires.
+    log::info!("[+] data-plane ok");
+
     let tunnel_result = tunnel_task.await;
     if let Some(t) = socks_task {
         t.abort();
@@ -1276,6 +1281,9 @@ async fn run_wireguard_tunnel(
         }));
     }
 
+    // Signal the FFI/GUI that the tunnel is fully connected.
+    log::info!("[+] data-plane ok");
+
     let tunnel_result = tunnel_task.await;
     if let Some(t) = socks_task {
         t.abort();
@@ -1457,6 +1465,9 @@ async fn run_warp_in_warp(
             }
         }));
     }
+
+    // Signal the FFI/GUI that the tunnel is fully connected.
+    log::info!("[+] data-plane ok");
 
     let outcome = tokio::select! {
         result = &mut outer_exit => join_outcome("outer wireguard tunnel", result),
