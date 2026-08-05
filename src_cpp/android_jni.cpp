@@ -84,7 +84,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jboolean h2Enabled,
     jboolean echEnabled,
     jstring sni,
-    jboolean ironcladValidate,
     jint sysProfile,
     jstring teamName,
     jstring accessToken,

@@ -136,7 +136,6 @@ public class FCAEVpnService extends VpnService {
         final boolean quick   = intent.getBooleanExtra("quickReconnect", false);
         final boolean h2      = intent.getBooleanExtra("h2Enabled", true);
         final boolean ech     = intent.getBooleanExtra("echEnabled", true);
-        final boolean iron    = intent.getBooleanExtra("ironclad", false);
         final boolean lan     = intent.getBooleanExtra("lanSharing", false);
         final int socks       = intent.getIntExtra("socksPort", 1819);
         final int http        = intent.getIntExtra("httpPort", 1820);
@@ -194,7 +193,7 @@ public class FCAEVpnService extends VpnService {
                     ipVersion, quick, noizeVal,
                     false, 16, 32, 2, 10, socks, http,
                     peerVal, cfgPath, h2, ech,
-                    sniVal, iron, sysProfile,
+                    sniVal, sysProfile,
                     teamVal, tokenVal, emailVal, routesVal, routesIVal
                 );
                 if (!ok) {

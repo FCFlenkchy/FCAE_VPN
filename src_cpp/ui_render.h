@@ -48,8 +48,6 @@ struct AppState {
 
     // MASQUE SNI (empty = default consumer-masque.cloudflareclient.com)
     char sni[128] = {};
-    // Post-scan ironclad validation
-    bool ironclad_validate = false;
     // Zero Trust (Cloudflare Teams)
     char team_name[128] = {};
     char access_token[256] = {};

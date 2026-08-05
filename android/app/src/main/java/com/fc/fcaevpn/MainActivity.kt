@@ -67,7 +67,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editRoutesFile: android.widget.EditText
     private lateinit var editRoutesInline: android.widget.EditText
     private lateinit var outerScroll: ScrollView
-    private lateinit var switchIronclad: SwitchMaterial
 
     private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         val t = Thread(r, "bgExecutor")
@@ -256,7 +255,7 @@ class MainActivity : AppCompatActivity() {
         )
         spinnerScan.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
-            listOf("Turbo", "Balanced", "Thorough", "Stealth"),
+            listOf("Turbo", "Balanced", "Thorough", "Stealth", "Ironclad"),
         )
         spinnerNoize.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
@@ -439,7 +438,6 @@ class MainActivity : AppCompatActivity() {
             putBoolean("h2", switchH2.isChecked)
             putBoolean("ech", switchEch.isChecked)
             putBoolean("quick", switchQuick.isChecked)
-            putBoolean("ironclad", switchIronclad.isChecked)
             putBoolean("lan", switchLan.isChecked)
             putBoolean("logging", switchLogging.isChecked)
             putBoolean("socks", switchSocks.isChecked)
@@ -466,7 +464,6 @@ class MainActivity : AppCompatActivity() {
         switchH2.isChecked = prefs.getBoolean("h2", true)
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", false)
-        switchIronclad.isChecked = prefs.getBoolean("ironclad", false)
         switchLan.isChecked = prefs.getBoolean("lan", false)
         switchLogging.isChecked = prefs.getBoolean("logging", true)
         switchSocks.isChecked = prefs.getBoolean("socks", true)
@@ -519,7 +516,6 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("lanSharing", switchLan.isChecked)
         i.putExtra("configPath", filesDir.resolve("aether.toml").absolutePath)
         i.putExtra("sni", editSni.text.toString().trim())
-        i.putExtra("ironclad", switchIronclad.isChecked)
         i.putExtra("socksPort", if (switchSocks.isChecked) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0)
         i.putExtra("httpPort", if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0)
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
@@ -557,7 +553,6 @@ class MainActivity : AppCompatActivity() {
         val quick = switchQuick.isChecked
         val h2 = switchH2.isChecked
         val ech = switchEch.isChecked
-        val iron = switchIronclad.isChecked
         val lan = switchLan.isChecked
         val sni = editSni.text.toString().trim()
         val cfgPath = filesDir.resolve("aether.toml").absolutePath

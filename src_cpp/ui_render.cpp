@@ -136,7 +136,6 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "ech_enabled") g_app.ech_enabled = atoi(val.c_str()) != 0;
     else if (key == "sni")
         snprintf(g_app.sni, sizeof(g_app.sni), "%s", val.c_str());
-    else if (key == "ironclad_validate") g_app.ironclad_validate = atoi(val.c_str()) != 0;
     else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
     else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
@@ -186,7 +185,6 @@ static void save_config() {
     fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled ? 1 : 0);
     fprintf(f, "ech_enabled=%d\n", g_app.ech_enabled ? 1 : 0);
     fprintf(f, "sni=%s\n", g_app.sni);
-    fprintf(f, "ironclad_validate=%d\n", g_app.ironclad_validate ? 1 : 0);
     fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
     fprintf(f, "auto_scroll=%d\n", g_app.auto_scroll ? 1 : 0);
     fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
@@ -853,9 +851,9 @@ void render_ui() {
             ImGui::BeginChild("##scan_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Scan Mode");
-            const char* modes[] = { "Turbo", "Balanced", "Thorough", "Stealth" };
-            if (g_app.scan_mode > 3) g_app.scan_mode = 1;
-            ImGui::Combo("Mode", &g_app.scan_mode, modes, 4);
+            const char* modes[] = { "Turbo", "Balanced", "Thorough", "Stealth", "Ironclad" };
+            if (g_app.scan_mode > 4) g_app.scan_mode = 1;
+            ImGui::Combo("Mode", &g_app.scan_mode, modes, 5);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("IP Version");
             ImGui::RadioButton("IPv4",       &g_app.ip_version, 4);
@@ -863,8 +861,6 @@ void render_ui() {
             ImGui::RadioButton("IPv6",       &g_app.ip_version, 6);
             ImGui::SameLine();
             ImGui::RadioButton("Dual-Stack", &g_app.ip_version, 10);
-            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Checkbox("Ironclad validation", &g_app.ironclad_validate);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("MASQUE SNI");
             ImGui::InputText("##sni", g_app.sni, sizeof(g_app.sni));
