@@ -1,6 +1,6 @@
 {
   "version": "v1.1.2",
   "release_date": "2026-08-05",
-  "release_notes": "Fast disconnect on Android",
+  "release_notes": "Fix sysprofile and ironclad scan mode",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
