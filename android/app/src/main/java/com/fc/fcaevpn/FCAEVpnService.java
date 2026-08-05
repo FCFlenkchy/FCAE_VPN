@@ -233,7 +233,7 @@ public class FCAEVpnService extends VpnService {
         }, "FCAE-NativeFree-Sync");
         t.setDaemon(true);
         t.start();
-        try { t.join(5000); } catch (InterruptedException ignored) {}
+        try { t.join(500); } catch (InterruptedException ignored) {}
         if (t.isAlive()) {
             Log.w(TAG, "nativeFree timed out — letting it die with process");
         }
