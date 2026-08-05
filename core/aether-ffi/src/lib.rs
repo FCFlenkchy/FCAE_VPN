@@ -856,7 +856,8 @@ pub extern "C" fn aether_stop() {
 
     SHUTDOWN.store(true, Ordering::SeqCst);
     SHUTDOWN_NOTIFY.notify_one();
-
+    
+    aether_engine::tun::close_all_fds();
     // ── Emergency cleanup: force-kill tun2socks and remove TUN adapters ──
     // This runs outside the tokio runtime so it works even if the runtime
     // is already shutting down.  The engine thread's normal cleanup path
