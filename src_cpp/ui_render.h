@@ -60,11 +60,6 @@ struct AppState {
     char routes_file[256] = {};
     // Inline routing rules (comma-separated, takes precedence over file)
     char routes_inline[2048] = {};
-    // Tunnel health
-    int health_interval_secs = 20;
-    int health_max_fails     = 2;
-    int health_timeout_secs  = 5;
-    int live_validate_secs   = 20;
     int sys_profile       = 0;   // 0=Auto, 1=Low, 2=Medium, 3=High
 
     AetherTelemetry telem = {};
@@ -137,10 +132,6 @@ struct AppState {
         c.udp_buf_kb       = 0;
         c.sni              = sni[0] ? sni : nullptr;
         c.ironclad_validate     = ironclad_validate;
-        c.health_interval_secs  = (uint32_t)(health_interval_secs > 0 ? health_interval_secs : 0);
-        c.health_max_fails      = (uint32_t)(health_max_fails > 0 ? health_max_fails : 0);
-        c.health_timeout_secs   = (uint32_t)(health_timeout_secs > 0 ? health_timeout_secs : 0);
-        c.live_validate_secs    = (uint32_t)(live_validate_secs > 0 ? live_validate_secs : 0);
         c.sys_profile           = sys_profile;
         c.team_name     = team_name[0] ? team_name : nullptr;
         c.access_token  = access_token[0] ? access_token : nullptr;

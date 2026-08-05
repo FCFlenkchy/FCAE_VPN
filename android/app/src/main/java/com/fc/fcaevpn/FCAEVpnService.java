@@ -138,10 +138,6 @@ public class FCAEVpnService extends VpnService {
         final boolean ech     = intent.getBooleanExtra("echEnabled", true);
         final boolean iron    = intent.getBooleanExtra("ironclad", false);
         final boolean lan     = intent.getBooleanExtra("lanSharing", false);
-        final int hi          = intent.getIntExtra("healthInterval", 20);
-        final int hf          = intent.getIntExtra("healthMaxFails", 2);
-        final int ht          = intent.getIntExtra("healthTimeout", 5);
-        final int lv          = intent.getIntExtra("liveValidate", 20);
         final int socks       = intent.getIntExtra("socksPort", 1819);
         final int http        = intent.getIntExtra("httpPort", 1820);
         final String noize    = intent.getStringExtra("noizeProfile");
@@ -198,7 +194,7 @@ public class FCAEVpnService extends VpnService {
                     ipVersion, quick, noizeVal,
                     false, 16, 32, 2, 10, socks, http,
                     peerVal, cfgPath, h2, ech,
-                    sniVal, iron, hi, hf, ht, lv, sysProfile,
+                    sniVal, iron, sysProfile,
                     teamVal, tokenVal, emailVal, routesVal, routesIVal
                 );
                 if (!ok) {

@@ -85,10 +85,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jboolean echEnabled,
     jstring sni,
     jboolean ironcladValidate,
-    jint healthIntervalSecs,
-    jint healthMaxFails,
-    jint healthTimeoutSecs,
-    jint liveValidateSecs,
     jint sysProfile,
     jstring teamName,
     jstring accessToken,
@@ -131,10 +127,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.ech_enabled = echEnabled == JNI_TRUE;
     cfg.sni = sniOwned.empty() ? nullptr : sniOwned.c_str();
     cfg.ironclad_validate = ironcladValidate == JNI_TRUE;
-    cfg.health_interval_secs = healthIntervalSecs > 0 ? (uint32_t)healthIntervalSecs : 0;
-    cfg.health_max_fails = healthMaxFails > 0 ? (uint32_t)healthMaxFails : 0;
-    cfg.health_timeout_secs = healthTimeoutSecs > 0 ? (uint32_t)healthTimeoutSecs : 0;
-    cfg.live_validate_secs = liveValidateSecs > 0 ? (uint32_t)liveValidateSecs : 0;
     cfg.sys_profile = (int)sysProfile;
     cfg.team_name = teamOwned.empty() ? nullptr : teamOwned.c_str();
     cfg.access_token = tokenOwned.empty() ? nullptr : tokenOwned.c_str();

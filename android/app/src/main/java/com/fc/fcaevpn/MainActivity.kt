@@ -52,7 +52,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchH2: SwitchMaterial
     private lateinit var switchEch: SwitchMaterial
     private lateinit var switchQuick: SwitchMaterial
-    private lateinit var switchIronclad: SwitchMaterial
     private lateinit var switchLan: SwitchMaterial
     private lateinit var switchLogging: SwitchMaterial
     private lateinit var switchSocks: SwitchMaterial
@@ -60,8 +59,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerSysprofile: Spinner
     private lateinit var editSni: android.widget.EditText
     private lateinit var editForcePeer: android.widget.EditText
-    private lateinit var editHealthInterval: android.widget.EditText
-    private lateinit var editHealthMaxFails: android.widget.EditText
     private lateinit var editSocksPort: android.widget.EditText
     private lateinit var editHttpPort: android.widget.EditText
     private lateinit var editTeam: android.widget.EditText
@@ -70,6 +67,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editRoutesFile: android.widget.EditText
     private lateinit var editRoutesInline: android.widget.EditText
     private lateinit var outerScroll: ScrollView
+    private lateinit var switchIronclad: SwitchMaterial
 
     private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         val t = Thread(r, "bgExecutor")
@@ -232,7 +230,6 @@ class MainActivity : AppCompatActivity() {
         switchH2 = findViewById(R.id.switchH2)
         switchEch = findViewById(R.id.switchEch)
         switchQuick = findViewById(R.id.switchQuick)
-        switchIronclad = findViewById(R.id.switchIronclad)
         switchLan = findViewById(R.id.switchLan)
         switchLogging = findViewById(R.id.switchLogging)
         switchSocks = findViewById(R.id.switchSocks)
@@ -240,8 +237,6 @@ class MainActivity : AppCompatActivity() {
         spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
         editSni = findViewById(R.id.editSni)
         editForcePeer = findViewById(R.id.editForcePeer)
-        editHealthInterval = findViewById(R.id.editHealthInterval)
-        editHealthMaxFails = findViewById(R.id.editHealthMaxFails)
         editSocksPort = findViewById(R.id.editSocksPort)
         editHttpPort = findViewById(R.id.editHttpPort)
         editTeam = findViewById(R.id.editTeam)
@@ -451,8 +446,6 @@ class MainActivity : AppCompatActivity() {
             putBoolean("http", switchHttp.isChecked)
             putString("sni", editSni.text.toString().trim())
             putString("forcePeer", editForcePeer.text.toString().trim())
-            putString("healthInterval", editHealthInterval.text.toString())
-            putString("healthMaxFails", editHealthMaxFails.text.toString())
             putInt("sysprofile", spinnerSysprofile.selectedItemPosition)
             putString("socksPort", editSocksPort.text.toString())
             putString("httpPort", editHttpPort.text.toString())
@@ -480,8 +473,6 @@ class MainActivity : AppCompatActivity() {
         switchHttp.isChecked = prefs.getBoolean("http", true)
         editSni.setText(prefs.getString("sni", ""))
         editForcePeer.setText(prefs.getString("forcePeer", ""))
-        editHealthInterval.setText(prefs.getString("healthInterval", "20"))
-        editHealthMaxFails.setText(prefs.getString("healthMaxFails", "2"))
         spinnerSysprofile.setSelection(prefs.getInt("sysprofile", 0))
         editSocksPort.setText(prefs.getString("socksPort", "1819"))
         editHttpPort.setText(prefs.getString("httpPort", "1820"))
@@ -508,16 +499,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun healthInterval(): Int =
-        editHealthInterval.text.toString().toIntOrNull()?.coerceIn(2, 120) ?: 20
-
-    private fun healthMaxFails(): Int =
-        editHealthMaxFails.text.toString().toIntOrNull()?.coerceIn(1, 10) ?: 2
-
-    private fun liveValidateSecs(): Int =
-        // Default 5s — fast enough for quick connect, still gives tunnel time to warm up.
-        5
-
     private fun startTunServiceWithConfig() {
         // Cancel any pending disconnect fallback — we're connecting now.
         disconnectPending = false
@@ -539,10 +520,6 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("configPath", filesDir.resolve("aether.toml").absolutePath)
         i.putExtra("sni", editSni.text.toString().trim())
         i.putExtra("ironclad", switchIronclad.isChecked)
-        i.putExtra("healthInterval", healthInterval())
-        i.putExtra("healthMaxFails", healthMaxFails())
-        i.putExtra("healthTimeout", 5)
-        i.putExtra("liveValidate", liveValidateSecs())
         i.putExtra("socksPort", if (switchSocks.isChecked) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0)
         i.putExtra("httpPort", if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0)
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
@@ -583,8 +560,6 @@ class MainActivity : AppCompatActivity() {
         val iron = switchIronclad.isChecked
         val lan = switchLan.isChecked
         val sni = editSni.text.toString().trim()
-        val hi = healthInterval()
-        val hf = healthMaxFails()
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
         // Extract ALL UI values on the main thread — never read Views from bg.
         val noizeProfile = spinnerNoize.selectedItem.toString()
@@ -628,10 +603,6 @@ class MainActivity : AppCompatActivity() {
                     echEnabled = ech,
                     sni = sni,
                     ironcladValidate = iron,
-                    healthIntervalSecs = hi,
-                    healthMaxFails = hf,
-                    healthTimeoutSecs = 5,
-                    liveValidateSecs = liveValidateSecs(),
                     sysProfile = sysProfile,
                     teamName = teamName,
                     accessToken = accessToken,
