@@ -1177,6 +1177,15 @@ async fn run_wireguard(
     }
 }
 
+fn wg_tunnel_validate_timeout() -> std::time::Duration {
+    let secs = std::env::var("AETHER_WG_VALIDATE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(20);
+    std::time::Duration::from_secs(secs)
+}
+
 async fn run_wireguard_tunnel(
     identity: account::Identity,
     peer: SocketAddr,
@@ -1466,6 +1475,18 @@ async fn run_warp_in_warp(
     drop(outer_stack);
 
     outcome
+}
+
+fn join_outcome(
+    what: &str,
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+) -> Result<()> {
+    match result {
+        Ok(Ok(())) => Err(AetherError::Other(format!("{what} stopped"))),
+        Ok(Err(e)) => Err(e),
+        Err(e) if e.is_cancelled() => Err(AetherError::Other(format!("{what} was cancelled"))),
+        Err(e) => Err(AetherError::Other(format!("{what} panicked: {e}"))),
+    }
 }
 
 async fn prompt_line(prompt: &str) -> Option<String> {
