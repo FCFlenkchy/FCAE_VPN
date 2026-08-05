@@ -856,23 +856,25 @@ pub extern "C" fn aether_stop() {
 
     SHUTDOWN.store(true, Ordering::SeqCst);
     SHUTDOWN_NOTIFY.notify_one();
-    
+
+    // ── Emergency cleanup: force-close TUN fds immediately ──────────────
+    // On Android this interrupts the blocking read() in tun::run() instantly
+    // so the VpnService fd is released before the engine thread finishes
+    // its graceful shutdown. Without this the VPN notification lingers
+    // for seconds because the kernel keeps the TUN device alive until
+    // the last dup'd fd is closed.
     aether_engine::tun::close_all_fds();
+
     // ── Emergency cleanup: force-kill tun2socks and remove TUN adapters ──
-    // This runs outside the tokio runtime so it works even if the runtime
-    // is already shutting down.  The engine thread's normal cleanup path
-    // may not get a chance to run if the runtime drops first.
     #[cfg(target_os = "windows")]
     {
-        // Use a short timeout so we don't block the UI thread
         std::thread::spawn(|| {
             aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
         });
     }
 
     // Update telemetry immediately so the UI shows DISCONNECTED without
-    // waiting for the engine thread to finish.  The engine thread will
-    // also update telemetry when it exits, which is fine (idempotent).
+    // waiting for the engine thread to finish.
     let mut t = TELEMETRY.lock();
     t.state = 0;
     t.status_message = "Disconnected".to_string();
