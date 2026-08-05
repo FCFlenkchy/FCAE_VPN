@@ -1221,8 +1221,10 @@ async fn run_wireguard_tunnel(
         aethernoize: std::sync::Arc::new(aethernoize),
     };
 
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(512);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+    
+    let cap = sysprofile::channel_capacity();
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(cap);
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
 
     let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
 
