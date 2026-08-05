@@ -824,7 +824,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
 
             // Now that the runtime is dropped, update telemetry — this
             // runs outside the runtime.
-            if (SHUTDOWN.load(Ordering::SqCst) {
+            if SHUTDOWN.load(Ordering::SeqCst) {
             match result {
                 Ok(()) => {
                     let mut t = TELEMETRY.lock();
