@@ -19,7 +19,7 @@ pub struct Tuning {
     pub channel_capacity: usize,
 }
 
-static TUNING: OnceLock<Tuning> = OnceLock::new();
+static TUNING: std::sync::Mutex<Option<Tuning>> = std::sync::Mutex::new(None);
 
 fn detected_cpus() -> usize {
     std::thread::available_parallelism()
@@ -168,8 +168,9 @@ fn build_tuning() -> Tuning {
     }
 }
 
-pub fn tuning() -> &'static Tuning {
-    TUNING.get_or_init(build_tuning)
+pub fn tuning() -> Tuning {
+    let mut lock = TUNING.lock().unwrap();
+    *lock.get_or_insert_with(build_tuning)
 }
 
 pub fn log_summary() {
@@ -214,4 +215,8 @@ pub fn netstack_udp_buf_bytes() -> usize {
 
 pub fn channel_capacity() -> usize {
     tuning().channel_capacity
+}
+
+pub fn reset() {
+    *TUNING.lock().unwrap() = None;
 }
