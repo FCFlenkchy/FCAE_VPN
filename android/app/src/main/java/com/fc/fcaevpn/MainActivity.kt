@@ -602,7 +602,6 @@ class MainActivity : AppCompatActivity() {
                     h2Enabled = h2,
                     echEnabled = ech,
                     sni = sni,
-                    ironcladValidate = iron,
                     sysProfile = sysProfile,
                     teamName = teamName,
                     accessToken = accessToken,
