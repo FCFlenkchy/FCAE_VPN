@@ -1,6 +1,6 @@
 {
-  "version": "v1.1.2",
+  "version": "v1.1.3",
   "release_date": "2026-08-05",
-  "release_notes": "Fix sysprofile and ironclad scan mode",
+  "release_notes": "Better connecting and disconnecting handeling",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
