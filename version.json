@@ -1,6 +1,6 @@
 {
-  "version": "v1.1.1",
+  "version": "v1.1.2",
   "release_date": "2026-08-05",
-  "release_notes": "faster connection and wireguard fixed",
+  "release_notes": "Fast disconnect on Android",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
