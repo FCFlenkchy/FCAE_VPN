@@ -7,29 +7,21 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class FCAEVpnService extends VpnService {
     private static final String TAG = "FCAE_VPN";
 
-    public static final String ACTION_STOP      = "com.fc.fcaevpn.STOP";
+    public static final String ACTION_STOP       = "com.fc.fcaevpn.STOP";
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
-    public static final String ACTION_START     = "com.fc.fcaevpn.START";
+    public static final String ACTION_START      = "com.fc.fcaevpn.START";
 
-    public static final String BROADCAST_VPN_DISCONNECTED = "com.fc.fcaevpn.VPN_DISCONNECTED";
+    public static final String BROADCAST_VPN_DISCONNECTED  = "com.fc.fcaevpn.VPN_DISCONNECTED";
     public static final String BROADCAST_VPN_STATE_CHANGED = "com.fc.fcaevpn.VPN_STATE_CHANGED";
 
-    // Monotonically increasing generation counter.  Every startVpn() and
-    // fullShutdown() increments it.  The broadcast carries the generation
-    // so the Activity can ignore stale broadcasts from a previous cycle.
     private static final AtomicLong sGeneration = new AtomicLong(0);
 
-    // Cleanup generation — incremented by startVpn() so stale cleanup
-    // threads from a previous shutdown skip freeNativeOnce() (which
-    // would otherwise join the NEW engine thread and deadlock it).
     private volatile long cleanupGeneration = 0;
-
     private volatile ParcelFileDescriptor vpnInterface;
     private volatile Thread vpnThread;
     private volatile boolean running = false;
@@ -41,19 +33,13 @@ public class FCAEVpnService extends VpnService {
     private Intent lastStartIntent;
     private VpnNotification notification;
     private Handler handler;
-
-    // Skip redundant manager.notify() calls (Binder call into system_server,
-    // can wake SystemUI) when the displayed text hasn't actually changed —
-    // meaningful during idle-but-connected periods with no traffic.
     private String lastNotifText = null;
 
     private final Runnable statsRunnable = new Runnable() {
         @Override
         public void run() {
             updateNotification();
-            if (running) {
-                handler.postDelayed(this, 1000);
-            }
+            if (running) handler.postDelayed(this, 1000);
         }
     };
 
@@ -63,7 +49,6 @@ public class FCAEVpnService extends VpnService {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.i(TAG, "Service created");
         handler = new Handler(Looper.getMainLooper());
         notification = new VpnNotification(this);
     }
@@ -75,10 +60,8 @@ public class FCAEVpnService extends VpnService {
                 case ACTION_STOP:
                     pauseVpn();
                     return START_STICKY;
+
                 case ACTION_DISCONNECT:
-                    // Guard: if the service was never started with a VPN config
-                    // (i.e. proxy mode scenario where disconnectAll() still
-                    // sends ACTION_DISCONNECT), just stop self gracefully.
                     if (vpnInterface == null && vpnThread == null && !running) {
                         handler.removeCallbacks(statsRunnable);
                         notification.dismiss();
@@ -88,6 +71,7 @@ public class FCAEVpnService extends VpnService {
                     }
                     fullShutdown();
                     return START_NOT_STICKY;
+
                 case ACTION_START:
                     if (!intent.hasExtra("protocol") && lastStartIntent != null) {
                         startVpn(lastStartIntent);
@@ -95,7 +79,6 @@ public class FCAEVpnService extends VpnService {
                         lastStartIntent = new Intent(intent);
                         startVpn(intent);
                     } else {
-                        // Notification Start with no config — just show notification
                         notification.show("FCAE VPN — Ready (tap Connect in app)", false);
                         startForeground(VpnNotification.NOTIFICATION_ID,
                             notification.build("FCAE VPN — Ready (tap Connect in app)", false));
@@ -104,9 +87,9 @@ public class FCAEVpnService extends VpnService {
             }
         }
 
-        notification.show("FCAE VPN \u2014 Ready (tap Connect in app)", false);
+        notification.show("FCAE VPN — Ready (tap Connect in app)", false);
         startForeground(VpnNotification.NOTIFICATION_ID,
-            notification.build("FCAE VPN \u2014 Ready (tap Connect in app)", false));
+            notification.build("FCAE VPN — Ready (tap Connect in app)", false));
         return START_STICKY;
     }
 
@@ -117,17 +100,19 @@ public class FCAEVpnService extends VpnService {
         shuttingDown = false;
         nativeFreed = false;
 
-        // Force-stop any previous engine — running may still be true if
-        // the old cleanup thread hasn't finished yet.  nativeStop() is
-        // non-blocking (sets SHUTDOWN flag), and aether_start() has its
-        // own RUNNING-wait loop, so the new engine won't start until the
-        // old one fully exits.
         running = false;
         try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
 
-        notification.show("FCAE VPN \u2014 Connecting...", false);
+        // close leftover interface from previous session before building a new one
+        final ParcelFileDescriptor oldPfd = vpnInterface;
+        vpnInterface = null;
+        if (oldPfd != null) {
+            try { oldPfd.close(); } catch (Exception ignored) {}
+        }
+
+        notification.show("FCAE VPN — Connecting...", false);
         startForeground(VpnNotification.NOTIFICATION_ID,
-            notification.build("FCAE VPN \u2014 Connecting...", false));
+            notification.build("FCAE VPN — Connecting...", false));
 
         final int protocol    = intent.getIntExtra("protocol", 0);
         final int mode        = intent.getIntExtra("mode", 1);
@@ -209,7 +194,6 @@ public class FCAEVpnService extends VpnService {
                 handler.post(statsRunnable);
                 notifyUi();
 
-                // Block until shutdown — no periodic wakeup, no CPU cost.
                 shutdownLatch = new CountDownLatch(1);
                 try { shutdownLatch.await(); } catch (InterruptedException ignored) {}
             } catch (Exception e) {
@@ -221,146 +205,105 @@ public class FCAEVpnService extends VpnService {
         vpnThread.start();
     }
 
-    /**
-     * Free native engine once — guarded by {@code nativeFreed} so that
-     * pauseVpn() + fullShutdown() never double-free on the Rust STOP_GUARD.
-     */
     private void freeNativeOnce() {
         if (nativeFreed) return;
         nativeFreed = true;
         Thread t = new Thread(() -> {
             try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
-        }, "FCAE-NativeFree-Sync");
+        }, "FCAE-NativeFree");
         t.setDaemon(true);
         t.start();
     }
 
-    /**
-     * Full shutdown — kills everything: engine, notification, service.
-     * Safe to call multiple times (idempotent) and safe to call after
-     * pauseVpn().
-     */
     private void fullShutdown() {
-    sGeneration.incrementAndGet();
-    running = false;
-    vpnPaused = false;
+        sGeneration.incrementAndGet();
+        running = false;
+        vpnPaused = false;
 
-    // Unblock the VPN worker thread immediately.
-    if (shutdownLatch != null) {
-        shutdownLatch.countDown();
-        shutdownLatch = null;
+        if (shutdownLatch != null) {
+            shutdownLatch.countDown();
+            shutdownLatch = null;
+        }
+
+        if (!shuttingDown) {
+            shuttingDown = true;
+            Log.i(TAG, "fullShutdown");
+        }
+
+        handler.removeCallbacks(statsRunnable);
+        notification.dismiss();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        notifyUi();
+        stopSelf();
+
+        final Thread t = vpnThread;
+        vpnThread = null;
+        final ParcelFileDescriptor pfd = vpnInterface;
+        vpnInterface = null;
+        lastStartIntent = null;
+
+        // close rust dup'd fds first, then close the original pfd
+        // so the kernel tears down the tun device the instant pfd closes
+        try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+        if (pfd != null) {
+            try { pfd.close(); } catch (Exception ignored) {}
+        }
+
+        final long myGen = cleanupGeneration;
+        Thread cleanupThread = new Thread(() -> {
+            if (myGen != cleanupGeneration) return;
+            freeNativeOnce();
+            if (t != null) {
+                t.interrupt();
+                try { t.join(1000); } catch (InterruptedException ignored) {}
+            }
+            if (!MainActivity.activityAlive) {
+                android.os.Process.killProcess(android.os.Process.myPid());
+            }
+        }, "FCAE-Cleanup");
+        cleanupThread.setDaemon(true);
+        cleanupThread.start();
     }
 
-    if (!shuttingDown) {
-        shuttingDown = true;
-        Log.i(TAG, "fullShutdown: starting");
-    }
-
-    handler.removeCallbacks(statsRunnable);
-    notification.dismiss();
-    stopForeground(STOP_FOREGROUND_REMOVE);
-    notifyUi();
-    stopSelf();
-
-    // Save refs — null them out so other code paths see stopped state.
-    final Thread t = vpnThread;
-    vpnThread = null;
-    final ParcelFileDescriptor pfdToClose = vpnInterface;
-    vpnInterface = null;
-    lastStartIntent = null;
-
-    // ── CRITICAL: Close the VPN fd IMMEDIATELY on the main thread ──────
-    // Android tears down the VPN interface the instant the PFD is closed.
-    // The dup'd fds in Rust are closed separately by aether_stop().
-    if (pfdToClose != null) {
-        try {
-            pfdToClose.close();
-            Log.i(TAG, "VPN fd closed (immediate)");
-        } catch (Exception e) {
-            Log.e(TAG, "Error closing fd: " + e.getMessage());
-        }
-    }
-
-    // Signal Rust to stop — non-blocking, idempotent.
-    try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-
-    // Heavy cleanup in background. nativeFree() joins the Rust engine
-    // thread, but we no longer block the VPN teardown on it.
-    final long myGen = cleanupGeneration;
-    Thread cleanupThread = new Thread(() -> {
-        if (myGen != cleanupGeneration) {
-            Log.i(TAG, "cleanup: stale generation, skipping nativeFree");
-            return;
-        }
-
-        freeNativeOnce();
-
-        if (t != null) {
-            t.interrupt();
-            try { t.join(1000); } catch (InterruptedException ignored) {}
-        }
-
-        if (!MainActivity.activityAlive) {
-            Log.i(TAG, "Activity not alive after shutdown — killing process");
-            android.os.Process.killProcess(android.os.Process.myPid());
-        }
-    }, "FCAE-Cleanup");
-    cleanupThread.setDaemon(true);
-    cleanupThread.start();
-}
-
-    /**
-     * Pause VPN — stops the engine but keeps the service alive so the
-     * user can tap Start in the notification to resume.
-     */
     private void pauseVpn() {
-    sGeneration.incrementAndGet();
-    running = false;
-    vpnPaused = true;
+        sGeneration.incrementAndGet();
+        running = false;
+        vpnPaused = true;
 
-    if (shutdownLatch != null) {
-        shutdownLatch.countDown();
-        shutdownLatch = null;
-    }
-
-    Log.i(TAG, "pauseVpn: starting");
-    notifyUi();
-
-    final Thread t = vpnThread;
-    vpnThread = null;
-    final ParcelFileDescriptor pfdToClose = vpnInterface;
-    vpnInterface = null;
-
-    // Close PFD immediately so Android drops the VPN interface now
-    if (pfdToClose != null) {
-        try { pfdToClose.close(); } catch (Exception ignored) {}
-    }
-
-    try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-
-    final long myGen = cleanupGeneration;
-    Thread cleanupThread = new Thread(() -> {
-        if (myGen != cleanupGeneration) {
-            Log.i(TAG, "pause-cleanup: stale generation, skipping nativeFree");
-            return;
+        if (shutdownLatch != null) {
+            shutdownLatch.countDown();
+            shutdownLatch = null;
         }
 
-        freeNativeOnce();
+        Log.i(TAG, "pauseVpn");
+        notifyUi();
 
-        if (t != null) {
-            t.interrupt();
-            try { t.join(1000); } catch (InterruptedException ignored) {}
+        final Thread t = vpnThread;
+        vpnThread = null;
+        final ParcelFileDescriptor pfd = vpnInterface;
+        vpnInterface = null;
+
+        try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+        if (pfd != null) {
+            try { pfd.close(); } catch (Exception ignored) {}
         }
 
-        handler.post(() -> {
-            handler.removeCallbacks(statsRunnable);
-            updateNotification();
-            Log.i(TAG, "VPN paused");
-        });
-    }, "FCAE-PauseCleanup");
-    cleanupThread.setDaemon(true);
-    cleanupThread.start();
-}
+        final long myGen = cleanupGeneration;
+        Thread cleanupThread = new Thread(() -> {
+            if (myGen != cleanupGeneration) return;
+            freeNativeOnce();
+            if (t != null) {
+                t.interrupt();
+                try { t.join(1000); } catch (InterruptedException ignored) {}
+            }
+            handler.post(() -> {
+                handler.removeCallbacks(statsRunnable);
+                updateNotification();
+            });
+        }, "FCAE-PauseCleanup");
+        cleanupThread.setDaemon(true);
+        cleanupThread.start();
+    }
 
     private void notifyUi() {
         Intent intent = new Intent(BROADCAST_VPN_STATE_CHANGED);
@@ -374,7 +317,7 @@ public class FCAEVpnService extends VpnService {
     private void updateNotification() {
         if (vpnPaused) {
             lastNotifText = null;
-            notification.show("FCAE VPN \u2014 Stopped (tap Start to resume)", false);
+            notification.show("FCAE VPN — Stopped (tap Start to resume)", false);
         } else if (running) {
             long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
             try {
@@ -394,7 +337,7 @@ public class FCAEVpnService extends VpnService {
             notification.show(text, true);
         } else {
             lastNotifText = null;
-            notification.show("FCAE VPN \u2014 Disconnected", false);
+            notification.show("FCAE VPN — Disconnected", false);
         }
     }
 
@@ -414,7 +357,6 @@ public class FCAEVpnService extends VpnService {
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         if (level >= TRIM_MEMORY_RUNNING_LOW) {
-            // Help the system reclaim memory by clearing logs.
             try { NativeEngine.nativeClearLogs(); } catch (Exception ignored) {}
             lastNotifText = null;
         }
