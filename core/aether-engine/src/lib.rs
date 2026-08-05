@@ -111,149 +111,6 @@ fn use_tun2socks() -> bool {
     }
 }
 
-/// Post-scan validation: ironclad = real HTTP through tunnel; handshake = probe only.
-fn ironclad_validate() -> bool {
-    match std::env::var("AETHER_VALIDATE")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
-        "ironclad" | "http" | "real" | "1" | "true" | "yes" | "on" => true,
-        _ => false,
-    }
-}
-
-fn health_interval() -> std::time::Duration {
-    let secs = std::env::var("AETHER_HEALTH_INTERVAL_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(20);
-    std::time::Duration::from_secs(secs)
-}
-
-fn health_timeout() -> std::time::Duration {
-    let secs = std::env::var("AETHER_HEALTH_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(5);
-    std::time::Duration::from_secs(secs)
-}
-
-fn health_max_fails() -> u32 {
-    std::env::var("AETHER_HEALTH_MAX_FAILS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(2)
-}
-
-fn live_validate_timeout() -> std::time::Duration {
-    // Pre-SOCKS validation needs some headroom over health probes
-    // (handshake settle + DNS + HTTP through a cold tunnel).
-    //
-    // This has to comfortably contain the steps it wraps sequentially:
-    // DNS resolution (socks::dns_exchange allows up to 5s per resolver,
-    // with a second resolver as fallback) + a TCP handshake + an HTTP
-    // request/response (tunnelping::http_probe allows up to 6s just to
-    // read the response). A 5s outer budget was smaller than either of
-    // those inner steps alone, so on a cold/still-settling tunnel the
-    // probe was being cut off before DNS even finished, let alone TCP
-    // and HTTP — failing validation even when the endpoint was fine.
-    let secs = std::env::var("AETHER_LIVE_VALIDATE_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(15);
-    std::time::Duration::from_secs(secs)
-}
-
-/// Probe the live netstack before exposing SOCKS (DNS + optional HTTP).
-async fn validate_live_stack(stack: &netstack::StackHandle, label: &str) -> Result<()> {
-    if std::env::var("AETHER_NO_LIVE_CHECK").is_ok() {
-        return Ok(());
-    }
-    let timeout = live_validate_timeout();
-    log::info!("[*] validating live {label} data-plane before exposing SOCKS (timeout {timeout:?})");
-    // A few retries — cold WG/MASQUE often needs 1–2 attempts after handshake.
-    let mut last_err = AetherError::Other("live validation failed".into());
-    for attempt in 1..=3u32 {
-        match tokio::time::timeout(timeout, tunnelping::live_stack_probe(stack)).await {
-            Ok(Ok(())) => {
-                log::info!("[+] live {label} data-plane OK (attempt {attempt})");
-                return Ok(());
-            }
-            Ok(Err(e)) => {
-                last_err = AetherError::Other(format!("live {label} validation failed: {e}"));
-                log::debug!("[-] live {label} attempt {attempt}/3: {e}");
-            }
-            Err(_) => {
-                last_err = AetherError::Other(format!(
-                    "live {label} validation timeout ({timeout:?})"
-                ));
-                log::debug!("[-] live {label} attempt {attempt}/3: timeout");
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200 * attempt as u64)).await;
-    }
-    Err(last_err)
-}
-
-/// Background health monitor: consecutive failed probes abort the tunnel task.
-fn spawn_health_monitor(
-    stack: netstack::StackHandle,
-    shutdown: tokio::sync::oneshot::Sender<()>,
-) -> tokio::task::JoinHandle<()> {
-    let interval = health_interval();
-    let max_fails = health_max_fails();
-    let probe_timeout = health_timeout().max(std::time::Duration::from_secs(8));
-    // Give the tunnel 2 full intervals to stabilize before counting failures.
-    // Using 1x caused the first probe (at t=interval) to land exactly on the
-    // grace boundary, so a single transient failure immediately killed the tunnel.
-    let grace = interval * 2;
-    tokio::spawn(async move {
-        let mut fails = 0u32;
-        let started = std::time::Instant::now();
-        let mut ticker = tokio::time::interval(interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // skip first immediate tick
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            let ok = match tokio::time::timeout(probe_timeout, tunnelping::live_stack_probe(&stack))
-                .await
-            {
-                Ok(Ok(())) => true,
-                Ok(Err(e)) => {
-                    log::debug!("[health] probe failed: {e}");
-                    false
-                }
-                Err(_) => {
-                    log::debug!("[health] probe timeout");
-                    false
-                }
-            };
-            if ok {
-                fails = 0;
-            } else if started.elapsed() < grace {
-                log::debug!(
-                    "[health] probe failed during grace ({:?} left); not counting",
-                    grace.saturating_sub(started.elapsed())
-                );
-            } else {
-                fails += 1;
-                log::warn!("[health] consecutive failures {fails}/{max_fails}");
-                if fails >= max_fails {
-                    log::warn!("[health] tunnel considered dead; forcing reconnect");
-                    let _ = shutdown.send(());
-                    return;
-                }
-            }
-        }
-    })
-}
-
 async fn spawn_local_proxies(
     stack: netstack::StackHandle,
     listen: Option<SocketAddr>,
@@ -840,71 +697,6 @@ async fn run_masque(
     }
 }
 
-type TunBridge = (
-    i32,
-    tokio::sync::mpsc::Sender<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<Vec<u8>>,
-);
-
-/// Wire tunnel channels to netstack. Only fan-out when a real TUN fd is present
-/// (Android VpnService). Proxy-only mode keeps the original direct path.
-/// 
-/// For non-Android platforms (Linux/Windows) with tun2socks,
-/// the TUN is managed externally and we don't need to bridge channels.
-fn split_dataplane(
-    outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
-    inbound_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-) -> (
-    tokio::sync::mpsc::Sender<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<Vec<u8>>,
-    Option<TunBridge>,
-) {
-    // Check if we should use tun2socks (non-Android TUN mode)
-    let use_t2s = use_tun2socks();
-    
-    // For tun2socks TUN, we don't bridge channels - tun2socks handles the TUN completely
-    if use_t2s {
-        log::info!("[lib] Using tun2socks for TUN (non-Android mode)");
-        // Direct: netstack ↔ tunnel (tun2socks handles the TUN side)
-        return (outbound_tx, inbound_rx, None);
-    }
-    
-    // Android-style TUN with fd from VpnService
-    let Some(fd) = (if tun_mode_active() {
-        tun::resolve_fd()
-    } else {
-        None
-    }) else {
-        // Direct: netstack ↔ tunnel (same as pre-TUN-bridge behavior).
-        return (outbound_tx, inbound_rx, None);
-    };
-
-    let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
-    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
-    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
-
-    let ot_ns = outbound_tx.clone();
-    tokio::spawn(async move {
-        while let Some(p) = ns_out_rx.recv().await {
-            if ot_ns.send(p).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // Tunnel → netstack + TUN.
-    let mut inbound_rx = inbound_rx;
-    tokio::spawn(async move {
-        while let Some(pkt) = inbound_rx.recv().await {
-            let _ = ns_in_tx.send(pkt.clone()).await;
-            let _ = tun_in_tx.send(pkt).await;
-        }
-    });
-
-    // TUN reads are sent on `outbound_tx` (shared with netstack via ot_ns clone above).
-    (ns_out_tx, ns_in_rx, Some((fd, outbound_tx, tun_in_rx)))
-}
-
 async fn run_masque_tunnel(
     identity: &account::Identity,
     peer: SocketAddr,
@@ -934,14 +726,12 @@ async fn run_masque_tunnel(
     } = chans;
     let _ctrl = ctrl_tx;
 
-    let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
-
     let stack = netstack::spawn(
         &identity.ipv4,
         &identity.ipv6,
         TUNNEL_MTU,
-        ns_in_rx,
-        ns_out_tx,
+        inbound_rx,
+        outbound_tx,
     )?;
 
     let (addr_tx, mut addr_rx) = tokio::sync::mpsc::channel::<quic::AssignedAddr>(8);
@@ -993,21 +783,9 @@ async fn run_masque_tunnel(
         }
     }
 
-    // Re-validate on the live stack before SOCKS (avoids false positives after reconnect).
-    if let Err(e) = validate_live_stack(&stack, "MASQUE").await {
-        tunnel_task.abort();
-        return Err(e);
-    }
-
-    let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
-    // Keep a StackHandle clone alive so the netstack task is NOT dropped
-    // when socks/http/health tasks are aborted on health-check failure.
-    let _stack_keepalive = stack.clone();
-    let health_task = spawn_health_monitor(stack.clone(), health_tx);
-    let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
+    let (socks_task, http_task) = spawn_local_proxies(stack.clone(), listen, http_listen).await;
 
     // Start TUN adapter (tun2socks or Android fd) ONLY after SOCKS5 is listening.
-    // tun2socks connects to the SOCKS5 proxy, so it must wait until the proxy is ready.
     let mut tun_task = None;
     if use_tun2socks() {
         log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
@@ -1026,7 +804,6 @@ async fn run_masque_tunnel(
             password: None,
             tunnel_peer_ip: Some(peer.ip().to_string()),
         };
-        
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let t2s_task = tokio::spawn(async move {
             if let Err(e) = tun_t2s::run_tun2socks(t2s_cfg, shutdown_rx).await {
@@ -1034,43 +811,30 @@ async fn run_masque_tunnel(
             }
         });
         tun_task = Some(tokio::spawn(async move {
-            // Wait for the tun2socks task to complete
             let _ = t2s_task.await;
             drop(shutdown_tx);
         }));
-    } else if let Some((fd, ot, tun_rx)) = tun_bridge {
-        log::info!("[+] TUN mode: bridging Android/system fd={fd}");
-        tun_task = Some(tokio::spawn(async move {
-            if let Err(e) = tun::run(fd, ot, tun_rx).await {
-                log::warn!("[-] tun bridge ended: {e}");
-            }
-        }));
+    } else if tun_mode_active() {
+        if let Some(fd) = tun::resolve_fd() {
+            let (tun_out_tx, _tun_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+            log::info!("[+] TUN mode: bridging Android/system fd={fd}");
+            tun_task = Some(tokio::spawn(async move {
+                if let Err(e) = tun::run(fd, tun_out_tx, tokio::sync::mpsc::channel::<Vec<u8>>(512).1).await {
+                    log::warn!("[-] tun bridge ended: {e}");
+                }
+            }));
+        }
     }
 
-    enum End {
-        Tunnel(std::result::Result<Result<()>, tokio::task::JoinError>),
-        Health,
-    }
-    let end = tokio::select! {
-        r = tunnel_task => End::Tunnel(r),
-        _ = health_rx => End::Health,
-    };
-    if let Some(t) = socks_task {
-        t.abort();
-    }
-    health_task.abort();
-    if let Some(t) = http_task {
-        t.abort();
-    }
-    if let Some(t) = tun_task {
-        t.abort();
-    }
+    let tunnel_result = tunnel_task.await;
+    if let Some(t) = socks_task { t.abort(); }
+    if let Some(t) = http_task { t.abort(); }
+    if let Some(t) = tun_task { t.abort(); }
 
-    match end {
-        End::Health => Err(AetherError::Other("tunnel health check failed".into())),
-        End::Tunnel(Ok(Ok(()))) => Ok(()),
-        End::Tunnel(Ok(Err(e))) => Err(AetherError::Other(format!("tunnel exited: {e}"))),
-        End::Tunnel(Err(e)) => Err(AetherError::Other(format!("tunnel task join error: {e}"))),
+    match tunnel_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(AetherError::Other(format!("tunnel exited: {e}"))),
+        Err(e) => Err(AetherError::Other(format!("tunnel task join error: {e}"))),
     }
 }
 
@@ -1328,6 +1092,15 @@ async fn run_wireguard(
     }
 }
 
+fn wg_tunnel_validate_timeout() -> std::time::Duration {
+    let secs = std::env::var("AETHER_WG_VALIDATE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(20);
+    std::time::Duration::from_secs(secs)
+}
+
 async fn run_wireguard_tunnel(
     identity: account::Identity,
     peer: SocketAddr,
@@ -1335,64 +1108,36 @@ async fn run_wireguard_tunnel(
     listen: Option<SocketAddr>,
     http_listen: Option<SocketAddr>,
 ) -> Result<()> {
-    log::info!("[*] establishing WireGuard tunnel with {peer} (already verified during scan)...");
-
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
     let ipv4: std::net::Ipv4Addr = identity.ipv4.parse()
         .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
-    let ipv6: std::net::Ipv6Addr = identity.ipv6.parse()
-        .map_err(|_| AetherError::Other("invalid ipv6".into()))?;
 
-    let cfg = wireguard::WgConfig {
-        local_private_key: private_key,
-        peer_public_key: peer_public,
-        peer_endpoint: peer,
-        local_ipv4: ipv4,
-        local_ipv6: ipv6,
-        client_id: identity.client_id,
-        preshared_key: None,
-        persistent_keepalive: Some(wg_keepalive_secs()),
-        aethernoize: std::sync::Arc::new(aethernoize),
-    };
+    log::info!("[*] validating WireGuard tunnel with {peer} (handshake + data-plane) before exposing socks5...");
+    let (_, session) = wireguard::verify_endpoint_keep_session(
+        peer,
+        private_key,
+        peer_public,
+        identity.client_id,
+        ipv4,
+        &aethernoize,
+        wg_tunnel_validate_timeout(),
+        Some(wg_keepalive_secs()),
+    )
+    .await
+    .map_err(|e| AetherError::Other(format!("tunnel failed validation: {e}")))?;
+    log::info!("[+] wireguard tunnel validated (end-to-end data confirmed); exposing socks5");
 
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(512);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
 
-    let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
+    let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(aethernoize), inbound_tx, ipv4);
 
-    let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
-    let stack = netstack::spawn(
-        &identity.ipv4,
-        &identity.ipv6,
-        TUNNEL_MTU,
-        ns_in_rx,
-        ns_out_tx,
-    )?;
+    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, TUNNEL_MTU, inbound_rx, outbound_tx)?;
 
-    // Run tunnel first so live validation can pass traffic.
-    let tunnel_task = tokio::spawn(async move { tunnel.run(outbound_rx).await });
-
-    // Brief settle for WG handshake + keepalive path.  The health-check grace
-    // period (2x interval) handles the rest — no need for a long sleep here.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // WireGuard was verified on a throwaway session; re-check the LIVE stack
-    // before SOCKS (fixes false positives on quick-reconnect / Ironclad).
-    if let Err(e) = validate_live_stack(&stack, "WireGuard").await {
-        tunnel_task.abort();
-        return Err(e);
-    }
-
-    let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
-    // Keep a StackHandle clone alive so the netstack task is NOT dropped
-    // when socks/http/health tasks are aborted on health-check failure.
-    let _stack_keepalive = stack.clone();
-    let health_task = spawn_health_monitor(stack.clone(), health_tx);
-    let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
+    let (socks_task, http_task) = spawn_local_proxies(stack.clone(), listen, http_listen).await;
 
     // Start TUN adapter (tun2socks or Android fd) ONLY after SOCKS5 is listening.
-    // tun2socks connects to the SOCKS5 proxy, so it must wait until the proxy is ready.
     let mut tun_task = None;
     if use_tun2socks() {
         log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
@@ -1411,7 +1156,6 @@ async fn run_wireguard_tunnel(
             password: None,
             tunnel_peer_ip: Some(peer.ip().to_string()),
         };
-        
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let t2s_task = tokio::spawn(async move {
             if let Err(e) = tun_t2s::run_tun2socks(t2s_cfg, shutdown_rx).await {
@@ -1422,39 +1166,29 @@ async fn run_wireguard_tunnel(
             let _ = t2s_task.await;
             drop(shutdown_tx);
         }));
-    } else if let Some((fd, ot, tun_rx)) = tun_bridge {
-        log::info!("[+] TUN mode: bridging Android/system fd={fd}");
-        tun_task = Some(tokio::spawn(async move {
-            if let Err(e) = tun::run(fd, ot, tun_rx).await {
-                log::warn!("[-] tun bridge ended: {e}");
-            }
-        }));
+    } else if tun_mode_active() {
+        if let Some(fd) = tun::resolve_fd() {
+            let (tun_out_tx, _tun_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+            log::info!("[+] TUN mode: bridging Android/system fd={fd}");
+            tun_task = Some(tokio::spawn(async move {
+                if let Err(e) = tun::run(fd, tun_out_tx, tokio::sync::mpsc::channel::<Vec<u8>>(512).1).await {
+                    log::warn!("[-] tun bridge ended: {e}");
+                }
+            }));
+        }
     }
 
-    enum End {
-        Tunnel(std::result::Result<Result<()>, tokio::task::JoinError>),
-        Health,
-    }
-    let end = tokio::select! {
-        r = tunnel_task => End::Tunnel(r),
-        _ = health_rx => End::Health,
-    };
-    if let Some(t) = socks_task {
-        t.abort();
-    }
-    health_task.abort();
-    if let Some(t) = http_task {
-        t.abort();
-    }
-    if let Some(t) = tun_task {
-        t.abort();
-    }
+    let tunnel_result = tunnel.run(outbound_rx).await;
 
-    match end {
-        End::Health => Err(AetherError::Other("tunnel health check failed".into())),
-        End::Tunnel(Ok(Ok(()))) => Ok(()),
-        End::Tunnel(Ok(Err(e))) => Err(AetherError::Other(format!("wireguard tunnel exited: {e}"))),
-        End::Tunnel(Err(e)) => Err(AetherError::Other(format!("wireguard task join: {e}"))),
+    if let Some(t) = socks_task { t.abort(); }
+    if let Some(t) = http_task { t.abort(); }
+    if let Some(t) = tun_task { t.abort(); }
+
+    drop(stack);
+
+    match tunnel_result {
+        Ok(()) => Ok(()),
+        Err(e) => Err(AetherError::Other(format!("wireguard tunnel exited: {e}"))),
     }
 }
 
@@ -1465,7 +1199,7 @@ async fn establish_wg(
     obfuscate: bool,
     keepalive: u16,
     label: &'static str,
-) -> Result<netstack::StackHandle> {
+) -> Result<(netstack::StackHandle, tokio::task::JoinHandle<Result<()>>)> {
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
 
@@ -1473,10 +1207,6 @@ async fn establish_wg(
         .ipv4
         .parse()
         .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
-    let ipv6: std::net::Ipv6Addr = identity
-        .ipv6
-        .parse()
-        .map_err(|_| AetherError::Other("invalid ipv6".into()))?;
 
     let profile = if obfuscate {
         aethernoize_config()
@@ -1484,31 +1214,41 @@ async fn establish_wg(
         aethernoize::from_profile("off")
     };
 
-    let cfg = wireguard::WgConfig {
-        local_private_key: private_key,
-        peer_public_key: peer_public,
-        peer_endpoint: peer,
-        local_ipv4: ipv4,
-        local_ipv6: ipv6,
-        client_id: identity.client_id,
-        preshared_key: None,
-        persistent_keepalive: Some(keepalive),
-        aethernoize: std::sync::Arc::new(profile),
-    };
+    log::info!("[*] [{label}] validating WireGuard tunnel with {peer} (handshake + data-plane)...");
+    let (_, session) = wireguard::verify_endpoint_keep_session(
+        peer,
+        private_key,
+        peer_public,
+        identity.client_id,
+        ipv4,
+        &profile,
+        wg_tunnel_validate_timeout(),
+        Some(keepalive),
+    )
+    .await
+    .map_err(|e| AetherError::Other(format!("[{label}] tunnel failed validation: {e}")))?;
+    log::info!("[+] [{label}] wireguard tunnel validated (end-to-end data confirmed)");
 
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(512);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
 
-    let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
+    let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(profile), inbound_tx, ipv4);
     let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
 
-    tokio::spawn(async move {
-        if let Err(e) = tunnel.run(outbound_rx).await {
-            log::error!("[{label}] wireguard tunnel exited: {e}");
+    let exit = tokio::spawn(async move {
+        match tunnel.run(outbound_rx).await {
+            Ok(()) => {
+                log::warn!("[-] [{label}] wireguard tunnel closed");
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("[-] [{label}] wireguard tunnel exited: {e}");
+                Err(AetherError::Other(format!("[{label}] {e}")))
+            }
         }
     });
 
-    Ok(stack)
+    Ok((stack, exit))
 }
 
 async fn spawn_udp_forwarder(
@@ -1521,20 +1261,18 @@ async fn spawn_udp_forwarder(
     let udp = outer.open_udp().await?;
     let (udp_tx, mut udp_rx) = udp.into_split();
 
-    let inner_peer: std::sync::Arc<parking_lot::Mutex<Option<SocketAddr>>> =
-        std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let inner_peer: std::sync::Arc<tokio::sync::Mutex<Option<SocketAddr>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
     let up_sock = sock.clone();
     let up_peer = inner_peer.clone();
     tokio::spawn(async move {
-        let mut buf = vec![0u8; 2048];
+        let mut buf = vec![0u8; 65536];
         loop {
             match up_sock.recv_from(&mut buf).await {
                 Ok((n, from)) => {
-                    *up_peer.lock() = Some(from);
-                    let mut pkt = buffer_pool::take(n);
-                    pkt.extend_from_slice(&buf[..n]);
-                    if udp_tx.send_to(remote, pkt).await.is_err() {
+                    *up_peer.lock().await = Some(from);
+                    if udp_tx.send_to(remote, buf[..n].to_vec()).await.is_err() {
                         break;
                     }
                 }
@@ -1547,7 +1285,7 @@ async fn spawn_udp_forwarder(
     let down_peer = inner_peer.clone();
     tokio::spawn(async move {
         while let Some((_src, data)) = udp_rx.recv().await {
-            let dst = *down_peer.lock();
+            let dst = *down_peer.lock().await;
             if let Some(dst) = dst {
                 let _ = down_sock.send_to(&data, dst).await;
             }
@@ -1565,53 +1303,86 @@ async fn run_warp_in_warp(
     http_listen: Option<SocketAddr>,
 ) -> Result<()> {
     log::info!("[*] establishing outer WARP tunnel to {peer}...");
-    let outer_stack = establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
-
-    // Outer needs time for handshake + first data before inner can forward.
-    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-
-    // Validate the outer tunnel before building the inner tunnel on top of it.
-    if let Err(e) = validate_live_stack(&outer_stack, "outer WARP").await {
-        log::warn!("[-] outer WARP validation failed: {e}; inner tunnel may not work");
-    }
+    let (outer_stack, mut outer_exit) = establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
 
     let forwarder = spawn_udp_forwarder(&outer_stack, peer).await?;
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
-    let inner_stack = establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
+    let (inner_stack, mut inner_exit) =
+        establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
 
-    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+    let (socks_task, http_task) = spawn_local_proxies(inner_stack.clone(), listen, http_listen).await;
 
-    if let Err(e) = validate_live_stack(&inner_stack, "WARP-in-WARP").await {
-        return Err(e);
-    }
-
-    let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
-    let health_task = spawn_health_monitor(inner_stack.clone(), health_tx);
-    let (socks_task, http_task) = spawn_local_proxies(inner_stack, listen, http_listen).await;
-
-    enum End {
-        Socks(std::result::Result<Result<()>, tokio::task::JoinError>),
-        Health,
-    }
-    let end = if let Some(task) = socks_task {
-        tokio::select! {
-            r = task => End::Socks(r),
-            _ = health_rx => End::Health,
+    // Start TUN adapter (tun2socks or Android fd) ONLY after SOCKS5 is listening.
+    let mut tun_task = None;
+    if use_tun2socks() {
+        log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
+        let socks_port: u16 = std::env::var("AETHER_SOCKS")
+            .ok()
+            .and_then(|s| s.rsplit(':').next()?.parse().ok())
+            .unwrap_or(1819);
+        let t2s_cfg = tun_t2s::TunConfig {
+            name: "FCAE_VPN".to_string(),
+            mtu: TUNNEL_MTU as u32,
+            ipv4: secondary.ipv4.clone(),
+            ipv6: Some(secondary.ipv6.clone()),
+            socks_port,
+            socks_host: "127.0.0.1".to_string(),
+            username: None,
+            password: None,
+            tunnel_peer_ip: Some(peer.ip().to_string()),
+        };
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let t2s_task = tokio::spawn(async move {
+            if let Err(e) = tun_t2s::run_tun2socks(t2s_cfg, shutdown_rx).await {
+                log::warn!("[-] tun2socks ended: {e}");
+            }
+        });
+        tun_task = Some(tokio::spawn(async move {
+            let _ = t2s_task.await;
+            drop(shutdown_tx);
+        }));
+    } else if tun_mode_active() {
+        if let Some(fd) = tun::resolve_fd() {
+            let (tun_out_tx, _tun_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+            log::info!("[+] TUN mode: bridging Android/system fd={fd}");
+            tun_task = Some(tokio::spawn(async move {
+                if let Err(e) = tun::run(fd, tun_out_tx, tokio::sync::mpsc::channel::<Vec<u8>>(512).1).await {
+                    log::warn!("[-] tun bridge ended: {e}");
+                }
+            }));
         }
-    } else {
-        End::Health
-    };
-    health_task.abort();
-    if let Some(t) = http_task {
-        t.abort();
     }
-    match end {
-        End::Health => Err(AetherError::Other("tunnel health check failed".into())),
-        End::Socks(Ok(Ok(()))) => Ok(()),
-        End::Socks(Ok(Err(e))) => Err(e),
-        End::Socks(Err(e)) => Err(AetherError::Other(format!("socks task join: {e}"))),
+
+    let outcome = tokio::select! {
+        result = &mut outer_exit => join_outcome("outer wireguard tunnel", result),
+        result = &mut inner_exit => join_outcome("inner wireguard tunnel", result),
+    };
+
+    outer_exit.abort();
+    inner_exit.abort();
+    if let Some(t) = socks_task { t.abort(); }
+    if let Some(t) = http_task { t.abort(); }
+    if let Some(t) = tun_task { t.abort(); }
+
+    let _ = outer_exit.await;
+    let _ = inner_exit.await;
+
+    drop(outer_stack);
+
+    outcome
+}
+
+fn join_outcome(
+    what: &str,
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+) -> Result<()> {
+    match result {
+        Ok(Ok(())) => Err(AetherError::Other(format!("{what} stopped"))),
+        Ok(Err(e)) => Err(e),
+        Err(e) if e.is_cancelled() => Err(AetherError::Other(format!("{what} was cancelled"))),
+        Err(e) => Err(AetherError::Other(format!("{what} panicked: {e}"))),
     }
 }
 
