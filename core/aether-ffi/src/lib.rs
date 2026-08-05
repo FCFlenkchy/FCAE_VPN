@@ -349,7 +349,9 @@ fn scan_mode_to_env(s: i32) -> &'static str {
         1 => "balanced",
         2 => "thorough",
         3 => "stealth",
-        4 => "ironclad",
+        // Ironclad is a validation mode, not a scan speed — use thorough
+        // scanning underneath, and set AETHER_VALIDATE=ironclad separately.
+        4 => "thorough",
         _ => "balanced",
     }
 }
@@ -412,6 +414,12 @@ fn parse_inline_routes(input: &str) -> (String, String) {
 fn apply_config_env(cfg: &AetherCfgRaw) {
     std::env::set_var("AETHER_PROTOCOL", protocol_to_env(cfg.protocol));
     std::env::set_var("AETHER_SCAN", scan_mode_to_env(cfg.scan_mode));
+    // Ironclad mode: deep HTTP validation after scan (mode 4)
+    if cfg.scan_mode == 4 {
+        std::env::set_var("AETHER_VALIDATE", "ironclad");
+    } else {
+        std::env::remove_var("AETHER_VALIDATE");
+    }
     std::env::set_var("AETHER_IP", ip_version_to_env(cfg.ip_version));
 
     // SOCKS5 proxy
