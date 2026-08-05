@@ -54,13 +54,6 @@ typedef struct {
     uint32_t udp_buf_kb;      // UDP socket buffer size in KiB (0 = default 512)
     const char* sni;          // TLS Server Name for MASQUE (NULL = default consumer-masque...)
 
-    // Validation & tunnel health (0 / NULL = engine defaults)
-    bool ironclad_validate;       // post-scan real HTTP validation on top candidates
-    uint32_t health_interval_secs; // background probe interval (default 20)
-    uint32_t health_max_fails;     // consecutive fails before reconnect (default 2)
-    uint32_t health_timeout_secs;  // per health probe timeout (default 5)
-    uint32_t live_validate_secs;   // pre-SOCKS live validation timeout (default 20)
-
     // Sysprofile: 0 = Auto, 1 = Low, 2 = Medium, 3 = High
     int sys_profile;
 
