@@ -1,6 +1,6 @@
 {
   "version": "v1.1.3",
   "release_date": "2026-08-05",
-  "release_notes": "Better connecting and disconnecting handeling",
+  "release_notes": "fix wg use sysprofile",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
