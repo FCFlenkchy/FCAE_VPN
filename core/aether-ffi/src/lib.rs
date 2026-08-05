@@ -816,11 +816,15 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                 aether_engine::tun::close_all_fds();
                 #[cfg(target_os = "windows")]
                 aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
+
+                RUNNING.store(false,Ordering::SeqCst);
+                
                 drop(rt);
             }));
 
             // Now that the runtime is dropped, update telemetry — this
             // runs outside the runtime.
+            if (SHUTDOWN.load(Ordering::SqCst) {
             match result {
                 Ok(()) => {
                     let mut t = TELEMETRY.lock();
@@ -836,8 +840,8 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                     t.status_message = "Error".to_string();
                 }
             }
-
-            RUNNING.store(false, Ordering::SeqCst);
+        }
+        
         })
     {
         Ok(h) => h,
