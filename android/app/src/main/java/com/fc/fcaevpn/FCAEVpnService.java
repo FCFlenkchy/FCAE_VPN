@@ -318,51 +318,53 @@ public class FCAEVpnService extends VpnService {
      * user can tap Start in the notification to resume.
      */
     private void pauseVpn() {
-        sGeneration.incrementAndGet();
-        running = false;
-        vpnPaused = true;
+    sGeneration.incrementAndGet();
+    running = false;
+    vpnPaused = true;
 
-        // Unblock the VPN worker thread immediately.
-        if (shutdownLatch != null) {
-            shutdownLatch.countDown();
-            shutdownLatch = null;
+    if (shutdownLatch != null) {
+        shutdownLatch.countDown();
+        shutdownLatch = null;
+    }
+
+    Log.i(TAG, "pauseVpn: starting");
+    notifyUi();
+
+    final Thread t = vpnThread;
+    vpnThread = null;
+    final ParcelFileDescriptor pfdToClose = vpnInterface;
+    vpnInterface = null;
+
+    // Close PFD immediately so Android drops the VPN interface now
+    if (pfdToClose != null) {
+        try { pfdToClose.close(); } catch (Exception ignored) {}
+    }
+
+    try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+
+    final long myGen = cleanupGeneration;
+    Thread cleanupThread = new Thread(() -> {
+        if (myGen != cleanupGeneration) {
+            Log.i(TAG, "pause-cleanup: stale generation, skipping nativeFree");
+            return;
         }
 
-        Log.i(TAG, "pauseVpn: starting");
-        notifyUi();
+        freeNativeOnce();
 
-        final Thread t = vpnThread;
-        vpnThread = null;
-        final ParcelFileDescriptor pfdToClose = vpnInterface;
-        vpnInterface = null;
+        if (t != null) {
+            t.interrupt();
+            try { t.join(1000); } catch (InterruptedException ignored) {}
+        }
 
-        final long myGen = cleanupGeneration;
-        Thread cleanupThread = new Thread(() -> {
-            if (myGen != cleanupGeneration) {
-                Log.i(TAG, "pause-cleanup: stale generation, skipping nativeFree");
-                return;
-            }
-
-            freeNativeOnce();
-
-            if (t != null) {
-                t.interrupt();
-                try { t.join(1000); } catch (InterruptedException ignored) {}
-            }
-
-            if (pfdToClose != null) {
-                try { pfdToClose.close(); } catch (Exception ignored) {}
-            }
-
-            handler.post(() -> {
-                handler.removeCallbacks(statsRunnable);
-                updateNotification();
-                Log.i(TAG, "VPN paused");
-            });
-        }, "FCAE-PauseCleanup");
-        cleanupThread.setDaemon(true);
-        cleanupThread.start();
-    }
+        handler.post(() -> {
+            handler.removeCallbacks(statsRunnable);
+            updateNotification();
+            Log.i(TAG, "VPN paused");
+        });
+    }, "FCAE-PauseCleanup");
+    cleanupThread.setDaemon(true);
+    cleanupThread.start();
+}
 
     private void notifyUi() {
         Intent intent = new Intent(BROADCAST_VPN_STATE_CHANGED);
