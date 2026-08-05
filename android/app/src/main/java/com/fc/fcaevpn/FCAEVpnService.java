@@ -245,83 +245,73 @@ public class FCAEVpnService extends VpnService {
      * pauseVpn().
      */
     private void fullShutdown() {
-        sGeneration.incrementAndGet();
-        running = false;
-        vpnPaused = false;
+    sGeneration.incrementAndGet();
+    running = false;
+    vpnPaused = false;
 
-        // Unblock the VPN worker thread immediately.
-        if (shutdownLatch != null) {
-            shutdownLatch.countDown();
-            shutdownLatch = null;
-        }
-
-        if (!shuttingDown) {
-            shuttingDown = true;
-            Log.i(TAG, "fullShutdown: starting");
-        }
-
-        // Always re-run the kill sequence — even if called a second time
-        // (e.g. notification disconnect after a stalled first attempt).
-        handler.removeCallbacks(statsRunnable);
-        notification.dismiss();
-        stopForeground(STOP_FOREGROUND_REMOVE);
-        notifyUi();
-
-        // Stop the service IMMEDIATELY on the main thread so the system
-        // knows this service is done.  nativeFree + fd close happen in
-        // the background — they don't need to block the kill.
-        stopSelf();
-        Log.i(TAG, "service stopped (cleanup continues in background)");
-
-        // Save refs — null them out so other code paths see stopped state.
-        final Thread t = vpnThread;
-        vpnThread = null;
-        final ParcelFileDescriptor pfdToClose = vpnInterface;
-        vpnInterface = null;
-        lastStartIntent = null;
-
-        // Heavy cleanup on background thread.  Must NOT block main thread
-        // for >100ms (ANR threshold).
-        final long myGen = cleanupGeneration;
-        Thread cleanupThread = new Thread(() -> {
-            // If a new startVpn() has run since this shutdown was
-            // initiated, skip freeNativeOnce() — it would try to join
-            // the NEW engine thread and deadlock it.
-            if (myGen != cleanupGeneration) {
-                Log.i(TAG, "cleanup: stale generation, skipping nativeFree");
-                return;
-            }
-
-            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-
-            freeNativeOnce();
-
-            if (t != null) {
-                t.interrupt();
-                try { t.join(1000); } catch (InterruptedException ignored) {}
-            }
-
-            if (pfdToClose != null) {
-                try {
-                    pfdToClose.close();
-                    Log.i(TAG, "VPN fd closed");
-                } catch (Exception e) {
-                    Log.e(TAG, "Error closing fd: " + e.getMessage());
-                }
-            }
-
-            // If the Activity was destroyed (user closed app or swiped it
-            // away), kill the process so the stopped service doesn't linger
-            // as a zombie.  If the Activity IS alive, leave the process —
-            // the user may want to reconnect from the UI.
-            if (!MainActivity.activityAlive) {
-                Log.i(TAG, "Activity not alive after shutdown — killing process");
-                android.os.Process.killProcess(android.os.Process.myPid());
-            }
-        }, "FCAE-Cleanup");
-        cleanupThread.setDaemon(true);
-        cleanupThread.start();
+    // Unblock the VPN worker thread immediately.
+    if (shutdownLatch != null) {
+        shutdownLatch.countDown();
+        shutdownLatch = null;
     }
+
+    if (!shuttingDown) {
+        shuttingDown = true;
+        Log.i(TAG, "fullShutdown: starting");
+    }
+
+    handler.removeCallbacks(statsRunnable);
+    notification.dismiss();
+    stopForeground(STOP_FOREGROUND_REMOVE);
+    notifyUi();
+    stopSelf();
+
+    // Save refs — null them out so other code paths see stopped state.
+    final Thread t = vpnThread;
+    vpnThread = null;
+    final ParcelFileDescriptor pfdToClose = vpnInterface;
+    vpnInterface = null;
+    lastStartIntent = null;
+
+    // ── CRITICAL: Close the VPN fd IMMEDIATELY on the main thread ──────
+    // Android tears down the VPN interface the instant the PFD is closed.
+    // The dup'd fds in Rust are closed separately by aether_stop().
+    if (pfdToClose != null) {
+        try {
+            pfdToClose.close();
+            Log.i(TAG, "VPN fd closed (immediate)");
+        } catch (Exception e) {
+            Log.e(TAG, "Error closing fd: " + e.getMessage());
+        }
+    }
+
+    // Signal Rust to stop — non-blocking, idempotent.
+    try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+
+    // Heavy cleanup in background. nativeFree() joins the Rust engine
+    // thread, but we no longer block the VPN teardown on it.
+    final long myGen = cleanupGeneration;
+    Thread cleanupThread = new Thread(() -> {
+        if (myGen != cleanupGeneration) {
+            Log.i(TAG, "cleanup: stale generation, skipping nativeFree");
+            return;
+        }
+
+        freeNativeOnce();
+
+        if (t != null) {
+            t.interrupt();
+            try { t.join(1000); } catch (InterruptedException ignored) {}
+        }
+
+        if (!MainActivity.activityAlive) {
+            Log.i(TAG, "Activity not alive after shutdown — killing process");
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }
+    }, "FCAE-Cleanup");
+    cleanupThread.setDaemon(true);
+    cleanupThread.start();
+}
 
     /**
      * Pause VPN — stops the engine but keeps the service alive so the
