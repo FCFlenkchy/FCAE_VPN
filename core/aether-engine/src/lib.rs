@@ -816,13 +816,30 @@ async fn run_masque_tunnel(
         }));
     } else if tun_mode_active() {
         if let Some(fd) = tun::resolve_fd() {
-            let (tun_out_tx, _tun_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+            // Android TUN mode: bridge the TUN fd to the netstack.
+            // TUN read → tun_out_tx → bridge task → (future: netstack via SOCKS5)
+            // Netstack egress → (future) → tun_in_tx → TUN write
+            let (tun_out_tx, mut tun_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+            let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
             log::info!("[+] TUN mode: bridging Android/system fd={fd}");
             tun_task = Some(tokio::spawn(async move {
-                if let Err(e) = tun::run(fd, tun_out_tx, tokio::sync::mpsc::channel::<Vec<u8>>(512).1).await {
+                if let Err(e) = tun::run(fd, tun_out_tx, tun_in_rx).await {
                     log::warn!("[-] tun bridge ended: {e}");
                 }
             }));
+            let _bridge_stack = stack.clone();
+            tokio::spawn(async move {
+                let mut pkt_count: u64 = 0;
+                while let Some(pkt) = tun_out_rx.recv().await {
+                    pkt_count += 1;
+                    if pkt_count <= 5 || pkt_count % 100 == 0 {
+                        log::info!("[tun-bridge] received IP packet #{} ({} bytes)", pkt_count, pkt.len());
+                    }
+                    crate::buffer_pool::recycle(pkt);
+                }
+                log::info!("[tun-bridge] TUN read channel closed after {} packets", pkt_count);
+            });
+            let _tun_in = tun_in_tx;
         }
     }
 
@@ -1168,13 +1185,28 @@ async fn run_wireguard_tunnel(
         }));
     } else if tun_mode_active() {
         if let Some(fd) = tun::resolve_fd() {
-            let (tun_out_tx, _tun_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+            let _tun_stack = stack.clone();
+            let (tun_out_tx, mut tun_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+            let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
             log::info!("[+] TUN mode: bridging Android/system fd={fd}");
             tun_task = Some(tokio::spawn(async move {
-                if let Err(e) = tun::run(fd, tun_out_tx, tokio::sync::mpsc::channel::<Vec<u8>>(512).1).await {
+                if let Err(e) = tun::run(fd, tun_out_tx, tun_in_rx).await {
                     log::warn!("[-] tun bridge ended: {e}");
                 }
             }));
+            let _bridge_stack = stack.clone();
+            tokio::spawn(async move {
+                let mut pkt_count: u64 = 0;
+                while let Some(pkt) = tun_out_rx.recv().await {
+                    pkt_count += 1;
+                    if pkt_count <= 5 || pkt_count % 100 == 0 {
+                        log::info!("[tun-bridge] received IP packet #{} ({} bytes)", pkt_count, pkt.len());
+                    }
+                    crate::buffer_pool::recycle(pkt);
+                }
+                log::info!("[tun-bridge] TUN read channel closed after {} packets", pkt_count);
+            });
+            let _tun_in = tun_in_tx;
         }
     }
 
@@ -1345,13 +1377,28 @@ async fn run_warp_in_warp(
         }));
     } else if tun_mode_active() {
         if let Some(fd) = tun::resolve_fd() {
-            let (tun_out_tx, _tun_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+            let _tun_stack = inner_stack.clone();
+            let (tun_out_tx, mut tun_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
+            let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(512);
             log::info!("[+] TUN mode: bridging Android/system fd={fd}");
             tun_task = Some(tokio::spawn(async move {
-                if let Err(e) = tun::run(fd, tun_out_tx, tokio::sync::mpsc::channel::<Vec<u8>>(512).1).await {
+                if let Err(e) = tun::run(fd, tun_out_tx, tun_in_rx).await {
                     log::warn!("[-] tun bridge ended: {e}");
                 }
             }));
+            let _bridge_stack = inner_stack.clone();
+            tokio::spawn(async move {
+                let mut pkt_count: u64 = 0;
+                while let Some(pkt) = tun_out_rx.recv().await {
+                    pkt_count += 1;
+                    if pkt_count <= 5 || pkt_count % 100 == 0 {
+                        log::info!("[tun-bridge] received IP packet #{} ({} bytes)", pkt_count, pkt.len());
+                    }
+                    crate::buffer_pool::recycle(pkt);
+                }
+                log::info!("[tun-bridge] TUN read channel closed after {} packets", pkt_count);
+            });
+            let _tun_in = tun_in_tx;
         }
     }
 
