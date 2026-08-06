@@ -420,7 +420,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(poll)
-        handler.removeCallbacks(disconnectFallback)
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
         // In proxy mode, the engine is kept alive by ProxyNotification foreground service.
         // Do NOT stop it here — the proxy should continue running in the background.
