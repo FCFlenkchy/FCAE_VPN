@@ -213,116 +213,118 @@ public class FCAEVpnService extends VpnService {
         t.setDaemon(true);
         t.start();
     }
-
+    
     private void fullShutdown() {
-    sGeneration.incrementAndGet();
-    running = false;
-    vpnPaused = false;
+        sGeneration.incrementAndGet();
+        running = false;
+        vpnPaused = false;
 
-    if (shutdownLatch != null) {
-        shutdownLatch.countDown();
-        shutdownLatch = null;
-    }
+        if (shutdownLatch != null) {
+            shutdownLatch.countDown();
+            shutdownLatch = null;
+        }
 
-    if (!shuttingDown) {
-        shuttingDown = true;
-    }
+        if (!shuttingDown) {
+            shuttingDown = true;
+        }
 
-    final Thread t = vpnThread;
-    vpnThread = null;
-    final ParcelFileDescriptor pfd = vpnInterface;
-    vpnInterface = null;
-    lastStartIntent = null;
+        final Thread t = vpnThread;
+        vpnThread = null;
+        final ParcelFileDescriptor pfd = vpnInterface;
+        vpnInterface = null;
+        lastStartIntent = null;
 
-    if (Looper.myLooper() == Looper.getMainLooper()) {
-        handler.removeCallbacks(statsRunnable);
-        notifyUi();
-    } else {
-        handler.post(() -> {
+        // 1. INSTANT UI & NOTIFICATION CLEANUP
+        Runnable uiCleanup = () -> {
             handler.removeCallbacks(statsRunnable);
             notifyUi();
-        });
-    }
-
-    // Close PFD and stop engine IMMEDIATELY on the calling thread.
-    // Do not defer this to a background thread, as thread scheduling delays 
-    // cause the TUN device to stay alive for 1-2 seconds.
-    try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-    if (pfd != null) {
-        try { pfd.close(); } catch (Exception ignored) {}
-    }
-
-    final long myGen = cleanupGeneration;
-    Thread cleanupThread = new Thread(() -> {
-        if (myGen != cleanupGeneration) return;
-
-        freeNativeOnce();
-
-        if (t != null) {
-            t.interrupt();
-            try { t.join(1000); } catch (InterruptedException ignored) {}
-        }
-
-        handler.post(() -> {
             notification.dismiss();
             stopForeground(STOP_FOREGROUND_REMOVE);
-            stopSelf();
-        });
+        };
 
-        if (!MainActivity.activityAlive) {
-            android.os.Process.killProcess(android.os.Process.myPid());
-        }
-    }, "FCAE-Cleanup");
-    cleanupThread.setDaemon(true);
-    cleanupThread.start();
-}
-
-private void pauseVpn() {
-    sGeneration.incrementAndGet();
-    running = false;
-    vpnPaused = true;
-
-    if (shutdownLatch != null) {
-        shutdownLatch.countDown();
-        shutdownLatch = null;
-    }
-
-    final Thread t = vpnThread;
-    vpnThread = null;
-    final ParcelFileDescriptor pfd = vpnInterface;
-    vpnInterface = null;
-
-    if (Looper.myLooper() == Looper.getMainLooper()) {
-        notifyUi();
-    } else {
-        handler.post(this::notifyUi);
-    }
-
-    // ✅ CRITICAL FIX: Same as fullShutdown — close immediately
-    try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-    if (pfd != null) {
-        try { pfd.close(); } catch (Exception ignored) {}
-    }
-
-    final long myGen = cleanupGeneration;
-    Thread cleanupThread = new Thread(() -> {
-        if (myGen != cleanupGeneration) return;
-
-        freeNativeOnce();
-
-        if (t != null) {
-            t.interrupt();
-            try { t.join(1000); } catch (InterruptedException ignored) {}
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            uiCleanup.run();
+        } else {
+            handler.post(uiCleanup);
         }
 
-        handler.post(() -> {
+        // 2. INSTANT TUN TEARDOWN
+        try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+        if (pfd != null) {
+            try { pfd.close(); } catch (Exception ignored) {}
+        }
+
+        // 3. BACKGROUND RUST CLEANUP
+        final long myGen = cleanupGeneration;
+        Thread cleanupThread = new Thread(() -> {
+            if (myGen != cleanupGeneration) return;
+
+            freeNativeOnce();
+
+            if (t != null) {
+                t.interrupt();
+                try { t.join(1000); } catch (InterruptedException ignored) {}
+            }
+
+            handler.post(this::stopSelf);
+
+            if (!MainActivity.activityAlive) {
+                android.os.Process.killProcess(android.os.Process.myPid());
+            }
+        }, "FCAE-Cleanup");
+        cleanupThread.setDaemon(true);
+        cleanupThread.start();
+    }
+
+    private void pauseVpn() {
+        sGeneration.incrementAndGet();
+        running = false;
+        vpnPaused = true;
+
+        if (shutdownLatch != null) {
+            shutdownLatch.countDown();
+            shutdownLatch = null;
+        }
+
+        final Thread t = vpnThread;
+        vpnThread = null;
+        final ParcelFileDescriptor pfd = vpnInterface;
+        vpnInterface = null;
+
+        // 1. INSTANT UI & NOTIFICATION UPDATE
+        Runnable uiCleanup = () -> {
+            notifyUi();
             handler.removeCallbacks(statsRunnable);
             updateNotification();
-        });
-    }, "FCAE-PauseCleanup");
-    cleanupThread.setDaemon(true);
-    cleanupThread.start();
-}
+        };
+
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            uiCleanup.run();
+        } else {
+            handler.post(uiCleanup);
+        }
+
+        // 2. INSTANT TUN TEARDOWN
+        try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+        if (pfd != null) {
+            try { pfd.close(); } catch (Exception ignored) {}
+        }
+
+        // 3. BACKGROUND RUST CLEANUP
+        final long myGen = cleanupGeneration;
+        Thread cleanupThread = new Thread(() -> {
+            if (myGen != cleanupGeneration) return;
+
+            freeNativeOnce();
+
+            if (t != null) {
+                t.interrupt();
+                try { t.join(1000); } catch (InterruptedException ignored) {}
+            }
+        }, "FCAE-PauseCleanup");
+        cleanupThread.setDaemon(true);
+        cleanupThread.start();
+    }
 
     private void notifyUi() {
         Intent intent = new Intent(BROADCAST_VPN_STATE_CHANGED);
