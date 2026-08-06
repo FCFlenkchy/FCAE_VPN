@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
+import android.util.Log;
 
 public class VpnNotification {
 
@@ -23,11 +24,23 @@ public class VpnNotification {
     }
 
     public void show(String text, boolean ongoing) {
-        if (nm != null) nm.notify(NOTIFICATION_ID, build(text, ongoing));
+        try {
+            if (nm != null) {
+                nm.notify(NOTIFICATION_ID, build(text, ongoing));
+            }
+        } catch (Exception e) {
+            Log.w("VpnNotification", "show failed: " + e.getMessage());
+        }
     }
 
     public void dismiss() {
-        if (nm != null) nm.cancel(NOTIFICATION_ID);
+        try {
+            if (nm != null) {
+                nm.cancel(NOTIFICATION_ID);
+            }
+        } catch (Exception e) {
+            Log.w("VpnNotification", "dismiss failed: " + e.getMessage());
+        }
     }
 
     public Notification build(String text, boolean ongoing) {
@@ -45,7 +58,7 @@ public class VpnNotification {
 
         b.setContentTitle("FCAE VPN")
          .setContentText(text)
-         .setSmallIcon(R.drawable.ic_lock_lock)
+         .setSmallIcon(android.R.drawable.ic_lock_lock)
          .setContentIntent(openPi)
          .setOngoing(ongoing)
          .setOnlyAlertOnce(true);
