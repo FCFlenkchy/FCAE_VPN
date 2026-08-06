@@ -72,7 +72,7 @@ public class ProxyNotification extends Service {
 
         b.setContentTitle("FCAE VPN")
          .setContentText(text)
-         .setSmallIcon(R.drawable.ic_vpn)
+         .setSmallIcon(R.drawable.ic_lock_lock)
          .setContentIntent(openPi)
          .setOngoing(ongoing)
          .setOnlyAlertOnce(true);
