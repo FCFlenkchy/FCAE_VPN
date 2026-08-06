@@ -324,52 +324,6 @@ private void pauseVpn() {
     cleanupThread.start();
 }
 
-    private void pauseVpn() {
-        sGeneration.incrementAndGet();
-        running = false;
-        vpnPaused = true;
-
-        if (shutdownLatch != null) {
-            shutdownLatch.countDown();
-            shutdownLatch = null;
-        }
-
-        final Thread t = vpnThread;
-        vpnThread = null;
-        final ParcelFileDescriptor pfd = vpnInterface;
-        vpnInterface = null;
-
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            notifyUi();
-        } else {
-            handler.post(this::notifyUi);
-        }
-
-        final long myGen = cleanupGeneration;
-        Thread cleanupThread = new Thread(() -> {
-            if (myGen != cleanupGeneration) return;
-
-            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-            if (pfd != null) {
-                try { pfd.close(); } catch (Exception ignored) {}
-            }
-
-            freeNativeOnce();
-
-            if (t != null) {
-                t.interrupt();
-                try { t.join(1000); } catch (InterruptedException ignored) {}
-            }
-
-            handler.post(() -> {
-                handler.removeCallbacks(statsRunnable);
-                updateNotification();
-            });
-        }, "FCAE-PauseCleanup");
-        cleanupThread.setDaemon(true);
-        cleanupThread.start();
-    }
-
     private void notifyUi() {
         Intent intent = new Intent(BROADCAST_VPN_STATE_CHANGED);
         intent.setPackage(getPackageName());
