@@ -346,6 +346,7 @@ tr:hover td { background: var(--surface2); }
     border: 2px solid var(--border); transition: border-color .3s;
 }
 .contrib-card:hover .contrib-av { border-color: var(--acc); }
+.contrib-info { display: flex; align-items: center; gap: 8px; }
 .contrib-info .contrib-nm { font-weight: 700; color: #d8d8f0; font-size: .98rem; }
 .contrib-info .contrib-cm { font-size: .78rem; color: var(--acc2); font-weight: 600; }
 
