@@ -498,8 +498,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun startTunServiceWithConfig() {
         // Cancel any pending disconnect fallback — we're connecting now.
-        disconnectPending = false
-        handler.removeCallbacks(disconnectFallback)
         connecting = true
         vpnActive = true
         updateButton()
@@ -534,8 +532,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun startEngine() {
         // Cancel any pending disconnect fallback — we're connecting now.
-        disconnectPending = false
-        handler.removeCallbacks(disconnectFallback)
         connecting = true
         vpnActive = true
         engineRunning = false  // will become true once poll confirms connected
