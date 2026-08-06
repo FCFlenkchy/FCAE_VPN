@@ -5,7 +5,9 @@
 //! 
 //! For Linux/Windows TUN support, see `tun_t2s.rs` which uses
 //! tun2socks as the TUN engine.
+
 use tokio::sync::mpsc;
+use bytes::Bytes;
 
 use crate::error::{AetherError, Result};
 
@@ -87,7 +89,7 @@ pub fn resolve_fd() -> Option<i32> {
 pub async fn run(
     fd: i32,
     outbound_tx: mpsc::Sender<Vec<u8>>,
-    mut inbound_rx: mpsc::Receiver<Vec<u8>>,
+    mut inbound_rx: mpsc::Receiver<Bytes>,
 ) -> Result<()> {
     let dup = unsafe { libc::dup(fd) };
     if dup < 0 {
@@ -98,21 +100,13 @@ pub async fn run(
     }
     log::info!("[tun] bridging fd={fd} (dup={dup})");
 
-    // Android hands us a non-blocking fd (VpnService's ParcelFileDescriptor),
-    // which made the read loop below fall back to its WouldBlock branch —
-    // sleep 50ms and retry — as its steady-state behavior for the entire
-    // connection, even at idle. That's a ~20Hz wakeup loop running for
-    // hours, which keeps the CPU from reaching deeper idle states and
-    // shows up as background battery drain. We own this dup'd copy, so
-    // clear O_NONBLOCK on it: reads then genuinely block in the kernel
-    // until a packet arrives, at zero CPU cost, and the WouldBlock arm
-    // below becomes a rare defensive fallback instead of the common case.
-    unsafe {
-        let flags = libc::fcntl(dup, libc::F_GETFL, 0);
-        if flags >= 0 {
-            libc::fcntl(dup, libc::F_SETFL, flags & !libc::O_NONBLOCK);
-        }
-    }
+    // CRITICAL ANDROID QUIRK:
+    // We intentionally DO NOT clear O_NONBLOCK here.
+    // On Android's modified kernel, if a thread is fully blocked in a read() syscall
+    // on a TUN device, calling close() from another thread doesn't always wake it up
+    // immediately. By keeping it non-blocking and using a 50ms polling loop below,
+    // we guarantee the thread checks the fd state frequently and can exit instantly
+    // (within 50ms) when close_all_fds() is called during shutdown.
 
     let (err_tx, mut err_rx) = mpsc::channel::<String>(4);
 
@@ -125,37 +119,24 @@ pub async fn run(
 
     let read_task = tokio::task::spawn_blocking(move || {
         let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+        let mut buf = vec![0u8; 16384];
         loop {
-            // Read directly into a pooled buffer — avoids a 16 KB memcpy
-            // per packet compared to the old read-into-stack-then-copy
-            // approach. The pool recycles allocations so we don't churn
-            // the allocator on every packet either.
-            let mut pkt = crate::buffer_pool::take(16384);
-            let cap = pkt.capacity();
-            // SAFETY: we set len to capacity so read() has valid mutable
-            // space to write into. The buffer was just taken from the pool
-            // (or freshly allocated), so the memory is initialized enough
-            // for read() to overwrite. We immediately truncate to the
-            // actual bytes read afterwards.
-            unsafe { pkt.set_len(cap); }
-            match file.read(&mut pkt) {
+            match file.read(&mut buf) {
                 Ok(0) => {
                     let _ = err_tx_r.blocking_send("tun eof".into());
                     break;
                 }
                 Ok(n) => {
-                    unsafe { pkt.set_len(n); }
                     crate::stats::add_tx(n as u64);
+                    let mut pkt = crate::buffer_pool::take(n);
+                    pkt.extend_from_slice(&buf[..n]);
                     if out_tx.blocking_send(pkt).is_err() {
                         break;
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                    crate::buffer_pool::recycle(pkt);
-                    continue;
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    crate::buffer_pool::recycle(pkt);
+                    // 50ms heartbeat ensures we can be killed instantly on Android
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 Err(e) => {
@@ -164,6 +145,7 @@ pub async fn run(
                 }
             }
         }
+        // Prevent File::drop from closing the fd, as cleanup handles it via atomics
         let _ = file.into_raw_fd();
     });
 
@@ -227,7 +209,7 @@ pub async fn run(
 pub async fn run(
     _fd: i32,
     _outbound_tx: mpsc::Sender<Vec<u8>>,
-    _inbound_rx: mpsc::Receiver<Vec<u8>>,
+    _inbound_rx: mpsc::Receiver<Bytes>,
 ) -> Result<()> {
     Err(AetherError::Other("TUN not supported on this platform".into()))
 }
