@@ -817,9 +817,8 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                 #[cfg(target_os = "windows")]
                 aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
 
-                RUNNING.store(false,Ordering::SeqCst);
-                
-                drop(rt);
+                RUNNING.store(false, Ordering::SeqCst);
+                rt.shutdown_background();
             }));
 
             // Now that the runtime is dropped, update telemetry — this
