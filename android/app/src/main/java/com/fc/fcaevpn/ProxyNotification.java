@@ -35,7 +35,11 @@ public class ProxyNotification extends Service {
                 case ACTION_START:
                     if (!running) {
                         running = true;
-                        startForeground(NOTIFICATION_ID, build("Proxy running", true));
+                        try {
+                            startForeground(NOTIFICATION_ID, build("Proxy running", true));
+                        } catch (Exception e) {
+                            Log.e(TAG, "startForeground failed: " + e.getMessage());
+                        }
                         try { NativeEngine.nativeInit(); } catch (Exception ignored) {}
                         Log.i(TAG, "proxy started");
                     }
@@ -44,7 +48,13 @@ public class ProxyNotification extends Service {
                 case ACTION_STOP:
                     running = false;
                     try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-                    stopForeground(STOP_FOREGROUND_REMOVE);
+                    
+                    try {
+                        stopForeground(STOP_FOREGROUND_REMOVE);
+                    } catch (Exception e) {
+                        Log.w(TAG, "stopForeground failed: " + e.getMessage());
+                    }
+                    
                     stopSelf();
                     Log.i(TAG, "proxy stopped");
                     return START_NOT_STICKY;
@@ -72,7 +82,7 @@ public class ProxyNotification extends Service {
 
         b.setContentTitle("FCAE VPN")
          .setContentText(text)
-         .setSmallIcon(R.drawable.ic_lock_lock)
+         .setSmallIcon(android.R.drawable.ic_lock_lock)
          .setContentIntent(openPi)
          .setOngoing(ongoing)
          .setOnlyAlertOnce(true);
