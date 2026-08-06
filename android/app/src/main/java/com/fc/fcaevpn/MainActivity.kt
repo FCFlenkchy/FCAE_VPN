@@ -632,8 +632,6 @@ class MainActivity : AppCompatActivity() {
     engineRunning = false
     connecting = false
     handler.removeCallbacks(poll)
-    handler.removeCallbacks(disconnectFallback)
-    disconnectPending = false
     updateButton()
 
     
