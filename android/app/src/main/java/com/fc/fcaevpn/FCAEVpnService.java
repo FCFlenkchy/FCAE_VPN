@@ -20,6 +20,7 @@ public class FCAEVpnService extends VpnService {
     public static final String BROADCAST_VPN_STATE_CHANGED = "com.fc.fcaevpn.VPN_STATE_CHANGED";
 
     private static final AtomicLong sGeneration = new AtomicLong(0);
+    private static FCAEVpnService instance; // ADDED for instant UI disconnect
 
     private volatile long cleanupGeneration = 0;
     private volatile ParcelFileDescriptor vpnInterface;
@@ -46,9 +47,17 @@ public class FCAEVpnService extends VpnService {
     private static native void nativeSetTunFd(int fd);
     public static native long[] nativeGetTrafficStats();
 
+    // ADDED: Called directly from MainActivity for 0ms UI disconnect
+    public static void disconnectNow() {
+        if (instance != null) {
+            instance.fullShutdown();
+        }
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
+        instance = this;
         handler = new Handler(Looper.getMainLooper());
         notification = new VpnNotification(this);
     }
@@ -103,7 +112,7 @@ public class FCAEVpnService extends VpnService {
         running = false;
         try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
 
-        // close leftover interface from previous session before building a new one
+        // FIX: Close leftover PFD from previous session before building a new one
         final ParcelFileDescriptor oldPfd = vpnInterface;
         vpnInterface = null;
         if (oldPfd != null) {
@@ -152,25 +161,18 @@ public class FCAEVpnService extends VpnService {
                 builder.addAddress("10.0.0.2", 32);
                 builder.addRoute("0.0.0.0", 0);
                 builder.addRoute("::", 0);
-                try {
-                    builder.addDisallowedApplication(getPackageName());
-                } catch (Exception e) {
-                    Log.w(TAG, "Could not exclude own package: " + e.getMessage());
-                }
+                try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
                 builder.addDnsServer("1.1.1.1");
                 builder.addDnsServer("1.0.0.1");
 
                 vpnInterface = builder.establish();
                 if (vpnInterface == null) {
-                    Log.e(TAG, "Failed to establish VPN");
-                    handler.post(() -> fullShutdown());
+                    handler.post(this::fullShutdown);
                     return;
                 }
 
                 int fd = vpnInterface.getFd();
                 nativeSetTunFd(fd);
-                Log.i(TAG, "VPN established, fd=" + fd);
-
                 NativeEngine.nativeInit();
 
                 boolean ok = NativeEngine.nativeStart(
@@ -182,13 +184,11 @@ public class FCAEVpnService extends VpnService {
                     teamVal, tokenVal, emailVal, routesVal, routesIVal
                 );
                 if (!ok) {
-                    Log.e(TAG, "nativeStart failed");
-                    handler.post(() -> fullShutdown());
+                    handler.post(this::fullShutdown);
                     return;
                 }
 
                 running = true;
-                Log.i(TAG, "VPN engine started");
                 lastNotifText = null;
                 updateNotification();
                 handler.post(statsRunnable);
@@ -197,8 +197,7 @@ public class FCAEVpnService extends VpnService {
                 shutdownLatch = new CountDownLatch(1);
                 try { shutdownLatch.await(); } catch (InterruptedException ignored) {}
             } catch (Exception e) {
-                Log.e(TAG, "VPN error: " + e.getMessage(), e);
-                handler.post(() -> fullShutdown());
+                handler.post(this::fullShutdown);
             }
         }, "FCAE-VPN-Worker");
 
@@ -227,14 +226,7 @@ public class FCAEVpnService extends VpnService {
 
         if (!shuttingDown) {
             shuttingDown = true;
-            Log.i(TAG, "fullShutdown");
         }
-
-        handler.removeCallbacks(statsRunnable);
-        notification.dismiss();
-        stopForeground(STOP_FOREGROUND_REMOVE);
-        notifyUi();
-        stopSelf();
 
         final Thread t = vpnThread;
         vpnThread = null;
@@ -242,21 +234,42 @@ public class FCAEVpnService extends VpnService {
         vpnInterface = null;
         lastStartIntent = null;
 
-        // close rust dup'd fds first, then close the original pfd
-        // so the kernel tears down the tun device the instant pfd closes
-        try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-        if (pfd != null) {
-            try { pfd.close(); } catch (Exception ignored) {}
+        // 1. UI updates happen INSTANTLY on main thread
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            handler.removeCallbacks(statsRunnable);
+            notifyUi();
+        } else {
+            handler.post(() -> {
+                handler.removeCallbacks(statsRunnable);
+                notifyUi();
+            });
         }
 
+        // 2. Heavy teardown on background thread (prevents UI freeze & ANRs)
         final long myGen = cleanupGeneration;
         Thread cleanupThread = new Thread(() -> {
             if (myGen != cleanupGeneration) return;
+
+            // FIX: nativeStop BEFORE pfd.close so TUN dies instantly
+            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+            if (pfd != null) {
+                try { pfd.close(); } catch (Exception ignored) {}
+            }
+
             freeNativeOnce();
+
             if (t != null) {
                 t.interrupt();
                 try { t.join(1000); } catch (InterruptedException ignored) {}
             }
+
+            // Binder calls safely posted back to main thread
+            handler.post(() -> {
+                notification.dismiss();
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                stopSelf();
+            });
+
             if (!MainActivity.activityAlive) {
                 android.os.Process.killProcess(android.os.Process.myPid());
             }
@@ -275,27 +288,33 @@ public class FCAEVpnService extends VpnService {
             shutdownLatch = null;
         }
 
-        Log.i(TAG, "pauseVpn");
-        notifyUi();
-
         final Thread t = vpnThread;
         vpnThread = null;
         final ParcelFileDescriptor pfd = vpnInterface;
         vpnInterface = null;
 
-        try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-        if (pfd != null) {
-            try { pfd.close(); } catch (Exception ignored) {}
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            notifyUi();
+        } else {
+            handler.post(this::notifyUi);
         }
 
         final long myGen = cleanupGeneration;
         Thread cleanupThread = new Thread(() -> {
             if (myGen != cleanupGeneration) return;
+
+            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+            if (pfd != null) {
+                try { pfd.close(); } catch (Exception ignored) {}
+            }
+
             freeNativeOnce();
+
             if (t != null) {
                 t.interrupt();
                 try { t.join(1000); } catch (InterruptedException ignored) {}
             }
+
             handler.post(() -> {
                 handler.removeCallbacks(statsRunnable);
                 updateNotification();
@@ -323,18 +342,17 @@ public class FCAEVpnService extends VpnService {
             try {
                 long[] stats = nativeGetTrafficStats();
                 if (stats != null && stats.length >= 4) {
-                    rx = stats[0];
-                    tx = stats[1];
-                    totalRx = stats[2];
-                    totalTx = stats[3];
+                    rx = stats[0]; tx = stats[1]; totalRx = stats[2]; totalTx = stats[3];
                 }
             } catch (Exception ignored) {}
             String text = String.format(
-                "\u2193 %s  %s  |  \u2191 %s  %s",
+                "↓ %s  %s  |  ↑ %s  %s",
                 VpnNotification.fmtBytes(totalRx), VpnNotification.fmtRate(rx),
                 VpnNotification.fmtBytes(totalTx), VpnNotification.fmtRate(tx));
-            lastNotifText = text;
-            notification.show(text, true);
+            if (!text.equals(lastNotifText)) {
+                lastNotifText = text;
+                notification.show(text, true);
+            }
         } else {
             lastNotifText = null;
             notification.show("FCAE VPN — Disconnected", false);
@@ -343,6 +361,7 @@ public class FCAEVpnService extends VpnService {
 
     @Override
     public void onDestroy() {
+        instance = null;
         fullShutdown();
         super.onDestroy();
     }
