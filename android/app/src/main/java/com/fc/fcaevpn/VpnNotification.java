@@ -6,27 +6,70 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
 import android.util.Log;
 
 public class VpnNotification {
+    public static final String CHANNEL_ID = "fcaevpn_service";
+    public static final int NOTIFICATION_ID = 1;
 
-    public static final int NOTIFICATION_ID = 100;
-    private static final String CHANNEL_ID = "fcae_vpn";
+    private final Context context;
+    private final NotificationManager manager;
+    private final PendingIntent piMain;
+    private final Notification.Action disconnectAction;
+    private final Notification.Action stopAction;
+    private final Notification.Action startAction;
 
-    private final Context ctx;
-    private final NotificationManager nm;
-
-    public VpnNotification(Context ctx) {
-        this.ctx = ctx;
-        this.nm = ctx.getSystemService(NotificationManager.class);
+    public VpnNotification(Context context) {
+        this.context = context;
+        this.manager = context.getSystemService(NotificationManager.class);
         createChannel();
+
+        Intent mainIntent = new Intent(context, MainActivity.class);
+        piMain = PendingIntent.getActivity(context, 0, mainIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        disconnectAction = buildAction("Disconnect", FCAEVpnService.ACTION_DISCONNECT, 11);
+        stopAction = buildAction("Stop", FCAEVpnService.ACTION_STOP, 10);
+        startAction = buildAction("Start", FCAEVpnService.ACTION_START, 12);
     }
 
-    public void show(String text, boolean ongoing) {
+    private void createChannel() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            NotificationChannel ch = new NotificationChannel(
+                CHANNEL_ID, "FCAE VPN",
+                NotificationManager.IMPORTANCE_LOW);
+            ch.setDescription("FCAE VPN tunnel status");
+            ch.setShowBadge(false);
+            if (manager != null) manager.createNotificationChannel(ch);
+        }
+    }
+
+    public Notification build(String text, boolean showStopButton) {
+        Notification.Builder nb = new Notification.Builder(context, CHANNEL_ID);
+
+        nb.setContentTitle("FCAE VPN")
+          .setContentText(text)
+          .setSmallIcon(android.R.drawable.ic_lock_lock)
+          .setContentIntent(piMain)
+          .setOngoing(true)
+          .setOnlyAlertOnce(true)
+          .setStyle(new Notification.BigTextStyle().bigText(text));
+
+        if (showStopButton) {
+            nb.addAction(disconnectAction);
+            nb.addAction(stopAction);
+        } else {
+            nb.addAction(disconnectAction);
+            nb.addAction(startAction);
+        }
+
+        return nb.build();
+    }
+
+    public void show(String text, boolean showStopButton) {
         try {
-            if (nm != null) {
-                nm.notify(NOTIFICATION_ID, build(text, ongoing));
+            if (manager != null) {
+                manager.notify(NOTIFICATION_ID, build(text, showStopButton));
             }
         } catch (Exception e) {
             Log.w("VpnNotification", "show failed: " + e.getMessage());
@@ -35,56 +78,58 @@ public class VpnNotification {
 
     public void dismiss() {
         try {
-            if (nm != null) {
-                nm.cancel(NOTIFICATION_ID);
-            }
+            if (manager != null) manager.cancel(NOTIFICATION_ID);
         } catch (Exception e) {
             Log.w("VpnNotification", "dismiss failed: " + e.getMessage());
         }
     }
 
-    public Notification build(String text, boolean ongoing) {
-        Intent openIntent = ctx.getPackageManager()
-            .getLaunchIntentForPackage(ctx.getPackageName());
-        PendingIntent openPi = PendingIntent.getActivity(ctx, 10, openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    private Notification.Action buildAction(String label, String action, int requestCode) {
+        Intent intent = new Intent(context, FCAEVpnService.class);
+        intent.setAction(action);
+        PendingIntent pi = PendingIntent.getService(context, requestCode,
+            intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        return new Notification.Action.Builder(null, label, pi).build();
+    }
 
-        Notification.Builder b;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            b = new Notification.Builder(ctx, CHANNEL_ID);
-        } else {
-            b = new Notification.Builder(ctx);
+    static String fmtBytes(long b) {
+        if (b >= 1073741824L) {
+            double v = b / 1073741824.0;
+            long whole = (long) v;
+            long frac = (long) ((v - whole) * 10.0);
+            return whole + "." + frac + " GB";
         }
-
-        b.setContentTitle("FCAE VPN")
-         .setContentText(text)
-         .setSmallIcon(android.R.drawable.ic_lock_lock)
-         .setContentIntent(openPi)
-         .setOngoing(ongoing)
-         .setOnlyAlertOnce(true);
-
-        return b.build();
-    }
-
-    private void createChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel ch = new NotificationChannel(
-                CHANNEL_ID, "FCAE VPN", NotificationManager.IMPORTANCE_LOW);
-            ch.setShowBadge(false);
-            if (nm != null) nm.createNotificationChannel(ch);
+        if (b >= 1048576L) {
+            double v = b / 1048576.0;
+            long whole = (long) v;
+            long frac = (long) ((v - whole) * 10.0);
+            return whole + "." + frac + " MB";
         }
+        if (b >= 1024L) {
+            return (b / 1024L) + " KB";
+        }
+        return b + " B";
     }
 
-    public static String fmtBytes(long bytes) {
-        if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-        if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024));
-        return String.format("%.2f GB", bytes / (1024.0 * 1024 * 1024));
-    }
-
-    public static String fmtRate(long bytesPerSec) {
-        if (bytesPerSec < 1024) return bytesPerSec + " B/s";
-        if (bytesPerSec < 1024 * 1024) return String.format("%.1f KB/s", bytesPerSec / 1024.0);
-        return String.format("%.1f MB/s", bytesPerSec / (1024.0 * 1024));
+    static String fmtRate(long bps) {
+        if (bps >= 1073741824L) {
+            double v = bps / 1073741824.0;
+            long whole = (long) v;
+            long frac = (long) ((v - whole) * 10.0);
+            return whole + "." + frac + " GB/s";
+        }
+        if (bps >= 1048576L) {
+            double v = bps / 1048576.0;
+            long whole = (long) v;
+            long frac = (long) ((v - whole) * 10.0);
+            return whole + "." + frac + " MB/s";
+        }
+        if (bps >= 1024L) {
+            double v = bps / 1024.0;
+            long whole = (long) v;
+            long frac = (long) ((v - whole) * 10.0);
+            return whole + "." + frac + " KB/s";
+        }
+        return bps + " B/s";
     }
 }
