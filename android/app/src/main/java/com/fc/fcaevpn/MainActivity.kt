@@ -629,75 +629,46 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnectAll() {
-        // Reset UI state immediately so the button flips to CONNECT
-        // before the async broadcast arrives.  This prevents double-tap
-        // races where the user taps CONNECT while the old broadcast is
-        // still in-flight.
-        userInitiatedDisconnect = true
-        val currentMode = spinnerMode.selectedItemPosition
-        vpnActive = false
-        engineRunning = false
-        connecting = false
-        handler.removeCallbacks(poll)
-        updateButton()
-        statusText.text = "DISCONNECTING..."
-        statusText.setTextColor(Color.parseColor("#8A93A6"))
+    userInitiatedDisconnect = true
+    val currentMode = spinnerMode.selectedItemPosition
 
-        // Stop native engine directly — if the service was killed by the
-        // system while the app was backgrounded, startService(i) would go
-        // nowhere and the UI would stay stuck on DISCONNECTING forever.
-        // Use a dedicated thread so nativeStop() doesn't block the shared
-        // bgExecutor (which the poll also uses).
-        Thread({
-            try { NativeEngine.nativeStop() } catch (_: Throwable) {}
-        }, "NativeStop-Disconnect").start()
+    vpnActive = false
+    engineRunning = false
+    connecting = false
+    handler.removeCallbacks(poll)
+    handler.removeCallbacks(disconnectFallback)
+    disconnectPending = false
+    updateButton()
 
-        // Only try to interact with the VPN service if we're in TUN mode.
-        // In proxy mode (mode=0), the VPN service is not running and
-        // starting it just to send DISCONNECT would create an unnecessary
-        // service instance that could interfere with the engine.
-        if (currentMode == 1) {
-            try {
-                val i = Intent(this, FCAEVpnService::class.java)
-                i.action = FCAEVpnService.ACTION_DISCONNECT
-                startForegroundService(i)
-            } catch (_: Throwable) {
-                // Fallback: stopService works even from background on all APIs
-                try { stopService(Intent(this, FCAEVpnService::class.java)) } catch (_: Throwable) {}
-            }
-        } else {
-            // Proxy mode: stop the proxy notification foreground service
-            try {
-                val i = Intent(this, ProxyNotification::class.java)
-                i.action = ProxyNotification.ACTION_STOP
-                startService(i)
-            } catch (_: Throwable) {
-                try { stopService(Intent(this, ProxyNotification::class.java)) } catch (_: Throwable) {}
-            }
+    
+    statusText.text = "DISCONNECTED"
+    statusText.setTextColor(COLOR_DISCONNECTED)
+    statsText.text = ""
+    peerText.text = ""
+
+    Thread({
+        try { NativeEngine.nativeStop() } catch (_: Throwable) {}
+    }, "NativeStop-Disconnect").start()
+
+    if (currentMode == 1) {
+        try {
+            val i = Intent(this, FCAEVpnService::class.java)
+            i.action = FCAEVpnService.ACTION_DISCONNECT
+            startForegroundService(i)
+        } catch (_: Throwable) {
+            try { stopService(Intent(this, FCAEVpnService::class.java)) } catch (_: Throwable) {}
         }
-
-        // After a brief delay, force UI to DISCONNECTED even if no
-        // broadcast arrives (service might be dead).  Use a token to
-        // cancel this if a new connect starts before it fires.
-        disconnectPending = true
-        handler.postDelayed(disconnectFallback, 2000)
-    }
-
-    private var disconnectPending = false
-    private val disconnectFallback = Runnable {
-        if (!disconnectPending) return@Runnable
-        disconnectPending = false
-        if (statusText.text == "DISCONNECTING...") {
-            vpnActive = false
-            engineRunning = false
-            connecting = false
-            updateButton()
-            statusText.text = "DISCONNECTED"
-            statusText.setTextColor(Color.parseColor("#8A93A6"))
-            statsText.text = ""
-            peerText.text = ""
+    } else {
+        try {
+            val i = Intent(this, ProxyNotification::class.java)
+            i.action = ProxyNotification.ACTION_STOP
+            startService(i)
+        } catch (_: Throwable) {
+            try { stopService(Intent(this, ProxyNotification::class.java)) } catch (_: Throwable) {}
         }
     }
+}
+
 
     private fun checkForUpdates() {
         btnCheckUpdates.isEnabled = false
