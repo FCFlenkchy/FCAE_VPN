@@ -13,4 +13,10 @@ Built with pure **HTML + CSS** — no JavaScript at all.
 
 ## View Live
 
-Visit: [fcaevpn.fluxcast.dev](https://fcaevpn.fluxcast.dev/)
+## View Live
+
+Visit:
+
+- [fcaevpn.fluxcast.dev](https://fcaevpn.fluxcast.dev/)
+- [fcaevpn.fcrt.indevs.in](https://fcaevpn.fcrt.indevs.in/)
+- [fcaevpn.pages.dev](https://fcaevpn.pages.dev/)
