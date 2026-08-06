@@ -37,6 +37,8 @@ pub use stats::{
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use bytes::Bytes;
+
 use error::{AetherError, Result};
 use tokio::sync::oneshot;
 
@@ -713,7 +715,7 @@ async fn run_masque(
 type TunBridge = (
     i32,
     tokio::sync::mpsc::Sender<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<Vec<u8>>,
+    tokio::sync::mpsc::Receiver<Bytes>,
 );
 
 /// Wire tunnel channels to netstack. Only fan-out when a real TUN fd is present
@@ -752,7 +754,7 @@ fn split_dataplane(
     let cap = sysprofile::channel_capacity(); //it was hardcoded to 512
     let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
     let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
-    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
+    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Bytes>(cap);
 
     let ot_ns = outbound_tx.clone();
     tokio::spawn(async move {
@@ -768,7 +770,7 @@ fn split_dataplane(
     tokio::spawn(async move {
         while let Some(pkt) = inbound_rx.recv().await {
             let _ = ns_in_tx.send(pkt.clone()).await;
-            let _ = tun_in_tx.send(pkt).await;
+            let _ = tun_in_tx.send(Bytes::from(pkt)).await;
         }
     });
 
