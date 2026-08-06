@@ -1135,58 +1135,25 @@ pub extern "C" fn aether_check_update_from_json(
 
 #[no_mangle]
 pub extern "C" fn aether_free() {
-    // Acquire STOP_GUARD ONLY to safely take the engine thread handle.
-    // Release it immediately so a subsequent aether_start() call isn't
-    // blocked for the entire join+cleanup duration (which can exceed the
-    // 5s freeNativeOnce timeout, leaving STOP_GUARD held on an abandoned
-    // thread forever).
-    let handle = {
+    // Take the handle but DO NOT join it. 
+    // Dropping the handle detaches the thread so it finishes in the background
+    // without blocking the Java FFI cleanup thread.
+    let _handle = {
         let _guard = STOP_GUARD.lock();
         ENGINE_THREAD.lock().take()
     };
 
-    // Signal shutdown — this makes the engine thread's select! loop
-    // return so block_on() completes and the tokio runtime is dropped.
+    // Signal shutdown
     SHUTDOWN.store(true, Ordering::SeqCst);
-    // Only store a notify permit if the engine thread is still running.
-    // If it has already exited (RUNNING=false), storing a permit would
-    // leave an orphan that the NEXT aether_start()'s engine thread would
-    // consume and exit immediately — causing DISCONNECTED-forever on
-    // Android reconnect.
     if RUNNING.load(Ordering::SeqCst) {
         SHUTDOWN_NOTIFY.notify_one();
-    }
-
-    // Join the engine thread AFTER releasing STOP_GUARD.  This blocks
-    // only this cleanup thread, not a subsequent aether_start().
-    if let Some(h) = handle {
-        let _ = h.join();
-    }
-
-    // Wait for RUNNING to become false — covers the edge case where
-    // aether_start() spawned the thread but hasn't stored the JoinHandle yet.
-    for _ in 0..20 {
-        if !RUNNING.load(Ordering::SeqCst) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    } 
 
     // Safety net: close TUN fds and force-cleanup Windows TUN adapters.
     // close_all_fds() uses atomic swap so double-close is impossible.
     aether_engine::tun::close_all_fds();
     #[cfg(target_os = "windows")]
     aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
-
-    // Do NOT store RUNNING=false here.  The engine thread already set it
-    // to false when it exited (line 745).  If we set it here, a race with
-    // aether_start() would clobber RUNNING=true from a new engine.
-
-    // NOTE: Do NOT clear INITIALIZED or LOG_CB here.  On Android the
-    // VPN service may call aether_free() (via nativeFree) and then
-    // re-start the engine later.  aether_init() uses INIT_ONCE so it
-    // can only set these once — clearing them here would make the FFI
-    // layer permanently unusable after the first free.
 
     let mut t = TELEMETRY.lock();
     t.state = 0;
