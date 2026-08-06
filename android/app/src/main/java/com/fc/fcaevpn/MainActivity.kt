@@ -109,10 +109,6 @@ class MainActivity : AppCompatActivity() {
                         if (gen < lastBroadcastGeneration) return@post
 
                         if (!isRunning && !isPaused) {
-                            // If the user already called disconnectAll(),
-                            // this broadcast belongs to the old cycle.
-                            // Ignore it so a fast reconnect isn't overridden.
-                            if (userInitiatedDisconnect) return@post
 
                             lastBroadcastGeneration = gen
                             connecting = false
@@ -625,41 +621,36 @@ class MainActivity : AppCompatActivity() {
 
     private fun disconnectAll() {
     userInitiatedDisconnect = true
-    val currentMode = spinnerMode.selectedItemPosition
 
+    // 1. UI updates happen INSTANTLY on main thread
     vpnActive = false
     engineRunning = false
     connecting = false
     handler.removeCallbacks(poll)
     updateButton()
-
     
     statusText.text = "DISCONNECTED"
-    statusText.setTextColor(COLOR_DISCONNECTED)
+    statusText.setTextColor(Color.parseColor("#8A93A6")) // Use your disconnected color
     statsText.text = ""
     peerText.text = ""
 
+    // 2. Trigger disconnect on a background thread to avoid UI freezing
+    val currentMode = spinnerMode.selectedItemPosition
     Thread({
         try { NativeEngine.nativeStop() } catch (_: Throwable) {}
-    }, "NativeStop-Disconnect").start()
 
-    if (currentMode == 1) {
-        try {
-            val i = Intent(this, FCAEVpnService::class.java)
-            i.action = FCAEVpnService.ACTION_DISCONNECT
-            startForegroundService(i)
-        } catch (_: Throwable) {
-            try { stopService(Intent(this, FCAEVpnService::class.java)) } catch (_: Throwable) {}
+        if (currentMode == 1) {
+            // TUN Mode: Call the service DIRECTLY (0ms delay)
+            FCAEVpnService.disconnectNow()
+        } else {
+            // Proxy Mode: Send intent
+            try {
+                val i = Intent(this, ProxyNotification::class.java)
+                i.action = ProxyNotification.ACTION_STOP
+                startService(i)
+            } catch (_: Throwable) {}
         }
-    } else {
-        try {
-            val i = Intent(this, ProxyNotification::class.java)
-            i.action = ProxyNotification.ACTION_STOP
-            startService(i)
-        } catch (_: Throwable) {
-            try { stopService(Intent(this, ProxyNotification::class.java)) } catch (_: Throwable) {}
-        }
-    }
+    }, "Disconnect-Background").start()
 }
 
 
