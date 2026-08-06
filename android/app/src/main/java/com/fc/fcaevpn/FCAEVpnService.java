@@ -112,7 +112,7 @@ public class FCAEVpnService extends VpnService {
         running = false;
         try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
 
-        // FIX: Close leftover PFD from previous session before building a new one
+        //Close leftover PFD from previous session before building a new one
         final ParcelFileDescriptor oldPfd = vpnInterface;
         vpnInterface = null;
         if (oldPfd != null) {
@@ -215,68 +215,114 @@ public class FCAEVpnService extends VpnService {
     }
 
     private void fullShutdown() {
-        sGeneration.incrementAndGet();
-        running = false;
-        vpnPaused = false;
+    sGeneration.incrementAndGet();
+    running = false;
+    vpnPaused = false;
 
-        if (shutdownLatch != null) {
-            shutdownLatch.countDown();
-            shutdownLatch = null;
-        }
+    if (shutdownLatch != null) {
+        shutdownLatch.countDown();
+        shutdownLatch = null;
+    }
 
-        if (!shuttingDown) {
-            shuttingDown = true;
-        }
+    if (!shuttingDown) {
+        shuttingDown = true;
+    }
 
-        final Thread t = vpnThread;
-        vpnThread = null;
-        final ParcelFileDescriptor pfd = vpnInterface;
-        vpnInterface = null;
-        lastStartIntent = null;
+    final Thread t = vpnThread;
+    vpnThread = null;
+    final ParcelFileDescriptor pfd = vpnInterface;
+    vpnInterface = null;
+    lastStartIntent = null;
 
-        // 1. UI updates happen INSTANTLY on main thread
-        if (Looper.myLooper() == Looper.getMainLooper()) {
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+        handler.removeCallbacks(statsRunnable);
+        notifyUi();
+    } else {
+        handler.post(() -> {
             handler.removeCallbacks(statsRunnable);
             notifyUi();
-        } else {
-            handler.post(() -> {
-                handler.removeCallbacks(statsRunnable);
-                notifyUi();
-            });
+        });
+    }
+
+    // Close PFD and stop engine IMMEDIATELY on the calling thread.
+    // Do not defer this to a background thread, as thread scheduling delays 
+    // cause the TUN device to stay alive for 1-2 seconds.
+    try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+    if (pfd != null) {
+        try { pfd.close(); } catch (Exception ignored) {}
+    }
+
+    final long myGen = cleanupGeneration;
+    Thread cleanupThread = new Thread(() -> {
+        if (myGen != cleanupGeneration) return;
+
+        freeNativeOnce();
+
+        if (t != null) {
+            t.interrupt();
+            try { t.join(1000); } catch (InterruptedException ignored) {}
         }
 
-        // 2. Heavy teardown on background thread (prevents UI freeze & ANRs)
-        final long myGen = cleanupGeneration;
-        Thread cleanupThread = new Thread(() -> {
-            if (myGen != cleanupGeneration) return;
+        handler.post(() -> {
+            notification.dismiss();
+            stopForeground(STOP_FOREGROUND_REMOVE);
+            stopSelf();
+        });
 
-            // FIX: nativeStop BEFORE pfd.close so TUN dies instantly
-            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-            if (pfd != null) {
-                try { pfd.close(); } catch (Exception ignored) {}
-            }
+        if (!MainActivity.activityAlive) {
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }
+    }, "FCAE-Cleanup");
+    cleanupThread.setDaemon(true);
+    cleanupThread.start();
+}
 
-            freeNativeOnce();
+private void pauseVpn() {
+    sGeneration.incrementAndGet();
+    running = false;
+    vpnPaused = true;
 
-            if (t != null) {
-                t.interrupt();
-                try { t.join(1000); } catch (InterruptedException ignored) {}
-            }
-
-            // Binder calls safely posted back to main thread
-            handler.post(() -> {
-                notification.dismiss();
-                stopForeground(STOP_FOREGROUND_REMOVE);
-                stopSelf();
-            });
-
-            if (!MainActivity.activityAlive) {
-                android.os.Process.killProcess(android.os.Process.myPid());
-            }
-        }, "FCAE-Cleanup");
-        cleanupThread.setDaemon(true);
-        cleanupThread.start();
+    if (shutdownLatch != null) {
+        shutdownLatch.countDown();
+        shutdownLatch = null;
     }
+
+    final Thread t = vpnThread;
+    vpnThread = null;
+    final ParcelFileDescriptor pfd = vpnInterface;
+    vpnInterface = null;
+
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+        notifyUi();
+    } else {
+        handler.post(this::notifyUi);
+    }
+
+    // ✅ CRITICAL FIX: Same as fullShutdown — close immediately
+    try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+    if (pfd != null) {
+        try { pfd.close(); } catch (Exception ignored) {}
+    }
+
+    final long myGen = cleanupGeneration;
+    Thread cleanupThread = new Thread(() -> {
+        if (myGen != cleanupGeneration) return;
+
+        freeNativeOnce();
+
+        if (t != null) {
+            t.interrupt();
+            try { t.join(1000); } catch (InterruptedException ignored) {}
+        }
+
+        handler.post(() -> {
+            handler.removeCallbacks(statsRunnable);
+            updateNotification();
+        });
+    }, "FCAE-PauseCleanup");
+    cleanupThread.setDaemon(true);
+    cleanupThread.start();
+}
 
     private void pauseVpn() {
         sGeneration.incrementAndGet();
