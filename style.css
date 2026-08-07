@@ -17,8 +17,7 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(6,6,13,.6);b
 
 /* Hero */
 .hero{text-align:center;padding:120px 20px 60px;position:relative}
-.hero-logo{width:96px;height:96px;margin:0 auto 28px;display:flex;align-items:center;justify-content:center;border-radius:24px;background:linear-gradient(135deg,rgba(124,92,252,.22),rgba(0,229,255,.16));border:1px solid rgba(124,92,252,.35);animation:float 4s ease-in-out infinite;filter:drop-shadow(var(--glow))}
-.hero-logo img{width:64px;height:64px;display:block}
+.hero-icon{display:block;margin:0 auto 28px;animation:float 4s ease-in-out infinite;filter:drop-shadow(var(--glow))}
 @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
 .hero h1{font-size:clamp(2.2rem,5vw,3.5rem);font-weight:900;background:linear-gradient(135deg,#b4a4ff,#7c5cfc,#00e5ff);background-size:200% 200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:gradShift 4s ease infinite;margin-bottom:16px;letter-spacing:-1px}
 @keyframes gradShift{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
