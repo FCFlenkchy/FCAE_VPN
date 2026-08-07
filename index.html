@@ -1,617 +1,233 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>FCAE VPN - Break Through Censorship</title>
-  <meta
-    name="description"
-    content="FCAE VPN breaks through censorship with automatic endpoint discovery, encrypted MASQUE / WireGuard tunneling, and local SOCKS5 & HTTP proxy."
-  />
-
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap"
-    rel="stylesheet"
-  />
-
-  <link rel="stylesheet" href="style.css" />
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>FCAE VPN - Break Through Censorship</title>
+<meta name="description" content="FCAE VPN breaks through censorship with automatic endpoint discovery, encrypted MASQUE / WireGuard tunneling, and local SOCKS5 & HTTP proxy.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="icon" type="image/png" href="icon_48.png">
+<link rel="stylesheet" href="style.css">
 </head>
-
 <body>
-  <nav aria-label="Main navigation">
-    <div class="nav-inner">
-      <a class="nav-logo" href="#top">⚡ FCAE VPN</a>
 
-      <ul class="nav-links">
-        <li><a href="#how">How</a></li>
-        <li><a href="#links">Get It</a></li>
-        <li><a href="#features">Features</a></li>
-        <li><a href="#platforms">Platforms</a></li>
-        <li><a href="#contribute">Contribute</a></li>
-      </ul>
+<nav aria-label="Main navigation">
+  <div class="nav-inner">
+    <a class="nav-logo" href="#top"><img src="icon_48.png" width="24" height="24" alt="" style="vertical-align:middle;margin-right:6px;">FCAE VPN</a>
+    <ul class="nav-links">
+      <li><a href="#how">How</a></li>
+      <li><a href="#links">Get It</a></li>
+      <li><a href="#features">Features</a></li>
+      <li><a href="#platforms">Platforms</a></li>
+      <li><a href="#contribute">Contribute</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main id="top">
+
+<!-- HERO -->
+<header class="hero container">
+  <div class="hero-logo" aria-hidden="true"><img src="icon_48.png" width="96" height="96" alt=""></div>
+  <h1>FCAE VPN</h1>
+  <p class="sub">Break through censorship with automatic endpoint discovery, encrypted MASQUE / WireGuard tunneling, and local SOCKS5 &amp; HTTP proxy. Built for heavily restricted networks.</p>
+  <div class="badges">
+    <span class="badge"><span class="dot p"></span>Windows</span>
+    <span class="badge"><span class="dot c"></span>Linux</span>
+    <span class="badge"><span class="dot p"></span>macOS</span>
+    <span class="badge"><span class="dot c"></span>Android</span>
+    <span class="badge"><span class="dot p"></span>MIT License</span>
+  </div>
+  <div class="hero-btns">
+    <a class="btn btn-primary" href="https://github.com/FCFlenkchy/FCAE_VPN/releases" target="_blank" rel="noopener">⬇️ Download</a>
+    <a class="btn btn-outline" href="https://github.com/FCFlenkchy/FCAE_VPN" target="_blank" rel="noopener">📁 Source Code</a>
+  </div>
+</header>
+
+<!-- HOW IT WORKS -->
+<section id="how" class="container">
+  <div class="sh">
+    <h2>🔧 How It Works</h2>
+    <p>Connects to Cloudflare's WARP network — the infrastructure behind 1.1.1.1</p>
+  </div>
+  <div class="steps">
+    <div class="step-card"><div class="step-num">1</div><h4>Account Provisioning</h4><p>Creates WARP device identity &amp; obtains dedicated IPv4/IPv6 + WireGuard keypairs.</p></div>
+    <div class="step-card"><div class="step-num">2</div><h4>Endpoint Scanning</h4><p>Probes Cloudflare edge IPs across multiple ports to find reachable gateways.</p></div>
+    <div class="step-card"><div class="step-num">3</div><h4>Tunnel Establishment</h4><p>Encrypted MASQUE, WireGuard, or WARP-in-WARP tunnels to the best edge.</p></div>
+    <div class="step-card"><div class="step-num">4</div><h4>Local Proxy</h4><p>SOCKS5 (:1819) &amp; HTTP (:1820) proxies for all your apps.</p></div>
+  </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section id="architecture" class="container">
+  <div class="sh"><h2>🏗️ Architecture</h2><p>From your app to the public internet</p></div>
+  <div class="arch-flow">
+    <div class="arch-box"><div class="arch-label">Your Device</div><div class="arch-title">Any Application</div><div class="arch-sub">Browser, CLI, or system-wide TUN</div></div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-box"><div class="arch-label">Local Proxies</div><div class="arch-title">SOCKS5 :1819 · HTTP :1820</div><div class="arch-sub">Apps connect through FCAE VPN locally</div></div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-box">
+      <div class="arch-label">FCAE VPN Client</div><div class="arch-title">Core Engine</div>
+      <div class="arch-row">
+        <div class="arch-box-sm"><div class="arch-sm-title">Netstack</div><div class="arch-sm-sub">TCP/IP Stack</div></div>
+        <div class="arch-box-sm"><div class="arch-sm-title">Scanner</div><div class="arch-sm-sub">Endpoint Discovery</div></div>
+        <div class="arch-box-sm"><div class="arch-sm-title">Obfuscation</div><div class="arch-sm-sub">aether-noize</div></div>
+        <div class="arch-box-sm"><div class="arch-sm-title">Health</div><div class="arch-sm-sub">Auto-Reconnect</div></div>
+      </div>
     </div>
-  </nav>
-
-  <main id="top">
-    <!-- HERO -->
-    <header class="hero container">
-      <div class="hero-logo" aria-hidden="true">⚡</div>
-
-      <h1>FCAE VPN</h1>
-
-      <p class="sub">
-        Break through censorship with automatic endpoint discovery, encrypted
-        MASQUE / WireGuard tunneling, and local SOCKS5 &amp; HTTP proxy. Built
-        for heavily restricted networks.
-      </p>
-
-      <div class="badges">
-        <span class="badge"><span class="dot p"></span>Windows</span>
-        <span class="badge"><span class="dot c"></span>Linux</span>
-        <span class="badge"><span class="dot p"></span>macOS</span>
-        <span class="badge"><span class="dot c"></span>Android</span>
-        <span class="badge"><span class="dot p"></span>MIT License</span>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-box">
+      <div class="arch-label">Encrypted Tunnels</div><div class="arch-title">Best Available Transport</div>
+      <div class="arch-row">
+        <div class="arch-box-sm"><div class="arch-sm-title">MASQUE HTTP/3</div><div class="arch-sm-sub">QUIC</div></div>
+        <div class="arch-box-sm"><div class="arch-sm-title">MASQUE HTTP/2</div><div class="arch-sm-sub">TLS</div></div>
+        <div class="arch-box-sm"><div class="arch-sm-title">WireGuard</div><div class="arch-sm-sub">UDP</div></div>
+        <div class="arch-box-sm"><div class="arch-sm-title">WARP-in-WARP</div><div class="arch-sm-sub">Double WG</div></div>
       </div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-box"><div class="arch-label">Cloudflare WARP Edge</div><div class="arch-title">162.159.192.x</div><div class="arch-sub">Automatic endpoint discovery</div></div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-box"><div class="arch-label">Freedom</div><div class="arch-title">🌐 Public Internet</div></div>
+  </div>
+</section>
 
-      <div class="hero-btns">
-        <a
-          class="btn btn-primary"
-          href="https://github.com/FCFlenkchy/FCAE_VPN/releases"
-          target="_blank"
-          rel="noopener"
-        >
-          ⬇️ Download
-        </a>
+<!-- PROTOCOL COMPARISON -->
+<section id="protocols" class="container">
+  <div class="sh"><h2>📊 Protocol Comparison</h2><p>Choose the right tunnel depending on network restrictions</p></div>
+  <div class="twrap">
+    <table>
+      <thead><tr><th>Protocol</th><th>Transport</th><th>DPI Resistance</th><th>Speed</th><th>Use Case</th></tr></thead>
+      <tbody>
+        <tr><td><span class="tag tbg">MASQUE (HTTP/3)</span></td><td>QUIC over UDP</td><td>Best</td><td>Fast</td><td>Default, most resistant</td></tr>
+        <tr><td><span class="tag thg">MASQUE (HTTP/2)</span></td><td>TLS over TCP</td><td>Best</td><td>Fast</td><td>Fallback when QUIC blocked</td></tr>
+        <tr><td><span class="tag tfs">WireGuard</span></td><td>UDP</td><td>Moderate</td><td>Fastest</td><td>When UDP is allowed</td></tr>
+        <tr><td><span class="tag tmo">WARP-in-WARP</span></td><td>Nested UDP</td><td>High</td><td>Moderate</td><td>Extra obfuscation layer</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
 
-        <a
-          class="btn btn-outline"
-          href="https://github.com/FCFlenkchy/FCAE_VPN"
-          target="_blank"
-          rel="noopener"
-        >
-          📁 Source Code
-        </a>
-      </div>
-    </header>
+<!-- GET IT -->
+<section id="links" class="container">
+  <div class="sh"><h2>⬇️ Get FCAE VPN</h2><p>Download releases or browse the source code</p></div>
+  <div class="link-cards">
+    <a class="link-card" href="https://github.com/FCFlenkchy/FCAE_VPN/releases" target="_blank" rel="noopener">
+      <div class="lc-icon">📦</div><div class="lc-info"><div class="lc-title">Download</div><div class="lc-desc">Get the latest builds for Windows, Linux, macOS &amp; Android.</div></div><div class="lc-arrow">→</div>
+    </a>
+    <a class="link-card" href="https://github.com/FCFlenkchy/FCAE_VPN" target="_blank" rel="noopener">
+      <div class="lc-icon">💻</div><div class="lc-info"><div class="lc-title">Source Code</div><div class="lc-desc">Browse the code, open issues, or fork on GitHub.</div></div><div class="lc-arrow">→</div>
+    </a>
+  </div>
+</section>
 
-    <!-- HOW IT WORKS -->
-    <section id="how" class="container">
-      <div class="sh">
-        <h2>🔧 How It Works</h2>
-        <p>
-          Connects to Cloudflare's WARP network — the infrastructure behind
-          1.1.1.1
-        </p>
-      </div>
+<!-- FEATURES -->
+<section id="features" class="container">
+  <div class="sh"><h2>✨ Features</h2><p>Built for restricted networks</p></div>
+  <div class="features">
+    <div class="fi"><div class="ic">🔍</div><span>Automatic endpoint discovery with end-to-end data-plane validation.</span></div>
+    <div class="fi"><div class="ic">🔐</div><span>MASQUE (HTTP/3 QUIC / HTTP/2), WireGuard, and WARP-in-WARP support.</span></div>
+    <div class="fi"><div class="ic">🎭</div><span>Traffic obfuscation with configurable profiles (aether-noize).</span></div>
+    <div class="fi"><div class="ic">🔄</div><span>Automatic reconnection with quick-reconnect on failure.</span></div>
+    <div class="fi"><div class="ic">🔌</div><span>Local SOCKS5 and HTTP proxies for any application.</span></div>
+    <div class="fi"><div class="ic">🖥️</div><span>Native GUI on all platforms (ImGui + DX11 / OpenGL / Material UI).</span></div>
+  </div>
+</section>
 
-      <div class="steps">
-        <div class="step-card">
-          <div class="step-num">1</div>
-          <h4>Account Provisioning</h4>
-          <p>
-            Creates WARP device identity &amp; obtains dedicated IPv4/IPv6 +
-            WireGuard keypairs.
-          </p>
-        </div>
+<!-- PLATFORMS -->
+<section id="platforms" class="container">
+  <div class="sh"><h2>💻 Supported Platforms</h2><p>Native builds for major desktop and mobile systems</p></div>
+  <div class="p-grid">
+    <div class="p-card"><div class="p-ic">🪟</div><div class="p-nm">Windows</div><div class="p-ui">DirectX 11 + ImGui</div></div>
+    <div class="p-card"><div class="p-ic">🐧</div><div class="p-nm">Linux</div><div class="p-ui">GLFW + OpenGL + ImGui</div></div>
+    <div class="p-card"><div class="p-ic">🍎</div><div class="p-nm">macOS</div><div class="p-ui">GLFW + OpenGL + ImGui</div></div>
+    <div class="p-card"><div class="p-ic">📱</div><div class="p-nm">Android</div><div class="p-ui">Kotlin Material UI</div></div>
+  </div>
+</section>
 
-        <div class="step-card">
-          <div class="step-num">2</div>
-          <h4>Endpoint Scanning</h4>
-          <p>
-            Probes Cloudflare edge IPs across multiple ports to find reachable
-            gateways.
-          </p>
-        </div>
-
-        <div class="step-card">
-          <div class="step-num">3</div>
-          <h4>Tunnel Establishment</h4>
-          <p>
-            Encrypted MASQUE, WireGuard, or WARP-in-WARP tunnels to the best
-            edge.
-          </p>
-        </div>
-
-        <div class="step-card">
-          <div class="step-num">4</div>
-          <h4>Local Proxy</h4>
-          <p>SOCKS5 (:1819) &amp; HTTP (:1820) proxies for all your apps.</p>
-        </div>
-      </div>
-    </section>
-
-    <!-- ARCHITECTURE -->
-    <section id="architecture" class="container">
-      <div class="sh">
-        <h2>🏗️ Architecture</h2>
-        <p>From your app to the public internet</p>
-      </div>
-
-      <div class="arch-flow">
-        <div class="arch-box">
-          <div class="arch-label">Your Device</div>
-          <div class="arch-title">Any Application</div>
-          <div class="arch-sub">Browser, CLI, or system-wide TUN</div>
-        </div>
-
-        <div class="arch-arrow">↓</div>
-
-        <div class="arch-box">
-          <div class="arch-label">Local Proxies</div>
-          <div class="arch-title">SOCKS5 :1819 · HTTP :1820</div>
-          <div class="arch-sub">Apps connect through FCAE VPN locally</div>
-        </div>
-
-        <div class="arch-arrow">↓</div>
-
-        <div class="arch-box">
-          <div class="arch-label">FCAE VPN Client</div>
-          <div class="arch-title">Core Engine</div>
-
-          <div class="arch-row">
-            <div class="arch-box-sm">
-              <div class="arch-sm-title">Netstack</div>
-              <div class="arch-sm-sub">TCP/IP Stack</div>
-            </div>
-
-            <div class="arch-box-sm">
-              <div class="arch-sm-title">Scanner</div>
-              <div class="arch-sm-sub">Endpoint Discovery</div>
-            </div>
-
-            <div class="arch-box-sm">
-              <div class="arch-sm-title">Obfuscation</div>
-              <div class="arch-sm-sub">aether-noize</div>
-            </div>
-
-            <div class="arch-box-sm">
-              <div class="arch-sm-title">Health</div>
-              <div class="arch-sm-sub">Auto-Reconnect</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="arch-arrow">↓</div>
-
-        <div class="arch-box">
-          <div class="arch-label">Encrypted Tunnels</div>
-          <div class="arch-title">Best Available Transport</div>
-
-          <div class="arch-row">
-            <div class="arch-box-sm">
-              <div class="arch-sm-title">MASQUE HTTP/3</div>
-              <div class="arch-sm-sub">QUIC</div>
-            </div>
-
-            <div class="arch-box-sm">
-              <div class="arch-sm-title">MASQUE HTTP/2</div>
-              <div class="arch-sm-sub">TLS</div>
-            </div>
-
-            <div class="arch-box-sm">
-              <div class="arch-sm-title">WireGuard</div>
-              <div class="arch-sm-sub">UDP</div>
-            </div>
-
-            <div class="arch-box-sm">
-              <div class="arch-sm-title">WARP-in-WARP</div>
-              <div class="arch-sm-sub">Double WG</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="arch-arrow">↓</div>
-
-        <div class="arch-box">
-          <div class="arch-label">Cloudflare WARP Edge</div>
-          <div class="arch-title">162.159.192.x</div>
-          <div class="arch-sub">Automatic endpoint discovery</div>
-        </div>
-
-        <div class="arch-arrow">↓</div>
-
-        <div class="arch-box">
-          <div class="arch-label">Freedom</div>
-          <div class="arch-title">🌐 Public Internet</div>
-        </div>
-      </div>
-    </section>
-
-    <!-- PROTOCOL COMPARISON -->
-    <section id="protocols" class="container">
-      <div class="sh">
-        <h2>📊 Protocol Comparison</h2>
-        <p>Choose the right tunnel depending on network restrictions</p>
-      </div>
-
-      <div class="twrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Protocol</th>
-              <th>Transport</th>
-              <th>DPI Resistance</th>
-              <th>Speed</th>
-              <th>Use Case</th>
-            </tr>
-          </thead>
-
-          <tbody>
-            <tr>
-              <td><span class="tag tbg">MASQUE (HTTP/3)</span></td>
-              <td>QUIC over UDP</td>
-              <td>Best</td>
-              <td>Fast</td>
-              <td>Default, most resistant</td>
-            </tr>
-
-            <tr>
-              <td><span class="tag thg">MASQUE (HTTP/2)</span></td>
-              <td>TLS over TCP</td>
-              <td>Best</td>
-              <td>Fast</td>
-              <td>Fallback when QUIC blocked</td>
-            </tr>
-
-            <tr>
-              <td><span class="tag tfs">WireGuard</span></td>
-              <td>UDP</td>
-              <td>Moderate</td>
-              <td>Fastest</td>
-              <td>When UDP is allowed</td>
-            </tr>
-
-            <tr>
-              <td><span class="tag tmo">WARP-in-WARP</span></td>
-              <td>Nested UDP</td>
-              <td>High</td>
-              <td>Moderate</td>
-              <td>Extra obfuscation layer</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- GET IT -->
-    <section id="links" class="container">
-      <div class="sh">
-        <h2>⬇️ Get FCAE VPN</h2>
-        <p>Download releases or browse the source code</p>
-      </div>
-
-      <div class="link-cards">
-        <a
-          class="link-card"
-          href="https://github.com/FCFlenkchy/FCAE_VPN/releases"
-          target="_blank"
-          rel="noopener"
-        >
-          <div class="lc-icon">📦</div>
-
-          <div class="lc-info">
-            <div class="lc-title">Download</div>
-            <div class="lc-desc">
-              Get the latest builds for Windows, Linux, macOS &amp; Android.
-            </div>
-          </div>
-
-          <div class="lc-arrow">→</div>
-        </a>
-
-        <a
-          class="link-card"
-          href="https://github.com/FCFlenkchy/FCAE_VPN"
-          target="_blank"
-          rel="noopener"
-        >
-          <div class="lc-icon">💻</div>
-
-          <div class="lc-info">
-            <div class="lc-title">Source Code</div>
-            <div class="lc-desc">
-              Browse the code, open issues, or fork on GitHub.
-            </div>
-          </div>
-
-          <div class="lc-arrow">→</div>
-        </a>
-      </div>
-    </section>
-
-    <!-- FEATURES -->
-    <section id="features" class="container">
-      <div class="sh">
-        <h2>✨ Features</h2>
-        <p>Built for restricted networks</p>
-      </div>
-
-      <div class="features">
-        <div class="fi">
-          <div class="ic">🔍</div>
-          <span>
-            Automatic endpoint discovery with end-to-end data-plane validation.
-          </span>
-        </div>
-
-        <div class="fi">
-          <div class="ic">🔐</div>
-          <span>
-            MASQUE (HTTP/3 QUIC / HTTP/2), WireGuard, and WARP-in-WARP support.
-          </span>
-        </div>
-
-        <div class="fi">
-          <div class="ic">🎭</div>
-          <span>
-            Traffic obfuscation with configurable profiles (aether-noize).
-          </span>
-        </div>
-
-        <div class="fi">
-          <div class="ic">🔄</div>
-          <span>Automatic reconnection with quick-reconnect on failure.</span>
-        </div>
-
-        <div class="fi">
-          <div class="ic">🔌</div>
-          <span>Local SOCKS5 and HTTP proxies for any application.</span>
-        </div>
-
-        <div class="fi">
-          <div class="ic">🖥️</div>
-          <span>
-            Native GUI on all platforms (ImGui + DX11 / OpenGL / Material UI).
-          </span>
-        </div>
-      </div>
-    </section>
-
-    <!-- PLATFORMS -->
-    <section id="platforms" class="container">
-      <div class="sh">
-        <h2>💻 Supported Platforms</h2>
-        <p>Native builds for major desktop and mobile systems</p>
-      </div>
-
-      <div class="p-grid">
-        <div class="p-card">
-          <div class="p-ic">🪟</div>
-          <div class="p-nm">Windows</div>
-          <div class="p-ui">DirectX 11 + ImGui</div>
-        </div>
-
-        <div class="p-card">
-          <div class="p-ic">🐧</div>
-          <div class="p-nm">Linux</div>
-          <div class="p-ui">GLFW + OpenGL + ImGui</div>
-        </div>
-
-        <div class="p-card">
-          <div class="p-ic">🍎</div>
-          <div class="p-nm">macOS</div>
-          <div class="p-ui">GLFW + OpenGL + ImGui</div>
-        </div>
-
-        <div class="p-card">
-          <div class="p-ic">📱</div>
-          <div class="p-nm">Android</div>
-          <div class="p-ui">Kotlin Material UI</div>
-        </div>
-      </div>
-    </section>
-
-    <!-- BUILDING -->
-    <section id="building" class="container">
-      <div class="sh">
-        <h2>🔨 Building from Source</h2>
-        <p>For developers who want to compile FCAE VPN themselves</p>
-      </div>
-
-      <h3>Requirements</h3>
-
-      <ul class="build-list">
-        <li>Rust (latest stable)</li>
-        <li>C/C++ compiler (GCC/Clang/MSVC)</li>
-        <li>CMake 3.22+</li>
-        <li>Vulkan SDK or DirectX SDK (Windows)</li>
-        <li>For Android: NDK, Android SDK, Kotlin</li>
-      </ul>
-
-      <h3>Rust engine</h3>
-
-      <pre><code>cargo build --manifest-path core/Cargo.toml -p aether-ffi --release</code></pre>
-
-      <h3>Native GUI</h3>
-
-      <pre><code>cmake -B build -DAETHER_TARGET=LINUX_X64
+<!-- BUILDING -->
+<section id="building" class="container">
+  <div class="sh"><h2>🔨 Building from Source</h2><p>For developers who want to compile FCAE VPN themselves</p></div>
+  <h3>Requirements</h3>
+  <ul class="build-list">
+    <li>Rust (latest stable)</li>
+    <li>C/C++ compiler (GCC/Clang/MSVC)</li>
+    <li>CMake 3.22+</li>
+    <li>Vulkan SDK or DirectX SDK (Windows)</li>
+    <li>For Android: NDK, Android SDK, Kotlin</li>
+  </ul>
+  <h3>Rust engine</h3>
+  <pre><code>cargo build --manifest-path core/Cargo.toml -p aether-ffi --release</code></pre>
+  <h3>Native GUI</h3>
+  <pre><code>cmake -B build -DAETHER_TARGET=LINUX_X64
 cmake --build build --config Release</code></pre>
+  <p class="build-note">Targets: <code>LINUX_X64</code>, <code>WIN_X64</code>, <code>MACOS_ARM64</code>, <code>MACOS_X64</code>, <code>ANDROID_ARM64</code>.</p>
+</section>
 
-      <p class="build-note">
-        Targets: <code>LINUX_X64</code>, <code>WIN_X64</code>,
-        <code>MACOS_ARM64</code>, <code>MACOS_X64</code>,
-        <code>ANDROID_ARM64</code>.
-      </p>
-    </section>
+<!-- CONTRIBUTE + CONTRIBUTORS -->
+<section id="contribute" class="container">
+  <div class="sh"><h2>🤝 Want to Contribute?</h2><p>Open Source &amp; Open to Contributions!</p></div>
+  <div class="contribute-card">
+    <h3>FCAE VPN is MIT licensed</h3>
+    <p>FCAE VPN welcomes pull requests, bug reports, and feature ideas. Join us in building a better censorship circumvention tool.</p>
+    <div class="hero-btns"><a class="btn btn-primary" href="https://github.com/FCFlenkchy/FCAE_VPN" target="_blank" rel="noopener">⭐ Star &amp; Fork on GitHub</a></div>
+  </div>
+  <div class="sh contributors-head"><h2>👥 Contributors</h2><p>People who built FCAE VPN</p></div>
+  <div class="contrib-grid">
+    <a class="contrib-card" href="https://github.com/Plangto" target="_blank" rel="noopener">
+      <img class="contrib-av" src="https://avatars.githubusercontent.com/u/208489752?v=4&s=104" alt="Plangto avatar">
+      <div class="contrib-info"><span class="contrib-nm">@Plangto</span><span class="contrib-cm">443 commits</span></div>
+    </a>
+    <a class="contrib-card" href="https://github.com/Bat-Script" target="_blank" rel="noopener">
+      <img class="contrib-av" src="https://avatars.githubusercontent.com/u/124243547?v=4&s=104" alt="Bat-Script avatar">
+      <div class="contrib-info"><span class="contrib-nm">@Bat-Script</span><span class="contrib-cm">1 commit</span></div>
+    </a>
+  </div>
+</section>
 
-    <!-- CONTRIBUTE + CONTRIBUTORS -->
-    <section id="contribute" class="container">
-      <div class="sh">
-        <h2>🤝 Want to Contribute?</h2>
-        <p>Open Source &amp; Open to Contributions!</p>
-      </div>
-
-      <div class="contribute-card">
-        <h3>FCAE VPN is MIT licensed</h3>
-        <p>
-          FCAE VPN welcomes pull requests, bug reports, and feature ideas. Join
-          us in building a better censorship circumvention tool.
-        </p>
-
-        <div class="hero-btns">
-          <a
-            class="btn btn-primary"
-            href="https://github.com/FCFlenkchy/FCAE_VPN"
-            target="_blank"
-            rel="noopener"
-          >
-            ⭐ Star &amp; Fork on GitHub
-          </a>
-        </div>
-      </div>
-
-      <div class="sh contributors-head">
-        <h2>👥 Contributors</h2>
-        <p>People who built FCAE VPN</p>
-      </div>
-
-      <div class="contrib-grid">
-        <a
-          class="contrib-card"
-          href="https://github.com/Plangto"
-          target="_blank"
-          rel="noopener"
-        >
-          <img
-            class="contrib-av"
-            src="https://avatars.githubusercontent.com/u/208489752?v=4&s=104"
-            alt="Plangto avatar"
-          />
-
-          <div class="contrib-info">
-            <span class="contrib-nm">@Plangto</span>
-            <span class="contrib-cm">443 commits</span>
-          </div>
-        </a>
-
-        <a
-          class="contrib-card"
-          href="https://github.com/Bat-Script"
-          target="_blank"
-          rel="noopener"
-        >
-          <img
-            class="contrib-av"
-            src="https://avatars.githubusercontent.com/u/124243547?v=4&s=104"
-            alt="Bat-Script avatar"
-          />
-
-          <div class="contrib-info">
-            <span class="contrib-nm">@Bat-Script</span>
-            <span class="contrib-cm">1 commit</span>
-          </div>
-        </a>
-      </div>
-    </section>
-
-    <!-- CREDITS -->
-    <section id="credits" class="container">
-      <div class="sh">
-        <h2>🙏 Credits</h2>
-        <p>Standing on the shoulders of open-source giants</p>
-      </div>
-
-      <div class="credits-grid">
-        <div class="credit-card">
-          <h4>
-            <a href="https://github.com/CluvexStudio/aether" target="_blank" rel="noopener">
-              Aether
-            </a>
-          </h4>
-          <div class="cby">by CluvexStudio</div>
-          <p>
-            The core censorship circumvention engine. Provides MASQUE,
-            WireGuard, and WARP-in-WARP protocols.
-          </p>
-        </div>
-
-        <div class="credit-card">
-          <h4>
-            <a href="https://github.com/ocornut/imgui" target="_blank" rel="noopener">
-              Dear ImGui
-            </a>
-          </h4>
-          <div class="cby">by ocornut</div>
-          <p>
-            Immediate-mode GUI library used for all native desktop rendering.
-          </p>
-        </div>
-
-        <div class="credit-card">
-          <h4>
-            <a href="https://github.com/cloudflare/quiche" target="_blank" rel="noopener">
-              Quiche
-            </a>
-          </h4>
-          <div class="cby">by Cloudflare</div>
-          <p>
-            Cloudflare HTTP/3 and QUIC implementation. Used as the QUIC
-            transport backend.
-          </p>
-        </div>
-
-        <div class="credit-card">
-          <h4>
-            <a href="https://www.wintun.net/" target="_blank" rel="noopener">
-              Wintun
-            </a>
-          </h4>
-          <div class="cby">by WireGuard</div>
-          <p>
-            A TUN driver for Windows. High-performance Layer 3 network interface
-            for tunneling.
-          </p>
-        </div>
-
-        <div class="credit-card">
-          <h4>
-            <a href="https://github.com/xjasonlyu/tun2socks" target="_blank" rel="noopener">
-              tun2socks
-            </a>
-          </h4>
-          <div class="cby">by xjasonlyu</div>
-          <p>
-            Go library that transparently routes TUN device traffic through
-            SOCKS5 proxy. Powers TUN mode.
-          </p>
-        </div>
-      </div>
-    </section>
-  </main>
-
-  <footer>
-    <div class="container">
-      <p>
-        Made with <span class="heart">♥</span> for a free and open internet
-      </p>
-
-      <p>
-        Licensed under
-        <a
-          href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE"
-          target="_blank"
-          rel="noopener"
-        >
-          MIT License
-        </a>
-        · Copyright © 2026
-        <a href="https://github.com/Plangto" target="_blank" rel="noopener">
-          Plangto
-        </a>
-      </p>
-
-      <p>
-        <a
-          href="https://github.com/FCFlenkchy/FCAE_VPN/tree/GH-Page"
-          target="_blank"
-          rel="noopener"
-        >
-          Site Source Code
-        </a>
-      </p>
+<!-- CREDITS -->
+<section id="credits" class="container">
+  <div class="sh"><h2>🙏 Credits</h2><p>Standing on the shoulders of open-source giants</p></div>
+  <div class="credits-grid">
+    <div class="credit-card">
+      <h4><a href="https://github.com/CluvexStudio/aether" target="_blank" rel="noopener">Aether</a></h4>
+      <div class="cby">by CluvexStudio</div>
+      <p>The core censorship circumvention engine. Provides MASQUE, WireGuard, and WARP-in-WARP protocols.</p>
     </div>
-  </footer>
+    <div class="credit-card">
+      <h4><a href="https://github.com/ocornut/imgui" target="_blank" rel="noopener">Dear ImGui</a></h4>
+      <div class="cby">by ocornut</div>
+      <p>Immediate-mode GUI library used for all native desktop rendering.</p>
+    </div>
+    <div class="credit-card">
+      <h4><a href="https://github.com/cloudflare/quiche" target="_blank" rel="noopener">Quiche</a></h4>
+      <div class="cby">by Cloudflare</div>
+      <p>Cloudflare HTTP/3 and QUIC implementation. Used as the QUIC transport backend.</p>
+    </div>
+    <div class="credit-card">
+      <h4><a href="https://www.wintun.net/" target="_blank" rel="noopener">Wintun</a></h4>
+      <div class="cby">by WireGuard</div>
+      <p>A TUN driver for Windows. High-performance Layer 3 network interface for tunneling.</p>
+    </div>
+    <div class="credit-card">
+      <h4><a href="https://github.com/xjasonlyu/tun2socks" target="_blank" rel="noopener">tun2socks</a></h4>
+      <div class="cby">by xjasonlyu</div>
+      <p>Go library that transparently routes TUN device traffic through SOCKS5 proxy. Powers TUN mode.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="container">
+    <p>Made with <span class="heart">♥</span> for a free and open internet</p>
+    <p>Licensed under <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a> · Copyright © 2026 <a href="https://github.com/Plangto" target="_blank" rel="noopener">Plangto</a></p>
+    <p><a href="https://github.com/FCFlenkchy/FCAE_VPN/tree/GH-Page" target="_blank" rel="noopener">Site Source Code</a></p>
+  </div>
+</footer>
+
 </body>
 </html>
