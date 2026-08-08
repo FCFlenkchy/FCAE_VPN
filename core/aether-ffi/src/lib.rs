@@ -40,6 +40,9 @@ static SHUTDOWN_NOTIFY: once_cell::sync::Lazy<tokio::sync::Notify> =
 // logging) while aether_free() nulls out LOG_CB → crash.
 static ENGINE_THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
+// Track whether force cleanup already ran (avoids duplicate DNS restore etc.)
+static FORCE_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
+
 struct TelemetryState {
     state: u32,
     mode: u32,
@@ -879,9 +882,11 @@ pub extern "C" fn aether_stop() {
     // ── Emergency cleanup: force-kill tun2socks and remove TUN adapters ──
     #[cfg(target_os = "windows")]
     {
-        std::thread::spawn(|| {
-            aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
-        });
+        if !FORCE_CLEANUP_DONE.swap(true, Ordering::SeqCst) {
+            std::thread::spawn(|| {
+                aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
+            });
+        }
     }
 
     // Update telemetry immediately so the UI shows DISCONNECTED without
@@ -1167,7 +1172,11 @@ pub extern "C" fn aether_free() {
     // close_all_fds() uses atomic swap so double-close is impossible.
     aether_engine::tun::close_all_fds();
     #[cfg(target_os = "windows")]
-    aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
+    {
+        if !FORCE_CLEANUP_DONE.swap(true, Ordering::SeqCst) {
+            aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
+        }
+    }
 
     let mut t = TELEMETRY.lock();
     t.state = 0;

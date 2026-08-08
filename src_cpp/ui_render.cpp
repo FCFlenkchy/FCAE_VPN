@@ -344,18 +344,16 @@ void ui_frame() {
 
 void ui_shutdown() {
     aether_stop();
-    aether_free();
-    // On Windows, ensure we don't linger as a zombie process.
-    // aether_free() joins the engine thread with cleanup, but if anything
-    // is still stuck, TerminateProcess ensures we exit immediately.
-    // The OS will reclaim TUN adapters; antivirus won't see a lingering process.
+    // Don't call aether_free() — it blocks on engine thread join which can
+    // take 0-15 seconds while the tokio runtime drains.  Instead, detach the
+    // engine thread and let ExitProcess handle cleanup.  force_cleanup_windows
+    // already ran in aether_stop(), so DNS/routes/adapters are restored.
 #if defined(_WIN32)
-    // Give cleanup a brief window (already done above), then force exit.
-    // ExitProcess is immediate — no DLL_PROCESS_DETACH, no static destructors.
-    // This is safe because we've already:
-    //   - Killed tun2socks.exe (via force_cleanup_windows)
-    //   - Removed TUN adapters (via cleanup_adapter_by_name)
-    //   - Closed TUN file descriptors (via close_all_fds)
+    // Signal the engine thread handle to detach (same as aether_free but without join)
+    aether_free();
+    // Force immediate exit.  No DLL_PROCESS_DETACH, no static destructors.
+    // This prevents AV from seeing a lingering process with active network
+    // threads and flagging it as suspicious.
     ExitProcess(0);
 #endif
 }
