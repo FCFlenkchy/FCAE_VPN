@@ -714,24 +714,49 @@ fn configure_windows_tun(cfg: &TunConfig) {
             Err(e) => log::warn!("[tun_t2s] route ADD ::/0 error: {}", e),
         }
 
-        // 6. Add route to exclude the tunnel peer from TUN (avoid routing loop)
+        // 6. Add route to exclude the tunnel peer from TUN (avoid routing loop).
+        // Handles both IPv4 (/32 via route ADD) and IPv6 (/128 via netsh).
         if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
-            // Get current default gateway to route tunnel peer through it
-            if let Ok(gw_output) = run_silent("powershell", &["-NoProfile", "-Command",
-                "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1).NextHop"])
-            {
-                let gw = String::from_utf8_lossy(&gw_output.stdout).trim().to_string();
-                if !gw.is_empty() {
-                    let output = run_silent("route", &["ADD", peer_ip, "MASK", "255.255.255.255", &gw]);
-                    match output {
-                        Ok(o) if o.status.success() => log::info!("[tun_t2s] route ADD bypass {} via {} OK", peer_ip, gw),
-                        Ok(o) => {
-                            let stderr = String::from_utf8_lossy(&o.stderr);
-                            if !stderr.contains("already exists") {
-                                log::warn!("[tun_t2s] route ADD bypass failed: {}", stderr.trim());
+            let is_ipv6 = peer_ip.contains(':');
+            if is_ipv6 {
+                // IPv6 tunnel peer: add /128 host route through physical IPv6 gateway
+                if let Ok(gw6_output) = run_silent("powershell", &["-NoProfile", "-Command",
+                    "(Get-NetRoute -DestinationPrefix '::/0' | Where-Object { $_.NextHop -ne '::' } | Sort-Object RouteMetric | Select-Object -First 1).NextHop"])
+                {
+                    let gw6 = String::from_utf8_lossy(&gw6_output.stdout).trim().to_string();
+                    if !gw6.is_empty() {
+                        let output = run_silent("netsh", &["interface", "ipv6", "add", "route",
+                            &format!("{}/128", peer_ip), name, &gw6]);
+                        match output {
+                            Ok(o) if o.status.success() => log::info!("[tun_t2s] route ADD bypass IPv6 {} via {} OK", peer_ip, gw6),
+                            Ok(o) => {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                if !stderr.contains("already exists") {
+                                    log::warn!("[tun_t2s] route ADD bypass IPv6 failed: {}", stderr.trim());
+                                }
                             }
+                            Err(e) => log::warn!("[tun_t2s] route ADD bypass IPv6 error: {}", e),
                         }
-                        Err(e) => log::warn!("[tun_t2s] route ADD bypass error: {}", e),
+                    }
+                }
+            } else {
+                // IPv4 tunnel peer: add /32 host route through physical IPv4 gateway
+                if let Ok(gw_output) = run_silent("powershell", &["-NoProfile", "-Command",
+                    "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1).NextHop"])
+                {
+                    let gw = String::from_utf8_lossy(&gw_output.stdout).trim().to_string();
+                    if !gw.is_empty() {
+                        let output = run_silent("route", &["ADD", peer_ip, "MASK", "255.255.255.255", &gw]);
+                        match output {
+                            Ok(o) if o.status.success() => log::info!("[tun_t2s] route ADD bypass IPv4 {} via {} OK", peer_ip, gw),
+                            Ok(o) => {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                if !stderr.contains("already exists") {
+                                    log::warn!("[tun_t2s] route ADD bypass IPv4 failed: {}", stderr.trim());
+                                }
+                            }
+                            Err(e) => log::warn!("[tun_t2s] route ADD bypass IPv4 error: {}", e),
+                        }
                     }
                 }
             }
@@ -1100,8 +1125,21 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
         Err(e) => log::debug!("[tun_t2s] route DELETE ::/0 error: {}", e),
     }
 
-    // Reset DNS on the TUN adapter to DHCP
+    // Remove tunnel peer bypass routes (added in step 6 of configure_windows_tun)
     let name_hyphen = name.replace('_', "-");
+    if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
+        if peer_ip.contains(':') {
+            // IPv6 peer bypass
+            let _ = run_silent("netsh", &["interface", "ipv6", "delete", "route", &format!("{}/128", peer_ip), name]);
+            let _ = run_silent("netsh", &["interface", "ipv6", "delete", "route", &format!("{}/128", peer_ip), &name_hyphen]);
+        } else {
+            // IPv4 peer bypass
+            let _ = run_silent("route", &["DELETE", peer_ip, "MASK", "255.255.255.255"]);
+        }
+        log::debug!("[tun_t2s] Tunnel peer bypass route removed for {}", peer_ip);
+    }
+
+    // Reset DNS on the TUN adapter to DHCP
     let _ = run_silent("netsh", &["interface", "ip", "set", "dns", name, "dhcp"]);
     let _ = run_silent("netsh", &["interface", "ipv6", "set", "dns", name, "dhcp"]);
     let _ = run_silent("netsh", &["interface", "ip", "set", "dns", &name_hyphen, "dhcp"]);
