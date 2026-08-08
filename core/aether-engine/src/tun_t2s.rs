@@ -148,16 +148,21 @@ pub fn is_available() -> bool {
     get_tun2socks_path().is_ok()
 }
 
-/// Force-kill any running tun2socks processes.
+/// Force-kill any running tun2socks processes and restore system DNS.
 /// This is the emergency cleanup — call from outside the tokio runtime
 /// (e.g., from aether_stop / aether_free) to ensure the process is killed
-/// even when the runtime is being torn down and can't run async tasks.
-/// Does NOT delete the adapter — that's handled by the normal shutdown path.
+/// and DNS is restored even when the runtime is being torn down.
 #[cfg(target_os = "windows")]
-pub fn force_cleanup_windows(_name: &str) {
+pub fn force_cleanup_windows(name: &str) {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut c = Command::new(cmd);
+        c.creation_flags(CREATE_NO_WINDOW);
+        c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    };
 
     // Kill all tun2socks processes
     log::info!("[tun_t2s] Force-killing tun2socks processes");
@@ -167,6 +172,77 @@ pub fn force_cleanup_windows(_name: &str) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+
+    // Restore DNS from the backup file saved during startup.
+    // The backup path is deterministic: %TEMP%\fcaevpn\dns_backup.json
+    let dns_backup_path = std::env::temp_dir().join("fcaevpn").join("dns_backup.json");
+    if dns_backup_path.exists() {
+        log::info!("[tun_t2s] Force cleanup: restoring DNS from backup");
+        let dns_backup_str = dns_backup_path.to_string_lossy().replace('\\', "\\\\");
+        let name_hyphen = name.replace('_', "-");
+        let ps_restore = format!(
+            "$ErrorActionPreference='SilentlyContinue';\
+             $backupFile='{backup}';\
+             if (Test-Path $backupFile) {{\
+                 $raw = Get-Content $backupFile -Raw;\
+                 $raw = $raw -replace '^\\uFEFF', '';\
+                 if ($raw) {{\
+                     try {{ $backup = ConvertFrom-Json $raw }} catch {{ $backup = $null }};\
+                     if ($backup) {{\
+                         foreach ($b in $backup) {{\
+                             $idx = $b.ifIndex;\
+                             if ($b.v4) {{ Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ($b.v4 -split ',') -ErrorAction SilentlyContinue }} else {{ Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue }};\
+                             if ($b.v6) {{ Set-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv6 -ServerAddresses ($b.v6 -split ',') -ErrorAction SilentlyContinue }} else {{ Set-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv6 -ResetServerAddresses -ErrorAction SilentlyContinue }};\
+                         }};\
+                     }};\
+                 }};\
+                 Remove-Item $backupFile -Force -ErrorAction SilentlyContinue;\
+             }};\
+             Write-Host 'dns_restore_done'",
+            backup = dns_backup_str
+        );
+        let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_restore]);
+        match &output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                if stdout.contains("dns_restore_done") {
+                    log::info!("[tun_t2s] Force cleanup: DNS restore from backup OK");
+                } else {
+                    log::warn!("[tun_t2s] Force cleanup: DNS restore may have failed, falling back to DHCP reset");
+                    // Fallback: reset all adapters except ours to DHCP
+                    let netsh_fallback = format!(
+                        "$ErrorActionPreference='SilentlyContinue';\
+                         Get-NetAdapter | Where-Object {{ $_.Name -ne '{name}' -and $_.Name -ne '{name_hyphen}' }} | ForEach-Object {{\
+                             netsh interface ip set dns $_.Name dhcp;\
+                             netsh interface ipv6 set dns $_.Name dhcp;\
+                         }};\
+                         Write-Host 'dns_fallback_done'",
+                        name = name, name_hyphen = name_hyphen
+                    );
+                    let _ = run_silent("powershell", &["-NoProfile", "-Command", &netsh_fallback]);
+                }
+            }
+            Err(e) => {
+                log::warn!("[tun_t2s] Force cleanup: DNS restore PowerShell error: {}", e);
+            }
+        }
+    } else {
+        log::info!("[tun_t2s] Force cleanup: no DNS backup file found, resetting all adapters to DHCP");
+        let name_hyphen = name.replace('_', "-");
+        let netsh_fallback = format!(
+            "$ErrorActionPreference='SilentlyContinue';\
+             Get-NetAdapter | Where-Object {{ $_.Name -ne '{name}' -and $_.Name -ne '{name_hyphen}' }} | ForEach-Object {{\
+                 netsh interface ip set dns $_.Name dhcp;\
+                 netsh interface ipv6 set dns $_.Name dhcp;\
+             }};\
+             Write-Host 'dns_fallback_done'",
+            name = name, name_hyphen = name_hyphen
+        );
+        let _ = run_silent("powershell", &["-NoProfile", "-Command", &netsh_fallback]);
+    }
+
+    // Clean up routes and adapter
+    cleanup_adapter_by_name(name);
 }
 
 #[cfg(not(target_os = "windows"))]
