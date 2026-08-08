@@ -548,7 +548,9 @@ fn configure_windows_tun(cfg: &TunConfig) {
     let ip = cfg.ipv4.split('/').next().filter(|v| !v.is_empty()).unwrap_or("198.18.0.1");
     let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { v.split('/').next() }).unwrap_or("fc00::1");
     let dns = "1.1.1.1";
+    let dns2 = "1.0.0.1";
     let dns6 = "2606:4700:4700::1111";
+    let dns62 = "2606:4700:4700::1001";
 
     log::info!("[tun_t2s] Configuring Windows TUN adapter '{}' with IP {} IPv6 {} DNS {}", name, ip, ipv6, dns);
 
@@ -584,7 +586,7 @@ fn configure_windows_tun(cfg: &TunConfig) {
         Err(e) => log::warn!("[tun_t2s] netsh set ipv6 address error: {}", e),
     }
 
-    // 2. Set DNS server on the adapter
+    // 2. Set DNS server on the adapter (dual-stack, with redundancy)
     let output = run_silent("netsh", &["interface", "ip", "set", "dns", name, "static", dns]);
     match output {
         Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set dns OK"),
@@ -594,8 +596,10 @@ fn configure_windows_tun(cfg: &TunConfig) {
         }
         Err(e) => log::warn!("[tun_t2s] netsh set dns error: {}", e),
     }
+    // Add secondary IPv4 DNS
+    let _ = run_silent("netsh", &["interface", "ip", "add", "dns", name, dns2, "index=2"]);
 
-    // 2b. Set IPv6 DNS server on the adapter
+    // 2b. Set IPv6 DNS server on the adapter (dual-stack, with redundancy)
     let output = run_silent("netsh", &["interface", "ipv6", "set", "dns", name, "static", dns6]);
     match output {
         Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set ipv6 dns OK"),
@@ -605,6 +609,8 @@ fn configure_windows_tun(cfg: &TunConfig) {
         }
         Err(e) => log::warn!("[tun_t2s] netsh set ipv6 dns error: {}", e),
     }
+    // Add secondary IPv6 DNS
+    let _ = run_silent("netsh", &["interface", "ipv6", "add", "dns", name, dns62, "index=2"]);
 
     // 2c. Save current DNS on ALL adapters to a temp file, then override to Cloudflare.
     // Original DNS is restored from the backup file on cleanup.
@@ -615,19 +621,19 @@ fn configure_windows_tun(cfg: &TunConfig) {
     let dns_backup_str = dns_backup_path.to_string_lossy().replace('\\', "\\\\");
     let ps_override = format!(
         "$ErrorActionPreference='SilentlyContinue';\
-         $dns4='{dns}'; $dns6='{dns6}'; $backupFile='{backup}';\
+         $dns4='{dns}'; $dns42='{dns2}'; $dns6='{dns6}'; $dns62='{dns62}'; $backupFile='{backup}';\
          $adapters = Get-NetAdapter | Where-Object {{ $_.Status -eq 'Up' -and $_.Name -ne '{name}' -and $_.Name -ne '{name_hyphen}' }};\
          $backup = @();\
          foreach ($a in $adapters) {{\
              $v4 = (Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses -join ',';\
              $v6 = (Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses -join ',';\
              $backup += [PSCustomObject]@{{ ifIndex=$a.ifIndex; name=$a.Name; v4=$v4; v6=$v6 }};\
-             Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses ($dns4,'1.0.0.1');\
-             Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv6 -ServerAddresses $dns6;\
+             Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses ($dns4,$dns42);\
+             Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv6 -ServerAddresses ($dns6,$dns62);\
          }};\
          $backup | ConvertTo-Json | Out-File -FilePath $backupFile -Encoding UTF8;\
          Write-Host 'dns_override_done'",
-        name = name, name_hyphen = name_hyphen, dns = dns, dns6 = dns6, backup = dns_backup_str
+        name = name, name_hyphen = name_hyphen, dns = dns, dns2 = dns2, dns6 = dns6, dns62 = dns62, backup = dns_backup_str
     );
     let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_override]);
     match output {
@@ -1100,32 +1106,69 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
     let _ = run_silent("netsh", &["interface", "ip", "set", "dns", &name_hyphen, "dhcp"]);
     let _ = run_silent("netsh", &["interface", "ipv6", "set", "dns", &name_hyphen, "dhcp"]);
 
-    // Restore DNS on all other adapters from the backup file saved during override
+    // Restore DNS on all other adapters from the backup file saved during override.
+    // We try PowerShell first (handles JSON backup), then fall back to netsh DHCP reset.
     let dns_backup_path = std::env::temp_dir().join("fcaevpn").join("dns_backup.json");
     let dns_backup_str = dns_backup_path.to_string_lossy().replace('\\', "\\\\");
     let ps_restore = format!(
         "$ErrorActionPreference='SilentlyContinue';\
          $backupFile='{backup}';\
          if (Test-Path $backupFile) {{\
-             $backup = Get-Content $backupFile -Raw | ConvertFrom-Json;\
-             foreach ($b in $backup) {{\
-                 if ($b.v4) {{ Set-DnsClientServerAddress -InterfaceIndex $b.ifIndex -ServerAddresses ($b.v4 -split ',') }} else {{ Set-DnsClientServerAddress -InterfaceIndex $b.ifIndex -ResetServerAddresses }};\
-                 if ($b.v6) {{ Set-DnsClientServerAddress -InterfaceIndex $b.ifIndex -AddressFamily IPv6 -ServerAddresses ($b.v6 -split ',') }} else {{ Set-DnsClientServerAddress -InterfaceIndex $b.ifIndex -AddressFamily IPv6 -ResetServerAddresses }};\
+             $raw = Get-Content $backupFile -Raw;\
+             $raw = $raw -replace '^\\uFEFF', '';\
+             if ($raw) {{\
+                 try {{ $backup = ConvertFrom-Json $raw }} catch {{ $backup = $null }};\
+                 if ($backup) {{\
+                     foreach ($b in $backup) {{\
+                         $idx = $b.ifIndex;\
+                         if ($b.v4) {{ Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ($b.v4 -split ',') -ErrorAction SilentlyContinue }} else {{ Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue }};\
+                         if ($b.v6) {{ Set-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv6 -ServerAddresses ($b.v6 -split ',') -ErrorAction SilentlyContinue }} else {{ Set-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv6 -ResetServerAddresses -ErrorAction SilentlyContinue }};\
+                     }};\
+                 }};\
              }};\
-             Remove-Item $backupFile -Force;\
+             Remove-Item $backupFile -Force -ErrorAction SilentlyContinue;\
          }};\
          Write-Host 'dns_restore_done'",
         backup = dns_backup_str
     );
     let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_restore]);
-    match output {
+    let mut restored = false;
+    match &output {
         Ok(o) => {
             let stdout = String::from_utf8_lossy(&o.stdout);
             if stdout.contains("dns_restore_done") {
-                log::info!("[tun_t2s] DNS restore on all adapters OK");
+                log::info!("[tun_t2s] DNS restore from backup OK");
+                restored = true;
             }
         }
-        Err(e) => log::debug!("[tun_t2s] DNS restore on all adapters error: {}", e),
+        Err(e) => log::warn!("[tun_t2s] DNS restore PowerShell error: {}", e),
+    }
+
+    // Fallback: if PowerShell restore didn't confirm, reset DNS on all adapters to DHCP via netsh
+    if !restored {
+        log::warn!("[tun_t2s] PowerShell DNS restore did not complete; falling back to netsh DHCP reset on all adapters");
+        // Get all adapter names except ours and reset them to DHCP
+        let netsh_fallback = format!(
+            "$ErrorActionPreference='SilentlyContinue';\
+             Get-NetAdapter | Where-Object {{ $_.Name -ne '{name}' -and $_.Name -ne '{name_hyphen}' }} | ForEach-Object {{\
+                 netsh interface ip set dns $_.Name dhcp;\
+                 netsh interface ipv6 set dns $_.Name dhcp;\
+             }};\
+             Write-Host 'dns_fallback_done'",
+            name = name, name_hyphen = name_hyphen
+        );
+        let fb_output = run_silent("powershell", &["-NoProfile", "-Command", &netsh_fallback]);
+        match fb_output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                if stdout.contains("dns_fallback_done") {
+                    log::info!("[tun_t2s] DNS fallback reset to DHCP on all adapters OK");
+                } else {
+                    log::warn!("[tun_t2s] DNS fallback netsh reset may have failed; stdout: {}", stdout.trim());
+                }
+            }
+            Err(e) => log::error!("[tun_t2s] DNS fallback netsh reset error: {}", e),
+        }
     }
 
     // Delete the TUN adapter — full cleanup so next start is fresh
@@ -1207,10 +1250,8 @@ fn cleanup_macos_tun(cfg: &TunConfig) {
                             .args(["-setdnsservers", service, "Empty"])
                             .status();
                     } else {
-                        let args: Vec<&str> = std::iter::once(&"-setdnsservers")
-                            .chain(std::iter::once(&service))
-                            .chain(dns.split_whitespace())
-                            .collect();
+                        let mut args = vec!["-setdnsservers", service];
+                        args.extend(dns.split_whitespace());
                         let _ = StdCommand::new("networksetup")
                             .args(&args)
                             .status();
