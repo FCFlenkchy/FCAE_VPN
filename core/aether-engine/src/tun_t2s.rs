@@ -860,27 +860,54 @@ fn configure_macos_tun(cfg: &TunConfig) {
         Err(e) => log::warn!("[tun_t2s] route add IPv6 error: {}", e),
     }
 
-    // 4. Add route to bypass tunnel peer (avoid routing loop)
+    // 4. Add route to bypass tunnel peer (avoid routing loop).
+    // Handles both IPv4 and IPv6 peers.
     if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
-        // Get current default gateway to route tunnel peer through it
-        if let Ok(gw_output) = StdCommand::new("sh")
-            .args(["-c", "route -n get default | grep gateway | head -1 | awk '{print $2}'"])
-            .output()
-        {
-            let gw = String::from_utf8_lossy(&gw_output.stdout).trim().to_string();
-            if !gw.is_empty() {
-                let output = StdCommand::new("route")
-                    .args(["add", peer_ip, &gw])
-                    .output();
-                match output {
-                    Ok(o) if o.status.success() => log::info!("[tun_t2s] route bypass {} via {} OK", peer_ip, gw),
-                    Ok(o) => {
-                        let stderr = String::from_utf8_lossy(&o.stderr);
-                        if !stderr.contains("already in table") && !stderr.contains("File exists") {
-                            log::warn!("[tun_t2s] route bypass failed: {}", stderr.trim());
+        let is_ipv6 = peer_ip.contains(':');
+        if is_ipv6 {
+            // Get physical IPv6 gateway
+            if let Ok(gw6_out) = StdCommand::new("sh")
+                .args(["-c", "route -n get -inet6 default | grep gateway | head -1 | awk '{print $2}'"])
+                .output()
+            {
+                let gw6 = String::from_utf8_lossy(&gw6_out.stdout).trim().to_string();
+                if !gw6.is_empty() {
+                    let output = StdCommand::new("route")
+                        .args(["add", "-inet6", &format!("{}/128", peer_ip), &gw6])
+                        .output();
+                    match output {
+                        Ok(o) if o.status.success() => log::info!("[tun_t2s] route bypass IPv6 {} via {} OK", peer_ip, gw6),
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            if !stderr.contains("already in table") && !stderr.contains("File exists") {
+                                log::warn!("[tun_t2s] route bypass IPv6 failed: {}", stderr.trim());
+                            }
                         }
+                        Err(e) => log::warn!("[tun_t2s] route bypass IPv6 error: {}", e),
                     }
-                    Err(e) => log::warn!("[tun_t2s] route bypass error: {}", e),
+                }
+            }
+        } else {
+            // Get current default IPv4 gateway to route tunnel peer through it
+            if let Ok(gw_output) = StdCommand::new("sh")
+                .args(["-c", "route -n get default | grep gateway | head -1 | awk '{print $2}'"])
+                .output()
+            {
+                let gw = String::from_utf8_lossy(&gw_output.stdout).trim().to_string();
+                if !gw.is_empty() {
+                    let output = StdCommand::new("route")
+                        .args(["add", peer_ip, &gw])
+                        .output();
+                    match output {
+                        Ok(o) if o.status.success() => log::info!("[tun_t2s] route bypass IPv4 {} via {} OK", peer_ip, gw),
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            if !stderr.contains("already in table") && !stderr.contains("File exists") {
+                                log::warn!("[tun_t2s] route bypass IPv4 failed: {}", stderr.trim());
+                            }
+                        }
+                        Err(e) => log::warn!("[tun_t2s] route bypass IPv4 error: {}", e),
+                    }
                 }
             }
         }
@@ -1038,6 +1065,49 @@ fn configure_linux_tun(cfg: &TunConfig) {
         Ok(s) if s.success() => log::info!("[tun_t2s] ip route add default IPv6 OK"),
         Ok(s) => log::warn!("[tun_t2s] ip route add default IPv6 failed with status {:?}", s.code()),
         Err(e) => log::warn!("[tun_t2s] ip route add default IPv6 error: {}", e),
+    }
+
+    // Add route to exclude the tunnel peer from TUN (avoid routing loop).
+    // Handles both IPv4 and IPv6 peers.
+    if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
+        let is_ipv6 = peer_ip.contains(':');
+        if is_ipv6 {
+            // Get physical IPv6 gateway
+            if let Ok(gw6_out) = StdCommand::new("sh")
+                .args(["-c", "ip -6 route show default | awk '{print $3}' | head -1"])
+                .output()
+            {
+                let gw6 = String::from_utf8_lossy(&gw6_out.stdout).trim().to_string();
+                if !gw6.is_empty() {
+                    let output = StdCommand::new("ip")
+                        .args(["-6", "route", "add", &format!("{}/128", peer_ip), "via", &gw6])
+                        .status();
+                    match output {
+                        Ok(s) if s.success() => log::info!("[tun_t2s] route ADD bypass IPv6 {} via {} OK", peer_ip, gw6),
+                        Ok(s) => log::warn!("[tun_t2s] route ADD bypass IPv6 failed with status {:?}", s.code()),
+                        Err(e) => log::warn!("[tun_t2s] route ADD bypass IPv6 error: {}", e),
+                    }
+                }
+            }
+        } else {
+            // Get physical IPv4 gateway
+            if let Ok(gw_out) = StdCommand::new("sh")
+                .args(["-c", "ip route show default | awk '{print $3}' | head -1"])
+                .output()
+            {
+                let gw = String::from_utf8_lossy(&gw_out.stdout).trim().to_string();
+                if !gw.is_empty() {
+                    let output = StdCommand::new("ip")
+                        .args(["route", "add", &format!("{}/32", peer_ip), "via", &gw])
+                        .status();
+                    match output {
+                        Ok(s) if s.success() => log::info!("[tun_t2s] route ADD bypass IPv4 {} via {} OK", peer_ip, gw),
+                        Ok(s) => log::warn!("[tun_t2s] route ADD bypass IPv4 failed with status {:?}", s.code()),
+                        Err(e) => log::warn!("[tun_t2s] route ADD bypass IPv4 error: {}", e),
+                    }
+                }
+            }
+        }
     }
 
     // Save current global DNS, then set Cloudflare DNS via resolvectl
@@ -1222,6 +1292,17 @@ fn cleanup_linux_tun(cfg: &TunConfig) {
     use std::process::Command as StdCommand;
     let name = &cfg.name;
     log::info!("[tun_t2s] Cleaning up Linux TUN routes for '{}'", name);
+
+    // Remove tunnel peer bypass routes first (before removing default routes)
+    if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
+        if peer_ip.contains(':') {
+            let _ = StdCommand::new("ip").args(["-6", "route", "del", &format!("{}/128", peer_ip)]).status();
+        } else {
+            let _ = StdCommand::new("ip").args(["route", "del", &format!("{}/32", peer_ip)]).status();
+        }
+        log::debug!("[tun_t2s] Tunnel peer bypass route removed for {}", peer_ip);
+    }
+
     let _ = StdCommand::new("ip").args(["route", "del", "default", "dev", name]).status();
     let _ = StdCommand::new("ip").args(["-6", "route", "del", "default", "dev", name]).status();
     let _ = StdCommand::new("ip").args(["link", "set", name, "down"]).status();
@@ -1272,6 +1353,20 @@ fn cleanup_macos_tun(cfg: &TunConfig) {
     let _ = StdCommand::new("route")
         .args(["delete", "-inet6", "default", "-interface", iface])
         .status();
+
+    // Remove tunnel peer bypass routes
+    if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
+        if peer_ip.contains(':') {
+            let _ = StdCommand::new("route")
+                .args(["delete", "-inet6", &format!("{}/128", peer_ip)])
+                .status();
+        } else {
+            let _ = StdCommand::new("route")
+                .args(["delete", &format!("{}/32", peer_ip)])
+                .status();
+        }
+        log::debug!("[tun_t2s] Tunnel peer bypass route removed for {}", peer_ip);
+    }
 
     // Bring interface down
     let _ = StdCommand::new("ifconfig")
