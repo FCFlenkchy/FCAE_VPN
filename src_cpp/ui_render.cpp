@@ -1,4 +1,5 @@
 #include "ui_render.h"
+#include <chrono>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -358,12 +359,18 @@ void ui_shutdown() {
 
 void render_ui() {
     // Auto-connect on startup if relaunched elevated with --auto-connect.
-    // Defer to second frame to ensure the old instance has fully exited
+    // Wait 3 seconds to ensure the old instance has fully exited
     // and all resources (ports, mutexes, TUN adapter) are released.
-    static int auto_connect_frame = 0;
+    static auto auto_connect_start = std::chrono::steady_clock::now();
+    static bool auto_connect_timer_init = false;
     if (g_app.auto_connect) {
-        auto_connect_frame++;
-        if (auto_connect_frame >= 5) {  // Wait ~5 frames (~80ms) before connecting
+        if (!auto_connect_timer_init) {
+            auto_connect_start = std::chrono::steady_clock::now();
+            auto_connect_timer_init = true;
+        }
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - auto_connect_start).count();
+        if (elapsed >= 3000) {  // Wait 3 seconds before connecting
             g_app.auto_connect = false;
             if (!g_app.start_busy.load() && g_app.ffi_state.load() == AETHER_STATE_DISCONNECTED) {
                 g_app.start_busy.store(true);
@@ -409,6 +416,8 @@ void render_ui() {
                 }).detach();
             }
         }
+    } else {
+        auto_connect_timer_init = false;
     }
 
     const ImGuiIO& io = ImGui::GetIO();

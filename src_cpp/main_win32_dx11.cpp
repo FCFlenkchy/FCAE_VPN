@@ -27,16 +27,16 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     switch (msg) {
         case WM_SIZE:
-            if (g_pd3dDevice != nullptr && wParam != SIZE_MINIMIZED) {
+            if (g_pd3dDevice != nullptr && g_pSwapChain != nullptr && wParam != SIZE_MINIMIZED) {
                 // Release old RTV before ResizeBuffers invalidates its backing buffer
                 if (g_mainRenderTargetView) {
                     g_mainRenderTargetView->Release();
                     g_mainRenderTargetView = nullptr;
                 }
-                g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
-                ID3D11Texture2D* pBackBuffer;
-                g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
-                if (pBackBuffer) {
+                if (FAILED(g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0)))
+                    return 0;
+                ID3D11Texture2D* pBackBuffer = nullptr;
+                if (SUCCEEDED(g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer))) && pBackBuffer) {
                     g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
                     pBackBuffer->Release();
                 }
@@ -90,13 +90,17 @@ static bool CreateDeviceD3D(HWND hWnd) {
         levels, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext) != S_OK)
         return false;
 
-    ID3D11Texture2D* pBackBuffer;
-    g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
-    if (pBackBuffer) {
+    if (!g_pSwapChain || !g_pd3dDevice) {
+        CleanupDeviceD3D();
+        return false;
+    }
+
+    ID3D11Texture2D* pBackBuffer = nullptr;
+    if (SUCCEEDED(g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer))) && pBackBuffer) {
         g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
         pBackBuffer->Release();
     }
-    return true;
+    return g_mainRenderTargetView != nullptr;
 }
 
 static void CleanupDeviceD3D() {
@@ -238,6 +242,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
         // Only render when VPN is running (stats updates) or input arrived.
         if (g_app.running.load() || wait_result == WAIT_OBJECT_0) {
+            // ── Crash-safe D3D11 guard ──────────────────────────────
+            // If the device was lost or context became invalid (driver crash,
+            // GPU hang, or rapid suspend/resume), skip the frame instead of
+            // crashing the process.  The window will remain visible but frozen;
+            // the engine threads continue running in the background.
+            if (!g_pd3dDevice || !g_pd3dDeviceContext || !g_pSwapChain || !g_mainRenderTargetView)
+                continue;
+
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
@@ -245,11 +257,18 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             ui_frame();
 
             ImGui::Render();
+
+            // Double-check RTV again after ImGui::Render — resizing or
+            // WM_SIZE between NewFrame and Render can invalidate the RTV.
+            if (!g_mainRenderTargetView) continue;
+
             const float clear_color[4] = { 0.05f, 0.05f, 0.08f, 1.0f };
             g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
             g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
+            // Present can fail if device lost (DXGI_ERROR_DEVICE_REMOVED).
+            // Ignore the HRESULT — next frame will skip via the null guard above.
             g_pSwapChain->Present(1, 0);
         }
     }
