@@ -776,6 +776,7 @@ fn configure_macos_tun(cfg: &TunConfig) {
     let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { v.split('/').next() }).unwrap_or("fc00::1");
     let netmask = "255.255.255.0"; // hardcoded for /24
     let dns6 = "2606:4700:4700::1111";
+    let dns62 = "2606:4700:4700::1001";
 
     log::info!("[tun_t2s] Configuring macOS TUN adapter '{}' with IP {} IPv6 {} netmask {}", name, ip, ipv6, netmask);
 
