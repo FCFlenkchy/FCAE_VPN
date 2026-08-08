@@ -15,8 +15,10 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(6,6,13,.6);b
 .nav-links a{color:var(--text2);text-decoration:none;font-size:.85rem;font-weight:500}
 .nav-links a:hover{color:var(--acc2);text-decoration:none}
 
+/* Main offset for fixed nav */
+main{padding-top:60px}
 /* Hero */
-.hero{text-align:center;padding:120px 20px 60px;position:relative}
+.hero{text-align:center;padding:80px 20px 60px;position:relative}
 .hero-icon{display:block;margin:0 auto 28px;animation:float 4s ease-in-out infinite;filter:drop-shadow(var(--glow))}
 @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
 .hero h1{font-size:clamp(2.2rem,5vw,3.5rem);font-weight:900;background:linear-gradient(135deg,#b4a4ff,#7c5cfc,#00e5ff);background-size:200% 200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:gradShift 4s ease infinite;margin-bottom:16px;letter-spacing:-1px}
@@ -159,7 +161,8 @@ a:hover{color:#ccc0ff;text-decoration:underline}
 
 /* Mobile */
 @media (max-width:640px){
-.hero{padding:100px 16px 40px}
+main{padding-top:50px}
+.hero{padding:60px 16px 40px}
 .hero h1{font-size:1.9rem}
 .steps{grid-template-columns:1fr}
 .p-grid{grid-template-columns:1fr 1fr}
