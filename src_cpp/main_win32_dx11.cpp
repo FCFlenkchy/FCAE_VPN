@@ -114,6 +114,22 @@ static void CleanupDeviceD3D() {
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     HINSTANCE inst = hInst ? hInst : GetModuleHandleW(nullptr);
 
+    // Parse command-line flags (passed when relaunching elevated for TUN mode).
+    // These override config file values so unsaved UI changes are preserved.
+    for (int i = 1; i < __argc; i++) {
+        if (strcmp(__argv[i], "--auto-connect") == 0) {
+            g_app.auto_connect = true;
+        } else if (strncmp(__argv[i], "--mode=", 7) == 0) {
+            g_app.mode = atoi(__argv[i] + 7);
+        } else if (strncmp(__argv[i], "--protocol=", 11) == 0) {
+            g_app.protocol = atoi(__argv[i] + 11);
+        } else if (strncmp(__argv[i], "--ip-version=", 13) == 0) {
+            g_app.ip_version = atoi(__argv[i] + 13);
+        } else if (strncmp(__argv[i], "--scan-mode=", 12) == 0) {
+            g_app.scan_mode = atoi(__argv[i] + 12);
+        }
+    }
+
     WNDCLASSEXW wc = {};
     wc.cbSize        = sizeof(wc);
     wc.style         = CS_CLASSDC;

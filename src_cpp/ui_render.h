@@ -69,6 +69,7 @@ struct AppState {
     bool auto_scroll = true;
     int  prev_log_count = 0;
     bool logging_enabled = true;
+    bool auto_connect = false;  // Set by --auto-connect flag on elevated relaunch
     char save_status[128] = {};
     char copy_status[64] = {};
 

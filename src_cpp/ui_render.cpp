@@ -361,6 +361,54 @@ void ui_shutdown() {
 }
 
 void render_ui() {
+    // Auto-connect on startup if relaunched elevated with --auto-connect
+    if (g_app.auto_connect) {
+        g_app.auto_connect = false;  // Only fire once
+        if (!g_app.start_busy.load() && g_app.ffi_state.load() == AETHER_STATE_DISCONNECTED) {
+            g_app.start_busy.store(true);
+            struct Owned {
+                std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
+                AetherConfig c{};
+            };
+            auto o = std::unique_ptr<Owned, void(*)(Owned*)>(
+                new Owned(),
+                [](Owned* p) {
+                    g_app.start_busy.store(false);
+                    delete p;
+                }
+            );
+            o->noize = g_app.noize_profile;
+            o->peer  = g_app.force_peer;
+            o->path  = g_app.config_path;
+            o->sni   = g_app.sni;
+            o->team  = g_app.team_name;
+            o->token = g_app.access_token;
+            o->email = g_app.access_email;
+            o->routes = g_app.routes_file;
+            o->routes_inline = g_app.routes_inline;
+            o->c = g_app.to_config();
+            o->c.noize_profile = o->noize.c_str();
+            o->c.force_peer    = o->peer.empty() ? nullptr : o->peer.c_str();
+            o->c.config_path   = o->path.c_str();
+            o->c.sni           = o->sni.empty() ? nullptr : o->sni.c_str();
+            o->c.team_name     = o->team.empty() ? nullptr : o->team.c_str();
+            o->c.access_token  = o->token.empty() ? nullptr : o->token.c_str();
+            o->c.access_email  = o->email.empty() ? nullptr : o->email.c_str();
+            o->c.routes_file   = o->routes.empty() ? nullptr : o->routes.c_str();
+            o->c.routes_inline = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
+            auto* raw = o.release();
+            std::thread([raw] {
+                std::unique_ptr<Owned, void(*)(Owned*)> guard(
+                    raw, [](Owned* p) {
+                        g_app.start_busy.store(false);
+                        delete p;
+                    }
+                );
+                (void)aether_start(&guard->c);
+            }).detach();
+        }
+    }
+
     const ImGuiIO& io = ImGui::GetIO();
     const bool narrow = io.DisplaySize.x < 720.0f;
 
@@ -438,12 +486,25 @@ void render_ui() {
                 // TUN mode requires admin privileges on Windows
                 if (g_app.mode == 1 && !aether_is_admin()) {
 #ifdef _WIN32
-                    // Relaunch self as administrator
+                    // Relaunch self as administrator with current settings.
+                    // Pass --auto-connect and key config values so the elevated
+                    // instance uses the current UI state (which may be unsaved).
                     wchar_t exe_path[MAX_PATH];
                     GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+
+                    // Build parameter string with current unsaved config
+                    char params[1024];
+                    snprintf(params, sizeof(params),
+                        "--auto-connect --mode=%d --protocol=%d --ip-version=%d --scan-mode=%d",
+                        g_app.mode, g_app.protocol, g_app.ip_version, g_app.scan_mode);
+                    int wlen = MultiByteToWideChar(CP_UTF8, 0, params, -1, NULL, 0);
+                    std::wstring wparams(wlen, L'\0');
+                    MultiByteToWideChar(CP_UTF8, 0, params, -1, &wparams[0], wlen);
+
                     SHELLEXECUTEINFOW sei = { sizeof(sei) };
                     sei.lpVerb = L"runas";
                     sei.lpFile = exe_path;
+                    sei.lpParameters = wparams.c_str();
                     sei.nShow = SW_NORMAL;
                     sei.fMask = SEE_MASK_NOASYNC;
                     if (ShellExecuteExW(&sei)) {
