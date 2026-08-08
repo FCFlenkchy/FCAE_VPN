@@ -1,6 +1,6 @@
 {
   "version": "v1.1.6",
   "release_date": "2026-08-08",
-  "release_notes": "fix linux/macos/windows tun mode ipv6 related also go through the tunnel and dns leak and add auto prompt on windows for admin perms on tun mode",
+  "release_notes": "fix linux/macos/windows tun mode ipv6 related also go through the tunnel and dns leak fix and auto prompt on tun for windows",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
