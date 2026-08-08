@@ -707,10 +707,10 @@ void render_ui() {
                         ShellExecuteA(nullptr, "open", update_dl_url, nullptr, nullptr, SW_SHOWNORMAL);
 #elif defined(__APPLE__)
                         std::string cmd = "open '" + std::string(update_dl_url) + "'";
-                        (void)system(cmd.c_str());
+                        if (system(cmd.c_str()) != 0) { /* best-effort, ignore failure */ }
 #elif !defined(ANDROID)
                         std::string cmd = "xdg-open '" + std::string(update_dl_url) + "' 2>/dev/null";
-                        (void)system(cmd.c_str());
+                        if (system(cmd.c_str()) != 0) { /* best-effort, ignore failure */ }
 #endif
                     }
                 }
