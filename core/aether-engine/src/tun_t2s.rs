@@ -606,26 +606,35 @@ fn configure_windows_tun(cfg: &TunConfig) {
         Err(e) => log::warn!("[tun_t2s] netsh set ipv6 dns error: {}", e),
     }
 
-    // 2c. Override DNS on ALL active network adapters to prevent DNS leak.
-    // Apps may query DNS servers on any adapter, not just the TUN adapter.
-    // We force all adapters to use Cloudflare DNS and save originals for restore.
+    // 2c. Save current DNS on ALL adapters to a temp file, then override to Cloudflare.
+    // Original DNS is restored from the backup file on cleanup.
+    let dns_backup_path = std::env::temp_dir().join("fcaevpn").join("dns_backup.json");
+    if let Some(parent) = dns_backup_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let dns_backup_str = dns_backup_path.to_string_lossy().replace('\\', "\\\\");
     let ps_override = format!(
         "$ErrorActionPreference='SilentlyContinue';\
-         $dns4='{dns}'; $dns6='{dns6}';\
+         $dns4='{dns}'; $dns6='{dns6}'; $backupFile='{backup}';\
          $adapters = Get-NetAdapter | Where-Object {{ $_.Status -eq 'Up' -and $_.Name -ne '{name}' -and $_.Name -ne '{name_hyphen}' }};\
-         $adapters | ForEach-Object {{\
-             Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ($dns4,'1.0.0.1');\
-             Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv6 -ServerAddresses $dns6;\
+         $backup = @();\
+         foreach ($a in $adapters) {{\
+             $v4 = (Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses -join ',';\
+             $v6 = (Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses -join ',';\
+             $backup += [PSCustomObject]@{{ ifIndex=$a.ifIndex; name=$a.Name; v4=$v4; v6=$v6 }};\
+             Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses ($dns4,'1.0.0.1');\
+             Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv6 -ServerAddresses $dns6;\
          }};\
+         $backup | ConvertTo-Json | Out-File -FilePath $backupFile -Encoding UTF8;\
          Write-Host 'dns_override_done'",
-        name = name, name_hyphen = name_hyphen, dns = dns, dns6 = dns6
+        name = name, name_hyphen = name_hyphen, dns = dns, dns6 = dns6, backup = dns_backup_str
     );
     let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_override]);
     match output {
         Ok(o) => {
             let stdout = String::from_utf8_lossy(&o.stdout);
             if stdout.contains("dns_override_done") {
-                log::info!("[tun_t2s] DNS override on all adapters OK");
+                log::info!("[tun_t2s] DNS override on all adapters OK (backup: {})", dns_backup_path.display());
             }
         }
         Err(e) => log::warn!("[tun_t2s] DNS override on all adapters error: {}", e),
@@ -845,18 +854,32 @@ fn configure_macos_tun(cfg: &TunConfig) {
         }
     }
 
-    // 5. Set DNS servers on ALL network services (IPv4 + IPv6)
-    // Apply to all active services to prevent DNS leak from any interface.
+    // 5. Save original DNS, then set Cloudflare DNS on ALL network services.
+    // Original DNS is saved to a temp file and restored on cleanup.
+    let dns_backup_path = std::env::temp_dir().join("fcaevpn").join("dns_backup_macos.txt");
+    if let Some(parent) = dns_backup_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Ok(services_output) = StdCommand::new("networksetup")
         .args(["-listallnetworkservices"])
         .output()
     {
         let services = String::from_utf8_lossy(&services_output.stdout);
+        let mut backup_lines = Vec::new();
         for service in services.lines().skip(1) {
             let service = service.trim();
             if service.is_empty() || service.starts_with('*') {
                 continue;
             }
+            // Save current DNS for this service
+            if let Ok(dns_out) = StdCommand::new("networksetup")
+                .args(["-getdnsservers", service])
+                .output()
+            {
+                let dns_str = String::from_utf8_lossy(&dns_out.stdout).trim().to_string();
+                backup_lines.push(format!("{}|{}", service, dns_str));
+            }
+            // Set Cloudflare DNS
             let output = StdCommand::new("networksetup")
                 .args(["-setdnsservers", service, "1.1.1.1", "1.0.0.1", dns6])
                 .output();
@@ -865,6 +888,12 @@ fn configure_macos_tun(cfg: &TunConfig) {
                 Ok(_) => log::debug!("[tun_t2s] networksetup DNS failed for '{}'", service),
                 Err(_) => {}
             }
+        }
+        // Write backup file
+        if let Ok(mut f) = std::fs::File::create(&dns_backup_path) {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", backup_lines.join("\n"));
+            log::info!("[tun_t2s] DNS backup saved to {}", dns_backup_path.display());
         }
     }
 }
@@ -978,7 +1007,20 @@ fn configure_linux_tun(cfg: &TunConfig) {
         Err(e) => log::warn!("[tun_t2s] ip route add default IPv6 error: {}", e),
     }
 
-    // Set IPv6 DNS via resolvectl (system-wide + per-link)
+    // Save current global DNS, then set Cloudflare DNS via resolvectl
+    let dns_backup_path = std::env::temp_dir().join("fcaevpn").join("dns_backup_linux.txt");
+    if let Some(parent) = dns_backup_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Save current global DNS servers
+    if let Ok(output) = StdCommand::new("resolvectl")
+        .args(["dns"])
+        .output()
+    {
+        let current = String::from_utf8_lossy(&output.stdout).to_string();
+        let _ = std::fs::write(&dns_backup_path, &current);
+        log::debug!("[tun_t2s] Saved current DNS state to {}", dns_backup_path.display());
+    }
     // Per-link DNS on the TUN interface
     if let Ok(output) = StdCommand::new("resolvectl")
         .args(["dns", name, "1.1.1.1", dns6])
@@ -1058,14 +1100,22 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
     let _ = run_silent("netsh", &["interface", "ip", "set", "dns", &name_hyphen, "dhcp"]);
     let _ = run_silent("netsh", &["interface", "ipv6", "set", "dns", &name_hyphen, "dhcp"]);
 
-    // Restore DNS on all other adapters back to DHCP (undo the override)
+    // Restore DNS on all other adapters from the backup file saved during override
+    let dns_backup_path = std::env::temp_dir().join("fcaevpn").join("dns_backup.json");
+    let dns_backup_str = dns_backup_path.to_string_lossy().replace('\\', "\\\\");
     let ps_restore = format!(
         "$ErrorActionPreference='SilentlyContinue';\
-         Get-NetAdapter | Where-Object {{ $_.Status -eq 'Up' -and $_.Name -ne '{name}' -and $_.Name -ne '{name_hyphen}' }} | ForEach-Object {{\
-             Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses;\
+         $backupFile='{backup}';\
+         if (Test-Path $backupFile) {{\
+             $backup = Get-Content $backupFile -Raw | ConvertFrom-Json;\
+             foreach ($b in $backup) {{\
+                 if ($b.v4) {{ Set-DnsClientServerAddress -InterfaceIndex $b.ifIndex -ServerAddresses ($b.v4 -split ',') }} else {{ Set-DnsClientServerAddress -InterfaceIndex $b.ifIndex -ResetServerAddresses }};\
+                 if ($b.v6) {{ Set-DnsClientServerAddress -InterfaceIndex $b.ifIndex -AddressFamily IPv6 -ServerAddresses ($b.v6 -split ',') }} else {{ Set-DnsClientServerAddress -InterfaceIndex $b.ifIndex -AddressFamily IPv6 -ResetServerAddresses }};\
+             }};\
+             Remove-Item $backupFile -Force;\
          }};\
          Write-Host 'dns_restore_done'",
-        name = name, name_hyphen = name_hyphen
+        backup = dns_backup_str
     );
     let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_restore]);
     match output {
@@ -1092,6 +1142,32 @@ fn cleanup_linux_tun(cfg: &TunConfig) {
     let _ = StdCommand::new("ip").args(["route", "del", "default", "dev", name]).status();
     let _ = StdCommand::new("ip").args(["-6", "route", "del", "default", "dev", name]).status();
     let _ = StdCommand::new("ip").args(["link", "set", name, "down"]).status();
+    // Restore DNS from backup: revert the link DNS, then restore global from backup
+    let _ = StdCommand::new("resolvectl").args(["revert", name]).status();
+    let dns_backup_path = std::env::temp_dir().join("fcaevpn").join("dns_backup_linux.txt");
+    if dns_backup_path.exists() {
+        // Parse the backup to find the original global DNS (lines starting with "Global:")
+        if let Ok(backup) = std::fs::read_to_string(&dns_backup_path) {
+            // Find the line after "Global:" that has the DNS servers
+            let mut found_global = false;
+            for line in backup.lines() {
+                if line.starts_with("Global:") {
+                    found_global = true;
+                    continue;
+                }
+                if found_global && !line.is_empty() && !line.starts_with("Link") {
+                    let servers: Vec<&str> = line.split_whitespace().collect();
+                    if !servers.is_empty() {
+                        let mut args = vec!["dns"];
+                        args.extend(&servers);
+                        let _ = StdCommand::new("resolvectl").args(&args).status();
+                    }
+                    break;
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&dns_backup_path);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1119,20 +1195,47 @@ fn cleanup_macos_tun(cfg: &TunConfig) {
         .args([iface, "down"])
         .status();
 
-    // Reset DNS to automatic on ALL network services
-    if let Ok(services_output) = StdCommand::new("networksetup")
-        .args(["-listallnetworkservices"])
-        .output()
-    {
-        let services = String::from_utf8_lossy(&services_output.stdout);
-        for service in services.lines().skip(1) {
-            let service = service.trim();
-            if service.is_empty() || service.starts_with('*') {
-                continue;
+    // Restore DNS from backup file saved during override
+    let dns_backup_path = std::env::temp_dir().join("fcaevpn").join("dns_backup_macos.txt");
+    if dns_backup_path.exists() {
+        if let Ok(backup_data) = std::fs::read_to_string(&dns_backup_path) {
+            for line in backup_data.lines() {
+                if let Some((service, dns)) = line.split_once('|') {
+                    let dns = dns.trim();
+                    if dns.is_empty() || dns.contains("There aren't any") {
+                        let _ = StdCommand::new("networksetup")
+                            .args(["-setdnsservers", service, "Empty"])
+                            .status();
+                    } else {
+                        let args: Vec<&str> = std::iter::once(&"-setdnsservers")
+                            .chain(std::iter::once(&service))
+                            .chain(dns.split_whitespace())
+                            .collect();
+                        let _ = StdCommand::new("networksetup")
+                            .args(&args)
+                            .status();
+                    }
+                }
             }
-            let _ = StdCommand::new("networksetup")
-                .args(["-setdnsservers", service, "Empty"])
-                .status();
+        }
+        let _ = std::fs::remove_file(&dns_backup_path);
+        log::info!("[tun_t2s] DNS restored from backup and backup file deleted");
+    } else {
+        // Fallback: reset all services to Empty if no backup exists
+        if let Ok(services_output) = StdCommand::new("networksetup")
+            .args(["-listallnetworkservices"])
+            .output()
+        {
+            let services = String::from_utf8_lossy(&services_output.stdout);
+            for service in services.lines().skip(1) {
+                let service = service.trim();
+                if service.is_empty() || service.starts_with('*') {
+                    continue;
+                }
+                let _ = StdCommand::new("networksetup")
+                    .args(["-setdnsservers", service, "Empty"])
+                    .status();
+            }
         }
     }
 
