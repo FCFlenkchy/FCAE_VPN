@@ -468,7 +468,7 @@ impl Default for TunConfig {
             name: "FCAE_VPN".to_string(),
             mtu: 1500,
             ipv4: "198.18.0.1/24".to_string(),
-            ipv6: None,
+            ipv6: Some("fc00::1/64".to_string()),
             socks_port: 1819,
             socks_host: "127.0.0.1".to_string(),
             username: None,
@@ -546,9 +546,11 @@ fn configure_windows_tun(cfg: &TunConfig) {
     let name = &cfg.name;
     // Extract IP without prefix (e.g., "172.16.0.2" from "172.16.0.2/24")
     let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+    let ipv6 = cfg.ipv6.as_deref().and_then(|v| v.split('/').next()).unwrap_or("fc00::1");
     let dns = "1.1.1.1";
+    let dns6 = "2606:4700:4700::1111";
 
-    log::info!("[tun_t2s] Configuring Windows TUN adapter '{}' with IP {} DNS {}", name, ip, dns);
+    log::info!("[tun_t2s] Configuring Windows TUN adapter '{}' with IP {} IPv6 {} DNS {}", name, ip, ipv6, dns);
 
     // Helper to run a command silently (no window popup)
     let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
@@ -568,6 +570,17 @@ fn configure_windows_tun(cfg: &TunConfig) {
         Err(e) => log::warn!("[tun_t2s] netsh set address error: {}", e),
     }
 
+    // 1b. Set IPv6 address on the adapter
+    let output = run_silent("netsh", &["interface", "ipv6", "set", "address", name, ipv6]);
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set ipv6 address OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            log::warn!("[tun_t2s] netsh set ipv6 address failed: {}", stderr.trim());
+        }
+        Err(e) => log::warn!("[tun_t2s] netsh set ipv6 address error: {}", e),
+    }
+
     // 2. Set DNS server on the adapter
     let output = run_silent("netsh", &["interface", "ip", "set", "dns", name, "static", dns]);
     match output {
@@ -577,6 +590,17 @@ fn configure_windows_tun(cfg: &TunConfig) {
             log::warn!("[tun_t2s] netsh set dns failed: {}", stderr.trim());
         }
         Err(e) => log::warn!("[tun_t2s] netsh set dns error: {}", e),
+    }
+
+    // 2b. Set IPv6 DNS server on the adapter
+    let output = run_silent("netsh", &["interface", "ipv6", "set", "dns", name, "static", dns6]);
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] netsh set ipv6 dns OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            log::warn!("[tun_t2s] netsh set ipv6 dns failed: {}", stderr.trim());
+        }
+        Err(e) => log::warn!("[tun_t2s] netsh set ipv6 dns error: {}", e),
     }
 
     // 3. Find the interface index (use CREATE_NO_WINDOW to avoid popup)
@@ -633,6 +657,22 @@ fn configure_windows_tun(cfg: &TunConfig) {
             Err(e) => log::warn!("[tun_t2s] route ADD error: {}", e),
         }
 
+        // 5b. Add IPv6 route: ::/0 -> TUN adapter (redirect all IPv6 traffic)
+        let output = run_silent("route", &["ADD", "::/0", ipv6, "IF", &idx.to_string()]);
+        match output {
+            Ok(o) if o.status.success() => log::info!("[tun_t2s] route ADD ::/0 OK"),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                if stderr.contains("already exists") || stdout.contains("already exists") {
+                    log::info!("[tun_t2s] route ::/0 already exists (OK)");
+                } else {
+                    log::warn!("[tun_t2s] route ADD ::/0 failed: {} {}", stdout.trim(), stderr.trim());
+                }
+            }
+            Err(e) => log::warn!("[tun_t2s] route ADD ::/0 error: {}", e),
+        }
+
         // 6. Add route to exclude the tunnel peer from TUN (avoid routing loop)
         if let Some(ref peer_ip) = cfg.tunnel_peer_ip {
             // Get current default gateway to route tunnel peer through it
@@ -667,9 +707,11 @@ fn configure_macos_tun(cfg: &TunConfig) {
 
     let name = &cfg.name;
     let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+    let ipv6 = cfg.ipv6.as_deref().and_then(|v| v.split('/').next()).unwrap_or("fc00::1");
     let netmask = "255.255.255.0"; // hardcoded for /24
+    let dns6 = "2606:4700:4700::1111";
 
-    log::info!("[tun_t2s] Configuring macOS TUN adapter '{}' with IP {} netmask {}", name, ip, netmask);
+    log::info!("[tun_t2s] Configuring macOS TUN adapter '{}' with IP {} IPv6 {} netmask {}", name, ip, ipv6, netmask);
 
     // Find the utun interface that tun2socks created
     // tun2socks creates utun with the name we specified; on macOS this becomes a utunX device.
@@ -678,17 +720,30 @@ fn configure_macos_tun(cfg: &TunConfig) {
     let iface = iface.as_deref().unwrap_or(name);
     log::info!("[tun_t2s] Using macOS interface: {}", iface);
 
-    // 1. Assign IP address to the interface
+    // 1. Assign IPv4 address to the interface
     let output = StdCommand::new("ifconfig")
         .args([iface, "inet", ip, netmask, ip])
         .output();
     match output {
-        Ok(o) if o.status.success() => log::info!("[tun_t2s] ifconfig assign IP OK"),
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] ifconfig assign IPv4 OK"),
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            log::warn!("[tun_t2s] ifconfig assign IP: {}", stderr.trim());
+            log::warn!("[tun_t2s] ifconfig assign IPv4: {}", stderr.trim());
         }
         Err(e) => log::warn!("[tun_t2s] ifconfig error: {}", e),
+    }
+
+    // 1b. Assign IPv6 address to the interface
+    let output = StdCommand::new("ifconfig")
+        .args([iface, "inet6", ipv6, "prefixlen", "64"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] ifconfig assign IPv6 OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            log::warn!("[tun_t2s] ifconfig assign IPv6: {}", stderr.trim());
+        }
+        Err(e) => log::warn!("[tun_t2s] ifconfig IPv6 error: {}", e),
     }
 
     // 2. Bring interface up
@@ -704,21 +759,38 @@ fn configure_macos_tun(cfg: &TunConfig) {
         Err(e) => log::warn!("[tun_t2s] ifconfig up error: {}", e),
     }
 
-    // 3. Add default route via the TUN interface
+    // 3. Add default IPv4 route via the TUN interface
     let output = StdCommand::new("route")
         .args(["add", "default", "-interface", iface])
         .output();
     match output {
-        Ok(o) if o.status.success() => log::info!("[tun_t2s] route add default OK"),
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] route add default IPv4 OK"),
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             if !stderr.contains("already in table") && !stderr.contains("File exists") {
-                log::warn!("[tun_t2s] route add default: {}", stderr.trim());
+                log::warn!("[tun_t2s] route add default IPv4: {}", stderr.trim());
             } else {
-                log::info!("[tun_t2s] default route already exists (OK)");
+                log::info!("[tun_t2s] default IPv4 route already exists (OK)");
             }
         }
-        Err(e) => log::warn!("[tun_t2s] route add error: {}", e),
+        Err(e) => log::warn!("[tun_t2s] route add IPv4 error: {}", e),
+    }
+
+    // 3b. Add default IPv6 route via the TUN interface
+    let output = StdCommand::new("route")
+        .args(["add", "-inet6", "default", "-interface", iface])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] route add default IPv6 OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.contains("already in table") && !stderr.contains("File exists") {
+                log::warn!("[tun_t2s] route add default IPv6: {}", stderr.trim());
+            } else {
+                log::info!("[tun_t2s] default IPv6 route already exists (OK)");
+            }
+        }
+        Err(e) => log::warn!("[tun_t2s] route add IPv6 error: {}", e),
     }
 
     // 4. Add route to bypass tunnel peer (avoid routing loop)
@@ -747,9 +819,9 @@ fn configure_macos_tun(cfg: &TunConfig) {
         }
     }
 
-    // 5. Set DNS servers
+    // 5. Set DNS servers (IPv4 + IPv6)
     let output = StdCommand::new("networksetup")
-        .args(["-setdnsservers", "Wi-Fi", "1.1.1.1", "1.0.0.1"])
+        .args(["-setdnsservers", "Wi-Fi", "1.1.1.1", "1.0.0.1", dns6])
         .output();
     match output {
         Ok(o) if o.status.success() => log::info!("[tun_t2s] networksetup DNS OK"),
@@ -815,17 +887,29 @@ fn configure_linux_tun(cfg: &TunConfig) {
 
     let name = &cfg.name;
     let ip = &cfg.ipv4;
+    let ipv6 = cfg.ipv6.as_deref().unwrap_or("fc00::1/64");
+    let dns6 = "2606:4700:4700::1111";
 
-    log::info!("[tun_t2s] Configuring Linux TUN adapter '{}' with IP {}", name, ip);
+    log::info!("[tun_t2s] Configuring Linux TUN adapter '{}' with IP {} IPv6 {}", name, ip, ipv6);
 
-    // Add IP to interface
+    // Add IPv4 to interface
     let output = StdCommand::new("ip")
         .args(["addr", "add", ip, "dev", name])
         .status();
     match output {
-        Ok(s) if s.success() => log::info!("[tun_t2s] ip addr add OK"),
-        Ok(s) => log::warn!("[tun_t2s] ip addr add failed with status {:?}", s.code()),
-        Err(e) => log::warn!("[tun_t2s] ip addr add error: {}", e),
+        Ok(s) if s.success() => log::info!("[tun_t2s] ip addr add IPv4 OK"),
+        Ok(s) => log::warn!("[tun_t2s] ip addr add IPv4 failed with status {:?}", s.code()),
+        Err(e) => log::warn!("[tun_t2s] ip addr add IPv4 error: {}", e),
+    }
+
+    // Add IPv6 to interface
+    let output = StdCommand::new("ip")
+        .args(["-6", "addr", "add", ipv6, "dev", name])
+        .status();
+    match output {
+        Ok(s) if s.success() => log::info!("[tun_t2s] ip addr add IPv6 OK"),
+        Ok(s) => log::warn!("[tun_t2s] ip addr add IPv6 failed with status {:?}", s.code()),
+        Err(e) => log::warn!("[tun_t2s] ip addr add IPv6 error: {}", e),
     }
 
     // Bring interface up
@@ -838,15 +922,36 @@ fn configure_linux_tun(cfg: &TunConfig) {
         Err(e) => log::warn!("[tun_t2s] ip link set up error: {}", e),
     }
 
-    // Add default route via TUN (higher metric = lower priority so existing routes stay)
-    // We use a separate routing table to avoid conflicts
+    // Add default IPv4 route via TUN (higher metric = lower priority so existing routes stay)
     let output = StdCommand::new("ip")
         .args(["route", "add", "default", "dev", name, "metric", "100"])
         .status();
     match output {
-        Ok(s) if s.success() => log::info!("[tun_t2s] ip route add default OK"),
-        Ok(s) => log::warn!("[tun_t2s] ip route add default failed with status {:?}", s.code()),
-        Err(e) => log::warn!("[tun_t2s] ip route add default error: {}", e),
+        Ok(s) if s.success() => log::info!("[tun_t2s] ip route add default IPv4 OK"),
+        Ok(s) => log::warn!("[tun_t2s] ip route add default IPv4 failed with status {:?}", s.code()),
+        Err(e) => log::warn!("[tun_t2s] ip route add default IPv4 error: {}", e),
+    }
+
+    // Add default IPv6 route via TUN
+    let output = StdCommand::new("ip")
+        .args(["-6", "route", "add", "default", "dev", name, "metric", "100"])
+        .status();
+    match output {
+        Ok(s) if s.success() => log::info!("[tun_t2s] ip route add default IPv6 OK"),
+        Ok(s) => log::warn!("[tun_t2s] ip route add default IPv6 failed with status {:?}", s.code()),
+        Err(e) => log::warn!("[tun_t2s] ip route add default IPv6 error: {}", e),
+    }
+
+    // Set IPv6 DNS via resolvectl or resolv.conf
+    if let Ok(output) = StdCommand::new("resolvectl")
+        .args(["dns", name, dns6])
+        .output()
+    {
+        if output.status.success() {
+            log::info!("[tun_t2s] resolvectl set DNS OK");
+        } else {
+            log::debug!("[tun_t2s] resolvectl set DNS: {}", String::from_utf8_lossy(&output.stderr).trim());
+        }
     }
 }
 
@@ -862,6 +967,7 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
 
     let name = &cfg.name;
     let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+    let ipv6 = cfg.ipv6.as_deref().and_then(|v| v.split('/').next()).unwrap_or("fc00::1");
 
     log::info!("[tun_t2s] Cleaning up Windows TUN adapter '{}'", name);
 
@@ -871,23 +977,38 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
         c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     };
 
-    // Remove default route via the TUN adapter
+    // Remove default IPv4 route via the TUN adapter
     let output = run_silent("route", &["DELETE", "0.0.0.0", "MASK", "0.0.0.0", ip]);
     match output {
-        Ok(o) if o.status.success() => log::info!("[tun_t2s] route DELETE OK"),
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] route DELETE IPv4 OK"),
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             if !stderr.trim().is_empty() {
-                log::debug!("[tun_t2s] route DELETE: {}", stderr.trim());
+                log::debug!("[tun_t2s] route DELETE IPv4: {}", stderr.trim());
             }
         }
-        Err(e) => log::debug!("[tun_t2s] route DELETE error: {}", e),
+        Err(e) => log::debug!("[tun_t2s] route DELETE IPv4 error: {}", e),
+    }
+
+    // Remove default IPv6 route via the TUN adapter
+    let output = run_silent("route", &["DELETE", "::/0", ipv6]);
+    match output {
+        Ok(o) if o.status.success() => log::info!("[tun_t2s] route DELETE ::/0 OK"),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.trim().is_empty() {
+                log::debug!("[tun_t2s] route DELETE ::/0: {}", stderr.trim());
+            }
+        }
+        Err(e) => log::debug!("[tun_t2s] route DELETE ::/0 error: {}", e),
     }
 
     // Reset DNS on the adapter to DHCP
     let name_hyphen = name.replace('_', "-");
     let _ = run_silent("netsh", &["interface", "ip", "set", "dns", name, "dhcp"]);
+    let _ = run_silent("netsh", &["interface", "ipv6", "set", "dns", name, "dhcp"]);
     let _ = run_silent("netsh", &["interface", "ip", "set", "dns", &name_hyphen, "dhcp"]);
+    let _ = run_silent("netsh", &["interface", "ipv6", "set", "dns", &name_hyphen, "dhcp"]);
 
     // Delete the TUN adapter — full cleanup so next start is fresh
     cleanup_adapter_by_name(name);
@@ -901,6 +1022,7 @@ fn cleanup_linux_tun(cfg: &TunConfig) {
     let name = &cfg.name;
     log::info!("[tun_t2s] Cleaning up Linux TUN routes for '{}'", name);
     let _ = StdCommand::new("ip").args(["route", "del", "default", "dev", name]).status();
+    let _ = StdCommand::new("ip").args(["-6", "route", "del", "default", "dev", name]).status();
     let _ = StdCommand::new("ip").args(["link", "set", name, "down"]).status();
 }
 
@@ -914,9 +1036,14 @@ fn cleanup_macos_tun(cfg: &TunConfig) {
     let iface = find_macos_utun(name);
     let iface = iface.as_deref().unwrap_or(name);
 
-    // Remove default route
+    // Remove default IPv4 route
     let _ = StdCommand::new("route")
         .args(["delete", "default", "-interface", iface])
+        .status();
+
+    // Remove default IPv6 route
+    let _ = StdCommand::new("route")
+        .args(["delete", "-inet6", "default", "-interface", iface])
         .status();
 
     // Bring interface down
