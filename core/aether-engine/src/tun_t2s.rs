@@ -885,9 +885,9 @@ fn configure_macos_tun(cfg: &TunConfig) {
                 let dns_str = String::from_utf8_lossy(&dns_out.stdout).trim().to_string();
                 backup_lines.push(format!("{}|{}", service, dns_str));
             }
-            // Set Cloudflare DNS
+            // Set Cloudflare DNS (dual-stack, with redundancy)
             let output = StdCommand::new("networksetup")
-                .args(["-setdnsservers", service, "1.1.1.1", "1.0.0.1", dns6])
+                .args(["-setdnsservers", service, "1.1.1.1", "1.0.0.1", dns6, dns62])
                 .output();
             match output {
                 Ok(o) if o.status.success() => log::info!("[tun_t2s] networksetup DNS OK for '{}'", service),
@@ -960,6 +960,7 @@ fn configure_linux_tun(cfg: &TunConfig) {
     let ip = if cfg.ipv4.is_empty() { "198.18.0.1/24" } else { &cfg.ipv4 };
     let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { Some(v) }).unwrap_or("fc00::1/64");
     let dns6 = "2606:4700:4700::1111";
+    let dns62 = "2606:4700:4700::1001";
 
     log::info!("[tun_t2s] Configuring Linux TUN adapter '{}' with IP {} IPv6 {}", name, ip, ipv6);
 
@@ -1027,9 +1028,9 @@ fn configure_linux_tun(cfg: &TunConfig) {
         let _ = std::fs::write(&dns_backup_path, &current);
         log::debug!("[tun_t2s] Saved current DNS state to {}", dns_backup_path.display());
     }
-    // Per-link DNS on the TUN interface
+    // Per-link DNS on the TUN interface (dual-stack, with redundancy)
     if let Ok(output) = StdCommand::new("resolvectl")
-        .args(["dns", name, "1.1.1.1", dns6])
+        .args(["dns", name, "1.1.1.1", "1.0.0.1", dns6, dns62])
         .output()
     {
         if output.status.success() {
@@ -1040,7 +1041,7 @@ fn configure_linux_tun(cfg: &TunConfig) {
     }
     // Also set global DNS as fallback to override any per-interface DNS leaks
     if let Ok(output) = StdCommand::new("resolvectl")
-        .args(["dns", "1.1.1.1", dns6])
+        .args(["dns", "1.1.1.1", "1.0.0.1", dns6, dns62])
         .output()
     {
         if output.status.success() {
