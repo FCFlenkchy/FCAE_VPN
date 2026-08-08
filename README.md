@@ -121,6 +121,14 @@ Rules set via inline input take priority and are merged with any rules file spec
 | macOS | GLFW + OpenGL | ImGui |
 | Android | Kotlin Material VpnService + JNI bridge | Kotlin Material UI |
 
+### Screenshots
+
+<p align="center">
+  <img src="windows_ui.png" alt="Windows UI" width="45%">
+  &nbsp;
+  <img src="android_ui.png" alt="Android UI" width="45%">
+</p>
+
 ## Building
 
 ### Requirements

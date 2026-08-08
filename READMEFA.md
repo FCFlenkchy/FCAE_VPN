@@ -123,6 +123,14 @@ FCAE VPN به **شبکه WARP کلادفلر** متصل می‌شود — هما
 | مک | GLFW + OpenGL | ImGui |
 | اندروید | Kotlin Material VpnService + پل JNI | Kotlin Material UI |
 
+### تصاویر
+
+<p align="center">
+  <img src="windows_ui.png" alt="رابط کاربری ویندوز" width="45%">
+  &nbsp;
+  <img src="android_ui.png" alt="رابط کاربری اندروید" width="45%">
+</p>
+
 ## ساخت
 
 ### پیش‌نیازها
