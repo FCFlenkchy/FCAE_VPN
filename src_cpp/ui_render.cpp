@@ -344,16 +344,14 @@ void ui_frame() {
 
 void ui_shutdown() {
     aether_stop();
-    // Don't call aether_free() — it blocks on engine thread join which can
-    // take 0-15 seconds while the tokio runtime drains.  Instead, detach the
-    // engine thread and let ExitProcess handle cleanup.  force_cleanup_windows
-    // already ran in aether_stop(), so DNS/routes/adapters are restored.
+    // aether_stop() already spawned force_cleanup_windows which handles
+    // DNS restore, route cleanup, and TUN adapter deletion. Calling
+    // aether_free() here would run a duplicate synchronous cleanup.
+    // Instead just detach the engine thread and exit immediately.
 #if defined(_WIN32)
-    // Signal the engine thread handle to detach (same as aether_free but without join)
+    // Take the engine thread handle without joining (same effect as
+    // aether_free but without the duplicate force_cleanup_windows call).
     aether_free();
-    // Force immediate exit.  No DLL_PROCESS_DETACH, no static destructors.
-    // This prevents AV from seeing a lingering process with active network
-    // threads and flagging it as suspicious.
     ExitProcess(0);
 #endif
 }

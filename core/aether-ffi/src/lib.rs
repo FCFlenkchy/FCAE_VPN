@@ -819,7 +819,11 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                 SHUTDOWN.store(true, Ordering::SeqCst);
                 aether_engine::tun::close_all_fds();
                 #[cfg(target_os = "windows")]
-                aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
+                {
+                    if !FORCE_CLEANUP_DONE.swap(true, Ordering::SeqCst) {
+                        aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
+                    }
+                }
 
                 RUNNING.store(false, Ordering::SeqCst);
                 rt.shutdown_background();
