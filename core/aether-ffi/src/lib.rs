@@ -41,6 +41,7 @@ static SHUTDOWN_NOTIFY: once_cell::sync::Lazy<tokio::sync::Notify> =
 static ENGINE_THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
 // Track whether force cleanup already ran (avoids duplicate DNS restore etc.)
+#[cfg(target_os = "windows")]
 static FORCE_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
 
 struct TelemetryState {

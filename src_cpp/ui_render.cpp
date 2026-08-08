@@ -499,7 +499,8 @@ void render_ui() {
                     std::wstring wparams(wlen, L'\0');
                     MultiByteToWideChar(CP_UTF8, 0, params, -1, &wparams[0], wlen);
 
-                    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+                    SHELLEXECUTEINFOW sei = {};
+                    sei.cbSize = sizeof(sei);
                     sei.lpVerb = L"runas";
                     sei.lpFile = exe_path;
                     sei.lpParameters = wparams.c_str();
@@ -625,7 +626,7 @@ void render_ui() {
                 snprintf(update_latest, sizeof(update_latest), "%s", info.latest_version);
                 snprintf(update_notes, sizeof(update_notes), "%s", info.release_notes);
                 snprintf(update_dl_url, sizeof(update_dl_url), "%s", info.download_url);
-                snprintf(update_status, sizeof(update_status), "%s", info.status_message);
+                snprintf(update_status, sizeof(update_status), "%.127s", info.status_message);
 
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
@@ -637,7 +638,7 @@ void render_ui() {
                 // Check finished — no update needed, but allow re-check
                 update_available = false;
                 update_checked = true;
-                snprintf(update_status, sizeof(update_status), "%s", info.status_message);
+                snprintf(update_status, sizeof(update_status), "%.127s", info.status_message);
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
                     aether_check_update_async(FCAE_VERSION);
                     update_checked = false;
