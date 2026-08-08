@@ -1,6 +1,6 @@
 :root{--bg:rgba(6,6,13,.7);--surface:rgba(14,14,26,.6);--surface2:rgba(22,22,48,.65);--border:rgba(34,34,68,.6);--text:#c8c8e0;--text2:#7c7ca0;--acc:#7c5cfc;--acc2:#b4a4ff;--grn:#00e676;--org:#ff9100;--red:#ff5252;--cya:#00e5ff;--glow:0 0 30px rgba(124,92,252,.25)}
 *{margin:0;padding:0;box-sizing:border-box}
-html{scroll-behavior:smooth;background:#06060d}
+html{scroll-behavior:smooth;scroll-padding-top:80px;background:#06060d}
 body{font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:transparent;color:var(--text);line-height:1.7;overflow-x:hidden;position:relative;text-shadow:0 1px 4px rgba(0,0,0,.6)}
 body::before{content:"";position:fixed;top:0;left:0;width:100%;height:100%;background:#06060d url("mountain.png") center/cover no-repeat;opacity:1;z-index:-2;pointer-events:none}
 body::after{content:"";position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(6,6,13,.75);z-index:-1;pointer-events:none}
@@ -16,9 +16,9 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(6,6,13,.6);b
 .nav-links a:hover{color:var(--acc2);text-decoration:none}
 
 /* Main offset for fixed nav */
-main{padding-top:60px}
+main{padding-top:80px}
 /* Hero */
-.hero{text-align:center;padding:80px 20px 60px;position:relative}
+.hero{text-align:center;padding:60px 20px 60px;position:relative}
 .hero-icon{display:block;margin:0 auto 28px;animation:float 4s ease-in-out infinite;filter:drop-shadow(var(--glow))}
 @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
 .hero h1{font-size:clamp(2.2rem,5vw,3.5rem);font-weight:900;background:linear-gradient(135deg,#b4a4ff,#7c5cfc,#00e5ff);background-size:200% 200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:gradShift 4s ease infinite;margin-bottom:16px;letter-spacing:-1px}
@@ -39,7 +39,7 @@ main{padding-top:60px}
 .btn-outline:hover{background:rgba(124,92,252,.1);transform:translateY(-2px);text-decoration:none}
 
 /* Sections */
-section{margin:60px 0}
+section{margin:60px 0;scroll-margin-top:80px}
 .sh{text-align:center;margin-bottom:36px}
 .sh h2{font-size:1.9rem;font-weight:800;color:#e8e8ff;display:inline-block;position:relative}
 .sh h2::after{content:"";position:absolute;bottom:-4px;left:50%;transform:translateX(-50%);width:50px;height:3px;background:var(--acc);border-radius:2px}
@@ -161,8 +161,8 @@ a:hover{color:#ccc0ff;text-decoration:underline}
 
 /* Mobile */
 @media (max-width:640px){
-main{padding-top:50px}
-.hero{padding:60px 16px 40px}
+main{padding-top:70px}
+.hero{padding:40px 16px 40px}
 .hero h1{font-size:1.9rem}
 .steps{grid-template-columns:1fr}
 .p-grid{grid-template-columns:1fr 1fr}
@@ -171,6 +171,16 @@ main{padding-top:50px}
 .nav-links a{font-size:.78rem}
 .arch-row{flex-direction:column;align-items:center}
 .contrib-card{width:100%;min-width:0}
+}
+
+/* Tiny screens (≤380px) */
+@media (max-width:380px){
+main{padding-top:90px}
+.hero{padding:24px 12px 32px}
+.hero h1{font-size:1.6rem}
+.nav-links{gap:6px}
+.nav-links a{font-size:.7rem}
+.nav-logo{font-size:1rem}
 }
 
 /* Scrollbar */
