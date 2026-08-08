@@ -1132,6 +1132,21 @@ pub extern "C" fn aether_check_update_from_json(
     }
 }
 
+/// Check if the current process is running with administrator/root privileges.
+/// Required for TUN mode on all platforms.
+#[no_mangle]
+pub extern "C" fn aether_is_admin() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        aether_engine::tun_t2s::is_admin()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // On Linux/macOS, check if we're root
+        unsafe { libc::geteuid() == 0 }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn aether_free() {
     // Take the handle but DO NOT join it. 

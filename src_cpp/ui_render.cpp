@@ -435,6 +435,26 @@ void render_ui() {
                 aether_stop();
                 g_app.ffi_state.store(AETHER_STATE_DISCONNECTED);
             } else if (!g_app.start_busy.load()) {
+                // TUN mode requires admin privileges on Windows
+                if (g_app.mode == 1 && !aether_is_admin()) {
+                    // Relaunch self as administrator
+                    wchar_t exe_path[MAX_PATH];
+                    GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+                    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+                    sei.lpVerb = L"runas";
+                    sei.lpFile = exe_path;
+                    sei.nShow = SW_NORMAL;
+                    sei.fMask = SEE_MASK_NOASYNC;
+                    if (ShellExecuteExW(&sei)) {
+                        // Successfully launched elevated — close current instance
+                        g_app.running.store(false);
+                        PostQuitMessage(0);
+                    } else {
+                        g_app.add_log(3, "[ui] TUN mode requires administrator privileges. Please run as Administrator.");
+                    }
+                    ImGui::PopStyleColor(3);
+                    return;
+                }
                 g_app.start_busy.store(true);
                 // Snapshot config + own string storage for the worker thread.
                 struct Owned {

@@ -556,7 +556,7 @@ impl Default for TunConfig {
 
 /// Check if the current process has administrator privileges on Windows.
 #[cfg(target_os = "windows")]
-fn is_admin() -> bool {
+pub fn is_admin() -> bool {
     // Use Win32 CheckTokenMembership to check if running as admin
     // This avoids needing the "windows" crate by using a minimal FFI call
     extern "system" {

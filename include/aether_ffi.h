@@ -105,6 +105,7 @@ void aether_get_telemetry(AetherTelemetry* out_telemetry);
 void aether_get_cached_telemetry(AetherTelemetry* out_telemetry);
 void aether_set_android_tun_fd(int tun_fd); // Pass Android VpnService file descriptor across JNI
 void aether_free(void);
+bool aether_is_admin(void);  // Check if running with admin/root privileges (needed for TUN mode)
 
 // Version checker – start async check (non-blocking). Call aether_poll_update() to get result.
 void aether_check_update_async(const char* current_version);
