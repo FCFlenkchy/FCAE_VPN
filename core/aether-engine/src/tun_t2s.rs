@@ -545,7 +545,7 @@ fn configure_windows_tun(cfg: &TunConfig) {
 
     let name = &cfg.name;
     // Extract IP without prefix (e.g., "172.16.0.2" from "172.16.0.2/24")
-    let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+    let ip = cfg.ipv4.split('/').next().filter(|v| !v.is_empty()).unwrap_or("198.18.0.1");
     let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { v.split('/').next() }).unwrap_or("fc00::1");
     let dns = "1.1.1.1";
     let dns6 = "2606:4700:4700::1111";
@@ -706,7 +706,7 @@ fn configure_macos_tun(cfg: &TunConfig) {
     use std::process::Command as StdCommand;
 
     let name = &cfg.name;
-    let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+    let ip = cfg.ipv4.split('/').next().filter(|v| !v.is_empty()).unwrap_or("198.18.0.1");
     let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { v.split('/').next() }).unwrap_or("fc00::1");
     let netmask = "255.255.255.0"; // hardcoded for /24
     let dns6 = "2606:4700:4700::1111";
@@ -886,7 +886,7 @@ fn configure_linux_tun(cfg: &TunConfig) {
     use std::process::Command as StdCommand;
 
     let name = &cfg.name;
-    let ip = &cfg.ipv4;
+    let ip = if cfg.ipv4.is_empty() { "198.18.0.1/24" } else { &cfg.ipv4 };
     let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { Some(v) }).unwrap_or("fc00::1/64");
     let dns6 = "2606:4700:4700::1111";
 
@@ -966,7 +966,7 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let name = &cfg.name;
-    let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+    let ip = cfg.ipv4.split('/').next().filter(|v| !v.is_empty()).unwrap_or("198.18.0.1");
     let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { v.split('/').next() }).unwrap_or("fc00::1");
 
     log::info!("[tun_t2s] Cleaning up Windows TUN adapter '{}'", name);
@@ -1083,7 +1083,7 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     #[cfg(target_os = "windows")]
     {
         log::info!("[tun_t2s] Removing any stale routes on '{}'", cfg.name);
-        let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
+        let ip = cfg.ipv4.split('/').next().filter(|v| !v.is_empty()).unwrap_or("198.18.0.1");
         remove_default_route_windows(ip);
     }
 

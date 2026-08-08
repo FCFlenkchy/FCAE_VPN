@@ -880,7 +880,7 @@ async fn run_masque_tunnel(
         let t2s_cfg = tun_t2s::TunConfig {
             name: "FCAE_VPN".to_string(),
             mtu: TUNNEL_MTU as u32,
-            ipv4: identity.ipv4.clone(),
+            ipv4: if identity.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { identity.ipv4.clone() },
             ipv6: if identity.ipv6.is_empty() { None } else { Some(identity.ipv6.clone()) },
             socks_port,
             socks_host: "127.0.0.1".to_string(),
@@ -1259,7 +1259,7 @@ async fn run_wireguard_tunnel(
         let t2s_cfg = tun_t2s::TunConfig {
             name: "FCAE_VPN".to_string(),
             mtu: TUNNEL_MTU as u32,
-            ipv4: identity.ipv4.clone(),
+            ipv4: if identity.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { identity.ipv4.clone() },
             ipv6: if identity.ipv6.is_empty() { None } else { Some(identity.ipv6.clone()) },
             socks_port,
             socks_host: "127.0.0.1".to_string(),
@@ -1445,7 +1445,7 @@ async fn run_warp_in_warp(
         let t2s_cfg = tun_t2s::TunConfig {
             name: "FCAE_VPN".to_string(),
             mtu: TUNNEL_MTU as u32,
-            ipv4: secondary.ipv4.clone(),
+            ipv4: if secondary.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { secondary.ipv4.clone() },
             ipv6: if secondary.ipv6.is_empty() { None } else { Some(secondary.ipv6.clone()) },
             socks_port,
             socks_host: "127.0.0.1".to_string(),
