@@ -603,6 +603,31 @@ fn configure_windows_tun(cfg: &TunConfig) {
         Err(e) => log::warn!("[tun_t2s] netsh set ipv6 dns error: {}", e),
     }
 
+    // 2c. Override DNS on ALL active network adapters to prevent DNS leak.
+    // Apps may query DNS servers on any adapter, not just the TUN adapter.
+    // We force all adapters to use Cloudflare DNS and save originals for restore.
+    let ps_override = format!(
+        "$ErrorActionPreference='SilentlyContinue';\
+         $dns4='{dns}'; $dns6='{dns6}';\
+         $adapters = Get-NetAdapter | Where-Object {{ $_.Status -eq 'Up' -and $_.Name -ne '{name}' -and $_.Name -ne '{name_hyphen}' }};\
+         $adapters | ForEach-Object {{\
+             Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ($dns4,'1.0.0.1');\
+             Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv6 -ServerAddresses $dns6;\
+         }};\
+         Write-Host 'dns_override_done'",
+        name = name, name_hyphen = name_hyphen, dns = dns, dns6 = dns6
+    );
+    let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_override]);
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if stdout.contains("dns_override_done") {
+                log::info!("[tun_t2s] DNS override on all adapters OK");
+            }
+        }
+        Err(e) => log::warn!("[tun_t2s] DNS override on all adapters error: {}", e),
+    }
+
     // 3. Find the interface index (use CREATE_NO_WINDOW to avoid popup)
     // tun2socks may create the adapter with hyphens instead of underscores on Windows
     let name_hyphen = name.replace('_', "-");
@@ -819,17 +844,27 @@ fn configure_macos_tun(cfg: &TunConfig) {
         }
     }
 
-    // 5. Set DNS servers (IPv4 + IPv6)
-    let output = StdCommand::new("networksetup")
-        .args(["-setdnsservers", "Wi-Fi", "1.1.1.1", "1.0.0.1", dns6])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => log::info!("[tun_t2s] networksetup DNS OK"),
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            log::debug!("[tun_t2s] networksetup DNS: {}", stderr.trim());
+    // 5. Set DNS servers on ALL network services (IPv4 + IPv6)
+    // Apply to all active services to prevent DNS leak from any interface.
+    if let Ok(services_output) = StdCommand::new("networksetup")
+        .args(["-listallnetworkservices"])
+        .output()
+    {
+        let services = String::from_utf8_lossy(&services_output.stdout);
+        for service in services.lines().skip(1) {
+            let service = service.trim();
+            if service.is_empty() || service.starts_with('*') {
+                continue;
+            }
+            let output = StdCommand::new("networksetup")
+                .args(["-setdnsservers", service, "1.1.1.1", "1.0.0.1", dns6])
+                .output();
+            match output {
+                Ok(o) if o.status.success() => log::info!("[tun_t2s] networksetup DNS OK for '{}'", service),
+                Ok(_) => log::debug!("[tun_t2s] networksetup DNS failed for '{}'", service),
+                Err(_) => {}
+            }
         }
-        Err(e) => log::debug!("[tun_t2s] networksetup DNS error: {}", e),
     }
 }
 
@@ -942,15 +977,27 @@ fn configure_linux_tun(cfg: &TunConfig) {
         Err(e) => log::warn!("[tun_t2s] ip route add default IPv6 error: {}", e),
     }
 
-    // Set IPv6 DNS via resolvectl or resolv.conf
+    // Set IPv6 DNS via resolvectl (system-wide + per-link)
+    // Per-link DNS on the TUN interface
     if let Ok(output) = StdCommand::new("resolvectl")
-        .args(["dns", name, dns6])
+        .args(["dns", name, "1.1.1.1", dns6])
         .output()
     {
         if output.status.success() {
-            log::info!("[tun_t2s] resolvectl set DNS OK");
+            log::info!("[tun_t2s] resolvectl set link DNS OK");
         } else {
-            log::debug!("[tun_t2s] resolvectl set DNS: {}", String::from_utf8_lossy(&output.stderr).trim());
+            log::debug!("[tun_t2s] resolvectl set link DNS: {}", String::from_utf8_lossy(&output.stderr).trim());
+        }
+    }
+    // Also set global DNS as fallback to override any per-interface DNS leaks
+    if let Ok(output) = StdCommand::new("resolvectl")
+        .args(["dns", "1.1.1.1", dns6])
+        .output()
+    {
+        if output.status.success() {
+            log::info!("[tun_t2s] resolvectl set global DNS OK");
+        } else {
+            log::debug!("[tun_t2s] resolvectl set global DNS: {}", String::from_utf8_lossy(&output.stderr).trim());
         }
     }
 }
@@ -1003,12 +1050,32 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
         Err(e) => log::debug!("[tun_t2s] route DELETE ::/0 error: {}", e),
     }
 
-    // Reset DNS on the adapter to DHCP
+    // Reset DNS on the TUN adapter to DHCP
     let name_hyphen = name.replace('_', "-");
     let _ = run_silent("netsh", &["interface", "ip", "set", "dns", name, "dhcp"]);
     let _ = run_silent("netsh", &["interface", "ipv6", "set", "dns", name, "dhcp"]);
     let _ = run_silent("netsh", &["interface", "ip", "set", "dns", &name_hyphen, "dhcp"]);
     let _ = run_silent("netsh", &["interface", "ipv6", "set", "dns", &name_hyphen, "dhcp"]);
+
+    // Restore DNS on all other adapters back to DHCP (undo the override)
+    let ps_restore = format!(
+        "$ErrorActionPreference='SilentlyContinue';\
+         Get-NetAdapter | Where-Object {{ $_.Status -eq 'Up' -and $_.Name -ne '{name}' -and $_.Name -ne '{name_hyphen}' }} | ForEach-Object {{\
+             Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses;\
+         }};\
+         Write-Host 'dns_restore_done'",
+        name = name, name_hyphen = name_hyphen
+    );
+    let output = run_silent("powershell", &["-NoProfile", "-Command", &ps_restore]);
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if stdout.contains("dns_restore_done") {
+                log::info!("[tun_t2s] DNS restore on all adapters OK");
+            }
+        }
+        Err(e) => log::debug!("[tun_t2s] DNS restore on all adapters error: {}", e),
+    }
 
     // Delete the TUN adapter — full cleanup so next start is fresh
     cleanup_adapter_by_name(name);
@@ -1051,10 +1118,22 @@ fn cleanup_macos_tun(cfg: &TunConfig) {
         .args([iface, "down"])
         .status();
 
-    // Reset DNS to automatic
-    let _ = StdCommand::new("networksetup")
-        .args(["-setdnsservers", "Wi-Fi", "Empty"])
-        .status();
+    // Reset DNS to automatic on ALL network services
+    if let Ok(services_output) = StdCommand::new("networksetup")
+        .args(["-listallnetworkservices"])
+        .output()
+    {
+        let services = String::from_utf8_lossy(&services_output.stdout);
+        for service in services.lines().skip(1) {
+            let service = service.trim();
+            if service.is_empty() || service.starts_with('*') {
+                continue;
+            }
+            let _ = StdCommand::new("networksetup")
+                .args(["-setdnsservers", service, "Empty"])
+                .status();
+        }
+    }
 
     log::info!("[tun_t2s] macOS TUN cleanup complete for '{}'", name);
 }
