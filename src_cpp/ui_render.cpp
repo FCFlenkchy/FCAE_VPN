@@ -503,11 +503,30 @@ void render_ui() {
                     wchar_t exe_path[MAX_PATH];
                     GetModuleFileNameW(NULL, exe_path, MAX_PATH);
 
-                    // Build parameter string with current unsaved config
-                    char params[1024];
+                    // Build parameter string with current unsaved config.
+                    // Pass ALL config values so the elevated instance has
+                    // an exact copy of the current UI state — prevents
+                    // mismatch crashes from stale config file values.
+                    char params[4096];
                     snprintf(params, sizeof(params),
-                        "--auto-connect --mode=%d --protocol=%d --ip-version=%d --scan-mode=%d",
-                        g_app.mode, g_app.protocol, g_app.ip_version, g_app.scan_mode);
+                        "--auto-connect --mode=%d --protocol=%d --ip-version=%d --scan-mode=%d"
+                        " --lan-sharing=%d --quick-reconnect=%d --socks-port=%u --http-port=%u"
+                        " --socks-enabled=%d --http-enabled=%d --h2-enabled=%d --ech-enabled=%d"
+                        " --fragment-enabled=%d --frag-min-size=%d --frag-max-size=%d"
+                        " --frag-min-delay=%d --frag-max-delay=%d --noize=%s"
+                        " --sni=%s --force-peer=%s --config-path=%s"
+                        " --team=%s --token=%s --email=%s"
+                        " --routes-file=%s --routes-inline=%s",
+                        g_app.mode, g_app.protocol, g_app.ip_version, g_app.scan_mode,
+                        g_app.lan_sharing ? 1 : 0, g_app.quick_reconnect ? 1 : 0,
+                        (unsigned)g_app.socks_port, (unsigned)g_app.http_port,
+                        g_app.socks_enabled ? 1 : 0, g_app.http_enabled ? 1 : 0,
+                        g_app.h2_enabled ? 1 : 0, g_app.ech_enabled ? 1 : 0,
+                        g_app.fragment_enabled ? 1 : 0, g_app.frag_min_size, g_app.frag_max_size,
+                        g_app.frag_min_delay, g_app.frag_max_delay, g_app.noize_profile,
+                        g_app.sni, g_app.force_peer, g_app.config_path,
+                        g_app.team_name, g_app.access_token, g_app.access_email,
+                        g_app.routes_file, g_app.routes_inline);
                     int wlen = MultiByteToWideChar(CP_UTF8, 0, params, -1, NULL, 0);
                     std::wstring wparams(wlen, L'\0');
                     MultiByteToWideChar(CP_UTF8, 0, params, -1, &wparams[0], wlen);
@@ -520,17 +539,28 @@ void render_ui() {
                     sei.nShow = SW_NORMAL;
                     sei.fMask = SEE_MASK_NOASYNC;
                     if (ShellExecuteExW(&sei)) {
-                        // Successfully launched elevated — close current instance
+                        // Successfully launched elevated — close current instance.
+                        // Pop all ImGui stacks that were pushed before the early exit
+                        // to avoid ImGui stack corruption on the next frame.
+                        ImGui::PopStyleColor(3);  // button colors
+                        ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
+                        ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
+                        ImGui::End();
                         g_app.running.store(false);
                         PostQuitMessage(0);
+                        return;
                     } else {
                         g_app.add_log(3, "[ui] TUN mode requires administrator privileges. Please run as Administrator.");
+                        ImGui::PopStyleColor(3);  // button colors
+                        ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
+                        return;
                     }
 #else
                     g_app.add_log(3, "[ui] TUN mode requires root privileges. Please run with sudo.");
-#endif
-                    ImGui::PopStyleColor(3);
+                    ImGui::PopStyleColor(3);  // button colors
+                    ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
                     return;
+#endif
                 }
                 g_app.start_busy.store(true);
                 // Snapshot config + own string storage for the worker thread.
