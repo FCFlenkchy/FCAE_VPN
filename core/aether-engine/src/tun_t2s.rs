@@ -546,7 +546,7 @@ fn configure_windows_tun(cfg: &TunConfig) {
     let name = &cfg.name;
     // Extract IP without prefix (e.g., "172.16.0.2" from "172.16.0.2/24")
     let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
-    let ipv6 = cfg.ipv6.as_deref().and_then(|v| v.split('/').next()).unwrap_or("fc00::1");
+    let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { v.split('/').next() }).unwrap_or("fc00::1");
     let dns = "1.1.1.1";
     let dns6 = "2606:4700:4700::1111";
 
@@ -707,7 +707,7 @@ fn configure_macos_tun(cfg: &TunConfig) {
 
     let name = &cfg.name;
     let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
-    let ipv6 = cfg.ipv6.as_deref().and_then(|v| v.split('/').next()).unwrap_or("fc00::1");
+    let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { v.split('/').next() }).unwrap_or("fc00::1");
     let netmask = "255.255.255.0"; // hardcoded for /24
     let dns6 = "2606:4700:4700::1111";
 
@@ -887,7 +887,7 @@ fn configure_linux_tun(cfg: &TunConfig) {
 
     let name = &cfg.name;
     let ip = &cfg.ipv4;
-    let ipv6 = cfg.ipv6.as_deref().unwrap_or("fc00::1/64");
+    let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { Some(v) }).unwrap_or("fc00::1/64");
     let dns6 = "2606:4700:4700::1111";
 
     log::info!("[tun_t2s] Configuring Linux TUN adapter '{}' with IP {} IPv6 {}", name, ip, ipv6);
@@ -967,7 +967,7 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
 
     let name = &cfg.name;
     let ip = cfg.ipv4.split('/').next().unwrap_or(&cfg.ipv4);
-    let ipv6 = cfg.ipv6.as_deref().and_then(|v| v.split('/').next()).unwrap_or("fc00::1");
+    let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { v.split('/').next() }).unwrap_or("fc00::1");
 
     log::info!("[tun_t2s] Cleaning up Windows TUN adapter '{}'", name);
 
