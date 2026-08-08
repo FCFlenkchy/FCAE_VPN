@@ -48,6 +48,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
     private lateinit var spinnerScan: Spinner
+    private lateinit var spinnerIpVersion: Spinner
     private lateinit var spinnerNoize: Spinner
     private lateinit var switchH2: SwitchMaterial
     private lateinit var switchEch: SwitchMaterial
@@ -221,6 +222,7 @@ class MainActivity : AppCompatActivity() {
         spinnerProtocol = findViewById(R.id.spinnerProtocol)
         spinnerMode = findViewById(R.id.spinnerMode)
         spinnerScan = findViewById(R.id.spinnerScan)
+        spinnerIpVersion = findViewById(R.id.spinnerIpVersion)
         spinnerNoize = findViewById(R.id.spinnerNoize)
         switchH2 = findViewById(R.id.switchH2)
         switchEch = findViewById(R.id.switchEch)
@@ -252,6 +254,10 @@ class MainActivity : AppCompatActivity() {
         spinnerScan.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
             listOf("Turbo", "Balanced", "Thorough", "Stealth", "Ironclad"),
+        )
+        spinnerIpVersion.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            listOf("IPv4", "IPv6", "Dual Stack (IPv4+IPv6)"),
         )
         spinnerNoize.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
@@ -429,6 +435,7 @@ class MainActivity : AppCompatActivity() {
             putInt("protocol", spinnerProtocol.selectedItemPosition)
             putInt("mode", spinnerMode.selectedItemPosition)
             putInt("scan", spinnerScan.selectedItemPosition)
+            putInt("ipVersion", spinnerIpVersion.selectedItemPosition)
             putInt("noize", spinnerNoize.selectedItemPosition)
             putBoolean("h2", switchH2.isChecked)
             putBoolean("ech", switchEch.isChecked)
@@ -455,6 +462,7 @@ class MainActivity : AppCompatActivity() {
         spinnerProtocol.setSelection(prefs.getInt("protocol", 0))
         spinnerMode.setSelection(prefs.getInt("mode", 1))
         spinnerScan.setSelection(prefs.getInt("scan", 0))
+        spinnerIpVersion.setSelection(prefs.getInt("ipVersion", 0))
         spinnerNoize.setSelection(prefs.getInt("noize", 2))
         switchH2.isChecked = prefs.getBoolean("h2", true)
         switchEch.isChecked = prefs.getBoolean("ech", true)
@@ -502,7 +510,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("protocol", spinnerProtocol.selectedItemPosition)
         i.putExtra("mode", spinnerMode.selectedItemPosition)
         i.putExtra("scanMode", spinnerScan.selectedItemPosition)
-        i.putExtra("ipVersion", 4)
+        i.putExtra("ipVersion", spinnerIpVersionToInt())
         i.putExtra("quickReconnect", switchQuick.isChecked)
         i.putExtra("h2Enabled", switchH2.isChecked)
         i.putExtra("echEnabled", switchEch.isChecked)
@@ -541,6 +549,7 @@ class MainActivity : AppCompatActivity() {
         val protocol = spinnerProtocol.selectedItemPosition
         val mode = spinnerMode.selectedItemPosition
         val scanMode = spinnerScan.selectedItemPosition
+        val ipVersion = spinnerIpVersionToInt()
         val quick = switchQuick.isChecked
         val h2 = switchH2.isChecked
         val ech = switchEch.isChecked
@@ -573,7 +582,7 @@ class MainActivity : AppCompatActivity() {
                     mode = mode,
                     lanSharing = lan,
                     scanMode = scanMode,
-                    ipVersion = 4,
+                    ipVersion = ipVersion,
                     quickReconnect = quick,
                     noizeProfile = noizeProfile,
                     fragmentEnabled = false,
@@ -858,6 +867,15 @@ class MainActivity : AppCompatActivity() {
             btnConnect.text = "CONNECT"
             btnConnect.setBackgroundColor(COLOR_CONNECT_BTN)
         }
+    }
+
+    /** Map spinner position to the ip_version value the engine expects.
+     *  Position 0 = IPv4 (4), 1 = IPv6 (6), 2 = Dual Stack (10). */
+    private fun spinnerIpVersionToInt(): Int = when (spinnerIpVersion.selectedItemPosition) {
+        0 -> 4    // IPv4 only
+        1 -> 6    // IPv6 only
+        2 -> 10   // Dual Stack (both)
+        else -> 4
     }
 
     // Manual formatting avoids String.format() which creates a Formatter +

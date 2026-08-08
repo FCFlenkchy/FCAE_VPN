@@ -188,12 +188,15 @@ pub fn force_cleanup_windows(name: &str) {
         log::info!("[tun_t2s] Force cleanup: restoring DNS from backup");
         let dns_backup_str = dns_backup_path.to_string_lossy().replace('\\', "\\\\");
         let name_hyphen = name.replace('_', "-");
+        // Use [System.IO.File]::ReadAllText instead of Get-Content -Raw
+        // because ReadAllText handles the UTF-8 BOM automatically.
+        // The old '-replace ^\\uFEFF' regex didn't work because \uFEFF is
+        // literal text in single-quoted PowerShell strings, not the BOM char.
         let ps_restore = format!(
             "$ErrorActionPreference='SilentlyContinue';\
              $backupFile='{backup}';\
              if (Test-Path $backupFile) {{\
-                 $raw = Get-Content $backupFile -Raw;\
-                 $raw = $raw -replace '^\\uFEFF', '';\
+                 try {{ $raw = [System.IO.File]::ReadAllText($backupFile) }} catch {{ $raw = $null }};\
                  if ($raw) {{\
                      try {{ $backup = ConvertFrom-Json $raw }} catch {{ $backup = $null }};\
                      if ($backup) {{\
@@ -217,12 +220,13 @@ pub fn force_cleanup_windows(name: &str) {
                     log::info!("[tun_t2s] Force cleanup: DNS restore from backup OK");
                 } else {
                     log::warn!("[tun_t2s] Force cleanup: DNS restore may have failed, falling back to DHCP reset");
-                    // Fallback: reset all adapters except ours to DHCP
+                    // Fallback: use Set-DnsClientServerAddress -ResetServerAddresses
+                    // instead of netsh (handles adapter names with spaces reliably).
                     let netsh_fallback = format!(
                         "$ErrorActionPreference='SilentlyContinue';\
                          Get-NetAdapter | Where-Object {{ $_.Name -ne '{name}' -and $_.Name -ne '{name_hyphen}' }} | ForEach-Object {{\
-                             netsh interface ip set dns $_.Name dhcp;\
-                             netsh interface ipv6 set dns $_.Name dhcp;\
+                             Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue;\
+                             Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv6 -ResetServerAddresses -ErrorAction SilentlyContinue;\
                          }};\
                          Write-Host 'dns_fallback_done'",
                         name = name, name_hyphen = name_hyphen
@@ -237,11 +241,13 @@ pub fn force_cleanup_windows(name: &str) {
     } else {
         log::info!("[tun_t2s] Force cleanup: no DNS backup file found, resetting all adapters to DHCP");
         let name_hyphen = name.replace('_', "-");
+        // Use Set-DnsClientServerAddress -ResetServerAddresses (not netsh)
+        // because it handles adapter names with spaces reliably.
         let netsh_fallback = format!(
             "$ErrorActionPreference='SilentlyContinue';\
              Get-NetAdapter | Where-Object {{ $_.Name -ne '{name}' -and $_.Name -ne '{name_hyphen}' }} | ForEach-Object {{\
-                 netsh interface ip set dns $_.Name dhcp;\
-                 netsh interface ipv6 set dns $_.Name dhcp;\
+                 Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue;\
+                 Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv6 -ResetServerAddresses -ErrorAction SilentlyContinue;\
              }};\
              Write-Host 'dns_fallback_done'",
             name = name, name_hyphen = name_hyphen
@@ -1301,15 +1307,16 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
     let _ = run_silent("netsh", &["interface", "ipv6", "set", "dns", &name_hyphen, "dhcp"]);
 
     // Restore DNS on all other adapters from the backup file saved during override.
-    // We try PowerShell first (handles JSON backup), then fall back to netsh DHCP reset.
+    // We try PowerShell first (handles JSON backup), then fall back to DHCP reset.
     let dns_backup_path = std::env::temp_dir().join("fcaevpn").join("dns_backup.json");
     let dns_backup_str = dns_backup_path.to_string_lossy().replace('\\', "\\\\");
+    // Use [System.IO.File]::ReadAllText instead of Get-Content -Raw
+    // because ReadAllText handles the UTF-8 BOM automatically.
     let ps_restore = format!(
         "$ErrorActionPreference='SilentlyContinue';\
          $backupFile='{backup}';\
          if (Test-Path $backupFile) {{\
-             $raw = Get-Content $backupFile -Raw;\
-             $raw = $raw -replace '^\\uFEFF', '';\
+             try {{ $raw = [System.IO.File]::ReadAllText($backupFile) }} catch {{ $raw = $null }};\
              if ($raw) {{\
                  try {{ $backup = ConvertFrom-Json $raw }} catch {{ $backup = $null }};\
                  if ($backup) {{\
@@ -1338,15 +1345,16 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
         Err(e) => log::warn!("[tun_t2s] DNS restore PowerShell error: {}", e),
     }
 
-    // Fallback: if PowerShell restore didn't confirm, reset DNS on all adapters to DHCP via netsh
+    // Fallback: if PowerShell restore didn't confirm, reset DNS on all adapters to DHCP
     if !restored {
-        log::warn!("[tun_t2s] PowerShell DNS restore did not complete; falling back to netsh DHCP reset on all adapters");
-        // Get all adapter names except ours and reset them to DHCP
+        log::warn!("[tun_t2s] PowerShell DNS restore did not complete; falling back to DHCP reset on all adapters");
+        // Use Set-DnsClientServerAddress -ResetServerAddresses (not netsh)
+        // because it handles adapter names with spaces reliably.
         let netsh_fallback = format!(
             "$ErrorActionPreference='SilentlyContinue';\
              Get-NetAdapter | Where-Object {{ $_.Name -ne '{name}' -and $_.Name -ne '{name_hyphen}' }} | ForEach-Object {{\
-                 netsh interface ip set dns $_.Name dhcp;\
-                 netsh interface ipv6 set dns $_.Name dhcp;\
+                 Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue;\
+                 Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv6 -ResetServerAddresses -ErrorAction SilentlyContinue;\
              }};\
              Write-Host 'dns_fallback_done'",
             name = name, name_hyphen = name_hyphen
@@ -1358,10 +1366,10 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
                 if stdout.contains("dns_fallback_done") {
                     log::info!("[tun_t2s] DNS fallback reset to DHCP on all adapters OK");
                 } else {
-                    log::warn!("[tun_t2s] DNS fallback netsh reset may have failed; stdout: {}", stdout.trim());
+                    log::warn!("[tun_t2s] DNS fallback reset may have failed; stdout: {}", stdout.trim());
                 }
             }
-            Err(e) => log::error!("[tun_t2s] DNS fallback netsh reset error: {}", e),
+            Err(e) => log::error!("[tun_t2s] DNS fallback reset error: {}", e),
         }
     }
 

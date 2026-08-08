@@ -159,11 +159,14 @@ public class FCAEVpnService extends VpnService {
                 builder.setSession("FCAE VPN");
                 builder.setMtu(1420);
                 builder.addAddress("10.0.0.2", 32);
+                builder.addAddress("fd00::2", 128);
                 builder.addRoute("0.0.0.0", 0);
                 builder.addRoute("::", 0);
                 try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
                 builder.addDnsServer("1.1.1.1");
                 builder.addDnsServer("1.0.0.1");
+                builder.addDnsServer("2606:4700:4700::1111");
+                builder.addDnsServer("2606:4700:4700::1001");
 
                 vpnInterface = builder.establish();
                 if (vpnInterface == null) {
