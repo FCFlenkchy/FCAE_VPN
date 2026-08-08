@@ -116,17 +116,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     // Parse command-line flags (passed when relaunching elevated for TUN mode).
     // These override config file values so unsaved UI changes are preserved.
+    // We save them and apply AFTER ui_init() loads the config file.
+    bool cli_auto_connect = false;
+    int cli_mode = -1, cli_protocol = -1, cli_ip_version = -1, cli_scan_mode = -1;
     for (int i = 1; i < __argc; i++) {
         if (strcmp(__argv[i], "--auto-connect") == 0) {
-            g_app.auto_connect = true;
+            cli_auto_connect = true;
         } else if (strncmp(__argv[i], "--mode=", 7) == 0) {
-            g_app.mode = atoi(__argv[i] + 7);
+            cli_mode = atoi(__argv[i] + 7);
         } else if (strncmp(__argv[i], "--protocol=", 11) == 0) {
-            g_app.protocol = atoi(__argv[i] + 11);
+            cli_protocol = atoi(__argv[i] + 11);
         } else if (strncmp(__argv[i], "--ip-version=", 13) == 0) {
-            g_app.ip_version = atoi(__argv[i] + 13);
+            cli_ip_version = atoi(__argv[i] + 13);
         } else if (strncmp(__argv[i], "--scan-mode=", 12) == 0) {
-            g_app.scan_mode = atoi(__argv[i] + 12);
+            cli_scan_mode = atoi(__argv[i] + 12);
         }
     }
 
@@ -196,6 +199,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     ui_init();
+
+    // Apply CLI overrides AFTER ui_init() loads config file.
+    // This preserves unsaved UI settings passed from the non-elevated instance.
+    g_app.auto_connect = cli_auto_connect;
+    if (cli_mode >= 0) g_app.mode = cli_mode;
+    if (cli_protocol >= 0) g_app.protocol = cli_protocol;
+    if (cli_ip_version >= 0) g_app.ip_version = cli_ip_version;
+    if (cli_scan_mode >= 0) g_app.scan_mode = cli_scan_mode;
 
     // Event-driven render loop: only render when input arrives or 1 Hz stats refresh.
     // Eliminates continuous 60 FPS GPU/CPU waste when idle.
