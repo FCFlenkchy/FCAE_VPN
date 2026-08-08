@@ -559,6 +559,9 @@ fn configure_windows_tun(cfg: &TunConfig) {
         c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     };
 
+    // tun2socks may create the adapter with hyphens instead of underscores on Windows
+    let name_hyphen = name.replace('_', "-");
+
     // 1. Set the adapter's IP address
     let output = run_silent("netsh", &["interface", "ip", "set", "address", name, "static", ip, "255.255.255.0"]);
     match output {
@@ -629,8 +632,6 @@ fn configure_windows_tun(cfg: &TunConfig) {
     }
 
     // 3. Find the interface index (use CREATE_NO_WINDOW to avoid popup)
-    // tun2socks may create the adapter with hyphens instead of underscores on Windows
-    let name_hyphen = name.replace('_', "-");
     let ifidx = match run_silent("powershell", &["-NoProfile", "-Command",
         &format!("$name = '{}'; $hname = '{}'; $adapter = Get-NetAdapter -Name $name -ErrorAction SilentlyContinue; if (-not $adapter) {{ $adapter = Get-NetAdapter -Name $hname -ErrorAction SilentlyContinue }}; if ($adapter) {{ $adapter.ifIndex }}", name, name_hyphen)])
     {
