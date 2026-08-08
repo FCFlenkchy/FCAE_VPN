@@ -437,6 +437,7 @@ void render_ui() {
             } else if (!g_app.start_busy.load()) {
                 // TUN mode requires admin privileges on Windows
                 if (g_app.mode == 1 && !aether_is_admin()) {
+#ifdef _WIN32
                     // Relaunch self as administrator
                     wchar_t exe_path[MAX_PATH];
                     GetModuleFileNameW(NULL, exe_path, MAX_PATH);
@@ -452,6 +453,9 @@ void render_ui() {
                     } else {
                         g_app.add_log(3, "[ui] TUN mode requires administrator privileges. Please run as Administrator.");
                     }
+#else
+                    g_app.add_log(3, "[ui] TUN mode requires root privileges. Please run with sudo.");
+#endif
                     ImGui::PopStyleColor(3);
                     return;
                 }
