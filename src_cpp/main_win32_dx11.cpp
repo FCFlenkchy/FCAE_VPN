@@ -120,57 +120,6 @@ static void CleanupDeviceD3D() {
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     HINSTANCE inst = hInst ? hInst : GetModuleHandleW(nullptr);
 
-    // Parse command-line flags (passed when relaunching elevated for TUN mode).
-    // These override config file values so unsaved UI changes are preserved.
-    // We save them and apply AFTER ui_init() loads the config file.
-    bool cli_auto_connect = false;
-    int  cli_mode = -1, cli_protocol = -1, cli_ip_version = -1, cli_scan_mode = -1;
-    int  cli_lan_sharing = -1, cli_quick_reconnect = -1;
-    int  cli_socks_port = -1, cli_http_port = -1;
-    int  cli_socks_enabled = -1, cli_http_enabled = -1;
-    int  cli_h2_enabled = -1, cli_ech_enabled = -1;
-    int  cli_fragment_enabled = -1, cli_frag_min_size = -1, cli_frag_max_size = -1;
-    int  cli_frag_min_delay = -1, cli_frag_max_delay = -1;
-    char cli_noize[128] = {};
-    char cli_sni[256] = {};
-    char cli_force_peer[256] = {};
-    char cli_config_path[512] = {};
-    char cli_team[256] = {};
-    char cli_token[512] = {};
-    char cli_email[256] = {};
-    char cli_routes_file[512] = {};
-    char cli_routes_inline[1024] = {};
-    for (int i = 1; i < __argc; i++) {
-        const char* a = __argv[i];
-        if (strcmp(a, "--auto-connect") == 0) { cli_auto_connect = true; }
-        else if (strncmp(a, "--mode=", 7) == 0) { cli_mode = atoi(a + 7); }
-        else if (strncmp(a, "--protocol=", 11) == 0) { cli_protocol = atoi(a + 11); }
-        else if (strncmp(a, "--ip-version=", 13) == 0) { cli_ip_version = atoi(a + 13); }
-        else if (strncmp(a, "--scan-mode=", 12) == 0) { cli_scan_mode = atoi(a + 12); }
-        else if (strncmp(a, "--lan-sharing=", 14) == 0) { cli_lan_sharing = atoi(a + 14); }
-        else if (strncmp(a, "--quick-reconnect=", 18) == 0) { cli_quick_reconnect = atoi(a + 18); }
-        else if (strncmp(a, "--socks-port=", 13) == 0) { cli_socks_port = atoi(a + 13); }
-        else if (strncmp(a, "--http-port=", 12) == 0) { cli_http_port = atoi(a + 12); }
-        else if (strncmp(a, "--socks-enabled=", 16) == 0) { cli_socks_enabled = atoi(a + 16); }
-        else if (strncmp(a, "--http-enabled=", 15) == 0) { cli_http_enabled = atoi(a + 15); }
-        else if (strncmp(a, "--h2-enabled=", 13) == 0) { cli_h2_enabled = atoi(a + 13); }
-        else if (strncmp(a, "--ech-enabled=", 14) == 0) { cli_ech_enabled = atoi(a + 14); }
-        else if (strncmp(a, "--fragment-enabled=", 19) == 0) { cli_fragment_enabled = atoi(a + 19); }
-        else if (strncmp(a, "--frag-min-size=", 16) == 0) { cli_frag_min_size = atoi(a + 16); }
-        else if (strncmp(a, "--frag-max-size=", 16) == 0) { cli_frag_max_size = atoi(a + 16); }
-        else if (strncmp(a, "--frag-min-delay=", 17) == 0) { cli_frag_min_delay = atoi(a + 17); }
-        else if (strncmp(a, "--frag-max-delay=", 17) == 0) { cli_frag_max_delay = atoi(a + 17); }
-        else if (strncmp(a, "--noize=", 8) == 0) { snprintf(cli_noize, sizeof(cli_noize), "%s", a + 8); }
-        else if (strncmp(a, "--sni=", 6) == 0) { snprintf(cli_sni, sizeof(cli_sni), "%s", a + 6); }
-        else if (strncmp(a, "--force-peer=", 13) == 0) { snprintf(cli_force_peer, sizeof(cli_force_peer), "%s", a + 13); }
-        else if (strncmp(a, "--config-path=", 14) == 0) { snprintf(cli_config_path, sizeof(cli_config_path), "%s", a + 14); }
-        else if (strncmp(a, "--team=", 7) == 0) { snprintf(cli_team, sizeof(cli_team), "%s", a + 7); }
-        else if (strncmp(a, "--token=", 8) == 0) { snprintf(cli_token, sizeof(cli_token), "%s", a + 8); }
-        else if (strncmp(a, "--email=", 8) == 0) { snprintf(cli_email, sizeof(cli_email), "%s", a + 8); }
-        else if (strncmp(a, "--routes-file=", 14) == 0) { snprintf(cli_routes_file, sizeof(cli_routes_file), "%s", a + 14); }
-        else if (strncmp(a, "--routes-inline=", 16) == 0) { snprintf(cli_routes_inline, sizeof(cli_routes_inline), "%s", a + 16); }
-    }
-
     WNDCLASSEXW wc = {};
     wc.cbSize        = sizeof(wc);
     wc.style         = CS_CLASSDC;
@@ -237,36 +186,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     ui_init();
-
-    // Apply CLI overrides AFTER ui_init() loads config file.
-    // This preserves unsaved UI settings passed from the non-elevated instance.
-    g_app.auto_connect = cli_auto_connect;
-    if (cli_mode >= 0) g_app.mode = cli_mode;
-    if (cli_protocol >= 0) g_app.protocol = cli_protocol;
-    if (cli_ip_version >= 0) g_app.ip_version = cli_ip_version;
-    if (cli_scan_mode >= 0) g_app.scan_mode = cli_scan_mode;
-    if (cli_lan_sharing >= 0) g_app.lan_sharing = cli_lan_sharing != 0;
-    if (cli_quick_reconnect >= 0) g_app.quick_reconnect = cli_quick_reconnect != 0;
-    if (cli_socks_port >= 0) g_app.socks_port = (uint16_t)cli_socks_port;
-    if (cli_http_port >= 0) g_app.http_port = (uint16_t)cli_http_port;
-    if (cli_socks_enabled >= 0) g_app.socks_enabled = cli_socks_enabled != 0;
-    if (cli_http_enabled >= 0) g_app.http_enabled = cli_http_enabled != 0;
-    if (cli_h2_enabled >= 0) g_app.h2_enabled = cli_h2_enabled != 0;
-    if (cli_ech_enabled >= 0) g_app.ech_enabled = cli_ech_enabled != 0;
-    if (cli_fragment_enabled >= 0) g_app.fragment_enabled = cli_fragment_enabled != 0;
-    if (cli_frag_min_size >= 0) g_app.frag_min_size = cli_frag_min_size;
-    if (cli_frag_max_size >= 0) g_app.frag_max_size = cli_frag_max_size;
-    if (cli_frag_min_delay >= 0) g_app.frag_min_delay = cli_frag_min_delay;
-    if (cli_frag_max_delay >= 0) g_app.frag_max_delay = cli_frag_max_delay;
-    if (cli_noize[0]) snprintf(g_app.noize_profile, sizeof(g_app.noize_profile), "%s", cli_noize);
-    if (cli_sni[0]) snprintf(g_app.sni, sizeof(g_app.sni), "%s", cli_sni);
-    if (cli_force_peer[0]) snprintf(g_app.force_peer, sizeof(g_app.force_peer), "%s", cli_force_peer);
-    if (cli_config_path[0]) snprintf(g_app.config_path, sizeof(g_app.config_path), "%s", cli_config_path);
-    if (cli_team[0]) snprintf(g_app.team_name, sizeof(g_app.team_name), "%s", cli_team);
-    if (cli_token[0]) snprintf(g_app.access_token, sizeof(g_app.access_token), "%s", cli_token);
-    if (cli_email[0]) snprintf(g_app.access_email, sizeof(g_app.access_email), "%s", cli_email);
-    if (cli_routes_file[0]) snprintf(g_app.routes_file, sizeof(g_app.routes_file), "%s", cli_routes_file);
-    if (cli_routes_inline[0]) snprintf(g_app.routes_inline, sizeof(g_app.routes_inline), "%s", cli_routes_inline);
 
     // Event-driven render loop: only render when input arrives or 1 Hz stats refresh.
     // Eliminates continuous 60 FPS GPU/CPU waste when idle.

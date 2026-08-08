@@ -1,5 +1,4 @@
 #include "ui_render.h"
-#include <chrono>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -358,68 +357,6 @@ void ui_shutdown() {
 }
 
 void render_ui() {
-    // Auto-connect on startup if relaunched elevated with --auto-connect.
-    // Wait 3 seconds to ensure the old instance has fully exited
-    // and all resources (ports, mutexes, TUN adapter) are released.
-    static auto auto_connect_start = std::chrono::steady_clock::now();
-    static bool auto_connect_timer_init = false;
-    if (g_app.auto_connect) {
-        if (!auto_connect_timer_init) {
-            auto_connect_start = std::chrono::steady_clock::now();
-            auto_connect_timer_init = true;
-        }
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - auto_connect_start).count();
-        if (elapsed >= 3000) {  // Wait 3 seconds before connecting
-            g_app.auto_connect = false;
-            if (!g_app.start_busy.load() && g_app.ffi_state.load() == AETHER_STATE_DISCONNECTED) {
-                g_app.start_busy.store(true);
-                struct Owned {
-                    std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
-                    AetherConfig c{};
-                };
-                auto o = std::unique_ptr<Owned, void(*)(Owned*)>(
-                    new Owned(),
-                    [](Owned* p) {
-                        g_app.start_busy.store(false);
-                        delete p;
-                    }
-                );
-                o->noize = g_app.noize_profile;
-                o->peer  = g_app.force_peer;
-                o->path  = g_app.config_path;
-                o->sni   = g_app.sni;
-                o->team  = g_app.team_name;
-                o->token = g_app.access_token;
-                o->email = g_app.access_email;
-                o->routes = g_app.routes_file;
-                o->routes_inline = g_app.routes_inline;
-                o->c = g_app.to_config();
-                o->c.noize_profile = o->noize.c_str();
-                o->c.force_peer    = o->peer.empty() ? nullptr : o->peer.c_str();
-                o->c.config_path   = o->path.c_str();
-                o->c.sni           = o->sni.empty() ? nullptr : o->sni.c_str();
-                o->c.team_name     = o->team.empty() ? nullptr : o->team.c_str();
-                o->c.access_token  = o->token.empty() ? nullptr : o->token.c_str();
-                o->c.access_email  = o->email.empty() ? nullptr : o->email.c_str();
-                o->c.routes_file   = o->routes.empty() ? nullptr : o->routes.c_str();
-                o->c.routes_inline = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
-                auto* raw = o.release();
-                std::thread([raw] {
-                    std::unique_ptr<Owned, void(*)(Owned*)> guard(
-                        raw, [](Owned* p) {
-                            g_app.start_busy.store(false);
-                            delete p;
-                        }
-                    );
-                    (void)aether_start(&guard->c);
-                }).detach();
-            }
-        }
-    } else {
-        auto_connect_timer_init = false;
-    }
-
     const ImGuiIO& io = ImGui::GetIO();
     const bool narrow = io.DisplaySize.x < 720.0f;
 
@@ -497,51 +434,21 @@ void render_ui() {
                 // TUN mode requires admin privileges on Windows
                 if (g_app.mode == 1 && !aether_is_admin()) {
 #ifdef _WIN32
-                    // Relaunch self as administrator with current settings.
-                    // Pass --auto-connect and key config values so the elevated
-                    // instance uses the current UI state (which may be unsaved).
+                    // Save config then relaunch self as administrator.
+                    // The elevated instance will start fresh — user clicks CONNECT manually.
+                    save_config();
                     wchar_t exe_path[MAX_PATH];
                     GetModuleFileNameW(NULL, exe_path, MAX_PATH);
-
-                    // Build parameter string with current unsaved config.
-                    // Pass ALL config values so the elevated instance has
-                    // an exact copy of the current UI state — prevents
-                    // mismatch crashes from stale config file values.
-                    char params[4096];
-                    snprintf(params, sizeof(params),
-                        "--auto-connect --mode=%d --protocol=%d --ip-version=%d --scan-mode=%d"
-                        " --lan-sharing=%d --quick-reconnect=%d --socks-port=%u --http-port=%u"
-                        " --socks-enabled=%d --http-enabled=%d --h2-enabled=%d --ech-enabled=%d"
-                        " --fragment-enabled=%d --frag-min-size=%d --frag-max-size=%d"
-                        " --frag-min-delay=%d --frag-max-delay=%d --noize=%s"
-                        " --sni=%s --force-peer=%s --config-path=%s"
-                        " --team=%s --token=%s --email=%s"
-                        " --routes-file=%s --routes-inline=%s",
-                        g_app.mode, g_app.protocol, g_app.ip_version, g_app.scan_mode,
-                        g_app.lan_sharing ? 1 : 0, g_app.quick_reconnect ? 1 : 0,
-                        (unsigned)g_app.socks_port, (unsigned)g_app.http_port,
-                        g_app.socks_enabled ? 1 : 0, g_app.http_enabled ? 1 : 0,
-                        g_app.h2_enabled ? 1 : 0, g_app.ech_enabled ? 1 : 0,
-                        g_app.fragment_enabled ? 1 : 0, g_app.frag_min_size, g_app.frag_max_size,
-                        g_app.frag_min_delay, g_app.frag_max_delay, g_app.noize_profile,
-                        g_app.sni, g_app.force_peer, g_app.config_path,
-                        g_app.team_name, g_app.access_token, g_app.access_email,
-                        g_app.routes_file, g_app.routes_inline);
-                    int wlen = MultiByteToWideChar(CP_UTF8, 0, params, -1, NULL, 0);
-                    std::wstring wparams(wlen, L'\0');
-                    MultiByteToWideChar(CP_UTF8, 0, params, -1, &wparams[0], wlen);
 
                     SHELLEXECUTEINFOW sei = {};
                     sei.cbSize = sizeof(sei);
                     sei.lpVerb = L"runas";
                     sei.lpFile = exe_path;
-                    sei.lpParameters = wparams.c_str();
+                    sei.lpParameters = L"";
                     sei.nShow = SW_NORMAL;
                     sei.fMask = SEE_MASK_NOASYNC;
                     if (ShellExecuteExW(&sei)) {
                         // Successfully launched elevated — close current instance.
-                        // Pop all ImGui stacks that were pushed before the early exit
-                        // to avoid ImGui stack corruption on the next frame.
                         ImGui::PopStyleColor(3);  // button colors
                         ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
                         ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
