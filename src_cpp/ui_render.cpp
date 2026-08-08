@@ -359,51 +359,57 @@ void ui_shutdown() {
 }
 
 void render_ui() {
-    // Auto-connect on startup if relaunched elevated with --auto-connect
+    // Auto-connect on startup if relaunched elevated with --auto-connect.
+    // Defer to second frame to ensure the old instance has fully exited
+    // and all resources (ports, mutexes, TUN adapter) are released.
+    static int auto_connect_frame = 0;
     if (g_app.auto_connect) {
-        g_app.auto_connect = false;  // Only fire once
-        if (!g_app.start_busy.load() && g_app.ffi_state.load() == AETHER_STATE_DISCONNECTED) {
-            g_app.start_busy.store(true);
-            struct Owned {
-                std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
-                AetherConfig c{};
-            };
-            auto o = std::unique_ptr<Owned, void(*)(Owned*)>(
-                new Owned(),
-                [](Owned* p) {
-                    g_app.start_busy.store(false);
-                    delete p;
-                }
-            );
-            o->noize = g_app.noize_profile;
-            o->peer  = g_app.force_peer;
-            o->path  = g_app.config_path;
-            o->sni   = g_app.sni;
-            o->team  = g_app.team_name;
-            o->token = g_app.access_token;
-            o->email = g_app.access_email;
-            o->routes = g_app.routes_file;
-            o->routes_inline = g_app.routes_inline;
-            o->c = g_app.to_config();
-            o->c.noize_profile = o->noize.c_str();
-            o->c.force_peer    = o->peer.empty() ? nullptr : o->peer.c_str();
-            o->c.config_path   = o->path.c_str();
-            o->c.sni           = o->sni.empty() ? nullptr : o->sni.c_str();
-            o->c.team_name     = o->team.empty() ? nullptr : o->team.c_str();
-            o->c.access_token  = o->token.empty() ? nullptr : o->token.c_str();
-            o->c.access_email  = o->email.empty() ? nullptr : o->email.c_str();
-            o->c.routes_file   = o->routes.empty() ? nullptr : o->routes.c_str();
-            o->c.routes_inline = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
-            auto* raw = o.release();
-            std::thread([raw] {
-                std::unique_ptr<Owned, void(*)(Owned*)> guard(
-                    raw, [](Owned* p) {
+        auto_connect_frame++;
+        if (auto_connect_frame >= 5) {  // Wait ~5 frames (~80ms) before connecting
+            g_app.auto_connect = false;
+            if (!g_app.start_busy.load() && g_app.ffi_state.load() == AETHER_STATE_DISCONNECTED) {
+                g_app.start_busy.store(true);
+                struct Owned {
+                    std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
+                    AetherConfig c{};
+                };
+                auto o = std::unique_ptr<Owned, void(*)(Owned*)>(
+                    new Owned(),
+                    [](Owned* p) {
                         g_app.start_busy.store(false);
                         delete p;
                     }
                 );
-                (void)aether_start(&guard->c);
-            }).detach();
+                o->noize = g_app.noize_profile;
+                o->peer  = g_app.force_peer;
+                o->path  = g_app.config_path;
+                o->sni   = g_app.sni;
+                o->team  = g_app.team_name;
+                o->token = g_app.access_token;
+                o->email = g_app.access_email;
+                o->routes = g_app.routes_file;
+                o->routes_inline = g_app.routes_inline;
+                o->c = g_app.to_config();
+                o->c.noize_profile = o->noize.c_str();
+                o->c.force_peer    = o->peer.empty() ? nullptr : o->peer.c_str();
+                o->c.config_path   = o->path.c_str();
+                o->c.sni           = o->sni.empty() ? nullptr : o->sni.c_str();
+                o->c.team_name     = o->team.empty() ? nullptr : o->team.c_str();
+                o->c.access_token  = o->token.empty() ? nullptr : o->token.c_str();
+                o->c.access_email  = o->email.empty() ? nullptr : o->email.c_str();
+                o->c.routes_file   = o->routes.empty() ? nullptr : o->routes.c_str();
+                o->c.routes_inline = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
+                auto* raw = o.release();
+                std::thread([raw] {
+                    std::unique_ptr<Owned, void(*)(Owned*)> guard(
+                        raw, [](Owned* p) {
+                            g_app.start_busy.store(false);
+                            delete p;
+                        }
+                    );
+                    (void)aether_start(&guard->c);
+                }).detach();
+            }
         }
     }
 
