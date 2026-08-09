@@ -1,6 +1,6 @@
 {
   "version": "v1.1.7",
-  "release_date": "2026-08-08",
-  "release_notes": "fix linux/macos/windows tun mode ipv6 related also go through the tunnel and dns leak fix and auto prompt on tun for windows and ipv6 support for android tun",
+  "release_date": "2026-08-09",
+  "release_notes": "fix linux/macos/windows tun mode ipv6 related also go through the tunnel and dns leak fix and auto prompt on tun for windows and ipv6 support for android/destkops tun",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
