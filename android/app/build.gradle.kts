@@ -33,13 +33,19 @@ android {
         buildConfigField("String", "APP_VERSION", "\"${appVersion}\"")
 
         // Support arm64-v8a, armeabi-v7a, and x86_64 (Chromebook/emulator).
-        // The CI workflow passes -PNDK_ABI="arm64-v8a", "armeabi-v7a", or "x86_64" as project property;
-        // if not set via -P, fall back to environment variable NDK_ABI, then default to arm64-v8a.
-        val ndkAbi = (project.findProperty("NDK_ABI") as? String)
-            ?: System.getenv("NDK_ABI")
-            ?: "arm64-v8a"
+        // The CI workflow passes -PNDK_ABI="arm64-v8a", "armeabi-v7a", "x86_64",
+        // or an empty string / -PUNIVERSAL=true for a universal APK with all ABIs.
+        // If not set via -P, fall back to environment variable NDK_ABI, then default to arm64-v8a.
+        val universal = (project.findProperty("UNIVERSAL") as? String)?.toBoolean() ?: false
+        val ndkAbi = if (universal) ""
+            else (project.findProperty("NDK_ABI") as? String)
+                ?: System.getenv("NDK_ABI")
+                ?: "arm64-v8a"
         ndk {
-            abiFilters += ndkAbi
+            if (ndkAbi.isNotEmpty()) {
+                abiFilters += ndkAbi
+            }
+            // Empty string = include all ABIs (universal APK)
         }
 
         externalNativeBuild {

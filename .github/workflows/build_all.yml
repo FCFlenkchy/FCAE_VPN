@@ -71,6 +71,13 @@ jobs:
             abi: x86_64
             cmake_args: "-DAETHER_TARGET=ANDROID_X86_64"
 
+          - target: aarch64-linux-android
+            name: android-universal
+            os: ubuntu-latest
+            abi: universal
+            universal: true
+            cmake_args: "-DAETHER_TARGET=ANDROID_ARM64"
+
           - target: aarch64-apple-darwin
             name: macos-arm64
             os: macos-latest
@@ -288,8 +295,9 @@ jobs:
 
       - name: copy pre-generated icons
         run: |
-          cp src_cpp/icon_192.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png 2>/dev/null || true
           cp src_cpp/icon_48.png android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png 2>/dev/null || true
+          cp src_cpp/icon_48.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png 2>/dev/null || true
+          cp src_cpp/icon_48.png android/app/src/main/res/drawable/ic_launcher_foreground.png 2>/dev/null || true
 
       - name: build rust (engine + ffi, in-process)
         run: |
@@ -423,7 +431,17 @@ jobs:
 
           cd android
           gradle wrapper --gradle-version 9.0
-          ./gradlew assembleRelease -PNDK_ABI=${{ matrix.abi }}
+          if [ "${{ matrix.universal }}" = "true" ]; then
+            # Build native libs for all ABIs, then assemble universal APK
+            for abi in arm64-v8a armeabi-v7a x86_64; do
+              echo "=== Building native libs for $abi ==="
+              ./gradlew assembleRelease -PNDK_ABI="$abi" -x packageRelease -x signRelease 2>&1 | tail -5
+            done
+            echo "=== Assembling universal APK ==="
+            ./gradlew assembleRelease -PUNIVERSAL=true
+          else
+            ./gradlew assembleRelease -PNDK_ABI=${{ matrix.abi }}
+          fi
 
       - name: sign apk
         if: startsWith(matrix.name, 'android-')
