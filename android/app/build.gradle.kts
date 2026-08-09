@@ -47,10 +47,13 @@ android {
                 ?: System.getenv("NDK_ABI")
                 ?: "arm64-v8a"
         ndk {
-            if (ndkAbi.isNotEmpty()) {
+            if (isAndroidUniversal) {
+                // Universal APK: explicitly include only the 3 supported ABIs
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            } else if (ndkAbi.isNotEmpty()) {
                 abiFilters += ndkAbi
             }
-            // Empty string = include all ABIs (universal APK)
+            // Empty ndkAbi without universal flag = include all ABIs (legacy)
         }
 
         externalNativeBuild {
@@ -61,7 +64,7 @@ android {
                 } else when (ndkAbi) {
                     "arm64-v8a" -> "ANDROID_ARM64"
                     "armeabi-v7a" -> "ANDROID_ARM32"
-                    "x86_64" -> "ANDROID_X86_64"
+                    "x86_64", "x86" -> "ANDROID_X86_64"
                     else -> "ANDROID_ARM64"
                 }
                 arguments += listOf(
