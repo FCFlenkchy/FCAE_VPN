@@ -336,18 +336,31 @@ jobs:
               RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
             fi
 
-            CLANG="$BIN/${NDK_CLANG_PREFIX}26-clang"
-            CLANGXX="$BIN/${NDK_CLANG_PREFIX}26-clang++"
+            # NDK r27+ may use different API-level suffixes. Try 26, 24, then no suffix.
+            for suffix in 26 24 ""; do
+              if [ -x "$BIN/${NDK_CLANG_PREFIX}${suffix}-clang" ]; then
+                export CLANG_SUFFIX="${suffix}"
+                break
+              fi
+            done
+            if [ -z "${CLANG_SUFFIX+x}" ]; then
+              echo "ERROR: could not find clang for ${NDK_CLANG_PREFIX} in $BIN"
+              ls "$BIN/${NDK_CLANG_PREFIX}"* 2>/dev/null || true
+              exit 1
+            fi
+            CLANG="$BIN/${NDK_CLANG_PREFIX}${CLANG_SUFFIX}-clang"
+            CLANGXX="$BIN/${NDK_CLANG_PREFIX}${CLANG_SUFFIX}-clang++"
 
             export "CC_${RUST_ENV_LOWER}"="$CLANG"
             export "CXX_${RUST_ENV_LOWER}"="$CLANGXX"
             export "AR_${RUST_ENV_LOWER}"="$BIN/llvm-ar"
             export "CARGO_TARGET_${RUST_ENV_UPPER}_LINKER"="$CLANG"
             export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
+            # Also set without API suffix for cc crate fallback
             ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
             ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
-            export CC="${NDK_CLANG_PREFIX}26-clang"
-            export CXX="${NDK_CLANG_PREFIX}26-clang++"
+            export CC="$CLANG"
+            export CXX="$CLANGXX"
             export AR=llvm-ar
 
             export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
