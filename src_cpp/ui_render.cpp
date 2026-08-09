@@ -343,10 +343,9 @@ void ui_frame() {
 }
 
 void ui_shutdown() {
-    // aether_free() does synchronous shutdown: signals the engine thread,
-    // closes TUN fds, and calls force_cleanup_windows (which restores DNS,
-    // kills tun2socks, and removes TUN adapters). This MUST complete before
-    // ExitProcess or the spawned thread from aether_stop() gets killed.
+    // aether_free() signals shutdown, closes TUN fds, and calls
+    // force_cleanup_windows synchronously (restores DNS, kills tun2socks,
+    // removes TUN adapter). This MUST complete before ExitProcess.
     aether_free();
 #if defined(_WIN32)
     ExitProcess(0);
