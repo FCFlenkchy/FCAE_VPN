@@ -158,6 +158,15 @@ pub fn force_cleanup_windows(name: &str) {
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+    // In proxy mode there is no TUN adapter, no DNS override, and no
+    // tun2socks process. Skip all cleanup to avoid unnecessarily resetting
+    // the user's DNS settings to DHCP.
+    let mode = std::env::var("AETHER_MODE").unwrap_or_default();
+    if mode != "tun" {
+        log::debug!("[tun_t2s] force_cleanup_windows: skipping (mode={})", mode);
+        return;
+    }
+
     let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
         let mut c = Command::new(cmd);
         c.creation_flags(CREATE_NO_WINDOW);
