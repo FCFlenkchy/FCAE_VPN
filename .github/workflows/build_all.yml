@@ -363,9 +363,22 @@ jobs:
             export CXX="$CLANGXX"
             export AR=llvm-ar
 
+            # Also set hyphenated versions for cc crate (it uses CC_aarch64-linux-android format)
+            export "CC_${NDK_CLANG_PREFIX}"="$CLANG"
+            export "CXX_${NDK_CLANG_PREFIX}"="$CLANGXX"
+
             export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
             export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
             export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+
+            # Write a temporary cargo config to force the correct linker
+            mkdir -p .cargo
+            cat >> .cargo/config.toml << EOF
+[target.${{ matrix.target }}]
+linker = "${CLANG}"
+rustflags = ["-C", "link-arg=--sysroot=${PREBUILT}/sysroot"]
+EOF
+            cat .cargo/config.toml
 
             echo "Using NDK: $NDK"
             "$CLANG" --version | head -1
