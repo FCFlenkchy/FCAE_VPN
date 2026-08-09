@@ -373,11 +373,11 @@ jobs:
 
             # Write a temporary cargo config to force the correct linker
             mkdir -p .cargo
-            cat >> .cargo/config.toml << EOF
-[target.${{ matrix.target }}]
-linker = "${CLANG}"
-rustflags = ["-C", "link-arg=--sysroot=${PREBUILT}/sysroot"]
-EOF
+            {
+              printf '%s\n' "[target.${{ matrix.target }}]"
+              printf '%s\n' "linker = \"${CLANG}\""
+              printf '%s\n' "rustflags = [\"-C\", \"link-arg=--sysroot=${PREBUILT}/sysroot\"]"
+            } >> .cargo/config.toml
             cat .cargo/config.toml
 
             echo "Using NDK: $NDK"
