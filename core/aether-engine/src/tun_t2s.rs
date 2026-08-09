@@ -154,14 +154,6 @@ pub fn is_available() -> bool {
 /// and DNS is restored even when the runtime is being torn down.
 #[cfg(target_os = "windows")]
 pub fn force_cleanup_windows(name: &str) {
-    // Only run cleanup if TUN mode was active. In proxy mode there's no
-    // TUN adapter, no DNS override, and no tun2socks process to kill.
-    let mode = std::env::var("AETHER_MODE").unwrap_or_default();
-    if mode != "tun" {
-        log::debug!("[tun_t2s] force_cleanup_windows: skipping (mode={})", mode);
-        return;
-    }
-
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
