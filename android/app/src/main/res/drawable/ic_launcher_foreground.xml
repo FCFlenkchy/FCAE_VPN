@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Blue circle background -->
+    <path
+        android:fillColor="#1A3A5C"
+        android:pathData="M54,14 C76.1,14 94,31.9 94,54 C94,76.1 76.1,94 54,94 C31.9,94 14,76.1 14,54 C14,31.9 31.9,14 54,14 Z"/>
+    <!-- Border ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#224466"
+        android:strokeWidth="1.5"
+        android:pathData="M54,15 C75.5,15 93,32.5 93,54 C93,75.5 75.5,93 54,93 C32.5,93 15,75.5 15,54 C15,32.5 32.5,15 54,15 Z"/>
+    <!-- Letter F -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M33,36 L33,72 M33,36 L48,36 M33,52 L43,52"/>
+    <!-- Letter C -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:pathData="M69,42 C65,38 60,36 56,36 C51,36 47,40 47,46 C47,52 47,56 47,62 C47,68 51,72 56,72 C60,72 65,70 69,66"/>
+    <!-- Letter A -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M73,72 L77,54 L86,54 L76,36 L70,36 L60,54 L69,54 L73,72 Z M67,60 L85,60 L83,64 L69,64 Z"/>
+    <!-- Letter E -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M88,38 L88,70 M88,38 L78,38 M88,54 L82,54 M88,70 L78,70"/>
+</vector>
