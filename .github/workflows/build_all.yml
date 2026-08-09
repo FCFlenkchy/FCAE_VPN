@@ -283,7 +283,7 @@ jobs:
         if: startsWith(matrix.name, 'android-')
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27c
+          ndk-version: r26d
           link-to-sdk: true
 
       - name: fetch imgui
@@ -336,8 +336,8 @@ jobs:
               RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
             fi
 
-            CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
-            CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
+            CLANG="$BIN/${NDK_CLANG_PREFIX}26-clang"
+            CLANGXX="$BIN/${NDK_CLANG_PREFIX}26-clang++"
 
             export "CC_${RUST_ENV_LOWER}"="$CLANG"
             export "CXX_${RUST_ENV_LOWER}"="$CLANGXX"
@@ -346,8 +346,8 @@ jobs:
             export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
             ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
             ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
-            export CC="${NDK_CLANG_PREFIX}24-clang"
-            export CXX="${NDK_CLANG_PREFIX}24-clang++"
+            export CC="${NDK_CLANG_PREFIX}26-clang"
+            export CXX="${NDK_CLANG_PREFIX}26-clang++"
             export AR=llvm-ar
 
             export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
