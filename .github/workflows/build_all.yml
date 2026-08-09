@@ -426,6 +426,24 @@ jobs:
               ls -lh "$DEST"
               test -f "$DEST"
             fi
+          else
+            # Non-Android builds (linux, windows, macos)
+            cargo build --manifest-path core/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
+
+            DEST="$(pwd)/target/${{ matrix.target }}/release/libaether_ffi.a"
+            mkdir -p "$(dirname "$DEST")"
+            if [ ! -f "$DEST" ]; then
+              for f in \
+                "$(pwd)/core/target/${{ matrix.target }}/release/libaether_ffi.a" \
+                "$(pwd)/core/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a"; do
+                if [ -f "$f" ] && [ "$(realpath "$f" 2>/dev/null || echo "$f")" != "$(realpath "$DEST" 2>/dev/null || echo "$DEST")" ]; then
+                  cp -f "$f" "$DEST"
+                  break
+                fi
+              done
+            fi
+            ls -lh "$DEST"
+            test -f "$DEST"
           fi
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
