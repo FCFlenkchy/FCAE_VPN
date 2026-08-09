@@ -283,7 +283,7 @@ jobs:
         if: startsWith(matrix.name, 'android-')
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r26d
+          ndk-version: r27c
           link-to-sdk: true
 
       - name: fetch imgui
