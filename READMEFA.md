@@ -166,7 +166,7 @@ cmake --build build --config Release
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — کتابخانه رابط گرافیکی حالت فوری. برای تمام رندرهای بومی دسکتاپ استفاده می‌شود.
 - **[Quiche](https://github.com/cloudflare/quiche)** — پیاده‌سازی HTTP/3 و QUIC کلادفلر. به‌عنوان بک‌اند حمل‌ونقل QUIC برای پشتیبانی از پروتکل MASQUE استفاده می‌شود.
 - **[Wintun](https://www.wintun.net/)** — یک درایور TUN برای ویندوز ساخته‌شده توسط WireGuard. یک رابط شبکه با کارایی بالا در لایه ۳ برای تونل کردن ترافیک فراهم می‌کند.
-- **[tun2socks](https://github.com/xjasonlyu/tun2socks)** — یک کتابخانه Go که ترافیک دستگاه TUN را به‌صورت شفاف از طریق پروکسی SOCKS5 مسیریابی می‌کند. قدرت‌دهنده حالت TUN VPN در سطح سیستم.
+- **[tun2socks](https://github.com/xjasonlyu/tun2socks)** — یک کتابخانه Go که ترافیک دستگاه TUN را به‌صورت شفاف از طریق پروکسی SOCKS5 مسیریابی می‌کند. قدرت‌دهنده حالت TUN VPN در سطح سیستم در لینوکس، ویندوز و مک (اندروید از پیاده‌سازی سفارشی TUN استفاده می‌کند).
 
 ## مشارکت
 

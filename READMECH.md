@@ -166,7 +166,7 @@ cmake --build build --config Release
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — 即时模式 GUI 库，用于所有原生桌面渲染。
 - **[Quiche](https://github.com/cloudflare/quiche)** — Cloudflare 的 HTTP/3 和 QUIC 实现。作为 MASQUE 协议支持的 QUIC 传输后端。
 - **[Wintun](https://www.wintun.net/)** — 由 WireGuard 开发的 Windows TUN 驱动程序。提供高性能的第 3 层网络接口，用于隧道传输流量。
-- **[tun2socks](https://github.com/xjasonlyu/tun2socks)** — 一个 Go 库，可透明地将 TUN 设备流量通过 SOCKS5 代理路由。为系统级 VPN TUN 模式提供支持。
+- **[tun2socks](https://github.com/xjasonlyu/tun2socks)** — 一个 Go 库，可透明地将 TUN 设备流量通过 SOCKS5 代理路由。为 Linux、Windows 和 macOS 上的系统级 VPN TUN 模式提供支持（Android 使用自定义 TUN 实现）。
 
 ## 贡献
 
