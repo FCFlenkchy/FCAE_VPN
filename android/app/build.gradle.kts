@@ -37,7 +37,12 @@ android {
         // or an empty string / -PUNIVERSAL=true for a universal APK with all ABIs.
         // If not set via -P, fall back to environment variable NDK_ABI, then default to arm64-v8a.
         val universal = (project.findProperty("UNIVERSAL") as? String)?.toBoolean() ?: false
-        val ndkAbi = if (universal) ""
+        val buildType = (project.findProperty("BUILD_TYPE") as? String)
+            ?: System.getenv("BUILD_TYPE")
+            ?: ""
+        val isAndroidUniversal = buildType == "android_universal"
+        
+        val ndkAbi = if (universal || isAndroidUniversal) ""
             else (project.findProperty("NDK_ABI") as? String)
                 ?: System.getenv("NDK_ABI")
                 ?: "arm64-v8a"
@@ -51,7 +56,9 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += listOf("-std=c++17", "-O3", "-fPIC", "-flto", "-DNDEBUG")
-                val cmakeTarget = when (ndkAbi) {
+                val cmakeTarget = if (isAndroidUniversal) {
+                    "ANDROID_UNIVERSAL"
+                } else when (ndkAbi) {
                     "arm64-v8a" -> "ANDROID_ARM64"
                     "armeabi-v7a" -> "ANDROID_ARM32"
                     "x86_64" -> "ANDROID_X86_64"

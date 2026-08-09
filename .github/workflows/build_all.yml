@@ -71,6 +71,13 @@ jobs:
             abi: x86_64
             cmake_args: "-DAETHER_TARGET=ANDROID_X86_64"
 
+          - target: x86_64-linux-android
+            name: android-universal
+            os: ubuntu-latest
+            abi: ""
+            build_type: android_universal
+            cmake_args: "-DAETHER_TARGET=ANDROID_UNIVERSAL"
+
           - target: aarch64-apple-darwin
             name: macos-arm64
             os: macos-latest
@@ -308,58 +315,118 @@ jobs:
             export ANDROID_NDK_HOME="$NDK"
             export ANDROID_NDK_ROOT="$NDK"
 
-            if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
-              NDK_CLANG_PREFIX=aarch64-linux-android
-              RUST_ENV_LOWER=aarch64_linux_android
-              RUST_ENV_UPPER=AARCH64_LINUX_ANDROID
-            elif [ "${{ matrix.name }}" = "android-x86_64" ]; then
-              NDK_CLANG_PREFIX=x86_64-linux-android
-              RUST_ENV_LOWER=x86_64_linux_android
-              RUST_ENV_UPPER=X86_64_LINUX_ANDROID
+            if [ "${{ matrix.name }}" = "android-universal" ]; then
+              # Build all three Android targets for universal APK
+              echo "Building Rust for all Android ABIs (universal)..."
+              
+              for TARGET_TRIPLE in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
+                echo "  -> Building for $TARGET_TRIPLE"
+                
+                if [ "$TARGET_TRIPLE" = "aarch64-linux-android" ]; then
+                  NDK_CLANG_PREFIX=aarch64-linux-android
+                  RUST_ENV_LOWER=aarch64_linux_android
+                  RUST_ENV_UPPER=AARCH64_LINUX_ANDROID
+                elif [ "$TARGET_TRIPLE" = "x86_64-linux-android" ]; then
+                  NDK_CLANG_PREFIX=x86_64-linux-android
+                  RUST_ENV_LOWER=x86_64_linux_android
+                  RUST_ENV_UPPER=X86_64_LINUX_ANDROID
+                else
+                  NDK_CLANG_PREFIX=armv7a-linux-androideabi
+                  RUST_ENV_LOWER=armv7_linux_androideabi
+                  RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
+                fi
+                
+                CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
+                CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
+                
+                export "CC_${RUST_ENV_LOWER}"="$CLANG"
+                export "CXX_${RUST_ENV_LOWER}"="$CLANGXX"
+                export "AR_${RUST_ENV_LOWER}"="$BIN/llvm-ar"
+                export "CARGO_TARGET_${RUST_ENV_UPPER}_LINKER"="$CLANG"
+                export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
+                ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
+                ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
+                export CC="${NDK_CLANG_PREFIX}24-clang"
+                export CXX="${NDK_CLANG_PREFIX}24-clang++"
+                export AR=llvm-ar
+                
+                export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+                export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+                export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+                
+                cargo build --manifest-path core/Cargo.toml --release --target "$TARGET_TRIPLE" -p aether-ffi
+                
+                DEST="$(pwd)/target/$TARGET_TRIPLE/release/libaether_ffi.a"
+                mkdir -p "$(dirname "$DEST")"
+                if [ ! -f "$DEST" ]; then
+                  for f in \
+                    "$(pwd)/core/target/$TARGET_TRIPLE/release/libaether_ffi.a" \
+                    "$(pwd)/core/aether-ffi/target/$TARGET_TRIPLE/release/libaether_ffi.a"; do
+                    if [ -f "$f" ] && [ "$(realpath "$f" 2>/dev/null || echo "$f")" != "$(realpath "$DEST" 2>/dev/null || echo "$DEST")" ]; then
+                      cp -f "$f" "$DEST"
+                      break
+                    fi
+                  done
+                fi
+                ls -lh "$DEST"
+                test -f "$DEST"
+              done
+              echo "All Android Rust targets built successfully"
             else
-              NDK_CLANG_PREFIX=armv7a-linux-androideabi
-              RUST_ENV_LOWER=armv7_linux_androideabi
-              RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
-            fi
-
-            CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
-            CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
-
-            export "CC_${RUST_ENV_LOWER}"="$CLANG"
-            export "CXX_${RUST_ENV_LOWER}"="$CLANGXX"
-            export "AR_${RUST_ENV_LOWER}"="$BIN/llvm-ar"
-            export "CARGO_TARGET_${RUST_ENV_UPPER}_LINKER"="$CLANG"
-            export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
-            ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
-            ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
-            export CC="${NDK_CLANG_PREFIX}24-clang"
-            export CXX="${NDK_CLANG_PREFIX}24-clang++"
-            export AR=llvm-ar
-
-            export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-            export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-            export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-
-            echo "Using NDK: $NDK"
-            "$CLANG" --version | head -1
-          fi
-
-          cargo build --manifest-path core/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
-
-          DEST="$(pwd)/target/${{ matrix.target }}/release/libaether_ffi.a"
-          mkdir -p "$(dirname "$DEST")"
-          if [ ! -f "$DEST" ]; then
-            for f in \
-              "$(pwd)/core/target/${{ matrix.target }}/release/libaether_ffi.a" \
-              "$(pwd)/core/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a"; do
-              if [ -f "$f" ] && [ "$(realpath "$f" 2>/dev/null || echo "$f")" != "$(realpath "$DEST" 2>/dev/null || echo "$DEST")" ]; then
-                cp -f "$f" "$DEST"
-                break
+              # Single-ABI build (original logic)
+              if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
+                NDK_CLANG_PREFIX=aarch64-linux-android
+                RUST_ENV_LOWER=aarch64_linux_android
+                RUST_ENV_UPPER=AARCH64_LINUX_ANDROID
+              elif [ "${{ matrix.name }}" = "android-x86_64" ]; then
+                NDK_CLANG_PREFIX=x86_64-linux-android
+                RUST_ENV_LOWER=x86_64_linux_android
+                RUST_ENV_UPPER=X86_64_LINUX_ANDROID
+              else
+                NDK_CLANG_PREFIX=armv7a-linux-androideabi
+                RUST_ENV_LOWER=armv7_linux_androideabi
+                RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
               fi
-            done
+
+              CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
+              CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
+
+              export "CC_${RUST_ENV_LOWER}"="$CLANG"
+              export "CXX_${RUST_ENV_LOWER}"="$CLANGXX"
+              export "AR_${RUST_ENV_LOWER}"="$BIN/llvm-ar"
+              export "CARGO_TARGET_${RUST_ENV_UPPER}_LINKER"="$CLANG"
+              export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
+              ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
+              ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
+              export CC="${NDK_CLANG_PREFIX}24-clang"
+              export CXX="${NDK_CLANG_PREFIX}24-clang++"
+              export AR=llvm-ar
+
+              export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+              export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+              export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+
+              echo "Using NDK: $NDK"
+              "$CLANG" --version | head -1
+              
+              cargo build --manifest-path core/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
+
+              DEST="$(pwd)/target/${{ matrix.target }}/release/libaether_ffi.a"
+              mkdir -p "$(dirname "$DEST")"
+              if [ ! -f "$DEST" ]; then
+                for f in \
+                  "$(pwd)/core/target/${{ matrix.target }}/release/libaether_ffi.a" \
+                  "$(pwd)/core/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a"; do
+                  if [ -f "$f" ] && [ "$(realpath "$f" 2>/dev/null || echo "$f")" != "$(realpath "$DEST" 2>/dev/null || echo "$DEST")" ]; then
+                    cp -f "$f" "$DEST"
+                    break
+                  fi
+                done
+              fi
+              ls -lh "$DEST"
+              test -f "$DEST"
+            fi
           fi
-          ls -lh "$DEST"
-          test -f "$DEST"
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -417,7 +484,11 @@ jobs:
 
           cd android
           gradle wrapper --gradle-version 9.0
-          ./gradlew assembleRelease -PNDK_ABI=${{ matrix.abi }}
+          if [ "${{ matrix.name }}" = "android-universal" ]; then
+            ./gradlew assembleRelease -PUNIVERSAL=true -PBUILD_TYPE=android_universal
+          else
+            ./gradlew assembleRelease -PNDK_ABI=${{ matrix.abi }}
+          fi
 
       - name: sign apk
         if: startsWith(matrix.name, 'android-')

@@ -195,6 +195,49 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_X86_64")
     )
     target_link_options(fcaevpn_native PRIVATE -Wl,--export-dynamic)
 
+elseif(AETHER_TARGET STREQUAL "ANDROID_UNIVERSAL")
+
+    # Universal Android build — all ABIs in a single APK.
+    # Each ABI variant is compiled separately by CMake (via ANDROID_ABI loop in build.gradle).
+    # This branch acts as a fallback/sentinel; actual ABI selection happens in the
+    # Gradle script which invokes CMake once per ABI with the correct ANDROID_ABI.
+    # We default to arm64-v8a here just so CMake configuration succeeds.
+    message(STATUS "ANDROID_UNIVERSAL: building for all Android ABIs (arm64-v8a, armeabi-v7a, x86_64)")
+    
+    add_library(fcaevpn_native SHARED
+        ${CMAKE_SOURCE_DIR}/src_cpp/android_jni.cpp
+    )
+
+    target_include_directories(fcaevpn_native PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src_cpp
+    )
+
+    target_compile_definitions(fcaevpn_native PRIVATE
+        ANDROID
+        AETHER_TARGET_ANDROID_UNIVERSAL
+    )
+
+    find_library(log-lib log)
+    find_library(android-lib android)
+
+    # Try to find any available ABI lib; Gradle will handle per-ABI builds
+    if(ANDROID_ABI STREQUAL "arm64-v8a")
+        aether_ffi_lib_path(AETHER_FFI_A aarch64-linux-android)
+    elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+        aether_ffi_lib_path(AETHER_FFI_A armv7-linux-androideabi)
+    elseif(ANDROID_ABI STREQUAL "x86_64")
+        aether_ffi_lib_path(AETHER_FFI_A x86_64-linux-android)
+    else()
+        aether_ffi_lib_path(AETHER_FFI_A aarch64-linux-android)
+    endif()
+    aether_link_ffi(fcaevpn_native "${AETHER_FFI_A}")
+
+    target_link_libraries(fcaevpn_native PRIVATE
+        ${log-lib} ${android-lib} m
+    )
+    target_link_options(fcaevpn_native PRIVATE -Wl,--export-dynamic)
+
 elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     add_executable(fcaevpn
@@ -394,7 +437,7 @@ elseif(UNIX)
 endif()
 
 # ── Common compile flags ─────────────────────────────────────────────────
-if(AETHER_TARGET STREQUAL "ANDROID_ARM64" OR AETHER_TARGET STREQUAL "ANDROID_ARM32" OR AETHER_TARGET STREQUAL "ANDROID_X86_64")
+if(AETHER_TARGET STREQUAL "ANDROID_ARM64" OR AETHER_TARGET STREQUAL "ANDROID_ARM32" OR AETHER_TARGET STREQUAL "ANDROID_X86_64" OR AETHER_TARGET STREQUAL "ANDROID_UNIVERSAL")
     set(AETHER_COMPILE_TARGET fcaevpn_native)
 else()
     set(AETHER_COMPILE_TARGET fcaevpn)
