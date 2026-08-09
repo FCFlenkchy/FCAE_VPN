@@ -343,15 +343,12 @@ void ui_frame() {
 }
 
 void ui_shutdown() {
-    aether_stop();
-    // aether_stop() already spawned force_cleanup_windows which handles
-    // DNS restore, route cleanup, and TUN adapter deletion. Calling
-    // aether_free() here would run a duplicate synchronous cleanup.
-    // Instead just detach the engine thread and exit immediately.
-#if defined(_WIN32)
-    // Take the engine thread handle without joining (same effect as
-    // aether_free but without the duplicate force_cleanup_windows call).
+    // aether_free() does synchronous shutdown: signals the engine thread,
+    // closes TUN fds, and calls force_cleanup_windows (which restores DNS,
+    // kills tun2socks, and removes TUN adapters). This MUST complete before
+    // ExitProcess or the spawned thread from aether_stop() gets killed.
     aether_free();
+#if defined(_WIN32)
     ExitProcess(0);
 #endif
 }

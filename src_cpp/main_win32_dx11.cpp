@@ -48,12 +48,10 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
             break;
         case WM_CLOSE:
-            // User clicked X button — trigger engine shutdown BEFORE
-            // the window is destroyed.  This gives the engine time to
-            // kill tun2socks and clean up before the message loop exits.
+            // User clicked X button — set running=false so the message
+            // loop exits, then ui_shutdown() will call aether_free() which
+            // does synchronous DNS restore and cleanup.
             g_app.running.store(false);
-            aether_stop();
-            // Fall through to DestroyWindow which will trigger WM_DESTROY
             DestroyWindow(hWnd);
             return 0;
         case WM_DESTROY:
