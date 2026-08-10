@@ -1,6 +1,6 @@
 {
-  "version": "v1.1.9",
-  "release_date": "2026-08-09",
-  "release_notes": "android universal build",
+  "version": "v1.2.0",
+  "release_date": "2026-08-10",
+  "release_notes": "fix exiting from the windows when connected dosnt stops the tun",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
