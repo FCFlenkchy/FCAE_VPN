@@ -884,16 +884,6 @@ pub extern "C" fn aether_stop() {
     // the last dup'd fd is closed.
     aether_engine::tun::close_all_fds();
 
-    // ── Emergency cleanup: force-kill tun2socks and remove TUN adapters ──
-    #[cfg(target_os = "windows")]
-    {
-        if !FORCE_CLEANUP_DONE.swap(true, Ordering::SeqCst) {
-            std::thread::spawn(|| {
-                aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
-            });
-        }
-    }
-
     // Update telemetry immediately so the UI shows DISCONNECTED without
     // waiting for the engine thread to finish.
     let mut t = TELEMETRY.lock();
@@ -1178,9 +1168,11 @@ pub extern "C" fn aether_free() {
     aether_engine::tun::close_all_fds();
     #[cfg(target_os = "windows")]
     {
-        if !FORCE_CLEANUP_DONE.swap(true, Ordering::SeqCst) {
-            aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
-        }
+        // Always run force cleanup on aether_free() — this is the final
+        // exit path (ui_shutdown).  Set the done flag BEFORE calling
+        // cleanup so the engine thread (if still running) won't race.
+        FORCE_CLEANUP_DONE.store(true, Ordering::SeqCst);
+        aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
     }
 
     let mut t = TELEMETRY.lock();
