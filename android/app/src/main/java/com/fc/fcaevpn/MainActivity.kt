@@ -698,7 +698,7 @@ class MainActivity : AppCompatActivity() {
     }, "Disconnect-Background").start()
 }
 
-    // Auto-disconnect on error: polls until error log arrives from JNI, then disconnects
+    // Auto-disconnect on error: waits briefly then grabs logs + injects error reason
     private fun autoDisconnectOnError(errorReason: String) {
         userInitiatedDisconnect = true
 
@@ -713,13 +713,16 @@ class MainActivity : AppCompatActivity() {
         statsText.text = ""
         peerText.text = ""
 
-        // 2. Wait 200ms for Rust error logs to reach JNI callback, then grab and show them.
+        // 2. Wait 150ms for any pending Rust logs, then grab + inject error, then disconnect.
         val currentMode = spinnerMode.selectedItemPosition
         Thread({
             try { Thread.sleep(150) } catch (_: Throwable) {}
-            // Grab logs now — error callback has had time to deliver
+            // Grab logs and ALWAYS append the error reason so it's visible
             try {
-                val logs = NativeEngine.nativeGetLogs()
+                var logs = NativeEngine.nativeGetLogs()
+                if (errorReason.isNotEmpty()) {
+                    logs = logs + "E $errorReason\n"
+                }
                 if (switchLogging.isChecked && logs.isNotEmpty()) {
                     val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
                     handler.post {
