@@ -710,7 +710,7 @@ class MainActivity : AppCompatActivity() {
         // 2. Wait 200ms for Rust error logs to reach JNI callback, then grab and show them.
         val currentMode = spinnerMode.selectedItemPosition
         Thread({
-            try { Thread.sleep(200) } catch (_: Throwable) {}
+            try { Thread.sleep(150) } catch (_: Throwable) {}
             // Grab logs now — error callback has had time to deliver
             try {
                 val logs = NativeEngine.nativeGetLogs()
