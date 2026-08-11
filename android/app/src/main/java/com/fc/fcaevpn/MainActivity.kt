@@ -365,6 +365,29 @@ class MainActivity : AppCompatActivity() {
                     updateButton()
                 }
             }
+
+            // Auto-trigger update check once on app open
+            try {
+                NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION)
+                // Poll for result and cache it for the button
+                for (i in 0..20) {
+                    Thread.sleep(500)
+                    val info = NativeEngine.nativePollUpdate()
+                    if (info.checkDone) {
+                        handler.post {
+                            if (info.updateAvailable) {
+                                btnCheckUpdates.text = "Update Available!"
+                                updateStatus.visibility = android.view.View.VISIBLE
+                                updateStatus.text = info.statusMessage
+                                updateAvailableInfo = info
+                            } else {
+                                updateAvailableInfo = null
+                            }
+                        }
+                        break
+                    }
+                }
+            } catch (_: Throwable) {}
         }
     }
 
@@ -397,7 +420,9 @@ class MainActivity : AppCompatActivity() {
                             vpnActive = true
                             engineRunning = true
                             connecting = state in 1..3
+                            updateButton()
                             handler.removeCallbacks(poll)
+                            // Force an immediate poll tick to refresh UI instantly
                             handler.post(poll)
                         } else {
                             // Engine died while we were in background
@@ -407,15 +432,40 @@ class MainActivity : AppCompatActivity() {
                             updateButton()
                             statusText.text = "DISCONNECTED"
                             statusText.setTextColor(Color.parseColor("#8A93A6"))
+                            statsText.text = ""
+                            peerText.text = ""
                         }
                     }
                 } catch (_: Throwable) {
                     handler.post {
                         vpnActive = false
                         engineRunning = false
+                        connecting = false
                         updateButton()
+                        statusText.text = "DISCONNECTED"
+                        statusText.setTextColor(Color.parseColor("#8A93A6"))
+                        statsText.text = ""
+                        peerText.text = ""
                     }
                 }
+            }
+        } else {
+            // Even if no local flag is set, double-check native state
+            // in case the engine was started externally (e.g., from notification)
+            bgExecutor.execute {
+                try {
+                    val state = NativeEngine.nativeGetState()
+                    if (state in 1..4) {
+                        handler.post {
+                            vpnActive = true
+                            engineRunning = true
+                            connecting = state in 1..3
+                            updateButton()
+                            handler.removeCallbacks(poll)
+                            handler.post(poll)
+                        }
+                    }
+                } catch (_: Throwable) {}
             }
         }
     }
@@ -785,6 +835,12 @@ class MainActivity : AppCompatActivity() {
                     connecting = false
                     handler.removeCallbacks(poll)
                 }
+                // Auto-disconnect on error: if engine enters error state,
+                // automatically disconnect so user doesn't have to manually click.
+                if (state == 5) {
+                    handler.post { disconnectAll() }
+                    return  // skip rendering this frame, disconnectAll handles UI
+                }
             }
 
             val label = when (state) {
@@ -796,7 +852,13 @@ class MainActivity : AppCompatActivity() {
                 5 -> "ERROR"
                 else -> "UNKNOWN"
             }
-            statusText.text = if (statusMsg.isNotEmpty()) "$label \u2014 $statusMsg" else label
+            // If error state, show the error message directly instead of label + message concatenation
+            // which causes double display ("ERROR — Error: ..." then again in peerText)
+            if (state == 5 && errMsg.isNotEmpty()) {
+                statusText.text = "ERROR: $errMsg"
+            } else {
+                statusText.text = if (statusMsg.isNotEmpty()) "$label \u2014 $statusMsg" else label
+            }
             statusText.setTextColor(
                 when (state) {
                     4 -> COLOR_CONNECTED
@@ -822,7 +884,8 @@ class MainActivity : AppCompatActivity() {
                     peerLine.append("\nLAN: $ports")
                 }
             }
-            if (errMsg.isNotEmpty()) peerLine.append("\nError: $errMsg")
+            // Only append error here if not already shown in statusText (state 5 = ERROR)
+            if (errMsg.isNotEmpty() && state != 5) peerLine.append("\nError: $errMsg")
             peerText.text = peerLine.toString()
 
             // Fast change detection: length + first/last chars is cheaper

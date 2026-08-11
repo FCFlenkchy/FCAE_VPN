@@ -336,6 +336,9 @@ void ui_init() {
     }
     g_app.add_log(4, ("[ui] settings file: " + get_config_path()).c_str());
     g_app.add_log(4, (std::string("[ui] identity file: ") + g_app.config_path).c_str());
+
+    // Auto-trigger update check once on startup
+    aether_check_update_async(FCAE_VERSION);
 }
 
 void ui_frame() {
@@ -383,6 +386,21 @@ void render_ui() {
                       || g_app.start_busy.load();
     bool errored    = (cur == AETHER_STATE_ERROR);
 
+    // Auto-disconnect on error: if engine entered error state while we thought
+    // it was running, automatically stop it so the UI flips back to disconnected.
+    static bool was_running = false;
+    if (errored && was_running) {
+        g_app.start_busy.store(false);
+        aether_stop();
+        g_app.ffi_state.store(AETHER_STATE_DISCONNECTED);
+        cur = AETHER_STATE_DISCONNECTED;
+        connected = false;
+        busy = false;
+        errored = false;
+        g_app.add_log(3, "[ui] auto-disconnected due to error");
+    }
+    was_running = (connected || busy);
+
     // ── 1. STATUS BAR + ACTIONS ──────────────────────────────────────────
     {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
@@ -398,7 +416,12 @@ void render_ui() {
         ImGui::PopStyleColor();
         ImGui::SameLine(0, 10);
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
-        ImGui::Text("%s", state_label(cur));
+        // If errored and we have an error message, show it instead of just "ERROR"
+        if (errored && telem.last_error[0]) {
+            ImGui::Text("ERROR: %s", telem.last_error);
+        } else {
+            ImGui::Text("%s", state_label(cur));
+        }
         ImGui::PopStyleColor();
 
         if (busy) { ImGui::SameLine(0, 8); draw_spinner(7.0f, 14, 7.0f); }
@@ -456,12 +479,16 @@ void render_ui() {
                         g_app.add_log(3, "[ui] TUN mode requires administrator privileges. Please run as Administrator.");
                         ImGui::PopStyleColor(3);  // button colors
                         ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
+                        ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
+                        ImGui::End();
                         return;
                     }
 #else
                     g_app.add_log(3, "[ui] TUN mode requires root privileges. Please run with sudo.");
                     ImGui::PopStyleColor(3);  // button colors
                     ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
+                    ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
+                    ImGui::End();
                     return;
 #endif
                 }
@@ -657,10 +684,7 @@ void render_ui() {
         ImGui::PopStyleVar(2);
     }
 
-    if (errored && telem.last_error[0]) {
-        ImGui::Spacing();
-        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Error: %s", telem.last_error);
-    }
+    // Error message is now shown inline in the status bar above (avoids double display)
 
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
