@@ -57,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchLogging: SwitchMaterial
     private lateinit var switchSocks: SwitchMaterial
     private lateinit var switchHttp: SwitchMaterial
+    private lateinit var switchAutoUpdate: SwitchMaterial
     private lateinit var spinnerSysprofile: Spinner
     private lateinit var editSni: android.widget.EditText
     private lateinit var editForcePeer: android.widget.EditText
@@ -231,6 +232,7 @@ class MainActivity : AppCompatActivity() {
         switchLogging = findViewById(R.id.switchLogging)
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
+        switchAutoUpdate = findViewById(R.id.switchAutoUpdate)
         spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
         editSni = findViewById(R.id.editSni)
         editForcePeer = findViewById(R.id.editForcePeer)
@@ -366,9 +368,11 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Auto-trigger update check once on app open (non-blocking)
+            // Auto-trigger update check once on app open if enabled
             handler.post {
-                checkForUpdates()
+                if (switchAutoUpdate.isChecked) {
+                    checkForUpdates()
+                }
             }
         }
     }
@@ -476,6 +480,7 @@ class MainActivity : AppCompatActivity() {
             putBoolean("logging", switchLogging.isChecked)
             putBoolean("socks", switchSocks.isChecked)
             putBoolean("http", switchHttp.isChecked)
+            putBoolean("autoUpdate", switchAutoUpdate.isChecked)
             putString("sni", editSni.text.toString().trim())
             putString("forcePeer", editForcePeer.text.toString().trim())
             putInt("sysprofile", spinnerSysprofile.selectedItemPosition)
@@ -503,6 +508,7 @@ class MainActivity : AppCompatActivity() {
         switchLogging.isChecked = prefs.getBoolean("logging", true)
         switchSocks.isChecked = prefs.getBoolean("socks", true)
         switchHttp.isChecked = prefs.getBoolean("http", true)
+        switchAutoUpdate.isChecked = prefs.getBoolean("autoUpdate", true)
         editSni.setText(prefs.getString("sni", ""))
         editForcePeer.setText(prefs.getString("forcePeer", ""))
         spinnerSysprofile.setSelection(prefs.getInt("sysprofile", 0))

@@ -138,6 +138,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         snprintf(g_app.sni, sizeof(g_app.sni), "%s", val.c_str());
     else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
+    else if (key == "auto_update_check") g_app.auto_update_check = atoi(val.c_str()) != 0;
     else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
     else if (key == "team_name")
         snprintf(g_app.team_name, sizeof(g_app.team_name), "%s", val.c_str());
@@ -187,6 +188,7 @@ static void save_config() {
     fprintf(f, "sni=%s\n", g_app.sni);
     fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
     fprintf(f, "auto_scroll=%d\n", g_app.auto_scroll ? 1 : 0);
+    fprintf(f, "auto_update_check=%d\n", g_app.auto_update_check ? 1 : 0);
     fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
     fprintf(f, "team_name=%s\n", g_app.team_name);
     fprintf(f, "access_token=%s\n", g_app.access_token);
@@ -337,8 +339,10 @@ void ui_init() {
     g_app.add_log(4, ("[ui] settings file: " + get_config_path()).c_str());
     g_app.add_log(4, (std::string("[ui] identity file: ") + g_app.config_path).c_str());
 
-    // Auto-trigger update check once on startup
-    aether_check_update_async(FCAE_VERSION);
+    // Auto-trigger update check once on startup if enabled
+    if (g_app.auto_update_check) {
+        aether_check_update_async(FCAE_VERSION);
+    }
 }
 
 void ui_frame() {
@@ -927,6 +931,8 @@ void render_ui() {
             ImGui::Checkbox("Logging", &g_app.logging_enabled);
             ImGui::SameLine(0, 12);
             ImGui::Checkbox("Auto-scroll", &g_app.auto_scroll);
+            ImGui::SameLine(0, 12);
+            ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
             ImGui::SameLine(0, 12);
             if (ImGui::Button("Clear")) g_app.logs.clear();
             ImGui::SameLine(0, 8);

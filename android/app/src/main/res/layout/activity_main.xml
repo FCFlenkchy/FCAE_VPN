@@ -89,6 +89,15 @@
                 android:textColor="#FF9AA3B5"
                 android:visibility="gone" />
 
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchAutoUpdate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:checked="true"
+                android:text="Auto-check for updates on open"
+                android:textColor="#FFE0E4EE" />
+
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
