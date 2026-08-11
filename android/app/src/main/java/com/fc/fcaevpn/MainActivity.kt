@@ -261,7 +261,7 @@ class MainActivity : AppCompatActivity() {
         )
         spinnerNoize.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
-            listOf("off", "firewall", "balanced", "gfw", "chrome", "voice", "streaming"),
+            listOf("off", "light", "firewall", "gfw"),
         )
         spinnerSysprofile.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
