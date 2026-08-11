@@ -707,26 +707,22 @@ class MainActivity : AppCompatActivity() {
         statsText.text = ""
         peerText.text = ""
 
-        // 2. Poll for logs briefly (Rust error callback needs ~1 tick to reach JNI),
-        //    then disconnect. Max 100ms total, checking every 5ms.
+        // 2. Wait 200ms for Rust error logs to reach JNI callback, then grab and show them.
         val currentMode = spinnerMode.selectedItemPosition
         Thread({
-            // Wait for error log to arrive from Rust -> JNI callback
-            var logs = ""
-            for (i in 0..20) {
-                try { Thread.sleep(5) } catch (_: Throwable) {}
-                try { logs = NativeEngine.nativeGetLogs() } catch (_: Throwable) {}
-                if (logs.contains(errorReason.take(20))) break
-            }
-            // Show logs immediately
-            if (switchLogging.isChecked && logs.isNotEmpty()) {
-                val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
-                handler.post {
-                    val h = shown.length.toLong() * 31 + shown[0].code.toLong() * 31 + shown[shown.length - 1].code.toLong()
-                    lastLogHash = h
-                    logText.text = shown
+            try { Thread.sleep(200) } catch (_: Throwable) {}
+            // Grab logs now — error callback has had time to deliver
+            try {
+                val logs = NativeEngine.nativeGetLogs()
+                if (switchLogging.isChecked && logs.isNotEmpty()) {
+                    val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
+                    handler.post {
+                        val h = shown.length.toLong() * 31 + shown[0].code.toLong() * 31 + shown[shown.length - 1].code.toLong()
+                        lastLogHash = h
+                        logText.text = shown
+                    }
                 }
-            }
+            } catch (_: Throwable) {}
             // Now disconnect
             try { NativeEngine.nativeStop() } catch (_: Throwable) {}
             if (currentMode == 1) {
