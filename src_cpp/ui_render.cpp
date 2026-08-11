@@ -397,6 +397,7 @@ void render_ui() {
         connected = false;
         busy = false;
         errored = false;
+        g_app.add_log(1, (std::string("[ERROR] ") + telem.last_error).c_str());
         g_app.add_log(3, "[ui] auto-disconnected due to error");
     }
     was_running = (connected || busy);

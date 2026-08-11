@@ -823,6 +823,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 // Auto-disconnect on error: if engine enters error state,
                 // automatically disconnect so user doesn't have to manually click.
+                // Error details are already captured in native logs via jni_log_cb.
                 if (state == 5) {
                     handler.post { disconnectAll() }
                     return  // skip rendering this frame, disconnectAll handles UI
