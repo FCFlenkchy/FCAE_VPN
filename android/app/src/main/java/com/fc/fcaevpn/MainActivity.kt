@@ -967,6 +967,6 @@ class MainActivity : AppCompatActivity() {
         private val COLOR_DISCONNECT_BTN = Color.parseColor("#B91C1C")
         private val COLOR_CONNECT_BTN = Color.parseColor("#15803D")
         private val COLOR_UPDATE_AVAILABLE = Color.parseColor("#FF8C00")  // orange
-        private val COLOR_UPDATE_IDLE = Color.parseColor("#FFFFFF")        // white default
+        private val COLOR_UPDATE_IDLE = Color.parseColor("#60A5FA")        // blue theme
     }
 }
