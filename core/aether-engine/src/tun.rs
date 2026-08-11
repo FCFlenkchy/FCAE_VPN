@@ -221,7 +221,7 @@ pub async fn run(
                 }
                 Ok(Ok(n)) => {
                     unsafe { pkt.set_len(n); }
-                    crate::stats::add_tx(n as u64);
+                    // TX counted in netstack::flush_tx (common path for all modes)
                     if out_tx.send(pkt).await.is_err() {
                         break;
                     }
@@ -261,7 +261,7 @@ pub async fn run(
             tokio::select! {
                 pkt = inbound_rx.recv() => {
                     let Some(pkt) = pkt else { break };
-                    crate::stats::add_rx(pkt.len() as u64);
+                    // RX counted in netstack (common path for all modes)
                     if let Err(e) = file.write_all(&pkt) {
                         log::warn!("[tun] write: {e}");
                         break;

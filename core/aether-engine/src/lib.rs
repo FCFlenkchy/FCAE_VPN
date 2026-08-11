@@ -1382,7 +1382,7 @@ fn split_dataplane(
         let mut inbound_rx = inbound_rx;
         tokio::spawn(async move {
             while let Some(pkt) = inbound_rx.recv().await {
-                stats::add_rx(pkt.len() as u64);
+                // RX counted in netstack when packets enter device.rx
                 if ct_tx.send(pkt).await.is_err() { break; }
             }
         });
@@ -1393,7 +1393,7 @@ fn split_dataplane(
         let mut inbound_rx = inbound_rx;
         tokio::spawn(async move {
             while let Some(pkt) = inbound_rx.recv().await {
-                stats::add_rx(pkt.len() as u64);
+                // RX counted in netstack when packets enter device.rx
                 if ct_tx.send(pkt).await.is_err() { break; }
             }
         });
@@ -1412,7 +1412,8 @@ fn split_dataplane(
     let mut inbound_rx = inbound_rx;
     tokio::spawn(async move {
         while let Some(pkt) = inbound_rx.recv().await {
-            stats::add_rx(pkt.len() as u64);
+            // add_rx is handled by tun.rs when writing to the TUN fd —
+            // counting here would double the RX bytes.
             let _ = ns_in_tx.send(pkt.clone()).await;
             let _ = tun_in_tx.send(Bytes::from(pkt)).await;
         }

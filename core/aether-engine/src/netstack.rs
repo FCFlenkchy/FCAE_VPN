@@ -472,11 +472,12 @@ async fn run(
             maybe = inbound_rx.recv() => {
                 match maybe {
                     Some(pkt) => {
+                        stats::add_rx(pkt.len() as u64);
                         s.device.rx.push_back(pkt);
                         let mut n = 0;
                         while n < MAX_INGEST_PER_TICK {
                             match inbound_rx.try_recv() {
-                                Ok(p) => { s.device.rx.push_back(p); n += 1; }
+                                Ok(p) => { stats::add_rx(p.len() as u64); s.device.rx.push_back(p); n += 1; }
                                 Err(_) => break,
                             }
                         }
