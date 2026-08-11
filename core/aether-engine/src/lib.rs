@@ -1,32 +1,31 @@
 #![allow(dead_code)]
-mod account;
-mod apifront;
-mod aethernoize;
+pub mod account;
+pub mod apifront;
+pub mod aethernoize;
 mod buffer_pool;
-mod config;
-mod consts;
-mod dns;
+pub mod config;
+pub mod consts;
+pub mod dns;
 pub mod error;
-mod fragment;
-mod http_proxy;
-mod lastconn;
-mod masque;
-mod masque_h2;
-mod netstack;
-mod noize;
-mod prober;
-mod quic;
-mod routing;
-mod socks;
-mod stats;
-mod sysprofile;
-mod tls;
+pub mod fragment;
+pub mod lastconn;
+pub mod masque;
+pub mod masque_h2;
+pub mod netstack;
+pub mod noize;
+pub mod prober;
+pub mod routing;
+pub mod quic;
+pub mod socks;
+pub mod stats;
+pub mod sysprofile;
+pub mod tls;
 pub mod tun;
 pub mod tun_t2s;
-mod tunnelping;
-mod wg_prober;
-mod wireguard;
-mod zerotrust;
+pub mod tunnelping;
+pub mod wireguard;
+pub mod wg_prober;
+pub mod zerotrust;
 pub mod version_checker;
 
 /// Public traffic counters for the FFI / GUI.
@@ -35,7 +34,9 @@ pub use stats::{
 };
 
 
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::Instant;
 
 use bytes::Bytes;
 
@@ -50,18 +51,9 @@ fn parse_local_v4(s: &str) -> Ipv4Addr {
         .unwrap_or(Ipv4Addr::UNSPECIFIED)
 }
 
-const TUNNEL_MTU: usize = 1420;
-const INNER_MTU: usize = 1400;
+const TUNNEL_MTU: usize = 1280;
+const INNER_MTU: usize = 1200;
 const DEFAULT_CONFIG: &str = "aether.toml";
-
-/// TLS Server Name (SNI) for MASQUE. Override with AETHER_SNI / --sni.
-fn connect_sni() -> String {
-    std::env::var("AETHER_SNI")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| consts::CONNECT_SNI.to_string())
-}
 
 fn tun_mode_active() -> bool {
     matches!(
@@ -73,83 +65,41 @@ fn tun_mode_active() -> bool {
     ) && tun::resolve_fd().is_some()
 }
 
-/// Determine if we should use tun2socks for TUN (non-Android platforms)
 fn use_tun2socks() -> bool {
-    // Check if we're on Android - always use tun.rs
     #[cfg(target_os = "android")]
-    {
-        return false;
-    }
-    
+    { return false; }
     #[cfg(not(target_os = "android"))]
     {
-        // Check if TUN2SOCKS is explicitly enabled
         let explicitly_enabled = std::env::var("AETHER_TUN2SOCKS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
             .unwrap_or(false);
-        
-        // If explicitly enabled but not available, log a warning
         if explicitly_enabled && !tun_t2s::is_available() {
             log::warn!("[lib] tun2socks explicitly enabled but binary not available!");
             return false;
         }
-        
-        // Auto-detect: use tun2socks on non-Android platforms when TUN mode is active
-        // and we don't have an fd from the environment (which would indicate Android)
-        if !tun_t2s::is_available() {
-            return false;
-        }
-        
-        // Check if TUN mode is active and we don't have a fd
+        if !tun_t2s::is_available() { return false; }
         let mode_active = matches!(
-            std::env::var("AETHER_MODE")
-                .unwrap_or_default()
-                .to_lowercase()
-                .as_str(),
+            std::env::var("AETHER_MODE").unwrap_or_default().to_lowercase().as_str(),
             "tun" | "1" | "true" | "vpn"
         );
-        
         mode_active && tun::resolve_fd().is_none()
     }
 }
 
-/// Post-scan validation: ironclad = real HTTP through tunnel; handshake = probe only.
-fn ironclad_validate() -> bool {
-    match std::env::var("AETHER_VALIDATE")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
-        "ironclad" | "http" | "real" | "1" | "true" | "yes" | "on" => true,
-        _ => false,
-    }
+fn connect_sni() -> String {
+    std::env::var("AETHER_SNI")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| consts::CONNECT_SNI.to_string())
 }
 
-async fn spawn_local_proxies(
-    stack: netstack::StackHandle,
-    listen: Option<SocketAddr>,
-    http_listen: Option<SocketAddr>,
-) -> (Option<tokio::task::JoinHandle<Result<()>>>, Option<tokio::task::JoinHandle<()>>) {
-    let socks_task = listen.map(|addr| {
-        let socks_stack = stack.clone();
-        tokio::spawn(async move {
-            log::info!("[+] socks5 server listening on {addr}");
-            socks::serve(addr, socks_stack).await
-        })
-    });
-    let http_task = http_listen.map(|http_addr| {
-        let http_stack = stack.clone();
-        tokio::spawn(async move {
-            log::info!("[+] http proxy listening on {http_addr}");
-            if let Err(e) = http_proxy::serve(http_addr, http_stack).await {
-                log::warn!("[-] http proxy ended: {e}");
-            }
-        })
-    });
-    (socks_task, http_task)
+fn ironclad_validate() -> bool {
+    matches!(std::env::var("AETHER_VALIDATE").unwrap_or_default().to_lowercase().as_str(),
+        "ironclad" | "http" | "real" | "1" | "true" | "yes" | "on")
 }
-/// Run the engine using AETHER_* environment variables (set by CLI or FFI).
-/// Does not parse argv or initialize the global logger (caller owns that).
+
+/// Run the engine using AETHER_* environment variables (set by FFI/GUI).
 pub async fn run_from_env() -> Result<()> {
     log::info!("Aether v{}", env!("CARGO_PKG_VERSION"));
     sysprofile::reset();
@@ -160,58 +110,29 @@ pub async fn run_from_env() -> Result<()> {
     let http_disabled = std::env::var("AETHER_HTTP_DISABLED").is_ok();
     let tun_active = tun_mode_active();
     let lan_sharing = std::env::var("AETHER_LAN_SHARING")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
 
-    let listen: Option<SocketAddr> = if socks_disabled {
-        None
-    } else if tun_active && !lan_sharing {
-        // TUN mode without LAN sharing: all traffic is routed by the OS
-        // through the TUN fd.  Local SOCKS5 proxy is redundant — skip it.
-        None
-    } else {
-        std::env::var("AETHER_SOCKS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|a: &SocketAddr| a.port() != 0)
-    };
+    let listen: Option<SocketAddr> = if socks_disabled { None }
+    else if tun_active && !lan_sharing { None }
+    else { std::env::var("AETHER_SOCKS").ok().and_then(|s| s.parse().ok()).filter(|a: &SocketAddr| a.port() != 0) };
 
-    let http_listen: Option<SocketAddr> = if http_disabled {
-        None
-    } else if tun_active && !lan_sharing {
-        // TUN mode without LAN sharing: local HTTP proxy is redundant.
-        None
-    } else {
-        std::env::var("AETHER_HTTP")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|a: &SocketAddr| a.port() != 0)
+    let http_listen: Option<SocketAddr> = if http_disabled { None }
+    else if tun_active && !lan_sharing { None }
+    else {
+        std::env::var("AETHER_HTTP").ok().and_then(|s| s.parse().ok()).filter(|a: &SocketAddr| a.port() != 0)
             .or_else(|| {
-                let port: u16 = std::env::var("AETHER_HTTP_PORT")
-                    .ok()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(1820);
+                let port: u16 = std::env::var("AETHER_HTTP_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(1820);
                 match listen {
-                    Some(addr) if port != 0 && port != addr.port() => {
-                        Some(SocketAddr::new(addr.ip(), port))
-                    }
+                    Some(addr) if port != 0 && port != addr.port() => Some(SocketAddr::new(addr.ip(), port)),
                     _ => None,
                 }
             })
     };
 
     let base_config = std::env::var("AETHER_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
-
-    // Prefer env (GUI/FFI always sets AETHER_PROTOCOL). Only prompt in interactive CLI.
     let protocol = match std::env::var("AETHER_PROTOCOL") {
         Ok(v) => Protocol::parse(&v),
-        Err(_) => {
-            if std::env::var("AETHER_PEER").is_ok() || std::env::var("AETHER_WG_PEER").is_ok() {
-                Protocol::Masque
-            } else {
-                select_protocol().await
-            }
-        }
+        Err(_) => if std::env::var("AETHER_PEER").is_ok() || std::env::var("AETHER_WG_PEER").is_ok() { Protocol::Masque } else { select_protocol("aether.toml").await },
     };
 
     match protocol {
@@ -219,12 +140,7 @@ pub async fn run_from_env() -> Result<()> {
             select_masque_transport().await;
             let config_path = masque_config_path(&base_config);
             let identity = load_or_provision_masque(&config_path).await?;
-            log::info!(
-                "[+] identity ready: device={} ipv4={} ipv6={}",
-                identity.device_id,
-                identity.ipv4,
-                identity.ipv6
-            );
+            log::info!("[+] identity ready: device={} ipv4={} ipv6={}", identity.device_id, identity.ipv4, identity.ipv6);
             let ech = resolve_ech().await;
             let lastconn_path = lastconn_path(&config_path);
             run_masque(identity, ech, listen, http_listen, lastconn_path).await
@@ -232,12 +148,7 @@ pub async fn run_from_env() -> Result<()> {
         Protocol::WireGuard => {
             let config_path = warp_config_path(&base_config);
             let identity = load_or_provision_warp(&config_path).await?;
-            log::info!(
-                "[+] identity ready: device={} ipv4={} ipv6={}",
-                identity.device_id,
-                identity.ipv4,
-                identity.ipv6
-            );
+            log::info!("[+] identity ready: device={} ipv4={} ipv6={}", identity.device_id, identity.ipv4, identity.ipv6);
             let lastconn_path = lastconn_path(&config_path);
             run_wireguard(identity, listen, http_listen, lastconn_path).await
         }
@@ -246,14 +157,59 @@ pub async fn run_from_env() -> Result<()> {
             let secondary_path = derive_sibling_path(&primary_path, "secondary");
             let primary = load_or_provision_warp(&primary_path).await?;
             let secondary = load_or_provision_warp(&secondary_path).await?;
-            log::info!(
-                "[+] outer device={} ipv4={} | inner device={} ipv4={}",
-                primary.device_id, primary.ipv4, secondary.device_id, secondary.ipv4
-            );
+            log::info!("[+] outer device={} ipv4={} | inner device={} ipv4={}", primary.device_id, primary.ipv4, secondary.device_id, secondary.ipv4);
             let peer = select_peer(&primary, Protocol::WireGuard).await?;
             log::info!("[+] using cloudflare edge {peer} (outer)");
             run_warp_in_warp(primary, secondary, peer, listen, http_listen).await
         }
+    }
+}
+
+async fn run_gool(
+    primary: account::Identity,
+    secondary: account::Identity,
+    listen: Option<SocketAddr>,
+    http_listen: Option<SocketAddr>,
+) -> Result<()> {
+    let mut last_peer: Option<SocketAddr> = None;
+    let mut consecutive_fails: u32 = 0;
+    const MAX_CONSECUTIVE_FAILS: u32 = 2;
+
+    loop {
+        let peer = if consecutive_fails < MAX_CONSECUTIVE_FAILS {
+            if let Some(p) = last_peer { Some(p) } else { None }
+        } else {
+            if let Some(p) = last_peer {
+                log::warn!("[-] outer endpoint {p} failed {consecutive_fails} times in a row; blacklisting and rescanning");
+            }
+            None
+        };
+
+        let peer = match peer {
+            Some(p) => p,
+            None => {
+                let p = match select_peer(&primary, Protocol::WireGuard).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!("[-] no usable outer WARP endpoint found: {e}; rescanning shortly");
+                        tokio::time::sleep(wg_reconnect_delay()).await;
+                        continue;
+                    }
+                };
+                consecutive_fails = 0;
+                p
+            }
+        };
+
+        log::info!("[+] using cloudflare edge {peer} (outer)");
+        last_peer = Some(peer);
+
+        match run_warp_in_warp(primary.clone(), secondary.clone(), peer, listen, http_listen).await {
+            Ok(()) => log::warn!("[-] gool tunnel closed; reconnecting"),
+            Err(e) => log::warn!("[-] gool tunnel ended: {e}; reconnecting"),
+        }
+        consecutive_fails += 1;
+        tokio::time::sleep(wg_reconnect_delay()).await;
     }
 }
 
@@ -284,18 +240,203 @@ fn aethernoize_config() -> aethernoize::AetherNoizeConfig {
     aethernoize::from_profile(&profile)
 }
 
+fn team_scope() -> Option<String> {
+    zerotrust::TeamSettings::from_env().map(|settings| settings.team)
+}
+
+fn enrolled_teams(base: &str) -> Vec<String> {
+    let dir_end = base.rfind(|c| c == '/' || c == '\\').map(|i| i + 1).unwrap_or(0);
+    let dir = if dir_end == 0 { "." } else { &base[..dir_end] };
+    let stem = match base[dir_end..].rfind('.') {
+        Some(rel) => &base[dir_end..dir_end + rel],
+        None => &base[dir_end..],
+    };
+    let prefix = format!("{stem}-team-");
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut teams: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(rest) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some(team) = rest.strip_suffix(".toml") else {
+            continue;
+        };
+        if team.is_empty() || team.ends_with("-secondary") || team.ends_with("-lastconn") {
+            continue;
+        }
+        if !teams.iter().any(|known| known == team) {
+            teams.push(team.to_string());
+        }
+    }
+    teams.sort();
+    teams
+}
+
+async fn enrol_zero_trust(base: &str) {
+    let known = enrolled_teams(base);
+
+    let prompt = match known.first() {
+        Some(team) => format!(
+            "\nZero Trust organization.\n  already enrolled: {}\nTeam name from \
+             <team>.cloudflareaccess.com, or blank to reuse '{}': ",
+            known.join(", "),
+            team
+        ),
+        None => "\nZero Trust organization.\nTeam name from <team>.cloudflareaccess.com \
+                 (blank to cancel): "
+            .to_string(),
+    };
+
+    let answer = prompt_line(&prompt).await.unwrap_or_default();
+    let answer = answer.trim().to_string();
+
+    let team = if answer.is_empty() {
+        match known.first() {
+            Some(team) => team.clone(),
+            None => {
+                log::info!("[*] Zero Trust skipped; staying on personal WARP");
+                return;
+            }
+        }
+    } else {
+        match zerotrust::normalize_team(&answer) {
+            Some(team) => team,
+            None => {
+                log::warn!("[-] '{answer}' is not a usable team name");
+                return;
+            }
+        }
+    };
+
+    std::env::set_var("AETHER_TEAM", &team);
+
+    if known.iter().any(|enrolled| *enrolled == team) {
+        log::info!("[+] reusing the saved enrolment for team {team}; no sign-in needed");
+        return;
+    }
+
+    let needs_method = match zerotrust::TeamSettings::from_env() {
+        Some(settings) => {
+            !(settings.token.is_some() || settings.has_service_token() || settings.email.is_some())
+        }
+        None => {
+            std::env::remove_var("AETHER_TEAM");
+            return;
+        }
+    };
+
+    if needs_method {
+        let email = prompt_line("Email address for the one-time login code (blank to cancel): ")
+            .await
+            .unwrap_or_default();
+        let email = email.trim().to_string();
+
+        if email.is_empty() {
+            log::warn!("[-] no email given; staying on personal WARP");
+            std::env::remove_var("AETHER_TEAM");
+            return;
+        }
+
+        std::env::set_var("AETHER_ACCESS_EMAIL", &email);
+    }
+
+    let settings = match zerotrust::TeamSettings::from_env() {
+        Some(settings) => settings,
+        None => {
+            std::env::remove_var("AETHER_TEAM");
+            return;
+        }
+    };
+
+    match zerotrust::resolve_token(&settings).await {
+        Ok(_) => log::info!("[+] signed in to team {team}; now pick the transport to use"),
+        Err(error) => {
+            log::error!("[-] Zero Trust sign-in failed: {error}");
+            log::warn!("[-] staying on personal WARP");
+            std::env::remove_var("AETHER_TEAM");
+            std::env::remove_var("AETHER_ACCESS_EMAIL");
+        }
+    }
+}
+
+async fn provision_account() -> Result<account::Identity> {
+    match zerotrust::TeamSettings::from_env() {
+        Some(settings) => {
+            log::info!(
+                "[*] enrolling this device into the Zero Trust organization {} ({})",
+                settings.team,
+                settings.team_domain()
+            );
+            let identity =
+                account::provision_team(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, &settings)
+                    .await?;
+            Ok(account::refresh_profile(identity).await)
+        }
+        None => account::provision_wg(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, None).await,
+    }
+}
+
+async fn adopt_team_profile(identity: account::Identity) -> account::Identity {
+    if team_scope().is_none() {
+        return identity;
+    }
+
+    let identity = account::refresh_profile(identity).await;
+
+    if !identity.gateway_proxy.is_empty() {
+        if std::env::var("AETHER_GATEWAY").is_ok() {
+            socks::set_gateway_proxy(&identity.gateway_proxy);
+        } else {
+            log::debug!(
+                "[zerotrust] the organization offers a gateway proxy at {}; pass --gateway to route http through it",
+                identity.gateway_proxy
+            );
+        }
+    }
+
+    if !identity.assigned_endpoint.is_empty() && std::env::var("AETHER_PEER").is_err() {
+        let port = if std::env::var("AETHER_PROTOCOL")
+            .map(|value| value == "wg" || value == "gool")
+            .unwrap_or(false)
+        {
+            2408
+        } else {
+            443
+        };
+        let peer = format!("{}:{port}", identity.assigned_endpoint);
+        if peer.parse::<SocketAddr>().is_ok() {
+            log::info!("[+] the organization assigned endpoint {peer}; trying it before scanning");
+            std::env::set_var("AETHER_TEAM_ENDPOINT", &peer);
+        }
+    }
+
+    identity
+}
+
 fn warp_config_path(base: &str) -> String {
     if let Ok(p) = std::env::var("AETHER_WG_CONFIG") {
         return p;
     }
-    base.to_string()
+    match team_scope() {
+        Some(team) => derive_sibling_path(base, &format!("team-{team}")),
+        None => base.to_string(),
+    }
 }
 
 fn masque_config_path(base: &str) -> String {
     if let Ok(p) = std::env::var("AETHER_MASQUE_CONFIG") {
         return p;
     }
-    derive_sibling_path(base, "masque")
+    match team_scope() {
+        Some(team) => derive_sibling_path(base, &format!("team-{team}")),
+        None => derive_sibling_path(base, "masque"),
+    }
 }
 
 fn derive_sibling_path(base: &str, suffix: &str) -> String {
@@ -312,11 +453,14 @@ fn derive_sibling_path(base: &str, suffix: &str) -> String {
 async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> {
     if let Some(identity) = config::load(config_path)? {
         log::info!("[+] loaded existing warp identity from {config_path}");
+        let identity = adopt_team_profile(identity).await;
+        config::save(config_path, &identity)?;
         return Ok(identity);
     }
 
     log::info!("[+] no warp identity found; provisioning dedicated wireguard account");
-    let identity = account::provision_wg(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, None).await?;
+    let identity = provision_account().await?;
+    let identity = adopt_team_profile(identity).await;
     config::save(config_path, &identity)?;
     log::info!("[+] provisioned and saved new warp identity to {config_path}");
     Ok(identity)
@@ -326,19 +470,32 @@ async fn load_or_provision_masque(config_path: &str) -> Result<account::Identity
     if let Some(identity) = config::load(config_path)? {
         log::info!("[+] loaded existing masque identity from {config_path}");
         if identity.has_masque_credentials() {
+            let identity = adopt_team_profile(identity).await;
+            config::save(config_path, &identity)?;
             return Ok(identity);
         }
-        log::info!("[+] masque identity missing credentials; enrolling masque key");
+        log::info!("[+] masque identity needs a certificate; enrolling masque key");
         let enrollment = account::ensure_masque_enrolled(&identity).await?;
-        let identity = account::Identity { cert_pem: enrollment.cert_pem, key_pem: enrollment.key_pem, ..identity };
+        let identity = account::Identity {
+            cert_pem: enrollment.cert_pem,
+            key_pem: enrollment.key_pem,
+            cert_issued_at: enrollment.issued_at,
+            ..identity
+        };
         config::save(config_path, &identity)?;
         return Ok(identity);
     }
 
     log::info!("[+] no masque identity found; provisioning dedicated masque account");
-    let identity = account::provision_wg(consts::DEFAULT_MODEL, consts::DEFAULT_LOCALE, None).await?;
+    let identity = provision_account().await?;
     let enrollment = account::ensure_masque_enrolled(&identity).await?;
-    let identity = account::Identity { cert_pem: enrollment.cert_pem, key_pem: enrollment.key_pem, ..identity };
+    let identity = account::Identity {
+        cert_pem: enrollment.cert_pem,
+        key_pem: enrollment.key_pem,
+        cert_issued_at: enrollment.issued_at,
+        ..identity
+    };
+    let identity = adopt_team_profile(identity).await;
     config::save(config_path, &identity)?;
     log::info!("[+] provisioned and saved new masque identity to {config_path}");
     Ok(identity)
@@ -356,64 +513,7 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
         let peer: SocketAddr = p
             .parse()
             .map_err(|_| AetherError::Other(format!("bad peer address {p}")))?;
-
-        match protocol {
-            Protocol::Masque => {
-                log::info!("[+] using forced MASQUE peer {peer}; probing RTT...");
-                let params = tunnelping::MasquePingParams {
-                    peer,
-                    sni: connect_sni(),
-                    authority: quic::default_authority().to_string(),
-                    path: quic::default_path().to_string(),
-                    cert_pem: identity.cert_pem.clone(),
-                    key_pem: identity.key_pem.clone(),
-                    noize: noize_config(),
-                    local_ipv4: parse_local_v4(&identity.ipv4),
-                    local_ipv4_str: identity.ipv4.clone(),
-                    local_ipv6_str: String::new(),
-                };
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(8),
-                    tunnelping::masque_http_ping(&params, std::time::Duration::from_secs(5)),
-                )
-                .await
-                {
-                    Ok(Ok(rtt)) => {
-                        log::info!("[+] forced peer {peer} RTT: {:?}", rtt);
-                        stats::set_rtt_ms(rtt.as_millis() as u64);
-                    }
-                    _ => {
-                        log::warn!("[-] forced peer {peer} RTT probe failed; continuing anyway");
-                    }
-                }
-            }
-            Protocol::WireGuard | Protocol::WarpInWarp => {
-                log::info!("[+] using forced WireGuard peer {peer}; probing RTT...");
-                let private_key = identity.private_key_bytes()?;
-                let peer_public = identity.peer_public_key_bytes()?;
-                let profile = aethernoize_config();
-                match wireguard::verify_endpoint(
-                    peer,
-                    private_key,
-                    peer_public,
-                    identity.client_id,
-                    parse_local_v4(&identity.ipv4),
-                    &profile,
-                    std::time::Duration::from_secs(10),
-                    None,
-                )
-                .await
-                {
-                    Ok(rtt) => {
-                        log::info!("[+] forced WireGuard peer {peer} RTT: {:?}", rtt);
-                        stats::set_rtt_ms(rtt.as_millis() as u64);
-                    }
-                    Err(e) => {
-                        log::warn!("[-] forced WireGuard peer {peer} probe failed: {e}; continuing anyway");
-                    }
-                }
-            }
-        }
+        log::info!("[+] using forced peer {peer} (probe skipped)");
         return Ok(peer);
     }
 
@@ -427,7 +527,7 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
             log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip verification)");
             let mode = prober::ScanMode::parse(&mode_str);
             let probe = prober::MasqueProbe {
-                sni: connect_sni(),
+                sni: consts::CONNECT_SNI.to_string(),
                 authority: quic::default_authority().to_string(),
                 path: quic::default_path().to_string(),
                 cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -441,7 +541,6 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
 
             let best = prober::hunt_best_gateway(&probe, mode).await?;
             log::info!("[+] selected MASQUE gateway {}:{} (rtt {:?})", best.ip, best.port, best.rtt);
-            stats::set_rtt_ms(best.rtt.as_millis() as u64);
             Ok(SocketAddr::new(best.ip, best.port))
         }
         Protocol::WireGuard | Protocol::WarpInWarp => {
@@ -459,11 +558,11 @@ async fn select_peer(identity: &account::Identity, protocol: Protocol) -> Result
                 aethernoize: aethernoize_config(),
                 ports: wireguard::WG_PORTS.to_vec(),
                 ip,
+                excluded: HashSet::new(),
             };
 
             let best = wg_prober::hunt_best_wg_endpoint(&probe, mode).await?;
             log::info!("[+] selected WireGuard endpoint {}:{} (rtt {:?})", best.ip, best.port, best.rtt);
-            stats::set_rtt_ms(best.rtt.as_millis() as u64);
             Ok(SocketAddr::new(best.ip, best.port))
         }
     }
@@ -506,6 +605,15 @@ fn masque_reconnect_delay() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+fn masque_startup_timeout() -> std::time::Duration {
+    let secs = std::env::var("AETHER_MASQUE_STARTUP_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(30);
+    std::time::Duration::from_secs(secs)
+}
+
 async fn hunt_masque_peer(
     identity: &account::Identity,
     mode_str: &str,
@@ -514,7 +622,7 @@ async fn hunt_masque_peer(
     log::info!("[*] hunting for a working MASQUE gateway (deep connect-ip + data-plane verification)");
     let mode = prober::ScanMode::parse(mode_str);
     let probe = prober::MasqueProbe {
-        sni: connect_sni(),
+        sni: consts::CONNECT_SNI.to_string(),
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: std::sync::Arc::from(identity.cert_pem.clone()),
@@ -533,7 +641,6 @@ async fn hunt_masque_peer(
         best.port,
         best.rtt
     );
-    stats::set_rtt_ms(best.rtt.as_millis() as u64);
     Ok(SocketAddr::new(best.ip, best.port))
 }
 
@@ -545,7 +652,7 @@ fn lastconn_path(config_path: &str) -> String {
 async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr) -> bool {
     let vp = quic::VerifyParams {
         peer,
-        sni: connect_sni(),
+        sni: consts::CONNECT_SNI.to_string(),
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: identity.cert_pem.clone(),
@@ -559,15 +666,15 @@ async fn quick_verify_masque_peer(identity: &account::Identity, peer: SocketAddr
     if masque_h2::enabled() {
         let cfg = masque_h2::H2TunnelConfig {
             peer: masque_h2::h2_peer(peer),
-            sni: connect_sni(),
+            sni: consts::CONNECT_SNI.to_string(),
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
             key_pem: identity.key_pem.clone(),
             local_ipv4: parse_local_v4(&identity.ipv4),
             quiet: true,
-            pin_endpoint: false,
-            expected_pins: Vec::new(),
+            pin_endpoint: true,
+            expected_pins: consts::MASQUE_PINS.iter().map(|p| p.to_vec()).collect(),
         };
         return masque_h2::verify_h2(&cfg, std::time::Duration::from_secs(5))
             .await
@@ -603,7 +710,25 @@ async fn run_masque(
     let forced = std::env::var("AETHER_PEER").ok();
 
     let mut quick_peer: Option<SocketAddr> = None;
+
     if forced.is_none() {
+        if let Some(assigned) = std::env::var("AETHER_TEAM_ENDPOINT")
+            .ok()
+            .and_then(|value| value.parse::<SocketAddr>().ok())
+        {
+            log::info!("[*] verifying the endpoint the organization assigned: {assigned}");
+            if quick_verify_masque_peer(&identity, assigned).await {
+                log::info!("[+] the assigned endpoint {assigned} works; skipping the scan");
+                quick_peer = Some(assigned);
+            } else {
+                log::warn!(
+                    "[-] the assigned endpoint {assigned} did not answer; falling back to scanning"
+                );
+            }
+        }
+    }
+
+    if forced.is_none() && quick_peer.is_none() {
         if let Some(cached) = lastconn::load(&lastconn_path) {
             if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
                 if want_quick_reconnect(&cached).await {
@@ -651,33 +776,7 @@ async fn run_masque(
                 None => match &forced {
                     Some(p) => match p.parse::<SocketAddr>() {
                         Ok(peer) => {
-                            log::info!("[+] using forced peer {peer}; probing RTT...");
-                            let params = tunnelping::MasquePingParams {
-                                peer,
-                                sni: connect_sni(),
-                                authority: quic::default_authority().to_string(),
-                                path: quic::default_path().to_string(),
-                                cert_pem: identity.cert_pem.clone(),
-                                key_pem: identity.key_pem.clone(),
-                                noize: noize_config(),
-                                local_ipv4: parse_local_v4(&identity.ipv4),
-                                local_ipv4_str: identity.ipv4.clone(),
-                                local_ipv6_str: String::new(),
-                            };
-                            match tokio::time::timeout(
-                                std::time::Duration::from_secs(8),
-                                tunnelping::masque_http_ping(&params, std::time::Duration::from_secs(5)),
-                            )
-                            .await
-                            {
-                                Ok(Ok(rtt)) => {
-                                    log::info!("[+] forced peer {peer} RTT: {:?}", rtt);
-                                    stats::set_rtt_ms(rtt.as_millis() as u64);
-                                }
-                                _ => {
-                                    log::warn!("[-] forced peer {peer} RTT probe failed; continuing anyway");
-                                }
-                            }
+                            log::info!("[+] using forced peer {peer} (probe skipped)");
                             peer
                         }
                         Err(_) => return Err(AetherError::Other(format!("bad peer address {p}"))),
@@ -712,72 +811,6 @@ async fn run_masque(
     }
 }
 
-type TunBridge = (
-    i32,
-    tokio::sync::mpsc::Sender<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<Bytes>,
-);
-
-/// Wire tunnel channels to netstack. Only fan-out when a real TUN fd is present
-/// (Android VpnService). Proxy-only mode keeps the original direct path.
-/// 
-/// For non-Android platforms (Linux/Windows) with tun2socks,
-/// the TUN is managed externally and we don't need to bridge channels.
-fn split_dataplane(
-    outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
-    inbound_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-) -> (
-    tokio::sync::mpsc::Sender<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<Vec<u8>>,
-    Option<TunBridge>,
-) {
-    // Check if we should use tun2socks (non-Android TUN mode)
-    let use_t2s = use_tun2socks();
-    
-    // For tun2socks TUN, we don't bridge channels - tun2socks handles the TUN completely
-    if use_t2s {
-        log::info!("[lib] Using tun2socks for TUN (non-Android mode)");
-        // Direct: netstack ↔ tunnel (tun2socks handles the TUN side)
-        return (outbound_tx, inbound_rx, None);
-    }
-    
-    // Android-style TUN with fd from VpnService
-    let Some(fd) = (if tun_mode_active() {
-        tun::resolve_fd()
-    } else {
-        None
-    }) else {
-        // Direct: netstack ↔ tunnel (same as pre-TUN-bridge behavior).
-        return (outbound_tx, inbound_rx, None);
-    };
-
-    let cap = sysprofile::channel_capacity(); //it was hardcoded to 512
-    let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
-    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
-    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Bytes>(cap);
-
-    let ot_ns = outbound_tx.clone();
-    tokio::spawn(async move {
-        while let Some(p) = ns_out_rx.recv().await {
-            if ot_ns.send(p).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // Tunnel → netstack + TUN.
-    let mut inbound_rx = inbound_rx;
-    tokio::spawn(async move {
-        while let Some(pkt) = inbound_rx.recv().await {
-            let _ = ns_in_tx.send(pkt.clone()).await;
-            let _ = tun_in_tx.send(Bytes::from(pkt)).await;
-        }
-    });
-
-    // TUN reads are sent on `outbound_tx` (shared with netstack via ot_ns clone above).
-    (ns_out_tx, ns_in_rx, Some((fd, outbound_tx, tun_in_rx)))
-}
-
 async fn run_masque_tunnel(
     identity: &account::Identity,
     peer: SocketAddr,
@@ -789,7 +822,7 @@ async fn run_masque_tunnel(
 
     let cfg = quic::TunnelConfig {
         peer,
-        sni: connect_sni(),
+        sni: consts::CONNECT_SNI.to_string(),
         authority: quic::default_authority().to_string(),
         path: quic::default_path().to_string(),
         cert_pem: identity.cert_pem.clone(),
@@ -810,16 +843,14 @@ async fn run_masque_tunnel(
     let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
 
     let stack = netstack::spawn(
-        &identity.ipv4,
-        &identity.ipv6,
-        TUNNEL_MTU,
-        ns_in_rx,
-        ns_out_tx,
+        &identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx,
     )?;
+
+    let mut tasks = TaskGuard::new();
 
     let (addr_tx, mut addr_rx) = tokio::sync::mpsc::channel::<quic::AssignedAddr>(8);
     let bridge_stack = stack.clone();
-    tokio::spawn(async move {
+    let bridge_task = tokio::spawn(async move {
         while let Some(a) = addr_rx.recv().await {
             let res = match a.ip {
                 IpAddr::V4(v4) => bridge_stack.set_addrs(Some((v4, a.prefix)), None).await,
@@ -830,21 +861,22 @@ async fn run_masque_tunnel(
             }
         }
     });
+    tasks.push(bridge_task.abort_handle());
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
 
     let tunnel_task = if masque_h2::enabled() {
         let h2cfg = masque_h2::H2TunnelConfig {
             peer: masque_h2::h2_peer(peer),
-            sni: connect_sni(),
+            sni: consts::CONNECT_SNI.to_string(),
             authority: quic::default_authority().to_string(),
             path: quic::default_path().to_string(),
             cert_pem: identity.cert_pem.clone(),
             key_pem: identity.key_pem.clone(),
             local_ipv4: parse_local_v4(&identity.ipv4),
             quiet: false,
-            pin_endpoint: false,
-            expected_pins: Vec::new(),
+            pin_endpoint: true,
+            expected_pins: consts::MASQUE_PINS.iter().map(|p| p.to_vec()).collect(),
         };
         log::info!("[+] MASQUE transport: HTTP/2 (TCP) to {}", h2cfg.peer);
         tokio::spawn(masque_h2::run(h2cfg, internals, Some(addr_tx), Some(ready_tx)))
@@ -852,10 +884,12 @@ async fn run_masque_tunnel(
         log::info!("[+] MASQUE transport: HTTP/3 (QUIC) to {}", peer);
         tokio::spawn(quic::run(cfg, internals, Some(addr_tx), Some(ready_tx)))
     };
+    tasks.push(tunnel_task.abort_handle());
 
-    match ready_rx.await {
-        Ok(()) => {}
-        Err(_) => {
+    let startup_timeout = masque_startup_timeout();
+    match tokio::time::timeout(startup_timeout, ready_rx).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
             let joined = tunnel_task.await;
             let msg = match joined {
                 Ok(Ok(())) => "tunnel exited before validation".to_string(),
@@ -864,66 +898,49 @@ async fn run_masque_tunnel(
             };
             return Err(AetherError::Other(msg));
         }
+        Err(_) => {
+            tunnel_task.abort();
+            let _ = tunnel_task.await;
+            return Err(AetherError::Other(format!("tunnel startup timed out after {:?}", startup_timeout)));
+        }
     }
 
     let (socks_task, http_task) = spawn_local_proxies(stack.clone(), listen, http_listen).await;
 
-    // Start TUN adapter (tun2socks or Android fd) ONLY after SOCKS5 is listening.
-    // tun2socks connects to the SOCKS5 proxy, so it must wait until the proxy is ready.
+    // TUN adapter (tun2socks or Android fd) after SOCKS5 is listening.
     let mut tun_task = None;
     if use_tun2socks() {
         log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
-        let socks_port: u16 = std::env::var("AETHER_SOCKS")
-            .ok()
-            .and_then(|s| s.rsplit(':').next()?.parse().ok())
-            .unwrap_or(1819);
+        let socks_port: u16 = std::env::var("AETHER_SOCKS").ok()
+            .and_then(|s| s.rsplit(':').next()?.parse().ok()).unwrap_or(1819);
         let t2s_cfg = tun_t2s::TunConfig {
-            name: "FCAE_VPN".to_string(),
-            mtu: TUNNEL_MTU as u32,
+            name: "FCAE_VPN".to_string(), mtu: TUNNEL_MTU as u32,
             ipv4: if identity.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { identity.ipv4.clone() },
             ipv6: if identity.ipv6.is_empty() { None } else { Some(identity.ipv6.clone()) },
-            socks_port,
-            socks_host: "127.0.0.1".to_string(),
-            username: None,
-            password: None,
+            socks_port, socks_host: "127.0.0.1".to_string(),
+            username: None, password: None,
             tunnel_peer_ip: Some(peer.ip().to_string()),
         };
-        
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let t2s_task = tokio::spawn(async move {
             if let Err(e) = tun_t2s::run_tun2socks(t2s_cfg, shutdown_rx).await {
                 log::warn!("[-] tun2socks ended: {e}");
             }
         });
-        tun_task = Some(tokio::spawn(async move {
-            // Wait for the tun2socks task to complete
-            let _ = t2s_task.await;
-            drop(shutdown_tx);
-        }));
+        tun_task = Some(tokio::spawn(async move { let _ = t2s_task.await; drop(shutdown_tx); }));
     } else if let Some((fd, ot, tun_rx)) = tun_bridge {
         log::info!("[+] TUN mode: bridging Android/system fd={fd}");
         tun_task = Some(tokio::spawn(async move {
-            if let Err(e) = tun::run(fd, ot, tun_rx).await {
-                log::warn!("[-] tun bridge ended: {e}");
-            }
+            if let Err(e) = tun::run(fd, ot, tun_rx).await { log::warn!("[-] tun bridge ended: {e}"); }
         }));
     }
 
-    // Signal the FFI/GUI that the tunnel is fully connected.
-    // In TUN mode without LAN sharing, SOCKS5 is not started so the
-    // usual "socks5 server listening" log trigger never fires.
     log::info!("[+] data-plane ok");
 
     let tunnel_result = tunnel_task.await;
-    if let Some(t) = socks_task {
-        t.abort();
-    }
-    if let Some(t) = http_task {
-        t.abort();
-    }
-    if let Some(t) = tun_task {
-        t.abort();
-    }
+    if let Some(t) = socks_task { t.abort(); }
+    if let Some(t) = http_task { t.abort(); }
+    if let Some(t) = tun_task { t.abort(); }
 
     match tunnel_result {
         Ok(Ok(())) => Ok(()),
@@ -946,7 +963,7 @@ fn wg_profile_candidates() -> Vec<(String, aethernoize::AetherNoizeConfig)> {
 
     let mut names = vec![primary.clone()];
     if std::env::var("AETHER_WG_NO_PROFILE_RETRY").is_err() {
-        for fallback in ["balanced", "chrome", "aggressive", "light", "off"] {
+        for fallback in ["balanced", "aggressive", "light", "off"] {
             if !names.iter().any(|n| n.eq_ignore_ascii_case(fallback)) {
                 names.push(fallback.to_string());
             }
@@ -967,6 +984,7 @@ async fn hunt_wg_peer_with_profile(
     mode_str: &str,
     ip: prober::IpScan,
     profile: aethernoize::AetherNoizeConfig,
+    excluded: &HashSet<SocketAddr>,
 ) -> Result<SocketAddr> {
     let mode = wg_prober::WgScanMode::parse(mode_str);
     let private_key = identity.private_key_bytes()?;
@@ -983,10 +1001,10 @@ async fn hunt_wg_peer_with_profile(
         aethernoize: profile,
         ports: wireguard::WG_PORTS.to_vec(),
         ip,
+        excluded: excluded.clone(),
     };
 
     let best = wg_prober::hunt_best_wg_endpoint(&probe, mode).await?;
-    stats::set_rtt_ms(best.rtt.as_millis() as u64);
     Ok(SocketAddr::new(best.ip, best.port))
 }
 
@@ -998,18 +1016,28 @@ fn wg_reconnect_delay() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+fn wg_endpoint_cooldown() -> std::time::Duration {
+    let secs = std::env::var("AETHER_WG_ENDPOINT_COOLDOWN_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(300);
+    std::time::Duration::from_secs(secs)
+}
+
 async fn hunt_wg_peer(
     identity: &account::Identity,
     candidates: &[(String, aethernoize::AetherNoizeConfig)],
     mode_str: &str,
     ip: prober::IpScan,
+    excluded: &HashSet<SocketAddr>,
 ) -> Result<(SocketAddr, aethernoize::AetherNoizeConfig, String)> {
     let multi = candidates.len() > 1;
     for (name, profile) in candidates {
         log::info!(
             "[*] hunting for a working WireGuard endpoint (handshake + data-plane verification, aethernoize='{name}')"
         );
-        match hunt_wg_peer_with_profile(identity, mode_str, ip, profile.clone()).await {
+        match hunt_wg_peer_with_profile(identity, mode_str, ip, profile.clone(), excluded).await {
             Ok(peer) => {
                 log::info!("[+] selected WireGuard endpoint {peer} using aethernoize profile '{name}'");
                 return Ok((peer, profile.clone(), name.clone()));
@@ -1026,12 +1054,7 @@ async fn hunt_wg_peer(
     Err(AetherError::NoCleanEndpoint)
 }
 
-async fn run_wireguard(
-    identity: account::Identity,
-    listen: Option<SocketAddr>,
-    http_listen: Option<SocketAddr>,
-    lastconn_path: String,
-) -> Result<()> {
+async fn run_wireguard(identity: account::Identity, listen: Option<SocketAddr>, http_listen: Option<SocketAddr>, lastconn_path: String) -> Result<()> {
     let candidates = wg_profile_candidates();
 
     let forced = std::env::var("AETHER_WG_PEER")
@@ -1046,7 +1069,47 @@ async fn run_wireguard(
         .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
 
     let mut quick: Option<(SocketAddr, aethernoize::AetherNoizeConfig, String)> = None;
+
     if forced.is_none() {
+        if let Some(assigned) = std::env::var("AETHER_TEAM_ENDPOINT")
+            .ok()
+            .and_then(|value| value.parse::<SocketAddr>().ok())
+        {
+            log::info!("[*] verifying the endpoint the organization assigned: {assigned}");
+            for (name, profile) in &candidates {
+                match wireguard::verify_endpoint(
+                    assigned,
+                    private_key,
+                    peer_public,
+                    identity.client_id,
+                    ipv4,
+                    profile,
+                    std::time::Duration::from_secs(8),
+                    None,
+                )
+                .await
+                {
+                    Ok(rtt) => {
+                        log::info!(
+                            "[+] the assigned endpoint {assigned} works with profile '{name}' (rtt {rtt:?}); skipping the scan"
+                        );
+                        quick = Some((assigned, profile.clone(), name.clone()));
+                        break;
+                    }
+                    Err(e) => {
+                        log::debug!("[-] assigned endpoint {assigned} failed profile '{name}': {e}");
+                    }
+                }
+            }
+            if quick.is_none() {
+                log::warn!(
+                    "[-] the assigned endpoint {assigned} did not pass validation; falling back to scanning"
+                );
+            }
+        }
+    }
+
+    if forced.is_none() && quick.is_none() {
         if let Some(cached) = lastconn::load(&lastconn_path) {
             if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
                 if want_quick_reconnect(&cached).await {
@@ -1086,8 +1149,25 @@ async fn run_wireguard(
     };
 
     let mut last_good: Option<(SocketAddr, aethernoize::AetherNoizeConfig, String)> = None;
+    let mut consecutive_fails_on_peer: u32 = 0;
+    let mut endpoint_cooldowns: HashMap<SocketAddr, Instant> = HashMap::new();
+    const MAX_CONSECUTIVE_FAILS: u32 = 2;
 
     loop {
+        let now = Instant::now();
+        endpoint_cooldowns.retain(|_, until| *until > now);
+        if consecutive_fails_on_peer >= MAX_CONSECUTIVE_FAILS {
+            if let Some((peer, _, _)) = last_good.take() {
+                let cooldown = wg_endpoint_cooldown();
+                endpoint_cooldowns.insert(peer, now + cooldown);
+                log::warn!(
+                    "[-] endpoint {peer} failed {consecutive_fails_on_peer} times in a row; excluding it for {:?}",
+                    cooldown
+                );
+            }
+            consecutive_fails_on_peer = 0;
+        }
+
         let (peer, profile, profile_name) = if let Some(q) = quick.take() {
             q
         } else {
@@ -1142,7 +1222,6 @@ async fn run_wireguard(
                             {
                                 Ok(rtt) => {
                                     log::info!("[+] profile '{}' passed handshake + data-plane (rtt {:?})", name, rtt);
-                                    stats::set_rtt_ms(rtt.as_millis() as u64);
                                     chosen = Some((peer, profile.clone(), name.clone()));
                                     break;
                                 }
@@ -1156,7 +1235,9 @@ async fn run_wireguard(
                             None => return Err(AetherError::NoCleanEndpoint),
                         }
                     } else {
-                        match hunt_wg_peer(&identity, &candidates, &mode_str, ip).await {
+                        let excluded: HashSet<SocketAddr> =
+                            endpoint_cooldowns.keys().copied().collect();
+                        match hunt_wg_peer(&identity, &candidates, &mode_str, ip, &excluded).await {
                             Ok(v) => v,
                             Err(e) => {
                                 log::warn!("[-] no usable WireGuard endpoint found: {e}; rescanning shortly");
@@ -1175,11 +1256,21 @@ async fn run_wireguard(
             lastconn::save(&lastconn_path, &peer.to_string(), &profile_name);
         }
 
+        let is_same_peer_as_before = last_good.as_ref().map(|(p, _, _)| *p) == Some(peer);
+        if !is_same_peer_as_before {
+            consecutive_fails_on_peer = 0;
+        }
         last_good = Some((peer, profile.clone(), profile_name));
 
         match run_wireguard_tunnel(identity.clone(), peer, profile, listen, http_listen).await {
-            Ok(()) => log::warn!("[-] WireGuard tunnel closed; reconnecting"),
-            Err(e) => log::warn!("[-] WireGuard tunnel ended: {e}; reconnecting"),
+            Ok(()) => {
+                log::warn!("[-] WireGuard tunnel closed; reconnecting");
+                consecutive_fails_on_peer += 1;
+            }
+            Err(e) => {
+                log::warn!("[-] WireGuard tunnel ended: {e}; reconnecting");
+                consecutive_fails_on_peer += 1;
+            }
         }
 
         tokio::time::sleep(wg_reconnect_delay()).await;
@@ -1191,7 +1282,7 @@ fn wg_tunnel_validate_timeout() -> std::time::Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(20);
+        .unwrap_or(10);
     std::time::Duration::from_secs(secs)
 }
 
@@ -1202,110 +1293,177 @@ async fn run_wireguard_tunnel(
     listen: Option<SocketAddr>,
     http_listen: Option<SocketAddr>,
 ) -> Result<()> {
-    log::info!("[*] establishing WireGuard tunnel with {peer} (already verified during scan)...");
-
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
     let ipv4: std::net::Ipv4Addr = identity.ipv4.parse()
         .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
-    let ipv6: std::net::Ipv6Addr = identity.ipv6.parse()
-        .map_err(|_| AetherError::Other("invalid ipv6".into()))?;
 
-    let cfg = wireguard::WgConfig {
-        local_private_key: private_key,
-        peer_public_key: peer_public,
-        peer_endpoint: peer,
-        local_ipv4: ipv4,
-        local_ipv6: ipv6,
-        client_id: identity.client_id,
-        preshared_key: None,
-        persistent_keepalive: Some(wg_keepalive_secs()),
-        aethernoize: std::sync::Arc::new(aethernoize),
-    };
+    log::info!("[*] validating WireGuard tunnel with {peer} (handshake + data-plane) before exposing socks5...");
+    let (_, session) = wireguard::verify_endpoint_keep_session(
+        peer, private_key, peer_public, identity.client_id, ipv4,
+        &aethernoize, wg_tunnel_validate_timeout(), Some(wg_keepalive_secs()),
+    ).await.map_err(|e| AetherError::Other(format!("tunnel failed validation: {e}")))?;
+    log::info!("[+] wireguard tunnel validated (end-to-end data confirmed); exposing socks5");
 
-    
-    let cap = sysprofile::channel_capacity();
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(cap);
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
 
-    let tunnel = wireguard::WgTunnel::new(cfg, inbound_tx).await?;
+    let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(aethernoize), inbound_tx, ipv4);
 
     let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
-    let stack = netstack::spawn(
-        &identity.ipv4,
-        &identity.ipv6,
-        TUNNEL_MTU,
-        ns_in_rx,
-        ns_out_tx,
-    )?;
+    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx)?;
 
-    // Run tunnel first so live validation can pass traffic.
-    let tunnel_task = tokio::spawn(async move { tunnel.run(outbound_rx).await });
+    let (socks_task, http_task) = spawn_local_proxies(stack.clone(), listen, http_listen).await;
 
-    // Brief settle for WG handshake + keepalive path.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let (socks_task, http_task) = spawn_local_proxies(stack, listen, http_listen).await;
-
-    // Start TUN adapter (tun2socks or Android fd) ONLY after SOCKS5 is listening.
-    // tun2socks connects to the SOCKS5 proxy, so it must wait until the proxy is ready.
+    // TUN adapter (tun2socks or Android fd) after SOCKS5 is listening.
     let mut tun_task = None;
     if use_tun2socks() {
         log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
-        let socks_port: u16 = std::env::var("AETHER_SOCKS")
-            .ok()
-            .and_then(|s| s.rsplit(':').next()?.parse().ok())
-            .unwrap_or(1819);
+        let socks_port: u16 = std::env::var("AETHER_SOCKS").ok()
+            .and_then(|s| s.rsplit(':').next()?.parse().ok()).unwrap_or(1819);
         let t2s_cfg = tun_t2s::TunConfig {
-            name: "FCAE_VPN".to_string(),
-            mtu: TUNNEL_MTU as u32,
+            name: "FCAE_VPN".to_string(), mtu: TUNNEL_MTU as u32,
             ipv4: if identity.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { identity.ipv4.clone() },
             ipv6: if identity.ipv6.is_empty() { None } else { Some(identity.ipv6.clone()) },
-            socks_port,
-            socks_host: "127.0.0.1".to_string(),
-            username: None,
-            password: None,
+            socks_port, socks_host: "127.0.0.1".to_string(),
+            username: None, password: None,
             tunnel_peer_ip: Some(peer.ip().to_string()),
         };
-        
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let t2s_task = tokio::spawn(async move {
             if let Err(e) = tun_t2s::run_tun2socks(t2s_cfg, shutdown_rx).await {
                 log::warn!("[-] tun2socks ended: {e}");
             }
         });
-        tun_task = Some(tokio::spawn(async move {
-            let _ = t2s_task.await;
-            drop(shutdown_tx);
-        }));
+        tun_task = Some(tokio::spawn(async move { let _ = t2s_task.await; drop(shutdown_tx); }));
     } else if let Some((fd, ot, tun_rx)) = tun_bridge {
         log::info!("[+] TUN mode: bridging Android/system fd={fd}");
         tun_task = Some(tokio::spawn(async move {
-            if let Err(e) = tun::run(fd, ot, tun_rx).await {
-                log::warn!("[-] tun bridge ended: {e}");
-            }
+            if let Err(e) = tun::run(fd, ot, tun_rx).await { log::warn!("[-] tun bridge ended: {e}"); }
         }));
     }
 
-    // Signal the FFI/GUI that the tunnel is fully connected.
     log::info!("[+] data-plane ok");
 
-    let tunnel_result = tunnel_task.await;
-    if let Some(t) = socks_task {
-        t.abort();
-    }
-    if let Some(t) = http_task {
-        t.abort();
-    }
-    if let Some(t) = tun_task {
-        t.abort();
-    }
+    let tunnel_result = tunnel.run(outbound_rx).await;
+
+    if let Some(t) = socks_task { t.abort(); }
+    if let Some(t) = http_task { t.abort(); }
+    if let Some(t) = tun_task { t.abort(); }
+
+    drop(stack);
 
     match tunnel_result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(AetherError::Other(format!("wireguard tunnel exited: {e}"))),
-        Err(e) => Err(AetherError::Other(format!("wireguard task join: {e}"))),
+        Ok(()) => Ok(()),
+        Err(e) => Err(AetherError::Other(format!("wireguard tunnel exited: {e}"))),
     }
+}
+
+type TunnelExit = tokio::task::JoinHandle<Result<()>>;
+
+type TunBridge = (
+    i32,
+    tokio::sync::mpsc::Sender<Vec<u8>>,
+    tokio::sync::mpsc::Receiver<Bytes>,
+);
+
+fn split_dataplane(
+    outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    inbound_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) -> (
+    tokio::sync::mpsc::Sender<Vec<u8>>,
+    tokio::sync::mpsc::Receiver<Vec<u8>>,
+    Option<TunBridge>,
+) {
+    let use_t2s = use_tun2socks();
+    if use_t2s {
+        log::info!("[lib] Using tun2socks for TUN (non-Android mode)");
+        let (ct_tx, ct_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(sysprofile::channel_capacity());
+        let mut inbound_rx = inbound_rx;
+        tokio::spawn(async move {
+            while let Some(pkt) = inbound_rx.recv().await {
+                stats::add_rx(pkt.len() as u64);
+                if ct_tx.send(pkt).await.is_err() { break; }
+            }
+        });
+        return (outbound_tx, ct_rx, None);
+    }
+    let Some(fd) = (if tun_mode_active() { tun::resolve_fd() } else { None }) else {
+        let (ct_tx, ct_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(sysprofile::channel_capacity());
+        let mut inbound_rx = inbound_rx;
+        tokio::spawn(async move {
+            while let Some(pkt) = inbound_rx.recv().await {
+                stats::add_rx(pkt.len() as u64);
+                if ct_tx.send(pkt).await.is_err() { break; }
+            }
+        });
+        return (outbound_tx, ct_rx, None);
+    };
+    let cap = sysprofile::channel_capacity();
+    let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
+    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
+    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Bytes>(cap);
+    let ot_ns = outbound_tx.clone();
+    tokio::spawn(async move {
+        while let Some(p) = ns_out_rx.recv().await {
+            if ot_ns.send(p).await.is_err() { break; }
+        }
+    });
+    let mut inbound_rx = inbound_rx;
+    tokio::spawn(async move {
+        while let Some(pkt) = inbound_rx.recv().await {
+            stats::add_rx(pkt.len() as u64);
+            let _ = ns_in_tx.send(pkt.clone()).await;
+            let _ = tun_in_tx.send(Bytes::from(pkt)).await;
+        }
+    });
+    (ns_out_tx, ns_in_rx, Some((fd, outbound_tx, tun_in_rx)))
+}
+
+async fn spawn_local_proxies(
+    stack: netstack::StackHandle,
+    listen: Option<SocketAddr>,
+    http_listen: Option<SocketAddr>,
+) -> (Option<tokio::task::JoinHandle<Result<()>>>, Option<tokio::task::JoinHandle<()>>) {
+    let socks_task = listen.map(|addr| {
+        let socks_stack = stack.clone();
+        tokio::spawn(async move {
+            log::info!("[+] socks5 server listening on {addr}");
+            socks::serve(addr, socks_stack).await
+        })
+    });
+    let http_task = http_listen.map(|http_addr| {
+        let http_stack = stack.clone();
+        tokio::spawn(async move {
+            log::info!("[+] http proxy listening on {http_addr}");
+            if let Err(e) = socks::serve_http(http_addr, http_stack).await {
+                log::warn!("[-] http proxy ended: {e}");
+            }
+        })
+    });
+    (socks_task, http_task)
+}
+
+fn http_proxy_listen() -> Option<SocketAddr> {
+    let raw = std::env::var("AETHER_HTTP_PROXY").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() { return None; }
+    match trimmed.parse::<SocketAddr>() {
+        Ok(addr) => Some(addr),
+        Err(_) => {
+            log::warn!("[-] ignoring an unparsable http proxy address: {trimmed}");
+            None
+        }
+    }
+}
+
+fn spawn_http_proxy(stack: &netstack::StackHandle) -> Option<TunnelExit> {
+    let listen = http_proxy_listen()?;
+    let stack = stack.clone();
+    Some(tokio::spawn(async move {
+        log::info!("[+] http proxy listening on {listen}");
+        socks::serve_http(listen, stack).await
+    }))
 }
 
 async fn establish_wg(
@@ -1315,7 +1473,7 @@ async fn establish_wg(
     obfuscate: bool,
     keepalive: u16,
     label: &'static str,
-) -> Result<(netstack::StackHandle, tokio::task::JoinHandle<Result<()>>, Option<TunBridge>)> {
+) -> Result<(netstack::StackHandle, TunnelExit)> {
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
 
@@ -1348,10 +1506,8 @@ async fn establish_wg(
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
 
-    let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
-
     let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(profile), inbound_tx, ipv4);
-    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, ns_in_rx, ns_out_tx)?;
+    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
 
     let exit = tokio::spawn(async move {
         match tunnel.run(outbound_rx).await {
@@ -1366,33 +1522,53 @@ async fn establish_wg(
         }
     });
 
-    Ok((stack, exit, tun_bridge))
+    Ok((stack, exit))
 }
+
+struct TaskGuard(Vec<tokio::task::AbortHandle>);
+
+impl TaskGuard {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn push(&mut self, handle: tokio::task::AbortHandle) {
+        self.0.push(handle);
+    }
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        for handle in self.0.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
+
 
 async fn spawn_udp_forwarder(
     outer: &netstack::StackHandle,
     remote: SocketAddr,
-) -> Result<SocketAddr> {
+) -> Result<(SocketAddr, TaskGuard)> {
     let sock = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await?);
     let local = sock.local_addr()?;
 
     let udp = outer.open_udp().await?;
     let (udp_tx, mut udp_rx) = udp.into_split();
 
-    let inner_peer: std::sync::Arc<parking_lot::Mutex<Option<SocketAddr>>> =
-        std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let inner_peer: std::sync::Arc<tokio::sync::Mutex<Option<SocketAddr>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
     let up_sock = sock.clone();
     let up_peer = inner_peer.clone();
-    tokio::spawn(async move {
-        let mut buf = vec![0u8; 2048];
+    let up_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
         loop {
             match up_sock.recv_from(&mut buf).await {
                 Ok((n, from)) => {
-                    *up_peer.lock() = Some(from);
-                    let mut pkt = buffer_pool::take(n);
-                    pkt.extend_from_slice(&buf[..n]);
-                    if udp_tx.send_to(remote, pkt).await.is_err() {
+                    *up_peer.lock().await = Some(from);
+                    if udp_tx.send_to(remote, buf[..n].to_vec()).await.is_err() {
                         break;
                     }
                 }
@@ -1403,16 +1579,18 @@ async fn spawn_udp_forwarder(
 
     let down_sock = sock.clone();
     let down_peer = inner_peer.clone();
-    tokio::spawn(async move {
+    let down_task = tokio::spawn(async move {
         while let Some((_src, data)) = udp_rx.recv().await {
-            let dst = *down_peer.lock();
+            let dst = *down_peer.lock().await;
             if let Some(dst) = dst {
                 let _ = down_sock.send_to(&data, dst).await;
             }
         }
     });
 
-    Ok(local)
+    let guard = TaskGuard(vec![up_task.abort_handle(), down_task.abort_handle()]);
+
+    Ok((local, guard))
 }
 
 async fn run_warp_in_warp(
@@ -1423,34 +1601,29 @@ async fn run_warp_in_warp(
     http_listen: Option<SocketAddr>,
 ) -> Result<()> {
     log::info!("[*] establishing outer WARP tunnel to {peer}...");
-    let (outer_stack, mut outer_exit, _outer_tun) = establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
+    let (outer_stack, mut outer_exit) = establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
 
-    let forwarder = spawn_udp_forwarder(&outer_stack, peer).await?;
+    let (forwarder, _forwarder_guard) = spawn_udp_forwarder(&outer_stack, peer).await?;
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
-    let (inner_stack, mut inner_exit, tun_bridge) =
+    let (inner_stack, mut inner_exit) =
         establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
 
     let (socks_task, http_task) = spawn_local_proxies(inner_stack.clone(), listen, http_listen).await;
 
-    // Start TUN adapter (tun2socks or Android fd) ONLY after SOCKS5 is listening.
+    // TUN adapter for warp-in-warp
     let mut tun_task = None;
     if use_tun2socks() {
         log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
-        let socks_port: u16 = std::env::var("AETHER_SOCKS")
-            .ok()
-            .and_then(|s| s.rsplit(':').next()?.parse().ok())
-            .unwrap_or(1819);
+        let socks_port: u16 = std::env::var("AETHER_SOCKS").ok()
+            .and_then(|s| s.rsplit(':').next()?.parse().ok()).unwrap_or(1819);
         let t2s_cfg = tun_t2s::TunConfig {
-            name: "FCAE_VPN".to_string(),
-            mtu: TUNNEL_MTU as u32,
+            name: "FCAE_VPN".to_string(), mtu: TUNNEL_MTU as u32,
             ipv4: if secondary.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { secondary.ipv4.clone() },
             ipv6: if secondary.ipv6.is_empty() { None } else { Some(secondary.ipv6.clone()) },
-            socks_port,
-            socks_host: "127.0.0.1".to_string(),
-            username: None,
-            password: None,
+            socks_port, socks_host: "127.0.0.1".to_string(),
+            username: None, password: None,
             tunnel_peer_ip: Some(peer.ip().to_string()),
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -1459,20 +1632,9 @@ async fn run_warp_in_warp(
                 log::warn!("[-] tun2socks ended: {e}");
             }
         });
-        tun_task = Some(tokio::spawn(async move {
-            let _ = t2s_task.await;
-            drop(shutdown_tx);
-        }));
-    } else if let Some((fd, ot, tun_rx)) = tun_bridge {
-        log::info!("[+] TUN mode: bridging Android/system fd={fd}");
-        tun_task = Some(tokio::spawn(async move {
-            if let Err(e) = tun::run(fd, ot, tun_rx).await {
-                log::warn!("[-] tun bridge ended: {e}");
-            }
-        }));
+        tun_task = Some(tokio::spawn(async move { let _ = t2s_task.await; drop(shutdown_tx); }));
     }
 
-    // Signal the FFI/GUI that the tunnel is fully connected.
     log::info!("[+] data-plane ok");
 
     let outcome = tokio::select! {
@@ -1480,11 +1642,11 @@ async fn run_warp_in_warp(
         result = &mut inner_exit => join_outcome("inner wireguard tunnel", result),
     };
 
+    if let Some(t) = &http_task { t.abort(); }
+    if let Some(t) = socks_task { t.abort(); }
+    if let Some(t) = tun_task { t.abort(); }
     outer_exit.abort();
     inner_exit.abort();
-    if let Some(t) = socks_task { t.abort(); }
-    if let Some(t) = http_task { t.abort(); }
-    if let Some(t) = tun_task { t.abort(); }
 
     let _ = outer_exit.await;
     let _ = inner_exit.await;
@@ -1526,9 +1688,7 @@ async fn prompt_line(prompt: &str) -> Option<String> {
     }
 }
 
-const SCAN_MODE_PROMPT: &str = "\nScan mode (discovery speed):\n  [1] turbo     (fast, first hit)\n  [2] balanced  (thorough)\n  [3] thorough  (deep, best ping)\n  [4] stealth   (quiet, patient)\nChoose [1-4] (default 1): ";
-
-const VALIDATE_PROMPT: &str = "\nValidate candidates with:\n  [1] handshake / dataplane ping (default, fast)\n  [2] ironclad — real tunnel + HTTP on top candidates only\nChoose [1-2] (default 1): ";
+const SCAN_MODE_PROMPT: &str = "\nScan mode:\n  [1] turbo     (fast, first hit)\n  [2] balanced  (default)\n  [3] thorough  (deep, best ping)\n  [4] stealth   (quiet, patient)\n  [5] ironclad  (real tunnel + real HTTP check per candidate, guaranteed working)\nChoose [1-5] (default 2): ";
 
 async fn select_scan_mode() -> prober::ScanMode {
     if let Ok(v) = std::env::var("AETHER_SCAN") {
@@ -1538,10 +1698,11 @@ async fn select_scan_mode() -> prober::ScanMode {
     let answer = prompt_line(SCAN_MODE_PROMPT).await;
 
     match answer.as_deref() {
-        Some("2") => prober::ScanMode::Balanced,
+        Some("1") => prober::ScanMode::Turbo,
         Some("3") => prober::ScanMode::Thorough,
         Some("4") => prober::ScanMode::Stealth,
-        _ => prober::ScanMode::Turbo,
+        Some("5") => prober::ScanMode::Ironclad,
+        _ => prober::ScanMode::Balanced,
     }
 }
 
@@ -1551,43 +1712,43 @@ async fn select_scan_mode_str() -> String {
     }
 
     let answer = prompt_line(SCAN_MODE_PROMPT).await;
-    let mode = match answer.as_deref() {
-        Some("2") => "balanced".to_string(),
+
+    match answer.as_deref() {
+        Some("1") => "turbo".to_string(),
         Some("3") => "thorough".to_string(),
         Some("4") => "stealth".to_string(),
-        _ => "turbo".to_string(),
-    };
-
-    // Optional ironclad validation (independent of scan mode).
-    if std::env::var("AETHER_VALIDATE").is_err() && std::env::var("AETHER_NONINTERACTIVE").is_err()
-    {
-        let v = prompt_line(VALIDATE_PROMPT).await;
-        if matches!(v.as_deref(), Some("2")) {
-            std::env::set_var("AETHER_VALIDATE", "ironclad");
-            log::info!("[+] validation mode: ironclad (post-scan HTTP check on top candidates)");
-        }
+        Some("5") => "ironclad".to_string(),
+        _ => "balanced".to_string(),
     }
-
-    mode
 }
 
-async fn select_protocol() -> Protocol {
+async fn select_protocol(base: &str) -> Protocol {
     if let Ok(v) = std::env::var("AETHER_PROTOCOL") {
         return Protocol::parse(&v);
     }
-    if std::env::var("AETHER_NONINTERACTIVE").is_ok() {
-        return Protocol::Masque;
-    }
 
-    let answer = prompt_line(
-        "\nProtocol:\n  [1] MASQUE (modern, QUIC/H3, default)\n  [2] WireGuard (classic, faster)\n  [3] WARP-in-WARP / gool\nChoose [1-3] (default 1): ",
-    )
-    .await;
+    loop {
+        let zero_trust = match team_scope() {
+            Some(team) => format!("  [4] Zero Trust: signed in to {team}, pick another team\n"),
+            None => "  [4] Zero Trust: sign in to an organization (WARP for teams)\n".to_string(),
+        };
 
-    match answer.as_deref() {
-        Some("2") => Protocol::WireGuard,
-        Some("3") => Protocol::WarpInWarp,
-        _ => Protocol::Masque,
+        let answer = prompt_line(&format!(
+            "\nProtocol:\n  [1] MASQUE (modern, QUIC/H3, default)\n  \
+             [2] WireGuard (classic, faster)\n  [3] WARP-in-WARP / gool\n{zero_trust}\
+             Choose [1-4] (default 1): "
+        ))
+        .await;
+
+        match answer.as_deref() {
+            Some("2") => return Protocol::WireGuard,
+            Some("3") => return Protocol::WarpInWarp,
+            Some("4") => {
+                enrol_zero_trust(base).await;
+                continue;
+            }
+            _ => return Protocol::Masque,
+        }
     }
 }
 
@@ -1617,10 +1778,7 @@ impl Protocol {
 }
 
 async fn select_masque_transport() {
-    if std::env::var("AETHER_MASQUE_HTTP2").is_ok()
-        || std::env::var("AETHER_PEER").is_ok()
-        || std::env::var("AETHER_NONINTERACTIVE").is_ok()
-    {
+    if std::env::var("AETHER_MASQUE_HTTP2").is_ok() || std::env::var("AETHER_PEER").is_ok() {
         return;
     }
 
