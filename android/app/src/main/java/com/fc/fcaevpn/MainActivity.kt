@@ -660,21 +660,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun disconnectAll(errorReason: String? = null) {
+    private fun disconnectAll() {
     userInitiatedDisconnect = true
-
-    // If auto-disconnecting due to error, log the reason first so it shows in Logs tab
-    if (errorReason != null) {
-        val currentLogs = if (switchLogging.isChecked) NativeEngine.nativeGetLogs() else ""
-        // Append error to the log display immediately before disconnect clears everything
-        if (currentLogs.isNotEmpty()) {
-            val updated = currentLogs + "E $errorReason\n"
-            val shown = if (updated.length > MAX_LOG_CHARS) updated.takeLast(MAX_LOG_CHARS) else updated
-            val h = shown.length.toLong() * 31 + shown[0].code.toLong() * 31 + shown[shown.length - 1].code.toLong()
-            lastLogHash = h
-            logText.text = shown
-        }
-    }
 
     // 1. UI updates happen INSTANTLY on main thread
     vpnActive = false
@@ -684,21 +671,18 @@ class MainActivity : AppCompatActivity() {
     updateButton()
     
     statusText.text = "DISCONNECTED"
-    statusText.setTextColor(Color.parseColor("#8A93A6")) // Use your disconnected color
+    statusText.setTextColor(Color.parseColor("#8A93A6"))
     statsText.text = ""
     peerText.text = ""
 
-    // 2. Brief delay so Rust error log has time to reach JNI before we kill the engine
+    // 2. Trigger disconnect on a background thread
     val currentMode = spinnerMode.selectedItemPosition
     Thread({
-        try { Thread.sleep(300) } catch (_: Throwable) {}
         try { NativeEngine.nativeStop() } catch (_: Throwable) {}
 
         if (currentMode == 1) {
-            // TUN Mode: Call the service DIRECTLY (0ms delay)
             FCAEVpnService.disconnectNow()
         } else {
-            // Proxy Mode: Send intent
             try {
                 val i = Intent(this, ProxyNotification::class.java)
                 i.action = ProxyNotification.ACTION_STOP
@@ -707,6 +691,55 @@ class MainActivity : AppCompatActivity() {
         }
     }, "Disconnect-Background").start()
 }
+
+    // Auto-disconnect on error: polls until error log arrives from JNI, then disconnects
+    private fun autoDisconnectOnError(errorReason: String) {
+        userInitiatedDisconnect = true
+
+        // 1. UI updates instantly
+        vpnActive = false
+        engineRunning = false
+        connecting = false
+        handler.removeCallbacks(poll)
+        updateButton()
+        statusText.text = "DISCONNECTED"
+        statusText.setTextColor(Color.parseColor("#8A93A6"))
+        statsText.text = ""
+        peerText.text = ""
+
+        // 2. Poll for logs briefly (Rust error callback needs ~1 tick to reach JNI),
+        //    then disconnect. Max 100ms total, checking every 5ms.
+        val currentMode = spinnerMode.selectedItemPosition
+        Thread({
+            // Wait for error log to arrive from Rust -> JNI callback
+            var logs = ""
+            for (i in 0..20) {
+                try { Thread.sleep(5) } catch (_: Throwable) {}
+                try { logs = NativeEngine.nativeGetLogs() } catch (_: Throwable) {}
+                if (logs.contains(errorReason.take(20))) break
+            }
+            // Show logs immediately
+            if (switchLogging.isChecked && logs.isNotEmpty()) {
+                val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
+                handler.post {
+                    val h = shown.length.toLong() * 31 + shown[0].code.toLong() * 31 + shown[shown.length - 1].code.toLong()
+                    lastLogHash = h
+                    logText.text = shown
+                }
+            }
+            // Now disconnect
+            try { NativeEngine.nativeStop() } catch (_: Throwable) {}
+            if (currentMode == 1) {
+                FCAEVpnService.disconnectNow()
+            } else {
+                try {
+                    val i = Intent(this, ProxyNotification::class.java)
+                    i.action = ProxyNotification.ACTION_STOP
+                    startService(i)
+                } catch (_: Throwable) {}
+            }
+        }, "AutoDisconnect-Error").start()
+    }
 
 
     private fun checkForUpdates() {
@@ -839,8 +872,8 @@ class MainActivity : AppCompatActivity() {
                 // automatically disconnect so user doesn't have to manually click.
                 // Error reason is passed so it shows in Logs tab before engine is killed.
                 if (state == 5) {
-                    handler.post { disconnectAll(errMsg.ifEmpty { "Unknown error" }) }
-                    return  // skip rendering this frame, disconnectAll handles UI
+                    handler.post { autoDisconnectOnError(errMsg.ifEmpty { "Unknown error" }) }
+                    return
                 }
             }
 
