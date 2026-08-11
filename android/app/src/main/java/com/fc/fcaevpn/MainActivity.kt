@@ -366,28 +366,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Auto-trigger update check once on app open
-            try {
-                NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION)
-                // Poll for result and cache it for the button
-                for (i in 0..20) {
-                    Thread.sleep(500)
-                    val info = NativeEngine.nativePollUpdate()
-                    if (info.checkDone) {
-                        handler.post {
-                            if (info.updateAvailable) {
-                                btnCheckUpdates.text = "Update Available!"
-                                updateStatus.visibility = android.view.View.VISIBLE
-                                updateStatus.text = info.statusMessage
-                                updateAvailableInfo = info
-                            } else {
-                                updateAvailableInfo = null
-                            }
-                        }
-                        break
-                    }
-                }
-            } catch (_: Throwable) {}
+            // Auto-trigger update check once on app open (non-blocking)
+            handler.post {
+                checkForUpdates()
+            }
         }
     }
 
