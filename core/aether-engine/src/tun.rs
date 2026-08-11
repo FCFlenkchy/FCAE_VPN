@@ -261,9 +261,7 @@ pub async fn run(
             tokio::select! {
                 pkt = inbound_rx.recv() => {
                     let Some(pkt) = pkt else { break };
-                    // NOTE: no add_rx here — netstack.rs already counts
-                    // inbound packets via the split_dataplane fan-out.
-                    // Counting here too would double the download stats.
+                    crate::stats::add_rx(pkt.len() as u64);
                     if let Err(e) = file.write_all(&pkt) {
                         log::warn!("[tun] write: {e}");
                         break;
