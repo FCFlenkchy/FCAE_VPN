@@ -1,6 +1,6 @@
 {
-  "version": "v1.2.1",
+  "version": "v1.2.2",
   "release_date": "2026-08-11",
-  "release_notes": "update aether core from v1.5.0 to v1.6.0 and fixed wireguard on android tun mode not counting download bytes and auto disconnect on error and auto update check",
+  "release_notes": "fix android tun mode not counting upload bytes",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
