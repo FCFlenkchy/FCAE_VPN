@@ -660,8 +660,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun disconnectAll() {
+    private fun disconnectAll(errorReason: String? = null) {
     userInitiatedDisconnect = true
+
+    // If auto-disconnecting due to error, log the reason first so it shows in Logs tab
+    if (errorReason != null) {
+        val currentLogs = if (switchLogging.isChecked) NativeEngine.nativeGetLogs() else ""
+        // Append error to the log display immediately before disconnect clears everything
+        if (currentLogs.isNotEmpty()) {
+            val updated = currentLogs + "E $errorReason\n"
+            val shown = if (updated.length > MAX_LOG_CHARS) updated.takeLast(MAX_LOG_CHARS) else updated
+            val h = shown.length.toLong() * 31 + shown[0].code.toLong() * 31 + shown[shown.length - 1].code.toLong()
+            lastLogHash = h
+            logText.text = shown
+        }
+    }
 
     // 1. UI updates happen INSTANTLY on main thread
     vpnActive = false
@@ -675,9 +688,10 @@ class MainActivity : AppCompatActivity() {
     statsText.text = ""
     peerText.text = ""
 
-    // 2. Trigger disconnect on a background thread to avoid UI freezing
+    // 2. Brief delay so Rust error log has time to reach JNI before we kill the engine
     val currentMode = spinnerMode.selectedItemPosition
     Thread({
+        try { Thread.sleep(300) } catch (_: Throwable) {}
         try { NativeEngine.nativeStop() } catch (_: Throwable) {}
 
         if (currentMode == 1) {
@@ -823,9 +837,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 // Auto-disconnect on error: if engine enters error state,
                 // automatically disconnect so user doesn't have to manually click.
-                // Error details are already captured in native logs via jni_log_cb.
+                // Error reason is passed so it shows in Logs tab before engine is killed.
                 if (state == 5) {
-                    handler.post { disconnectAll() }
+                    handler.post { disconnectAll(errMsg.ifEmpty { "Unknown error" }) }
                     return  // skip rendering this frame, disconnectAll handles UI
                 }
             }
