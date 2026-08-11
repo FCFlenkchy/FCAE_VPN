@@ -729,16 +729,19 @@ class MainActivity : AppCompatActivity() {
                     btnCheckUpdates.isEnabled = true
                     if (info.updateAvailable) {
                         btnCheckUpdates.text = "Update Available!"
+                        btnCheckUpdates.setTextColor(COLOR_UPDATE_AVAILABLE)
                         updateStatus.text = info.statusMessage
                         // Don't auto-show dialog — just update the button.
                         // User clicks the button to open the dialog.
                         updateAvailableInfo = info
                     } else if (info.checkDone) {
                         btnCheckUpdates.text = "Check for Updates"
+                        btnCheckUpdates.setTextColor(COLOR_UPDATE_IDLE)
                         updateStatus.text = "Up to date (${info.statusMessage})"
                         updateAvailableInfo = null
                     } else {
                         btnCheckUpdates.text = "Check for Updates"
+                        btnCheckUpdates.setTextColor(COLOR_UPDATE_IDLE)
                         updateStatus.text = "Check timed out"
                         updateAvailableInfo = null
                     }
@@ -747,6 +750,7 @@ class MainActivity : AppCompatActivity() {
                 handler.post {
                     btnCheckUpdates.isEnabled = true
                     btnCheckUpdates.text = "Check for Updates"
+                    btnCheckUpdates.setTextColor(COLOR_UPDATE_IDLE)
                     updateStatus.text = "Update check failed: ${e.message}"
                 }
             }
@@ -962,5 +966,7 @@ class MainActivity : AppCompatActivity() {
         private val COLOR_PROGRESS = Color.parseColor("#60A5FA")
         private val COLOR_DISCONNECT_BTN = Color.parseColor("#B91C1C")
         private val COLOR_CONNECT_BTN = Color.parseColor("#15803D")
+        private val COLOR_UPDATE_AVAILABLE = Color.parseColor("#FF8C00")  // orange
+        private val COLOR_UPDATE_IDLE = Color.parseColor("#FFFFFF")        // white default
     }
 }
