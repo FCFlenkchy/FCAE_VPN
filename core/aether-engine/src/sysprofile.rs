@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use parking_lot::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
@@ -19,7 +19,7 @@ pub struct Tuning {
     pub channel_capacity: usize,
 }
 
-static TUNING: OnceLock<Tuning> = OnceLock::new();
+static TUNING: Mutex<Option<Tuning>> = Mutex::new(None);
 
 fn detected_cpus() -> usize {
     std::thread::available_parallelism()
@@ -168,8 +168,17 @@ fn build_tuning() -> Tuning {
     }
 }
 
-pub fn tuning() -> &'static Tuning {
-    TUNING.get_or_init(build_tuning)
+pub fn tuning() -> Tuning {
+    let mut guard = TUNING.lock();
+    if guard.is_none() {
+        *guard = Some(build_tuning());
+    }
+    *guard.as_ref().unwrap()
+}
+
+/// Reset the cached tuning so the next call to tuning() re-detects system resources.
+pub fn reset() {
+    *TUNING.lock() = None;
 }
 
 pub fn log_summary() {
