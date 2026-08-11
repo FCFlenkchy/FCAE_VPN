@@ -221,7 +221,9 @@ pub async fn run(
                 }
                 Ok(Ok(n)) => {
                     unsafe { pkt.set_len(n); }
-                    // TX counted in netstack::flush_tx (common path for all modes)
+                    // TX counted here for TUN mode (packets go directly to tunnel,
+                    // bypassing netstack). Proxy/SOCKS mode counts in netstack::flush_tx.
+                    crate::stats::add_tx(n as u64);
                     if out_tx.send(pkt).await.is_err() {
                         break;
                     }
