@@ -245,6 +245,19 @@ class MainActivity : AppCompatActivity() {
         editRoutesInline = findViewById(R.id.editRoutesInline)
         outerScroll = findViewById(R.id.outerScroll)
 
+        // Tapping anywhere outside an EditText clears its focus and hides the
+        // soft keyboard. This prevents the blinking cursor from remaining
+        // visible after the keyboard is dismissed on Android.
+        outerScroll.setOnTouchListener { _, _ ->
+            val focused = currentFocus
+            if (focused is android.widget.EditText) {
+                focused.clearFocus()
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                imm.hideSoftInputFromWindow(focused.windowToken, 0)
+            }
+            false
+        }
+
         spinnerProtocol.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
             listOf("MASQUE (HTTP/3)", "WireGuard", "WARP-in-WARP"),
@@ -380,6 +393,9 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         inForeground = false
+        // Clear any EditText focus so the blinking cursor doesn't stay
+        // visible after the keyboard is dismissed.
+        clearEditTextFocus()
         // Stop the JNI status/log poll while the UI is invisible — it was
         // previously only gated on vpnActive, so it kept firing every 5s
         // (JNI calls + TextView updates) even when the app was backgrounded.
@@ -453,6 +469,18 @@ class MainActivity : AppCompatActivity() {
                     }
                 } catch (_: Throwable) {}
             }
+        }
+    }
+
+    /** Clear focus from any currently focused EditText and dismiss the soft
+     *  keyboard.  Fixes the Android quirk where the blinking text cursor (|)
+     *  stays visible in a text field even after the keyboard is gone. */
+    private fun clearEditTextFocus() {
+        val focused = currentFocus
+        if (focused is android.widget.EditText) {
+            focused.clearFocus()
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+            imm.hideSoftInputFromWindow(focused.windowToken, 0)
         }
     }
 
@@ -717,11 +745,8 @@ class MainActivity : AppCompatActivity() {
         val currentMode = spinnerMode.selectedItemPosition
         Thread({
             try { Thread.sleep(150) } catch (_: Throwable) {}
-            // Inject error into native log buffer + update UI
+            // Grab the latest logs and update the UI before disconnecting.
             try {
-                if (errorReason.isNotEmpty()) {
-                    NativeEngine.nativeInjectLog("Auto-disconnected: $errorReason")
-                }
                 val logs = NativeEngine.nativeGetLogs()
                 if (switchLogging.isChecked && logs.isNotEmpty()) {
                     val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs

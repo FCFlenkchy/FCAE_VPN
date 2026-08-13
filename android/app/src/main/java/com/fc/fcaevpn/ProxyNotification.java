@@ -101,15 +101,6 @@ public class ProxyNotification extends Service {
         try {
             int state = NativeEngine.nativeGetState();
             if (state == 5) {  // AETHER_STATE_ERROR
-                // Inject error into native log buffer so it persists for UI
-                try {
-                    String err = NativeEngine.nativeGetLastError();
-                    if (err != null && !err.isEmpty()) {
-                        NativeEngine.nativeInjectLog("Auto-disconnected: " + err);
-                    } else {
-                        NativeEngine.nativeInjectLog("Auto-disconnected: unknown error");
-                    }
-                } catch (Exception ignored) {}
                 handler.post(this::stopProxy);
                 return;
             }

@@ -252,24 +252,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativeGetLogs(JNIEnv* env, jclass) {
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeInjectLog(JNIEnv* env, jclass, jstring msg) {
-    if (!msg) return;
-    const char* c = env->GetStringUTFChars(msg, nullptr);
-    if (!c) return;
-    {
-        std::lock_guard<std::mutex> lock(g_log_mu);
-        std::string line = "E ";
-        line += c;
-        g_logs.push_back(line);
-        while (g_logs.size() > kMaxLogs) {
-            g_logs.pop_front();
-        }
-    }
-    __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "%s", c);
-    env->ReleaseStringUTFChars(msg, c);
-}
-
-extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeClearLogs(JNIEnv*, jclass) {
     std::lock_guard<std::mutex> lock(g_log_mu);
     g_logs.clear();
