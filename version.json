@@ -1,6 +1,6 @@
 {
-  "version": "v1.2.2",
-  "release_date": "2026-08-11",
-  "release_notes": "fix android tun mode not counting upload bytes",
+  "version": "v1.2.3",
+  "release_date": "2026-08-13",
+  "release_notes": "fix a crash on android double race shutdown",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
