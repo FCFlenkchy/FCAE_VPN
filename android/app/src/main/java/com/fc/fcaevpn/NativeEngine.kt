@@ -37,6 +37,7 @@ object NativeEngine {
     @JvmStatic external fun nativeFree()
     @JvmStatic external fun nativeGetLogs(): String
     @JvmStatic external fun nativeClearLogs()
+    @JvmStatic external fun nativeInjectLog(msg: String)
 
     // ── Structured telemetry getters ──
     @JvmStatic external fun nativeGetState(): Int

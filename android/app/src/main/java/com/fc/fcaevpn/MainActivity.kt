@@ -684,11 +684,11 @@ class MainActivity : AppCompatActivity() {
     // 2. Trigger disconnect on a background thread
     val currentMode = spinnerMode.selectedItemPosition
     Thread({
-        try { NativeEngine.nativeStop() } catch (_: Throwable) {}
-
         if (currentMode == 1) {
+            // TUN mode: fullShutdown() handles nativeStop + nativeFree
             FCAEVpnService.disconnectNow()
         } else {
+            // Proxy mode: stopProxy() handles nativeStop + nativeFree
             try {
                 val i = Intent(this, ProxyNotification::class.java)
                 i.action = ProxyNotification.ACTION_STOP
@@ -717,12 +717,12 @@ class MainActivity : AppCompatActivity() {
         val currentMode = spinnerMode.selectedItemPosition
         Thread({
             try { Thread.sleep(150) } catch (_: Throwable) {}
-            // Grab logs and ALWAYS append the error reason so it's visible
+            // Inject error into native log buffer + update UI
             try {
-                var logs = NativeEngine.nativeGetLogs()
                 if (errorReason.isNotEmpty()) {
-                    logs = logs + "E $errorReason\n"
+                    NativeEngine.nativeInjectLog("Auto-disconnected: $errorReason")
                 }
+                val logs = NativeEngine.nativeGetLogs()
                 if (switchLogging.isChecked && logs.isNotEmpty()) {
                     val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
                     handler.post {
@@ -732,11 +732,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             } catch (_: Throwable) {}
-            // Now disconnect
-            try { NativeEngine.nativeStop() } catch (_: Throwable) {}
+            // Now disconnect — let the services handle stop/free properly
             if (currentMode == 1) {
+                // TUN mode: service's fullShutdown() handles nativeStop + nativeFree
                 FCAEVpnService.disconnectNow()
             } else {
+                // Proxy mode: ProxyNotification.stopProxy() handles nativeStop + nativeFree
                 try {
                     val i = Intent(this, ProxyNotification::class.java)
                     i.action = ProxyNotification.ACTION_STOP

@@ -21,6 +21,7 @@ public class ProxyNotification extends Service {
     private PendingIntent piMain;
     private Notification.Action disconnectAction;
     private String lastNotifText = null;
+    private volatile boolean nativeFreed = false;
 
     private final Runnable statsRunnable = new Runnable() {
         @Override
@@ -100,6 +101,15 @@ public class ProxyNotification extends Service {
         try {
             int state = NativeEngine.nativeGetState();
             if (state == 5) {  // AETHER_STATE_ERROR
+                // Inject error into native log buffer so it persists for UI
+                try {
+                    String err = NativeEngine.nativeGetLastError();
+                    if (err != null && !err.isEmpty()) {
+                        NativeEngine.nativeInjectLog("Auto-disconnected: " + err);
+                    } else {
+                        NativeEngine.nativeInjectLog("Auto-disconnected: unknown error");
+                    }
+                } catch (Exception ignored) {}
                 handler.post(this::stopProxy);
                 return;
             }
@@ -137,15 +147,20 @@ public class ProxyNotification extends Service {
         stopSelf();
         Log.i(TAG, "ProxyNotification stopped");
 
+        freeNativeOnce();
+
+        if (!MainActivity.activityAlive) {
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }
+    }
+
+    private void freeNativeOnce() {
+        if (nativeFreed) return;
+        nativeFreed = true;
         new Thread(() -> {
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
             try { Thread.sleep(300); } catch (InterruptedException ignored) {}
             try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
-
-            if (!MainActivity.activityAlive) {
-                Log.i(TAG, "Activity not alive after proxy stop — killing process");
-                android.os.Process.killProcess(android.os.Process.myPid());
-            }
         }, "FCAE-ProxyStop").start();
     }
 
@@ -154,12 +169,11 @@ public class ProxyNotification extends Service {
         handler.removeCallbacks(statsRunnable);
         Log.i(TAG, "ProxyNotification onDestroy");
 
+        // Only cleanup native here if stopProxy() didn't already do it.
+        freeNativeOnce();
+
         if (!MainActivity.activityAlive) {
-            new Thread(() -> {
-                try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-                try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
-                android.os.Process.killProcess(android.os.Process.myPid());
-            }, "FCAE-ProxyDestroy").start();
+            android.os.Process.killProcess(android.os.Process.myPid());
         }
 
         super.onDestroy();
