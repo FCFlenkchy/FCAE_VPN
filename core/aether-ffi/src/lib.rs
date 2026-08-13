@@ -845,6 +845,10 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                     t.state = 5;
                     t.last_error = format!("{e:#}");
                     t.status_message = "Error".to_string();
+                    drop(t);
+                    unsafe {
+                        log_msg(1, &format!("[engine] error: {e:#}"));
+                    }
                 }
             }
         }
