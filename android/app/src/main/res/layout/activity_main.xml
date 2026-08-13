@@ -4,6 +4,8 @@
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:fitsSystemWindows="true"
+    android:focusable="true"
+    android:focusableInTouchMode="true"
     android:background="#FF141420">
 
     <!-- Scrollable controls area — fills all space above the fixed log section -->

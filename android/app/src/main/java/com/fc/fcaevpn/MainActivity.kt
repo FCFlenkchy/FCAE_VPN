@@ -245,19 +245,31 @@ class MainActivity : AppCompatActivity() {
         editRoutesInline = findViewById(R.id.editRoutesInline)
         outerScroll = findViewById(R.id.outerScroll)
 
-        // Tapping anywhere outside an EditText clears its focus and hides the
-        // soft keyboard. This prevents the blinking cursor from remaining
-        // visible after the keyboard is dismissed on Android.
+        // Tapping anywhere outside an EditText clears its focus and moves
+        // focus to the decor view, preventing the system from immediately
+        // re-assigning focus back to the same field.
         outerScroll.setOnTouchListener { _, _ ->
             val focused = currentFocus
             if (focused is android.widget.EditText) {
                 focused.clearFocus()
+                window.decorView.requestFocus()
                 val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
                 imm.hideSoftInputFromWindow(focused.windowToken, 0)
             }
             false
         }
 
+        // Bulletproof: whenever any EditText loses focus, explicitly hide its
+        // cursor.  This covers every focus-loss path (taps outside, back
+        // button, keyboard dismissal, spinner selection) regardless of how
+        // the focus was moved.
+        val editTexts = listOf(editSni, editForcePeer, editSocksPort, editHttpPort,
+            editTeam, editAccessToken, editAccessEmail, editRoutesFile, editRoutesInline)
+        for (et in editTexts) {
+            et.setOnFocusChangeListener { view, hasFocus ->
+                (view as android.widget.EditText).isCursorVisible = hasFocus
+            }
+        }
         spinnerProtocol.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
             listOf("MASQUE (HTTP/3)", "WireGuard", "WARP-in-WARP"),
@@ -390,6 +402,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Catch the back button: if an EditText is focused, clear its focus
+     *  first (which also hides the blinking cursor) before propagating
+     *  the event to finish the activity. */
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        val focused = currentFocus
+        if (focused is android.widget.EditText) {
+            clearEditTextFocus()
+            return  // Consume the event — don't finish the activity yet
+        }
+        super.onBackPressed()
+    }
+
     override fun onPause() {
         super.onPause()
         inForeground = false
@@ -473,12 +498,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Clear focus from any currently focused EditText and dismiss the soft
-     *  keyboard.  Fixes the Android quirk where the blinking text cursor (|)
-     *  stays visible in a text field even after the keyboard is gone. */
+     *  keyboard.  Requests focus on the root layout so the system doesn't
+     *  immediately re-assign focus back to the same EditText, which would
+     *  leave the blinking text cursor (|) visible. */
     private fun clearEditTextFocus() {
         val focused = currentFocus
         if (focused is android.widget.EditText) {
             focused.clearFocus()
+            // Move focus to the decor view (root) so the EditText cannot
+            // immediately regain focus.
+            window.decorView.requestFocus()
             val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
             imm.hideSoftInputFromWindow(focused.windowToken, 0)
         }
