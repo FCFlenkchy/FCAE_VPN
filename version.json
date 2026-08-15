@@ -1,6 +1,6 @@
 {
-  "version": "v1.2.3",
-  "release_date": "2026-08-13",
-  "release_notes": "fix crash on android: double race shutdown on disconnect and fix clear focus on cursor android txt fields",
+  "version": "v1.2.4",
+  "release_date": "2026-08-15",
+  "release_notes": "Aggressive build cmake for android/destkops",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
