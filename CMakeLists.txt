@@ -444,5 +444,5 @@ else()
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(${AETHER_COMPILE_TARGET} PRIVATE -O2 -Wall -Wextra -Wpedantic)
+    target_compile_options(${AETHER_COMPILE_TARGET} PRIVATE -O3 -Wall -Wextra -Wpedantic)
 endif()
