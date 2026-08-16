@@ -157,7 +157,14 @@ public class FCAEVpnService extends VpnService {
             try {
                 Builder builder = new Builder();
                 builder.setSession("FCAE VPN");
-                builder.setMtu(1420);
+                // MTU must match the engine's tunnel MTU, otherwise apps
+                // negotiate their TCP MSS off a too-large value and every
+                // full-size packet gets fragmented inside the tunnel.
+                // Engine constants: TUNNEL_MTU = 1280 (MASQUE/WireGuard),
+                // INNER_MTU = 1100 (WARP-in-WARP inner tunnel).
+                // protocol: 0 = MASQUE, 1 = WireGuard, 2 = WARP-in-WARP (gool)
+                final int tunMtu = (protocol == 2) ? 1100 : 1280;
+                builder.setMtu(tunMtu);
                 builder.addAddress("10.0.0.2", 32);
                 builder.addAddress("fd00::2", 128);
                 builder.addRoute("0.0.0.0", 0);
