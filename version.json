@@ -1,6 +1,6 @@
 {
-  "version": "v1.2.4",
-  "release_date": "2026-08-15",
-  "release_notes": "Aggressive build cmake for android/destkops",
+  "version": "v1.2.5",
+  "release_date": "2026-08-16",
+  "release_notes": "fix android warp in warp tun",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
