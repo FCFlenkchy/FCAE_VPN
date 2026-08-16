@@ -51,7 +51,12 @@ fn parse_local_v4(s: &str) -> Ipv4Addr {
 }
 
 const TUNNEL_MTU: usize = 1280;
-const INNER_MTU: usize = 1200;
+// Warp-in-warp double-encapsulates: an inner-tunnel packet gains
+// IPv4(20) + UDP(8) + WG(32) + up-to-16B padding before it must fit
+// through the outer tunnel (MTU 1280). With the previous 1200 the
+// encapsulated inner packet could exceed the outer MTU and fragment,
+// wrecking throughput. 1100 + ~80 overhead stays safely under 1280.
+const INNER_MTU: usize = 1100;
 const DEFAULT_CONFIG: &str = "aether.toml";
 
 fn tun_mode_active() -> bool {
@@ -841,9 +846,17 @@ async fn run_masque_tunnel(
 
     let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
 
-    let stack = netstack::spawn(
-        &identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx,
-    )?;
+    // TUN fd mode counts RX in split_dataplane's fanout and TX in tun.rs,
+    // so the netstack must not meter its (partial) copy of the traffic.
+    let stack = if tun_bridge.is_some() {
+        netstack::spawn_unmetered(
+            &identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx,
+        )?
+    } else {
+        netstack::spawn(
+            &identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx,
+        )?
+    };
 
     let mut tasks = TaskGuard::new();
 
@@ -1310,7 +1323,13 @@ async fn run_wireguard_tunnel(
     let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(aethernoize), inbound_tx, ipv4);
 
     let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
-    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx)?;
+    // TUN fd mode counts RX in split_dataplane's fanout and TX in tun.rs,
+    // so the netstack must not meter its (partial) copy of the traffic.
+    let stack = if tun_bridge.is_some() {
+        netstack::spawn_unmetered(&identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx)?
+    } else {
+        netstack::spawn(&identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx)?
+    };
 
     let (socks_task, http_task) = spawn_local_proxies(stack.clone(), listen, http_listen).await;
 
@@ -1411,9 +1430,19 @@ fn split_dataplane(
     let mut inbound_rx = inbound_rx;
     tokio::spawn(async move {
         while let Some(pkt) = inbound_rx.recv().await {
-            // add_rx is handled by tun.rs when writing to the TUN fd —
-            // counting here would double the RX bytes.
-            let _ = ns_in_tx.send(pkt.clone()).await;
+            // RX is counted here, exactly once per packet. The netstack
+            // paired with this fanout is spawned unmetered (see callers)
+            // so the best-effort copy below can't double-count.
+            add_rx(pkt.len() as u64);
+            // The netstack only needs these packets for local SOCKS/HTTP
+            // proxy flows. Copy best-effort: if it has room, clone; if it
+            // is backed up, skip the clone entirely instead of memcpy-ing
+            // every packet and back-pressuring the TUN fast path.
+            if let Ok(permit) = ns_in_tx.try_reserve() {
+                permit.send(pkt.clone());
+            }
+            // Bytes::from(Vec) is zero-copy — the TUN writer receives the
+            // original buffer without an extra allocation.
             let _ = tun_in_tx.send(Bytes::from(pkt)).await;
         }
     });
@@ -1569,7 +1598,13 @@ async fn establish_wg_with_tun(
 
     let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(profile), inbound_tx, ipv4);
     let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
-    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, ns_in_rx, ns_out_tx)?;
+    // TUN fd mode counts RX in split_dataplane's fanout and TX in tun.rs,
+    // so the netstack must not meter its (partial) copy of the traffic.
+    let stack = if tun_bridge.is_some() {
+        netstack::spawn_unmetered(&identity.ipv4, &identity.ipv6, mtu, ns_in_rx, ns_out_tx)?
+    } else {
+        netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, ns_in_rx, ns_out_tx)?
+    };
 
     let exit = tokio::spawn(async move {
         match tunnel.run(outbound_rx).await {
@@ -1681,7 +1716,12 @@ async fn run_warp_in_warp(
         let socks_port: u16 = std::env::var("AETHER_SOCKS").ok()
             .and_then(|s| s.rsplit(':').next()?.parse().ok()).unwrap_or(1819);
         let t2s_cfg = tun_t2s::TunConfig {
-            name: "FCAE_VPN".to_string(), mtu: TUNNEL_MTU as u32,
+            // Device MTU must match the INNER tunnel: the SOCKS proxy
+            // behind tun2socks runs on inner_stack (INNER_MTU). TCP is
+            // re-segmented anyway, but UDP datagrams are forwarded whole —
+            // with a larger device MTU, QUIC's >=1200-byte datagrams get
+            // dropped by the 1100-MTU inner netstack and black-hole.
+            name: "FCAE_VPN".to_string(), mtu: INNER_MTU as u32,
             ipv4: if secondary.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { secondary.ipv4.clone() },
             ipv6: if secondary.ipv6.is_empty() { None } else { Some(secondary.ipv6.clone()) },
             socks_port, socks_host: "127.0.0.1".to_string(),

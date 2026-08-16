@@ -12,17 +12,15 @@ use bytes::Bytes;
 use crate::error::{AetherError, Result};
 
 #[cfg(unix)]
-use std::io::Write;
-#[cfg(unix)]
-use std::mem::ManuallyDrop;
-#[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, RawFd};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
 #[cfg(unix)]
 use std::sync::OnceLock;
 #[cfg(unix)]
 use tokio::io::unix::AsyncFd;
+#[cfg(unix)]
+use tokio::io::Interest;
 #[cfg(unix)]
 use tokio::sync::Notify;
 
@@ -137,6 +135,57 @@ impl AsRawFd for RawFdHandle {
     }
 }
 
+/// Write one packet to the TUN fd, retrying on EAGAIN/EWOULDBLOCK.
+///
+/// The fd is O_NONBLOCK: under sustained download the kernel TUN queue
+/// fills up and write() returns EAGAIN. Treating that as a fatal error
+/// (as `File::write_all` does) killed the whole write task and dropped
+/// the connection under load. Instead we park on epoll writability and
+/// retry, handling partial writes and EINTR. Returns Err(Interrupted)
+/// if shutdown is signalled while waiting.
+#[cfg(unix)]
+async fn write_packet(async_fd: &AsyncFd<RawFdHandle>, pkt: &[u8]) -> std::io::Result<()> {
+    let mut written = 0usize;
+    while written < pkt.len() {
+        let mut guard = tokio::select! {
+            r = async_fd.writable() => r?,
+            _ = shutdown_notify().notified() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "shutdown",
+                ));
+            }
+        };
+
+        let res = guard.try_io(|inner| {
+            let raw = inner.as_raw_fd();
+            let n = unsafe {
+                libc::write(
+                    raw,
+                    pkt[written..].as_ptr() as *const libc::c_void,
+                    pkt.len() - written,
+                )
+            };
+            if n < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
+        });
+
+        match res {
+            Ok(Ok(n)) => written += n,
+            // EINTR: not a readiness problem, just retry the write.
+            Ok(Err(ref e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Ok(Err(e)) => return Err(e),
+            // WouldBlock: readiness was consumed by try_io — loop back
+            // and park on writable() until the kernel drains the queue.
+            Err(_would_block) => continue,
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 pub async fn run(
     fd: i32,
@@ -179,6 +228,14 @@ pub async fn run(
             }
         };
 
+        // Reusable scratch buffer. TUN packets are bounded by the tunnel
+        // MTU (<= 1280), so 8 KiB is ample headroom. Reading into a
+        // persistent buffer and copying out only the actual packet bytes
+        // avoids allocating (and zeroing) a fresh large buffer for every
+        // single packet — that allocation churn throttled throughput on
+        // mobile CPUs.
+        let mut buf = vec![0u8; 8192];
+
         loop {
             let mut guard = tokio::select! {
                 r = async_fd.readable() => match r {
@@ -194,12 +251,10 @@ pub async fn run(
                 }
             };
 
-            let mut pkt = vec![0u8; 16384];
-
             let read_result = guard.try_io(|inner| {
                 let raw = inner.as_raw_fd();
                 let n = unsafe {
-                    libc::read(raw, pkt.as_mut_ptr() as *mut libc::c_void, 16384)
+                    libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
                 };
                 if n < 0 {
                     Err(std::io::Error::last_os_error())
@@ -214,7 +269,8 @@ pub async fn run(
                     break;
                 }
                 Ok(Ok(n)) => {
-                    unsafe { pkt.set_len(n); }
+                    // Right-sized copy of just the packet bytes.
+                    let pkt = buf[..n].to_vec();
                     // TX counted here for TUN mode (packets go directly to tunnel,
                     // bypassing netstack). Proxy/SOCKS mode counts in netstack::flush_tx.
                     crate::stats::add_tx(n as u64);
@@ -245,19 +301,29 @@ pub async fn run(
     TUN_DUP_WRITE.store(write_fd, Ordering::SeqCst);
 
     let write_task = tokio::spawn(async move {
-        // Use ManuallyDrop so File::drop() NEVER closes the fd.
-        // When the runtime is dropped, this async task is cancelled and
-        // drop() would run — but close_all_fds() already owns the fd via
-        // the atomic. Without ManuallyDrop, cancelling this task causes
-        // a double-close crash on Android disconnect.
-        let mut file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(write_fd) });
+        // Register for WRITABLE readiness only — we never read this fd.
+        // No File/ManuallyDrop wrapper: RawFdHandle has no Drop, so fd
+        // lifecycle stays fully owned by the TUN_DUP_* atomics +
+        // close_all_fds(), and cancelling this task can never
+        // double-close on Android disconnect.
+        let async_fd = match AsyncFd::with_interest(RawFdHandle(write_fd), Interest::WRITABLE) {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!("[tun] asyncfd register (write): {e}");
+                return;
+            }
+        };
         loop {
             tokio::select! {
                 pkt = inbound_rx.recv() => {
                     let Some(pkt) = pkt else { break };
-                    // RX counted in netstack (common path for all modes)
-                    if let Err(e) = file.write_all(&pkt) {
-                        log::warn!("[tun] write: {e}");
+                    // RX counted upstream in split_dataplane's fanout.
+                    if let Err(e) = write_packet(&async_fd, &pkt).await {
+                        if e.kind() == std::io::ErrorKind::Interrupted {
+                            log::info!("[tun] write task got shutdown signal");
+                        } else {
+                            log::warn!("[tun] write: {e}");
+                        }
                         break;
                     }
                     // Bytes is refcounted — drops automatically when last reference is gone.
