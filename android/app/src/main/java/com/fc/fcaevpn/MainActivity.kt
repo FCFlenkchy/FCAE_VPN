@@ -201,9 +201,15 @@ class MainActivity : AppCompatActivity() {
     private var idleTicks = 0
 
     private fun currentPollInterval(): Long {
+        // Fast-poll while connecting so the UI flips to CONNECTED as soon
+        // as the engine does, instead of lagging up to 1s behind it.
         // After 5 idle ticks at 1s, switch to 2s to reduce JNI overhead.
         // Resets to 1s as soon as traffic resumes.
-        return if (idleTicks >= 5) 2000L else POLL_INTERVAL_MS
+        return when {
+            connecting -> 250L
+            idleTicks >= 5 -> 2000L
+            else -> POLL_INTERVAL_MS
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -665,11 +671,11 @@ class MainActivity : AppCompatActivity() {
 
         bgExecutor.execute {
             // Ensure previous engine is fully stopped before starting.
-            // aether_start() now waits for RUNNING=false if SHUTDOWN is set,
-            // but we still call nativeStop() first for safety.
+            // aether_start() itself waits for RUNNING=false when SHUTDOWN
+            // is set (in 100ms steps), so no fixed sleep is needed here.
+            // The old unconditional Thread.sleep(300) added 300ms to EVERY
+            // connect — including cold starts with nothing running at all.
             try { NativeEngine.nativeStop() } catch (_: Throwable) {}
-            // Brief pause to let the engine thread observe SHUTDOWN
-            try { Thread.sleep(300) } catch (_: Throwable) {}
 
             val ok = try {
                 NativeEngine.nativeStart(
