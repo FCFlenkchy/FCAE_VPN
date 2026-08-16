@@ -51,12 +51,17 @@ fn parse_local_v4(s: &str) -> Ipv4Addr {
 }
 
 const TUNNEL_MTU: usize = 1280;
-// Warp-in-warp double-encapsulates: an inner-tunnel packet gains
-// IPv4(20) + UDP(8) + WG(32) + up-to-16B padding before it must fit
-// through the outer tunnel (MTU 1280). With the previous 1200 the
-// encapsulated inner packet could exceed the outer MTU and fragment,
-// wrecking throughput. 1100 + ~80 overhead stays safely under 1280.
-const INNER_MTU: usize = 1100;
+// Warp-in-warp MTUs. The inner tunnel matches the TUN device MTU (1280 —
+// Android refuses IPv6 on interfaces with MTU < 1280, so the device can
+// never go lower while fd00::/rt ::/0 are configured). The outer tunnel
+// gets extra headroom instead: a 1280-byte inner packet becomes
+// 1280 + WG(32) = 1312, + UDP/IP(28) = 1340 by the time the loopback
+// forwarder pushes it through the outer netstack, so the outer MTU must
+// be >= 1340 or every full-size packet fragments. 1400 covers it and the
+// resulting physical datagram (~1404) still fits a standard 1500 path
+// (stock WARP itself runs at 1420).
+const INNER_MTU: usize = 1280;
+const WIW_OUTER_MTU: usize = 1400;
 const DEFAULT_CONFIG: &str = "aether.toml";
 
 fn tun_mode_active() -> bool {
@@ -1654,8 +1659,12 @@ async fn spawn_udp_forwarder(
     let udp = outer.open_udp().await?;
     let (udp_tx, mut udp_rx) = udp.into_split();
 
-    let inner_peer: std::sync::Arc<tokio::sync::Mutex<Option<SocketAddr>>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    // Inner WG's source addr: written once by the first uplink packet,
+    // read per-packet on the downlink. A std Mutex (never held across
+    // await) avoids the old per-packet async-Mutex lock/wake overhead
+    // on the warp-in-warp hot path.
+    let inner_peer: std::sync::Arc<std::sync::Mutex<Option<SocketAddr>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
 
     let up_sock = sock.clone();
     let up_peer = inner_peer.clone();
@@ -1664,7 +1673,7 @@ async fn spawn_udp_forwarder(
         loop {
             match up_sock.recv_from(&mut buf).await {
                 Ok((n, from)) => {
-                    *up_peer.lock().await = Some(from);
+                    *up_peer.lock().unwrap() = Some(from);
                     if udp_tx.send_to(remote, buf[..n].to_vec()).await.is_err() {
                         break;
                     }
@@ -1678,7 +1687,7 @@ async fn spawn_udp_forwarder(
     let down_peer = inner_peer.clone();
     let down_task = tokio::spawn(async move {
         while let Some((_src, data)) = udp_rx.recv().await {
-            let dst = *down_peer.lock().await;
+            let dst = *down_peer.lock().unwrap();
             if let Some(dst) = dst {
                 let _ = down_sock.send_to(&data, dst).await;
             }
@@ -1698,7 +1707,7 @@ async fn run_warp_in_warp(
     http_listen: Option<SocketAddr>,
 ) -> Result<()> {
     log::info!("[*] establishing outer WARP tunnel to {peer}...");
-    let (outer_stack, mut outer_exit) = establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
+    let (outer_stack, mut outer_exit) = establish_wg(&primary, peer, WIW_OUTER_MTU, true, 5, "outer").await?;
 
     let (forwarder, _forwarder_guard) = spawn_udp_forwarder(&outer_stack, peer).await?;
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
@@ -1716,11 +1725,10 @@ async fn run_warp_in_warp(
         let socks_port: u16 = std::env::var("AETHER_SOCKS").ok()
             .and_then(|s| s.rsplit(':').next()?.parse().ok()).unwrap_or(1819);
         let t2s_cfg = tun_t2s::TunConfig {
-            // Device MTU must match the INNER tunnel: the SOCKS proxy
-            // behind tun2socks runs on inner_stack (INNER_MTU). TCP is
-            // re-segmented anyway, but UDP datagrams are forwarded whole —
-            // with a larger device MTU, QUIC's >=1200-byte datagrams get
-            // dropped by the 1100-MTU inner netstack and black-hole.
+            // Device MTU matches the inner tunnel (INNER_MTU = 1280):
+            // the SOCKS proxy behind tun2socks runs on inner_stack, and
+            // UDP datagrams are forwarded whole, so the device must never
+            // advertise more than the inner netstack can carry.
             name: "FCAE_VPN".to_string(), mtu: INNER_MTU as u32,
             ipv4: if secondary.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { secondary.ipv4.clone() },
             ipv6: if secondary.ipv6.is_empty() { None } else { Some(secondary.ipv6.clone()) },
