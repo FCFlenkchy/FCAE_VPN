@@ -140,7 +140,7 @@ struct AppState {
     }
 };
 
-static AppState g_app;
+extern AppState g_app;
 
 void ui_init();
 void ui_frame();

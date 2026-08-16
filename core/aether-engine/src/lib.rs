@@ -1526,6 +1526,66 @@ async fn establish_wg(
     Ok((stack, exit))
 }
 
+async fn establish_wg_with_tun(
+    identity: &account::Identity,
+    peer: SocketAddr,
+    mtu: usize,
+    obfuscate: bool,
+    keepalive: u16,
+    label: &'static str,
+) -> Result<(netstack::StackHandle, TunnelExit, Option<TunBridge>)> {
+    let private_key = identity.private_key_bytes()?;
+    let peer_public = identity.peer_public_key_bytes()?;
+
+    let ipv4: std::net::Ipv4Addr = identity
+        .ipv4
+        .parse()
+        .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
+
+    let profile = if obfuscate {
+        aethernoize_config()
+    } else {
+        aethernoize::from_profile("off")
+    };
+
+    log::info!("[*] [{label}] validating WireGuard tunnel with {peer} (handshake + data-plane)...");
+    let (_, session) = wireguard::verify_endpoint_keep_session(
+        peer,
+        private_key,
+        peer_public,
+        identity.client_id,
+        ipv4,
+        &profile,
+        wg_tunnel_validate_timeout(),
+        Some(keepalive),
+    )
+    .await
+    .map_err(|e| AetherError::Other(format!("[{label}] tunnel failed validation: {e}")))?;
+    log::info!("[+] [{label}] wireguard tunnel validated (end-to-end data confirmed)");
+
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
+
+    let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(profile), inbound_tx, ipv4);
+    let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
+    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, ns_in_rx, ns_out_tx)?;
+
+    let exit = tokio::spawn(async move {
+        match tunnel.run(outbound_rx).await {
+            Ok(()) => {
+                log::warn!("[-] [{label}] wireguard tunnel closed");
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("[-] [{label}] wireguard tunnel exited: {e}");
+                Err(AetherError::Other(format!("[{label}] {e}")))
+            }
+        }
+    });
+
+    Ok((stack, exit, tun_bridge))
+}
+
 struct TaskGuard(Vec<tokio::task::AbortHandle>);
 
 impl TaskGuard {
@@ -1608,8 +1668,8 @@ async fn run_warp_in_warp(
     log::info!("[+] inner endpoint tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
-    let (inner_stack, mut inner_exit) =
-        establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
+    let (inner_stack, mut inner_exit, tun_bridge) =
+        establish_wg_with_tun(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
 
     let (socks_task, http_task) = spawn_local_proxies(inner_stack.clone(), listen, http_listen).await;
 
@@ -1634,6 +1694,11 @@ async fn run_warp_in_warp(
             }
         });
         tun_task = Some(tokio::spawn(async move { let _ = t2s_task.await; drop(shutdown_tx); }));
+    } else if let Some((fd, ot, tun_rx)) = tun_bridge {
+        log::info!("[+] TUN mode: bridging Android/system fd={fd}");
+        tun_task = Some(tokio::spawn(async move {
+            if let Err(e) = tun::run(fd, ot, tun_rx).await { log::warn!("[-] tun bridge ended: {e}"); }
+        }));
     }
 
     log::info!("[+] data-plane ok");
@@ -1653,6 +1718,7 @@ async fn run_warp_in_warp(
     let _ = inner_exit.await;
 
     drop(outer_stack);
+    drop(inner_stack);
 
     outcome
 }

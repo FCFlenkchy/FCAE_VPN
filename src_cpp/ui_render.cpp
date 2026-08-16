@@ -17,6 +17,10 @@
 #include <unistd.h>
 #endif
 
+// ── Global application state ─────────────────────────────────────────────
+
+AppState g_app;
+
 // ── Config persistence ──────────────────────────────────────────────────
 
 static std::string join_cfg(const std::string& dir) {

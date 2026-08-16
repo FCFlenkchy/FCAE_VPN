@@ -826,7 +826,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
                 }
 
                 RUNNING.store(false, Ordering::SeqCst);
-                rt.shutdown_background();
+                rt.shutdown_timeout(std::time::Duration::from_secs(1));
             }));
 
             // Now that the runtime is dropped, update telemetry — this
