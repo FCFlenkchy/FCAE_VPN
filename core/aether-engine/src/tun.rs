@@ -194,18 +194,12 @@ pub async fn run(
                 }
             };
 
-            // Pooled buffer avoids an allocation + extra memcpy per packet.
-            let mut pkt = crate::buffer_pool::take(16384);
-            let cap = pkt.capacity();
-            // SAFETY: len set to capacity purely so read() has valid
-            // mutable space to write into; truncated to actual bytes
-            // read immediately below before pkt is ever inspected.
-            unsafe { pkt.set_len(cap); }
+            let mut pkt = vec![0u8; 16384];
 
             let read_result = guard.try_io(|inner| {
                 let raw = inner.as_raw_fd();
                 let n = unsafe {
-                    libc::read(raw, pkt.as_mut_ptr() as *mut libc::c_void, cap)
+                    libc::read(raw, pkt.as_mut_ptr() as *mut libc::c_void, 16384)
                 };
                 if n < 0 {
                     Err(std::io::Error::last_os_error())
@@ -229,7 +223,6 @@ pub async fn run(
                     }
                 }
                 Ok(Err(e)) => {
-                    crate::buffer_pool::recycle(pkt);
                     let _ = err_tx_r.send(format!("tun read: {e}")).await;
                     break;
                 }
@@ -237,7 +230,6 @@ pub async fn run(
                     // Readiness was stale (spurious wakeup or another
                     // waiter drained it) — guard clears itself, loop
                     // back and wait for a fresh readiness notification.
-                    crate::buffer_pool::recycle(pkt);
                     continue;
                 }
             }

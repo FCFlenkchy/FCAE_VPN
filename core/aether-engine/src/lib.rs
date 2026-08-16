@@ -2,7 +2,6 @@
 pub mod account;
 pub mod apifront;
 pub mod aethernoize;
-mod buffer_pool;
 pub mod config;
 pub mod consts;
 pub mod dns;
@@ -1508,7 +1507,9 @@ async fn establish_wg(
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
 
     let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(profile), inbound_tx, ipv4);
-    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
+    // Outer tunnel in warp-in-warp: internal plumbing, so don't count its
+    // traffic (the inner stack already counts the real user traffic).
+    let stack = netstack::spawn_unmetered(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
 
     let exit = tokio::spawn(async move {
         match tunnel.run(outbound_rx).await {

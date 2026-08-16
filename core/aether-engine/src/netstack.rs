@@ -275,6 +275,11 @@ pub struct NetStack {
     next_id: usize,
     next_port: u16,
     data_in_tx: mpsc::Sender<DataIn>,
+    /// Whether this stack's traffic is user-facing and should be counted
+    /// toward the global RX/TX stats. Internal/plumbing stacks (e.g. the
+    /// outer tunnel in warp-in-warp) set this to false so they don't
+    /// double-count bytes that already flow through the inner stack.
+    count_stats: bool,
 }
 
 fn strip_cidr(s: &str) -> &str {
@@ -386,6 +391,30 @@ pub fn spawn(
     inbound_rx: mpsc::Receiver<Vec<u8>>,
     outbound_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<StackHandle> {
+    spawn_inner(ipv4, ipv6, mtu, inbound_rx, outbound_tx, true)
+}
+
+/// Like [`spawn`], but the stack does NOT bump the global RX/TX counters.
+/// Used for the warp-in-warp outer tunnel, whose traffic is internal
+/// plumbing that already flows through (and is counted by) the inner stack.
+pub fn spawn_unmetered(
+    ipv4: &str,
+    ipv6: &str,
+    mtu: usize,
+    inbound_rx: mpsc::Receiver<Vec<u8>>,
+    outbound_tx: mpsc::Sender<Vec<u8>>,
+) -> Result<StackHandle> {
+    spawn_inner(ipv4, ipv6, mtu, inbound_rx, outbound_tx, false)
+}
+
+fn spawn_inner(
+    ipv4: &str,
+    ipv6: &str,
+    mtu: usize,
+    inbound_rx: mpsc::Receiver<Vec<u8>>,
+    outbound_tx: mpsc::Sender<Vec<u8>>,
+    count_stats: bool,
+) -> Result<StackHandle> {
     let mut device = StackDevice::new(mtu);
 
     let config = Config::new(HardwareAddress::Ip);
@@ -407,6 +436,7 @@ pub fn spawn(
         next_id: 1,
         next_port: 49152,
         data_in_tx: data_in_tx.clone(),
+        count_stats,
     };
 
     tokio::spawn(run(stack, cmd_rx, data_in_rx, inbound_rx, outbound_tx));
@@ -472,12 +502,14 @@ async fn run(
             maybe = inbound_rx.recv() => {
                 match maybe {
                     Some(pkt) => {
-                        stats::add_rx(pkt.len() as u64);
+                        if s.count_stats {
+                            stats::add_rx(pkt.len() as u64);
+                        }
                         s.device.rx.push_back(pkt);
                         let mut n = 0;
                         while n < MAX_INGEST_PER_TICK {
                             match inbound_rx.try_recv() {
-                                Ok(p) => { stats::add_rx(p.len() as u64); s.device.rx.push_back(p); n += 1; }
+                                Ok(p) => { if s.count_stats { stats::add_rx(p.len() as u64); } s.device.rx.push_back(p); n += 1; }
                                 Err(_) => break,
                             }
                         }
@@ -762,7 +794,9 @@ fn service_udp(s: &mut NetStack) -> bool {
 fn flush_tx(s: &mut NetStack, outbound_tx: &mpsc::Sender<Vec<u8>>) -> usize {
     let mut dropped = 0;
     while let Some(pkt) = s.device.tx.pop_front() {
-        stats::add_tx(pkt.len() as u64);
+        if s.count_stats {
+            stats::add_tx(pkt.len() as u64);
+        }
         match outbound_tx.try_send(pkt) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => dropped += 1,
@@ -986,6 +1020,7 @@ mod tests {
             next_id: 0,
             next_port: 40000,
             data_in_tx: mpsc::channel(1).0,
+            count_stats: true,
         };
 
         for _ in 0..10 {
