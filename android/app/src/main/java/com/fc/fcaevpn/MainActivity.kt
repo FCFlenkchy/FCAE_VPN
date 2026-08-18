@@ -817,15 +817,18 @@ class MainActivity : AppCompatActivity() {
         // Poll for result on a background thread
         Thread {
             try {
-                // Wait up to 15 seconds for the check to complete
+                // Wait up to ~15 seconds for the check to complete.
+                // Poll FIRST, then sleep — the old loop slept 500ms before
+                // its first look, so even an instant result took 500ms+ to
+                // show. 333ms cadence keeps the result display snappy.
                 var info: AetherUpdateInfo? = null
-                for (i in 0..30) {
-                    Thread.sleep(500)
+                for (i in 0..45) {
                     val poll = NativeEngine.nativePollUpdate()
                     if (poll.checkDone) {
                         info = poll
                         break
                     }
+                    Thread.sleep(333)
                 }
                 if (info == null) {
                     val poll = NativeEngine.nativePollUpdate()
