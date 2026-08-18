@@ -201,15 +201,9 @@ class MainActivity : AppCompatActivity() {
     private var idleTicks = 0
 
     private fun currentPollInterval(): Long {
-        // Fast-poll while connecting so the UI flips to CONNECTED as soon
-        // as the engine does, instead of lagging up to 1s behind it.
         // After 5 idle ticks at 1s, switch to 2s to reduce JNI overhead.
         // Resets to 1s as soon as traffic resumes.
-        return when {
-            connecting -> 250L
-            idleTicks >= 5 -> 2000L
-            else -> POLL_INTERVAL_MS
-        }
+        return if (idleTicks >= 5) 2000L else POLL_INTERVAL_MS
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
