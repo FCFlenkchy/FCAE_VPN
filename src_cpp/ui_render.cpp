@@ -394,22 +394,6 @@ void render_ui() {
                       || g_app.start_busy.load();
     bool errored    = (cur == AETHER_STATE_ERROR);
 
-    // Auto-disconnect on error: if engine entered error state while we thought
-    // it was running, automatically stop it so the UI flips back to disconnected.
-    static bool was_running = false;
-    if (errored && was_running) {
-        g_app.start_busy.store(false);
-        aether_stop();
-        g_app.ffi_state.store(AETHER_STATE_DISCONNECTED);
-        cur = AETHER_STATE_DISCONNECTED;
-        connected = false;
-        busy = false;
-        errored = false;
-        g_app.add_log(1, (std::string("[ERROR] ") + telem.last_error).c_str());
-        g_app.add_log(3, "[ui] auto-disconnected due to error");
-    }
-    was_running = (connected || busy);
-
     // ── 1. STATUS BAR + ACTIONS ──────────────────────────────────────────
     {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
