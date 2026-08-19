@@ -818,16 +818,29 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 SHUTDOWN.store(true, Ordering::SeqCst);
                 aether_engine::tun::close_all_fds();
-                #[cfg(target_os = "windows")]
-                {
-                    if !FORCE_CLEANUP_DONE.swap(true, Ordering::SeqCst) {
-                        aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
-                    }
-                }
 
                 RUNNING.store(false, Ordering::SeqCst);
                 rt.shutdown_timeout(std::time::Duration::from_secs(1));
             }));
+
+            // Force-kill tun2socks and clean up Windows TUN adapters AFTER
+            // the runtime has been dropped. These shell out to PowerShell/
+            // netsh/route and can take seconds; running them inside the
+            // catch_unwind above blocked the engine thread and made the
+            // whole app appear suspended during shutdown.
+            #[cfg(target_os = "windows")]
+            {
+                if !FORCE_CLEANUP_DONE.swap(true, Ordering::SeqCst) {
+                    // Fire-and-forget: the PowerShell/netsh cleanup can take
+                    // several seconds. Running it on a detached thread means
+                    // the engine thread returns immediately and the app stays
+                    // responsive. The OS-level cleanup completes in the
+                    // background.
+                    std::thread::spawn(|| {
+                        aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
+                    });
+                }
+            }
 
             // Now that the runtime is dropped, update telemetry — this
             // runs outside the runtime.
