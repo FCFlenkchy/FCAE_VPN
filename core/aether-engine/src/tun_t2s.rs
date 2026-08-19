@@ -1684,6 +1684,7 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
             // take seconds each; blocking the runtime here made the whole app
             // appear frozen during TUN shutdown.
             let cleanup_cfg = cfg.clone();
+            #[cfg(not(target_os = "windows"))]
             let cleanup_pid = pid;
             let cleanup_task = tokio::task::spawn_blocking(move || {
                 #[cfg(target_os = "windows")]
