@@ -1186,10 +1186,15 @@ pub extern "C" fn aether_free() {
     #[cfg(target_os = "windows")]
     {
         // Always run force cleanup on aether_free() — this is the final
-        // exit path (ui_shutdown).  Set the done flag BEFORE calling
-        // cleanup so the engine thread (if still running) won't race.
+        // exit path (ui_shutdown).  Set the done flag BEFORE spawning
+        // the cleanup so the engine thread (if still running) won't race.
         FORCE_CLEANUP_DONE.store(true, Ordering::SeqCst);
-        aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
+        // Fire-and-forget: PowerShell/netsh cleanup takes seconds and was
+        // blocking ui_shutdown() → aether_free() → ExitProcess, making the
+        // whole app appear suspended on exit.
+        std::thread::spawn(|| {
+            aether_engine::tun_t2s::force_cleanup_windows("FCAE-VPN");
+        });
     }
 
     let mut t = TELEMETRY.lock();
