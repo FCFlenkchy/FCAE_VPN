@@ -540,7 +540,6 @@ struct IfReq {
 
 /// Configuration for the TUN device
 #[derive(Clone)]
-#[derive(Clone)]
 pub struct TunConfig {
     pub name: String,
     pub mtu: u32,
