@@ -153,6 +153,23 @@ pub fn is_available() -> bool {
 /// (e.g., from aether_stop / aether_free) to ensure the process is killed
 /// and DNS is restored even when the runtime is being torn down.
 #[cfg(target_os = "windows")]
+/// Kill all tun2socks processes immediately — fast, synchronous, no PowerShell.
+/// Safe to call from any shutdown path without blocking the UI.
+#[cfg(target_os = "windows")]
+pub fn kill_tun2socks_processes() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    log::info!("[tun_t2s] Force-killing tun2socks processes");
+    let mut c = Command::new("taskkill");
+    c.creation_flags(CREATE_NO_WINDOW);
+    let _ = c.args(["/IM", "tun2socks.exe", "/F", "/T"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 pub fn force_cleanup_windows(name: &str) {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
@@ -174,13 +191,7 @@ pub fn force_cleanup_windows(name: &str) {
     };
 
     // Kill all tun2socks processes
-    log::info!("[tun_t2s] Force-killing tun2socks processes");
-    let mut c = Command::new("taskkill");
-    c.creation_flags(CREATE_NO_WINDOW);
-    let _ = c.args(["/IM", "tun2socks.exe", "/F", "/T"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    kill_tun2socks_processes();
 
     // Restore DNS from the backup file saved during startup.
     // The backup path is deterministic: %TEMP%\fcaevpn\dns_backup.json
