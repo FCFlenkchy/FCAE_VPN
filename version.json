@@ -1,6 +1,6 @@
 {
-  "version": "v1.2.5",
-  "release_date": "2026-08-16",
-  "release_notes": "fix android warp in warp tun",
+  "version": "v1.2.6",
+  "release_date": "2026-08-19",
+  "release_notes": "faster update check for android and updated aether core to 1.7.0",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
