@@ -88,70 +88,18 @@ fn cleanup_windows_sync(name: &str, timeout_secs: u64) -> bool {
             return true;
         }
         if start.elapsed() >= timeout {
-            // Timeout reached - log warning and detach the thread
+            // Timeout reached - log a warning, but DO NOT detach.
+            // Block until cleanup actually completes so DNS/route state is
+            // fully restored before the FFI returns to the caller.
+            // The timeout is only a diagnostic; it must not abandon cleanup.
             unsafe {
-                log_msg(2, &format!("[ffi] cleanup_windows_sync: TIMEOUT after {}s", timeout_secs));
+                log_msg(2, &format!("[ffi] cleanup_windows_sync: TIMEOUT after {}s — waiting for cleanup to finish", timeout_secs));
             }
-            // Don't mark as done - the cleanup may still be running
-            // Detach the thread so it can finish in the background
-            handle.detach();
-            return false;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-/// Synchronously run Windows cleanup (DNS restore, route cleanup, adapter deletion)
-/// with a timeout. Returns true if cleanup completed within the timeout, false if it timed out.
-#[cfg(target_os = "windows")]
-fn cleanup_windows_sync(name: &str, timeout_secs: u64) -> bool {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::thread;
-    use std::time::Duration;
-
-    // Check if cleanup already ran
-    if FORCE_CLEANUP_DONE.load(Ordering::SeqCst) {
-        unsafe {
-            log_msg(4, "[ffi] cleanup_windows_sync: already done, skipping");
-        }
-        return true;
-    }
-
-    let name = name.to_string();
-    let completed = Arc::new(AtomicBool::new(false));
-    let completed_clone = completed.clone();
-
-    unsafe {
-        log_msg(4, &format!("[ffi] cleanup_windows_sync: starting (timeout={}s)", timeout_secs));
-    }
-
-    // Spawn the cleanup in a separate thread so we can timeout
-    let handle = thread::spawn(move || {
-        aether_engine::tun_t2s::force_cleanup_windows(&name);
-        completed_clone.store(true, Ordering::SeqCst);
-    });
-
-    // Wait for completion with timeout
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(timeout_secs);
-    
-    loop {
-        if completed.load(Ordering::SeqCst) {
+            let _ = handle.join();
             FORCE_CLEANUP_DONE.store(true, Ordering::SeqCst);
             unsafe {
-                log_msg(4, "[ffi] cleanup_windows_sync: completed successfully");
+                log_msg(4, "[ffi] cleanup_windows_sync: completed (after timeout)");
             }
-            return true;
-        }
-        if start.elapsed() >= timeout {
-            // Timeout reached - log warning and detach the thread
-            unsafe {
-                log_msg(2, &format!("[ffi] cleanup_windows_sync: TIMEOUT after {}s", timeout_secs));
-            }
-            // Don't mark as done - the cleanup may still be running
-            // Detach the thread so it can finish in the background
-            handle.detach();
             return false;
         }
         thread::sleep(Duration::from_millis(100));

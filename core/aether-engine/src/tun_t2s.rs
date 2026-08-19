@@ -170,6 +170,7 @@ pub fn kill_tun2socks_processes() {
         .status();
 }
 
+#[cfg(target_os = "windows")]
 pub fn force_cleanup_windows(name: &str) {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
