@@ -1587,8 +1587,8 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     let mut child = cmd
         .current_dir(tun_dir)
         .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| AetherError::Other(format!("Failed to spawn tun2socks: {e}")))?;
 
@@ -1654,30 +1654,6 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     {
         std::thread::sleep(std::time::Duration::from_millis(1000));
         configure_macos_tun(&cfg);
-    }
-
-    // Read stdout/stderr in background threads
-    if let Some(stdout) = child.stdout.take() {
-        std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    log::info!("[tun2socks stdout] {}", line);
-                }
-            }
-        });
-    }
-    if let Some(stderr) = child.stderr.take() {
-        std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    log::info!("[tun2socks stderr] {}", line);
-                }
-            }
-        });
     }
 
     // Wait for process in a blocking task — child is moved here
