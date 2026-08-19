@@ -183,11 +183,21 @@ jobs:
 
       - name: install deps (linux)
         if: matrix.name == 'linux-x64'
-        env:
-          DEBIAN_FRONTEND: noninteractive
+        timeout-minutes: 15
         run: |
-          sudo apt-get update -qq || true
-          sudo apt-get install -y -qq --no-install-recommends \
+          set -euxo pipefail
+          # Freshly-booted ubuntu-latest VMs run apt-daily/unattended-upgrades at
+          # boot; they hold the apt/dpkg locks while apt 2.7 waits on them
+          # FOREVER (this is what made the workflow look "stuck" here).
+          sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+            echo "waiting for boot-time apt processes to release locks..."
+            sleep 5
+          done
+          # NOTE: sudo strips env vars, so DEBIAN_FRONTEND must be assigned
+          # after sudo (as below); an env: block on the step does NOT reach apt.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
             libxrandr-dev libxinerama-dev libxxf86vm-dev \
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
@@ -207,12 +217,26 @@ jobs:
 
       - name: install deps (windows cross)
         if: matrix.name == 'windows-x64'
-        env:
-          DEBIAN_FRONTEND: noninteractive
+        timeout-minutes: 15
         run: |
-          sudo apt-get update -qq || true
-          sudo apt-get install -y -qq --no-install-recommends \
-            mingw-w64 g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 nasm
+          set -euxo pipefail
+          # Freshly-booted ubuntu-latest VMs run apt-daily/unattended-upgrades at
+          # boot; they hold the apt/dpkg locks while apt 2.7 waits on them
+          # FOREVER (this is what made the workflow look "stuck" here).
+          sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+            echo "waiting for boot-time apt processes to release locks..."
+            sleep 5
+          done
+          # NOTE: sudo strips env vars, so DEBIAN_FRONTEND must be assigned
+          # after sudo (as below); an env: block on the step does NOT reach apt.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 nasm
+          echo "=== MinGW toolchain check ==="
+          which x86_64-w64-mingw32-gcc x86_64-w64-mingw32-g++
+          x86_64-w64-mingw32-gcc --version | head -1
+          x86_64-w64-mingw32-g++ --version | head -1
 
       - name: cache macos glfw build
         if: matrix.name == 'macos-x64'
@@ -599,9 +623,16 @@ jobs:
 
       - name: install osslsigncode (windows signing)
         if: matrix.name == 'windows-x64'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update -qq || true
-          sudo apt-get install -y -qq --no-install-recommends osslsigncode
+          set -euxo pipefail
+          sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+            echo "waiting for boot-time apt processes to release locks..."
+            sleep 5
+          done
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends osslsigncode
 
       - name: sign windows exe
         if: matrix.name == 'windows-x64'
@@ -771,10 +802,16 @@ jobs:
           merge-multiple: false
 
       - name: zip for GitHub Release
+        timeout-minutes: 10
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq zip
+          sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+            echo "waiting for boot-time apt processes to release locks..."
+            sleep 5
+          done
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y zip
           mkdir -p release-zips
           for dir in artifacts/*/; do
             [ -d "$dir" ] || continue
