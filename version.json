@@ -1,6 +1,6 @@
 {
   "version": "v1.2.6",
   "release_date": "2026-08-19",
-  "release_notes": "faster update check for android and updated aether core to 1.7.0",
+  "release_notes": "faster update check for android and updated aether core to 1.7.0 and fixed destkops tun mode huge memory leak and fixed on windows app on tun mode  closing causes suspend",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
