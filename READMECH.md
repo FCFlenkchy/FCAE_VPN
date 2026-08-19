@@ -126,9 +126,9 @@ FCAE VPN 连接到 **Cloudflare 的 WARP 网络** — 与 Cloudflare 1.1.1.1 DNS
 ### 界面截图
 
 <p align="center">
-  <img src="windows_ui.png" alt="Windows 界面" width="45%">
+  <img src="windows_ui.png" alt="Windows 界面" height="400">
   &nbsp;
-  <img src="android_ui.png" alt="Android 界面" width="45%">
+  <img src="android_ui.png" alt="Android 界面" height="400">
 </p>
 
 ## 构建

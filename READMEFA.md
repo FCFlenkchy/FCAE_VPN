@@ -126,9 +126,9 @@ FCAE VPN به **شبکه WARP کلادفلر** متصل می‌شود — هما
 ### تصاویر
 
 <p align="center">
-  <img src="windows_ui.png" alt="رابط کاربری ویندوز" width="45%">
+  <img src="windows_ui.png" alt="رابط کاربری ویندوز" height="400">
   &nbsp;
-  <img src="android_ui.png" alt="رابط کاربری اندروید" width="45%">
+  <img src="android_ui.png" alt="رابط کاربری اندروید" height="400">
 </p>
 
 ## ساخت

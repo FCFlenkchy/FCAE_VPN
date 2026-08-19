@@ -124,9 +124,9 @@ Rules set via inline input take priority and are merged with any rules file spec
 ### Screenshots
 
 <p align="center">
-  <img src="windows_ui.png" alt="Windows UI" width="45%">
+  <img src="windows_ui.png" alt="Windows UI" height="400">
   &nbsp;
-  <img src="android_ui.png" alt="Android UI" width="45%">
+  <img src="android_ui.png" alt="Android UI" height="400">
 </p>
 
 ## Building
