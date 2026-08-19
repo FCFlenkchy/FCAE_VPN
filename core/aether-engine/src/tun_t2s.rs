@@ -540,6 +540,7 @@ struct IfReq {
 
 /// Configuration for the TUN device
 #[derive(Clone)]
+#[derive(Clone)]
 pub struct TunConfig {
     pub name: String,
     pub mtu: u32,
@@ -1665,22 +1666,39 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
             log::info!("[tun_t2s] Shutting down tun2socks (pid={})", pid);
             // Kill the child process (child_guard handles taskkill /F /T)
             child_guard.kill();
-            #[cfg(target_os = "windows")]
-            {
-                cleanup_windows_tun(&cfg);
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
-                #[cfg(target_os = "linux")]
-                cleanup_linux_tun(&cfg);
-                #[cfg(target_os = "macos")]
-                cleanup_macos_tun(&cfg);
-            }
+
+            // Run the slow OS-level cleanup in spawn_blocking so the async
+            // runtime is NOT blocked while route/dns/adapter commands run.
+            // These shell out to route/netsh/ip/resolvectl/powershell and can
+            // take seconds each; blocking the runtime here made the whole app
+            // appear frozen during TUN shutdown.
+            let cleanup_cfg = cfg.clone();
+            let cleanup_pid = pid;
+            let cleanup_task = tokio::task::spawn_blocking(move || {
+                #[cfg(target_os = "windows")]
+                {
+                    cleanup_windows_tun(&cleanup_cfg);
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    unsafe { libc::kill(cleanup_pid as i32, libc::SIGTERM); }
+                    #[cfg(target_os = "linux")]
+                    cleanup_linux_tun(&cleanup_cfg);
+                    #[cfg(target_os = "macos")]
+                    cleanup_macos_tun(&cleanup_cfg);
+                }
+            });
+
             // Wait for process to exit with timeout
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 &mut wait_handle
+            ).await;
+
+            // Give the cleanup a bounded amount of time to finish.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                cleanup_task
             ).await;
         }
         result = &mut wait_handle => {
