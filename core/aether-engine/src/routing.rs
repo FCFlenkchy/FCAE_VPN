@@ -223,6 +223,18 @@ impl RuleSet {
         self.block.is_empty() && self.direct.is_empty()
     }
 
+    pub fn has_domain_rules(&self) -> bool {
+        self.block.iter().chain(self.direct.iter()).any(|rule| {
+            matches!(
+                rule,
+                Matcher::DomainSuffix(_)
+                    | Matcher::DomainFull(_)
+                    | Matcher::DomainKeyword(_)
+                    | Matcher::DomainRegex(_)
+            )
+        })
+    }
+
     pub fn decide(&self, host: Host<'_>, port: u16) -> Action {
         if self.block.iter().any(|rule| rule.matches(host, port)) {
             return Action::Block;

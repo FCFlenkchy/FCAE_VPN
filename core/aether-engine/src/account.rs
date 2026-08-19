@@ -249,6 +249,13 @@ fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Durati
     ))
 }
 
+fn refuses_identity(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+    )
+}
+
 fn worth_retrying(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS
         || status == reqwest::StatusCode::REQUEST_TIMEOUT
@@ -419,7 +426,12 @@ where
                 .map_err(|e| AetherError::Api(format!("{label} decode: {e}; body={body}")));
         }
 
-        last_error = AetherError::Api(format!("{label}: {}", describe_rejection(status, &body)));
+        let described = format!("{label}: {}", describe_rejection(status, &body));
+        last_error = if refuses_identity(status) {
+            AetherError::IdentityRefused(described)
+        } else {
+            AetherError::Api(described)
+        };
 
         if !worth_retrying(status) {
             return Err(last_error);

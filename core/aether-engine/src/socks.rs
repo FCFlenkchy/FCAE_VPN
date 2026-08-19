@@ -60,6 +60,50 @@ fn routes() -> &'static RuleSet {
     ROUTES.get_or_init(RuleSet::from_env)
 }
 
+fn decide_route(
+    set: &RuleSet,
+    target: &Target,
+    sniffed: Option<&str>,
+    port: u16,
+) -> Action {
+    match sniffed {
+        Some(name) => match set.decide(Host::Domain(name), port) {
+            Action::Proxy => set.decide(host_of(target), port),
+            decided => decided,
+        },
+        None => set.decide(host_of(target), port),
+    }
+}
+
+fn sniff_enabled() -> bool {
+    !matches!(
+        std::env::var("AETHER_ROUTE_SNIFF").as_deref(),
+        Ok("0") | Ok("off") | Ok("false")
+    )
+}
+
+fn sniff_window() -> Duration {
+    let ms = std::env::var("AETHER_ROUTE_SNIFF_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(400);
+    Duration::from_millis(ms)
+}
+
+async fn read_sniff_head(sock: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut head = vec![0u8; crate::sniff::PEEK_BUDGET];
+    match tokio::time::timeout(sniff_window(), sock.read(&mut head)).await {
+        Ok(Ok(0)) => None,
+        Ok(Ok(read)) => {
+            head.truncate(read);
+            Some(head)
+        }
+        Ok(Err(_)) => None,
+        Err(_) => Some(Vec::new()),
+    }
+}
+
 fn host_of(target: &Target) -> Host<'_> {
     match target {
         Target::Domain(name) => Host::Domain(name.as_str()),
@@ -472,15 +516,40 @@ async fn handle_connect(
     target: Target,
     port: u16,
 ) -> Result<()> {
-    match routes().decide(host_of(&target), port) {
+    let mut head = Vec::new();
+    let mut replied = false;
+    let mut named: Option<String> = None;
+
+    if matches!(target, Target::Ip(_)) && sniff_enabled() && routes().has_domain_rules() {
+        reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
+        replied = true;
+
+        head = match read_sniff_head(&mut sock).await {
+            Some(bytes) => bytes,
+            None => return Ok(()),
+        };
+
+        if head.is_empty() {
+            log::trace!("[route] {target}:{port} sent nothing to read a name from");
+        } else {
+            named = crate::sniff::hostname(&head);
+            if let Some(name) = &named {
+                log::debug!("[route] {target}:{port} announced itself as {name}");
+            }
+        }
+    }
+
+    match decide_route(routes(), &target, named.as_deref(), port) {
         Action::Block => {
             log::debug!("[route] block tcp {target}:{port}");
-            let _ = reply(&mut sock, REP_NOT_ALLOWED).await;
+            if !replied {
+                let _ = reply(&mut sock, REP_NOT_ALLOWED).await;
+            }
             return Ok(());
         }
         Action::Direct => {
             log::debug!("[route] direct tcp {target}:{port}");
-            return handle_direct(sock, target, port).await;
+            return handle_direct(sock, target, port, head, replied).await;
         }
         Action::Proxy => {}
     }
@@ -541,9 +610,16 @@ async fn handle_connect(
         }
     };
 
-    reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
+    if !replied {
+        reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
+    }
 
     let (sender, mut from_stack, leftover) = conn;
+
+    if !head.is_empty() && sender.send(head).await.is_err() {
+        return Ok(());
+    }
+
     let (mut rd, mut wr) = sock.into_split();
 
     if !leftover.is_empty() && wr.write_all(&leftover).await.is_err() {
@@ -610,13 +686,19 @@ fn udp_source_allowed(
     }
 }
 
-async fn handle_direct(mut sock: TcpStream, target: Target, port: u16) -> Result<()> {
+async fn handle_direct(
+    mut sock: TcpStream,
+    target: Target,
+    port: u16,
+    head: Vec<u8>,
+    replied: bool,
+) -> Result<()> {
     let address = match &target {
         Target::Domain(name) => format!("{name}:{port}"),
         Target::Ip(ip) => SocketAddr::new(*ip, port).to_string(),
     };
 
-    let upstream = match tokio::time::timeout(
+    let mut upstream = match tokio::time::timeout(
         Duration::from_secs(10),
         TcpStream::connect(&address),
     )
@@ -625,18 +707,29 @@ async fn handle_direct(mut sock: TcpStream, target: Target, port: u16) -> Result
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
             log::debug!("[route] direct connect to {address} failed: {error}");
-            let _ = reply(&mut sock, REP_GENERAL).await;
+            if !replied {
+                let _ = reply(&mut sock, REP_GENERAL).await;
+            }
             return Ok(());
         }
         Err(_) => {
             log::debug!("[route] direct connect to {address} timed out");
-            let _ = reply(&mut sock, REP_GENERAL).await;
+            if !replied {
+                let _ = reply(&mut sock, REP_GENERAL).await;
+            }
             return Ok(());
         }
     };
 
     let _ = upstream.set_nodelay(true);
-    reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
+
+    if !head.is_empty() && upstream.write_all(&head).await.is_err() {
+        return Ok(());
+    }
+
+    if !replied {
+        reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
+    }
 
     let (mut client_rd, mut client_wr) = sock.into_split();
     let (mut remote_rd, mut remote_wr) = upstream.into_split();

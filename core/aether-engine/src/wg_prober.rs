@@ -142,6 +142,19 @@ pub struct WgProbe {
 }
 
 pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<WgProbeResult> {
+    hunt_wg_endpoints(probe, mode, 1)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or(AetherError::NoCleanEndpoint)
+}
+
+pub async fn hunt_wg_endpoints(
+    probe: &WgProbe,
+    mode: WgScanMode,
+    want: usize,
+) -> Result<Vec<WgProbeResult>> {
+    let want = want.max(1);
     let mut st = mode.strategy();
     st.concurrency = crate::sysprofile::cap_concurrency(st.concurrency);
     let timeout = st.per_probe_timeout;
@@ -178,8 +191,13 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
     .buffer_unordered(st.concurrency);
     tokio::pin!(stream);
 
+    if want > 1 {
+        st.early_exit_first = false;
+        st.target_successes = st.target_successes.max(want * 3);
+    }
+
     let deadline = Instant::now() + st.overall_deadline;
-    let mut best: Option<WgProbeResult> = None;
+    let mut verified: Vec<WgProbeResult> = Vec::new();
     let mut found = 0usize;
     let mut quiet_until: Option<Instant> = None;
 
@@ -190,7 +208,7 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
         };
         let remaining = effective.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            if best.is_some() {
+            if !verified.is_empty() {
                 if quiet_until.is_some() {
                     log::info!("[+] no new endpoints recently, finalizing selection");
                 } else {
@@ -210,13 +228,16 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
                     Some(Some(pr)) => {
                         log::info!("[+] wg candidate ok {}:{} rtt={:?}", pr.ip, pr.port, pr.rtt);
                         if st.early_exit_first {
-                            return Ok(pr);
+                            return Ok(vec![pr]);
                         }
-                        best = Some(match best {
-                            Some(cur) if cur.rtt <= pr.rtt => cur,
-                            _ => pr,
-                        });
+                        verified.push(pr);
                         found += 1;
+
+                        if distinct_by_ip(&verified).len() >= want && want > 1 {
+                            log::info!("[+] found {want} endpoints on separate addresses");
+                            break;
+                        }
+
 
                         if st.target_successes > 0 && found >= st.target_successes && quiet_until.is_none() {
                             log::info!("[+] reached target of {} endpoints, selecting best", st.target_successes);
@@ -230,7 +251,7 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
                 }
             }
             _ = tokio::time::sleep(remaining) => {
-                if best.is_some() {
+                if !verified.is_empty() {
                     if quiet_until.is_some() {
                         log::info!("[+] no new endpoints recently, finalizing selection");
                     } else {
@@ -244,13 +265,27 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
         }
     }
 
-    match best {
-        Some(pr) => {
-            log::info!("[+] best wg endpoint {}:{} rtt={:?}", pr.ip, pr.port, pr.rtt);
-            Ok(pr)
-        }
-        None => Err(AetherError::NoCleanEndpoint),
+    let picked = distinct_by_ip(&verified);
+    if picked.is_empty() {
+        return Err(AetherError::NoCleanEndpoint);
     }
+
+    for pr in picked.iter().take(want) {
+        log::info!("[+] wg endpoint {}:{} rtt={:?}", pr.ip, pr.port, pr.rtt);
+    }
+
+    Ok(picked.into_iter().take(want).collect())
+}
+
+fn distinct_by_ip(found: &[WgProbeResult]) -> Vec<WgProbeResult> {
+    let mut sorted = found.to_vec();
+    sorted.sort_by_key(|pr| pr.rtt);
+
+    let mut seen = std::collections::HashSet::new();
+    sorted
+        .into_iter()
+        .filter(|pr| seen.insert(pr.ip))
+        .collect()
 }
 
 async fn verify_one_wg(

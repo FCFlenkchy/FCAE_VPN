@@ -38,6 +38,10 @@ const BACKPRESSURE_RETRY: std::time::Duration = std::time::Duration::from_millis
 const DROP_REPORT_STEP: usize = 512;
 const MAX_IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
+fn max_tcp_pending() -> usize {
+    tcp_buf().saturating_mul(2).max(64 * 1024)
+}
+
 type OpenTcpResp = oneshot::Sender<std::result::Result<TcpConn, String>>;
 type OpenUdpResp = oneshot::Sender<std::result::Result<UdpConn, String>>;
 
@@ -457,6 +461,7 @@ async fn run(
     mut inbound_rx: mpsc::Receiver<Vec<u8>>,
     outbound_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
+    let mut deferred: VecDeque<DataIn> = VecDeque::new();
     let mut tx_dropped: usize = 0;
     let mut next_drop_report: usize = DROP_REPORT_STEP;
 
@@ -481,7 +486,14 @@ async fn run(
             }
         }
 
-        let delay = if tcp_busy || udp_busy {
+        while let Some(d) = deferred.pop_front() {
+            if let Some(back) = try_handle_data(&mut s, d) {
+                deferred.push_front(back);
+                break;
+            }
+        }
+
+        let delay = if tcp_busy || udp_busy || !deferred.is_empty() {
             Some(BACKPRESSURE_RETRY)
         } else {
             let polled = s
@@ -525,11 +537,21 @@ async fn run(
                 }
             }
 
-            maybe = data_in_rx.recv() => {
+            maybe = data_in_rx.recv(), if deferred.is_empty() => {
                 if let Some(d) = maybe {
-                    handle_data(&mut s, d);
-                    while let Ok(d2) = data_in_rx.try_recv() {
-                        handle_data(&mut s, d2);
+                    if let Some(back) = try_handle_data(&mut s, d) {
+                        deferred.push_back(back);
+                    } else {
+                        while deferred.is_empty() {
+                            match data_in_rx.try_recv() {
+                                Ok(d2) => {
+                                    if let Some(back) = try_handle_data(&mut s, d2) {
+                                        deferred.push_back(back);
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
                     }
                 }
             }
@@ -615,28 +637,43 @@ fn handle_cmd(s: &mut NetStack, cmd: Cmd) {
     }
 }
 
-fn handle_data(s: &mut NetStack, d: DataIn) {
+/// Returns `Some(d)` when the datagram must be deferred (TCP pending full).
+fn try_handle_data(s: &mut NetStack, d: DataIn) -> Option<DataIn> {
     match d {
         DataIn::Tcp(id, data) => {
             if let Some(st) = s.tcp_conns.get_mut(&id) {
-                st.pending.extend_from_slice(&data);
+                let max = max_tcp_pending();
+                if st.pending.len() >= max {
+                    return Some(DataIn::Tcp(id, data));
+                }
+                let space = max - st.pending.len();
+                if data.len() <= space {
+                    st.pending.extend_from_slice(&data);
+                } else {
+                    st.pending.extend_from_slice(&data[..space]);
+                    return Some(DataIn::Tcp(id, data[space..].to_vec()));
+                }
             }
+            None
         }
         DataIn::TcpClose(id) => {
             if let Some(st) = s.tcp_conns.get_mut(&id) {
                 st.half_closed = true;
             }
+            None
         }
         DataIn::Udp(id, dst, data) => {
             if let Some(st) = s.udp_conns.get(&id) {
                 let sock = s.sockets.get_mut::<udp::Socket>(st.handle);
                 let _ = sock.send_slice(&data, to_ip_endpoint(dst));
             }
+            None
         }
         DataIn::UdpClose(id) => {
             if let Some(st) = s.udp_conns.remove(&id) {
                 s.sockets.remove(st.handle);
             }
+            None
         }
     }
 }
