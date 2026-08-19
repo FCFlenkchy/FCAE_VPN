@@ -97,15 +97,6 @@ public class ProxyNotification extends Service {
     }
 
     private void updateNotification() {
-        // Check if engine entered error state — auto-disconnect
-        try {
-            int state = NativeEngine.nativeGetState();
-            if (state == 5) {  // AETHER_STATE_ERROR
-                handler.post(this::stopProxy);
-                return;
-            }
-        } catch (Exception ignored) {}
-
         long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
         try {
             long[] stats = FCAEVpnService.nativeGetTrafficStats();

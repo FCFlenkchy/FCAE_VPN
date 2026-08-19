@@ -351,15 +351,6 @@ public class FCAEVpnService extends VpnService {
             lastNotifText = null;
             notification.show("FCAE VPN — Stopped (tap Start to resume)", false);
         } else if (running) {
-            // Check if engine entered error state — auto-disconnect
-            try {
-                int state = NativeEngine.nativeGetState();
-                if (state == 5) {  // AETHER_STATE_ERROR
-                    handler.post(this::fullShutdown);
-                    return;
-                }
-            } catch (Exception ignored) {}
-
             long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
             try {
                 long[] stats = nativeGetTrafficStats();

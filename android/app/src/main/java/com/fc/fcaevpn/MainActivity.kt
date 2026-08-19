@@ -755,53 +755,6 @@ class MainActivity : AppCompatActivity() {
     }, "Disconnect-Background").start()
 }
 
-    // Auto-disconnect on error: waits briefly then grabs logs + injects error reason
-    private fun autoDisconnectOnError(errorReason: String) {
-        userInitiatedDisconnect = true
-
-        // 1. UI updates instantly
-        vpnActive = false
-        engineRunning = false
-        connecting = false
-        handler.removeCallbacks(poll)
-        updateButton()
-        statusText.text = "DISCONNECTED"
-        statusText.setTextColor(Color.parseColor("#8A93A6"))
-        statsText.text = ""
-        peerText.text = ""
-
-        // 2. Wait 150ms for any pending Rust logs, then grab + inject error, then disconnect.
-        val currentMode = spinnerMode.selectedItemPosition
-        Thread({
-            try { Thread.sleep(150) } catch (_: Throwable) {}
-            // Grab the latest logs and update the UI before disconnecting.
-            try {
-                val logs = NativeEngine.nativeGetLogs()
-                if (switchLogging.isChecked && logs.isNotEmpty()) {
-                    val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
-                    handler.post {
-                        val h = shown.length.toLong() * 31 + shown[0].code.toLong() * 31 + shown[shown.length - 1].code.toLong()
-                        lastLogHash = h
-                        logText.text = shown
-                    }
-                }
-            } catch (_: Throwable) {}
-            // Now disconnect — let the services handle stop/free properly
-            if (currentMode == 1) {
-                // TUN mode: service's fullShutdown() handles nativeStop + nativeFree
-                FCAEVpnService.disconnectNow()
-            } else {
-                // Proxy mode: ProxyNotification.stopProxy() handles nativeStop + nativeFree
-                try {
-                    val i = Intent(this, ProxyNotification::class.java)
-                    i.action = ProxyNotification.ACTION_STOP
-                    startService(i)
-                } catch (_: Throwable) {}
-            }
-        }, "AutoDisconnect-Error").start()
-    }
-
-
     private fun checkForUpdates() {
         btnCheckUpdates.isEnabled = false
         btnCheckUpdates.text = "Checking..."
@@ -930,13 +883,6 @@ class MainActivity : AppCompatActivity() {
                     engineRunning = false
                     connecting = false
                     handler.removeCallbacks(poll)
-                }
-                // Auto-disconnect on error: if engine enters error state,
-                // automatically disconnect so user doesn't have to manually click.
-                // Error reason is passed so it shows in Logs tab before engine is killed.
-                if (state == 5) {
-                    handler.post { autoDisconnectOnError(errMsg.ifEmpty { "Unknown error" }) }
-                    return
                 }
             }
 
