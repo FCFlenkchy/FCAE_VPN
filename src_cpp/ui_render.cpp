@@ -436,10 +436,12 @@ void render_ui() {
         if (ImGui::Button(connected || busy ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 34))) {
             if (connected || busy || errored) {
                 g_app.start_busy.store(false);
-                // aether_stop() is non-blocking (just sets shutdown flag +
-                // closes TUN fds + updates telemetry), so calling it
-                // directly from the UI thread is safe and avoids races
-                // with the shutdown path in ui_shutdown().
+                // aether_stop() is non-blocking: it sets the shutdown flag,
+                // closes TUN fds, cancels any in-flight TUN configuration,
+                // updates telemetry, and hands the (slow, PowerShell-based)
+                // OS cleanup to a background finalizer thread. Never run
+                // the Windows cleanup inline here — it froze the UI window
+                // for the duration of the DNS restore / adapter removal.
                 aether_stop();
                 g_app.ffi_state.store(AETHER_STATE_DISCONNECTED);
             } else if (!g_app.start_busy.load()) {

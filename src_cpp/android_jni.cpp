@@ -149,9 +149,11 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStop(JNIEnv*, jclass) {
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeFree(JNIEnv*, jclass) {
     if (!g_inited) return;
-    // aether_free() joins the engine thread and tears down the FFI layer.
-    // Must NOT be called while nativeStop() is running on another thread
-    // (the core STOP_GUARD prevents concurrent stop+free).
+    // aether_free() signals shutdown (STOP_GUARD-serialized with
+    // aether_start), closes TUN fds, and runs the final exactly-once
+    // cleanup. It does NOT join the engine thread (it is detached and
+    // finishes in the background), so this stays safe to call from the
+    // Java cleanup thread.
     aether_free();
     g_inited = false;
     LOGI("aether_free");
