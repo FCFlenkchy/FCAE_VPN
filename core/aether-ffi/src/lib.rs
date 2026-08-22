@@ -1043,11 +1043,16 @@ pub extern "C" fn aether_stop() {
     aether_engine::tun_t2s::cancel_tun_configuration();
 
     // Update telemetry immediately so the UI shows DISCONNECTED without
-    // waiting for the engine thread to finish.
+    // waiting for the engine thread to finish. Keep state=5 (ERROR) and
+    // its message intact: on Android the VPN-service watchdog reacts to
+    // an engine error by calling stop — clobbering the error here would
+    // erase the reason the engine died from the UI.
     {
         let mut t = TELEMETRY.lock();
-        t.state = 0;
-        t.status_message = "Disconnected".to_string();
+        if t.state != 5 {
+            t.state = 0;
+            t.status_message = "Disconnected".to_string();
+        }
         t.connected_peer.clear();
         t.rtt_ms = 0;
         t.rx_bytes_sec = 0;
@@ -1373,13 +1378,23 @@ pub extern "C" fn aether_free() {
     }
 
     let mut t = TELEMETRY.lock();
-    t.state = 0;
-    t.status_message = "Disconnected".to_string();
-    t.connected_peer.clear();
-    t.rtt_ms = 0;
-    t.rx_bytes_sec = 0;
-    t.tx_bytes_sec = 0;
-    t.total_rx = 0;
-    t.total_tx = 0;
-    t.last_error.clear();
+    if t.state == 5 {
+        // Keep the error visible: aether_free() often runs as a REACTION
+        // to the engine erroring (Android service teardown); resetting
+        // here would erase the error message the user is looking at.
+        t.connected_peer.clear();
+        t.rtt_ms = 0;
+        t.rx_bytes_sec = 0;
+        t.tx_bytes_sec = 0;
+    } else {
+        t.state = 0;
+        t.status_message = "Disconnected".to_string();
+        t.connected_peer.clear();
+        t.rtt_ms = 0;
+        t.rx_bytes_sec = 0;
+        t.tx_bytes_sec = 0;
+        t.total_rx = 0;
+        t.total_tx = 0;
+        t.last_error.clear();
+    }
 }
