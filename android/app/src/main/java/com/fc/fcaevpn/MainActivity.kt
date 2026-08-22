@@ -50,7 +50,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerScan: Spinner
     private lateinit var spinnerIpVersion: Spinner
     private lateinit var spinnerNoize: Spinner
-    private lateinit var switchH2: SwitchMaterial
     private lateinit var switchEch: SwitchMaterial
     private lateinit var switchQuick: SwitchMaterial
     private lateinit var switchLan: SwitchMaterial
@@ -225,7 +224,6 @@ class MainActivity : AppCompatActivity() {
         spinnerScan = findViewById(R.id.spinnerScan)
         spinnerIpVersion = findViewById(R.id.spinnerIpVersion)
         spinnerNoize = findViewById(R.id.spinnerNoize)
-        switchH2 = findViewById(R.id.switchH2)
         switchEch = findViewById(R.id.switchEch)
         switchQuick = findViewById(R.id.switchQuick)
         switchLan = findViewById(R.id.switchLan)
@@ -272,7 +270,11 @@ class MainActivity : AppCompatActivity() {
         }
         spinnerProtocol.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
-            listOf("MASQUE (HTTP/3)", "WireGuard", "WARP-in-WARP"),
+            // H2 is folded into the MASQUE entries (used to be the separate
+            // "HTTP/2 fallback" switch). Positions map to core protocol +
+            // h2Enabled via the helpers below — the FFI/start intents keep
+            // taking exactly the same fields as before.
+            listOf("MASQUE (HTTP/3)", "MASQUE (HTTP/2)", "WireGuard", "WARP-in-WARP"),
         )
         spinnerMode.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
@@ -525,12 +527,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveSettings() {
         prefs.edit().apply {
-            putInt("protocol", spinnerProtocol.selectedItemPosition)
+            putInt("protocol", coreProtocolFromSelection())
             putInt("mode", spinnerMode.selectedItemPosition)
             putInt("scan", spinnerScan.selectedItemPosition)
             putInt("ipVersion", spinnerIpVersion.selectedItemPosition)
             putInt("noize", spinnerNoize.selectedItemPosition)
-            putBoolean("h2", switchH2.isChecked)
+            putBoolean("h2", h2FromSelection())
             putBoolean("ech", switchEch.isChecked)
             putBoolean("quick", switchQuick.isChecked)
             putBoolean("lan", switchLan.isChecked)
@@ -553,12 +555,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadSettings() {
-        spinnerProtocol.setSelection(prefs.getInt("protocol", 0))
+        spinnerProtocol.setSelection(
+            selectionPositionFromPrefs(prefs.getInt("protocol", 0), prefs.getBoolean("h2", true)))
         spinnerMode.setSelection(prefs.getInt("mode", 1))
         spinnerScan.setSelection(prefs.getInt("scan", 0))
         spinnerIpVersion.setSelection(prefs.getInt("ipVersion", 0))
         spinnerNoize.setSelection(prefs.getInt("noize", 2))
-        switchH2.isChecked = prefs.getBoolean("h2", true)
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", false)
         switchLan.isChecked = prefs.getBoolean("lan", false)
@@ -602,12 +604,12 @@ class MainActivity : AppCompatActivity() {
         saveSettings()
         val i = Intent(this, FCAEVpnService::class.java)
         i.action = FCAEVpnService.ACTION_START
-        i.putExtra("protocol", spinnerProtocol.selectedItemPosition)
+        i.putExtra("protocol", coreProtocolFromSelection())
         i.putExtra("mode", spinnerMode.selectedItemPosition)
         i.putExtra("scanMode", spinnerScan.selectedItemPosition)
         i.putExtra("ipVersion", spinnerIpVersionToInt())
         i.putExtra("quickReconnect", switchQuick.isChecked)
-        i.putExtra("h2Enabled", switchH2.isChecked)
+        i.putExtra("h2Enabled", h2FromSelection())
         i.putExtra("echEnabled", switchEch.isChecked)
         i.putExtra("lanSharing", switchLan.isChecked)
         i.putExtra("configPath", filesDir.resolve("aether.toml").absolutePath)
@@ -641,12 +643,12 @@ class MainActivity : AppCompatActivity() {
         proxyIntent.action = ProxyNotification.ACTION_START
         startForegroundService(proxyIntent)
 
-        val protocol = spinnerProtocol.selectedItemPosition
+        val protocol = coreProtocolFromSelection()
         val mode = spinnerMode.selectedItemPosition
         val scanMode = spinnerScan.selectedItemPosition
         val ipVersion = spinnerIpVersionToInt()
         val quick = switchQuick.isChecked
-        val h2 = switchH2.isChecked
+        val h2 = h2FromSelection()
         val ech = switchEch.isChecked
         val lan = switchLan.isChecked
         val sni = editSni.text.toString().trim()
@@ -983,6 +985,23 @@ class MainActivity : AppCompatActivity() {
         2 -> 10   // Dual Stack (both)
         else -> 4
     }
+
+    // ── Protocol spinner mapping (H2 folded into the list) ────────────────
+    // Spinner: 0 = MASQUE (HTTP/3), 1 = MASQUE (HTTP/2), 2 = WireGuard,
+    //          3 = WARP-in-WARP. The core/FFI still takes the same two
+    //  fields it always did: protocol (0=masque, 1=wg, 2=gool) + h2Enabled.
+    private fun coreProtocolFromSelection(): Int = when (spinnerProtocol.selectedItemPosition) {
+        2 -> 1    // WireGuard
+        3 -> 2    // WARP-in-WARP
+        else -> 0 // MASQUE (either HTTP version)
+    }
+
+    private fun h2FromSelection(): Boolean = spinnerProtocol.selectedItemPosition == 1
+
+    /** Old saved prefs keep protocol (0-2) + h2 (bool); map back to the
+     *  spinner position so existing configs load unchanged. */
+    private fun selectionPositionFromPrefs(protocol: Int, h2: Boolean): Int =
+        if (protocol == 0) { if (h2) 1 else 0 } else protocol + 1
 
     // Manual formatting avoids String.format() which creates a Formatter +
     // StringBuilder internally on every call — this runs 4× per poll tick.
