@@ -7,9 +7,168 @@
 //! The Android implementation in tun.rs remains untouched.
 
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::oneshot;
 
 use crate::error::{AetherError, Result};
+
+// ── Cancellation / overlap guard for OS-level TUN configuration ──────────
+//
+// configure_*_tun() shells out to netsh/PowerShell/ip/networksetup and can
+// run for 5–15 s. Two problems this state solves:
+//
+// 1. run_tun2socks() used to call configure_*_tun() inline in the async
+//    task (after a blocking thread::sleep). While a poll was stuck inside
+//    those calls the future could not be dropped and the runtime could not
+//    shut down — pressing DISCONNECT during connect froze shutdown until
+//    every command finished. Configuration now runs on the blocking pool
+//    and is raced against the shutdown signal.
+//
+// 2. Disconnecting mid-configuration raced the cleanup: the DNS override
+//    could complete AFTER force_cleanup_windows() had already restored
+//    the original DNS, leaving the system overridden with the TUN adapter
+//    deleted. Cleanup now waits for an in-flight configuration to drain,
+//    and the configuration aborts early once cancelled.
+static CONFIGURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static CONFIGURE_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+// Exactly-once claim for the OS-level TUN cleanup, shared by
+// cleanup_windows_tun()/cleanup_linux_tun()/cleanup_macos_tun() (task
+// shutdown path) and force_cleanup_windows() (FFI stop/exit paths) so the
+// different paths never run their PowerShell/netsh sequences concurrently.
+// 0 = idle, 1 = running, 2 = done. A path that loses the claim waits for
+// the winner instead of starting a second cleanup; configure_begin()
+// re-arms it (after draining) when a new session starts.
+static TUN_CLEANUP_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn configure_begin() {
+    // Never start configuring the adapter while a previous session's
+    // cleanup is still restoring DNS/routes in the background (fast
+    // disconnect → reconnect). Drain first, then re-arm the claim.
+    wait_tun_cleanup_done(std::time::Duration::from_secs(15));
+    TUN_CLEANUP_STATE.store(0, Ordering::SeqCst);
+    CONFIGURE_CANCELLED.store(false, Ordering::SeqCst);
+    CONFIGURE_IN_FLIGHT.store(true, Ordering::SeqCst);
+}
+
+fn configure_end() {
+    CONFIGURE_IN_FLIGHT.store(false, Ordering::SeqCst);
+}
+
+/// True once shutdown was signalled while configuration was still wanted.
+fn configure_cancelled() -> bool {
+    CONFIGURE_CANCELLED.load(Ordering::SeqCst)
+}
+
+/// Request cancellation of any in-flight TUN configuration. Called from the
+/// FFI stop path (and from run_tun2socks' shutdown handling) so a
+/// disconnect mid-connect stops applying DNS/route overrides promptly
+/// instead of running to completion.
+pub fn cancel_tun_configuration() {
+    CONFIGURE_CANCELLED.store(true, Ordering::SeqCst);
+}
+
+/// Block (bounded) until any in-flight TUN configuration finishes, so
+/// cleanup never restores DNS while configuration is still overriding it.
+fn wait_configure_drain(timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while CONFIGURE_IN_FLIGHT.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if CONFIGURE_IN_FLIGHT.load(Ordering::SeqCst) {
+        log::warn!(
+            "[tun_t2s] TUN configuration still in flight after {}s; proceeding with cleanup",
+            timeout.as_secs()
+        );
+    }
+}
+
+/// Try to become the single cleanup runner for this session (idle → running).
+fn claim_tun_cleanup() -> bool {
+    TUN_CLEANUP_STATE
+        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+/// Mark the session's cleanup as finished (called by the winning runner).
+fn tun_cleanup_done() {
+    TUN_CLEANUP_STATE.store(2, Ordering::SeqCst);
+}
+
+/// Block (bounded) until a cleanup started by another path finishes.
+/// Returns true if no cleanup is running any more (idle or done), false if
+/// one is still running when the timeout expires.
+fn wait_tun_cleanup_done(timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if TUN_CLEANUP_STATE.load(Ordering::SeqCst) != 1 {
+            return true; // idle or done
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if TUN_CLEANUP_STATE.load(Ordering::SeqCst) == 1 {
+        log::warn!(
+            "[tun_t2s] previous TUN cleanup still running after {}s; proceeding",
+            timeout.as_secs()
+        );
+        return false;
+    }
+    true
+}
+
+/// Public wrapper for the FFI exit path (aether_free): the FFI-side cleanup
+/// can be a no-op because the engine-side cleanup (spawned when the
+/// tun2socks task was dropped) already claimed the work — the caller must
+/// wait for THAT to finish before letting the process exit, or
+/// ExitProcess() kills it mid-PowerShell and the DNS restore is lost.
+pub fn wait_tun_cleanup_bounded(timeout: std::time::Duration) -> bool {
+    wait_tun_cleanup_done(timeout)
+}
+
+/// Common entry for OS-level cleanups: exactly-once claim + drain of any
+/// in-flight configuration. Returns false if another path already ran (or
+/// is running — which this call waits for, bounded) the cleanup.
+fn cleanup_claim_and_drain() -> bool {
+    if !claim_tun_cleanup() {
+        log::debug!("[tun_t2s] TUN cleanup already claimed by another path — waiting/skipping");
+        wait_tun_cleanup_done(std::time::Duration::from_secs(10));
+        return false;
+    }
+    // A configuration pass may still be applying DNS/route overrides
+    // (disconnect-during-connect). Drain it before restoring state, or the
+    // override could land AFTER this restore and stick forever.
+    wait_configure_drain(std::time::Duration::from_secs(10));
+    true
+}
+
+/// Run the OS-level TUN cleanup (routes, DNS, adapter) on a detached
+/// background thread. These shell out to route/netsh/PowerShell and can
+/// take seconds; running them inline only stalled runtime shutdown.
+/// Exactly-once per session is enforced by the claim shared with
+/// force_cleanup_windows() (the FFI stop/exit path), so the engine-side
+/// and FFI-side cleanups never run their PowerShell sequences concurrently.
+fn spawn_detached_platform_cleanup(cfg: &TunConfig, pid: u32) {
+    let cfg = cfg.clone();
+    let _ = std::thread::Builder::new()
+        .name("aether-tun-cleanup".to_string())
+        .spawn(move || {
+            #[cfg(target_os = "windows")]
+            {
+                let _ = pid; // tun2socks is killed by ChildGuard / taskkill /PID
+                cleanup_windows_tun(&cfg);
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                #[cfg(target_os = "linux")]
+                cleanup_linux_tun(&cfg);
+                #[cfg(target_os = "macos")]
+                cleanup_macos_tun(&cfg);
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                let _ = &cfg;
+            }
+        });
+}
 
 // Embed tun2socks binary at compile time
 #[cfg(not(target_os = "android"))]
@@ -185,6 +344,13 @@ pub fn force_cleanup_windows(name: &str) {
         return;
     }
 
+    // Exactly-once per session: the task-shutdown cleanup, the FFI stop
+    // finalizer, the engine thread teardown and aether_free() can all end
+    // up here; without the claim they ran concurrently (double cleanup).
+    if !cleanup_claim_and_drain() {
+        return;
+    }
+
     let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
         let mut c = Command::new(cmd);
         c.creation_flags(CREATE_NO_WINDOW);
@@ -270,6 +436,7 @@ pub fn force_cleanup_windows(name: &str) {
 
     // Clean up routes and adapter
     cleanup_adapter_by_name(name);
+    tun_cleanup_done();
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -657,6 +824,13 @@ fn configure_windows_tun(cfg: &TunConfig) {
 
     log::info!("[tun_t2s] Configuring Windows TUN adapter '{}' with IP {} IPv6 {} DNS {}", name, ip, ipv6, dns);
 
+    // Shutdown may have been requested while this blocking task was
+    // waiting for the adapter to appear — bail before touching anything.
+    if configure_cancelled() {
+        log::info!("[tun_t2s] configure cancelled before start — skipping adapter setup");
+        return;
+    }
+
     // Helper to run a command silently (no window popup)
     let run_silent = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::Output> {
         let mut c = StdCommand::new(cmd);
@@ -717,6 +891,14 @@ fn configure_windows_tun(cfg: &TunConfig) {
 
     // 2c. Save current DNS on ALL adapters to a temp file, then override to Cloudflare.
     // Original DNS is restored from the backup file on cleanup.
+    // State-mutating phase: if shutdown was requested while the earlier
+    // netsh calls were running, skip it — the cleanup path deletes the
+    // adapter anyway, and an override that lands after cleanup would
+    // leave the system DNS pointing at Cloudflare with no tunnel.
+    if configure_cancelled() {
+        log::info!("[tun_t2s] configure cancelled before DNS override — skipping remaining setup");
+        return;
+    }
     let dns_backup_path = std::env::temp_dir().join("fcaevpn").join("dns_backup.json");
     if let Some(parent) = dns_backup_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -771,6 +953,12 @@ fn configure_windows_tun(cfg: &TunConfig) {
 
     if let Some(idx) = ifidx {
         log::info!("[tun_t2s] Found adapter '{}' with ifIndex={}", name, idx);
+
+        // Don't install default routes if shutdown arrived mid-configure.
+        if configure_cancelled() {
+            log::info!("[tun_t2s] configure cancelled before route installation — skipping");
+            return;
+        }
 
         // 4. Set interface metric low so it becomes the preferred route
         let output = run_silent("netsh", &["interface", "ipv4", "set", "interface", &idx.to_string(), "metric=5"]);
@@ -882,6 +1070,13 @@ fn configure_macos_tun(cfg: &TunConfig) {
     let dns62 = "2606:4700:4700::1001";
 
     log::info!("[tun_t2s] Configuring macOS TUN adapter '{}' with IP {} IPv6 {} netmask {}", name, ip, ipv6, netmask);
+
+    // Shutdown may have been requested while this blocking task waited —
+    // bail before touching system state (cleanup deletes the adapter).
+    if configure_cancelled() {
+        log::info!("[tun_t2s] configure cancelled before start — skipping adapter setup");
+        return;
+    }
 
     // Find the utun interface that tun2socks created
     // tun2socks creates utun with the name we specified; on macOS this becomes a utunX device.
@@ -1120,6 +1315,13 @@ fn configure_linux_tun(cfg: &TunConfig) {
 
     log::info!("[tun_t2s] Configuring Linux TUN adapter '{}' with IP {} IPv6 {}", name, ip, ipv6);
 
+    // Shutdown may have been requested while this blocking task waited —
+    // bail before touching system state (cleanup deletes the adapter).
+    if configure_cancelled() {
+        log::info!("[tun_t2s] configure cancelled before start — skipping adapter setup");
+        return;
+    }
+
     // Add IPv4 to interface
     let output = StdCommand::new("ip")
         .args(["addr", "add", ip, "dev", name])
@@ -1261,6 +1463,12 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
     use std::process::Command as StdCommand;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+    // Exactly-once per session (shared with force_cleanup_windows): the
+    // FFI teardown paths may already be running the PowerShell cleanup.
+    if !cleanup_claim_and_drain() {
+        return;
+    }
+
     let name = &cfg.name;
     let ip = cfg.ipv4.split('/').next().filter(|v| !v.is_empty()).unwrap_or("198.18.0.1");
     let ipv6 = cfg.ipv6.as_deref().and_then(|v| if v.is_empty() { None } else { v.split('/').next() }).unwrap_or("fc00::1");
@@ -1388,6 +1596,7 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
 
     // Delete the TUN adapter — full cleanup so next start is fresh
     cleanup_adapter_by_name(name);
+    tun_cleanup_done();
 
     log::info!("[tun_t2s] TUN adapter '{}' deleted", name);
 }
@@ -1395,6 +1604,10 @@ fn cleanup_windows_tun(cfg: &TunConfig) {
 #[cfg(target_os = "linux")]
 fn cleanup_linux_tun(cfg: &TunConfig) {
     use std::process::Command as StdCommand;
+    // Exactly-once per session (shared with the other cleanup paths).
+    if !cleanup_claim_and_drain() {
+        return;
+    }
     let name = &cfg.name;
     log::info!("[tun_t2s] Cleaning up Linux TUN routes for '{}'", name);
 
@@ -1437,11 +1650,17 @@ fn cleanup_linux_tun(cfg: &TunConfig) {
         }
         let _ = std::fs::remove_file(&dns_backup_path);
     }
+    tun_cleanup_done();
+    log::info!("[tun_t2s] Linux TUN cleanup complete for '{}'", name);
 }
 
 #[cfg(target_os = "macos")]
 fn cleanup_macos_tun(cfg: &TunConfig) {
     use std::process::Command as StdCommand;
+    // Exactly-once per session (shared with the other cleanup paths).
+    if !cleanup_claim_and_drain() {
+        return;
+    }
     let name = &cfg.name;
     log::info!("[tun_t2s] Cleaning up macOS TUN routes for '{}'", name);
 
@@ -1520,11 +1739,12 @@ fn cleanup_macos_tun(cfg: &TunConfig) {
         }
     }
 
+    tun_cleanup_done();
     log::info!("[tun_t2s] macOS TUN cleanup complete for '{}'", name);
 }
 
 /// Run the TUN with tun2socks as a subprocess
-pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> Result<()> {
+pub async fn run_tun2socks(cfg: TunConfig, mut shutdown: oneshot::Receiver<()>) -> Result<()> {
     log::info!("[tun_t2s] Starting TUN with tun2socks");
     log::info!("[tun_t2s] Config: name={}, ipv4={}, socks={}:{}",
         cfg.name, cfg.ipv4, cfg.socks_host, cfg.socks_port
@@ -1646,76 +1866,118 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     }
     let mut child_guard = ChildGuard { pid, killed: false };
 
-    // ── Windows: configure TUN adapter routing ──────────────────────
-    #[cfg(target_os = "windows")]
-    {
-        // Give tun2socks a moment to create the adapter
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        configure_windows_tun(&cfg);
-    }
+    // ── Configure the TUN adapter OFF the async runtime ────────────
+    // This used to run inline (blocking thread::sleep + a burst of
+    // netsh/PowerShell calls) inside the async task, which made the future
+    // impossible to drop while a poll was stuck inside those calls —
+    // pressing DISCONNECT during connect froze shutdown until every
+    // command finished. It now runs on the blocking pool and is raced
+    // against the shutdown signal; if shutdown wins, CONFIGURE_CANCELLED
+    // makes the remaining state-mutating phases (DNS override, route
+    // adds) abort early.
+    let setup_task = tokio::task::spawn_blocking({
+        let cfg = cfg.clone();
+        move || {
+            #[cfg(target_os = "windows")]
+            const SETUP_DELAY_MS: u64 = 1500; // give tun2socks time to create the adapter
+            #[cfg(target_os = "linux")]
+            const SETUP_DELAY_MS: u64 = 500;
+            #[cfg(target_os = "macos")]
+            const SETUP_DELAY_MS: u64 = 1000;
+            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+            const SETUP_DELAY_MS: u64 = 0;
+            if SETUP_DELAY_MS > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(SETUP_DELAY_MS));
+            }
+            configure_begin();
+            // AssertUnwindSafe + catch_unwind: a panic inside configure_*
+            // must not skip configure_end() or CONFIGURE_IN_FLIGHT stays
+            // stuck true and every later cleanup pays the 10 s drain.
+            let cfg = std::panic::AssertUnwindSafe(&cfg);
+            let r = std::panic::catch_unwind(move || {
+                #[cfg(target_os = "windows")]
+                configure_windows_tun(&cfg);
+                #[cfg(target_os = "linux")]
+                configure_linux_tun(&cfg);
+                #[cfg(target_os = "macos")]
+                configure_macos_tun(&cfg);
+                #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+                let _ = &cfg;
+            });
+            configure_end();
+            if r.is_err() {
+                log::error!("[tun_t2s] TUN configuration panicked");
+            }
+        }
+    });
+    tokio::pin!(setup_task);
 
-    // ── Linux: configure TUN routing ───────────────────────────────
-    #[cfg(target_os = "linux")]
-    {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        configure_linux_tun(&cfg);
-    }
-
-    // ── macOS: configure TUN routing ───────────────────────────────
-    #[cfg(target_os = "macos")]
-    {
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-        configure_macos_tun(&cfg);
+    // If shutdown fires while the adapter is still being configured,
+    // cancel the configuration and fall through: the consumed oneshot
+    // below resolves immediately, so the main select takes the shutdown
+    // branch without waiting for the (cancelled) setup to finish.
+    tokio::select! {
+        _ = &mut shutdown => {
+            log::info!("[tun_t2s] Shutdown during TUN configuration — cancelling setup");
+            cancel_tun_configuration();
+        }
+        _ = &mut setup_task => {}
     }
 
     // Wait for process in a blocking task — child is moved here
     let wait_handle = tokio::task::spawn_blocking(move || child.wait());
     tokio::pin!(wait_handle);
 
+    // RAII guard: if this future is dropped without either select branch
+    // running (the NORMAL case when aether_stop() cancels the engine — the
+    // task is dropped at an await point, so the shutdown arm below never
+    // fires), still kill tun2socks and run the OS-level cleanup in the
+    // background. Before this guard existed, none of that ran on stop and
+    // the FFI had to compensate with its own duplicate cleanup.
+    struct TunShutdownGuard {
+        cfg: TunConfig,
+        pid: u32,
+        armed: bool,
+    }
+    impl Drop for TunShutdownGuard {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            log::info!(
+                "[tun_t2s] tun2socks task dropped without shutdown — killing pid={} and cleaning up in background",
+                self.pid
+            );
+            cancel_tun_configuration();
+            spawn_detached_platform_cleanup(&self.cfg, self.pid);
+        }
+    }
+    let mut tun_guard = TunShutdownGuard { cfg: cfg.clone(), pid, armed: true };
+
     tokio::select! {
+        biased;
         _ = shutdown => {
             log::info!("[tun_t2s] Shutting down tun2socks (pid={})", pid);
+            cancel_tun_configuration();
             // Kill the child process (child_guard handles taskkill /F /T)
             child_guard.kill();
-
-            // Run the slow OS-level cleanup in spawn_blocking so the async
-            // runtime is NOT blocked while route/dns/adapter commands run.
-            // These shell out to route/netsh/ip/resolvectl/powershell and can
-            // take seconds each; blocking the runtime here made the whole app
-            // appear frozen during TUN shutdown.
-            let cleanup_cfg = cfg.clone();
-            #[cfg(not(target_os = "windows"))]
-            let cleanup_pid = pid;
-            let cleanup_task = tokio::task::spawn_blocking(move || {
-                #[cfg(target_os = "windows")]
-                {
-                    cleanup_windows_tun(&cleanup_cfg);
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    unsafe { libc::kill(cleanup_pid as i32, libc::SIGTERM); }
-                    #[cfg(target_os = "linux")]
-                    cleanup_linux_tun(&cleanup_cfg);
-                    #[cfg(target_os = "macos")]
-                    cleanup_macos_tun(&cleanup_cfg);
-                }
-            });
+            // OS-level cleanup (route/DNS/adapter) runs detached: these
+            // shell out to route/netsh/ip/resolvectl/powershell and can
+            // take seconds each; blocking this task on them only stalled
+            // runtime shutdown (rt shutdown waits for blocking tasks).
+            spawn_detached_platform_cleanup(&tun_guard.cfg, pid);
+            tun_guard.armed = false;
 
             // Wait for process to exit with timeout
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 &mut wait_handle
             ).await;
-
-            // Give the cleanup a bounded amount of time to finish.
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                cleanup_task
-            ).await;
         }
         result = &mut wait_handle => {
             // Child exited on its own — mark as killed so Drop guard is a no-op
             child_guard.killed = true;
+            tun_guard.armed = false;
             match result {
                 Ok(Ok(s)) if s.success() => {
                     log::info!("[tun_t2s] tun2socks exited normally");
@@ -1746,6 +2008,7 @@ pub async fn run_tun2socks(cfg: TunConfig, shutdown: oneshot::Receiver<()>) -> R
     // The select branches above already handle cleanup on shutdown/exit.
     // This is a last-resort safety net if something went wrong.
     child_guard.kill();
+    tun_guard.armed = false;
 
     log::info!("[tun_t2s] TUN shut down");
     Ok(())
