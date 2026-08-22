@@ -39,6 +39,31 @@ public class FCAEVpnService extends VpnService {
     private final Runnable statsRunnable = new Runnable() {
         @Override
         public void run() {
+            // ── Engine-death watchdog ─────────────────────────────────────
+            // nativeStart() returns as soon as the engine thread is
+            // launched; the engine can still die LATER on its own (no
+            // endpoint found, tunnel failed permanently, etc.). This
+            // service would then keep the established TUN fd open forever:
+            // the kernel keeps routing every packet into a dead VPN
+            // (zombie interface, blackholed traffic, stale notification)
+            // until the user manually disconnects. Poll the engine state
+            // and tear down when it reaches a terminal state:
+            //   0 = DISCONNECTED (engine idle/finished on its own)
+            //   5 = ERROR
+            // Transient states (1 provisioning, 2 scanning/reconnecting,
+            // 3 connecting, 4 connected) never trigger a teardown.
+            if (running && !shuttingDown && !vpnPaused) {
+                int engineState = 5; // pessimistic default if the JNI call throws
+                try {
+                    engineState = NativeEngine.nativeGetState();
+                } catch (Exception ignored) {}
+                if (engineState == 0 || engineState == 5) {
+                    Log.w(TAG, "Engine reached terminal state " + engineState
+                            + " — tearing down VPN service");
+                    fullShutdown();
+                    return;
+                }
+            }
             updateNotification();
             if (running) handler.postDelayed(this, 1000);
         }
