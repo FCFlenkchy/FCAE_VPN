@@ -786,9 +786,24 @@ void render_ui() {
             ImGui::BeginChild("##proto_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Transport");
-            ImGui::RadioButton("MASQUE (HTTP/3 QUIC)", &g_app.protocol, 0);
-            ImGui::RadioButton("WireGuard",             &g_app.protocol, 1);
-            ImGui::RadioButton("WARP-in-WARP (Gool)",   &g_app.protocol, 2);
+            // H2 is folded into the MASQUE entries (used to be a separate
+            // "HTTP/2 Fallback" checkbox). Underlying config keeps the same
+            // two fields the FFI always took: protocol (0/1/2) + h2_enabled.
+            // idx 0 = MASQUE H3, 1 = MASQUE H2, 2 = WireGuard, 3 = WIW.
+            int transport = (g_app.protocol == 0) ? (g_app.h2_enabled ? 1 : 0)
+                          : (g_app.protocol == 1) ? 2 : 3;
+            if (ImGui::RadioButton("MASQUE (HTTP/3 QUIC)", &transport, 0)) {
+                g_app.protocol = 0; g_app.h2_enabled = false;
+            }
+            if (ImGui::RadioButton("MASQUE (HTTP/2 TLS)", &transport, 1)) {
+                g_app.protocol = 0; g_app.h2_enabled = true;
+            }
+            if (ImGui::RadioButton("WireGuard", &transport, 2)) {
+                g_app.protocol = 1;
+            }
+            if (ImGui::RadioButton("WARP-in-WARP (Gool)", &transport, 3)) {
+                g_app.protocol = 2;
+            }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Mode");
             ImGui::RadioButton("Proxy", &g_app.mode, 0);
@@ -797,7 +812,6 @@ void render_ui() {
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Transport Options");
-            ImGui::Checkbox("HTTP/2 Fallback (--h2)", &g_app.h2_enabled);
             ImGui::Checkbox("ECH", &g_app.ech_enabled);
             ImGui::Checkbox("Quick Reconnect", &g_app.quick_reconnect);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
