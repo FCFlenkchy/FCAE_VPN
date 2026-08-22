@@ -181,15 +181,6 @@
                 android:popupBackground="#FF1E1E2C" />
 
             <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/switchH2"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:checked="true"
-                android:text="HTTP/2 fallback"
-                android:textColor="#FFE0E4EE" />
-
-            <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/switchEch"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
