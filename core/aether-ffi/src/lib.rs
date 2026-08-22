@@ -1,6 +1,8 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "windows")]
+use std::sync::atomic::AtomicU8;
 
 use parking_lot::Mutex;
 
@@ -16,6 +18,11 @@ static mut LOG_USER_DATA: *mut std::ffi::c_void = std::ptr::null_mut();
 
 // Ensure aether_init() is called exactly once even from multiple threads.
 static INIT_ONCE: std::sync::Once = std::sync::Once::new();
+
+// Serializes concurrent aether_start() calls (the JNI layer can invoke
+// start from a different thread than the UI).  STOP_GUARD below only
+// protects the short flag-flip + handle-swap critical sections.
+static START_LOCK: Mutex<()> = Mutex::new(());
 
 // Guard to prevent concurrent aether_stop() / aether_free() calls.
 // On Windows the DISCONNECT button spawns a detached thread that calls
@@ -40,25 +47,52 @@ static SHUTDOWN_NOTIFY: once_cell::sync::Lazy<tokio::sync::Notify> =
 // logging) while aether_free() nulls out LOG_CB → crash.
 static ENGINE_THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
-// Track whether force cleanup already ran (avoids duplicate DNS restore etc.)
+// Windows force-cleanup dedupe state machine: 0 = idle, 1 = running, 2 = done.
+//
+// The old AtomicBool was check-then-act: aether_stop() (UI thread) and the
+// engine thread's post-runtime cleanup could both pass the check before
+// either set it, running two full PowerShell cleanups CONCURRENTLY (the
+// "runs twice cleanup" symptom: racing DNS restores + adapter removals).
+// compare_exchange makes the claim atomic; late callers wait bounded for
+// the in-flight run instead of starting a second one.
 #[cfg(target_os = "windows")]
-static FORCE_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
+static WIN_CLEANUP_STATE: AtomicU8 = AtomicU8::new(0);
 
-/// Synchronously run Windows cleanup (DNS restore, route cleanup, adapter deletion)
-/// with a timeout. Returns true if cleanup completed within the timeout, false if it timed out.
+/// Synchronously ensure the Windows cleanup (DNS restore, route cleanup,
+/// adapter deletion) runs exactly once per session.
+///
+/// - already done            → return immediately
+/// - in progress elsewhere   → wait up to `timeout_secs` for it to finish
+/// - nobody started it       → run it (on a helper thread) and wait up to
+///                             `timeout_secs` plus a short grace period
+///
+/// Returns true if the cleanup completed (by this thread or another).
+/// The helper thread is detached: if PowerShell hangs we must not hang the
+/// UI thread (aether_stop) or process exit (aether_free) with it — the old
+/// code joined it forever, which froze the app when PowerShell stalled.
 #[cfg(target_os = "windows")]
 fn cleanup_windows_sync(name: &str, timeout_secs: u64) -> bool {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
 
-    // Check if cleanup already ran
-    if FORCE_CLEANUP_DONE.load(Ordering::SeqCst) {
+    // Already done?
+    if WIN_CLEANUP_STATE.load(Ordering::SeqCst) == 2 {
         unsafe {
             log_msg(4, "[ffi] cleanup_windows_sync: already done, skipping");
         }
         return true;
+    }
+
+    // Try to become the single runner (idle → running).
+    if WIN_CLEANUP_STATE
+        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        unsafe {
+            log_msg(4, "[ffi] cleanup_windows_sync: already in progress, waiting");
+        }
+        return wait_cleanup_done(timeout_secs.max(5));
     }
 
     let name = name.to_string();
@@ -69,41 +103,68 @@ fn cleanup_windows_sync(name: &str, timeout_secs: u64) -> bool {
         log_msg(4, &format!("[ffi] cleanup_windows_sync: starting (timeout={}s)", timeout_secs));
     }
 
-    // Spawn the cleanup in a separate thread so we can timeout
-    let handle = thread::spawn(move || {
+    // Detached by design (see doc comment above): it keeps running and
+    // finishes the DNS restore even if we stop waiting for it.
+    thread::spawn(move || {
         aether_engine::tun_t2s::force_cleanup_windows(&name);
         completed_clone.store(true, Ordering::SeqCst);
+        WIN_CLEANUP_STATE.store(2, Ordering::SeqCst);
     });
 
-    // Wait for completion with timeout
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
-    
+    let grace = Duration::from_secs(5); // extra room past the diagnostic timeout
+    let mut timed_out_logged = false;
+
     loop {
         if completed.load(Ordering::SeqCst) {
-            FORCE_CLEANUP_DONE.store(true, Ordering::SeqCst);
             unsafe {
                 log_msg(4, "[ffi] cleanup_windows_sync: completed successfully");
             }
             return true;
         }
-        if start.elapsed() >= timeout {
-            // Timeout reached - log a warning, but DO NOT detach.
-            // Block until cleanup actually completes so DNS/route state is
-            // fully restored before the FFI returns to the caller.
-            // The timeout is only a diagnostic; it must not abandon cleanup.
+        let elapsed = start.elapsed();
+        if elapsed >= timeout && !timed_out_logged {
+            timed_out_logged = true;
             unsafe {
-                log_msg(2, &format!("[ffi] cleanup_windows_sync: TIMEOUT after {}s — waiting for cleanup to finish", timeout_secs));
+                log_msg(2, &format!(
+                    "[ffi] cleanup_windows_sync: TIMEOUT after {}s — still waiting (bounded)",
+                    timeout_secs
+                ));
             }
-            let _ = handle.join();
-            FORCE_CLEANUP_DONE.store(true, Ordering::SeqCst);
+        }
+        if elapsed >= timeout + grace {
             unsafe {
-                log_msg(4, "[ffi] cleanup_windows_sync: completed (after timeout)");
+                log_msg(1, &format!(
+                    "[ffi] cleanup_windows_sync: NOT finished after {}s — detaching (cleanup continues in background)",
+                    elapsed.as_secs()
+                ));
             }
             return false;
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Wait (bounded) for a cleanup started by another thread to finish.
+#[cfg(target_os = "windows")]
+fn wait_cleanup_done(secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if WIN_CLEANUP_STATE.load(Ordering::SeqCst) == 2 {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    WIN_CLEANUP_STATE.load(Ordering::SeqCst) == 2
+}
+
+/// Re-arm the cleanup guard at the start of a new engine session. Without
+/// this, the flag stayed true forever after the first disconnect and the
+/// NEXT session's disconnect skipped DNS restore entirely.
+#[cfg(target_os = "windows")]
+fn reset_cleanup_state() {
+    WIN_CLEANUP_STATE.store(0, Ordering::SeqCst);
 }
 
 struct TelemetryState {
@@ -743,17 +804,18 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         return false;
     }
 
-    // Acquire STOP_GUARD to serialize with aether_free().  Without this,
-    // aether_free() on the cleanup thread could join_engine_thread() after
-    // we've stored a NEW handle, killing the new engine.
-    let _guard = STOP_GUARD.lock();
+    // Serialize concurrent aether_start() calls (JNI can call from another
+    // thread). STOP_GUARD is NOT held for this whole body anymore: it used
+    // to be, which meant aether_free()/ui_shutdown() could block behind the
+    // up-to-5s drain loop below when the app was closed right after a stop.
+    let _start_lock = START_LOCK.lock();
 
+    // Previous engine still running.  If SHUTDOWN was signaled (i.e.
+    // aether_stop() was called), wait up to 5 s for it to drain.
+    // This covers the case where the service was killed while the
+    // engine was still running (e.g. notification disconnect with
+    // app in background), and the user re-opens the app quickly.
     if RUNNING.load(Ordering::SeqCst) {
-        // Previous engine still running.  If SHUTDOWN was signaled (i.e.
-        // aether_stop() was called), wait up to 5 s for it to drain.
-        // This covers the case where the service was killed while the
-        // engine was still running (e.g. notification disconnect with
-        // app in background), and the user re-opens the app quickly.
         if SHUTDOWN.load(Ordering::SeqCst) {
             for _ in 0..50 {
                 if !RUNNING.load(Ordering::SeqCst) {
@@ -767,8 +829,11 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         }
     }
 
-    // Take any leftover JoinHandle from a previous run.
-    let _ = ENGINE_THREAD.lock().take();
+    // Re-arm per-session state. In particular the Windows cleanup guard
+    // must be reset or the next disconnect would skip DNS restore
+    // (stale "done" flag from the previous session).
+    #[cfg(target_os = "windows")]
+    reset_cleanup_state();
 
     let cfg = unsafe {
         if config.is_null() {
@@ -776,6 +841,13 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
         }
         *config
     };
+
+    // Hold STOP_GUARD across the flag flips + spawn + handle store so
+    // aether_free() cannot take the handle / set SHUTDOWN in the middle of
+    // a fresh start (that race used to kill the brand-new engine).
+    let _stop_guard = STOP_GUARD.lock();
+    // Take any leftover JoinHandle from a previous run.
+    let _ = ENGINE_THREAD.lock().take();
 
     RUNNING.store(true, Ordering::SeqCst);
     SHUTDOWN.store(false, Ordering::SeqCst);
@@ -887,14 +959,19 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
 
             // Force-kill tun2socks and clean up Windows TUN adapters AFTER
             // the runtime has been dropped. These shell out to PowerShell/
-            // netsh/route and can take seconds; we run them synchronously
-            // with a timeout to ensure DNS is restored before the FFI returns.
+            // netsh/route and can take seconds; cleanup_windows_sync()
+            // dedupes against the stop-finalizer / aether_free() paths so
+            // only ONE cleanup actually runs per session.
             #[cfg(target_os = "windows")]
             {
+                // Cancel any TUN configuration that a dropped task left
+                // running (disconnect-during-connect) so it stops applying
+                // DNS/route overrides and the cleanup below can proceed.
+                aether_engine::tun_t2s::cancel_tun_configuration();
                 // Kill tun2socks synchronously (fast) so it's dead before
                 // we start the DNS restore.
                 aether_engine::tun_t2s::kill_tun2socks_processes();
-                // DNS restore and route cleanup - synchronous with 5 second timeout.
+                // DNS restore and route cleanup — synchronous with timeout.
                 // This ensures DNS is restored before the FFI returns to the caller,
                 // preventing the "no DNS restore" issue.
                 let _ = cleanup_windows_sync("FCAE-VPN", 5);
@@ -956,28 +1033,45 @@ pub extern "C" fn aether_stop() {
     // so the VpnService fd is released before the engine thread finishes
     // its graceful shutdown. Without this the VPN notification lingers
     // for seconds because the kernel keeps the TUN device alive until
-    // the last dup'd fd is closed.
+    // the last dup'd fd is closed. (No-op on Windows: TUN is a tun2socks
+    // subprocess there.)
     aether_engine::tun::close_all_fds();
 
-    // ── Windows: Kill tun2socks and restore DNS synchronously ───────────
-    // This ensures DNS is restored even if the engine thread is already dead
-    // or stuck. We use a short timeout (3s) to avoid blocking the UI thread
-    // for too long.
-    #[cfg(target_os = "windows")]
-    {
-        aether_engine::tun_t2s::kill_tun2socks_processes();
-        let _ = cleanup_windows_sync("FCAE-VPN", 3);
-    }
+    // Abort any in-flight TUN adapter configuration (netsh/PowerShell can
+    // run for many seconds during connect) so it stops overriding DNS and
+    // adding routes while we tear everything down.
+    aether_engine::tun_t2s::cancel_tun_configuration();
 
     // Update telemetry immediately so the UI shows DISCONNECTED without
     // waiting for the engine thread to finish.
-    let mut t = TELEMETRY.lock();
-    t.state = 0;
-    t.status_message = "Disconnected".to_string();
-    t.connected_peer.clear();
-    t.rtt_ms = 0;
-    t.rx_bytes_sec = 0;
-    t.tx_bytes_sec = 0;
+    {
+        let mut t = TELEMETRY.lock();
+        t.state = 0;
+        t.status_message = "Disconnected".to_string();
+        t.connected_peer.clear();
+        t.rtt_ms = 0;
+        t.rx_bytes_sec = 0;
+        t.tx_bytes_sec = 0;
+    }
+
+    // ── Windows: cleanup runs on a background thread, NEVER here ────────
+    // aether_stop() is called directly from the UI thread (DISCONNECT
+    // button). The kill + PowerShell cleanup (DNS restore, adapter
+    // removal) takes 5–20 s and can hang if PowerShell stalls — running
+    // it inline froze the whole window ("Not Responding"). A detached
+    // finalizer performs the exactly-once cleanup; the engine thread's
+    // post-runtime path and aether_free() dedupe against it via
+    // WIN_CLEANUP_STATE, so nothing runs twice.
+    #[cfg(target_os = "windows")]
+    {
+        std::thread::Builder::new()
+            .name("aether-stop-finalizer".to_string())
+            .spawn(|| {
+                aether_engine::tun_t2s::kill_tun2socks_processes();
+                let _ = cleanup_windows_sync("FCAE-VPN", 5);
+            })
+            .ok();
+    }
 }
 
 
@@ -1234,35 +1328,48 @@ pub extern "C" fn aether_is_admin() -> bool {
 
 #[no_mangle]
 pub extern "C" fn aether_free() {
-    // Take the handle but DO NOT join it. 
-    // Dropping the handle detaches the thread so it finishes in the background
-    // without blocking the Java FFI cleanup thread.
-    let _handle = {
+    // Signal shutdown under STOP_GUARD so a fresh aether_start() cannot
+    // slip in between the handle take and the flag flip (that race used
+    // to kill the brand-new engine with a stale SHUTDOWN=true).
+    {
         let _guard = STOP_GUARD.lock();
-        ENGINE_THREAD.lock().take()
-    };
+        // Take the handle but DO NOT join it.
+        // Dropping the handle detaches the thread so it finishes in the background
+        // without blocking the Java FFI cleanup thread.
+        let _handle = ENGINE_THREAD.lock().take();
 
-    // Signal shutdown
-    SHUTDOWN.store(true, Ordering::SeqCst);
-    if RUNNING.load(Ordering::SeqCst) {
-        SHUTDOWN_NOTIFY.notify_one();
-    } 
+        SHUTDOWN.store(true, Ordering::SeqCst);
+        if RUNNING.load(Ordering::SeqCst) {
+            SHUTDOWN_NOTIFY.notify_one();
+        }
+    }
+
+    // Abort any in-flight TUN configuration before cleaning up.
+    aether_engine::tun_t2s::cancel_tun_configuration();
 
     // Safety net: close TUN fds and force-cleanup Windows TUN adapters.
     // close_all_fds() uses atomic swap so double-close is impossible.
     aether_engine::tun::close_all_fds();
     #[cfg(target_os = "windows")]
     {
-        // Always run force cleanup on aether_free() — this is the final
-        // exit path (ui_shutdown). The cleanup runs synchronously with a
-        // timeout of 5 seconds to ensure DNS is restored before the process
-        // exits. This prevents the "no DNS restore" issue where the
-        // fire-and-forget thread gets killed before completing.
+        // Final exit path (ui_shutdown → ExitProcess). Run the exactly-once
+        // cleanup synchronously but BOUNDED: it either performs the DNS
+        // restore itself or waits for the in-progress one (from the engine
+        // thread / stop finalizer) to finish. The old version joined the
+        // cleanup thread forever, which could hang process exit when
+        // PowerShell stalled.
         aether_engine::tun_t2s::kill_tun2socks_processes();
-        // DNS restore and route cleanup - synchronous with 5 second timeout.
-        // This blocks the FFI cleanup thread but ensures DNS is restored
-        // before the process exits.
         let _ = cleanup_windows_sync("FCAE-VPN", 5);
+        // The FFI-side cleanup above may have been a no-op because the
+        // engine-side cleanup (spawned when the tun2socks task was
+        // dropped/cancelled) already claimed the work. Wait for that one
+        // too — ExitProcess() right after this would otherwise kill it
+        // mid-PowerShell and lose the DNS restore.
+        if !aether_engine::tun_t2s::wait_tun_cleanup_bounded(std::time::Duration::from_secs(10)) {
+            unsafe {
+                log_msg(2, "[ffi] aether_free: engine TUN cleanup still running at exit — giving up (bounded)");
+            }
+        }
     }
 
     let mut t = TELEMETRY.lock();
