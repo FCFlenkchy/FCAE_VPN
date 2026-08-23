@@ -112,7 +112,7 @@ jobs:
           script: |
             const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
             const prefixes = ['cmake-', 'gradle-', 'sccache-', 'glfw-'];
-            // Rust caches are managed by Swatinem/rust-cache — skip those.
+            // Rust caches are managed by Swatinem/rust-cache â€” skip those.
 
             for (const prefix of prefixes) {
               let page = 1;
@@ -378,14 +378,14 @@ jobs:
                 export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
                 export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
                 
-                cargo build --manifest-path core/Cargo.toml --release --target "$TARGET_TRIPLE" -p aether-ffi
+                cargo build --manifest-path core/Aether/Cargo.toml --release --target "$TARGET_TRIPLE" -p aether-ffi
                 
                 DEST="$(pwd)/target/$TARGET_TRIPLE/release/libaether_ffi.a"
                 mkdir -p "$(dirname "$DEST")"
                 if [ ! -f "$DEST" ]; then
                   for f in \
-                    "$(pwd)/core/target/$TARGET_TRIPLE/release/libaether_ffi.a" \
-                    "$(pwd)/core/aether-ffi/target/$TARGET_TRIPLE/release/libaether_ffi.a"; do
+                    "$(pwd)/core/Aether/target/$TARGET_TRIPLE/release/libaether_ffi.a" \
+                    "$(pwd)/core/Aether/aether-ffi/target/$TARGET_TRIPLE/release/libaether_ffi.a"; do
                     if [ -f "$f" ] && [ "$(realpath "$f" 2>/dev/null || echo "$f")" != "$(realpath "$DEST" 2>/dev/null || echo "$DEST")" ]; then
                       cp -f "$f" "$DEST"
                       break
@@ -433,14 +433,14 @@ jobs:
               echo "Using NDK: $NDK"
               "$CLANG" --version | head -1
               
-              cargo build --manifest-path core/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
+              cargo build --manifest-path core/Aether/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
 
               DEST="$(pwd)/target/${{ matrix.target }}/release/libaether_ffi.a"
               mkdir -p "$(dirname "$DEST")"
               if [ ! -f "$DEST" ]; then
                 for f in \
-                  "$(pwd)/core/target/${{ matrix.target }}/release/libaether_ffi.a" \
-                  "$(pwd)/core/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a"; do
+                  "$(pwd)/core/Aether/target/${{ matrix.target }}/release/libaether_ffi.a" \
+                  "$(pwd)/core/Aether/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a"; do
                   if [ -f "$f" ] && [ "$(realpath "$f" 2>/dev/null || echo "$f")" != "$(realpath "$DEST" 2>/dev/null || echo "$DEST")" ]; then
                     cp -f "$f" "$DEST"
                     break
@@ -452,14 +452,14 @@ jobs:
             fi
           else
             # Non-Android builds (linux, windows, macos)
-            cargo build --manifest-path core/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
+            cargo build --manifest-path core/Aether/Cargo.toml --release --target ${{ matrix.target }} -p aether-ffi
 
             DEST="$(pwd)/target/${{ matrix.target }}/release/libaether_ffi.a"
             mkdir -p "$(dirname "$DEST")"
             if [ ! -f "$DEST" ]; then
               for f in \
-                "$(pwd)/core/target/${{ matrix.target }}/release/libaether_ffi.a" \
-                "$(pwd)/core/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a"; do
+                "$(pwd)/core/Aether/target/${{ matrix.target }}/release/libaether_ffi.a" \
+                "$(pwd)/core/Aether/aether-ffi/target/${{ matrix.target }}/release/libaether_ffi.a"; do
                 if [ -f "$f" ] && [ "$(realpath "$f" 2>/dev/null || echo "$f")" != "$(realpath "$DEST" 2>/dev/null || echo "$DEST")" ]; then
                   cp -f "$f" "$DEST"
                   break
@@ -821,7 +821,7 @@ jobs:
             else
               suffix=""
             fi
-            # macOS artifacts contain only the .dmg — copy it directly (already compressed)
+            # macOS artifacts contain only the .dmg â€” copy it directly (already compressed)
             if ls "$dir"/*.dmg 1>/dev/null 2>&1; then
               for dmg in "$dir"/*.dmg; do
                 dmg_base=$(basename "$dmg" .dmg)

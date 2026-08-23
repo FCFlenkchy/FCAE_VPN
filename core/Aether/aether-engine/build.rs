@@ -30,13 +30,15 @@ fn main() {
     {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
         let manifest_path = PathBuf::from(&manifest_dir);
+        // core/Aether/aether-engine -> core/Aether -> core -> repo root
         let workspace_root = manifest_path
             .parent()
+            .and_then(|p| p.parent())
             .and_then(|p| p.parent())
             .unwrap_or(&manifest_path)
             .to_path_buf();
 
-        let tun2socks_src = workspace_root.join("tun2socks");
+        let tun2socks_src = workspace_root.join("core/tun2socks");
 
         if !tun2socks_src.join("main.go").exists() {
             panic!("tun2socks submodule not found at {}! Run: git submodule update --init --recursive", tun2socks_src.display());

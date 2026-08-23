@@ -10,65 +10,65 @@ Built on top of **[Aether](https://github.com/CluvexStudio/aether)** with native
 
 ## How It Works
 
-FCAE VPN connects to **Cloudflare's WARP network** — the same infrastructure behind Cloudflare's 1.1.1.1 DNS service. Here's the flow:
+FCAE VPN connects to **Cloudflare's WARP network** â€” the same infrastructure behind Cloudflare's 1.1.1.1 DNS service. Here's the flow:
 
-1. **Account provisioning** — On first launch, the client creates a WARP device identity and obtains dedicated IPv4/IPv6 addresses plus WireGuard keypairs from Cloudflare's registration API.
-2. **Endpoint scanning** — The client probes a list of Cloudflare edge IPs across multiple ports to find a reachable gateway. Each candidate is validated with a real handshake (and optionally a full HTTP request in ironclad mode) to confirm the route actually passes traffic.
-3. **Tunnel establishment** — Once a working edge is found, an encrypted tunnel is opened:
-   - **MASQUE** — Traffic is encapsulated inside HTTP/3 (QUIC) or HTTP/2 (TLS) sessions using the `CONNECT-IP` method, making it look like normal HTTPS traffic to DPI systems.
-   - **WireGuard** — A standard WireGuard UDP tunnel is established directly to the edge node.
-   - **WARP-in-WARP (gool)** — Two nested WireGuard tunnels for an additional encryption layer.
-4. **Local proxy** — The tunnel exposes a local SOCKS5 proxy (port 1819) and HTTP proxy (port 1820). Applications configured to use these proxies route their traffic through the encrypted tunnel to the internet via Cloudflare's network.
+1. **Account provisioning** â€” On first launch, the client creates a WARP device identity and obtains dedicated IPv4/IPv6 addresses plus WireGuard keypairs from Cloudflare's registration API.
+2. **Endpoint scanning** â€” The client probes a list of Cloudflare edge IPs across multiple ports to find a reachable gateway. Each candidate is validated with a real handshake (and optionally a full HTTP request in ironclad mode) to confirm the route actually passes traffic.
+3. **Tunnel establishment** â€” Once a working edge is found, an encrypted tunnel is opened:
+   - **MASQUE** â€” Traffic is encapsulated inside HTTP/3 (QUIC) or HTTP/2 (TLS) sessions using the `CONNECT-IP` method, making it look like normal HTTPS traffic to DPI systems.
+   - **WireGuard** â€” A standard WireGuard UDP tunnel is established directly to the edge node.
+   - **WARP-in-WARP (gool)** â€” Two nested WireGuard tunnels for an additional encryption layer.
+4. **Local proxy** â€” The tunnel exposes a local SOCKS5 proxy (port 1819) and HTTP proxy (port 1820). Applications configured to use these proxies route their traffic through the encrypted tunnel to the internet via Cloudflare's network.
 
 All traffic between the client and Cloudflare is encrypted. From Cloudflare onward, traffic exits to the public internet normally.
 
 ### Architecture Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Your Application                             │
-│              (browser, app, or system traffic via TUN)              │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ SOCKS5 :1819 / HTTP :1820
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                       FCAE VPN Client                               │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌──────────────┐   │
-│  │  Netstack  │  │  Scanner   │  │  Obfuscat. │  │  Health Mon. │   │
-│  │ (TCP/IP)   │  │ (endpoint  │  │  (aether-  │  │  (reconnect  │   │
-│  │            │  │  discovery)│  │   noize)   │  │   on fail)   │   │
-│  └──────┬─────┘  └────────────┘  └────────────┘  └──────────────┘   │
-│         │                                                           │
-│         ▼                                                           │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │                    Encrypted Tunnel                          │   │
-│  │   ┌───────────┐   ┌──────────────┐   ┌──────────────────┐    │   │
-│  │   │  MASQUE   │   │  WireGuard   │   │  WARP-in-WARP    │    │   │
-│  │   │ HTTP/3/2  │   │   (UDP)      │   │  (WG inside WG)  │    │   │
-│  │   └─────┬─────┘   └──────┬───────┘   └────────┬─────────┘    │   │
-│  └─────────┼────────────────┼────────────────────┼──────────────┘   │
-└────────────┼────────────────┼────────────────────┼──────────────────┘
-             │                │                    │
-             ▼                ▼                    ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                   Cloudflare WARP Edge                              │
-│          (162.159.192.x — automatic discovery)                      │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                       Public Internet                               │
-└─────────────────────────────────────────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                        Your Application                             â”‚
+â”‚              (browser, app, or system traffic via TUN)              â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                               â”‚ SOCKS5 :1819 / HTTP :1820
+                               â–¼
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                       FCAE VPN Client                               â”‚
+â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+â”‚  â”‚  Netstack  â”‚  â”‚  Scanner   â”‚  â”‚  Obfuscat. â”‚  â”‚  Health Mon. â”‚   â”‚
+â”‚  â”‚ (TCP/IP)   â”‚  â”‚ (endpoint  â”‚  â”‚  (aether-  â”‚  â”‚  (reconnect  â”‚   â”‚
+â”‚  â”‚            â”‚  â”‚  discovery)â”‚  â”‚   noize)   â”‚  â”‚   on fail)   â”‚   â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”˜  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+â”‚         â”‚                                                           â”‚
+â”‚         â–¼                                                           â”‚
+â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+â”‚  â”‚                    Encrypted Tunnel                          â”‚   â”‚
+â”‚  â”‚   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”    â”‚   â”‚
+â”‚  â”‚   â”‚  MASQUE   â”‚   â”‚  WireGuard   â”‚   â”‚  WARP-in-WARP    â”‚    â”‚   â”‚
+â”‚  â”‚   â”‚ HTTP/3/2  â”‚   â”‚   (UDP)      â”‚   â”‚  (WG inside WG)  â”‚    â”‚   â”‚
+â”‚  â”‚   â””â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”˜   â””â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”˜   â””â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜    â”‚   â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+             â”‚                â”‚                    â”‚
+             â–¼                â–¼                    â–¼
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                   Cloudflare WARP Edge                              â”‚
+â”‚          (162.159.192.x â€” automatic discovery)                      â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                               â”‚
+                               â–¼
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                       Public Internet                               â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 ### Protocol Comparison
 
 | Protocol | Transport | DPI Resistance | Speed | Use Case |
 |----------|-----------|---------------|-------|----------|
-| **MASQUE (HTTP/3)** | QUIC over UDP | Best — looks like HTTPS | Fast | Default, most censorship-resistant |
-| **MASQUE (HTTP/2)** | TLS over TCP | Best — looks like HTTPS | Fast | Fallback when QUIC is blocked |
-| **WireGuard** | UDP | Moderate — encrypted but detectable | Fastest | When UDP is allowed |
-| **WARP-in-WARP** | Nested UDP | High — double encryption | Moderate | Extra layer when WG alone is blocked |
+| **MASQUE (HTTP/3)** | QUIC over UDP | Best â€” looks like HTTPS | Fast | Default, most censorship-resistant |
+| **MASQUE (HTTP/2)** | TLS over TCP | Best â€” looks like HTTPS | Fast | Fallback when QUIC is blocked |
+| **WireGuard** | UDP | Moderate â€” encrypted but detectable | Fastest | When UDP is allowed |
+| **WARP-in-WARP** | Nested UDP | High â€” double encryption | Moderate | Extra layer when WG alone is blocked |
 
 ## Features
 
@@ -89,8 +89,8 @@ You can define custom routing rules directly in the UI (Routes tab) without need
 ```
 
 **Format:**
-- `[direct]` — traffic matching these rules bypasses the VPN (direct connection)
-- `[block]` — traffic matching these rules is blocked entirely
+- `[direct]` â€” traffic matching these rules bypasses the VPN (direct connection)
+- `[block]` â€” traffic matching these rules is blocked entirely
 - Entries are comma or newline separated
 - Unprefixed entries default to `[direct]`
 
@@ -142,7 +142,7 @@ Rules set via inline input take priority and are merged with any rules file spec
 ### Build the Rust engine first
 
 ```bash
-cargo build --manifest-path core/Cargo.toml -p aether-ffi --release
+cargo build --manifest-path core/Aether/Cargo.toml -p aether-ffi --release
 ```
 
 ### Build the native GUI
@@ -160,15 +160,15 @@ Open `android/` in Android Studio and build. The Gradle config invokes CMake wit
 
 ## Credits
 
-- **[Aether](https://github.com/CluvexStudio/aether)** — The core censorship circumvention engine by CluvexStudio. Provides MASQUE, WireGuard, and WARP-in-WARP protocols.
-- **[Dear ImGui](https://github.com/ocornut/imgui)** — Immediate-mode GUI library Used for all native desktop rendering.
-- **[Quiche](https://github.com/cloudflare/quiche)** — Cloudflare's HTTP/3 and QUIC implementation. Used as the QUIC transport backend for MASQUE protocol support.
-- **[Wintun](https://www.wintun.net/)** — A TUN driver for Windows by WireGuard. Provides a high-performance network interface at Layer 3 for tunneling traffic.
-- **[tun2socks](https://github.com/xjasonlyu/tun2socks)** — A Go library that transparently routes TUN device traffic through a SOCKS5 proxy. Powers the system-wide VPN TUN mode on Linux, Windows, and macOS (Android uses a custom TUN implementation).
+- **[Aether](https://github.com/CluvexStudio/aether)** â€” The core censorship circumvention engine by CluvexStudio. Provides MASQUE, WireGuard, and WARP-in-WARP protocols.
+- **[Dear ImGui](https://github.com/ocornut/imgui)** â€” Immediate-mode GUI library Used for all native desktop rendering.
+- **[Quiche](https://github.com/cloudflare/quiche)** â€” Cloudflare's HTTP/3 and QUIC implementation. Used as the QUIC transport backend for MASQUE protocol support.
+- **[Wintun](https://www.wintun.net/)** â€” A TUN driver for Windows by WireGuard. Provides a high-performance network interface at Layer 3 for tunneling traffic.
+- **[tun2socks](https://github.com/xjasonlyu/tun2socks)** â€” A Go library that transparently routes TUN device traffic through a SOCKS5 proxy. Powers the system-wide VPN TUN mode on Linux, Windows, and macOS (Android uses a custom TUN implementation).
 
 ## Contributing
 
-Contributions are welcome! Whether it's bug reports, feature requests, documentation improvements, or code contributions — feel free to open an issue or pull request.
+Contributions are welcome! Whether it's bug reports, feature requests, documentation improvements, or code contributions â€” feel free to open an issue or pull request.
 
 ### How to Contribute
 
@@ -188,10 +188,10 @@ See the individual components for their respective licenses.
 
 ### Found this useful?
 
-If this project helped you bypass censorship or just saved you some time, consider giving it a **star** — it helps others discover the tool and motivates continued development.
+If this project helped you bypass censorship or just saved you some time, consider giving it a **star** â€” it helps others discover the tool and motivates continued development.
 
 [![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN)
 
-**Other languages:** [فارسی](READMEFA.md) | [中文](READMECH.md)
+**Other languages:** [ÙØ§Ø±Ø³ÛŒ](READMEFA.md) | [ä¸­æ–‡](READMECH.md)
 
 </div>
