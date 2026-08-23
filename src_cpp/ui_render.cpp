@@ -815,22 +815,29 @@ void render_ui() {
             ImGui::Checkbox("ECH", &g_app.ech_enabled);
             ImGui::Checkbox("Quick Reconnect", &g_app.quick_reconnect);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            if (g_app.mode == 0) {
-                ImGui::Text("Proxy Ports");
-                ImGui::PushItemWidth(100);
-                ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
-                ImGui::SameLine(0, 20);
-                if (!g_app.socks_enabled) ImGui::BeginDisabled();
-                ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
-                if (!g_app.socks_enabled) ImGui::EndDisabled();
-                ImGui::Checkbox("HTTP", &g_app.http_enabled);
-                ImGui::SameLine(0, 20);
-                if (!g_app.http_enabled) ImGui::BeginDisabled();
-                ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
-                if (!g_app.http_enabled) ImGui::EndDisabled();
-                ImGui::PopItemWidth();
-                ImGui::Spacing();
+            ImGui::Text("Proxy Ports");
+            ImGui::PushItemWidth(100);
+            // TUN mode tunnels through the local SOCKS5 proxy, so keep it
+            // forced on and lock the checkbox while TUN is selected.
+            if (g_app.mode == 1) {
+                g_app.socks_enabled = true;
+                ImGui::BeginDisabled();
             }
+            ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
+            if (g_app.mode == 1) ImGui::EndDisabled();
+            ImGui::SameLine(0, 20);
+            if (!g_app.socks_enabled) ImGui::BeginDisabled();
+            ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
+            if (!g_app.socks_enabled) ImGui::EndDisabled();
+            ImGui::Checkbox("HTTP", &g_app.http_enabled);
+            ImGui::SameLine(0, 20);
+            if (!g_app.http_enabled) ImGui::BeginDisabled();
+            ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
+            if (!g_app.http_enabled) ImGui::EndDisabled();
+            ImGui::PopItemWidth();
+            if (g_app.mode == 1)
+                ImGui::TextDisabled("SOCKS5 is required for TUN mode");
+            ImGui::Spacing();
             ImGui::InputTextWithHint("##force_peer", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));
             ImGui::InputText("Identity file (aether.toml)", g_app.config_path, sizeof(g_app.config_path));
             ImGui::TextDisabled("UI settings: FCAE_VPN.cfg (next to app). Identity: Cloudflare device certs.");
