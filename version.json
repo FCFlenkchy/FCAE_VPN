@@ -1,6 +1,6 @@
 {
-  "version": "v1.2.6",
-  "release_date": "2026-08-19",
-  "release_notes": "faster update check for android and updated aether core to 1.7.0 and fixed destkops tun mode huge memory leak and remove useless auto-disconnect on error (android and destkops)",
+  "version": "v1.2.7",
+  "release_date": "2026-08-24",
+  "release_notes": "show proxy settings on tun mode for destkop and faster tun cleanup and fixed destkops twice tun clean up and android tear down kernel vpnservice on error and some more",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
