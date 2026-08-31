@@ -2,7 +2,6 @@ use std::net::Ipv4Addr;
 
 use octets::{Octets, OctetsMut};
 use quiche::h3;
-use rand::Rng;
 
 use crate::consts;
 use crate::error::{AetherError, Result};

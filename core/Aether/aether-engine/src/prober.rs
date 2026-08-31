@@ -559,7 +559,7 @@ fn sample_cidr_v4(cidr: &str, n: usize) -> Vec<Ipv4Addr> {
     let mut out = Vec::with_capacity(want as usize);
 
     while (out.len() as u32) < want {
-        let off = 1 + rng.gen_range(0..usable);
+        let off = 1 + rng.random_range(0..usable);
         if chosen.insert(off) {
             out.push(Ipv4Addr::from(base + off));
         }
@@ -587,14 +587,14 @@ fn sample_cidr_v6(cidr: &str, n: usize, v4_cidrs: &[&str]) -> Vec<Ipv6Addr> {
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         let embedded = if v4.is_empty() {
-            rng.gen::<u32>() as u128
+            rng.random::<u32>() as u128
         } else {
-            let (b, p) = v4[rng.gen_range(0..v4.len())];
+            let (b, p) = v4[rng.random_range(0..v4.len())];
             let host_bits = 32u32.saturating_sub(p as u32);
             let host = if host_bits == 0 {
                 0
             } else {
-                rng.gen::<u32>() & ((1u32 << host_bits) - 1)
+                rng.random::<u32>() & ((1u32 << host_bits) - 1)
             };
             (b | host) as u128
         };
@@ -678,7 +678,7 @@ mod tests {
         config.set_initial_max_streams_bidi(4);
 
         let mut scid = [0u8; 16];
-        rand::rng().fill(&mut scid[..]);
+        rand::rng().fill_bytes(&mut scid[..]);
         let scid = quiche::ConnectionId::from_ref(&scid);
 
         let sni = crate::consts::CONNECT_SNI;

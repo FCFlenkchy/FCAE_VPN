@@ -85,7 +85,7 @@ fn junk_packet(cfg: &NoizeConfig) -> Vec<u8> {
     } else {
         (40, 90)
     };
-    let size = rng.gen_range(lo..=hi);
+    let size = rng.random_range(lo..=hi);
     let mut buf = vec![0u8; size];
     rand::rng().fill_bytes(&mut buf);
     buf
