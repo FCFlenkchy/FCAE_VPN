@@ -1,6 +1,6 @@
 {
-  "version": "v1.2.7",
-  "release_date": "2026-08-24",
-  "release_notes": "show proxy settings on tun mode for destkop and faster tun cleanup and fixed destkops twice tun clean up and android tear down kernel vpnservice on error and moved MASSQUE HTTP/3(QUIC) into protocol on android the dropdown, on destkops on protocol radio buttons and some more changes",
+  "version": "v1.2.8",
+  "release_date": "2026-08-31",
+  "release_notes": "bump aether engine to 1.8.0",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
