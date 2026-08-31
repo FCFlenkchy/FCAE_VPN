@@ -158,33 +158,50 @@ pub(crate) fn proxy_connect_succeeded(head: &[u8]) -> Option<bool> {
     Some((200..300).contains(&status))
 }
 
+pub(crate) fn warn_if_world_reachable(kind: &str, listen: SocketAddr) {
+    if listen.ip().is_loopback() {
+        return;
+    }
+    log::warn!(
+        "[!] the {kind} listener is bound to {listen}, which is reachable from outside this machine. \
+         It accepts every client without authentication, so anyone who can reach {listen} can send \
+         traffic through your tunnel. Bind it to 127.0.0.1 unless you intend to share it."
+    );
+}
+
 pub async fn serve(listen: SocketAddr, stack: StackHandle) -> Result<()> {
     let listener = TcpListener::bind(listen).await?;
     log::info!("socks5 listening on {listen}");
+    warn_if_world_reachable("socks5", listen);
     let bind_ip = listen.ip();
 
+    let mut clients = tokio::task::JoinSet::new();
     loop {
-        let (sock, peer) = match listener.accept().await {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                if let Some(delay) = accept_backoff(&error) {
-                    log::warn!(
-                        "socks5 accept failed: {error}; the listener stays open and retries"
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-                log::error!("socks5 listener cannot continue: {error}");
-                return Err(error.into());
+        tokio::select! {
+            accept = listener.accept() => {
+                let (sock, peer) = match accept {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        if let Some(delay) = accept_backoff(&error) {
+                            log::warn!(
+                                "socks5 accept failed: {error}; the listener stays open and retries"
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        log::error!("socks5 listener cannot continue: {error}");
+                        return Err(error.into());
+                    }
+                };
+                let stack = stack.clone();
+                clients.spawn(async move {
+                    if let Err(e) = handle_client(sock, stack, bind_ip).await {
+                        log::debug!("socks client {peer} ended: {e}");
+                    }
+                });
             }
-        };
-
-        let stack = stack.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(sock, stack, bind_ip).await {
-                log::debug!("socks client {peer} ended: {e}");
-            }
-        });
+            Some(_) = clients.join_next(), if !clients.is_empty() => {}
+        }
     }
 }
 
@@ -1280,6 +1297,7 @@ const HTTP_HEAD_LIMIT: usize = 16 * 1024;
 pub async fn serve_http(listen: SocketAddr, stack: StackHandle) -> Result<()> {
     let listener = TcpListener::bind(listen).await?;
     log::info!("http proxy listening on {listen}");
+    warn_if_world_reachable("http proxy", listen);
 
     loop {
         let (sock, peer) = match listener.accept().await {
@@ -1377,24 +1395,38 @@ pub fn parse_request_line(line: &str) -> Option<HttpRequestLine> {
 }
 
 async fn read_head(sock: &mut TcpStream) -> Result<Vec<u8>> {
-    let mut head = Vec::with_capacity(1024);
-    let mut byte = [0u8; 1];
+    let mut buf = vec![0u8; HTTP_HEAD_LIMIT + 4];
+    let mut seen = 0usize;
 
     loop {
-        let read = sock.read(&mut byte).await?;
-        if read == 0 {
+        let window = (seen + 1024).min(buf.len());
+        let available = sock.peek(&mut buf[..window]).await?;
+        if available == 0 {
             return Err(AetherError::Other(
                 "the http client closed before sending a request".into(),
             ));
         }
-        head.push(byte[0]);
 
-        if head.len() >= 4 && head[head.len() - 4..] == *b"\r\n\r\n" {
+        let search_from = seen.saturating_sub(3);
+        if let Some(pos) = buf[..available]
+            .windows(4)
+            .skip(search_from)
+            .position(|w| w == b"\r\n\r\n")
+        {
+            let end = search_from + pos + 4;
+            let mut head = vec![0u8; end];
+            sock.read_exact(&mut head).await?;
             return Ok(head);
         }
-        if head.len() > HTTP_HEAD_LIMIT {
+
+        if available > HTTP_HEAD_LIMIT {
             return Err(AetherError::Other("http request head too large".into()));
         }
+
+        if available == seen {
+            sock.readable().await?;
+        }
+        seen = available;
     }
 }
 

@@ -190,7 +190,7 @@ public class FCAEVpnService extends VpnService {
                 // MTU < 1280, making establish() fail outright.
                 // Warp-in-warp headroom is handled engine-side by running
                 // the OUTER tunnel at WIW_OUTER_MTU (1400).
-                builder.setMtu(1280);
+                builder.setMtu(1400);
                 builder.addAddress("10.0.0.2", 32);
                 builder.addAddress("fd00::2", 128);
                 builder.addRoute("0.0.0.0", 0);

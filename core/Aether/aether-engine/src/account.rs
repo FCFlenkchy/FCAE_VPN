@@ -6,7 +6,7 @@ use boring::hash::MessageDigest;
 use boring::nid::Nid;
 use boring::pkey::PKey;
 use boring::x509::{X509Builder, X509NameBuilder};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::apifront;
@@ -149,6 +149,7 @@ pub struct Identity {
     pub organization: String,
     pub gateway_proxy: String,
     pub assigned_endpoint: String,
+    pub refused: bool,
 }
 
 pub struct MasqueKeyPair {
@@ -222,11 +223,20 @@ pub fn generate_masque_keypair() -> Result<MasqueKeyPair> {
 }
 
 fn http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .user_agent(consts::UA_REGISTER)
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| AetherError::Api(e.to_string()))
+        .timeout(std::time::Duration::from_secs(20));
+
+    if let Some(upstream) = crate::upstream::configured() {
+        match upstream.as_reqwest_proxy() {
+            Ok(proxy) => builder = builder.proxy(proxy),
+            Err(error) => {
+                log::warn!("[-] the api calls could not be sent through the proxy: {error}")
+            }
+        }
+    }
+
+    builder.build().map_err(|e| AetherError::Api(e.to_string()))
 }
 
 const API_ATTEMPTS: u32 = 5;
@@ -237,7 +247,7 @@ const API_RETRY_AFTER_CAP_SECS: u64 = 30;
 fn backoff_delay(attempt: u32) -> std::time::Duration {
     let exponential = API_BACKOFF_BASE_MS.saturating_mul(1u64 << attempt.min(5));
     let capped = exponential.min(API_BACKOFF_CAP_MS);
-    let jitter = rand::thread_rng().next_u32() as u64 % (capped / 3 + 1);
+    let jitter = rand::rng().next_u32() as u64 % (capped / 3 + 1);
     std::time::Duration::from_millis(capped / 2 + jitter)
 }
 
@@ -326,11 +336,15 @@ async fn fallback_call(
         });
     }
 
-    Err(AetherError::Api(format!(
+    let described = format!(
         "{label} over {}: {}",
         response.route,
         describe_status(response.status, &response.body)
-    )))
+    );
+    if matches!(response.status, 401 | 404 | 410) {
+        return Err(AetherError::IdentityRefused(described));
+    }
+    Err(AetherError::Api(described))
 }
 
 fn describe_status(status: u16, body: &str) -> String {
@@ -463,7 +477,7 @@ fn base_headers() -> reqwest::header::HeaderMap {
 
 fn generate_x25519_keypair() -> ([u8; 32], String) {
     let mut private = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut private);
+    rand::rng().fill_bytes(&mut private);
 
     private[0] &= 248;
     private[31] &= 127;
@@ -477,7 +491,7 @@ fn generate_x25519_keypair() -> ([u8; 32], String) {
 
 fn random_android_serial() -> String {
     let mut s = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut s);
+    rand::rng().fill_bytes(&mut s);
     hex::encode(s)
 }
 
@@ -715,8 +729,22 @@ pub fn endpoint_from(reg: &AccountData) -> String {
 pub async fn refresh_profile(identity: Identity) -> Identity {
     let reg = match fetch_device(&identity.device_id, &identity.access_token).await {
         Ok(reg) => reg,
+        Err(AetherError::IdentityRefused(reason)) => {
+            log::warn!(
+                "[-] cloudflare no longer accepts the saved identity for device {}: {reason}",
+                identity.device_id
+            );
+            log::warn!(
+                "[-] the tunnel will handshake but carry no traffic until this identity is replaced"
+            );
+            return Identity {
+                refused: true,
+                ..identity
+            };
+        }
         Err(error) => {
-            log::debug!("[!] could not refresh the device profile: {error}");
+            log::warn!("[!] could not reach the account api to check the identity: {error}");
+            log::warn!("[!] carrying on with the saved profile; it may be out of date");
             return identity;
         }
     };
@@ -749,6 +777,7 @@ pub async fn refresh_profile(identity: Identity) -> Identity {
         organization,
         gateway_proxy,
         assigned_endpoint,
+        refused: false,
         ..identity
     }
 }
@@ -795,6 +824,7 @@ fn finish_provision(reg: AccountData, wg_private: [u8; 32]) -> Result<Identity> 
         organization,
         gateway_proxy,
         assigned_endpoint,
+        refused: false,
     })
 }
 
@@ -953,6 +983,7 @@ mod tests {
             organization: String::new(),
             gateway_proxy: String::new(),
             assigned_endpoint: String::new(),
+            refused: false,
         }
     }
 
