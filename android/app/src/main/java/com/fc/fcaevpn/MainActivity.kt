@@ -18,6 +18,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
@@ -297,6 +298,7 @@ class MainActivity : AppCompatActivity() {
             listOf("Auto", "Low", "Medium", "High"),
         )
         loadSettings()
+        onBackPressedDispatcher.addCallback(this, backPressedCallback)
 
         logText.text = ""
         lastLogHash = 0L
@@ -407,14 +409,17 @@ class MainActivity : AppCompatActivity() {
     /** Catch the back button: if an EditText is focused, clear its focus
      *  first (which also hides the blinking cursor) before propagating
      *  the event to finish the activity. */
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        val focused = currentFocus
-        if (focused is android.widget.EditText) {
-            clearEditTextFocus()
-            return  // Consume the event — don't finish the activity yet
+    private val backPressedCallback = object : OnBackPressedCallback(true) {
+        override fun handleOnBackPressed() {
+            val focused = currentFocus
+            if (focused is android.widget.EditText) {
+                clearEditTextFocus()
+                return  // Consume the event — don't finish the activity yet
+            }
+            isEnabled = false
+            onBackPressedDispatcher.onBackPressed()
+            isEnabled = true
         }
-        super.onBackPressed()
     }
 
     override fun onPause() {
