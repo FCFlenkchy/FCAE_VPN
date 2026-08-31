@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use rand::RngExt;
 use rand::Rng;
 use tokio::net::UdpSocket;
 
