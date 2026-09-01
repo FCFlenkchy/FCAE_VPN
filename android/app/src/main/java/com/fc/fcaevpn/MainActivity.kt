@@ -289,9 +289,15 @@ class MainActivity : AppCompatActivity() {
             this, android.R.layout.simple_spinner_dropdown_item,
             listOf("IPv4", "IPv6", "Dual Stack (IPv4+IPv6)"),
         )
+        // Obfuscation/noize types must match the Aether engine/core profiles
+        // (aethernoize::from_profile). "firewall"/"gfw" are legacy aliases that
+        // the core collapses into "balanced"/"aggressive"; expose the four
+        // distinct types the core actually distinguishes. Index 2 = "balanced"
+        // keeps the saved default (prefs.getInt("noize", 2)) aligned with the
+        // core's default of "balanced".
         spinnerNoize.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
-            listOf("off", "light", "firewall", "gfw"),
+            listOf("off", "light", "balanced", "aggressive"),
         )
         spinnerSysprofile.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
