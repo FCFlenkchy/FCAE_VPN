@@ -31,7 +31,7 @@ typedef struct {
     bool quick_reconnect;     // Use cached known-good gateway if verified
 
     // Obfuscation & Fragmentation
-    const char* noize_profile;// "off", "firewall", "balanced", "gfw"
+    const char* noize_profile;// "off", "light", "balanced", "aggressive"
     bool fragment_enabled;    // TLS ClientHello fragmentation on HTTP/2 fallback
     uint32_t frag_min_size;   // Default: 16
     uint32_t frag_max_size;   // Default: 32
