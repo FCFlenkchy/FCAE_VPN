@@ -896,11 +896,17 @@ void render_ui() {
             ImGui::BeginChild("##obf_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Noize Profile");
-            const char* profiles[] = { "off", "light", "balanced", "firewall", "gfw", "aggressive" };
-            int idx = 0;
-            for (int i = 0; i < 6; i++)
+            // Obfuscation/noize types must match the Aether engine/core profiles
+            // (aethernoize::from_profile). "firewall"/"gfw" are legacy aliases the
+            // core collapses into "balanced"/"aggressive", so we expose only the
+            // four distinct types the core distinguishes. Default index 2 =
+            // "balanced" keeps saved legacy configs from silently dropping to off.
+            const char* profiles[] = { "off", "light", "balanced", "aggressive" };
+            const int kNoizeCount = 4;
+            int idx = 2; // balanced
+            for (int i = 0; i < kNoizeCount; i++)
                 if (strcmp(g_app.noize_profile, profiles[i]) == 0) { idx = i; break; }
-            if (ImGui::Combo("Profile", &idx, profiles, 6))
+            if (ImGui::Combo("Profile", &idx, profiles, kNoizeCount))
                 snprintf(g_app.noize_profile, sizeof(g_app.noize_profile), "%s", profiles[idx]);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("TLS Fragmentation");
