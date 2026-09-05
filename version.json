@@ -1,6 +1,6 @@
 {
-  "version": "v1.2.8",
-  "release_date": "2026-08-31",
-  "release_notes": "bump aether engine to 1.8.0",
+  "version": "v1.2.9",
+  "release_date": "2026-09-05",
+  "release_notes": "bump aether engine to 1.9.0 (faster download/upload speed in masque h2)",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
