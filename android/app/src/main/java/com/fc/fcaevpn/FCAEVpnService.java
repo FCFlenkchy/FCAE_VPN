@@ -182,15 +182,14 @@ public class FCAEVpnService extends VpnService {
             try {
                 Builder builder = new Builder();
                 builder.setSession("FCAE VPN");
-                // 1280 matches the engine's tunnel MTU (TUNNEL_MTU /
-                // INNER_MTU) so apps never emit packets the tunnel has to
-                // fragment (the old 1420 caused exactly that). Do NOT go
-                // below 1280: this interface carries an IPv6 address
+                // 1280 matches the engine's tunnel MTU (TUNNEL_MTU). Do NOT
+                // go below 1280: this interface carries an IPv6 address
                 // (fd00::2) and Android/Linux reject IPv6 on links with
                 // MTU < 1280, making establish() fail outright.
-                // Warp-in-warp headroom is handled engine-side by running
-                // the OUTER tunnel at WIW_OUTER_MTU (1400).
-                builder.setMtu(1400);
+                // Warp-in-warp: the inner tunnel runs at INNER_MTU (1200),
+                // and the engine's netstack fragments inner packets to fit.
+                // The OUTER tunnel gets WIW_OUTER_MTU (1400) headroom.
+                builder.setMtu(1280);
                 builder.addAddress("10.0.0.2", 32);
                 builder.addAddress("fd00::2", 128);
                 builder.addRoute("0.0.0.0", 0);

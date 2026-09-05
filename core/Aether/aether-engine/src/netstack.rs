@@ -12,8 +12,12 @@ use tokio::sync::{mpsc, oneshot};
 use crate::error::{AetherError, Result};
 use crate::stats;
 
-fn tcp_buf() -> usize {
-    crate::sysprofile::netstack_tcp_buf_bytes()
+fn tcp_rx_buf() -> usize {
+    crate::sysprofile::netstack_tcp_rx_buf_bytes()
+}
+
+fn tcp_tx_buf() -> usize {
+    crate::sysprofile::netstack_tcp_tx_buf_bytes()
 }
 
 fn udp_buf() -> usize {
@@ -39,7 +43,7 @@ const DROP_REPORT_STEP: usize = 512;
 const MAX_IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn max_tcp_pending() -> usize {
-    tcp_buf().saturating_mul(2).max(64 * 1024)
+    tcp_rx_buf().saturating_mul(2).max(64 * 1024)
 }
 
 type OpenTcpResp = oneshot::Sender<std::result::Result<TcpConn, String>>;
@@ -123,6 +127,7 @@ pub struct TcpConn {
     pub id: usize,
     pub from_stack: mpsc::Receiver<Vec<u8>>,
     data_in: mpsc::Sender<DataIn>,
+    split: bool,
 }
 
 impl TcpConn {
@@ -137,14 +142,29 @@ impl TcpConn {
         let _ = self.data_in.send(DataIn::TcpClose(self.id)).await;
     }
 
-    pub fn into_split(self) -> (TcpSender, mpsc::Receiver<Vec<u8>>) {
+    pub fn into_split(mut self) -> (TcpSender, mpsc::Receiver<Vec<u8>>) {
+        self.split = true;
         (
             TcpSender {
                 id: self.id,
-                data_in: self.data_in,
+                data_in: self.data_in.clone(),
             },
-            self.from_stack,
+            std::mem::replace(
+                &mut self.from_stack,
+                {
+                    let (_tx, rx) = mpsc::channel(1);
+                    rx
+                },
+            ),
         )
+    }
+}
+
+impl Drop for TcpConn {
+    fn drop(&mut self) {
+        if !self.split {
+            let _ = self.data_in.try_send(DataIn::TcpClose(self.id));
+        }
     }
 }
 
@@ -166,10 +186,17 @@ impl TcpSender {
     }
 }
 
+impl Drop for TcpSender {
+    fn drop(&mut self) {
+        let _ = self.data_in.try_send(DataIn::TcpClose(self.id));
+    }
+}
+
 pub struct UdpConn {
     pub id: usize,
     pub from_stack: mpsc::Receiver<(SocketAddr, Vec<u8>)>,
     data_in: mpsc::Sender<DataIn>,
+    split: bool,
 }
 
 impl UdpConn {
@@ -184,14 +211,29 @@ impl UdpConn {
         let _ = self.data_in.send(DataIn::UdpClose(self.id)).await;
     }
 
-    pub fn into_split(self) -> (UdpSender, mpsc::Receiver<(SocketAddr, Vec<u8>)>) {
+    pub fn into_split(mut self) -> (UdpSender, mpsc::Receiver<(SocketAddr, Vec<u8>)>) {
+        self.split = true;
         (
             UdpSender {
                 id: self.id,
-                data_in: self.data_in,
+                data_in: self.data_in.clone(),
             },
-            self.from_stack,
+            std::mem::replace(
+                &mut self.from_stack,
+                {
+                    let (_tx, rx) = mpsc::channel(1);
+                    rx
+                },
+            ),
         )
+    }
+}
+
+impl Drop for UdpConn {
+    fn drop(&mut self) {
+        if !self.split {
+            let _ = self.data_in.try_send(DataIn::UdpClose(self.id));
+        }
     }
 }
 
@@ -210,6 +252,12 @@ impl UdpSender {
 
     pub async fn close(&self) {
         let _ = self.data_in.send(DataIn::UdpClose(self.id)).await;
+    }
+}
+
+impl Drop for UdpSender {
+    fn drop(&mut self) {
+        let _ = self.data_in.try_send(DataIn::UdpClose(self.id));
     }
 }
 
@@ -571,8 +619,8 @@ async fn sleep_opt(delay: Option<std::time::Duration>) {
 fn handle_cmd(s: &mut NetStack, cmd: Cmd) {
     match cmd {
         Cmd::OpenTcp { dst, resp } => {
-            let rx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
-            let tx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
+            let rx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_rx_buf()]);
+            let tx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_tx_buf()]);
             let mut socket = tcp::Socket::new(rx_buf, tx_buf);
             socket.set_nagle_enabled(false);
 
@@ -627,6 +675,7 @@ fn handle_cmd(s: &mut NetStack, cmd: Cmd) {
                 id,
                 from_stack: to_app_rx,
                 data_in: s.data_in_tx.clone(),
+                split: false,
             };
             let _ = resp.send(Ok(conn));
         }
@@ -699,6 +748,7 @@ fn service_tcp(s: &mut NetStack) -> bool {
                         id,
                         from_stack: rx,
                         data_in: data_in_tx.clone(),
+                        split: false,
                     };
                     let _ = resp.send(Ok(conn));
                 }
@@ -726,6 +776,9 @@ fn service_tcp(s: &mut NetStack) -> bool {
                     let sent = socket.send_slice(&st.pending).unwrap_or(0);
                     if sent > 0 {
                         st.pending.drain(0..sent);
+                        if st.pending.len() * 4 < st.pending.capacity() {
+                            st.pending.shrink_to(max_tcp_pending().min(st.pending.capacity()));
+                        }
                     }
                 }
             }
@@ -779,7 +832,15 @@ fn service_tcp(s: &mut NetStack) -> bool {
         if matches!(st_state, tcp::State::CloseWait) {
             s.sockets.get_mut::<tcp::Socket>(handle).close();
         }
-        if matches!(st_state, tcp::State::Closed) && s.tcp_conns[&id].established {
+        if matches!(st_state, tcp::State::TimeWait) {
+            if let Some(st) = s.tcp_conns.get_mut(&id) {
+                st.pending.clear();
+                st.pending.shrink_to_fit();
+            }
+        }
+        if matches!(st_state, tcp::State::Closed | tcp::State::TimeWait)
+            && s.tcp_conns[&id].established
+        {
             s.sockets.remove(handle);
             s.tcp_conns.remove(&id);
         }

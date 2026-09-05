@@ -52,18 +52,37 @@ fn parse_local_v4(s: &str) -> Ipv4Addr {
         .unwrap_or(Ipv4Addr::UNSPECIFIED)
 }
 
-const TUNNEL_MTU: usize = 1400;
-// Warp-in-warp MTUs. The inner tunnel matches the TUN device MTU (1280 —
-// Android refuses IPv6 on interfaces with MTU < 1280, so the device can
-// never go lower while fd00::/rt ::/0 are configured). The outer tunnel
-// gets extra headroom instead: a 1280-byte inner packet becomes
-// 1280 + WG(32) = 1312, + UDP/IP(28) = 1340 by the time the loopback
-// forwarder pushes it through the outer netstack, so the outer MTU must
-// be >= 1340 or every full-size packet fragments. 1400 covers it and the
-// resulting physical datagram (~1404) still fits a standard 1500 path
-// (stock WARP itself runs at 1420).
-const INNER_MTU: usize = 1400;
+const TUNNEL_MTU: usize = 1280;
+const INNER_MTU: usize = 1200;
+// Warp-in-warp MTUs. The inner tunnel matches the TUN device MTU. The outer
+// tunnel gets extra headroom instead: an inner packet wrapped by the outer
+// netstack needs room for the extra WG/IP/UDP headers, so the outer MTU must
+// be large enough that every full-size inner packet avoids fragmentation.
 const WIW_OUTER_MTU: usize = 1400;
+
+/// MASQUE over HTTP/2 carries its capsules on a TCP stream, where nothing has
+/// to fit inside a single UDP datagram. The 1280 that keeps a QUIC datagram
+/// whole only buys the netstack more segments to cut on that path, so it gets
+/// an ordinary ethernet MTU instead.
+const H2_TUNNEL_MTU: usize = 1500;
+
+/// The inner MTU for the MASQUE tunnel. `AETHER_MASQUE_MTU` overrides it, for a
+/// path where the edge turns out not to carry full-size packets.
+fn masque_tunnel_mtu() -> usize {
+    if let Some(mtu) = std::env::var("AETHER_MASQUE_MTU")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|mtu| (576..=1500).contains(mtu))
+    {
+        return mtu;
+    }
+
+    if masque_h2::enabled() {
+        H2_TUNNEL_MTU
+    } else {
+        TUNNEL_MTU
+    }
+}
 const DEFAULT_CONFIG: &str = "aether.toml";
 
 fn tun_mode_active() -> bool {
@@ -937,13 +956,14 @@ async fn run_masque_tunnel(
 
     // TUN fd mode counts RX in split_dataplane's fanout and TX in tun.rs,
     // so the netstack must not meter its (partial) copy of the traffic.
+    let mtu = masque_tunnel_mtu();
     let stack = if tun_bridge.is_some() {
         netstack::spawn_unmetered(
-            &identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx,
+            &identity.ipv4, &identity.ipv6, mtu, ns_in_rx, ns_out_tx,
         )?
     } else {
         netstack::spawn(
-            &identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx,
+            &identity.ipv4, &identity.ipv6, mtu, ns_in_rx, ns_out_tx,
         )?
     };
 
@@ -1015,7 +1035,7 @@ async fn run_masque_tunnel(
         let socks_port: u16 = std::env::var("AETHER_SOCKS").ok()
             .and_then(|s| s.rsplit(':').next()?.parse().ok()).unwrap_or(1819);
         let t2s_cfg = tun_t2s::TunConfig {
-            name: "FCAE_VPN".to_string(), mtu: TUNNEL_MTU as u32,
+            name: "FCAE_VPN".to_string(), mtu: mtu as u32,
             ipv4: if identity.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { identity.ipv4.clone() },
             ipv6: if identity.ipv6.is_empty() { None } else { Some(identity.ipv6.clone()) },
             socks_port, socks_host: "127.0.0.1".to_string(),
