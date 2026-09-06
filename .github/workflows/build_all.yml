@@ -602,21 +602,6 @@ jobs:
                 'exec "$DIR/fcaevpn" "$@"' > package/fcaevpn.sh
               chmod +x package/fcaevpn.sh
             fi
-
-            # Ship the icon + a .desktop entry so the app has a proper icon in
-            # the launcher / dock instead of the generic placeholder.
-            cp src_cpp/icon_48.png package/fcaevpn.png
-            printf '%s\n' \
-              '[Desktop Entry]' \
-              'Type=Application' \
-              'Name=FCAE VPN' \
-              'GenericName=VPN Client' \
-              'Comment=Censorship circumvention client' \
-              'Exec=fcaevpn' \
-              'Icon=fcaevpn' \
-              'Terminal=false' \
-              'Categories=Network;Security;' \
-              'StartupWMClass=fcaevpn' > package/fcaevpn.desktop
           fi
 
           cd package
@@ -734,43 +719,24 @@ jobs:
           chmod +x "$APP/Contents/MacOS/fcaevpn"
 
           # ── App icon ────────────────────────────────────────────────
-          # Build a real .icns from src_cpp/icon_48.png (Finder/Dock ignore
-          # a bare .png referenced by CFBundleIconFile, which is why the app
-          # previously showed the blank generic icon).
-          ICON_SRC=""
-          for cand in src_cpp/icon_1024.png src_cpp/icon_512.png src_cpp/icon_48.png; do
-            if [ -f "$cand" ]; then ICON_SRC="$cand"; break; fi
-          done
+          # Build a real .icns from src_cpp/icon_48.png. Finder and the Dock
+          # ignore a bare .png referenced by CFBundleIconFile, which is why the
+          # app previously showed the blank generic icon.
+          ICONSET="$RUNNER_TEMP/AppIcon.iconset"
+          rm -rf "$ICONSET"
+          mkdir -p "$ICONSET"
 
-          if [ -n "$ICON_SRC" ]; then
-            echo "Generating AppIcon.icns from $ICON_SRC"
-            ICONSET="$RUNNER_TEMP/AppIcon.iconset"
-            rm -rf "$ICONSET"
-            mkdir -p "$ICONSET"
+          gen() { sips -s format png -z "$1" "$1" src_cpp/icon_48.png --out "$ICONSET/$2" >/dev/null; }
+          gen 16  icon_16x16.png
+          gen 32  icon_16x16@2x.png
+          gen 32  icon_32x32.png
+          gen 64  icon_32x32@2x.png
+          gen 128 icon_128x128.png
+          gen 256 icon_128x128@2x.png
 
-            # Upscale once to 1024 with nearest-neighbour-ish quality, then
-            # derive every size Apple expects.
-            BASE="$RUNNER_TEMP/icon_1024.png"
-            sips -s format png -z 1024 1024 "$ICON_SRC" --out "$BASE" >/dev/null
-
-            gen() { sips -s format png -z "$1" "$1" "$BASE" --out "$ICONSET/$2" >/dev/null; }
-            gen 16   icon_16x16.png
-            gen 32   icon_16x16@2x.png
-            gen 32   icon_32x32.png
-            gen 64   icon_32x32@2x.png
-            gen 128  icon_128x128.png
-            gen 256  icon_128x128@2x.png
-            gen 256  icon_256x256.png
-            gen 512  icon_256x256@2x.png
-            gen 512  icon_512x512.png
-            cp "$BASE" "$ICONSET/icon_512x512@2x.png"
-
-            iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
-            cp "$ICON_SRC" "$APP/Contents/Resources/AppIcon.png"
-            ls -la "$APP/Contents/Resources/"
-          else
-            echo "::warning::no icon source found, app will use the generic icon"
-          fi
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+          cp src_cpp/icon_48.png "$APP/Contents/Resources/AppIcon.png"
+          ls -la "$APP/Contents/Resources/"
 
           echo "Binary dynamic dependencies:"
           otool -L "$APP/Contents/MacOS/fcaevpn" || true
