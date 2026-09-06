@@ -1,6 +1,6 @@
 {
-  "version": "v1.2.9",
-  "release_date": "2026-09-05",
-  "release_notes": "bump aether engine to 1.9.0 (faster download/upload speed in masque h2)",
+  "version": "v1.3.0",
+  "release_date": "2026-09-06",
+  "release_notes": "Fix linux and macos icons",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
