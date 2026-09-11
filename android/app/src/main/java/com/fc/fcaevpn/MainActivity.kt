@@ -904,16 +904,20 @@ class MainActivity : AppCompatActivity() {
                 1 -> "PROVISIONING"
                 2 -> "SCANNING"
                 3 -> "CONNECTING"
-                4 -> "CONNECTED"
+                4 -> {
+                    val isTun = spinnerMode.selectedItemPosition == 1
+                    if (isTun) "CONNECTED (TUN)" else "CONNECTED (PROXY)"
+                }
                 5 -> "ERROR"
                 else -> "UNKNOWN"
             }
             // If error state, show the error message directly instead of label + message concatenation
-            // which causes double display ("ERROR — Error: ..." then again in peerText)
             if (state == 5 && errMsg.isNotEmpty()) {
                 statusText.text = "ERROR: $errMsg"
+            } else if (state == 4) {
+                statusText.text = label
             } else {
-                statusText.text = if (statusMsg.isNotEmpty()) "$label \u2014 $statusMsg" else label
+                statusText.text = if (statusMsg.isNotEmpty() && state != 0) "$label \u2014 $statusMsg" else label
             }
             statusText.setTextColor(
                 when (state) {
