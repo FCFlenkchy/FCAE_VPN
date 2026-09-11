@@ -951,7 +951,7 @@ pub extern "C" fn aether_start(config: *const AetherCfgRaw) -> bool {
             // does this cleanup will be cancelled during runtime drop.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 SHUTDOWN.store(true, Ordering::SeqCst);
-                aether_engine::tun::close_all_fds();
+                aether_engine::tun_t2s::close_all_fds();
 
                 RUNNING.store(false, Ordering::SeqCst);
                 rt.shutdown_timeout(std::time::Duration::from_secs(1));
@@ -1029,13 +1029,9 @@ pub extern "C" fn aether_stop() {
     SHUTDOWN_NOTIFY.notify_one();
 
     // ── Emergency cleanup: force-close TUN fds immediately ──────────────
-    // On Android this interrupts the blocking read() in tun::run() instantly
-    // so the VpnService fd is released before the engine thread finishes
-    // its graceful shutdown. Without this the VPN notification lingers
-    // for seconds because the kernel keeps the TUN device alive until
-    // the last dup'd fd is closed. (No-op on Windows: TUN is a tun2socks
-    // subprocess there.)
-    aether_engine::tun::close_all_fds();
+    // On Android this closes the TUN fd so the VpnService fd is released
+    // before the engine thread finishes its graceful shutdown.
+    aether_engine::tun_t2s::close_all_fds();
 
     // Abort any in-flight TUN adapter configuration (netsh/PowerShell can
     // run for many seconds during connect) so it stops overriding DNS and
@@ -1162,7 +1158,7 @@ pub extern "C" fn aether_set_android_tun_fd(tun_fd: i32) {
         log_msg(4, &format!("[ffi] aether_set_android_tun_fd(fd={tun_fd})"));
     }
     std::env::set_var("AETHER_TUN_FD", tun_fd.to_string());
-    aether_engine::tun::set_fd(tun_fd);
+    aether_engine::tun_t2s::set_fd(tun_fd);
 }
 
 // ── Version checker FFI ──────────────────────────────────────────────────
@@ -1354,7 +1350,7 @@ pub extern "C" fn aether_free() {
 
     // Safety net: close TUN fds and force-cleanup Windows TUN adapters.
     // close_all_fds() uses atomic swap so double-close is impossible.
-    aether_engine::tun::close_all_fds();
+    aether_engine::tun_t2s::close_all_fds();
     #[cfg(target_os = "windows")]
     {
         // Final exit path (ui_shutdown → ExitProcess). Run the exactly-once
