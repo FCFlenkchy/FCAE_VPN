@@ -34,10 +34,18 @@ pub fn resolve_fd() -> Option<i32> {
 /// Close any open TUN file descriptors and reset the stored descriptor.
 pub fn close_all_fds() {
     let fd = TUN_FD.swap(-1, Ordering::SeqCst);
+    #[cfg(not(target_os = "android"))]
     if fd >= 0 {
         unsafe {
             libc::close(fd);
         }
+    }
+    #[cfg(target_os = "android")]
+    {
+        // On Android, the TUN file descriptor is owned and closed by Android's VpnService
+        // (ParcelFileDescriptor.close()). Calling libc::close() in native code causes
+        // a fatal double-close abort in Android Bionic libc upon disconnection.
+        let _ = fd;
     }
 }
 
@@ -188,7 +196,9 @@ fn spawn_detached_platform_cleanup(cfg: &TunConfig, pid: u32) {
             }
             #[cfg(not(target_os = "windows"))]
             {
-                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                if pid > 0 {
+                    unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                }
                 #[cfg(target_os = "linux")]
                 cleanup_linux_tun(&cfg);
                 #[cfg(target_os = "macos")]
@@ -220,29 +230,50 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
         }
     }
 
-    // Determine target directory: prefer AETHER_DATA_DIR on Android, then config parent, then temp
-    let dir = if let Ok(data_dir) = std::env::var("AETHER_DATA_DIR") {
-        std::path::PathBuf::from(data_dir).join("bin")
-    } else if let Ok(cfg_path) = std::env::var("AETHER_CONFIG") {
-        std::path::PathBuf::from(cfg_path)
-            .parent()
-            .map(|p| p.join("bin"))
-            .unwrap_or_else(|| std::env::temp_dir().join("fcaevpn"))
-    } else {
-        #[cfg(target_os = "android")]
-        {
-            let local_tmp = std::path::PathBuf::from("/data/local/tmp");
-            if local_tmp.exists() {
-                local_tmp.join("fcaevpn")
-            } else {
-                std::env::temp_dir().join("fcaevpn")
+    #[cfg(target_os = "android")]
+    {
+        // Check for libtun2socks.so in native library directories
+        let native_candidates = [
+            std::env::var("AETHER_NATIVE_LIB_DIR").ok(),
+            Some("/data/data/com.fc.fcaevpn/lib".to_string()),
+            Some("/data/user/0/com.fc.fcaevpn/lib".to_string()),
+        ];
+        for lib_dir in native_candidates.into_iter().flatten() {
+            let candidate = std::path::PathBuf::from(lib_dir).join("libtun2socks.so");
+            if candidate.exists() {
+                log::info!("[tun_t2s] Found native tun2socks library at: {}", candidate.display());
+                return Ok(candidate);
             }
         }
-        #[cfg(not(target_os = "android"))]
-        {
-            std::env::temp_dir().join("fcaevpn")
+    }
+
+    // Determine target directory: probe candidate directories for write permission
+    let mut candidate_dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    if let Ok(data_dir) = std::env::var("AETHER_DATA_DIR") {
+        candidate_dirs.push(std::path::PathBuf::from(data_dir).join("bin"));
+    }
+    if let Ok(cfg_path) = std::env::var("AETHER_CONFIG") {
+        let p = std::path::PathBuf::from(&cfg_path);
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() {
+                candidate_dirs.push(parent.join("bin"));
+            }
         }
-    };
+    }
+    #[cfg(target_os = "android")]
+    {
+        candidate_dirs.push(std::path::PathBuf::from("/data/data/com.fc.fcaevpn/files/bin"));
+        candidate_dirs.push(std::path::PathBuf::from("/data/user/0/com.fc.fcaevpn/files/bin"));
+        candidate_dirs.push(std::path::PathBuf::from("/data/data/com.fc.fcaevpn/cache/bin"));
+        candidate_dirs.push(std::path::PathBuf::from("/data/user/0/com.fc.fcaevpn/cache/bin"));
+    }
+    candidate_dirs.push(std::env::temp_dir().join("fcaevpn"));
+
+    let dir = candidate_dirs
+        .into_iter()
+        .find(|d| std::fs::create_dir_all(d).is_ok())
+        .unwrap_or_else(|| std::env::temp_dir().join("fcaevpn"));
 
     std::fs::create_dir_all(&dir).ok();
 
@@ -261,7 +292,7 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
 
     if needs_write {
         let mut f = std::fs::File::create(&dest)
-            .map_err(|e| AetherError::Other(format!("Failed to create tun2socks binary: {e}")))?;
+            .map_err(|e| AetherError::Other(format!("Failed to create tun2socks binary at {}: {e}", dest.display())))?;
         f.write_all(TUN2SOCKS_BYTES)
             .map_err(|e| AetherError::Other(format!("Failed to write tun2socks binary: {e}")))?;
 
@@ -1826,7 +1857,8 @@ pub async fn run_tun2socks(cfg: TunConfig, mut shutdown: oneshot::Receiver<()>) 
     // Build tun2socks arguments
     // Use fd://<fd> if an explicit TUN file descriptor is provided (e.g. Android VpnService),
     // otherwise use tun://<name> (with GUID on Windows to avoid numeric suffixes).
-    let device = if let Some(fd) = cfg.fd.or_else(resolve_fd) {
+    let explicit_fd = cfg.fd.or_else(resolve_fd);
+    let device = if let Some(fd) = explicit_fd {
         log::info!("[tun_t2s] Using TUN file descriptor fd://{fd}");
         format!("fd://{fd}")
     } else {
@@ -1863,6 +1895,17 @@ pub async fn run_tun2socks(cfg: TunConfig, mut shutdown: oneshot::Receiver<()>) 
         .unwrap_or_else(|| std::path::Path::new("."));
     log::debug!("[tun_t2s] Running: {} {:?} (cwd: {})", t2s_path.display(), args, tun_dir.display());
 
+    #[cfg(unix)]
+    if let Some(fd) = explicit_fd {
+        // Clear FD_CLOEXEC so that the child tun2socks process inherits the TUN file descriptor across execve
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+            }
+        }
+    }
+
     #[cfg(target_os = "windows")]
     let mut cmd = {
         use std::os::windows::process::CommandExt;
@@ -1872,7 +1915,23 @@ pub async fn run_tun2socks(cfg: TunConfig, mut shutdown: oneshot::Receiver<()>) 
         c
     };
     #[cfg(not(target_os = "windows"))]
-    let mut cmd = Command::new(&t2s_path);
+    let mut cmd = {
+        let mut c = Command::new(&t2s_path);
+        #[cfg(unix)]
+        if let Some(fd) = explicit_fd {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                c.pre_exec(move || {
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags >= 0 {
+                        libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                    }
+                    Ok(())
+                });
+            }
+        }
+        c
+    };
 
     let mut child = cmd
         .current_dir(tun_dir)
@@ -1910,7 +1969,9 @@ pub async fn run_tun2socks(cfg: TunConfig, mut shutdown: oneshot::Receiver<()>) 
             }
             #[cfg(not(target_os = "windows"))]
             {
-                unsafe { libc::kill(self.pid as i32, libc::SIGKILL); }
+                if self.pid > 0 {
+                    unsafe { libc::kill(self.pid as i32, libc::SIGKILL); }
+                }
             }
         }
     }
