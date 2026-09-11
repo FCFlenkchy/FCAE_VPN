@@ -209,6 +209,10 @@ public class FCAEVpnService extends VpnService {
                 int fd = vpnInterface.getFd();
                 nativeSetTunFd(fd);
                 NativeEngine.nativeInit();
+                try {
+                    String nativeDir = getApplicationInfo().nativeLibraryDir;
+                    NativeEngine.nativeSetNativeLibDir(nativeDir);
+                } catch (Exception ignored) {}
 
                 boolean ok = NativeEngine.nativeStart(
                     protocol, mode, lan, scanMode,

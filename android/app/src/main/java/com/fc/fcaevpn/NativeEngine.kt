@@ -6,6 +6,8 @@ object NativeEngine {
     }
 
     @JvmStatic external fun nativeInit()
+    @JvmStatic external fun nativeSetNativeLibDir(path: String)
+    @JvmStatic external fun nativeSetTun2socksBin(path: String)
     @JvmStatic external fun nativeStart(
         protocol: Int,
         mode: Int,
