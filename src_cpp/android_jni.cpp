@@ -132,6 +132,14 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.routes_file = routesOwned.empty() ? nullptr : routesOwned.c_str();
     cfg.routes_inline = routesInlineOwned.empty() ? nullptr : routesInlineOwned.c_str();
 
+    if (!cfgOwned.empty()) {
+        size_t last_slash = cfgOwned.find_last_of('/');
+        if (last_slash != std::string::npos) {
+            std::string dataDir = cfgOwned.substr(0, last_slash);
+            setenv("AETHER_DATA_DIR", dataDir.c_str(), 1);
+        }
+    }
+
     bool ok = aether_start(&cfg);
     LOGI("aether_start -> %s", ok ? "ok" : "fail");
     return ok ? JNI_TRUE : JNI_FALSE;
