@@ -310,12 +310,12 @@ impl log::Log for GuiLogger {
         let mut t = TELEMETRY.lock();
         if line_lower.contains("socks5") && line_lower.contains("listen") {
             t.state = 4;
-            t.status_message = "Connected — SOCKS5 active".to_string();
+            t.status_message = if t.mode == 1 { "Connected (TUN)".to_string() } else { "Connected (Proxy)".to_string() };
         }
         if line_lower.contains("http proxy listening") {
             t.state = 4;
-            if !t.status_message.contains("HTTP") {
-                t.status_message = "Connected — SOCKS5 + HTTP proxy".to_string();
+            if t.status_message.is_empty() || t.status_message.starts_with("Connected") {
+                t.status_message = if t.mode == 1 { "Connected (TUN)".to_string() } else { "Connected (Proxy)".to_string() };
             }
         }
         if let Some(ms) = parse_rtt_ms_from_log(&msg) {
@@ -549,12 +549,20 @@ fn apply_config_env(cfg: &AetherCfgRaw) {
     }
     std::env::set_var("AETHER_IP", ip_version_to_env(cfg.ip_version));
 
-    // SOCKS5 proxy
-    if cfg.socks_port != 0 {
+    // SOCKS5 proxy (in TUN mode, internal SOCKS is required even if socks_port == 0)
+    let socks_port = if cfg.socks_port != 0 {
+        cfg.socks_port
+    } else if cfg.mode == 1 {
+        1819 // Default socks port for TUN mode
+    } else {
+        0
+    };
+
+    if socks_port != 0 {
         let socks_addr = if cfg.lan_sharing {
-            format!("0.0.0.0:{}", cfg.socks_port)
+            format!("0.0.0.0:{}", socks_port)
         } else {
-            format!("127.0.0.1:{}", cfg.socks_port)
+            format!("127.0.0.1:{}", socks_port)
         };
         std::env::set_var("AETHER_SOCKS", &socks_addr);
         std::env::remove_var("AETHER_SOCKS_DISABLED");
