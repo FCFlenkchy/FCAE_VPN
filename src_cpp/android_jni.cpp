@@ -61,6 +61,25 @@ Java_com_fc_fcaevpn_NativeEngine_nativeInit(JNIEnv*, jclass) {
     ensure_init();
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSetNativeLibDir(JNIEnv* env, jclass, jstring path) {
+    std::string p = jstr(env, path);
+    if (!p.empty()) {
+        setenv("AETHER_NATIVE_LIB_DIR", p.c_str(), 1);
+        LOGI("Native library dir set to %s", p.c_str());
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSetTun2socksBin(JNIEnv* env, jclass, jstring path) {
+    std::string p = jstr(env, path);
+    if (!p.empty()) {
+        setenv("AETHER_TUN2SOCKS_BIN", p.c_str(), 1);
+        setenv("TUN2SOCKS_BIN", p.c_str(), 1);
+        LOGI("tun2socks binary set to %s", p.c_str());
+    }
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     JNIEnv* env,
