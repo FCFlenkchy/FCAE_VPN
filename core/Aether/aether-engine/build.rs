@@ -125,6 +125,31 @@ fn main() {
             match status {
                 Ok(s) if s.success() => {
                     println!("cargo:warning=tun2socks built successfully for {goos}/{goarch}");
+
+                    // For Android targets: automatically populate android/app/src/main/jniLibs/<abi>/libtun2socks.so
+                    // so Gradle packages it directly into the APK's native library directory at build time!
+                    if target_os == "android" {
+                        let android_abi = match target_arch.as_str() {
+                            "aarch64" => "arm64-v8a",
+                            "arm" | "armv7" | "thumbv7neon" | "armv7a" => "armeabi-v7a",
+                            "x86_64" => "x86_64",
+                            "i686" | "x86" | "i386" | "i586" => "x86",
+                            _ => "arm64-v8a",
+                        };
+                        let jni_dir = workspace_root
+                            .join("android")
+                            .join("app")
+                            .join("src")
+                            .join("main")
+                            .join("jniLibs")
+                            .join(android_abi);
+                        if fs::create_dir_all(&jni_dir).is_ok() {
+                            let jni_so = jni_dir.join("libtun2socks.so");
+                            if fs::copy(&bin_path, &jni_so).is_ok() {
+                                println!("cargo:warning=Copied tun2socks to Android jniLibs: {}", jni_so.display());
+                            }
+                        }
+                    }
                 }
                 Ok(s) => {
                     println!("cargo:warning=go build failed with exit code: {:?}", s.code());
@@ -170,10 +195,35 @@ fn main() {
         }
     }
 
+    // ── Android: automatically copy tun2socks to jniLibs ─────────────
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
+    if target_os == "android" {
+        let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| String::from("unknown"));
+        let android_abi = match target_arch.as_str() {
+            "aarch64" => "arm64-v8a",
+            "arm" | "armv7" | "thumbv7neon" | "armv7a" => "armeabi-v7a",
+            "x86_64" => "x86_64",
+            "i686" | "x86" | "i386" | "i586" => "x86",
+            _ => "arm64-v8a",
+        };
+        let jni_dir = workspace_root
+            .join("android")
+            .join("app")
+            .join("src")
+            .join("main")
+            .join("jniLibs")
+            .join(android_abi);
+        if fs::create_dir_all(&jni_dir).is_ok() {
+            let jni_so = jni_dir.join("libtun2socks.so");
+            if fs::copy(&bin_path, &jni_so).is_ok() {
+                println!("cargo:warning=Copied tun2socks to Android jniLibs: {}", jni_so.display());
+            }
+        }
+    }
+
     // ── Windows: embed wintun.dll ───────────────────────────────────
     // Use target_os env var (not cfg!) to detect Windows target when
     // cross-compiling from Linux CI runners.
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
     if target_os == "windows" {
         let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| String::from("x86_64"));
         let wintun_arch = match target_arch.as_str() {
