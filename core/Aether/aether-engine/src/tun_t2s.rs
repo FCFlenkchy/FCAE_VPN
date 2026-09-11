@@ -222,27 +222,34 @@ static WINTUN_DLL_BYTES: &[u8] = include_bytes!(env!("WINTUN_EMBEDDED"));
 fn get_tun2socks_path() -> Result<std::path::PathBuf> {
     use std::io::Write;
 
-    // Check TUN2SOCKS_BIN override first
-    if let Ok(path) = std::env::var("TUN2SOCKS_BIN") {
-        let p = std::path::PathBuf::from(&path);
-        if p.exists() {
-            return Ok(p);
+    // Check TUN2SOCKS_BIN / AETHER_TUN2SOCKS_BIN override first
+    for env_var in ["TUN2SOCKS_BIN", "AETHER_TUN2SOCKS_BIN"] {
+        if let Ok(path) = std::env::var(env_var) {
+            let p = std::path::PathBuf::from(&path);
+            if p.exists() {
+                log::info!("[tun_t2s] Using tun2socks from {env_var}: {}", p.display());
+                return Ok(p);
+            }
         }
     }
 
     #[cfg(target_os = "android")]
     {
         // Check for libtun2socks.so in native library directories
-        let native_candidates = [
-            std::env::var("AETHER_NATIVE_LIB_DIR").ok(),
-            Some("/data/data/com.fc.fcaevpn/lib".to_string()),
-            Some("/data/user/0/com.fc.fcaevpn/lib".to_string()),
-        ];
-        for lib_dir in native_candidates.into_iter().flatten() {
-            let candidate = std::path::PathBuf::from(lib_dir).join("libtun2socks.so");
-            if candidate.exists() {
-                log::info!("[tun_t2s] Found native tun2socks library at: {}", candidate.display());
-                return Ok(candidate);
+        let mut native_dirs = Vec::new();
+        if let Ok(lib_dir) = std::env::var("AETHER_NATIVE_LIB_DIR") {
+            native_dirs.push(std::path::PathBuf::from(lib_dir));
+        }
+        native_dirs.push(std::path::PathBuf::from("/data/data/com.fc.fcaevpn/lib"));
+        native_dirs.push(std::path::PathBuf::from("/data/user/0/com.fc.fcaevpn/lib"));
+
+        for dir in native_dirs {
+            for name in ["libtun2socks.so", "tun2socks"] {
+                let candidate = dir.join(name);
+                if candidate.exists() {
+                    log::info!("[tun_t2s] Found native tun2socks library at: {}", candidate.display());
+                    return Ok(candidate);
+                }
             }
         }
     }
