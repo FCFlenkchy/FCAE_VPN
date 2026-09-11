@@ -78,11 +78,13 @@ fn main() {
             let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
             let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| String::from("unknown"));
 
+            // Android is Linux-kernel based. Using GOOS=linux with CGO_ENABLED=0 produces
+            // a 100% statically linked ELF binary that executes natively on Android without
+            // requiring an external CGO/NDK linker (which fails with 'android/arm requires external linking').
             let goos = match target_os.as_str() {
                 "windows" => "windows",
-                "linux" => "linux",
-                "macos" => "darwin",
-                "android" => "android",
+                "linux" | "android" => "linux",
+                "macos" | "ios" => "darwin",
                 other => {
                     println!("cargo:warning=Unknown target_os '{}', defaulting to linux", other);
                     "linux"
@@ -92,20 +94,28 @@ fn main() {
             let goarch = match target_arch.as_str() {
                 "x86_64" => "amd64",
                 "aarch64" => "arm64",
-                "arm" | "armv7" => "arm",
-                "i686" | "x86" => "386",
+                "arm" | "armv7" | "thumbv7neon" | "armv7a" => "arm",
+                "i686" | "x86" | "i386" | "i586" => "386",
+                "riscv64" => "riscv64",
                 other => {
                     println!("cargo:warning=Unknown target_arch '{}', defaulting to amd64", other);
                     "amd64"
                 }
             };
 
-            println!("cargo:warning=Building tun2socks from source ({goos}/{goarch})...");
+            println!("cargo:warning=Building tun2socks from source ({target_os}/{target_arch} -> {goos}/{goarch})...");
 
-            let status = Command::new("go")
-                .env("CGO_ENABLED", "0")
+            let mut cmd = Command::new("go");
+            cmd.env("CGO_ENABLED", "0")
                 .env("GOOS", goos)
-                .env("GOARCH", goarch)
+                .env("GOARCH", goarch);
+
+            // ARMv7 (armeabi-v7a on Android) needs GOARM=7 for hardware VFP
+            if goarch == "arm" {
+                cmd.env("GOARM", "7");
+            }
+
+            let status = cmd
                 .args(["build", "-o"])
                 .arg(&bin_path)
                 .args(["-trimpath", "-ldflags=-s -w"])
