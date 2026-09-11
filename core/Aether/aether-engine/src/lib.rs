@@ -21,7 +21,6 @@ pub mod socks;
 pub mod stats;
 pub mod sysprofile;
 pub mod tls;
-pub mod tun;
 pub mod tun_t2s;
 pub mod tunnelping;
 pub mod wireguard;
@@ -38,8 +37,6 @@ pub use stats::{
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
-
-use bytes::Bytes;
 
 use error::{AetherError, Result};
 use tokio::sync::oneshot;
@@ -92,28 +89,19 @@ fn tun_mode_active() -> bool {
             .to_lowercase()
             .as_str(),
         "tun" | "1" | "true" | "vpn"
-    ) && tun::resolve_fd().is_some()
+    )
 }
 
 fn use_tun2socks() -> bool {
-    #[cfg(target_os = "android")]
-    { return false; }
-    #[cfg(not(target_os = "android"))]
-    {
-        let explicitly_enabled = std::env::var("AETHER_TUN2SOCKS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
-            .unwrap_or(false);
-        if explicitly_enabled && !tun_t2s::is_available() {
-            log::warn!("[lib] tun2socks explicitly enabled but binary not available!");
-            return false;
-        }
-        if !tun_t2s::is_available() { return false; }
-        let mode_active = matches!(
-            std::env::var("AETHER_MODE").unwrap_or_default().to_lowercase().as_str(),
-            "tun" | "1" | "true" | "vpn"
-        );
-        mode_active && tun::resolve_fd().is_none()
+    let explicitly_enabled = std::env::var("AETHER_TUN2SOCKS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(false);
+    if explicitly_enabled && !tun_t2s::is_available() {
+        log::warn!("[lib] tun2socks explicitly enabled but binary not available!");
+        return false;
     }
+    if !tun_t2s::is_available() { return false; }
+    tun_mode_active()
 }
 
 fn connect_sni() -> String {
@@ -138,16 +126,11 @@ pub async fn run_from_env() -> Result<()> {
 
     let socks_disabled = std::env::var("AETHER_SOCKS_DISABLED").is_ok();
     let http_disabled = std::env::var("AETHER_HTTP_DISABLED").is_ok();
-    let tun_active = tun_mode_active();
-    let lan_sharing = std::env::var("AETHER_LAN_SHARING")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
 
     let listen: Option<SocketAddr> = if socks_disabled { None }
-    else if tun_active && !lan_sharing { None }
     else { std::env::var("AETHER_SOCKS").ok().and_then(|s| s.parse().ok()).filter(|a: &SocketAddr| a.port() != 0) };
 
     let http_listen: Option<SocketAddr> = if http_disabled { None }
-    else if tun_active && !lan_sharing { None }
     else {
         std::env::var("AETHER_HTTP").ok().and_then(|s| s.parse().ok()).filter(|a: &SocketAddr| a.port() != 0)
             .or_else(|| {
@@ -952,20 +935,10 @@ async fn run_masque_tunnel(
     } = chans;
     let _ctrl = ctrl_tx;
 
-    let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
-
-    // TUN fd mode counts RX in split_dataplane's fanout and TX in tun.rs,
-    // so the netstack must not meter its (partial) copy of the traffic.
     let mtu = masque_tunnel_mtu();
-    let stack = if tun_bridge.is_some() {
-        netstack::spawn_unmetered(
-            &identity.ipv4, &identity.ipv6, mtu, ns_in_rx, ns_out_tx,
-        )?
-    } else {
-        netstack::spawn(
-            &identity.ipv4, &identity.ipv6, mtu, ns_in_rx, ns_out_tx,
-        )?
-    };
+    let stack = netstack::spawn(
+        &identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx,
+    )?;
 
     let mut tasks = TaskGuard::new();
 
@@ -1028,19 +1001,24 @@ async fn run_masque_tunnel(
 
     let (socks_task, http_task) = spawn_local_proxies(stack.clone(), listen, http_listen).await;
 
-    // TUN adapter (tun2socks or Android fd) after SOCKS5 is listening.
+    // TUN adapter (tun2socks) after SOCKS5 is listening.
     let mut tun_task = None;
     if use_tun2socks() {
-        log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
-        let socks_port: u16 = std::env::var("AETHER_SOCKS").ok()
-            .and_then(|s| s.rsplit(':').next()?.parse().ok()).unwrap_or(1819);
+        log::info!("[+] TUN mode: using tun2socks");
+        let socks_var = std::env::var("AETHER_SOCKS").unwrap_or_default();
+        let socks_port: u16 = socks_var.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(1819);
+        let socks_host = socks_var.rsplit_once(':')
+            .map(|(h, _)| if h.is_empty() || h == "0.0.0.0" { "127.0.0.1" } else { h })
+            .unwrap_or("127.0.0.1")
+            .to_string();
         let t2s_cfg = tun_t2s::TunConfig {
             name: "FCAE_VPN".to_string(), mtu: mtu as u32,
             ipv4: if identity.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { identity.ipv4.clone() },
             ipv6: if identity.ipv6.is_empty() { None } else { Some(identity.ipv6.clone()) },
-            socks_port, socks_host: "127.0.0.1".to_string(),
+            socks_port, socks_host,
             username: None, password: None,
             tunnel_peer_ip: Some(peer.ip().to_string()),
+            fd: tun_t2s::resolve_fd(),
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let t2s_task = tokio::spawn(async move {
@@ -1049,11 +1027,6 @@ async fn run_masque_tunnel(
             }
         });
         tun_task = Some(tokio::spawn(async move { let _ = t2s_task.await; drop(shutdown_tx); }));
-    } else if let Some((fd, ot, tun_rx)) = tun_bridge {
-        log::info!("[+] TUN mode: bridging Android/system fd={fd}");
-        tun_task = Some(tokio::spawn(async move {
-            if let Err(e) = tun::run(fd, ot, tun_rx).await { log::warn!("[-] tun bridge ended: {e}"); }
-        }));
     }
 
     log::info!("[+] data-plane ok");
@@ -1431,30 +1404,28 @@ async fn run_wireguard_tunnel(
 
     let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(aethernoize), inbound_tx, ipv4);
 
-    let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
-    // TUN fd mode counts RX in split_dataplane's fanout and TX in tun.rs,
-    // so the netstack must not meter its (partial) copy of the traffic.
-    let stack = if tun_bridge.is_some() {
-        netstack::spawn_unmetered(&identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx)?
-    } else {
-        netstack::spawn(&identity.ipv4, &identity.ipv6, TUNNEL_MTU, ns_in_rx, ns_out_tx)?
-    };
+    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, TUNNEL_MTU, inbound_rx, outbound_tx)?;
 
     let (socks_task, http_task) = spawn_local_proxies(stack.clone(), listen, http_listen).await;
 
-    // TUN adapter (tun2socks or Android fd) after SOCKS5 is listening.
+    // TUN adapter (tun2socks) after SOCKS5 is listening.
     let mut tun_task = None;
     if use_tun2socks() {
-        log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
-        let socks_port: u16 = std::env::var("AETHER_SOCKS").ok()
-            .and_then(|s| s.rsplit(':').next()?.parse().ok()).unwrap_or(1819);
+        log::info!("[+] TUN mode: using tun2socks");
+        let socks_var = std::env::var("AETHER_SOCKS").unwrap_or_default();
+        let socks_port: u16 = socks_var.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(1819);
+        let socks_host = socks_var.rsplit_once(':')
+            .map(|(h, _)| if h.is_empty() || h == "0.0.0.0" { "127.0.0.1" } else { h })
+            .unwrap_or("127.0.0.1")
+            .to_string();
         let t2s_cfg = tun_t2s::TunConfig {
             name: "FCAE_VPN".to_string(), mtu: TUNNEL_MTU as u32,
             ipv4: if identity.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { identity.ipv4.clone() },
             ipv6: if identity.ipv6.is_empty() { None } else { Some(identity.ipv6.clone()) },
-            socks_port, socks_host: "127.0.0.1".to_string(),
+            socks_port, socks_host,
             username: None, password: None,
             tunnel_peer_ip: Some(peer.ip().to_string()),
+            fd: tun_t2s::resolve_fd(),
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let t2s_task = tokio::spawn(async move {
@@ -1463,11 +1434,6 @@ async fn run_wireguard_tunnel(
             }
         });
         tun_task = Some(tokio::spawn(async move { let _ = t2s_task.await; drop(shutdown_tx); }));
-    } else if let Some((fd, ot, tun_rx)) = tun_bridge {
-        log::info!("[+] TUN mode: bridging Android/system fd={fd}");
-        tun_task = Some(tokio::spawn(async move {
-            if let Err(e) = tun::run(fd, ot, tun_rx).await { log::warn!("[-] tun bridge ended: {e}"); }
-        }));
     }
 
     log::info!("[+] data-plane ok");
@@ -1487,76 +1453,6 @@ async fn run_wireguard_tunnel(
 }
 
 type TunnelExit = tokio::task::JoinHandle<Result<()>>;
-
-type TunBridge = (
-    i32,
-    tokio::sync::mpsc::Sender<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<Bytes>,
-);
-
-fn split_dataplane(
-    outbound_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
-    inbound_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-) -> (
-    tokio::sync::mpsc::Sender<Vec<u8>>,
-    tokio::sync::mpsc::Receiver<Vec<u8>>,
-    Option<TunBridge>,
-) {
-    let use_t2s = use_tun2socks();
-    if use_t2s {
-        log::info!("[lib] Using tun2socks for TUN (non-Android mode)");
-        let (ct_tx, ct_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(sysprofile::channel_capacity());
-        let mut inbound_rx = inbound_rx;
-        tokio::spawn(async move {
-            while let Some(pkt) = inbound_rx.recv().await {
-                // RX counted in netstack when packets enter device.rx
-                if ct_tx.send(pkt).await.is_err() { break; }
-            }
-        });
-        return (outbound_tx, ct_rx, None);
-    }
-    let Some(fd) = (if tun_mode_active() { tun::resolve_fd() } else { None }) else {
-        let (ct_tx, ct_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(sysprofile::channel_capacity());
-        let mut inbound_rx = inbound_rx;
-        tokio::spawn(async move {
-            while let Some(pkt) = inbound_rx.recv().await {
-                // RX counted in netstack when packets enter device.rx
-                if ct_tx.send(pkt).await.is_err() { break; }
-            }
-        });
-        return (outbound_tx, ct_rx, None);
-    };
-    let cap = sysprofile::channel_capacity();
-    let (ns_out_tx, mut ns_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
-    let (ns_in_tx, ns_in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(cap);
-    let (tun_in_tx, tun_in_rx) = tokio::sync::mpsc::channel::<Bytes>(cap);
-    let ot_ns = outbound_tx.clone();
-    tokio::spawn(async move {
-        while let Some(p) = ns_out_rx.recv().await {
-            if ot_ns.send(p).await.is_err() { break; }
-        }
-    });
-    let mut inbound_rx = inbound_rx;
-    tokio::spawn(async move {
-        while let Some(pkt) = inbound_rx.recv().await {
-            // RX is counted here, exactly once per packet. The netstack
-            // paired with this fanout is spawned unmetered (see callers)
-            // so the best-effort copy below can't double-count.
-            add_rx(pkt.len() as u64);
-            // The netstack only needs these packets for local SOCKS/HTTP
-            // proxy flows. Copy best-effort: if it has room, clone; if it
-            // is backed up, skip the clone entirely instead of memcpy-ing
-            // every packet and back-pressuring the TUN fast path.
-            if let Ok(permit) = ns_in_tx.try_reserve() {
-                permit.send(pkt.clone());
-            }
-            // Bytes::from(Vec) is zero-copy — the TUN writer receives the
-            // original buffer without an extra allocation.
-            let _ = tun_in_tx.send(Bytes::from(pkt)).await;
-        }
-    });
-    (ns_out_tx, ns_in_rx, Some((fd, outbound_tx, tun_in_rx)))
-}
 
 async fn spawn_local_proxies(
     stack: netstack::StackHandle,
@@ -1665,72 +1561,6 @@ async fn establish_wg(
     Ok((stack, exit))
 }
 
-async fn establish_wg_with_tun(
-    identity: &account::Identity,
-    peer: SocketAddr,
-    mtu: usize,
-    obfuscate: bool,
-    keepalive: u16,
-    label: &'static str,
-) -> Result<(netstack::StackHandle, TunnelExit, Option<TunBridge>)> {
-    let private_key = identity.private_key_bytes()?;
-    let peer_public = identity.peer_public_key_bytes()?;
-
-    let ipv4: std::net::Ipv4Addr = identity
-        .ipv4
-        .parse()
-        .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
-
-    let profile = if obfuscate {
-        aethernoize_config()
-    } else {
-        aethernoize::from_profile("off")
-    };
-
-    log::info!("[*] [{label}] validating WireGuard tunnel with {peer} (handshake + data-plane)...");
-    let (_, session) = wireguard::verify_endpoint_keep_session(
-        peer,
-        private_key,
-        peer_public,
-        identity.client_id,
-        ipv4,
-        &profile,
-        wg_tunnel_validate_timeout(),
-        Some(keepalive),
-    )
-    .await
-    .map_err(|e| AetherError::Other(format!("[{label}] tunnel failed validation: {e}")))?;
-    log::info!("[+] [{label}] wireguard tunnel validated (end-to-end data confirmed)");
-
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
-
-    let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(profile), inbound_tx, ipv4);
-    let (ns_out_tx, ns_in_rx, tun_bridge) = split_dataplane(outbound_tx, inbound_rx);
-    // TUN fd mode counts RX in split_dataplane's fanout and TX in tun.rs,
-    // so the netstack must not meter its (partial) copy of the traffic.
-    let stack = if tun_bridge.is_some() {
-        netstack::spawn_unmetered(&identity.ipv4, &identity.ipv6, mtu, ns_in_rx, ns_out_tx)?
-    } else {
-        netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, ns_in_rx, ns_out_tx)?
-    };
-
-    let exit = tokio::spawn(async move {
-        match tunnel.run(outbound_rx).await {
-            Ok(()) => {
-                log::warn!("[-] [{label}] wireguard tunnel closed");
-                Ok(())
-            }
-            Err(e) => {
-                log::warn!("[-] [{label}] wireguard tunnel exited: {e}");
-                Err(AetherError::Other(format!("[{label}] {e}")))
-            }
-        }
-    });
-
-    Ok((stack, exit, tun_bridge))
-}
-
 struct TaskGuard(Vec<tokio::task::AbortHandle>);
 
 impl TaskGuard {
@@ -1825,17 +1655,21 @@ async fn run_warp_in_warp(
     log::info!("[+] inner endpoint {inner_peer} tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
-    let (inner_stack, mut inner_exit, tun_bridge) =
-        establish_wg_with_tun(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
+    let (inner_stack, mut inner_exit) =
+        establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
 
     let (socks_task, http_task) = spawn_local_proxies(inner_stack.clone(), listen, http_listen).await;
 
     // TUN adapter for warp-in-warp
     let mut tun_task = None;
     if use_tun2socks() {
-        log::info!("[+] TUN mode: using tun2socks (Linux/Windows)");
-        let socks_port: u16 = std::env::var("AETHER_SOCKS").ok()
-            .and_then(|s| s.rsplit(':').next()?.parse().ok()).unwrap_or(1819);
+        log::info!("[+] TUN mode: using tun2socks");
+        let socks_var = std::env::var("AETHER_SOCKS").unwrap_or_default();
+        let socks_port: u16 = socks_var.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(1819);
+        let socks_host = socks_var.rsplit_once(':')
+            .map(|(h, _)| if h.is_empty() || h == "0.0.0.0" { "127.0.0.1" } else { h })
+            .unwrap_or("127.0.0.1")
+            .to_string();
         let t2s_cfg = tun_t2s::TunConfig {
             // Device MTU matches the inner tunnel (INNER_MTU = 1280):
             // the SOCKS proxy behind tun2socks runs on inner_stack, and
@@ -1844,9 +1678,10 @@ async fn run_warp_in_warp(
             name: "FCAE_VPN".to_string(), mtu: INNER_MTU as u32,
             ipv4: if secondary.ipv4.is_empty() { "198.18.0.1/24".to_string() } else { secondary.ipv4.clone() },
             ipv6: if secondary.ipv6.is_empty() { None } else { Some(secondary.ipv6.clone()) },
-            socks_port, socks_host: "127.0.0.1".to_string(),
+            socks_port, socks_host,
             username: None, password: None,
             tunnel_peer_ip: Some(peer.ip().to_string()),
+            fd: tun_t2s::resolve_fd(),
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let t2s_task = tokio::spawn(async move {
@@ -1855,11 +1690,6 @@ async fn run_warp_in_warp(
             }
         });
         tun_task = Some(tokio::spawn(async move { let _ = t2s_task.await; drop(shutdown_tx); }));
-    } else if let Some((fd, ot, tun_rx)) = tun_bridge {
-        log::info!("[+] TUN mode: bridging Android/system fd={fd}");
-        tun_task = Some(tokio::spawn(async move {
-            if let Err(e) = tun::run(fd, ot, tun_rx).await { log::warn!("[-] tun bridge ended: {e}"); }
-        }));
     }
 
     log::info!("[+] data-plane ok");

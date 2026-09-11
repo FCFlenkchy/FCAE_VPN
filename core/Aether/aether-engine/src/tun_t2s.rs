@@ -4,13 +4,42 @@
 //! 
 //! Flow: tun2socks (TUN) → Engine (SOCKS5 proxy) → Internet
 //! 
-//! The Android implementation in tun.rs remains untouched.
+//! Supports desktop platforms and Android (using Android VPN file descriptors fd://<fd>).
 
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use tokio::sync::oneshot;
 
 use crate::error::{AetherError, Result};
+
+static TUN_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// Set the TUN file descriptor (used on Android).
+pub fn set_fd(fd: i32) {
+    TUN_FD.store(fd, Ordering::SeqCst);
+}
+
+/// Resolve the active TUN file descriptor if set.
+pub fn resolve_fd() -> Option<i32> {
+    let fd = TUN_FD.load(Ordering::SeqCst);
+    if fd >= 0 {
+        return Some(fd);
+    }
+    std::env::var("AETHER_TUN_FD")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|&fd| fd >= 0)
+}
+
+/// Close any open TUN file descriptors and reset the stored descriptor.
+pub fn close_all_fds() {
+    let fd = TUN_FD.swap(-1, Ordering::SeqCst);
+    if fd >= 0 {
+        unsafe {
+            libc::close(fd);
+        }
+    }
+}
 
 // ── Cancellation / overlap guard for OS-level TUN configuration ──────────
 //
@@ -171,7 +200,6 @@ fn spawn_detached_platform_cleanup(cfg: &TunConfig, pid: u32) {
 }
 
 // Embed tun2socks binary at compile time
-#[cfg(not(target_os = "android"))]
 static TUN2SOCKS_BYTES: &[u8] = include_bytes!(env!("TUN2SOCKS_EMBEDDED"));
 
 // Embed wintun.dll on Windows
@@ -179,9 +207,8 @@ static TUN2SOCKS_BYTES: &[u8] = include_bytes!(env!("TUN2SOCKS_EMBEDDED"));
 static WINTUN_DLL_BYTES: &[u8] = include_bytes!(env!("WINTUN_EMBEDDED"));
 
 /// Extract and return path to the embedded tun2socks binary.
-/// On first call, writes the binary to a temp file and returns the path.
+/// On first call, writes the binary to a cache/temp directory and returns the path.
 /// On Windows, also ensures wintun.dll is extracted to the same directory.
-#[cfg(not(target_os = "android"))]
 fn get_tun2socks_path() -> Result<std::path::PathBuf> {
     use std::io::Write;
 
@@ -193,8 +220,30 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
         }
     }
 
-    // Use a fixed temp path so we don't recreate every time
-    let dir = std::env::temp_dir().join("fcaevpn");
+    // Determine target directory: prefer AETHER_DATA_DIR on Android, then config parent, then temp
+    let dir = if let Ok(data_dir) = std::env::var("AETHER_DATA_DIR") {
+        std::path::PathBuf::from(data_dir).join("bin")
+    } else if let Ok(cfg_path) = std::env::var("AETHER_CONFIG") {
+        std::path::PathBuf::from(cfg_path)
+            .parent()
+            .map(|p| p.join("bin"))
+            .unwrap_or_else(|| std::env::temp_dir().join("fcaevpn"))
+    } else {
+        #[cfg(target_os = "android")]
+        {
+            let local_tmp = std::path::PathBuf::from("/data/local/tmp");
+            if local_tmp.exists() {
+                local_tmp.join("fcaevpn")
+            } else {
+                std::env::temp_dir().join("fcaevpn")
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            std::env::temp_dir().join("fcaevpn")
+        }
+    };
+
     std::fs::create_dir_all(&dir).ok();
 
     #[cfg(target_os = "windows")]
@@ -248,8 +297,6 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
             #[cfg(not(wintun_embedded))]
             {
                 // Fallback: try to find wintun.dll from system locations at runtime.
-                // This should rarely be needed since build.rs downloads and embeds it,
-                // but provides a safety net for custom builds.
                 let mut found = false;
                 let candidate_paths = [
                     std::path::PathBuf::from("C:\\Windows\\System32\\wintun.dll"),
@@ -293,17 +340,8 @@ fn wintun_dll_expected_size() -> usize {
     { 0 }
 }
 
-#[cfg(target_os = "android")]
-fn get_tun2socks_path() -> Result<std::path::PathBuf> {
-    Err(AetherError::Other("tun2socks not available on Android".into()))
-}
-
 /// Check if tun2socks is available
 pub fn is_available() -> bool {
-    #[cfg(target_os = "android")]
-    return false;
-
-    #[cfg(not(target_os = "android"))]
     get_tun2socks_path().is_ok()
 }
 
@@ -730,6 +768,8 @@ pub struct TunConfig {
     pub password: Option<String>,
     /// IP of the tunnel endpoint — must be excluded from TUN routes to avoid routing loops
     pub tunnel_peer_ip: Option<String>,
+    /// Explicit TUN file descriptor (e.g. from Android VpnService)
+    pub fd: Option<i32>,
 }
 
 impl Default for TunConfig {
@@ -744,6 +784,7 @@ impl Default for TunConfig {
             username: None,
             password: None,
             tunnel_peer_ip: None,
+            fd: None,
         }
     }
 }
@@ -801,9 +842,17 @@ pub fn is_admin() -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn is_admin() -> bool {
-    // On Linux/macOS, check if we're root
-    unsafe { libc::geteuid() == 0 }
+pub fn is_admin() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        // On Android, VPN permissions and TUN fd are granted by Android VpnService
+        return true;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        // On Linux/macOS, check if we're root
+        unsafe { libc::geteuid() == 0 }
+    }
 }
 
 // ── Windows TUN adapter route configuration ─────────────────────────────
@@ -1775,12 +1824,21 @@ pub async fn run_tun2socks(cfg: TunConfig, mut shutdown: oneshot::Receiver<()>) 
     let t2s_path = get_tun2socks_path()?;
 
     // Build tun2socks arguments
-    // Use a persistent GUID on Windows so the adapter name doesn't get a
-    // numeric suffix on reconnect (FCAE_VPN 2, FCAE_VPN 3, ...).
-    #[cfg(target_os = "windows")]
-    let device = format!("tun://{}?guid={{24198F4C-7895-434C-AD65-9E29A92DDC61}}", cfg.name);
-    #[cfg(not(target_os = "windows"))]
-    let device = format!("tun://{}", cfg.name);
+    // Use fd://<fd> if an explicit TUN file descriptor is provided (e.g. Android VpnService),
+    // otherwise use tun://<name> (with GUID on Windows to avoid numeric suffixes).
+    let device = if let Some(fd) = cfg.fd.or_else(resolve_fd) {
+        log::info!("[tun_t2s] Using TUN file descriptor fd://{fd}");
+        format!("fd://{fd}")
+    } else {
+        #[cfg(target_os = "windows")]
+        {
+            format!("tun://{}?guid={{24198F4C-7895-434C-AD65-9E29A92DDC61}}", cfg.name)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!("tun://{}", cfg.name)
+        }
+    };
     let proxy = if let (Some(user), Some(pass)) = (&cfg.username, &cfg.password) {
         format!("socks5://{}:{}@{}:{}", user, pass, cfg.socks_host, cfg.socks_port)
     } else {
