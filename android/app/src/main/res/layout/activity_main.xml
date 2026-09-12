@@ -32,6 +32,16 @@
                 android:textSize="24sp"
                 android:textStyle="bold" />
 
+            <!-- Running build: "<version>  ·  release" or "…  ·  pre-release (BETA)".
+                 Filled in from BuildConfig.APP_VERSION at startup. -->
+            <TextView
+                android:id="@+id/versionText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:textColor="#FF8A93A6"
+                android:textSize="12sp" />
+
             <TextView
                 android:id="@+id/statusText"
                 android:layout_width="match_parent"
@@ -90,6 +100,15 @@
                 android:textSize="12sp"
                 android:textColor="#FF9AA3B5"
                 android:visibility="gone" />
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchPreRelease"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:checked="false"
+                android:text="Pre-release updates (beta)"
+                android:textColor="#FFE0E4EE" />
 
             <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/switchAutoUpdate"
