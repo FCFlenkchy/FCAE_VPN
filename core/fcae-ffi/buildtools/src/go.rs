@@ -1,14 +1,30 @@
-//! Cross-compiling Go packages to **c-archives** for static linking.
+//! Cross-compiling Go packages for **in-process** linking.
 //!
 //! This is what makes tun2socks (and later Psiphon, which is also Go) run
 //! in-process. Instead of `go build -o tun2socks.exe` and shipping an
-//! executable, we do `go build -buildmode=c-archive -o libX.a` and hand the
-//! archive to rustc, so the Go runtime lives inside our own library.
+//! executable, we build a linkable library and hand it to rustc, so the Go
+//! runtime lives inside our own binary.
 //!
-//! c-archive requires cgo, which requires a C cross-compiler for the target.
-//! [`CArchive::cc_for`] resolves the right one (NDK clang for Android, MinGW
-//! for Windows, `cc`/`clang` otherwise) and fails with an actionable message
-//! rather than emitting a mystery linker error later.
+//! ## Why Android differs
+//!
+//! Every platform uses `-buildmode=c-archive` (a static `.a`) **except
+//! Android**, where the Go toolchain rejects it:
+//!
+//! ```text
+//! -buildmode=c-archive not supported on android/arm64
+//! ```
+//!
+//! Android only supports `-buildmode=c-shared`, producing a `.so`. That is
+//! still in-process — the shared object is loaded into our address space and
+//! its symbols are called directly; there is no subprocess either way. The
+//! only consequence is packaging: the `.so` must be shipped in `jniLibs/<abi>/`
+//! so the dynamic loader can find it at runtime, which [`Built::staged_so`]
+//! handles.
+//!
+//! cgo is required in both modes, which means a C cross-compiler for the
+//! target. [`CArchive::cc_for`] resolves the right one (NDK clang for Android,
+//! MinGW for Windows, `cc`/`clang` otherwise) and fails with an actionable
+//! message rather than emitting a mystery linker error later.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,11 +48,16 @@ pub struct CArchive<'a> {
     pub tags: Vec<String>,
 }
 
-/// Where the built archive and its generated header ended up.
+/// Where the built library and its generated header ended up.
 pub struct Built {
+    /// The built library: a `.a` (c-archive) or, on Android, a `.so`
+    /// (c-shared). Either way it is linked into our own binary.
     pub archive: PathBuf,
     pub header: PathBuf,
     pub search_dir: PathBuf,
+    /// True when `archive` is a `c-shared` `.so` that must also be packaged
+    /// into `jniLibs/<abi>/` for the runtime loader.
+    pub shared: bool,
 }
 
 #[derive(Debug)]
@@ -88,7 +109,7 @@ impl<'a> CArchive<'a> {
             }
         }
         Err(GoError::ToolchainMissing(
-            "`go` not found on PATH. Install Go 1.22+ (https://go.dev/dl/) or set GO_BIN.".into(),
+            "`go` not found on PATH. Install Go 1.26.3+ (https://go.dev/dl/) or set GO_BIN.".into(),
         ))
     }
 
@@ -147,12 +168,20 @@ impl<'a> CArchive<'a> {
         let out_dir = PathBuf::from(
             std::env::var("OUT_DIR").map_err(|_| GoError::Build("OUT_DIR unset".into()))?,
         );
-        let archive = out_dir.join(format!("{}.{}", self.lib_name, self.target.static_lib_ext()));
+        // Android's Go toolchain supports only c-shared; everywhere else we
+        // prefer c-archive so the Go code is statically linked and there is
+        // no extra file to ship.
+        let shared = self.target.is_android();
+        let buildmode = if shared { "c-shared" } else { "c-archive" };
+        let ext = if shared { "so" } else { self.target.static_lib_ext() };
+
+        let archive = out_dir.join(format!("{}.{}", self.lib_name, ext));
         let header = out_dir.join(format!("{}.h", self.lib_name));
 
         crate::note(format!(
-            "building {} as a Go c-archive for {}/{} (in-process; no subprocess)",
+            "building {} as a Go {} for {}/{} (in-process; no subprocess)",
             self.package,
+            buildmode,
             self.target.goos(),
             self.target.goarch()
         ));
@@ -160,7 +189,7 @@ impl<'a> CArchive<'a> {
         let mut cmd = Command::new(&go);
         cmd.current_dir(self.module_dir)
             .arg("build")
-            .arg("-buildmode=c-archive")
+            .arg(format!("-buildmode={buildmode}"))
             .arg("-trimpath");
 
         if !self.tags.is_empty() {
@@ -213,11 +242,49 @@ impl<'a> CArchive<'a> {
             archive,
             header,
             search_dir: out_dir,
+            shared,
         })
     }
 }
 
 impl Built {
+    /// Copy a `c-shared` `.so` into `android/app/src/main/jniLibs/<abi>/` so
+    /// the dynamic loader finds it at runtime.
+    ///
+    /// No-op for `c-archive` builds, where the code is already inside
+    /// `libfcae_ffi.a` and there is nothing to ship separately.
+    ///
+    /// Note this is a *library* the app loads, not an executable it runs —
+    /// the previous design shipped a tun2socks **binary** here and spawned it
+    /// as a child process. Same directory, entirely different mechanism.
+    pub fn stage_android_so(&self, repo_root: &Path, target: Target) -> Result<(), GoError> {
+        if !self.shared {
+            return Ok(());
+        }
+        let abi = target.android_abi();
+        let dest_dir = repo_root
+            .join("android/app/src/main/jniLibs")
+            .join(abi);
+        std::fs::create_dir_all(&dest_dir)
+            .map_err(|e| GoError::Build(format!("could not create {}: {e}", dest_dir.display())))?;
+
+        let file_name = self
+            .archive
+            .file_name()
+            .ok_or_else(|| GoError::Build("built library has no file name".into()))?;
+        let dest = dest_dir.join(file_name);
+
+        std::fs::copy(&self.archive, &dest).map_err(|e| {
+            GoError::Build(format!(
+                "could not stage {} -> {}: {e}",
+                self.archive.display(),
+                dest.display()
+            ))
+        })?;
+        crate::note(format!("staged {} for {}", dest.display(), abi));
+        Ok(())
+    }
+
     /// Emit the `cargo:rustc-link-*` directives needed to link this archive,
     /// including the platform libraries the Go runtime itself requires.
     pub fn emit_link_directives(&self, lib_name: &str, target: Target) {
@@ -227,7 +294,13 @@ impl Built {
         );
         // `lib_name` arrives as `libfoo`; rustc wants `foo`.
         let link_name = lib_name.strip_prefix("lib").unwrap_or(lib_name);
-        println!("cargo:rustc-link-lib=static={link_name}");
+        if self.shared {
+            // Android: c-shared produces a .so, so link it dynamically. The
+            // runtime loader finds it via jniLibs/<abi>/ (see staged_so).
+            println!("cargo:rustc-link-lib=dylib={link_name}");
+        } else {
+            println!("cargo:rustc-link-lib=static={link_name}");
+        }
 
         match target.os {
             Os::Windows => {

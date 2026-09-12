@@ -34,6 +34,7 @@ fn main() {
     }
 
     let target = fcae_build::target::Target::from_cargo_env();
+    let repo_root = fcae_build::repo_root();
 
     fcae_build::rerun_if_changed(submodule.join("go.mod"));
     fcae_build::go::track_sources(&client_library);
@@ -47,6 +48,9 @@ fn main() {
 
     match archive.build() {
         Ok(built) => {
+            if let Err(e) = built.stage_android_so(&repo_root, target) {
+                panic!("failed to stage the Psiphon bridge for Android: {e}");
+            }
             built.emit_link_directives("libpsiphon_bridge", target);
             println!("cargo:rustc-cfg=psiphon_linked");
             println!(

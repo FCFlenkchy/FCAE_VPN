@@ -59,10 +59,13 @@ impl Target {
         Self { os, arch }
     }
 
-    /// `GOOS`. Android maps to `android` (not `linux`): now that we build a
-    /// c-archive linked into our own `.so`, cgo is available and the real
-    /// Android target is correct — the old `GOOS=linux, CGO_ENABLED=0` hack
-    /// existed only to dodge external linking for a standalone executable.
+    /// `GOOS`. Android maps to `android` (not `linux`): now that we link the
+    /// Go code into our own library, cgo is available and the real Android
+    /// target is correct — the old `GOOS=linux, CGO_ENABLED=0` hack existed
+    /// only to dodge external linking for a standalone executable.
+    ///
+    /// Note that `GOOS=android` supports only `-buildmode=c-shared`, not
+    /// `c-archive`; see `go.rs`, which selects the buildmode per target.
     pub fn goos(&self) -> &'static str {
         match self.os {
             Os::Windows => "windows",

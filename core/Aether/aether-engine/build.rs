@@ -1,12 +1,18 @@
 // Build script for aether-engine
 //
-// Builds tun2socks from source (Go) and embeds the binary
-// into the compiled executable at build time.
+// By default this script does almost nothing.
 //
-// On Windows, also downloads and embeds wintun.dll from wintun.net
-// at build time. The DLL is required by tun2socks for TUN device
-// creation via the WireGuard wintun package. It is NOT stored in
-// the repository — it's fetched fresh during the build.
+// tun2socks runs IN-PROCESS now. It is built and linked by
+// core/fcae-ffi/bridges/tun2socks (a Go c-archive on desktop, a c-shared .so
+// on Android, which is the only mode Go supports there). This crate no longer
+// builds a tun2socks *binary*, no longer embeds it, and no longer writes
+// android/app/src/main/jniLibs/<abi>/libtun2socks.so — doing so duplicated the
+// bridge's work, needed a Go toolchain on every runner, and reintroduced the
+// spawn-a-subprocess model the FFI refactor removed.
+//
+// The legacy path is still here, behind the default-off `embedded-tun2socks`
+// feature, so the old code keeps type-checking. Enabling it is not supported
+// for releases.
 
 use std::env;
 use std::fs;
@@ -16,6 +22,16 @@ use std::process::Command;
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(tun2socks_available)");
     println!("cargo::rustc-check-cfg=cfg(wintun_embedded)");
+
+    // Default build: nothing to do. tun2socks is linked in-process by
+    // core/fcae-ffi/bridges/tun2socks. `tun2socks_available` stays unset, so
+    // this engine's own TUN paths compile out and it cannot try to spawn a
+    // binary that is deliberately no longer produced.
+    if env::var("CARGO_FEATURE_EMBEDDED_TUN2SOCKS").is_err() {
+        println!("cargo:rerun-if-changed=build.rs");
+        return;
+    }
+
     println!("cargo:rustc-cfg=tun2socks_available");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();

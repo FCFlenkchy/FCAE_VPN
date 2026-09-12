@@ -6,7 +6,10 @@
 // what gets compiled — no network fetch of tun2socks itself.
 module github.com/FCFlenkchy/FCAE_VPN/core/fcae-ffi/bridges/tun2socks
 
-go 1.22
+// Must be >= the `go` directive in core/tun2socks/go.mod (currently 1.26.3):
+// Go refuses to build a dependency that requires a newer language version than
+// the main module declares. Bump this whenever the submodule is updated.
+go 1.26.3
 
 require github.com/xjasonlyu/tun2socks/v2 v2.6.0
 

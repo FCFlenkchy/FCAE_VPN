@@ -45,6 +45,11 @@ fn main() {
 
     match archive.build() {
         Ok(built) => {
+            // Android builds a c-shared .so (Go rejects c-archive there), so
+            // it has to land in jniLibs/<abi>/ for the loader. No-op elsewhere.
+            if let Err(e) = built.stage_android_so(&fcae_build::repo_root(), target) {
+                panic!("failed to stage the tun2socks bridge for Android: {e}");
+            }
             built.emit_link_directives("libtun2socks_bridge", target);
             println!("cargo:rustc-cfg=tun2socks_linked");
             println!(
@@ -55,7 +60,8 @@ fn main() {
         }
         Err(e) => panic!(
             "failed to build the in-process tun2socks bridge: {e}\n\
-             Install Go 1.22+ and a C toolchain for the target, or build with \
+             Install Go 1.26.3+ (matching core/tun2socks/go.mod) and a C \
+             toolchain for the target, or build with \
              `--features fcae-bridge-tun2socks/stub` to skip TUN support."
         ),
     }

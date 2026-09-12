@@ -10,6 +10,17 @@ path = "src/lib.rs"
 
 [features]
 default = []
+# Legacy desktop-only path: build the tun2socks *binary* from source, embed it
+# in this library and spawn it as a child process at runtime.
+#
+# OFF by default and unused by the shipping build. tun2socks now runs
+# IN-PROCESS via core/fcae-ffi/bridges/tun2socks, which links the Go engine
+# directly (c-archive on desktop, c-shared on Android). The fcae runtime also
+# forces AETHER_MODE=proxy, so this engine's own TUN paths are never taken.
+#
+# Kept only so the legacy code still type-checks; do not enable it for
+# releases, and do not re-add tun2socks binary packaging to CI.
+embedded-tun2socks = []
 
 [dependencies]
 # Use core/quiche submodule; workspace for these crates is core/quiche/Cargo.toml

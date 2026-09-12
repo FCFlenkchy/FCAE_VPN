@@ -105,15 +105,32 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 
-      # The in-process tun2socks bridge is a Go c-archive linked into
-      # libfcae_ffi.a, so every runner needs a Go toolchain -- including the
-      # Android and Windows-cross jobs, which previously needed none because
-      # tun2socks shipped as a prebuilt binary.
+      # The in-process tun2socks bridge links Go code into libfcae_ffi.a, so
+      # every runner needs a Go toolchain -- including the Android and
+      # Windows-cross jobs, which previously needed none because tun2socks
+      # shipped as a prebuilt binary.
+      #
+      # The version is driven by the tun2socks submodule's go.mod, which
+      # declares `go 1.26.3`. Go refuses to build a module that requires a
+      # newer toolchain than the one running, so anything older fails with
+      # "module ... requires go >= 1.26.3". Keep this >= that value; `stable`
+      # tracks the current release so submodule bumps do not break the build.
       - name: setup go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: 'stable'
           cache: false
+
+      # setup-go puts its Go first on PATH, but the distro `golang-go` package
+      # previously installed below was far older and some toolchains resolve
+      # /usr/bin/go directly. Pin GO_BIN (honoured by the bridge build
+      # scripts) to the toolchain setup-go provisioned.
+      - name: pin go toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "GO_BIN=$(command -v go)" >> "$GITHUB_ENV"
+          go version
 
       - name: cleanup old caches
         uses: actions/github-script@v7
@@ -211,7 +228,7 @@ jobs:
             libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
             libxrandr-dev libxinerama-dev libxxf86vm-dev \
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
-            libevent-dev protobuf-compiler nasm golang-go cmake ninja-build
+            libevent-dev protobuf-compiler nasm cmake ninja-build
           curl -fsSL https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
           tar xzf glfw.tar.gz
           cd glfw-3.4
@@ -241,12 +258,12 @@ jobs:
           # NOTE: sudo strips env vars, so DEBIAN_FRONTEND must be assigned
           # after sudo (as below); an env: block on the step does NOT reach apt.
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          # golang-go: the tun2socks bridge is compiled as a Go c-archive and
-          # linked into libfcae_ffi.a on every platform, so Go is required for
-          # the Windows cross build too (CGO uses the mingw toolchain below).
+          # Go itself comes from the setup-go step (the distro package is too
+          # old for the tun2socks submodule); cgo drives the mingw toolchain
+          # installed here for the Windows cross build.
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 nasm \
-            golang-go cmake
+            cmake
           echo "=== MinGW toolchain check ==="
           which x86_64-w64-mingw32-gcc x86_64-w64-mingw32-g++
           x86_64-w64-mingw32-gcc --version | head -1
@@ -263,7 +280,10 @@ jobs:
       - name: install deps (macOS)
         if: startsWith(matrix.name, 'macos-')
         run: |
-          brew install cmake ninja nasm protobuf go
+          # `go` intentionally omitted: the setup-go step above provisions a
+          # toolchain new enough for the tun2socks submodule, and brew's would
+          # only compete with it on PATH.
+          brew install cmake ninja nasm protobuf
           if [ "${{ matrix.name }}" = "macos-x64" ]; then
             ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
             GLFW_PREFIX=/usr/local/glfw_x64

@@ -218,11 +218,15 @@ fn spawn_detached_platform_cleanup(cfg: &TunConfig, pid: u32) {
 // embedded-bytes fallback below is compiled out on purpose. The manifest sets
 // `android:extractNativeLibs="true"`, which is what makes the packaged
 // libtun2socks.so extracted into nativeLibraryDir and executable directly.
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), feature = "embedded-tun2socks"))]
 static TUN2SOCKS_BYTES: &[u8] = include_bytes!(env!("TUN2SOCKS_EMBEDDED"));
 
 // Embed wintun.dll on Windows
-#[cfg(all(not(target_os = "android"), wintun_embedded))]
+#[cfg(all(
+    not(target_os = "android"),
+    feature = "embedded-tun2socks",
+    wintun_embedded
+))]
 static WINTUN_DLL_BYTES: &[u8] = include_bytes!(env!("WINTUN_EMBEDDED"));
 
 /// Directories that can hold the Android build's single tun2socks copy
@@ -308,7 +312,19 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
 /// Desktop: write the compile-time embedded tun2socks binary into a writable
 /// directory (once) and return its path. On Windows, also places wintun.dll
 /// next to it.
-#[cfg(not(target_os = "android"))]
+/// Default build: there is no embedded binary, because tun2socks runs
+/// in-process via core/fcae-ffi/bridges/tun2socks.
+#[cfg(all(not(target_os = "android"), not(feature = "embedded-tun2socks")))]
+fn extract_embedded_tun2socks() -> Result<std::path::PathBuf> {
+    Err(AetherError::Other(
+        "this build has no embedded tun2socks binary: tun2socks runs in-process \
+         through core/fcae-ffi/bridges/tun2socks. Set TUN2SOCKS_BIN to an external \
+         binary if you really need the legacy subprocess path."
+            .into(),
+    ))
+}
+
+#[cfg(all(not(target_os = "android"), feature = "embedded-tun2socks"))]
 fn extract_embedded_tun2socks() -> Result<std::path::PathBuf> {
     use std::io::Write;
 
@@ -423,9 +439,9 @@ fn extract_embedded_tun2socks() -> Result<std::path::PathBuf> {
 /// Returns the expected size of the embedded wintun.dll bytes (0 if not embedded).
 #[cfg(target_os = "windows")]
 fn wintun_dll_expected_size() -> usize {
-    #[cfg(wintun_embedded)]
+    #[cfg(all(feature = "embedded-tun2socks", wintun_embedded))]
     { WINTUN_DLL_BYTES.len() }
-    #[cfg(not(wintun_embedded))]
+    #[cfg(not(all(feature = "embedded-tun2socks", wintun_embedded)))]
     { 0 }
 }
 
