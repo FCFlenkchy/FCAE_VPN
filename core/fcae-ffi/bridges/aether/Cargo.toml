@@ -1,0 +1,21 @@
+[package]
+name = "fcae-bridge-aether"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Aether (MASQUE/WireGuard/Gool) backend plugin for the FCAE FFI."
+
+[lib]
+name = "fcae_bridge_aether"
+path = "src/lib.rs"
+
+[dependencies]
+fcae-abi.workspace = true
+fcae-runtime.workspace = true
+aether-engine.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true

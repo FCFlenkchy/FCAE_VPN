@@ -15,12 +15,12 @@
 #include "imgui.h"
 
 extern "C" {
-#include "../include/aether_ffi.h"
+#include "fcae.h"
 }
 
 struct AppState {
     std::atomic<bool> running{true};
-    std::atomic<int>  ffi_state{AETHER_STATE_DISCONNECTED};
+    std::atomic<int>  ffi_state{FCAE_STATE_DISCONNECTED};
     std::atomic<bool> ffi_connected{false};
     std::atomic<bool> start_busy{false};
     /// Set by the platform layer (resize, DPI change, focus/activate, expose) to
@@ -65,7 +65,7 @@ struct AppState {
     char routes_inline[2048] = {};
     int sys_profile       = 0;   // 0=Auto, 1=Low, 2=Medium, 3=High
 
-    AetherTelemetry telem = {};
+    FcaeTelemetry telem = {};
     double last_telem_t = 0.0;
 
     mutable std::mutex logs_mutex;
@@ -112,39 +112,46 @@ struct AppState {
         return logs;
     }
 
-    AetherConfig to_config() const {
-        AetherConfig c = {};
-        c.protocol         = protocol;
-        c.mode             = (AetherMode)mode;
+    /// Build a session config.
+    ///
+    /// Always starts from fcae_config_default() so struct_size/abi_version are
+    /// stamped correctly and any field the UI does not yet expose gets a sane
+    /// default instead of a zero.
+    FcaeConfig to_config() const {
+        FcaeConfig c;
+        fcae_config_default(&c);
+
+        c.backend          = FCAE_BACKEND_AETHER;
+        c.protocol         = (FcaeProtocol)protocol;
+        c.mode             = (FcaeMode)mode;
+        c.scan_mode        = (FcaeScanMode)scan_mode;
+        c.ip_version       = (FcaeIpVersion)ip_version;
+        c.sys_profile      = (FcaeSysProfile)sys_profile;
         c.lan_sharing      = lan_sharing;
-        c.scan_mode        = scan_mode;
-        c.ip_version       = ip_version;
         c.quick_reconnect  = quick_reconnect;
-        c.noize_profile    = noize_profile;
-        c.fragment_enabled = fragment_enabled;
-        c.frag_min_size    = (uint32_t)frag_min_size;
-        c.frag_max_size    = (uint32_t)frag_max_size;
-        c.frag_min_delay   = (uint32_t)frag_min_delay;
-        c.frag_max_delay   = (uint32_t)frag_max_delay;
         c.socks_port       = socks_enabled ? socks_port : 0;
         c.http_port        = http_enabled ? http_port : 0;
         c.force_peer       = force_peer[0] ? force_peer : nullptr;
         c.config_path      = config_path;
-        c.h2_enabled       = h2_enabled;
-        c.ech_enabled      = ech_enabled;
-        c.dns_server       = nullptr;
-        c.dns_mode         = 0;
-        c.doh_url          = nullptr;
-        c.dns_ip_prefer    = 0;
-        c.tls_groups       = nullptr;
-        c.udp_buf_kb       = 0;
-        c.sni              = sni[0] ? sni : nullptr;
-        c.sys_profile           = sys_profile;
-        c.team_name     = team_name[0] ? team_name : nullptr;
-        c.access_token  = access_token[0] ? access_token : nullptr;
-        c.access_email  = access_email[0] ? access_email : nullptr;
-        c.routes_file   = routes_file[0] ? routes_file : nullptr;
-        c.routes_inline = routes_inline[0] ? routes_inline : nullptr;
+
+        c.obfuscation.noize_profile    = noize_profile;
+        c.obfuscation.fragment_enabled = fragment_enabled;
+        c.obfuscation.frag_min_size    = (uint32_t)frag_min_size;
+        c.obfuscation.frag_max_size    = (uint32_t)frag_max_size;
+        c.obfuscation.frag_min_delay_ms = (uint32_t)frag_min_delay;
+        c.obfuscation.frag_max_delay_ms = (uint32_t)frag_max_delay;
+        c.obfuscation.h2_enabled       = h2_enabled;
+        c.obfuscation.ech_enabled      = ech_enabled;
+
+        c.dns.sni = sni[0] ? sni : nullptr;
+
+        c.routing.rules_file   = routes_file[0] ? routes_file : nullptr;
+        c.routing.rules_inline = routes_inline[0] ? routes_inline : nullptr;
+
+        c.zero_trust.team_name    = team_name[0] ? team_name : nullptr;
+        c.zero_trust.access_token = access_token[0] ? access_token : nullptr;
+        c.zero_trust.access_email = access_email[0] ? access_email : nullptr;
+
         return c;
     }
 };
@@ -155,7 +162,7 @@ void ui_init();
 void ui_frame();
 void ui_shutdown();
 void render_ui();
-void log_callback(int level, const char* message, void* user_data);
+void log_callback(FcaeLogLevel level, const char* message, void* user_data);
 
 // ── Idle-friendly rendering ──────────────────────────────────────────────
 // The window is repainted only when it has something new to show (engine

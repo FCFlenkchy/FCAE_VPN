@@ -4,3 +4,7 @@
 [submodule "tun2socks"]
 	path = core/tun2socks
 	url = https://github.com/xjasonlyu/tun2socks.git
+[submodule "core/psiphon"]
+	path = core/psiphon
+	url = https://github.com/Psiphon-Labs/psiphon-tunnel-core.git
+	branch = master

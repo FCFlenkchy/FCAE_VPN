@@ -74,13 +74,20 @@ set(UI_SOURCES
     ${CMAKE_SOURCE_DIR}/src_cpp/ui_render.cpp
 )
 
-# Resolve libaether_ffi.a from cargo (in-process engine is linked into this staticlib)
-function(aether_ffi_lib_path out_var triple)
+# Public C header for the shared FFI layer. Every C++ target gets this on its
+# include path, so sources say #include "fcae.h" rather than reaching up out of
+# the tree with a relative path.
+set(FCAE_FFI_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/core/fcae-ffi/include)
+
+# Resolve libfcae_ffi.a from cargo.
+#
+# This one staticlib now contains everything: the shared core, the selected
+# backends, and the tun2socks Go bridge as a c-archive. There is no separate
+# tun2socks executable to build, sign, package or ship any more.
+function(fcae_ffi_lib_path out_var triple)
     set(candidates
-        ${CMAKE_SOURCE_DIR}/target/${triple}/release/libaether_ffi.a
-        ${CMAKE_SOURCE_DIR}/core/Aether/aether-ffi/target/${triple}/release/libaether_ffi.a
-        ${CMAKE_SOURCE_DIR}/core/Aether/target/${triple}/release/libaether_ffi.a
-        ${CMAKE_SOURCE_DIR}/core/target/${triple}/release/libaether_ffi.a
+        ${CMAKE_SOURCE_DIR}/core/fcae-ffi/target/${triple}/release/libfcae_ffi.a
+        ${CMAKE_SOURCE_DIR}/target/${triple}/release/libfcae_ffi.a
     )
     foreach(c ${candidates})
         if(EXISTS "${c}")
@@ -88,27 +95,28 @@ function(aether_ffi_lib_path out_var triple)
             return()
         endif()
     endforeach()
-    set(${out_var} "${CMAKE_SOURCE_DIR}/target/${triple}/release/libaether_ffi.a" PARENT_SCOPE)
+    set(${out_var} "${CMAKE_SOURCE_DIR}/core/fcae-ffi/target/${triple}/release/libfcae_ffi.a" PARENT_SCOPE)
 endfunction()
 
-# Link Rust staticlib once as a full path.
-# Do NOT use --whole-archive: cargo packs C objects (BoringSSL bcm.o, etc.) that can
-# appear more than once in the archive; whole-archive then causes thousands of
-# "multiple definition" errors. Normal archive linking is enough because the C++
-# frontend references aether_init/start/stop/... which pull the rest of the graph.
-function(aether_link_ffi target_name lib_path)
+# Link the Rust staticlib once as a full path.
+# Do NOT use --whole-archive: cargo packs C objects (BoringSSL bcm.o, the Go
+# runtime from the tun2socks c-archive, etc.) that can appear more than once in
+# the archive; whole-archive then causes thousands of "multiple definition"
+# errors. Normal archive linking is enough because the C++ frontend references
+# fcae_init/start/stop/... which pull the rest of the graph.
+function(fcae_link_ffi target_name lib_path)
     if(NOT EXISTS "${lib_path}")
-        message(WARNING "libaether_ffi.a not found at ${lib_path} (build rust first)")
+        message(WARNING "libfcae_ffi.a not found at ${lib_path} (build rust first)")
     endif()
     # IMPORTED static library so CMake does not re-scan/duplicate the archive
-    get_filename_component(_aether_ffi_name "${lib_path}" NAME_WE)
-    if(NOT TARGET aether_ffi_imported)
-        add_library(aether_ffi_imported STATIC IMPORTED GLOBAL)
-        set_target_properties(aether_ffi_imported PROPERTIES
+    if(NOT TARGET fcae_ffi_imported)
+        add_library(fcae_ffi_imported STATIC IMPORTED GLOBAL)
+        set_target_properties(fcae_ffi_imported PROPERTIES
             IMPORTED_LOCATION "${lib_path}"
         )
     endif()
-    target_link_libraries(${target_name} PRIVATE aether_ffi_imported)
+    target_link_libraries(${target_name} PRIVATE fcae_ffi_imported)
+    target_include_directories(${target_name} PRIVATE ${FCAE_FFI_INCLUDE_DIR})
 endfunction()
 
 # ── Target-specific configuration ────────────────────────────────────────
@@ -132,8 +140,8 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
     find_library(log-lib log)
     find_library(android-lib android)
 
-    aether_ffi_lib_path(AETHER_FFI_A aarch64-linux-android)
-    aether_link_ffi(fcaevpn_native "${AETHER_FFI_A}")
+    fcae_ffi_lib_path(FCAE_FFI_A aarch64-linux-android)
+    fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
 
     target_link_libraries(fcaevpn_native PRIVATE
         ${log-lib} ${android-lib} m
@@ -160,8 +168,8 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_ARM32")
     find_library(log-lib log)
     find_library(android-lib android)
 
-    aether_ffi_lib_path(AETHER_FFI_A armv7-linux-androideabi)
-    aether_link_ffi(fcaevpn_native "${AETHER_FFI_A}")
+    fcae_ffi_lib_path(FCAE_FFI_A armv7-linux-androideabi)
+    fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
 
     target_link_libraries(fcaevpn_native PRIVATE
         ${log-lib} ${android-lib} m
@@ -188,8 +196,8 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_X86_64")
     find_library(log-lib log)
     find_library(android-lib android)
 
-    aether_ffi_lib_path(AETHER_FFI_A x86_64-linux-android)
-    aether_link_ffi(fcaevpn_native "${AETHER_FFI_A}")
+    fcae_ffi_lib_path(FCAE_FFI_A x86_64-linux-android)
+    fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
 
     target_link_libraries(fcaevpn_native PRIVATE
         ${log-lib} ${android-lib} m
@@ -224,15 +232,15 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_UNIVERSAL")
 
     # Try to find any available ABI lib; Gradle will handle per-ABI builds
     if(ANDROID_ABI STREQUAL "arm64-v8a")
-        aether_ffi_lib_path(AETHER_FFI_A aarch64-linux-android)
+        fcae_ffi_lib_path(FCAE_FFI_A aarch64-linux-android)
     elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
-        aether_ffi_lib_path(AETHER_FFI_A armv7-linux-androideabi)
+        fcae_ffi_lib_path(FCAE_FFI_A armv7-linux-androideabi)
     elseif(ANDROID_ABI STREQUAL "x86_64" OR ANDROID_ABI STREQUAL "x86")
-        aether_ffi_lib_path(AETHER_FFI_A x86_64-linux-android)
+        fcae_ffi_lib_path(FCAE_FFI_A x86_64-linux-android)
     else()
-        aether_ffi_lib_path(AETHER_FFI_A aarch64-linux-android)
+        fcae_ffi_lib_path(FCAE_FFI_A aarch64-linux-android)
     endif()
-    aether_link_ffi(fcaevpn_native "${AETHER_FFI_A}")
+    fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
 
     target_link_libraries(fcaevpn_native PRIVATE
         ${log-lib} ${android-lib} m
@@ -266,11 +274,11 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     target_compile_options(fcaevpn PRIVATE -municode)
 
-    aether_ffi_lib_path(AETHER_FFI_A x86_64-pc-windows-gnu)
-    aether_link_ffi(fcaevpn "${AETHER_FFI_A}")
+    fcae_ffi_lib_path(FCAE_FFI_A x86_64-pc-windows-gnu)
+    fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
 
     # System libs only — crypto is inside the Rust staticlib (BoringSSL), not OpenSSL.
-    # pthread MUST come after libaether_ffi.a (BoringSSL thread_pthread needs it).
+    # pthread MUST come after libfcae_ffi.a (BoringSSL thread_pthread needs it).
     target_link_libraries(fcaevpn PRIVATE
         d3d11 dxgi d3dcompiler dwmapi ntdll
         ws2_32 userenv bcrypt shell32 ole32 uuid crypt32 secur32 ncrypt
@@ -343,18 +351,18 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
     )
 
     if(AETHER_TARGET STREQUAL "MACOS_ARM64")
-        aether_ffi_lib_path(AETHER_FFI_A aarch64-apple-darwin)
+        fcae_ffi_lib_path(FCAE_FFI_A aarch64-apple-darwin)
     elseif(AETHER_TARGET STREQUAL "MACOS_X64")
-        aether_ffi_lib_path(AETHER_FFI_A x86_64-apple-darwin)
+        fcae_ffi_lib_path(FCAE_FFI_A x86_64-apple-darwin)
     else()
         # Native build on macOS host — detect arch
         if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-            aether_ffi_lib_path(AETHER_FFI_A aarch64-apple-darwin)
+            fcae_ffi_lib_path(FCAE_FFI_A aarch64-apple-darwin)
         else()
-            aether_ffi_lib_path(AETHER_FFI_A x86_64-apple-darwin)
+            fcae_ffi_lib_path(FCAE_FFI_A x86_64-apple-darwin)
         endif()
     endif()
-    aether_link_ffi(fcaevpn "${AETHER_FFI_A}")
+    fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
 
     # Link GLFW: use target if available (static), otherwise fall back to lib name
     if(TARGET glfw)
@@ -417,8 +425,8 @@ elseif(UNIX)
         FCAE_VERSION="${FCAE_VERSION}"
     )
 
-    aether_ffi_lib_path(AETHER_FFI_A x86_64-unknown-linux-gnu)
-    aether_link_ffi(fcaevpn "${AETHER_FFI_A}")
+    fcae_ffi_lib_path(FCAE_FFI_A x86_64-unknown-linux-gnu)
+    fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
 
     # Link GLFW: use imported target if available, otherwise raw lib name
     if(TARGET glfw)
@@ -429,7 +437,7 @@ elseif(UNIX)
         target_link_libraries(fcaevpn PRIVATE glfw)
     endif()
 
-    # Do not link system OpenSSL (ssl/crypto) — BoringSSL is already in libaether_ffi.a
+    # Do not link system OpenSSL (ssl/crypto) — BoringSSL is already in libfcae_ffi.a
     target_link_libraries(fcaevpn PRIVATE
         OpenGL::GL X11::X11 X11::Xi pthread dl m
         z bz2 lzma

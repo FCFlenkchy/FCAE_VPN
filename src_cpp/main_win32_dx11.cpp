@@ -66,7 +66,7 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             break;
         case WM_CLOSE:
             // User clicked X button — set running=false so the message
-            // loop exits, then ui_shutdown() will call aether_free() which
+            // loop exits, then ui_shutdown() will call fcae_shutdown() which
             // does synchronous DNS restore and cleanup.
             g_app.running.store(false);
             DestroyWindow(hWnd);

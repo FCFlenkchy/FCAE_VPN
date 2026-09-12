@@ -1,0 +1,41 @@
+[package]
+name = "fcae-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The FCAE VPN C ABI: the only crate that exports symbols."
+
+[lib]
+name = "fcae_ffi"
+# staticlib for the desktop/Android native builds; cdylib so bindings
+# (Python/C#/Node) and quick testing can dlopen it.
+crate-type = ["staticlib", "cdylib", "rlib"]
+path = "src/lib.rs"
+
+[features]
+default = ["tun"]
+# Compile the Aether backend in.
+aether = ["dep:fcae-bridge-aether"]
+# Compile the Psiphon backend in. On its own this registers the backend so the
+# UI can list it, but starting a tunnel reports BackendUnavailable.
+psiphon = ["dep:fcae-bridge-psiphon"]
+# Psiphon that actually runs: also builds and links the ClientLibrary
+# c-archive. Needs the core/psiphon submodule and a Go toolchain.
+psiphon-live = ["psiphon", "fcae-bridge-psiphon/enabled"]
+# Link the in-process tun2socks bridge.
+tun = ["dep:fcae-bridge-tun2socks"]
+
+[dependencies]
+fcae-abi.workspace = true
+fcae-runtime.workspace = true
+fcae-bridge-tun2socks = { workspace = true, optional = true }
+fcae-bridge-aether = { workspace = true, optional = true }
+fcae-bridge-psiphon = { workspace = true, optional = true }
+libc.workspace = true
+log.workspace = true
+once_cell.workspace = true
+parking_lot.workspace = true
+
+[build-dependencies]
+fcae-build.workspace = true

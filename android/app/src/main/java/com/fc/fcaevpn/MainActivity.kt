@@ -45,7 +45,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnConnect: MaterialButton
     private lateinit var btnCheckUpdates: MaterialButton
     private lateinit var updateStatus: TextView
-    private var updateAvailableInfo: AetherUpdateInfo? = null
+    private var updateAvailableInfo: FcaeUpdateInfo? = null
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
     private lateinit var spinnerScan: Spinner
@@ -757,10 +757,9 @@ class MainActivity : AppCompatActivity() {
 
         bgExecutor.execute {
             // Ensure previous engine is fully stopped before starting.
-            // aether_start() itself waits for RUNNING=false when SHUTDOWN
-            // is set (in 100ms steps), so no fixed sleep is needed here.
-            // The old unconditional Thread.sleep(300) added 300ms to EVERY
-            // connect — including cold starts with nothing running at all.
+            // nativeStop() -> fcae_stop() is synchronous, so once it returns
+            // the previous session has released the TUN fd and its threads
+            // are joined. No sleep or retry loop is needed here.
             try { NativeEngine.nativeStop() } catch (_: Throwable) {}
 
             val ok = try {
@@ -866,7 +865,7 @@ class MainActivity : AppCompatActivity() {
                 // Poll FIRST, then sleep — the old loop slept 500ms before
                 // its first look, so even an instant result took 500ms+ to
                 // show. 333ms cadence keeps the result display snappy.
-                var info: AetherUpdateInfo? = null
+                var info: FcaeUpdateInfo? = null
                 for (i in 0..45) {
                     val poll = NativeEngine.nativePollUpdate()
                     if (poll.checkDone) {
@@ -912,7 +911,7 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun showUpdateDialog(info: AetherUpdateInfo) {
+    private fun showUpdateDialog(info: FcaeUpdateInfo) {
         val msg = buildString {
             append("Current: ${BuildConfig.APP_VERSION}  (${if (buildIsPrerelease) "pre-release" else "release"})\n")
             append("Latest: ${info.latestVersion}  (${if (info.isPrerelease) "pre-release" else "release"})\n")

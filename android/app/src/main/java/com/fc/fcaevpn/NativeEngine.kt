@@ -7,7 +7,6 @@ object NativeEngine {
 
     @JvmStatic external fun nativeInit()
     @JvmStatic external fun nativeSetNativeLibDir(path: String)
-    @JvmStatic external fun nativeSetTun2socksBin(path: String)
     @JvmStatic external fun nativeStart(
         protocol: Int,
         mode: Int,
@@ -54,15 +53,15 @@ object NativeEngine {
 
     // ── version checker ─────────────────────────────────────────────
     @JvmStatic external fun nativeCheckForUpdates(currentVersion: String, includePrereleases: Boolean)
-    @JvmStatic external fun nativePollUpdate(): AetherUpdateInfo
+    @JvmStatic external fun nativePollUpdate(): FcaeUpdateInfo
     @JvmStatic external fun nativeCheckUpdateFromJson(currentVersion: String, json: String, includePrereleases: Boolean): Boolean
 }
 
 /**
- * Mirrors the C AetherUpdateInfo struct in aether_ffi.h.
+ * Mirrors the C FcaeUpdateInfo struct in core/fcae-ffi/include/fcae.h.
  * Returned by [NativeEngine.nativePollUpdate].
  */
-data class AetherUpdateInfo(
+data class FcaeUpdateInfo(
     val updateAvailable: Boolean = false,
     val checkInProgress: Boolean = false,
     val checkDone: Boolean = false,

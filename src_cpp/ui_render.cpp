@@ -87,7 +87,7 @@ static uint64_t fnv_value(uint64_t h, const T& v) {
 static uint64_t ui_content_signature() {
     uint64_t h = 1469598103934665603ull;   // FNV-1a offset basis
 
-    const AetherTelemetry& t = g_app.telem;
+    const FcaeTelemetry& t = g_app.telem;
     h = fnv_value(h, t.state);
     h = fnv_value(h, t.rtt_ms);
     h = fnv_value(h, t.rx_bytes_sec);
@@ -152,7 +152,7 @@ static uint64_t ui_content_signature() {
 /// True while the engine is running in any live state — the only time the
 /// telemetry numbers (and therefore the painted content) can move on their own.
 static bool ui_stats_live() {
-    return g_app.ffi_state.load() != AETHER_STATE_DISCONNECTED || g_app.start_busy.load();
+    return g_app.ffi_state.load() != FCAE_STATE_DISCONNECTED || g_app.start_busy.load();
 }
 
 /// Pull telemetry from the FFI when due: 4 Hz while the engine is live (so the
@@ -163,11 +163,13 @@ static void ui_poll_telemetry(double now) {
     const double interval = ui_stats_live() ? 0.25 : 1.0;
     if (now - g_app.last_telem_t < interval) return;
 
-    AetherTelemetry telem = {};
-    aether_get_telemetry(&telem);
+    FcaeTelemetry telem = {};
+    telem.struct_size = sizeof(telem);
+    telem.abi_version = FCAE_ABI_VERSION;
+    fcae_get_telemetry(&telem);
     g_app.telem = telem;
     g_app.ffi_state.store(telem.state);
-    g_app.ffi_connected.store(telem.state == AETHER_STATE_CONNECTED);
+    g_app.ffi_connected.store(telem.state == FCAE_STATE_CONNECTED);
     g_app.last_telem_t = now;
 }
 
@@ -457,9 +459,9 @@ static bool load_config() {
     return true;
 }
 
-void log_callback(int level, const char* message, void* user_data) {
+void log_callback(FcaeLogLevel level, const char* message, void* user_data) {
     (void)user_data;
-    if (g_app.logging_enabled) g_app.add_log(level, message);
+    if (g_app.logging_enabled) g_app.add_log((int)level, message);
 }
 
 static void fmt_bytes(char* buf, size_t len, uint64_t b) {
@@ -476,26 +478,30 @@ static void fmt_rate(char* buf, size_t len, uint64_t bps) {
     else snprintf(buf, len, "%llu B/s", (unsigned long long)bps);
 }
 
-static ImVec4 state_color(AetherState s) {
+static ImVec4 state_color(FcaeState s) {
     switch (s) {
-        case AETHER_STATE_DISCONNECTED: return ImVec4(0.55f, 0.55f, 0.60f, 1.0f);
-        case AETHER_STATE_PROVISIONING:
-        case AETHER_STATE_SCANNING:
-        case AETHER_STATE_CONNECTING:   return ImVec4(0.30f, 0.60f, 1.00f, 1.0f);
-        case AETHER_STATE_CONNECTED:    return ImVec4(0.20f, 0.90f, 0.35f, 1.0f);
-        case AETHER_STATE_ERROR:        return ImVec4(1.00f, 0.30f, 0.30f, 1.0f);
+        case FCAE_STATE_DISCONNECTED: return ImVec4(0.55f, 0.55f, 0.60f, 1.0f);
+        case FCAE_STATE_PROVISIONING:
+        case FCAE_STATE_SCANNING:
+        case FCAE_STATE_CONNECTING:   return ImVec4(0.30f, 0.60f, 1.00f, 1.0f);
+        // Amber: the tunnel dropped and is being re-established. Previously
+        // indistinguishable from a first connect.
+        case FCAE_STATE_RECONNECTING: return ImVec4(1.00f, 0.72f, 0.20f, 1.0f);
+        case FCAE_STATE_CONNECTED:    return ImVec4(0.20f, 0.90f, 0.35f, 1.0f);
+        case FCAE_STATE_ERROR:        return ImVec4(1.00f, 0.30f, 0.30f, 1.0f);
     }
     return ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
 }
 
-static const char* state_label(AetherState s) {
+static const char* state_label(FcaeState s) {
     switch (s) {
-        case AETHER_STATE_DISCONNECTED: return "DISCONNECTED";
-        case AETHER_STATE_PROVISIONING: return "PROVISIONING";
-        case AETHER_STATE_SCANNING:     return "SCANNING";
-        case AETHER_STATE_CONNECTING:   return "CONNECTING";
-        case AETHER_STATE_CONNECTED:    return "CONNECTED";
-        case AETHER_STATE_ERROR:        return "ERROR";
+        case FCAE_STATE_DISCONNECTED: return "DISCONNECTED";
+        case FCAE_STATE_PROVISIONING: return "PROVISIONING";
+        case FCAE_STATE_SCANNING:     return "SCANNING";
+        case FCAE_STATE_CONNECTING:   return "CONNECTING";
+        case FCAE_STATE_RECONNECTING: return "RECONNECTING";
+        case FCAE_STATE_CONNECTED:    return "CONNECTED";
+        case FCAE_STATE_ERROR:        return "ERROR";
     }
     return "UNKNOWN";
 }
@@ -517,7 +523,16 @@ static void draw_spinner(float radius, int segments, float speed) {
 }
 
 void ui_init() {
-    aether_init(log_callback, nullptr);
+    FcaeInitOptions opt = {};
+    opt.struct_size   = sizeof(opt);
+    opt.abi_version   = FCAE_ABI_VERSION;
+    opt.log_cb        = log_callback;
+    opt.state_cb      = nullptr;   // the UI already polls telemetry each frame
+    opt.user_data     = nullptr;
+    opt.max_log_level = FCAE_LOG_INFO;
+    if (fcae_init(&opt) != FCAE_OK) {
+        g_app.add_log(FCAE_LOG_ERROR, fcae_last_error());
+    }
     if (!load_config()) {
         // First run: write defaults next to the executable (or app files on Android).
         save_config();
@@ -544,7 +559,7 @@ void ui_init() {
 
     // Auto-trigger update check once on startup if enabled
     if (g_app.auto_update_check) {
-        aether_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
+        fcae_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
     }
 }
 
@@ -562,18 +577,19 @@ void ui_frame() {
     s_text_input = io.WantTextInput;
     const int st = g_app.ffi_state.load();
     s_busy_anim = g_app.start_busy.load()
-               || st == AETHER_STATE_PROVISIONING
-               || st == AETHER_STATE_SCANNING
-               || st == AETHER_STATE_CONNECTING;
+               || st == FCAE_STATE_PROVISIONING
+               || st == FCAE_STATE_SCANNING
+               || st == FCAE_STATE_CONNECTING
+               || st == FCAE_STATE_RECONNECTING;
 
     ui_note_frame_drawn();
 }
 
 void ui_shutdown() {
-    // aether_free() signals shutdown, closes TUN fds, and calls
-    // force_cleanup_windows synchronously (restores DNS, kills tun2socks,
-    // removes TUN adapter). This MUST complete before ExitProcess.
-    aether_free();
+    // fcae_shutdown() stops any running session first: TUN device down,
+    // routes and DNS restored, engine threads joined. It is synchronous, so
+    // everything is undone before we exit the process.
+    fcae_shutdown();
 #if defined(_WIN32)
     ExitProcess(0);
 #endif
@@ -596,13 +612,14 @@ void render_ui() {
     // poll the render gate (ui_should_render) uses, so it never double-polls.
     const double now = ui_now_seconds();
     ui_poll_telemetry(now);
-    const AetherTelemetry& telem = g_app.telem;
+    const FcaeTelemetry& telem = g_app.telem;
 
-    AetherState cur = (AetherState)telem.state;
-    bool connected  = (cur == AETHER_STATE_CONNECTED);
-    bool busy       = (cur == AETHER_STATE_PROVISIONING || cur == AETHER_STATE_SCANNING || cur == AETHER_STATE_CONNECTING)
+    FcaeState cur = (FcaeState)telem.state;
+    bool connected  = (cur == FCAE_STATE_CONNECTED);
+    bool busy       = (cur == FCAE_STATE_PROVISIONING || cur == FCAE_STATE_SCANNING
+                       || cur == FCAE_STATE_CONNECTING || cur == FCAE_STATE_RECONNECTING)
                       || g_app.start_busy.load();
-    bool errored    = (cur == AETHER_STATE_ERROR);
+    bool errored    = (cur == FCAE_STATE_ERROR);
 
     // ── 1. STATUS BAR + ACTIONS ──────────────────────────────────────────
     {
@@ -665,17 +682,22 @@ void render_ui() {
         if (ImGui::Button(connected || busy ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 34))) {
             if (connected || busy || errored) {
                 g_app.start_busy.store(false);
-                // aether_stop() is non-blocking: it sets the shutdown flag,
-                // closes TUN fds, cancels any in-flight TUN configuration,
-                // updates telemetry, and hands the (slow, PowerShell-based)
-                // OS cleanup to a background finalizer thread. Never run
-                // the Windows cleanup inline here — it froze the UI window
-                // for the duration of the DNS restore / adapter removal.
-                aether_stop();
-                g_app.ffi_state.store(AETHER_STATE_DISCONNECTED);
+                // fcae_stop() is synchronous and ordered: it brings the TUN
+                // device down and restores routes/DNS before returning. It is
+                // run on a worker thread purely so the window keeps painting
+                // during the teardown; the UI may offer CONNECT again the
+                // moment it completes, with no hidden background cleanup
+                // still racing the next session.
+                std::thread([] {
+                    if (fcae_stop() != FCAE_OK) {
+                        g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
+                    }
+                    g_app.ffi_state.store(FCAE_STATE_DISCONNECTED);
+                    ui_request_redraw();
+                }).detach();
             } else if (!g_app.start_busy.load()) {
                 // TUN mode requires admin privileges on Windows
-                if (g_app.mode == 1 && !aether_is_admin()) {
+                if (g_app.mode == 1 && !fcae_is_privileged()) {
 #ifdef _WIN32
                     // Save config then relaunch self as administrator.
                     // The elevated instance will start fresh — user clicks CONNECT manually.
@@ -720,10 +742,10 @@ void render_ui() {
                 // Snapshot config + own string storage for the worker thread.
                 struct Owned {
                     std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
-                    AetherConfig c{};
+                    FcaeConfig c{};
                 };
                 // Use unique_ptr with a custom deleter that handles the
-                // case where aether_start throws or the thread is killed.
+                // case where fcae_start throws or the thread is killed.
                 auto o = std::unique_ptr<Owned, void(*)(Owned*)>(
                     new Owned(),
                     [](Owned* p) {
@@ -741,26 +763,31 @@ void render_ui() {
                 o->routes = g_app.routes_file;
                 o->routes_inline = g_app.routes_inline;
                 o->c = g_app.to_config();
-                o->c.noize_profile = o->noize.c_str();
-                o->c.force_peer    = o->peer.empty() ? nullptr : o->peer.c_str();
-                o->c.config_path   = o->path.c_str();
-                o->c.sni           = o->sni.empty() ? nullptr : o->sni.c_str();
-                o->c.team_name     = o->team.empty() ? nullptr : o->team.c_str();
-                o->c.access_token  = o->token.empty() ? nullptr : o->token.c_str();
-                o->c.access_email  = o->email.empty() ? nullptr : o->email.c_str();
-                o->c.routes_file   = o->routes.empty() ? nullptr : o->routes.c_str();
-                o->c.routes_inline = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
+                o->c.obfuscation.noize_profile = o->noize.c_str();
+                o->c.force_peer                = o->peer.empty() ? nullptr : o->peer.c_str();
+                o->c.config_path               = o->path.c_str();
+                o->c.dns.sni                   = o->sni.empty() ? nullptr : o->sni.c_str();
+                o->c.zero_trust.team_name      = o->team.empty() ? nullptr : o->team.c_str();
+                o->c.zero_trust.access_token   = o->token.empty() ? nullptr : o->token.c_str();
+                o->c.zero_trust.access_email   = o->email.empty() ? nullptr : o->email.c_str();
+                o->c.routing.rules_file        = o->routes.empty() ? nullptr : o->routes.c_str();
+                o->c.routing.rules_inline      = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
                 auto* raw = o.release(); // transfer ownership to the thread
                 std::thread([raw] {
                     // Wrap in a unique_ptr again so the custom deleter
-                    // fires on scope exit (even if aether_start throws).
+                    // fires on scope exit (even if fcae_start throws).
                     std::unique_ptr<Owned, void(*)(Owned*)> guard(
                         raw, [](Owned* p) {
                             g_app.start_busy.store(false);
                             delete p;
                         }
                     );
-                    (void)aether_start(&guard->c);
+                    // Every failure mode now has a specific, user-facing
+                    // reason instead of a bare false.
+                    if (fcae_start(&guard->c) != FCAE_OK) {
+                        g_app.add_log(FCAE_LOG_ERROR, fcae_last_error());
+                        ui_request_redraw();
+                    }
                 }).detach();
             }
         }
@@ -783,8 +810,10 @@ void render_ui() {
             float btn_width = 160.0f;
             float avail = ImGui::GetContentRegionAvail().x;
             ImGui::SetCursorPosX((avail - btn_width) * 0.5f);
-        AetherUpdateInfo info = {};
-        bool done = aether_poll_update(&info);
+        FcaeUpdateInfo info = {};
+        info.struct_size = sizeof(info);
+        info.abi_version = FCAE_ABI_VERSION;
+        bool done = (fcae_poll_update(&info) == FCAE_OK);
         // The render gate watches this so the "Checking... (Ns)" counter keeps
         // ticking (1 Hz) even when the user is not touching the window.
         s_update_in_progress = info.check_in_progress;
@@ -801,7 +830,7 @@ void render_ui() {
                 s_update_available = false;
                 snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    aether_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
+                    fcae_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
                     s_update_checked = false;
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
@@ -834,14 +863,14 @@ void render_ui() {
                 s_update_checked = true;
                 snprintf(s_update_status, sizeof(s_update_status), "%.127s", info.status_message);
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    aether_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
+                    fcae_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
                     s_update_checked = false;
                     s_update_available = false;
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
             } else {
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    aether_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
+                    fcae_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
                     s_update_checked = false;
                     s_update_available = false;
                     s_check_start_time = std::chrono::steady_clock::now();

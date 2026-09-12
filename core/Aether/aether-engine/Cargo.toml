@@ -55,3 +55,13 @@ lto = "fat"
 codegen-units = 1
 panic = "unwind"
 strip = true
+
+# Standalone package, deliberately not a member of any workspace.
+#
+# core/Aether/Cargo.toml used to exist purely to hold aether-ffi and to
+# `exclude` this crate. aether-ffi is gone (superseded by core/fcae-ffi), so
+# that workspace went with it. This empty table stops the crate from being
+# absorbed into an ancestor workspace, which matters because it is consumed as
+# a path dependency by core/fcae-ffi/backends/aether and must keep resolving
+# against core/quiche's own workspace.
+[workspace]

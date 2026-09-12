@@ -1,0 +1,29 @@
+[package]
+name = "fcae-bridge-psiphon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Psiphon backend plugin for the FCAE FFI (scaffolding; enable with the `enabled` feature)."
+
+[lib]
+name = "fcae_bridge_psiphon"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Turn on once psiphon-tunnel-core is vendored as a submodule and the Go
+# c-archive bridge is wired up. Until then the backend registers itself but
+# reports BackendUnavailable, so the UI can show it greyed out.
+enabled = []
+
+[dependencies]
+fcae-abi.workspace = true
+fcae-runtime.workspace = true
+async-trait.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+
+[build-dependencies]
+fcae-build.workspace = true
