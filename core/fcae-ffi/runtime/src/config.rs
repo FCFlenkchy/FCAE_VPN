@@ -454,6 +454,28 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
                 .into(),
         ));
     }
+    // Tor opens its OWN socks listener. Defaulting it to 1820 put it on the
+    // same port as the HTTP proxy, so whichever bound second failed with
+    // "address already in use" -- tor came up only when the http proxy was
+    // disabled, which is why it "worked sometimes". The default is now 1821;
+    // reject an explicit collision too rather than lose the race at runtime.
+    if t.mode != FcaeTorMode::Off {
+        let tor_port = cstr_opt(t.bind)
+            .as_deref()
+            .and_then(|b| b.parse::<std::net::SocketAddr>().ok())
+            .map(|a| a.port())
+            .unwrap_or(1821);
+        if tor_port == cfg.socks_port {
+            return Err(CoreError::InvalidConfig(format!(
+                "tor.bind port {tor_port} collides with socks_port; they must differ"
+            )));
+        }
+        if cfg.http_port != 0 && tor_port == cfg.http_port {
+            return Err(CoreError::InvalidConfig(format!(
+                "tor.bind port {tor_port} collides with http_port; they must differ"
+            )));
+        }
+    }
     cfg.tor = TorConfig {
         mode: t.mode,
         bridges: t.bridges,

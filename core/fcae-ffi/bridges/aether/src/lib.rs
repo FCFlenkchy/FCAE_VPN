@@ -112,7 +112,16 @@ impl Backend for AetherBackend {
             let outcome = outcome.clone();
             let sink = cx.telemetry.clone();
             tokio::spawn(async move {
-                let result = aether_engine::run_from_env().await;
+                // Cancellation is checked before the engine starts: stop()
+                // can land between the supervisor deciding to (re)connect and
+                // this task being polled, and run_from_env() begins with
+                // shutdown::reset(), which would wipe that request and leave
+                // the engine running after a stop.
+                let result = if aether_engine::shutdown::is_cancelled() {
+                    Ok(())
+                } else {
+                    aether_engine::run_from_env().await
+                };
                 let mapped = match result {
                     Ok(()) => Ok(()),
                     Err(e) => {
@@ -139,7 +148,7 @@ impl Backend for AetherBackend {
         //
         // In Chain and Only mode the traffic only reaches the tor network via
         // the SOCKS port tor itself opens (AETHER_TOR_BIND, default
-        // 127.0.0.1:1820). The engine's own port is the *plain* tunnel: in
+        // 127.0.0.1:1821). The engine's own port is the *plain* tunnel: in
         // Chain mode it is the carrier tor dials out through, so pointing the
         // TUN at it bypasses tor completely -- the UI said "tor ready" while
         // every packet left through plain WARP, which is why check sites
@@ -152,7 +161,7 @@ impl Backend for AetherBackend {
                 cfg.tor
                     .bind
                     .as_deref()
-                    .unwrap_or("127.0.0.1:1820")
+                    .unwrap_or("127.0.0.1:1821")
                     .parse()
                     .map_err(|e| {
                         CoreError::InvalidConfig(format!("bad tor socks address: {e}"))

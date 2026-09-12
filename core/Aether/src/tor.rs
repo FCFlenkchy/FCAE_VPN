@@ -40,7 +40,7 @@ pub fn listen_address() -> SocketAddr {
     std::env::var("AETHER_TOR_BIND")
         .ok()
         .and_then(|value| value.trim().parse().ok())
-        .unwrap_or_else(|| "127.0.0.1:1820".parse().expect("a literal address"))
+        .unwrap_or_else(|| "127.0.0.1:1821".parse().expect("a literal address"))
 }
 
 pub fn state_dir(base_config: &str) -> PathBuf {
@@ -832,7 +832,7 @@ mod tests {
     #[test]
     fn the_tor_listener_has_a_default_of_its_own() {
         clear();
-        assert_eq!(listen_address(), "127.0.0.1:1820".parse().unwrap());
+        assert_eq!(listen_address(), "127.0.0.1:1821".parse().unwrap());
         std::env::set_var("AETHER_TOR_BIND", "127.0.0.1:9150");
         assert_eq!(listen_address(), "127.0.0.1:9150".parse().unwrap());
         clear();

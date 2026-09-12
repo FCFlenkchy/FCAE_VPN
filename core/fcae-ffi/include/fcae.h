@@ -224,7 +224,7 @@ typedef struct {
 typedef struct {
     FcaeTorMode     mode;
     FcaeTorBridges  bridges;
-    const char     *bind;          /* NULL = 127.0.0.1:1820                */
+    const char     *bind;          /* NULL = 127.0.0.1:1821                */
     const char     *state_dir;     /* NULL = under data_dir                */
     const char     *bridge_lines;  /* newline-separated, for CUSTOM        */
     const char     *pt_path;       /* pluggable transport binary, or NULL  */

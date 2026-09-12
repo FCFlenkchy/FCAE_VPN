@@ -318,7 +318,7 @@ pub struct FcaeTor {
     pub mode: FcaeTorMode,
     pub bridges: FcaeTorBridges,
     /// "ip:port" for the local Tor SOCKS listener in `Only` mode.
-    /// NULL = 127.0.0.1:1820.
+    /// NULL = 127.0.0.1:1821.
     pub bind: *const c_char,
     /// State/cache directory for the Arti client. NULL = under `data_dir`.
     pub state_dir: *const c_char,
