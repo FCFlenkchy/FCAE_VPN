@@ -201,25 +201,49 @@ int main(int argc, char** argv) {
 
     ui_init();
 
-    // Event-driven render loop: use glfwWaitEventsTimeout to sleep when idle.
-    // Only renders on input events or a 1 Hz timer for stats updates.
-    // Explicit 60 FPS cap via frame timing even when VSync is off or on high-refresh monitors.
+    // Event-driven, change-gated render loop: glfwWaitEventsTimeout sleeps the
+    // thread while idle, and a frame is painted only when something actually
+    // changed (stats/logs/transient text) or the user is interacting. An idle
+    // window therefore costs ~0% CPU instead of a full-frame repaint every
+    // second, and events that change nothing no longer force frames either.
     auto last_frame_time = std::chrono::steady_clock::now();
-    constexpr auto min_frame_interval = std::chrono::milliseconds(16); // ~60 FPS cap
+    constexpr auto min_frame_interval = std::chrono::milliseconds(16);   // ~60 FPS cap
+    constexpr double interaction_tail  = 0.7;                            // smooth for this long after the last event
+    double last_event_time = -1e9;                                       // monotonic seconds (glfwGetTime)
+    bool minimized = false;
+
     while (!glfwWindowShouldClose(window) && g_app.running.load()) {
-        // Wait for events with a 1-second timeout for stats refresh.
-        // glfwWaitEventsTimeout sleeps the thread when idle, consuming ~0% CPU.
-        double timeout = g_app.running.load() ? 1.0 : 1e10; // effectively infinite when disconnected
+        minimized = glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
+        const double t_before = glfwGetTime();
+        bool interacting = (t_before - last_event_time) < interaction_tail;
+
+        // Wait for events: ~60 FPS while interacting, slower when idle (the
+        // engine poll still runs, see ui_sleep_ms()).
+        double timeout = minimized ? 1.0
+                       : interacting ? min_frame_interval.count() / 1000.0
+                       : (double)ui_sleep_ms() / 1000.0;
         glfwWaitEventsTimeout(timeout);
 
         // Only render if the window is still alive after processing events.
         if (glfwWindowShouldClose(window)) break;
+
+        const double t = glfwGetTime();
+        // The wait returned before its timeout ⇒ events (i.e. user input or
+        // window changes) arrived; keep frames smooth for a short tail.
+        if (t - t_before < timeout - 0.005) last_event_time = t;
+        interacting = (t - last_event_time) < interaction_tail;
+
+        if (minimized) continue;
 
         // Throttle to 60 FPS max — skip frame if less than 16ms since last render
         auto now = std::chrono::steady_clock::now();
         if (now - last_frame_time < min_frame_interval) {
             continue;
         }
+
+        // Skip frames whose pixels would be identical to the last painted one.
+        if (!ui_should_render(interacting)) continue;
+
         last_frame_time = now;
 
         ImGui_ImplOpenGL3_NewFrame();

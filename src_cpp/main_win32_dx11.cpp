@@ -28,7 +28,24 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 1;
 
     switch (msg) {
+        // Window events that change what should be on screen: ask for exactly
+        // one repaint instead of leaving the loop free-running. (Resize/DPI also
+        // rebuild the swapchain, in the WM_SIZE case below.)
+        case WM_PAINT:
+        case WM_DPICHANGED:
+        case WM_DISPLAYCHANGE:
+        case WM_THEMECHANGED:
+        case WM_SYSCOLORCHANGE:
+        case WM_ACTIVATE:
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+        case WM_SHOWWINDOW:
+            ui_request_redraw();
+            break;
         case WM_SIZE:
+            // A restored/maximized window must be painted even if the render
+            // gate had nothing new to show.
+            ui_request_redraw();
             if (g_pd3dDevice != nullptr && g_pSwapChain != nullptr && wParam != SIZE_MINIMIZED) {
                 // Release old RTV before ResizeBuffers invalidates its backing buffer
                 if (g_mainRenderTargetView) {
@@ -185,65 +202,119 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     ui_init();
 
-    // Event-driven render loop: only render when input arrives or 1 Hz stats refresh.
-    // Eliminates continuous 60 FPS GPU/CPU waste when idle.
-    // Explicit 60 FPS cap via frame timing even when VSync is off or on high-refresh monitors.
+    // ── Event-driven, change-gated render loop ───────────────────────────────
+    // A frame is painted only when
+    //   * the user interacts with the window (hover/drag/type — capped at 60 FPS
+    //     and kept alive for a short tail after the last input),
+    //   * the fingerprint of everything the UI paints changed (telemetry stats,
+    //     logs, transient status text, settings), or
+    //   * a window event asked for a repaint (resize, DPI, focus, theme, …).
+    //
+    // Previously the loop woke every 1 s and repainted unconditionally, and any
+    // stray window message (WS_EX_COMPOSITED/DWM redraws, hidden tooltip windows,
+    // the IME, a hovering cursor…) woke it early and cost a full frame — which is
+    // where the idle CPU went. Now the thread blocks on the message queue and an
+    // idle window is genuinely 0% CPU: no periodic repaint, and messages that
+    // don't change anything (a repeated WM_MOUSEMOVE at the same position, for
+    // example) no longer force a frame.
     bool done = false;
     auto last_frame_time = std::chrono::steady_clock::now();
-    constexpr auto min_frame_interval = std::chrono::milliseconds(16); // ~60 FPS cap
-    while (!done && g_app.running.load()) {
-        // Wait up to 1000ms for user input or window events before waking up.
-        // When the VPN is running, wake every 1000ms to update stats.
-        DWORD timeout = g_app.running.load() ? 1000 : INFINITE;
-        DWORD wait_result = MsgWaitForMultipleObjects(0, nullptr, FALSE, timeout, QS_ALLINPUT);
+    auto last_input_time = last_frame_time;
+    POINT last_mouse_pos = {};
+    bool have_mouse_pos = false;
+    constexpr auto min_frame_interval = std::chrono::milliseconds(16);   // ~60 FPS cap
+    constexpr auto interaction_tail   = std::chrono::milliseconds(700);  // smooth for this long after the last input
 
-        // Drain all pending window messages.
+    while (!done && g_app.running.load()) {
+        const auto loop_now = std::chrono::steady_clock::now();
+        const bool interacting = (loop_now - last_input_time) < interaction_tail;
+
+        // A minimized or hidden window has nothing to paint. Sleep in 1 s steps
+        // (keeps the engine-state poll alive) and leave a pending redraw request
+        // alone so the first frame after restoring is guaranteed to be fresh.
+        const bool paintable = !IsIconic(hWnd) && IsWindowVisible(hWnd);
+
+        DWORD timeout;
+        if (!paintable)         timeout = 1000;
+        else if (interacting)   timeout = (DWORD)min_frame_interval.count();
+        else                    timeout = (DWORD)ui_sleep_ms();
+
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, timeout, QS_ALLINPUT);
+
+        // Drain pending window messages; real input counts as interaction.
+        bool got_input = false;
         MSG msg;
         while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) { done = true; break; }
+            switch (msg.message) {
+                case WM_MOUSEMOVE:
+                    // Only movement counts. Windows repeats WM_MOUSEMOVE at the
+                    // same position, and treating those as input would pin the
+                    // loop at 60 FPS forever.
+                    if (!have_mouse_pos || msg.pt.x != last_mouse_pos.x || msg.pt.y != last_mouse_pos.y) {
+                        last_mouse_pos = msg.pt;
+                        have_mouse_pos = true;
+                        got_input = true;
+                    }
+                    break;
+                case WM_LBUTTONDOWN: case WM_LBUTTONUP:
+                case WM_RBUTTONDOWN: case WM_RBUTTONUP:
+                case WM_MBUTTONDOWN: case WM_MBUTTONUP:
+                case WM_MOUSEWHEEL:  case WM_MOUSEHWHEEL:
+                case WM_KEYDOWN:     case WM_KEYUP:
+                case WM_SYSKEYDOWN:  case WM_SYSKEYUP:
+                case WM_CHAR:        case WM_UNICHAR:
+                    got_input = true;
+                    break;
+                default:
+                    break;
+            }
             TranslateMessage(&msg);
             DispatchMessage(&msg);
-            if (msg.message == WM_QUIT) { done = true; break; }
         }
         if (done) break;
+        if (got_input) last_input_time = std::chrono::steady_clock::now();
 
-        // Throttle to 60 FPS max — skip frame if less than 16ms since last render
-        auto now = std::chrono::steady_clock::now();
-        if (now - last_frame_time < min_frame_interval) {
+        // Hidden window: keep the engine poll alive, paint nothing.
+        if (!paintable) continue;
+
+        // Throttle to 60 FPS max — skip the frame if it is too early.
+        const auto frame_now = std::chrono::steady_clock::now();
+        if (frame_now - last_frame_time < min_frame_interval) continue;
+
+        // Skip frames whose pixels would be identical to the last painted frame.
+        const bool active = got_input || (frame_now - last_input_time) < interaction_tail;
+        if (!ui_should_render(active)) continue;
+
+        // ── Crash-safe D3D11 guard ──────────────────────────────
+        // If the device was lost or context became invalid (driver crash,
+        // GPU hang, or rapid suspend/resume), skip the frame instead of
+        // crashing the process.  The window will remain visible but frozen;
+        // the engine threads continue running in the background.
+        if (!g_pd3dDevice || !g_pd3dDeviceContext || !g_pSwapChain || !g_mainRenderTargetView)
             continue;
-        }
-        last_frame_time = now;
 
-        // Only render when VPN is running (stats updates) or input arrived.
-        if (g_app.running.load() || wait_result == WAIT_OBJECT_0) {
-            // ── Crash-safe D3D11 guard ──────────────────────────────
-            // If the device was lost or context became invalid (driver crash,
-            // GPU hang, or rapid suspend/resume), skip the frame instead of
-            // crashing the process.  The window will remain visible but frozen;
-            // the engine threads continue running in the background.
-            if (!g_pd3dDevice || !g_pd3dDeviceContext || !g_pSwapChain || !g_mainRenderTargetView)
-                continue;
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
 
-            ImGui_ImplDX11_NewFrame();
-            ImGui_ImplWin32_NewFrame();
-            ImGui::NewFrame();
+        ui_frame();
 
-            ui_frame();
+        ImGui::Render();
 
-            ImGui::Render();
+        // Double-check RTV again after ImGui::Render — resizing or
+        // WM_SIZE between NewFrame and Render can invalidate the RTV.
+        if (!g_mainRenderTargetView) continue;
 
-            // Double-check RTV again after ImGui::Render — resizing or
-            // WM_SIZE between NewFrame and Render can invalidate the RTV.
-            if (!g_mainRenderTargetView) continue;
+        const float clear_color[4] = { 0.05f, 0.05f, 0.08f, 1.0f };
+        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-            const float clear_color[4] = { 0.05f, 0.05f, 0.08f, 1.0f };
-            g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-            g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
-            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
-            // Present can fail if device lost (DXGI_ERROR_DEVICE_REMOVED).
-            // Ignore the HRESULT — next frame will skip via the null guard above.
-            g_pSwapChain->Present(1, 0);
-        }
+        // Present can fail if device lost (DXGI_ERROR_DEVICE_REMOVED).
+        // Ignore the HRESULT — next frame will skip via the null guard above.
+        g_pSwapChain->Present(1, 0);
+        last_frame_time = std::chrono::steady_clock::now();
     }
 
     ui_shutdown();

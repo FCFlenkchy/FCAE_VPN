@@ -23,6 +23,11 @@ struct AppState {
     std::atomic<int>  ffi_state{AETHER_STATE_DISCONNECTED};
     std::atomic<bool> ffi_connected{false};
     std::atomic<bool> start_busy{false};
+    /// Set by the platform layer (resize, DPI change, focus/activate, expose) to
+    /// force exactly one repaint even when nothing else changed. It is only
+    /// cleared once a frame has really been painted, so the request survives a
+    /// minimized/occluded period. Starts true so the first frame always draws.
+    std::atomic<bool> redraw_requested{true};
 
     int  protocol        = 0;
     int  mode            = 0;
@@ -147,3 +152,30 @@ void ui_frame();
 void ui_shutdown();
 void render_ui();
 void log_callback(int level, const char* message, void* user_data);
+
+// ── Idle-friendly rendering ──────────────────────────────────────────────
+// The window is repainted only when it has something new to show (engine
+// telemetry, logs, transient status text) or while the user is interacting.
+// Platform main loops call ui_should_render() before each frame and sleep for
+// ui_sleep_ms() instead of redrawing on a timer, so an idle window costs ~0%
+// CPU: no periodic full-frame repaint, and no 60 FPS spin when stray window
+// messages keep arriving.
+
+/// Should the platform paint a frame now?
+/// Polls telemetry when due and returns true if anything changed since the last
+/// painted frame, if a redraw was requested, if the UI has its own animation
+/// running (connect spinner), or while `interacting` is true.
+bool ui_should_render(bool interacting);
+
+/// How long (ms) the platform may sleep before calling ui_should_render()
+/// again. Small while something is animating or live, 1000 ms when idle.
+unsigned ui_sleep_ms();
+
+/// Request one extra repaint (call from window event handlers).
+void ui_request_redraw();
+
+/// Bookkeeping after a frame was actually painted. Called by ui_frame().
+void ui_note_frame_drawn();
+
+/// Monotonic clock in seconds, shared by the telemetry poll and the render gate.
+double ui_now_seconds();

@@ -21,6 +21,193 @@
 
 AppState g_app;
 
+// ── Idle-friendly rendering ──────────────────────────────────────────────
+// Everything below decides whether a frame needs to be painted at all. The
+// window content is a pure function of telemetry + logs + UI state, so a cheap
+// FNV-1a fingerprint of exactly those values tells us when repainting would
+// produce identical pixels — and then the platform loop simply sleeps instead.
+
+// Update-check UI state, hoisted out of render_ui() so the fingerprint can see
+// when the update panel still has live content (e.g. "Checking... (3s)").
+static bool s_update_checked = false;
+static bool s_update_available = false;
+static char s_update_status[128] = {};
+static char s_update_latest[32] = {};
+static char s_update_notes[1024] = {};
+static char s_update_dl_url[512] = {};
+static bool s_update_popup_open = false;
+static std::chrono::steady_clock::time_point s_check_start_time = std::chrono::steady_clock::now();
+static bool s_update_in_progress = false;
+
+// What the last painted frame looked like / when it was painted.
+static uint64_t s_painted_sig = 0;
+static bool     s_painted_once = false;
+static double   s_last_paint_t = 0.0;
+
+// UI state that keeps needing frames on its own.
+static bool s_busy_anim = false;      // connect/scan spinner is on screen
+static bool s_text_input = false;     // a text field is focused (blinking caret)
+
+/// Monotonic seconds. Shared by the telemetry poll and the render gate so both
+/// use one clock (ImGui::GetTime() is only meaningful inside a frame).
+double ui_now_seconds() {
+    using clock = std::chrono::steady_clock;
+    return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+}
+
+static uint64_t fnv_bytes(uint64_t h, const void* data, size_t len) {
+    const unsigned char* p = (const unsigned char*)data;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= (uint64_t)p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+static uint64_t fnv_cstr(uint64_t h, const char* s) {
+    if (!s) return fnv_bytes(h, "", 1);
+    return fnv_bytes(h, s, strlen(s) + 1);
+}
+
+template <typename T>
+static uint64_t fnv_value(uint64_t h, const T& v) {
+    return fnv_bytes(h, &v, sizeof(T));
+}
+
+/// Fingerprint of everything the UI paints. Unchanged fingerprint + no input ⇒
+/// the next frame would be pixel-identical, so it can be skipped.
+static uint64_t ui_content_signature() {
+    uint64_t h = 1469598103934665603ull;   // FNV-1a offset basis
+
+    const AetherTelemetry& t = g_app.telem;
+    h = fnv_value(h, t.state);
+    h = fnv_value(h, t.rtt_ms);
+    h = fnv_value(h, t.rx_bytes_sec);
+    h = fnv_value(h, t.tx_bytes_sec);
+    h = fnv_value(h, t.total_rx);
+    h = fnv_value(h, t.total_tx);
+    h = fnv_cstr(h, t.connected_peer);
+    h = fnv_cstr(h, t.lan_ip);
+    h = fnv_cstr(h, t.status_message);
+    h = fnv_cstr(h, t.last_error);
+
+    // Log panel: length + newest line is enough to notice new output.
+    {
+        std::lock_guard<std::mutex> lock(g_app.logs_mutex);
+        const size_t n = g_app.logs.size();
+        h = fnv_value(h, n);
+        if (n) h = fnv_cstr(h, g_app.logs.back().second.c_str());
+    }
+
+    // Settings the user can edit (changed by input, but a config load or a
+    // programmatic change must repaint too), plus transient notices.
+    h = fnv_value(h, g_app.protocol);
+    h = fnv_value(h, g_app.mode);
+    h = fnv_value(h, g_app.scan_mode);
+    h = fnv_value(h, g_app.ip_version);
+    h = fnv_value(h, g_app.lan_sharing);
+    h = fnv_value(h, g_app.quick_reconnect);
+    h = fnv_value(h, g_app.socks_enabled);
+    h = fnv_value(h, g_app.http_enabled);
+    h = fnv_value(h, g_app.socks_port);
+    h = fnv_value(h, g_app.http_port);
+    h = fnv_value(h, g_app.h2_enabled);
+    h = fnv_value(h, g_app.ech_enabled);
+    h = fnv_value(h, g_app.sys_profile);
+    h = fnv_cstr(h, g_app.noize_profile);
+    h = fnv_cstr(h, g_app.force_peer);
+    h = fnv_cstr(h, g_app.config_path);
+    h = fnv_cstr(h, g_app.sni);
+    h = fnv_cstr(h, g_app.team_name);
+    h = fnv_cstr(h, g_app.access_token);
+    h = fnv_cstr(h, g_app.access_email);
+    h = fnv_cstr(h, g_app.routes_file);
+    h = fnv_cstr(h, g_app.routes_inline);
+    h = fnv_cstr(h, g_app.save_status);
+    h = fnv_cstr(h, g_app.copy_status);
+    h = fnv_value(h, g_app.start_busy.load());
+
+    // Update panel (button label, "Checking... (Ns)" counter, popup contents).
+    h = fnv_value(h, s_update_checked);
+    h = fnv_value(h, s_update_available);
+    h = fnv_value(h, s_update_in_progress);
+    h = fnv_value(h, s_update_popup_open);
+    h = fnv_cstr(h, s_update_status);
+    h = fnv_cstr(h, s_update_latest);
+    h = fnv_cstr(h, s_update_notes);
+    h = fnv_cstr(h, s_update_dl_url);
+    return h;
+}
+
+/// True while the engine is running in any live state — the only time the
+/// telemetry numbers (and therefore the painted content) can move on their own.
+static bool ui_stats_live() {
+    return g_app.ffi_state.load() != AETHER_STATE_DISCONNECTED || g_app.start_busy.load();
+}
+
+/// Pull telemetry from the FFI when due: 4 Hz while the engine is live (so the
+/// counters feel live), 1 Hz when everything is idle. Throttled by
+/// g_app.last_telem_t, so the in-frame poll and this one never double-poll
+/// (rates() consumes a sampling window).
+static void ui_poll_telemetry(double now) {
+    const double interval = ui_stats_live() ? 0.25 : 1.0;
+    if (now - g_app.last_telem_t < interval) return;
+
+    AetherTelemetry telem = {};
+    aether_get_telemetry(&telem);
+    g_app.telem = telem;
+    g_app.ffi_state.store(telem.state);
+    g_app.ffi_connected.store(telem.state == AETHER_STATE_CONNECTED);
+    g_app.last_telem_t = now;
+}
+
+void ui_request_redraw() {
+    g_app.redraw_requested.store(true);
+}
+
+bool ui_should_render(bool interacting) {
+    const double now = ui_now_seconds();
+
+    // Telemetry is the main thing that changes without user input; poll it here
+    // so the fingerprint below is up to date.
+    ui_poll_telemetry(now);
+
+    // A redraw request is only cleared once a frame is really painted, so it
+    // cannot be lost while the window is minimized.
+    if (g_app.redraw_requested.load()) return true;
+
+    // The user is interacting: paint every frame the caller offers (hover,
+    // drag, typing, scroll). The platform caps this at ~60 FPS.
+    if (interacting) return true;
+
+    // Spinner/connect animation is running: it moves on its own.
+    if (s_busy_anim) return true;
+
+    // Nothing changed since the last painted frame → the frame would be
+    // pixel-identical, so skip it and let the platform go back to sleep.
+    if (s_painted_once && ui_content_signature() == s_painted_sig) {
+        // …except for the few things that tick slowly on their own:
+        const double period = (s_update_in_progress || s_text_input) ? 0.5 : 0.0;
+        if (period <= 0.0 || now - s_last_paint_t < period) return false;
+    }
+    return true;
+}
+
+unsigned ui_sleep_ms() {
+    if (s_busy_anim) return 16;              // connect spinner: keep it smooth
+    if (s_update_in_progress) return 250;    // "Checking... (Ns)" counter
+    if (s_text_input) return 250;            // caret blink in a focused field
+    if (ui_stats_live()) return 250;         // counter/state changes (4 Hz poll)
+    return 1000;                             // idle: poll the engine once a second
+}
+
+void ui_note_frame_drawn() {
+    s_painted_sig = ui_content_signature();
+    s_painted_once = true;
+    s_last_paint_t = ui_now_seconds();
+    g_app.redraw_requested.store(false);
+}
+
 // ── Config persistence ──────────────────────────────────────────────────
 
 static std::string join_cfg(const std::string& dir) {
@@ -350,7 +537,24 @@ void ui_init() {
 }
 
 void ui_frame() {
+    // The update panel sets this again below when a check is running; resetting
+    // it first keeps the flag honest on frames that return early.
+    s_update_in_progress = false;
+
     render_ui();
+
+    // Bookkeeping for the render gate (ui_should_render/ui_sleep_ms):
+    //  - a focused text field needs ~2 Hz frames so the caret keeps blinking,
+    //  - the connect/scan spinner animates on its own and wants smooth frames.
+    const ImGuiIO& io = ImGui::GetIO();
+    s_text_input = io.WantTextInput;
+    const int st = g_app.ffi_state.load();
+    s_busy_anim = g_app.start_busy.load()
+               || st == AETHER_STATE_PROVISIONING
+               || st == AETHER_STATE_SCANNING
+               || st == AETHER_STATE_CONNECTING;
+
+    ui_note_frame_drawn();
 }
 
 void ui_shutdown() {
@@ -376,16 +580,10 @@ void render_ui() {
         ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    // Throttle telemetry FFI (~4 Hz) — UI still paints at full rate.
-    const double now = ImGui::GetTime();
-    if (now - g_app.last_telem_t >= 0.25) {
-        AetherTelemetry telem = {};
-        aether_get_telemetry(&telem);
-        g_app.telem = telem;
-        g_app.ffi_state.store(telem.state);
-        g_app.ffi_connected.store(telem.state == AETHER_STATE_CONNECTED);
-        g_app.last_telem_t = now;
-    }
+    // Throttle telemetry FFI (~4 Hz while live, 1 Hz when idle) — the same
+    // poll the render gate (ui_should_render) uses, so it never double-polls.
+    const double now = ui_now_seconds();
+    ui_poll_telemetry(now);
     const AetherTelemetry& telem = g_app.telem;
 
     AetherState cur = (AetherState)telem.state;
@@ -554,31 +752,25 @@ void render_ui() {
             float btn_width = 160.0f;
             float avail = ImGui::GetContentRegionAvail().x;
             ImGui::SetCursorPosX((avail - btn_width) * 0.5f);
-        static bool update_checked = false;
-        static bool update_available = false;
-        static char update_status[128] = {};
-        static char update_latest[32] = {};
-        static char update_notes[1024] = {};
-        static char update_dl_url[512] = {};
-        static bool update_popup_open = false;
-        static auto check_start_time = std::chrono::steady_clock::now();
-
         AetherUpdateInfo info = {};
         bool done = aether_poll_update(&info);
+        // The render gate watches this so the "Checking... (Ns)" counter keeps
+        // ticking (1 Hz) even when the user is not touching the window.
+        s_update_in_progress = info.check_in_progress;
 
         if (info.check_in_progress) {
             // Safety timeout: if check takes >15s, show timeout message
             auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - check_start_time).count();
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - s_check_start_time).count();
             if (elapsed > 15) {
                 // Show timeout — the FFI check_in_progress is stuck, but we override the display
-                update_checked = true;
-                update_available = false;
-                snprintf(update_status, sizeof(update_status), "Check timed out (network unreachable?)");
+                s_update_checked = true;
+                s_update_available = false;
+                snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
                     aether_check_update_async(FCAE_VERSION);
-                    update_checked = false;
-                    check_start_time = std::chrono::steady_clock::now();
+                    s_update_checked = false;
+                    s_check_start_time = std::chrono::steady_clock::now();
                 }
             } else {
                 ImGui::BeginDisabled();
@@ -589,82 +781,82 @@ void render_ui() {
                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(%llds)", (long long)elapsed);
             }
         } else if (done && info.update_available) {
-                update_available = true;
-                update_checked = true;
-                snprintf(update_latest, sizeof(update_latest), "%s", info.latest_version);
-                snprintf(update_notes, sizeof(update_notes), "%s", info.release_notes);
-                snprintf(update_dl_url, sizeof(update_dl_url), "%s", info.download_url);
-                snprintf(update_status, sizeof(update_status), "%.127s", info.status_message);
+                s_update_available = true;
+                s_update_checked = true;
+                snprintf(s_update_latest, sizeof(s_update_latest), "%s", info.latest_version);
+                snprintf(s_update_notes, sizeof(s_update_notes), "%s", info.release_notes);
+                snprintf(s_update_dl_url, sizeof(s_update_dl_url), "%s", info.download_url);
+                snprintf(s_update_status, sizeof(s_update_status), "%.127s", info.status_message);
 
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
                 if (ImGui::Button("Update Available!", ImVec2(btn_width, 34))) {
-                    update_popup_open = true;
+                    s_update_popup_open = true;
                 }
                 ImGui::PopStyleColor(2);
             } else if (done && !info.update_available) {
                 // Check finished — no update needed, but allow re-check
-                update_available = false;
-                update_checked = true;
-                snprintf(update_status, sizeof(update_status), "%.127s", info.status_message);
+                s_update_available = false;
+                s_update_checked = true;
+                snprintf(s_update_status, sizeof(s_update_status), "%.127s", info.status_message);
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
                     aether_check_update_async(FCAE_VERSION);
-                    update_checked = false;
-                    update_available = false;
-                    check_start_time = std::chrono::steady_clock::now();
+                    s_update_checked = false;
+                    s_update_available = false;
+                    s_check_start_time = std::chrono::steady_clock::now();
                 }
             } else {
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
                     aether_check_update_async(FCAE_VERSION);
-                    update_checked = false;
-                    update_available = false;
-                    check_start_time = std::chrono::steady_clock::now();
+                    s_update_checked = false;
+                    s_update_available = false;
+                    s_check_start_time = std::chrono::steady_clock::now();
                 }
             }
 
             // Status text
-        if ((done || (info.check_in_progress && update_checked)) && !update_available && update_checked) {
+        if ((done || (info.check_in_progress && s_update_checked)) && !s_update_available && s_update_checked) {
             ImGui::SetCursorPosX((avail - btn_width) * 0.5f);
             // Detect error messages
-            bool is_error = strstr(update_status, "Failed") != nullptr ||
-                            strstr(update_status, "HTTP") != nullptr ||
-                            strstr(update_status, "error") != nullptr ||
-                            strstr(update_status, "timed out") != nullptr;
+            bool is_error = strstr(s_update_status, "Failed") != nullptr ||
+                            strstr(s_update_status, "HTTP") != nullptr ||
+                            strstr(s_update_status, "error") != nullptr ||
+                            strstr(s_update_status, "timed out") != nullptr;
             if (is_error) {
-                ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "%s", update_status);
+                ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "%s", s_update_status);
             } else {
-                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", update_status);
+                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", s_update_status);
             }
         }
 
             // Update popup modal
-            if (update_popup_open) {
+            if (s_update_popup_open) {
                 ImGui::OpenPopup("##update_popup");
-                update_popup_open = false;
+                s_update_popup_open = false;
             }
             if (ImGui::BeginPopupModal("##update_popup", nullptr,
                     ImGuiWindowFlags_AlwaysAutoResize)) {
                 ImGui::Text("Update Available");
                 ImGui::Spacing();
                 ImGui::Text("Current: " FCAE_VERSION);
-                ImGui::Text("Latest:  %s", update_latest);
+                ImGui::Text("Latest:  %s", s_update_latest);
                 ImGui::Spacing();
-                if (update_notes[0]) {
+                if (s_update_notes[0]) {
                     ImGui::Text("Release Notes:");
-                    ImGui::TextWrapped("%s", update_notes);
+                    ImGui::TextWrapped("%s", s_update_notes);
                 }
                 ImGui::Spacing();
-                if (update_dl_url[0]) {
-                    ImGui::Text("Download: %s", update_dl_url);
+                if (s_update_dl_url[0]) {
+                    ImGui::Text("Download: %s", s_update_dl_url);
                     ImGui::Spacing();
                     if (ImGui::Button("Open Releases Page")) {
 #if defined(_WIN32)
-                        ShellExecuteA(nullptr, "open", update_dl_url, nullptr, nullptr, SW_SHOWNORMAL);
+                        ShellExecuteA(nullptr, "open", s_update_dl_url, nullptr, nullptr, SW_SHOWNORMAL);
 #elif defined(__APPLE__)
-                        std::string cmd = "open '" + std::string(update_dl_url) + "'";
+                        std::string cmd = "open '" + std::string(s_update_dl_url) + "'";
                         if (system(cmd.c_str()) != 0) { /* best-effort, ignore failure */ }
 #elif !defined(ANDROID)
-                        std::string cmd = "xdg-open '" + std::string(update_dl_url) + "' 2>/dev/null";
+                        std::string cmd = "xdg-open '" + std::string(s_update_dl_url) + "' 2>/dev/null";
                         if (system(cmd.c_str()) != 0) { /* best-effort, ignore failure */ }
 #endif
                     }

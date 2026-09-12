@@ -89,12 +89,37 @@ int main(int argc, char** argv) {
 
     ui_init();
 
-    // Event-driven render loop: use glfwWaitEventsTimeout to sleep when idle.
+    // Event-driven, change-gated render loop: glfwWaitEventsTimeout sleeps the
+    // thread while idle, and a frame is painted only when something actually
+    // changed (stats/logs/transient text) or the user is interacting.
+    auto last_frame_time = std::chrono::steady_clock::now();
+    constexpr auto min_frame_interval = std::chrono::milliseconds(16);   // ~60 FPS cap
+    constexpr double interaction_tail  = 0.7;
+    double last_event_time = -1e9;                                       // monotonic seconds (glfwGetTime)
+    bool minimized = false;
+
     while (!glfwWindowShouldClose(window) && g_app.running.load()) {
-        double timeout = g_app.running.load() ? 1.0 : 1e10;
+        minimized = glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
+        const double t_before = glfwGetTime();
+        bool interacting = (t_before - last_event_time) < interaction_tail;
+
+        double timeout = minimized ? 1.0
+                       : interacting ? min_frame_interval.count() / 1000.0
+                       : (double)ui_sleep_ms() / 1000.0;
         glfwWaitEventsTimeout(timeout);
 
         if (glfwWindowShouldClose(window)) break;
+
+        const double t = glfwGetTime();
+        if (t - t_before < timeout - 0.005) last_event_time = t;
+        interacting = (t - last_event_time) < interaction_tail;
+
+        if (minimized) continue;
+
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_frame_time < min_frame_interval) continue;
+        if (!ui_should_render(interacting)) continue;
+        last_frame_time = now;
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
