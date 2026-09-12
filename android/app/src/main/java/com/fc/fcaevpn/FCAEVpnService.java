@@ -19,7 +19,10 @@ public class FCAEVpnService extends VpnService {
     public static final String BROADCAST_VPN_DISCONNECTED  = "com.fc.fcaevpn.VPN_DISCONNECTED";
     public static final String BROADCAST_VPN_STATE_CHANGED = "com.fc.fcaevpn.VPN_STATE_CHANGED";
 
-    private static final AtomicLong sGeneration = new AtomicLong(0);
+    // Package-private: ProxyNotification stamps the same generation counter on
+    // its disconnect broadcast, so MainActivity's stale-broadcast filter treats
+    // proxy and TUN teardowns identically.
+    static final AtomicLong sGeneration = new AtomicLong(0);
     private static FCAEVpnService instance; // ADDED for instant UI disconnect
 
     private volatile long cleanupGeneration = 0;
@@ -214,16 +217,13 @@ public class FCAEVpnService extends VpnService {
                 nativeSetTunFd(fd);
                 NativeEngine.nativeInit();
                 try {
-                    String nativeDir = getApplicationInfo().nativeLibraryDir;
-                    NativeEngine.nativeSetNativeLibDir(nativeDir);
-                    // tun2socks ships exactly ONCE in an Android build: as
-                    // libtun2socks.so inside the APK's native library dir (the
-                    // engine .so no longer embeds a second copy). Point the
-                    // engine straight at it so TUN mode runs that single binary.
-                    java.io.File t2s = new java.io.File(nativeDir, "libtun2socks.so");
-                    if (t2s.exists()) {
-                        NativeEngine.nativeSetTun2socksBin(t2s.getAbsolutePath());
-                    }
+                    // tun2socks runs IN-PROCESS: its Go code is linked into
+                    // libtun2socks_bridge.so, which the dynamic linker loads
+                    // alongside libfcaevpn_native.so. There is no tun2socks
+                    // binary to locate or execute any more, so the old
+                    // nativeSetTun2socksBin() handshake is gone; the TUN fd set
+                    // above via nativeSetTunFd() is all the bridge needs.
+                    NativeEngine.nativeSetNativeLibDir(getApplicationInfo().nativeLibraryDir);
                 } catch (Exception ignored) {}
 
                 boolean ok = NativeEngine.nativeStart(

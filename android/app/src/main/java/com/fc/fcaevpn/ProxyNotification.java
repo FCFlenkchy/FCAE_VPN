@@ -22,10 +22,36 @@ public class ProxyNotification extends Service {
     private Notification.Action disconnectAction;
     private String lastNotifText = null;
     private volatile boolean nativeFreed = false;
+    /** Set once teardown starts, so the watchdog cannot re-enter stopProxy(). */
+    private volatile boolean stopping = false;
 
     private final Runnable statsRunnable = new Runnable() {
         @Override
         public void run() {
+            // ── Engine-death watchdog ─────────────────────────
+            // nativeStart() returns as soon as the engine thread is launched;
+            // the engine can still die LATER on its own (no endpoint found,
+            // tunnel failed permanently, connectivity lost). Without this
+            // check the proxy notification kept claiming "connected" forever,
+            // complete with a Disconnect button, while nothing was listening
+            // on the SOCKS port -- and the UI never learned either, because
+            // only FCAEVpnService broadcasts state.
+            //
+            // Terminal states: 0 = DISCONNECTED, 5 = ERROR. Transient states
+            // (1 provisioning, 2 scanning/reconnecting, 3 connecting,
+            // 4 connected) must NOT tear down.
+            if (!stopping) {
+                int engineState = 5; // pessimistic if the JNI call throws
+                try {
+                    engineState = NativeEngine.nativeGetState();
+                } catch (Exception ignored) {}
+                if (engineState == 0 || engineState == 5) {
+                    Log.w(TAG, "Engine reached terminal state " + engineState
+                            + " \u2014 stopping proxy service");
+                    stopProxy();
+                    return;
+                }
+            }
             updateNotification();
             handler.postDelayed(this, 1000);
         }
@@ -65,7 +91,14 @@ public class ProxyNotification extends Service {
             return START_NOT_STICKY;
         }
 
+        // A fresh proxy session: bump the shared generation counter so this
+        // session's later disconnect broadcast is never mistaken for a stale
+        // one from a previous connect/disconnect cycle.
+        FCAEVpnService.sGeneration.incrementAndGet();
+        stopping = false;
+        nativeFreed = false;
         showNotification("FCAE VPN — Proxy connecting...", false);
+        handler.removeCallbacks(statsRunnable);
         handler.post(statsRunnable);
         return START_STICKY;
     }
@@ -120,7 +153,12 @@ public class ProxyNotification extends Service {
     }
 
     private void stopProxy() {
+        stopping = true;
         handler.removeCallbacks(statsRunnable);
+        // Proxy mode has no VpnService, so nothing else broadcasts state. The
+        // UI listens for these actions to clear its CONNECTED indicator; omit
+        // this and the app keeps showing a live session after the engine died.
+        broadcastStopped();
         try {
             stopForeground(STOP_FOREGROUND_REMOVE);
         } catch (Exception e) {
@@ -133,6 +171,20 @@ public class ProxyNotification extends Service {
 
         if (!MainActivity.activityAlive) {
             android.os.Process.killProcess(android.os.Process.myPid());
+        }
+    }
+
+    /** Mirrors FCAEVpnService's disconnect broadcast so MainActivity resets. */
+    private void broadcastStopped() {
+        try {
+            Intent i = new Intent(FCAEVpnService.BROADCAST_VPN_DISCONNECTED);
+            i.putExtra("running", false);
+            i.putExtra("paused", false);
+            i.putExtra("generation", FCAEVpnService.sGeneration.get());
+            i.setPackage(getPackageName());
+            sendBroadcast(i);
+        } catch (Exception e) {
+            Log.w(TAG, "state broadcast failed: " + e.getMessage());
         }
     }
 
@@ -150,6 +202,14 @@ public class ProxyNotification extends Service {
     public void onDestroy() {
         handler.removeCallbacks(statsRunnable);
         Log.i(TAG, "ProxyNotification onDestroy");
+
+        // The service can also be destroyed without stopProxy() -- e.g. the
+        // system reclaims it. Tell the UI in that case too, otherwise it keeps
+        // showing CONNECTED for an engine that is being torn down right here.
+        if (!stopping) {
+            stopping = true;
+            broadcastStopped();
+        }
 
         // Only cleanup native here if stopProxy() didn't already do it.
         freeNativeOnce();
