@@ -1,6 +1,6 @@
 {
-  "version": "v1.3.0",
-  "release_date": "2026-09-06",
-  "release_notes": "Fix linux and macos icons",
+  "version": "v1.3.1",
+  "release_date": "2026-09-12",
+  "release_notes": "use tun2socks for android too and fixed warp in warp counting bytes and warp in warp or wireguard in android now also perform well in tun mode due to this switchand",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases"
 }
