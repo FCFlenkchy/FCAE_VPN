@@ -266,6 +266,31 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Cancel the session and release the TUN device, WITHOUT waiting for the
+    /// worker thread to finish.
+    ///
+    /// [`stop`] is synchronous and can legitimately take seconds: it joins the
+    /// session thread, which may be mid-handshake inside a backend. On Android
+    /// that delay is very visible, because the VpnService fd stays open until
+    /// the bridge is down, so the system keeps showing the VPN as connected
+    /// and the key icon stays in the status bar.
+    ///
+    /// This performs only the two steps that actually free OS resources —
+    /// cancel, then tear down the TUN bridge (which closes our dup of the
+    /// VpnService fd and restores routes/DNS). The caller can then close its
+    /// own descriptor and dismiss the UI immediately, and call [`stop`]
+    /// afterwards to reap the thread.
+    ///
+    /// Safe to call more than once, and safe to follow with [`stop`].
+    pub fn begin_stop(&self) {
+        let Some(running) = self.running.lock().as_ref().map(|r| r.cancel.clone()) else {
+            return;
+        };
+        self.stopping.store(true, Ordering::SeqCst);
+        running.cancel();
+        self.cfg.tun_bridge.stop(self.cfg.stop_timeout);
+    }
+
     /// Request shutdown and wait (bounded) for the session thread to finish.
     ///
     /// Unlike the old `aether_stop`, this is synchronous and ordered: when it
@@ -273,6 +298,9 @@ impl Supervisor {
     /// immediately offer "Connect" again without a hidden race.
     pub fn stop(&self) -> Result<()> {
         let Some(running) = self.running.lock().take() else {
+            // Nothing running, but a previous begin_stop() may have left the
+            // flag set; clear it so a later start() is not blocked.
+            self.stopping.store(false, Ordering::SeqCst);
             return Ok(());
         };
         self.stopping.store(true, Ordering::SeqCst);

@@ -229,11 +229,16 @@ public class FCAEVpnService extends VpnService {
             try {
                 // Stop any previous session and release its descriptor before
                 // building a new interface. Blocking is fine here -- this is
-                // the worker thread, not the main thread.
-                try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+                // the worker thread, not the main thread -- but release the
+                // device first so the old interface is gone before
+                // Builder.establish() creates the new one; otherwise the two
+                // overlap and the system briefly routes through a TUN whose
+                // backend has already been cancelled.
+                try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
                 if (oldPfd != null) {
                     try { oldPfd.close(); } catch (Exception ignored) {}
                 }
+                try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
 
                 Builder builder = new Builder();
                 builder.setSession("FCAE VPN");
@@ -302,6 +307,20 @@ public class FCAEVpnService extends VpnService {
         vpnThread.start();
     }
 
+    /**
+     * Release the whole native library.
+     *
+     * Deliberately NOT called on an ordinary disconnect. fcae_shutdown()
+     * tears the library down process-wide, and the JNI layer latches
+     * g_inited=false; every later call then has to re-init, and anything
+     * holding state across a session (the log sink, the Psiphon region list,
+     * the registered VpnService for protect()) is lost. Disconnect →
+     * reconnect appeared to leave "the FFI turned off" for exactly that
+     * reason. fcae_stop() alone ends a session; the library stays usable.
+     *
+     * This is now reserved for the process genuinely going away (onDestroy
+     * with no activity alive), where releasing is correct.
+     */
     private void freeNativeOnce() {
         if (nativeFreed) return;
         nativeFreed = true;
@@ -346,32 +365,35 @@ public class FCAEVpnService extends VpnService {
             handler.post(uiCleanup);
         }
 
-        // 2. TUN TEARDOWN -- ordered, and NEVER on the main thread.
+        // 2. TUN TEARDOWN -- two phases, neither on the main thread.
         //
-        // fcae_stop() is synchronous: it cancels the session and joins the
-        // worker thread, which can take up to its 10s stop_timeout. Running
-        // that here blocked the UI thread (ANR, and the disconnect button
-        // appearing to do nothing).
+        // Phase A (fcae_stop_begin) only cancels the session and drops the
+        // TUN device, closing the native dup of our VpnService fd. It does
+        // NOT join the worker thread, so it returns in milliseconds. That
+        // matters because the kernel keeps the VPN alive -- key icon in the
+        // status bar, traffic still captured -- until every descriptor for
+        // the interface is closed. Previously the only path that released
+        // them was the blocking fcae_stop(), so the tunnel lingered for
+        // seconds after the user tapped disconnect.
         //
-        // Ordering also matters. This used to close the
-        // ParcelFileDescriptor immediately after firing nativeStop(). The
-        // native side is still draining at that point -- tun2socks owns a
-        // dup() of this fd and is mid-read -- so yanking the JVM's copy left
-        // the Go stack reading a descriptor the kernel had already recycled,
-        // and the interface stayed up. Close the PFD only AFTER the native
-        // stop has returned, i.e. once the dup is closed and the device is
-        // released.
+        // Order is still load-bearing: our own PFD may only be closed once
+        // the native side has released its dup, or the Go stack reads a
+        // descriptor the kernel has already recycled.
+        //
+        // Phase B (fcae_stop) reaps the session thread and can block; it
+        // runs after the interface is already gone, so nobody is waiting.
         final long myGen = cleanupGeneration;
         Thread cleanupThread = new Thread(() -> {
             if (myGen != cleanupGeneration) return;
 
-            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+            try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
 
             if (pfd != null) {
                 try { pfd.close(); } catch (Exception ignored) {}
             }
 
-            freeNativeOnce();
+            // The interface is down by here; the UI is already free.
+            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
 
             if (t != null) {
                 t.interrupt();
@@ -380,7 +402,11 @@ public class FCAEVpnService extends VpnService {
 
             handler.post(this::stopSelf);
 
+            // Only release the library when the process is actually going
+            // away. On a normal disconnect it must stay initialised, or the
+            // next connect finds a shut-down FFI.
             if (!MainActivity.activityAlive) {
+                freeNativeOnce();
                 android.os.Process.killProcess(android.os.Process.myPid());
             }
         }, "FCAE-Cleanup");
@@ -416,19 +442,23 @@ public class FCAEVpnService extends VpnService {
             handler.post(uiCleanup);
         }
 
-        // 2. TUN TEARDOWN -- off the main thread, and PFD closed only after
-        // the native stop returns. Same reasoning as fullShutdown().
+        // 2. TUN TEARDOWN -- same two-phase release as fullShutdown(), so the
+        // interface disappears immediately instead of after the join.
+        //
+        // freeNativeOnce() is deliberately absent: pause is resumable, and
+        // releasing the library here meant resuming had to re-init a
+        // shut-down FFI.
         final long myGen = cleanupGeneration;
         Thread cleanupThread = new Thread(() -> {
             if (myGen != cleanupGeneration) return;
 
-            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+            try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
 
             if (pfd != null) {
                 try { pfd.close(); } catch (Exception ignored) {}
             }
 
-            freeNativeOnce();
+            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
 
             if (t != null) {
                 t.interrupt();

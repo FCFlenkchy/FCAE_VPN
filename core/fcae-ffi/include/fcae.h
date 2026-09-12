@@ -355,6 +355,18 @@ FcaeStatus fcae_start(const FcaeConfig *config);
  * have been restored. */
 FcaeStatus fcae_stop(void);
 
+/* Release the tunnel's OS resources immediately, without waiting for the
+ * session thread to finish.
+ *
+ * fcae_stop() joins the worker thread and can take seconds if a backend is
+ * mid-handshake; until it returns, the TUN device (and on Android our dup of
+ * the VpnService fd) is still open, so the system keeps the VPN up. This
+ * cancels and drops the device only, so a UI can tear down at once. Follow
+ * with fcae_stop() on a background thread to reap the session.
+ *
+ * Idempotent. */
+FcaeStatus fcae_stop_begin(void);
+
 bool       fcae_is_running(void);
 
 /* `out->struct_size` and `out->abi_version` must be set before calling. */

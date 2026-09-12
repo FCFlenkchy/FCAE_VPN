@@ -73,6 +73,14 @@ object NativeEngine {
         psiphonHttpPort: Int,
     ): Boolean
     @JvmStatic external fun nativeStop()
+
+    /**
+     * Cancel the session and drop the TUN device without waiting for the
+     * worker thread. Returns in milliseconds, so the VPN interface (and the
+     * status-bar key icon) goes away immediately; follow with nativeStop()
+     * to reap the session.
+     */
+    @JvmStatic external fun nativeStopBegin()
     @JvmStatic external fun nativeFree()
     /// Psiphon egress regions as comma-separated ISO codes, or "" before the
     /// first successful connect.

@@ -306,6 +306,28 @@ pub extern "C" fn fcae_stop() -> FcaeStatus {
     guard("fcae_stop", || runtime()?.supervisor.stop())
 }
 
+/// Release the tunnel's OS resources immediately, without waiting for the
+/// session thread to finish.
+///
+/// [`fcae_stop`] joins the worker thread, which can take seconds if a backend
+/// is mid-handshake. On Android that delay is very visible: our dup of the
+/// VpnService fd stays open, so the system still considers the VPN up and the
+/// key icon lingers long after the user tapped disconnect.
+///
+/// This cancels the session and tears down the TUN bridge only — closing our
+/// descriptor and restoring routes/DNS — so the caller can close its own fd
+/// and update the UI at once. Follow it with [`fcae_stop`] on a background
+/// thread to reap the session.
+///
+/// Idempotent, and safe to call before [`fcae_stop`].
+#[no_mangle]
+pub extern "C" fn fcae_stop_begin() -> FcaeStatus {
+    guard("fcae_stop_begin", || {
+        runtime()?.supervisor.begin_stop();
+        Ok(())
+    })
+}
+
 /// True while a session is active.
 #[no_mangle]
 pub extern "C" fn fcae_is_running() -> bool {

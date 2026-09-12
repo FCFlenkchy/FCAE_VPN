@@ -121,6 +121,11 @@ static void jni_log_cb(FcaeLogLevel level, const char* message, void* /*user*/) 
     }
 }
 
+// Re-initialises transparently after a previous fcae_shutdown().
+//
+// fcae_init() is itself re-entrant now (it re-attaches the log callback and
+// state hook when the runtime already exists), so calling this after a
+// shutdown genuinely revives the library rather than silently no-opping.
 static void ensure_init() {
     if (g_inited) return;
     FcaeInitOptions opt = {};
@@ -344,6 +349,16 @@ Java_com_fc_fcaevpn_NativeEngine_nativePsiphonRegions(JNIEnv* env, jclass) {
     char buf[1024] = {0};
     fcae_psiphon_regions(buf, (uint32_t)sizeof(buf));
     return env->NewStringUTF(buf);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeStopBegin(JNIEnv*, jclass) {
+    if (!g_inited) return;
+    // Frees the TUN device and our dup of the VpnService fd right away; the
+    // blocking join happens later in nativeStop().
+    if (fcae_stop_begin() != FCAE_OK) {
+        LOGE("fcae_stop_begin: %s", fcae_last_error());
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
