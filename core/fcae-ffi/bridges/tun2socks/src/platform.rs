@@ -36,6 +36,10 @@ pub struct TunUndo {
 }
 
 /// Run a command, swallowing output. Returns success.
+///
+/// Unused on Android: the VpnService owns addressing, routing and DNS, so the
+/// desktop `ip`/`netsh`/`route` paths below are all compiled out there.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 fn run(program: &str, args: &[&str]) -> bool {
     let mut cmd = Command::new(program);
     cmd.args(args).stdout(Stdio::null()).stderr(Stdio::null());
@@ -58,6 +62,9 @@ fn run(program: &str, args: &[&str]) -> bool {
 }
 
 /// Run a command and capture stdout.
+///
+/// Unused on Android, for the same reason as [`run`].
+#[cfg_attr(target_os = "android", allow(dead_code))]
 fn capture(program: &str, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -104,6 +111,9 @@ pub fn is_privileged() -> bool {
 
 /// Apply addresses, routes and DNS for a freshly created device.
 pub fn configure(cfg: &SessionConfig, peer_ip: Option<&str>) -> Result<TunUndo> {
+    // `mut` is only needed on the desktop paths, which record what they changed
+    // so teardown can undo it; Android returns early and mutates nothing.
+    #[cfg_attr(target_os = "android", allow(unused_mut))]
     let mut undo = TunUndo {
         device_name: cfg.tun.name.clone(),
         ipv6: cfg.tun.ipv6.is_some(),

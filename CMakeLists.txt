@@ -119,6 +119,29 @@ function(fcae_link_ffi target_name lib_path)
     target_include_directories(${target_name} PRIVATE ${FCAE_FFI_INCLUDE_DIR})
 endfunction()
 
+# Link the Go bridges that were built as c-shared objects (Android only).
+#
+# On Android the Go toolchain rejects -buildmode=c-archive, so the tun2socks
+# bridge is built as libtun2socks_bridge.so and staged into jniLibs/<abi>/.
+# It is therefore NOT inside libfcae_ffi.a: the Rust side only *references*
+# t2s_start/t2s_stop/... and cargo emits `rustc-link-lib=dylib=...` directives
+# that apply when rustc links a final artifact. Here CMake performs the link,
+# so cargo's directives never reach it and we must name the .so explicitly --
+# otherwise ld.lld reports "undefined symbol: t2s_start" and friends.
+function(fcae_link_go_bridges target_name abi)
+    set(jni_dir ${CMAKE_SOURCE_DIR}/android/app/src/main/jniLibs/${abi})
+    foreach(bridge tun2socks_bridge psiphon_bridge)
+        set(so ${jni_dir}/lib${bridge}.so)
+        if(EXISTS "${so}")
+            target_link_libraries(${target_name} PRIVATE "${so}")
+            message(STATUS "linking Go bridge: ${so}")
+        endif()
+    endforeach()
+    # The .so lives next to our library inside the APK; the loader finds it
+    # there at runtime.
+    target_link_options(${target_name} PRIVATE "-Wl,-rpath,$ORIGIN")
+endfunction()
+
 # ── Target-specific configuration ────────────────────────────────────────
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
 
@@ -142,6 +165,7 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
 
     fcae_ffi_lib_path(FCAE_FFI_A aarch64-linux-android)
     fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
+    fcae_link_go_bridges(fcaevpn_native arm64-v8a)
 
     target_link_libraries(fcaevpn_native PRIVATE
         ${log-lib} ${android-lib} m
@@ -170,6 +194,7 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_ARM32")
 
     fcae_ffi_lib_path(FCAE_FFI_A armv7-linux-androideabi)
     fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
+    fcae_link_go_bridges(fcaevpn_native armeabi-v7a)
 
     target_link_libraries(fcaevpn_native PRIVATE
         ${log-lib} ${android-lib} m
@@ -198,6 +223,7 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_X86_64")
 
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-linux-android)
     fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
+    fcae_link_go_bridges(fcaevpn_native x86_64)
 
     target_link_libraries(fcaevpn_native PRIVATE
         ${log-lib} ${android-lib} m
@@ -241,6 +267,7 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_UNIVERSAL")
         fcae_ffi_lib_path(FCAE_FFI_A aarch64-linux-android)
     endif()
     fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
+    fcae_link_go_bridges(fcaevpn_native ${ANDROID_ABI})
 
     target_link_libraries(fcaevpn_native PRIVATE
         ${log-lib} ${android-lib} m
@@ -283,6 +310,10 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         d3d11 dxgi d3dcompiler dwmapi ntdll
         ws2_32 userenv bcrypt shell32 ole32 uuid crypt32 secur32 ncrypt
         iphlpapi
+        # winmm: the Go runtime (tun2socks c-archive) calls timeBeginPeriod.
+        # The rest of the Go runtime's imports (ws2_32/ntdll/userenv/bcrypt/
+        # iphlpapi) happen to be listed above already.
+        winmm
     )
 
     if(MINGW)
@@ -377,6 +408,14 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         "-framework IOKit"
         "-framework CoreFoundation"
         "-framework CoreVideo"
+        # Required by the Go runtime inside libfcae_ffi.a (tun2socks c-archive):
+        # crypto/x509 calls SecCertificate*/SecTrust* to read the system trust
+        # store, and net resolves DNS through libresolv. Cargo emits these as
+        # rustc-link-lib directives, but they only take effect when rustc links
+        # the final artifact -- here CMake does, so they must be repeated or the
+        # link fails with "Undefined symbols: _SecTrustEvaluateWithError", etc.
+        "-framework Security"
+        resolv
         pthread dl m
         z bz2 lzma
     )
@@ -441,6 +480,9 @@ elseif(UNIX)
     target_link_libraries(fcaevpn PRIVATE
         OpenGL::GL X11::X11 X11::Xi pthread dl m
         z bz2 lzma
+        # The Go runtime in the tun2socks c-archive resolves names through
+        # libresolv when cgo is enabled.
+        resolv
     )
 
 endif()

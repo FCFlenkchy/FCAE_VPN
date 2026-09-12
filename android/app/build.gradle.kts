@@ -110,6 +110,27 @@ android {
         }
     }
 
+    packaging {
+        jniLibs {
+            // Replaces android:extractNativeLibs in the manifest (AGP warns if
+            // that attribute is set there).
+            //
+            // `false` = load the .so straight from the APK without unpacking to
+            // disk, which is smaller and faster. The old build needed the
+            // legacy behaviour because it EXECUTED a packaged tun2socks binary,
+            // which requires a real file on disk. tun2socks now runs in-process
+            // as libtun2socks_bridge.so, loaded by the dynamic linker, so the
+            // extraction is no longer needed.
+            useLegacyPackaging = false
+            // Both our own CMake output and the staged Go bridge land in
+            // jniLibs/<abi>/; keep the first of any duplicate.
+            pickFirsts += listOf(
+                "**/libtun2socks_bridge.so",
+                "**/libpsiphon_bridge.so"
+            )
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
