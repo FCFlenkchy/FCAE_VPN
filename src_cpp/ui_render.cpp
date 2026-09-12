@@ -818,8 +818,20 @@ void render_ui() {
             ImGui::Text("Proxy Ports");
             ImGui::PushItemWidth(100);
             // TUN mode tunnels through the local SOCKS5 proxy, so keep it
-            // forced on and lock the checkbox while TUN is selected.
-            if (g_app.mode == 1) {
+            // forced on (grayed/auto) and lock the checkbox while TUN is
+            // selected. Leaving TUN restores the user's own Proxy-mode choice
+            // instead of leaving the forced value behind.
+            static int socks_mode_seen = -1;
+            static bool socks_choice_for_proxy = true;
+            if (socks_mode_seen != g_app.mode) {
+                if (g_app.mode == 0 && socks_mode_seen == 1) {
+                    g_app.socks_enabled = socks_choice_for_proxy;
+                }
+                socks_mode_seen = g_app.mode;
+            }
+            if (g_app.mode == 0) {
+                socks_choice_for_proxy = g_app.socks_enabled;
+            } else {
                 g_app.socks_enabled = true;
                 ImGui::BeginDisabled();
             }
