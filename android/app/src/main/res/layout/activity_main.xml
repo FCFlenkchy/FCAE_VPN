@@ -203,6 +203,107 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
+                android:text="Tor SOCKS port"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editTorSocksPort"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:hint="1821"
+                android:inputType="number"
+                android:padding="10dp"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF6B7280"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Psiphon config (JSON)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editPsiphonConfig"
+                android:layout_width="match_parent"
+                android:layout_height="80dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:gravity="top|start"
+                android:hint="paste the Psiphon config object"
+                android:inputType="textMultiLine"
+                android:padding="10dp"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF6B7280"
+                android:textSize="12sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Psiphon egress region"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <Spinner
+                android:id="@+id/spinnerPsiphonRegion"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:popupBackground="#FF1E1E2C" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Psiphon SOCKS port (0 = auto)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editPsiphonSocksPort"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:hint="0"
+                android:inputType="number"
+                android:padding="10dp"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF6B7280"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Psiphon HTTP port (0 = auto)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editPsiphonHttpPort"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:hint="0"
+                android:inputType="number"
+                android:padding="10dp"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF6B7280"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
                 android:text="Engine log level"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />

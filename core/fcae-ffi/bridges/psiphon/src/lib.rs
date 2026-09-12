@@ -1,6 +1,6 @@
 //! # fcae-bridge-psiphon
 //!
-//! Adapts Psiphon's `ClientLibrary` to the [`Backend`] trait.
+//! Adapts Psiphon to the [`Backend`] trait.
 //!
 //! This is a *tunnel* bridge: it implements [`Backend`], meaning it
 //! **produces** a SOCKS endpoint. Contrast `fcae-bridge-tun2socks`, which
@@ -9,37 +9,29 @@
 //! the in-process tun2socks bridge over whatever SOCKS endpoint a backend
 //! reports, without knowing which backend produced it.
 //!
-//! ## No hand-written Go shim
+//! ## MobileLibrary, not ClientLibrary
 //!
-//! Unlike tun2socks, Psiphon already ships a cgo C ABI
-//! (`core/psiphon/ClientLibrary/PsiphonTunnel.go`):
+//! Upstream's `ClientLibrary` ships a ready-made cgo C ABI, which is what this
+//! bridge used first. It cannot work on Android: its `PsiphonProvider` has no
+//! `BindToDevice`, so Psiphon's own sockets are captured by our TUN and the
+//! tunnel tries to reach the internet through itself.
 //!
-//! ```c
-//! char *PsiphonTunnelStart(char *configJSON, char *embeddedServerEntryList,
-//!                          struct Parameters *params);
-//! void  PsiphonTunnelStop(void);
-//! ```
+//! `MobileLibrary/psi` exposes `BindToDevice` — the hook that maps onto
+//! `VpnService.protect(fd)` — but it is a gobind package with no C surface, so
+//! `go/bridge.go` wraps it. Desktop uses the same shim with
+//! `useDeviceBinder=false`.
 //!
-//! so `build.rs` compiles that package straight to a c-archive. Nothing to
-//! rebase when the submodule is bumped.
+//! ## Lifecycle
 //!
-//! ## Lifecycle differences from Aether
+//! `psi.Start()` is **non-blocking**: it returns once the controller goroutine
+//! is launched, and "connected" arrives later as a notice. So unlike the old
+//! ClientLibrary path (which blocked until connected and returned the ports in
+//! its result JSON), this bridge polls `psi_state()` and reads the SOCKS port
+//! from `psi_socks_port()` once the handshake lands.
 //!
-//! `PsiphonTunnelStart` is **blocking and synchronous**: it returns only once
-//! a tunnel is established, the timeout elapses, or it fails. That is the
-//! opposite of `aether-engine`'s `run_from_env()`, which returns when the
-//! tunnel *dies*. So this bridge runs `start` on a blocking thread and gets
-//! the SOCKS port directly from the returned JSON — no port probing and no
-//! log scraping needed.
-//!
-//! Two consequences worth knowing:
-//!
-//! * The returned `char*` is **owned by Go**. Freeing it from Rust crashes the
-//!   process; it is released by the next `PsiphonTunnelStart` or by
-//!   `PsiphonTunnelStop`. [`StartOutcome`] copies what it needs immediately.
-//! * Upstream guards against concurrent starts with an atomic bool and returns
-//!   an error on the second call. [`STARTING`] refuses earlier so the caller
-//!   gets a clear message instead of a Go-side error string.
+//! The egress region list has the same shape: Psiphon only reports it after a
+//! successful handshake, which is why the UI offers "Auto" until the first
+//! connect completes and then fills the list from [`regions`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -57,6 +49,52 @@ use fcae_runtime::error::{CoreError, Result};
 /// produces a better message and avoids touching Go at all.
 #[cfg(all(feature = "enabled", psiphon_linked))]
 static STARTING: AtomicBool = AtomicBool::new(false);
+
+/// Egress regions reported by the last successful handshake.
+///
+/// Psiphon only learns these after connecting, so the UI shows "Auto" until
+/// the first connect populates this list. Kept process-wide (rather than on
+/// the handle) so the list survives a disconnect and the user can pick a
+/// region for the *next* session.
+static REGIONS: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
+
+/// Egress regions discovered so far, as ISO country codes.
+///
+/// Empty until the first successful connect. "" (auto) is always valid and is
+/// not included here.
+pub fn regions() -> Vec<String> {
+    REGIONS.lock().clone()
+}
+
+/// Android's `VpnService.protect(fd)`, installed by the FFI layer.
+///
+/// Stored as a raw pointer because it crosses the C ABI. Null on desktop,
+/// where the routing table already excludes our own sockets.
+static PROTECT: std::sync::atomic::AtomicPtr<std::ffi::c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// Install the socket-protection callback. Android calls this before start.
+pub fn set_protect_callback(cb: Option<unsafe extern "C" fn(std::ffi::c_int) -> std::ffi::c_int>) {
+    let raw = cb.map(|f| f as *mut std::ffi::c_void).unwrap_or(std::ptr::null_mut());
+    PROTECT.store(raw, Ordering::SeqCst);
+}
+
+#[cfg(all(feature = "enabled", psiphon_linked))]
+fn protect_hook() -> Option<unsafe extern "C" fn(std::ffi::c_int) -> std::ffi::c_int> {
+    let raw = PROTECT.load(Ordering::SeqCst);
+    if raw.is_null() {
+        None
+    } else {
+        // SAFETY: only ever set from set_protect_callback, which takes the
+        // same fn pointer type.
+        Some(unsafe {
+            std::mem::transmute::<
+                *mut std::ffi::c_void,
+                unsafe extern "C" fn(std::ffi::c_int) -> std::ffi::c_int,
+            >(raw)
+        })
+    }
+}
 
 /// Register the Psiphon backend. Always call this: when the `enabled` feature
 /// is off the backend still registers, but `start` returns a clear
@@ -118,33 +156,58 @@ impl Backend for PsiphonBackend {
         // From here on every exit path must clear STARTING.
         let _guard = StartGuard;
 
-        cx.report(FcaeState::Connecting, "Establishing Psiphon tunnel…");
+        ffi::install_log_hook();
+        // Android hands the protect hook in through
+        // fcae_set_psiphon_protect(); on desktop it stays unset and
+        // BindToDevice is a no-op.
+        ffi::set_protect(protect_hook());
 
-        let timeout_secs = cx.config.start_timeout().as_secs().min(i32::MAX as u64) as i32;
+        cx.report(FcaeState::Connecting, "Starting Psiphon…");
 
-        // PsiphonTunnelStart blocks until connected / timed out / failed, so
-        // it must not run on a runtime worker.
-        let outcome = tokio::task::spawn_blocking(move || ffi::start(&inputs, timeout_secs))
+        // psi.Start() only launches the controller; it does not wait for a
+        // tunnel. Kick it off, then poll for the handshake.
+        let launch = inputs.clone();
+        let use_binder = cfg!(target_os = "android");
+        tokio::task::spawn_blocking(move || ffi::start(&launch, use_binder))
             .await
             .map_err(|e| CoreError::Internal(format!("psiphon start task panicked: {e}")))??;
 
-        let socks_port = outcome.socks_port.ok_or_else(|| {
-            CoreError::StartFailed(
-                "Psiphon connected but reported no SOCKS proxy port; \
-                 check that DisableLocalSocksProxy is not set in the config JSON"
-                    .into(),
-            )
-        })?;
+        cx.report(FcaeState::Connecting, "Establishing Psiphon tunnel…");
 
-        log::info!(
-            "[psiphon] tunnel established in {} ms, socks 127.0.0.1:{}",
-            outcome.connect_time_ms,
-            socks_port
-        );
+        let deadline = std::time::Instant::now() + cx.config.start_timeout();
+        let socks_port = loop {
+            if cx.cancel.is_cancelled() {
+                ffi::stop();
+                return Err(CoreError::StartFailed("cancelled".into()));
+            }
+            if ffi::state() == ffi::STATE_CONNECTED {
+                let port = ffi::socks_port();
+                if port != 0 {
+                    break port;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                // Leave nothing running behind a failed start.
+                ffi::stop();
+                return Err(CoreError::StartFailed(format!(
+                    "Psiphon did not establish a tunnel within {:?}",
+                    cx.config.start_timeout()
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+
+        let found = ffi::regions();
+        if !found.is_empty() {
+            log::info!("[psiphon] egress regions: {}", found.join(","));
+            *REGIONS.lock() = found;
+        }
+
+        log::info!("[psiphon] tunnel established, socks 127.0.0.1:{socks_port}");
 
         Ok(Box::new(PsiphonHandle {
             socks_port,
-            http_port: outcome.http_port.unwrap_or(0),
+            http_port: ffi::http_port(),
             stopped: AtomicBool::new(false),
         }))
     }
@@ -219,197 +282,189 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
             )
         })?;
 
+    // Psiphon takes the egress region from the config JSON, and
+    // MobileLibrary has no setter for it, so splice it in. "" means auto,
+    // which is also what upstream treats as "no preference" -- so an unset
+    // or empty region is simply left out.
+    let region = p
+        .egress_region
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let config_json = match region {
+        Some(r) => inject_egress_region(config_json, r)?,
+        None => config_json.to_string(),
+    };
+
     Ok(StartInputs {
-        config_json: config_json.to_string(),
+        config_json,
         embedded_server_list: p.embedded_server_list.clone().unwrap_or_default(),
         data_root_dir: data_root_dir.to_string(),
     })
 }
 
-/// Parsed form of Psiphon's `startResult` JSON.
-#[derive(Debug, Default, PartialEq, Eq)]
-#[cfg_attr(not(all(feature = "enabled", psiphon_linked)), allow(dead_code))]
-pub(crate) struct StartOutcome {
-    pub socks_port: Option<u16>,
-    pub http_port: Option<u16>,
-    pub connect_time_ms: i64,
-}
-
-/// Result codes from `PsiphonTunnelStart`.
+/// Set `EgressRegion` in a Psiphon config object.
 ///
-/// The parser below is exercised by unit tests in every build, but only
-/// *called* by the `ffi` module when the c-archive is linked.
-#[cfg_attr(not(all(feature = "enabled", psiphon_linked)), allow(dead_code))]
-pub(crate) const CODE_SUCCESS: i64 = 0;
-#[cfg_attr(not(all(feature = "enabled", psiphon_linked)), allow(dead_code))]
-pub(crate) const CODE_TIMEOUT: i64 = 1;
-
-/// Parse the `startResult` JSON that `PsiphonTunnelStart` returns.
-///
-/// Hand-rolled rather than pulling in serde_json: the shape is fixed, tiny,
-/// and generated by upstream's `json.Marshal`, so it is always flat with no
-/// nesting or escapes in the numeric fields. Keeping this dependency-free
-/// matters because the crate is compiled into every build.
-#[cfg_attr(not(all(feature = "enabled", psiphon_linked)), allow(dead_code))]
-pub(crate) fn parse_start_result(json: &str) -> std::result::Result<StartOutcome, String> {
-    let code = json_i64(json, "Code").unwrap_or(CODE_SUCCESS);
-
-    if code != CODE_SUCCESS {
-        let msg = json_str(json, "Error").unwrap_or_else(|| "unknown error".to_string());
-        return Err(if code == CODE_TIMEOUT {
-            format!("Psiphon timed out before connecting: {msg}")
-        } else {
-            format!("Psiphon failed to connect: {msg}")
-        });
+/// Done textually rather than with serde: the crate is compiled into every
+/// build and the rest of this bridge is already dependency-free. The value is
+/// an ISO country code that we validate, so there is nothing to escape.
+fn inject_egress_region(config_json: &str, region: &str) -> Result<String> {
+    if !region.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(CoreError::InvalidConfig(format!(
+            "psiphon.egress_region {region:?} is not an alphanumeric country code"
+        )));
     }
 
-    Ok(StartOutcome {
-        socks_port: json_i64(json, "SOCKSProxyPort").and_then(|v| u16::try_from(v).ok()),
-        http_port: json_i64(json, "HTTPProxyPort").and_then(|v| u16::try_from(v).ok()),
-        connect_time_ms: json_i64(json, "ConnectTimeMS").unwrap_or(0),
-    })
-}
-
-/// Read a numeric field from a flat JSON object.
-#[cfg_attr(not(all(feature = "enabled", psiphon_linked)), allow(dead_code))]
-fn json_i64(json: &str, key: &str) -> Option<i64> {
-    let needle = format!("\"{key}\"");
-    let start = json.find(&needle)? + needle.len();
-    let rest = json[start..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit() && c != '-')
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
-}
-
-/// Read a string field from a flat JSON object, undoing the escapes
-/// `json.Marshal` can emit in an error message.
-#[cfg_attr(not(all(feature = "enabled", psiphon_linked)), allow(dead_code))]
-fn json_str(json: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let start = json.find(&needle)? + needle.len();
-    let rest = json[start..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
-
-    let mut out = String::new();
-    let mut chars = rest.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => return Some(out),
-            '\\' => match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
-                Some(other) => out.push(other),
-                None => break,
-            },
-            other => out.push(other),
-        }
+    // Replace an existing key rather than adding a duplicate: Go's json
+    // decoder takes the LAST occurrence, so a duplicate would work by
+    // accident on one decoder and break on another.
+    if let Some(at) = config_json.find("\"EgressRegion\"") {
+        let after = &config_json[at + "\"EgressRegion\"".len()..];
+        let colon = after.find(':').ok_or_else(|| {
+            CoreError::InvalidConfig("psiphon.config_json has a malformed EgressRegion".into())
+        })?;
+        let rest = &after[colon + 1..];
+        let q1 = rest.find('"').ok_or_else(|| {
+            CoreError::InvalidConfig("psiphon.config_json EgressRegion is not a string".into())
+        })?;
+        let q2 = rest[q1 + 1..].find('"').ok_or_else(|| {
+            CoreError::InvalidConfig("psiphon.config_json EgressRegion is unterminated".into())
+        })?;
+        let head_len = at + "\"EgressRegion\"".len() + colon + 1 + q1 + 1;
+        return Ok(format!(
+            "{}{}{}",
+            &config_json[..head_len],
+            region,
+            &config_json[head_len + q2..]
+        ));
     }
-    Some(out)
+
+    // No key yet: insert right after the opening brace.
+    let open = config_json.find('{').ok_or_else(|| {
+        CoreError::InvalidConfig("psiphon.config_json is not a JSON object".into())
+    })?;
+    Ok(format!(
+        "{}\"EgressRegion\":\"{}\",{}",
+        &config_json[..=open],
+        region,
+        &config_json[open + 1..]
+    ))
 }
 
 /// The cgo boundary. Only compiled when the archive is actually linked.
 #[cfg(all(feature = "enabled", psiphon_linked))]
 mod ffi {
-    use super::{parse_start_result, StartInputs, StartOutcome};
     use fcae_runtime::error::{CoreError, Result};
-    use std::ffi::{c_char, CStr, CString};
-
-    /// Mirrors `struct Parameters` in `ClientLibrary/PsiphonTunnel.go`.
-    ///
-    /// `sizeofStruct` is validated by upstream against its own
-    /// `sizeof(Parameters)`, so this layout must track theirs exactly. Field
-    /// order and types are copied verbatim from the cgo preamble.
-    #[repr(C)]
-    struct Parameters {
-        sizeof_struct: usize,
-        data_root_directory: *mut c_char,
-        client_platform: *mut c_char,
-        network_id: *mut c_char,
-        establish_tunnel_timeout_seconds: *mut i32,
-    }
+    use std::ffi::{c_char, c_int, CStr, CString};
 
     extern "C" {
-        fn PsiphonTunnelStart(
-            config_json: *mut c_char,
-            embedded_server_entry_list: *mut c_char,
-            params: *mut Parameters,
-        ) -> *mut c_char;
-        fn PsiphonTunnelStop();
+        fn psi_set_log_callback(cb: Option<unsafe extern "C" fn(c_int, *const c_char)>);
+        fn psi_set_protect_callback(cb: Option<unsafe extern "C" fn(c_int) -> c_int>);
+        fn psi_start(config_json: *const c_char, embedded: *const c_char, use_binder: c_int)
+            -> c_int;
+        fn psi_stop() -> c_int;
+        fn psi_state() -> c_int;
+        fn psi_socks_port() -> c_int;
+        fn psi_http_port() -> c_int;
+        fn psi_regions() -> *mut c_char;
+        fn psi_string_free(s: *mut c_char);
     }
 
-    pub(super) fn start(inputs: &StartInputs, timeout_secs: i32) -> Result<StartOutcome> {
+    pub(super) const STATE_STOPPED: i32 = 0;
+    pub(super) const STATE_CONNECTED: i32 = 2;
+
+    /// Forwards Psiphon's notices into the host log.
+    unsafe extern "C" fn log_trampoline(level: c_int, message: *const c_char) {
+        if message.is_null() {
+            return;
+        }
+        let text = CStr::from_ptr(message).to_string_lossy();
+        match level {
+            1 => log::error!("{text}"),
+            2 => log::warn!("{text}"),
+            4 => log::debug!("{text}"),
+            _ => log::info!("{text}"),
+        }
+    }
+
+    pub(super) fn install_log_hook() {
+        unsafe { psi_set_log_callback(Some(log_trampoline)) };
+    }
+
+    /// Install the Android socket-protection hook.
+    ///
+    /// Without this Psiphon's own sockets are routed into our TUN and the
+    /// tunnel deadlocks reaching the internet through itself.
+    pub(super) fn set_protect(cb: Option<unsafe extern "C" fn(c_int) -> c_int>) {
+        unsafe { psi_set_protect_callback(cb) };
+    }
+
+    pub(super) fn start(inputs: &super::StartInputs, use_binder: bool) -> Result<()> {
         let config = CString::new(inputs.config_json.as_str())
             .map_err(|_| CoreError::InvalidConfig("psiphon.config_json contains a NUL".into()))?;
         let servers = CString::new(inputs.embedded_server_list.as_str()).map_err(|_| {
             CoreError::InvalidConfig("psiphon.embedded_server_list contains a NUL".into())
         })?;
-        let data_dir = CString::new(inputs.data_root_dir.as_str())
-            .map_err(|_| CoreError::InvalidConfig("psiphon.data_root_dir contains a NUL".into()))?;
-        let platform = CString::new(client_platform()).unwrap_or_default();
-        // Psiphon requires a non-empty network id; it only affects its own
-        // network-change detection, which we do not drive.
-        let network_id = CString::new("FCAE").unwrap_or_default();
 
-        let mut timeout = timeout_secs;
-
-        let mut params = Parameters {
-            sizeof_struct: std::mem::size_of::<Parameters>(),
-            data_root_directory: data_dir.as_ptr() as *mut c_char,
-            client_platform: platform.as_ptr() as *mut c_char,
-            network_id: network_id.as_ptr() as *mut c_char,
-            establish_tunnel_timeout_seconds: &mut timeout as *mut i32,
-        };
-
-        // SAFETY: every pointer is valid for the duration of the call (the
-        // CStrings and `timeout` outlive it), and PsiphonTunnelStart copies
-        // anything it retains onto the Go heap. The returned pointer is owned
-        // by Go — we copy out of it and never free it.
-        let raw = unsafe {
-            PsiphonTunnelStart(
-                config.as_ptr() as *mut c_char,
-                servers.as_ptr() as *mut c_char,
-                &mut params as *mut Parameters,
+        let rc = unsafe {
+            psi_start(
+                config.as_ptr(),
+                servers.as_ptr(),
+                if use_binder { 1 } else { 0 },
             )
         };
 
-        if raw.is_null() {
-            return Err(CoreError::StartFailed(
-                "PsiphonTunnelStart returned no result".into(),
-            ));
+        match rc {
+            0 => Ok(()),
+            -1 => Err(CoreError::StartFailed(
+                "a Psiphon tunnel is already running".into(),
+            )),
+            -2 => Err(CoreError::InvalidConfig(
+                "Psiphon rejected the config json".into(),
+            )),
+            -3 => Err(CoreError::StartFailed(
+                "Psiphon failed to start; see the log for the controller error".into(),
+            )),
+            other => Err(CoreError::StartFailed(format!(
+                "psi_start returned {other}"
+            ))),
         }
-
-        let json = unsafe { CStr::from_ptr(raw) }
-            .to_string_lossy()
-            .into_owned();
-
-        parse_start_result(&json).map_err(CoreError::StartFailed)
     }
 
     pub(super) fn stop() {
-        // SAFETY: documented as safe to call when no tunnel is running, and
-        // it is what frees the managed start result.
-        unsafe { PsiphonTunnelStop() };
+        unsafe { psi_stop() };
     }
 
-    /// `OS_OSVersion_BundleIdentifier`, per upstream's documented format.
-    fn client_platform() -> String {
-        let os = if cfg!(target_os = "windows") {
-            "Windows"
-        } else if cfg!(target_os = "macos") {
-            "macOS"
-        } else if cfg!(target_os = "android") {
-            "Android"
-        } else {
-            "Linux"
-        };
-        format!("{os}_com.fc.fcaevpn")
+    pub(super) fn state() -> i32 {
+        unsafe { psi_state() as i32 }
     }
 
+    pub(super) fn socks_port() -> u16 {
+        let p = unsafe { psi_socks_port() };
+        if p > 0 { p as u16 } else { 0 }
+    }
+
+    pub(super) fn http_port() -> u16 {
+        let p = unsafe { psi_http_port() };
+        if p > 0 { p as u16 } else { 0 }
+    }
+
+    /// Egress regions reported after the handshake, as country codes.
+    pub(super) fn regions() -> Vec<String> {
+        let raw = unsafe { psi_regions() };
+        if raw.is_null() {
+            return Vec::new();
+        }
+        let text = unsafe { CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+        // The buffer is C.CString'd on the Go side, so it must be released
+        // through the Go allocator's free, never Rust's.
+        unsafe { psi_string_free(raw) };
+        text.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 /// Handle over a running Psiphon tunnel.
@@ -437,11 +492,26 @@ impl BackendHandle for PsiphonHandle {
     }
 
     async fn wait(&self) -> Result<()> {
-        // ClientLibrary gives no "tunnel died" signal — it reports failures
-        // through notices we do not subscribe to. Park until stopped; the
-        // supervisor's own health checks drive reconnection.
-        std::future::pending::<()>().await;
-        Ok(())
+        // The shim tracks tunnel count via the Tunnels notice, so a drop is
+        // observable now (ClientLibrary gave no such signal and this had to
+        // park forever). Returning lets the supervisor reconnect.
+        #[cfg(all(feature = "enabled", psiphon_linked))]
+        {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if self.stopped.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                if ffi::state() == ffi::STATE_STOPPED {
+                    return Err(CoreError::Internal("the Psiphon tunnel dropped".into()));
+                }
+            }
+        }
+        #[cfg(not(all(feature = "enabled", psiphon_linked)))]
+        {
+            std::future::pending::<()>().await;
+            Ok(())
+        }
     }
 
     async fn stop(&self, _timeout: Duration) -> Result<()> {
@@ -464,44 +534,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_a_successful_start_result() {
-        let json = r#"{"Code":0,"ConnectTimeMS":3421,"HTTPProxyPort":8081,"SOCKSProxyPort":1081}"#;
-        let out = parse_start_result(json).expect("should succeed");
-        assert_eq!(out.socks_port, Some(1081));
-        assert_eq!(out.http_port, Some(8081));
-        assert_eq!(out.connect_time_ms, 3421);
+    fn egress_region_is_inserted_when_absent() {
+        let out = inject_egress_region(r#"{"PropagationChannelId":"X"}"#, "GB").unwrap();
+        assert!(out.contains(r#""EgressRegion":"GB""#), "got: {out}");
+        assert!(out.contains(r#""PropagationChannelId":"X""#), "got: {out}");
+    }
+
+    /// Go's json decoder takes the LAST duplicate key, so an existing region
+    /// must be replaced in place rather than a second one appended.
+    #[test]
+    fn egress_region_replaces_an_existing_value() {
+        let out = inject_egress_region(r#"{"EgressRegion":"US","A":1}"#, "DE").unwrap();
+        assert!(out.contains(r#""EgressRegion":"DE""#), "got: {out}");
+        assert!(!out.contains("US"), "the old region survived: {out}");
+        assert_eq!(out.matches("EgressRegion").count(), 1, "duplicated: {out}");
+        assert!(out.contains(r#""A":1"#), "lost a sibling key: {out}");
     }
 
     #[test]
-    fn timeout_is_reported_distinctly_from_other_errors() {
-        let json = r#"{"Code":1,"Error":"Timeout occurred before Psiphon connected"}"#;
-        let err = parse_start_result(json).unwrap_err();
-        assert!(err.contains("timed out"), "got: {err}");
-    }
-
-    #[test]
-    fn other_errors_carry_the_upstream_message() {
-        let json = r#"{"Code":2,"Error":"config load failed"}"#;
-        let err = parse_start_result(json).unwrap_err();
-        assert!(err.contains("config load failed"), "got: {err}");
-        assert!(!err.contains("timed out"));
-    }
-
-    /// `omitempty` means a field can simply be absent; that must not be read
-    /// as port 0.
-    #[test]
-    fn absent_ports_are_none_not_zero() {
-        let json = r#"{"Code":0,"ConnectTimeMS":10}"#;
-        let out = parse_start_result(json).expect("should succeed");
-        assert_eq!(out.socks_port, None);
-        assert_eq!(out.http_port, None);
-    }
-
-    #[test]
-    fn escaped_characters_in_an_error_are_unescaped() {
-        let json = r#"{"Code":2,"Error":"line one\nline \"two\""}"#;
-        let err = parse_start_result(json).unwrap_err();
-        assert!(err.contains("line one\nline \"two\""), "got: {err}");
+    fn egress_region_rejects_injection_attempts() {
+        assert!(inject_egress_region(r#"{}"#, r#"a","X":"b"#).is_err());
     }
 
     #[test]

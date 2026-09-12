@@ -92,6 +92,10 @@ public class FCAEVpnService extends VpnService {
     };
 
     private static native void nativeSetTunFd(int fd);
+    // Hands this VpnService to the native side so Psiphon's own sockets can be
+    // excluded from the tunnel via protect(fd).
+    private native void nativeRegisterVpnService();
+    private static native void nativeUnregisterVpnService();
     public static native long[] nativeGetTrafficStats();
 
     // ADDED: Called directly from MainActivity for 0ms UI disconnect
@@ -105,6 +109,9 @@ public class FCAEVpnService extends VpnService {
     public void onCreate() {
         super.onCreate();
         instance = this;
+        // Register before any tunnel starts: Psiphon may call protect() as
+        // soon as it begins dialling.
+        try { nativeRegisterVpnService(); } catch (Throwable ignored) {}
         handler = new Handler(Looper.getMainLooper());
         notification = new VpnNotification(this);
     }
@@ -204,6 +211,14 @@ public class FCAEVpnService extends VpnService {
         final String torLines  = intent.getStringExtra("torBridgeLines");
         final String torLinesV = (torLines == null) ? "" : torLines;
         final int engineLog    = intent.getIntExtra("engineLog", 3);
+        final int backend      = intent.getIntExtra("backend", 0);
+        final int torSocksPort = intent.getIntExtra("torSocksPort", 1821);
+        final String psiphonCfg    = intent.getStringExtra("psiphonConfig");
+        final String psiphonRegion = intent.getStringExtra("psiphonRegion");
+        final String psiphonCfgV    = (psiphonCfg == null) ? "" : psiphonCfg;
+        final String psiphonRegionV = (psiphonRegion == null) ? "" : psiphonRegion;
+        final int psiphonSocks = intent.getIntExtra("psiphonSocksPort", 0);
+        final int psiphonHttp  = intent.getIntExtra("psiphonHttpPort", 0);
         final String teamVal   = (teamName == null) ? "" : teamName;
         final String tokenVal  = (accessTok == null) ? "" : accessTok;
         final String emailVal  = (accessEm == null) ? "" : accessEm;
@@ -262,7 +277,9 @@ public class FCAEVpnService extends VpnService {
                     peerVal, cfgPath, h2, ech,
                     sniVal, sysProfile,
                     teamVal, tokenVal, emailVal, routesVal, routesIVal,
-                    torMode, torBridges, torLinesV, engineLog
+                    torMode, torBridges, torLinesV, engineLog,
+                    backend, torSocksPort,
+                    psiphonCfgV, psiphonRegionV, psiphonSocks, psiphonHttp
                 );
                 if (!ok) {
                     handler.post(this::fullShutdown);
@@ -461,6 +478,9 @@ public class FCAEVpnService extends VpnService {
     public void onDestroy() {
         instance = null;
         fullShutdown();
+        // Drop the global ref before the service object dies, or the native
+        // side keeps a stale reference and protect() calls a dead object.
+        try { nativeUnregisterVpnService(); } catch (Throwable ignored) {}
         super.onDestroy();
     }
 

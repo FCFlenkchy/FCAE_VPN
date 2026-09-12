@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 5
+#define FCAE_ABI_VERSION 6
 
 /* ── Enumerations ──────────────────────────────────────────────────── */
 
@@ -93,7 +93,11 @@ typedef enum {
     FCAE_PROTOCOL_MASQUE    = 0,
     FCAE_PROTOCOL_WIREGUARD = 1,
     FCAE_PROTOCOL_GOOL      = 2,
-    FCAE_PROTOCOL_AUTO      = 3
+    FCAE_PROTOCOL_AUTO      = 3,
+    /* Tor alone, no WARP underneath. Sugar for tor.mode = FCAE_TOR_ONLY:
+     * from the user's point of view it is a peer of MASQUE/WireGuard, while
+     * Chain and Reverse remain modifiers on FcaeTor.mode.               */
+    FCAE_PROTOCOL_TOR       = 4
 } FcaeProtocol;
 
 typedef enum {
@@ -212,19 +216,28 @@ typedef struct {
     const char *access_email;
 } FcaeZeroTrust;
 
-/* Reserved for the Psiphon backend; ignored by other backends. */
+/* Psiphon backend inputs; ignored by other backends. */
 typedef struct {
     const char *config_json;
     const char *embedded_server_list;
+    /* ISO country code, or NULL/"" for automatic. The available regions are
+     * only known after the first successful connect -- read them back with
+     * fcae_psiphon_regions(). */
     const char *egress_region;
     const char *data_root_dir;
+    /* Psiphon's OWN proxy ports, separate from the session's socks_port so
+     * both can listen when Psiphon is chained behind another backend.
+     * 0 = let Psiphon choose a free port. */
+    uint16_t    socks_port;
+    uint16_t    http_port;
 } FcaePsiphon;
 
 /* Tor egress configuration. Consumed by the Aether backend only. */
 typedef struct {
     FcaeTorMode     mode;
     FcaeTorBridges  bridges;
-    const char     *bind;          /* NULL = 127.0.0.1:1821                */
+    const char     *bind;          /* NULL = 127.0.0.1:<socks_port>        */
+    uint16_t        socks_port;    /* tor's own SOCKS5 port; 0 = 1821      */
     const char     *state_dir;     /* NULL = under data_dir                */
     const char     *bridge_lines;  /* newline-separated, for CUSTOM        */
     const char     *pt_path;       /* pluggable transport binary, or NULL  */
@@ -373,6 +386,18 @@ FcaeStatus fcae_backend_info(uint32_t index, FcaeBackendInfo *out);
 /* How many backends fcae_backend_info() can describe. */
 uint32_t   fcae_backend_count(void);
 
+/* Psiphon egress regions discovered so far, as a comma-separated list of ISO
+ * country codes ("GB,DE,US"), written into `out`. Empty until the first
+ * successful Psiphon connect. Returns the length that would be written,
+ * excluding the NUL, so truncation is detectable. */
+uint32_t   fcae_psiphon_regions(char *out, uint32_t cap);
+
+/* Install Android's VpnService.protect(fd) for Psiphon's own sockets; the
+ * callback returns 1 on success, 0 on failure. Without it Psiphon's
+ * connections are captured by our own TUN. NULL clears. Desktop does not
+ * need this. */
+FcaeStatus fcae_set_psiphon_protect(int (*protect)(int fd));
+
 /* Release everything. fcae_init() must be called again afterwards. */
 FcaeStatus fcae_shutdown(void);
 
@@ -400,4 +425,4 @@ FcaeStatus fcae_poll_update(FcaeUpdateInfo *out);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0xed18462b5ae255d1 */
+/* fcae-abi-fingerprint: 0x1899eda7527e4783 */

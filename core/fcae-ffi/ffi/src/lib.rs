@@ -157,11 +157,15 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
             embedded_server_list: std::ptr::null(),
             egress_region: std::ptr::null(),
             data_root_dir: std::ptr::null(),
+            // 0 = let Psiphon pick a free port.
+            socks_port: 0,
+            http_port: 0,
         },
         tor: FcaeTor {
             mode: FcaeTorMode::Off,
             bridges: FcaeTorBridges::None,
             bind: std::ptr::null(),
+            socks_port: config::DEFAULT_TOR_SOCKS_PORT,
             state_dir: std::ptr::null(),
             bridge_lines: std::ptr::null(),
             pt_path: std::ptr::null(),
@@ -457,6 +461,49 @@ pub unsafe extern "C" fn fcae_backend_info(index: u32, out: *mut FcaeBackendInfo
         out.supports_gateway_scanning = caps.gateway_scanning;
         out.supports_routing_rules = caps.routing_rules;
         out.requires_privileges = caps.requires_privileges;
+        Ok(())
+    })
+}
+
+/// Psiphon egress regions discovered so far, as a comma-separated list of
+/// ISO country codes ("GB,DE,US"), written into `out`.
+///
+/// Empty until the first successful Psiphon connect: the region list arrives
+/// in a post-handshake notice, so a UI should offer "Auto" and then refresh
+/// from this once connected. Returns the number of bytes that would be
+/// written (excluding the NUL), so a caller can detect truncation.
+///
+/// # Safety
+/// `out` must point to storage for at least `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_psiphon_regions(out: *mut c_char, cap: u32) -> u32 {
+    #[cfg(feature = "psiphon")]
+    let list = fcae_bridge_psiphon::regions().join(",");
+    #[cfg(not(feature = "psiphon"))]
+    let list = String::new();
+
+    if !out.is_null() && cap > 0 {
+        let buf = std::slice::from_raw_parts_mut(out, cap as usize);
+        fill(buf, &list);
+    }
+    list.len() as u32
+}
+
+/// Install Android's `VpnService.protect(fd)` for Psiphon's own sockets.
+///
+/// Psiphon dials out while our TUN is up, so without this its connections are
+/// captured by the tunnel and it tries to reach the internet through itself.
+/// Desktop never needs it: the routing table already excludes our sockets.
+/// Pass NULL to clear.
+#[no_mangle]
+pub extern "C" fn fcae_set_psiphon_protect(
+    cb: Option<unsafe extern "C" fn(std::ffi::c_int) -> std::ffi::c_int>,
+) -> FcaeStatus {
+    guard("fcae_set_psiphon_protect", || {
+        #[cfg(feature = "psiphon")]
+        fcae_bridge_psiphon::set_protect_callback(cb);
+        #[cfg(not(feature = "psiphon"))]
+        let _ = cb;
         Ok(())
     })
 }

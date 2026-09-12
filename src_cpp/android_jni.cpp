@@ -18,6 +18,87 @@ static std::deque<std::string> g_logs;
 static constexpr size_t kMaxLogs = 30;
 static std::atomic<bool> g_inited{false};
 
+// ── Psiphon socket protection ───────────────────────────────────────────
+//
+// Psiphon dials out while our TUN is up, so every socket it opens must be
+// excluded from the VPN via VpnService.protect(fd) or it tries to reach the
+// internet through our own tunnel and never connects.
+//
+// The callback arrives on a Go goroutine with no JNIEnv, so the VM pointer is
+// cached at JNI_OnLoad and the thread is attached on demand.
+static JavaVM*  g_vm = nullptr;
+static jobject  g_vpn_service = nullptr;   // global ref to the VpnService
+static jmethodID g_protect_mid = nullptr;
+static std::mutex g_protect_mu;
+
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
+    g_vm = vm;
+    return JNI_VERSION_1_6;
+}
+
+// Returns 1 on success, 0 on failure, matching the C ABI's contract.
+static int psiphon_protect(int fd) {
+    std::lock_guard<std::mutex> lock(g_protect_mu);
+    if (!g_vm || !g_vpn_service || !g_protect_mid) {
+        // No service registered (desktop-style run, or called after
+        // teardown). Report success: there is no VPN to escape from.
+        return 1;
+    }
+
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (g_vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) {
+        if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+            LOGE("psiphon_protect: could not attach thread");
+            return 0;
+        }
+        attached = true;
+    }
+
+    jboolean ok = env->CallBooleanMethod(g_vpn_service, g_protect_mid, (jint)fd);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        ok = JNI_FALSE;
+    }
+
+    if (attached) {
+        g_vm->DetachCurrentThread();
+    }
+    return ok == JNI_TRUE ? 1 : 0;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_FCAEVpnService_nativeRegisterVpnService(JNIEnv* env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_protect_mu);
+    if (g_vpn_service) {
+        env->DeleteGlobalRef(g_vpn_service);
+        g_vpn_service = nullptr;
+    }
+    g_vpn_service = env->NewGlobalRef(thiz);
+    jclass cls = env->GetObjectClass(thiz);
+    // VpnService.protect(int) -> boolean
+    g_protect_mid = env->GetMethodID(cls, "protect", "(I)Z");
+    env->DeleteLocalRef(cls);
+    if (!g_protect_mid) {
+        env->ExceptionClear();
+        LOGE("could not resolve VpnService.protect(int)");
+        return;
+    }
+    fcae_set_psiphon_protect(psiphon_protect);
+    LOGI("psiphon socket protection registered");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_FCAEVpnService_nativeUnregisterVpnService(JNIEnv* env, jclass) {
+    fcae_set_psiphon_protect(nullptr);
+    std::lock_guard<std::mutex> lock(g_protect_mu);
+    if (g_vpn_service) {
+        env->DeleteGlobalRef(g_vpn_service);
+        g_vpn_service = nullptr;
+    }
+    g_protect_mid = nullptr;
+}
+
 static void jni_log_cb(FcaeLogLevel level, const char* message, void* /*user*/) {
     if (!message) return;
     std::lock_guard<std::mutex> lock(g_log_mu);
@@ -127,7 +208,13 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jint torMode,
     jint torBridges,
     jstring torBridgeLines,
-    jint engineLog
+    jint engineLog,
+    jint backend,
+    jint torSocksPort,
+    jstring psiphonConfig,
+    jstring psiphonRegion,
+    jint psiphonSocksPort,
+    jint psiphonHttpPort
 ) {
     ensure_init();
 
@@ -143,11 +230,13 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     std::string routesOwned = jstr(env, routesFile);
     std::string routesInlineOwned = jstr(env, routesInline);
     std::string torLinesOwned = jstr(env, torBridgeLines);
+    std::string psiCfgOwned = jstr(env, psiphonConfig);
+    std::string psiRegionOwned = jstr(env, psiphonRegion);
 
     FcaeConfig cfg;
     fcae_config_default(&cfg);
 
-    cfg.backend = FCAE_BACKEND_AETHER;
+    cfg.backend = (FcaeBackend)backend;
     cfg.protocol = (FcaeProtocol)protocol;
     cfg.mode = (FcaeMode)mode;
     cfg.lan_sharing = lanSharing == JNI_TRUE;
@@ -189,13 +278,28 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     // at info regardless -- this only changes how much the engine emits.
     cfg.engine_log = (FcaeEngineLog)engineLog;
 
+    // Tor's own listener, kept off the engine's and Psiphon's ports.
+    cfg.tor.socks_port = (uint16_t)torSocksPort;
+
+    // Psiphon. Its datastore must be writable and app-private; the Kotlin
+    // side passes filesDir, which is exactly that.
+    if (!psiCfgOwned.empty()) cfg.psiphon.config_json = psiCfgOwned.c_str();
+    if (!psiRegionOwned.empty()) cfg.psiphon.egress_region = psiRegionOwned.c_str();
+    cfg.psiphon.socks_port = (uint16_t)psiphonSocksPort;
+    cfg.psiphon.http_port = (uint16_t)psiphonHttpPort;
+
     // The data directory is a real config field now, not a smuggled env var.
     std::string dataDir;
+    std::string psiDataDir;
     if (!cfgOwned.empty()) {
         size_t last_slash = cfgOwned.find_last_of('/');
         if (last_slash != std::string::npos) {
             dataDir = cfgOwned.substr(0, last_slash);
             cfg.data_dir = dataDir.c_str();
+            // Psiphon keeps its own datastore; give it a subdirectory of the
+            // app-private dir rather than sharing the engine's.
+            psiDataDir = dataDir + "/psiphon";
+            cfg.psiphon.data_root_dir = psiDataDir.c_str();
         }
     }
 
@@ -230,6 +334,16 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStop(JNIEnv*, jclass) {
         LOGE("fcae_stop: %s", fcae_last_error());
     }
     LOGI("fcae_stop");
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativePsiphonRegions(JNIEnv* env, jclass) {
+    ensure_init();
+    // Empty until Psiphon has connected once: the region list arrives in a
+    // post-handshake notice, so the UI offers "Auto" and refreshes later.
+    char buf[1024] = {0};
+    fcae_psiphon_regions(buf, (uint32_t)sizeof(buf));
+    return env->NewStringUTF(buf);
 }
 
 extern "C" JNIEXPORT void JNICALL

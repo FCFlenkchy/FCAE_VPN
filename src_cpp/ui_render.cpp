@@ -110,6 +110,7 @@ static uint64_t ui_content_signature() {
     // Settings the user can edit (changed by input, but a config load or a
     // programmatic change must repaint too), plus transient notices.
     h = fnv_value(h, g_app.protocol);
+    h = fnv_value(h, g_app.backend);
     h = fnv_value(h, g_app.mode);
     h = fnv_value(h, g_app.scan_mode);
     h = fnv_value(h, g_app.ip_version);
@@ -319,6 +320,11 @@ static std::string resolve_config_path_for_load() {
 
 static void apply_config_kv(const std::string& key, const std::string& val) {
     if (key == "protocol") g_app.protocol = atoi(val.c_str());
+    else if (key == "backend") g_app.backend = atoi(val.c_str());
+    else if (key == "tor_socks_port") g_app.tor_socks_port = atoi(val.c_str());
+    else if (key == "psiphon_region") snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region), "%s", val.c_str());
+    else if (key == "psiphon_socks_port") g_app.psiphon_socks_port = atoi(val.c_str());
+    else if (key == "psiphon_http_port") g_app.psiphon_http_port = atoi(val.c_str());
     else if (key == "mode") g_app.mode = atoi(val.c_str());
     else if (key == "lan_sharing") g_app.lan_sharing = atoi(val.c_str()) != 0;
     else if (key == "scan_mode") g_app.scan_mode = atoi(val.c_str());
@@ -379,6 +385,11 @@ static void save_config() {
     }
     // Always LF; empty values allowed. Line-based load is robust on Win/Linux.
     fprintf(f, "protocol=%d\n", g_app.protocol);
+    fprintf(f, "backend=%d\n", g_app.backend);
+    fprintf(f, "tor_socks_port=%d\n", g_app.tor_socks_port);
+    fprintf(f, "psiphon_region=%s\n", g_app.psiphon_region);
+    fprintf(f, "psiphon_socks_port=%d\n", g_app.psiphon_socks_port);
+    fprintf(f, "psiphon_http_port=%d\n", g_app.psiphon_http_port);
     fprintf(f, "mode=%d\n", g_app.mode);
     fprintf(f, "lan_sharing=%d\n", g_app.lan_sharing ? 1 : 0);
     fprintf(f, "scan_mode=%d\n", g_app.scan_mode);
@@ -1078,19 +1089,33 @@ void render_ui() {
             // "HTTP/2 Fallback" checkbox). Underlying config keeps the same
             // two fields the FFI always took: protocol (0/1/2) + h2_enabled.
             // idx 0 = MASQUE H3, 1 = MASQUE H2, 2 = WireGuard, 3 = WIW.
-            int transport = (g_app.protocol == 0) ? (g_app.h2_enabled ? 1 : 0)
+            // idx 4 = Tor only, 5 = Psiphon. Both are peers of the WARP
+            // transports to the user even though internally Tor is an engine
+            // egress (tor.mode = Only) and Psiphon is a separate backend.
+            int transport = (g_app.backend == 1)  ? 5
+                          : (g_app.protocol == 4) ? 4
+                          : (g_app.protocol == 0) ? (g_app.h2_enabled ? 1 : 0)
                           : (g_app.protocol == 1) ? 2 : 3;
             if (ImGui::RadioButton("MASQUE (HTTP/3 QUIC)", &transport, 0)) {
-                g_app.protocol = 0; g_app.h2_enabled = false;
+                g_app.protocol = 0; g_app.h2_enabled = false; g_app.backend = 0;
             }
             if (ImGui::RadioButton("MASQUE (HTTP/2 TLS)", &transport, 1)) {
-                g_app.protocol = 0; g_app.h2_enabled = true;
+                g_app.protocol = 0; g_app.h2_enabled = true; g_app.backend = 0;
             }
             if (ImGui::RadioButton("WireGuard", &transport, 2)) {
-                g_app.protocol = 1;
+                g_app.protocol = 1; g_app.backend = 0;
             }
             if (ImGui::RadioButton("WARP-in-WARP (Gool)", &transport, 3)) {
-                g_app.protocol = 2;
+                g_app.protocol = 2; g_app.backend = 0;
+            }
+            if (ImGui::RadioButton("Tor only (no WARP)", &transport, 4)) {
+                // FcaeProtocol::Tor; the core normalises this to
+                // tor.mode = Only, so the Tor dropdown below is redundant here.
+                g_app.protocol = 4; g_app.backend = 0;
+            }
+            if (ImGui::RadioButton("Psiphon", &transport, 5)) {
+                // Psiphon picks its own transport, hence FcaeProtocol::Auto.
+                g_app.protocol = 3; g_app.backend = 1;
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Mode");
@@ -1182,6 +1207,56 @@ void render_ui() {
             ImGui::Combo("Engine log", &g_app.engine_log, engine_logs, 6);
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("Psiphon");
+            ImGui::InputTextMultiline("##psiphon_config", g_app.psiphon_config,
+                                      sizeof(g_app.psiphon_config), ImVec2(0, 70));
+            ImGui::TextDisabled("Paste the Psiphon config object (JSON), not a path.");
+
+            // Egress region. Psiphon only reports the available regions after
+            // a successful handshake, so before the first connect the only
+            // choice is Auto; the list fills in once connected.
+            {
+                static char region_buf[1024];
+                static std::vector<std::string> codes;
+                static double last_poll = 0.0;
+                double now = ImGui::GetTime();
+                if (now - last_poll > 2.0) {
+                    last_poll = now;
+                    region_buf[0] = '\0';
+                    fcae_psiphon_regions(region_buf, (uint32_t)sizeof(region_buf));
+                    codes.clear();
+                    codes.push_back("");           // Auto
+                    const char* p = region_buf;
+                    while (*p) {
+                        const char* comma = strchr(p, ',');
+                        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+                        if (len > 0) codes.push_back(std::string(p, len));
+                        if (!comma) break;
+                        p = comma + 1;
+                    }
+                }
+
+                int sel = 0;
+                for (size_t i = 0; i < codes.size(); ++i)
+                    if (codes[i] == g_app.psiphon_region) { sel = (int)i; break; }
+
+                std::vector<const char*> labels;
+                for (auto& c : codes)
+                    labels.push_back(c.empty() ? "Auto (fastest)" : c.c_str());
+
+                if (ImGui::Combo("Egress region", &sel, labels.data(), (int)labels.size()))
+                    snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region),
+                             "%s", codes[(size_t)sel].c_str());
+                if (codes.size() == 1)
+                    ImGui::TextDisabled("Regions appear after the first successful connect.");
+            }
+
+            // Psiphon's own listeners, kept off the engine's and Tor's ports.
+            ImGui::InputInt("Psiphon SOCKS port", &g_app.psiphon_socks_port);
+            ImGui::InputInt("Psiphon HTTP port", &g_app.psiphon_http_port);
+            ImGui::TextDisabled("0 lets Psiphon pick a free port.");
+
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Tor egress");
             // Tor is an egress inside the Aether engine (AETHER_TOR), not a
             // separate backend, so it needs no bridge of its own.
@@ -1193,6 +1268,7 @@ void render_ui() {
             };
             ImGui::Combo("Tor", &g_app.tor_mode, tor_modes, 4);
             if (g_app.tor_mode == 0) ImGui::BeginDisabled();
+            ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port);
             const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };
             ImGui::Combo("Bridges", &g_app.tor_bridges, tor_bridges, 4);
             if (g_app.tor_bridges != 3) ImGui::BeginDisabled();

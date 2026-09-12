@@ -157,11 +157,15 @@ impl Backend for AetherBackend {
         // Reverse mode is the opposite: tor is the carrier *underneath* the
         // tunnel, so the engine's SOCKS port is already the correct exit.
         let tor_socks: Option<SocketAddr> = match cfg.tor.mode {
+            // config::parse always resolves tor.bind, so there is no default
+            // to re-derive here -- doing so twice is how the port drifted.
             FcaeTorMode::Chain | FcaeTorMode::Only => Some(
                 cfg.tor
                     .bind
                     .as_deref()
-                    .unwrap_or("127.0.0.1:1821")
+                    .ok_or_else(|| {
+                        CoreError::InvalidConfig("tor is enabled but no bind address".into())
+                    })?
                     .parse()
                     .map_err(|e| {
                         CoreError::InvalidConfig(format!("bad tor socks address: {e}"))

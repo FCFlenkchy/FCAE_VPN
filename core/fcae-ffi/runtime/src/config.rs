@@ -92,6 +92,10 @@ pub struct PsiphonConfig {
     pub embedded_server_list: Option<String>,
     pub egress_region: Option<String>,
     pub data_root_dir: Option<String>,
+    /// Local SOCKS5 port for Psiphon's own proxy; 0 = Psiphon chooses.
+    pub socks_port: u16,
+    /// Local HTTP CONNECT port for Psiphon; 0 = Psiphon chooses.
+    pub http_port: u16,
 }
 
 /// TUN parameters. Owned by the supervisor, not the backend: whichever
@@ -258,6 +262,22 @@ impl SessionConfig {
     }
 }
 
+/// Default local SOCKS port for Tor's own listener.
+///
+/// Not 1820: that is the default HTTP proxy port, and sharing it meant
+/// whichever listener bound second died with "address already in use".
+pub const DEFAULT_TOR_SOCKS_PORT: u16 = 1821;
+
+/// Reject two listeners sharing a port, with a message naming both.
+fn check_port_clash(what: &str, port: u16, other: u16, other_name: &str) -> Result<()> {
+    if other != 0 && port == other {
+        return Err(CoreError::InvalidConfig(format!(
+            "{what} port {port} collides with {other_name}; they must differ"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate the caller's struct header. Checked *before* any field is read,
 /// which is what makes adding fields non-fatal for older UI binaries.
 fn check_abi(struct_size: u32, abi_version: u32, expected_size: usize, what: &str) -> Result<()> {
@@ -415,6 +435,8 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         embedded_server_list: cstr_opt(raw.psiphon.embedded_server_list),
         egress_region: cstr_opt(raw.psiphon.egress_region),
         data_root_dir: cstr_opt(raw.psiphon.data_root_dir),
+        socks_port: raw.psiphon.socks_port,
+        http_port: raw.psiphon.http_port,
     };
 
     // ── Tor ─────────────────────────────────────────────────────────────
@@ -434,6 +456,16 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             "tor.bridges = Custom but tor.bridge_lines is empty".into(),
         ));
     }
+    // Protocol::Tor is sugar for tor.mode = Only: the user picked "Tor" from
+    // the protocol list rather than setting the egress modifier by hand.
+    // Normalise here, before the checks below, so both routes validate
+    // identically and everything downstream only has to look at tor.mode.
+    let mut t = *t;
+    if cfg.protocol == FcaeProtocol::Tor {
+        t.mode = FcaeTorMode::Only;
+    }
+    let t = &t;
+
     // Tor `Only` means "no WARP tunnel at all", so a pinned gateway or a
     // protocol choice would be silently ignored. Say so rather than pretend.
     if t.mode == FcaeTorMode::Only && cfg.force_peer.is_some() {
@@ -459,27 +491,54 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // "address already in use" -- tor came up only when the http proxy was
     // disabled, which is why it "worked sometimes". The default is now 1821;
     // reject an explicit collision too rather than lose the race at runtime.
+    // Every listener that can be up at once must have its own port. In Chain
+    // mode tor and the engine both listen; with Psiphon chained behind Aether
+    // there is a third. An explicit tor.bind wins over tor.socks_port.
+    let tor_port = cstr_opt(t.bind)
+        .as_deref()
+        .and_then(|b| b.parse::<std::net::SocketAddr>().ok())
+        .map(|a| a.port())
+        .unwrap_or(if t.socks_port != 0 {
+            t.socks_port
+        } else {
+            DEFAULT_TOR_SOCKS_PORT
+        });
     if t.mode != FcaeTorMode::Off {
-        let tor_port = cstr_opt(t.bind)
-            .as_deref()
-            .and_then(|b| b.parse::<std::net::SocketAddr>().ok())
-            .map(|a| a.port())
-            .unwrap_or(1821);
-        if tor_port == cfg.socks_port {
-            return Err(CoreError::InvalidConfig(format!(
-                "tor.bind port {tor_port} collides with socks_port; they must differ"
-            )));
+        check_port_clash("tor", tor_port, cfg.socks_port, "socks_port")?;
+        check_port_clash("tor", tor_port, cfg.http_port, "http_port")?;
+    }
+
+    // Psiphon's own proxies. 0 means "let Psiphon choose", which never
+    // collides, so only a pinned port is checked.
+    let psi_socks = raw.psiphon.socks_port;
+    let psi_http = raw.psiphon.http_port;
+    if psi_socks != 0 {
+        check_port_clash("psiphon.socks_port", psi_socks, cfg.socks_port, "socks_port")?;
+        check_port_clash("psiphon.socks_port", psi_socks, cfg.http_port, "http_port")?;
+        if t.mode != FcaeTorMode::Off {
+            check_port_clash("psiphon.socks_port", psi_socks, tor_port, "tor")?;
         }
-        if cfg.http_port != 0 && tor_port == cfg.http_port {
-            return Err(CoreError::InvalidConfig(format!(
-                "tor.bind port {tor_port} collides with http_port; they must differ"
-            )));
+    }
+    if psi_http != 0 {
+        check_port_clash("psiphon.http_port", psi_http, cfg.socks_port, "socks_port")?;
+        check_port_clash("psiphon.http_port", psi_http, cfg.http_port, "http_port")?;
+        if t.mode != FcaeTorMode::Off {
+            check_port_clash("psiphon.http_port", psi_http, tor_port, "tor")?;
+        }
+        if psi_socks != 0 && psi_http == psi_socks {
+            return Err(CoreError::InvalidConfig(
+                "psiphon.socks_port and psiphon.http_port must differ".into(),
+            ));
         }
     }
     cfg.tor = TorConfig {
         mode: t.mode,
         bridges: t.bridges,
-        bind: cstr_opt(t.bind),
+        // Resolved once here so every consumer (env projection, the bridge's
+        // readiness probe) agrees on the port instead of each re-deriving it.
+        bind: Some(
+            cstr_opt(t.bind).unwrap_or_else(|| format!("127.0.0.1:{tor_port}")),
+        ),
         state_dir: cstr_opt(t.state_dir),
         bridge_lines,
         pt_path: cstr_opt(t.pt_path),
@@ -587,7 +646,9 @@ pub mod env_compat {
 
     pub fn apply(cfg: &SessionConfig) {
         let protocol = match cfg.protocol {
-            FcaeProtocol::Masque | FcaeProtocol::Auto => "masque",
+            // Protocol::Tor means tor-only, so no WARP carrier is dialled at
+            // all; the engine still wants a nominal protocol string.
+            FcaeProtocol::Masque | FcaeProtocol::Auto | FcaeProtocol::Tor => "masque",
             FcaeProtocol::WireGuard => "wg",
             FcaeProtocol::Gool => "gool",
         };

@@ -30,6 +30,8 @@ struct AppState {
     std::atomic<bool> redraw_requested{true};
 
     int  protocol        = 0;
+    // 0 = Aether, 1 = Psiphon (FcaeBackend).
+    int  backend         = 0;
     int  mode            = 0;
     bool lan_sharing     = false;
     int  scan_mode       = 0;
@@ -68,6 +70,17 @@ struct AppState {
     // Verbosity of the aether ENGINE (FcaeEngineLog). 3 = info = default.
     // The FFI's own log callback level is fixed at info and not exposed.
     int  engine_log  = 3;
+
+    // Tor's own SOCKS listener. Must differ from socks_port/http_port: in
+    // Chain mode tor and the engine are both listening.
+    int  tor_socks_port = 1821;
+
+    // Psiphon. config_json is the whole config object, not a path.
+    char psiphon_config[8192] = {0};
+    char psiphon_region[8]    = {0};   // ISO code, "" = auto
+    char psiphon_data_dir[512] = {0};
+    int  psiphon_socks_port = 0;       // 0 = Psiphon chooses
+    int  psiphon_http_port  = 0;
 
     // Tor egress (inside the Aether engine, not a separate backend).
     int  tor_mode    = 0;        // FcaeTorMode
@@ -130,7 +143,7 @@ struct AppState {
         FcaeConfig c;
         fcae_config_default(&c);
 
-        c.backend          = FCAE_BACKEND_AETHER;
+        c.backend          = (FcaeBackend)backend;
         c.protocol         = (FcaeProtocol)protocol;
         c.mode             = (FcaeMode)mode;
         c.scan_mode        = (FcaeScanMode)scan_mode;
@@ -166,6 +179,13 @@ struct AppState {
         c.tor.mode         = (FcaeTorMode)tor_mode;
         c.tor.bridges      = (FcaeTorBridges)tor_bridges;
         c.tor.bridge_lines = tor_bridge_lines[0] ? tor_bridge_lines : nullptr;
+        c.tor.socks_port   = (uint16_t)tor_socks_port;
+
+        c.psiphon.config_json   = psiphon_config[0] ? psiphon_config : nullptr;
+        c.psiphon.egress_region = psiphon_region[0] ? psiphon_region : nullptr;
+        c.psiphon.data_root_dir = psiphon_data_dir[0] ? psiphon_data_dir : nullptr;
+        c.psiphon.socks_port    = (uint16_t)psiphon_socks_port;
+        c.psiphon.http_port     = (uint16_t)psiphon_http_port;
 
         return c;
     }

@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 5;
+pub const FCAE_ABI_VERSION: u32 = 6;
 
 // ── Enumerations ────────────────────────────────────────────────────────
 
@@ -102,6 +102,15 @@ pub enum FcaeProtocol {
     Gool = 2,
     /// Backend picks. Psiphon uses this exclusively.
     Auto = 3,
+    /// Tor alone, with no WARP tunnel underneath.
+    ///
+    /// Tor is an egress *inside* the Aether engine rather than a backend, so
+    /// this is sugar for `tor.mode = Only`: it belongs in the protocol list
+    /// because from the user's point of view it is a peer of MASQUE and
+    /// WireGuard ("how do I get out?"), not a modifier layered on one. The
+    /// Chain and Reverse modes stay on [`FcaeTor::mode`], where they really
+    /// are modifiers.
+    Tor = 4,
 }
 
 #[repr(C)]
@@ -317,9 +326,18 @@ pub struct FcaeZeroTrust {
 pub struct FcaeTor {
     pub mode: FcaeTorMode,
     pub bridges: FcaeTorBridges,
-    /// "ip:port" for the local Tor SOCKS listener in `Only` mode.
-    /// NULL = 127.0.0.1:1821.
+    /// "ip:port" for the local Tor SOCKS listener. NULL = derive from
+    /// `socks_port` below, i.e. 127.0.0.1:<socks_port>.
+    ///
+    /// Prefer `socks_port`; this exists for binding to a non-loopback
+    /// address.
     pub bind: *const c_char,
+    /// Local SOCKS5 port for Tor's own listener. 0 = 1821.
+    ///
+    /// Distinct from the session `socks_port` (the engine's plain tunnel) and
+    /// from `psiphon.socks_port`: in Chain mode Tor and the engine both
+    /// listen at once, so they must not collide.
+    pub socks_port: u16,
     /// State/cache directory for the Arti client. NULL = under `data_dir`.
     pub state_dir: *const c_char,
     /// Newline-separated bridge lines, used when `bridges == Custom`.
@@ -342,6 +360,14 @@ pub struct FcaePsiphon {
     pub egress_region: *const c_char,
     /// Writable directory for Psiphon's datastore.
     pub data_root_dir: *const c_char,
+    /// Local SOCKS5 port for Psiphon's own proxy. 0 = let Psiphon choose.
+    ///
+    /// Separate from the session `socks_port`, which belongs to whichever
+    /// backend is active: when Psiphon is chained behind Aether both are
+    /// listening at once and they must not collide.
+    pub socks_port: u16,
+    /// Local HTTP CONNECT port for Psiphon. 0 = let Psiphon choose.
+    pub http_port: u16,
 }
 
 /// Top-level session configuration.

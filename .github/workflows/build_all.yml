@@ -412,7 +412,7 @@ jobs:
                 export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
                 export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
                 
-                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor
+                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon-live
 
                 # CARGO_TARGET_DIR (set in env: below) puts every artifact in
                 # one place, so there is no longer a fallback copy to do.
@@ -458,7 +458,7 @@ jobs:
               echo "Using NDK: $NDK"
               "$CLANG" --version | head -1
               
-              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor
+              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon-live
 
               DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
               ls -lh "$DEST"
@@ -466,7 +466,7 @@ jobs:
             fi
           else
             # Non-Android builds (linux, windows, macos)
-            cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor
+            cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon-live
 
             DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
             ls -lh "$DEST"

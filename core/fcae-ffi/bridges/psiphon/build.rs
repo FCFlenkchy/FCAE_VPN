@@ -1,10 +1,18 @@
-//! Builds Psiphon's ClientLibrary as a c-archive and links it statically.
+//! Builds the Psiphon Go bridge as a c-archive and links it statically.
 //!
-//! Unlike tun2socks, Psiphon **already ships a cgo C ABI**
-//! (`ClientLibrary/PsiphonTunnel.go` exports `PsiphonTunnelStart` and
-//! `PsiphonTunnelStop`), so there is no hand-written Go shim here — we build
-//! the upstream package directly. That is less code to maintain and nothing
-//! to rebase when the submodule is bumped.
+//! ## Why a hand-written shim now
+//!
+//! The first version compiled upstream's `ClientLibrary` package directly,
+//! because it already exports a cgo C ABI. That cannot work on Android: its
+//! `PsiphonProvider` has no `BindToDevice`, so Psiphon's own sockets get
+//! captured by our TUN and the tunnel tries to reach the internet through
+//! itself.
+//!
+//! `MobileLibrary/psi` does expose `BindToDevice`, but it is a gobind package
+//! with no C surface, so `go/bridge.go` wraps it. One shim serves both
+//! platforms — desktop simply passes `useDeviceBinder=false`.
+
+use std::path::PathBuf;
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(psiphon_linked)");
@@ -25,29 +33,31 @@ fn main() {
         );
     }
 
-    let client_library = submodule.join("ClientLibrary");
-    if !client_library.join("PsiphonTunnel.go").is_file() {
+    // The shim imports MobileLibrary/psi, so fail early and clearly if the
+    // submodule layout ever changes under us.
+    let mobile_library = submodule.join("MobileLibrary/psi");
+    if !mobile_library.join("psi.go").is_file() {
         panic!(
-            "{} does not contain PsiphonTunnel.go — the upstream layout changed",
-            client_library.display()
+            "{} does not contain psi.go — the upstream layout changed",
+            mobile_library.display()
         );
     }
 
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let go_dir = manifest.join("go");
     let target = fcae_build::target::Target::from_cargo_env();
     let repo_root = fcae_build::repo_root();
 
+    fcae_build::go::track_sources(&go_dir);
     fcae_build::rerun_if_changed(submodule.join("go.mod"));
-    fcae_build::go::track_sources(&client_library);
 
-    // The module root is the submodule itself; the package we want is the
-    // ClientLibrary subdirectory (it is `package main` with //export
-    // directives, which is exactly what c-archive mode needs).
-    let mut archive =
-        fcae_build::go::CArchive::new(&submodule, "./ClientLibrary", "libpsiphon_bridge");
+    let mut archive = fcae_build::go::CArchive::new(&go_dir, ".", "libpsiphon_bridge");
     archive.target = target;
 
     match archive.build() {
         Ok(built) => {
+            // Android builds a c-shared .so (Go rejects c-archive there), so
+            // it has to land in jniLibs/<abi>/ for the loader. No-op elsewhere.
             if let Err(e) = built.stage_android_so(&repo_root, target) {
                 panic!("failed to stage the Psiphon bridge for Android: {e}");
             }
@@ -57,13 +67,13 @@ fn main() {
                 "cargo:rustc-env=FCAE_PSIPHON_HEADER={}",
                 built.header.display()
             );
-            fcae_build::note("psiphon ClientLibrary linked in-process");
+            fcae_build::note("psiphon MobileLibrary linked in-process");
         }
         Err(e) => panic!(
-            "failed to build the Psiphon ClientLibrary c-archive: {e}\n\
+            "failed to build the Psiphon bridge c-archive: {e}\n\
              Psiphon requires a recent Go toolchain (see core/psiphon/go.mod) \
              and a C toolchain for the target.\n\
-             Build without `--features fcae-bridge-psiphon/enabled` to skip it."
+             Build without `--features psiphon-live` to skip it."
         ),
     }
 }

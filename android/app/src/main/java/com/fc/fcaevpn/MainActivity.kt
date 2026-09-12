@@ -55,6 +55,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerTorBridges: Spinner
     private lateinit var editTorBridgeLines: android.widget.EditText
     private lateinit var spinnerEngineLog: Spinner
+    private lateinit var editTorSocksPort: android.widget.EditText
+    private lateinit var editPsiphonConfig: android.widget.EditText
+    private lateinit var spinnerPsiphonRegion: Spinner
+    private lateinit var editPsiphonSocksPort: android.widget.EditText
+    private lateinit var editPsiphonHttpPort: android.widget.EditText
+    /// Regions currently offered, index 0 always "Auto" (empty code).
+    private var psiphonRegionCodes: List<String> = listOf("")
+    /// Region chosen before the list was known, restored once it arrives.
+    private var savedPsiphonRegion: String = ""
     private lateinit var switchEch: SwitchMaterial
     private lateinit var switchQuick: SwitchMaterial
     private lateinit var switchLan: SwitchMaterial
@@ -245,6 +254,11 @@ class MainActivity : AppCompatActivity() {
         spinnerTorBridges = findViewById(R.id.spinnerTorBridges)
         editTorBridgeLines = findViewById(R.id.editTorBridgeLines)
         spinnerEngineLog = findViewById(R.id.spinnerEngineLog)
+        editTorSocksPort = findViewById(R.id.editTorSocksPort)
+        editPsiphonConfig = findViewById(R.id.editPsiphonConfig)
+        spinnerPsiphonRegion = findViewById(R.id.spinnerPsiphonRegion)
+        editPsiphonSocksPort = findViewById(R.id.editPsiphonSocksPort)
+        editPsiphonHttpPort = findViewById(R.id.editPsiphonHttpPort)
         switchEch = findViewById(R.id.switchEch)
         switchQuick = findViewById(R.id.switchQuick)
         switchLan = findViewById(R.id.switchLan)
@@ -296,7 +310,15 @@ class MainActivity : AppCompatActivity() {
             // "HTTP/2 fallback" switch). Positions map to core protocol +
             // h2Enabled via the helpers below — the FFI/start intents keep
             // taking exactly the same fields as before.
-            listOf("MASQUE (HTTP/3)", "MASQUE (HTTP/2)", "WireGuard", "WARP-in-WARP"),
+            // 4 = Tor and 5 = Psiphon are peers of the WARP transports from
+            // the user's point of view ("how do I get out?"), even though
+            // internally Tor is an engine egress and Psiphon is a separate
+            // backend. The helpers below translate a position into the
+            // (backend, protocol, torMode) triple the FFI wants.
+            listOf(
+                "MASQUE (HTTP/3)", "MASQUE (HTTP/2)", "WireGuard", "WARP-in-WARP",
+                "Tor only (no WARP)", "Psiphon",
+            ),
         )
         spinnerMode.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
@@ -693,6 +715,12 @@ class MainActivity : AppCompatActivity() {
             putInt("torBridges", spinnerTorBridges.selectedItemPosition)
             putString("torBridgeLines", editTorBridgeLines.text.toString().trim())
             putInt("engineLog", spinnerEngineLog.selectedItemPosition)
+            putInt("backend", backendFromSelection())
+            putString("torSocksPort", editTorSocksPort.text.toString().trim())
+            putString("psiphonConfig", editPsiphonConfig.text.toString().trim())
+            putString("psiphonRegion", selectedPsiphonRegion())
+            putString("psiphonSocksPort", editPsiphonSocksPort.text.toString().trim())
+            putString("psiphonHttpPort", editPsiphonHttpPort.text.toString().trim())
             putBoolean("h2", h2FromSelection())
             putBoolean("ech", switchEch.isChecked)
             putBoolean("quick", switchQuick.isChecked)
@@ -720,7 +748,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadSettings() {
         spinnerProtocol.setSelection(
-            selectionPositionFromPrefs(prefs.getInt("protocol", 0), prefs.getBoolean("h2", true)))
+            selectionPositionFromPrefs(
+                prefs.getInt("protocol", 0),
+                prefs.getBoolean("h2", true),
+                prefs.getInt("backend", 0),
+            ))
         spinnerMode.setSelection(prefs.getInt("mode", 1))
         spinnerScan.setSelection(prefs.getInt("scan", 0))
         spinnerIpVersion.setSelection(prefs.getInt("ipVersion", 0))
@@ -729,6 +761,12 @@ class MainActivity : AppCompatActivity() {
         spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
         editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
         spinnerEngineLog.setSelection(prefs.getInt("engineLog", 3))
+        editTorSocksPort.setText(prefs.getString("torSocksPort", "1821"))
+        editPsiphonConfig.setText(prefs.getString("psiphonConfig", ""))
+        editPsiphonSocksPort.setText(prefs.getString("psiphonSocksPort", "0"))
+        editPsiphonHttpPort.setText(prefs.getString("psiphonHttpPort", "0"))
+        savedPsiphonRegion = prefs.getString("psiphonRegion", "") ?: ""
+        refreshPsiphonRegions()
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", false)
         switchLan.isChecked = prefs.getBoolean("lan", false)
@@ -797,6 +835,12 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("torBridges", spinnerTorBridges.selectedItemPosition)
         i.putExtra("torBridgeLines", editTorBridgeLines.text.toString().trim())
         i.putExtra("engineLog", spinnerEngineLog.selectedItemPosition)
+        i.putExtra("backend", backendFromSelection())
+        i.putExtra("torSocksPort", editTorSocksPort.text.toString().toIntOrNull() ?: 1821)
+        i.putExtra("psiphonConfig", editPsiphonConfig.text.toString().trim())
+        i.putExtra("psiphonRegion", selectedPsiphonRegion())
+        i.putExtra("psiphonSocksPort", editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
+        i.putExtra("psiphonHttpPort", editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
         startForegroundService(i)
         // Poll is started by the VPN_STATE_CHANGED broadcast from the service
         // AFTER nativeStart() succeeds — NOT here, to avoid calling native
@@ -1060,6 +1104,10 @@ class MainActivity : AppCompatActivity() {
             if (vpnActive) {
                 engineRunning = state in 1..4
                 connecting = state in 1..3
+                // Psiphon reports its egress regions only after a successful
+                // handshake, so this is the first moment the real list can be
+                // read. Cheap and idempotent: it no-ops unless the set changed.
+                if (state == 4 && isPsiphonSelected()) refreshPsiphonRegions()
                 // Detect engine stopped while we thought it was active
                 if (state == 0 && !userInitiatedDisconnect) {
                     // Engine died on its own — reset state
@@ -1179,15 +1227,71 @@ class MainActivity : AppCompatActivity() {
     private fun coreProtocolFromSelection(): Int = when (spinnerProtocol.selectedItemPosition) {
         2 -> 1    // WireGuard
         3 -> 2    // WARP-in-WARP
+        4 -> 4    // Tor only (FcaeProtocol::Tor; implies tor.mode = Only)
+        5 -> 3    // Psiphon picks its own transport (FcaeProtocol::Auto)
         else -> 0 // MASQUE (either HTTP version)
+    }
+
+    /** 0 = Aether, 1 = Psiphon. Only the Psiphon entry switches backend. */
+    private fun backendFromSelection(): Int =
+        if (spinnerProtocol.selectedItemPosition == 5) 1 else 0
+
+    private fun isPsiphonSelected(): Boolean = spinnerProtocol.selectedItemPosition == 5
+
+    /** The ISO code currently chosen, or "" for automatic. */
+    private fun selectedPsiphonRegion(): String {
+        if (!::spinnerPsiphonRegion.isInitialized) return savedPsiphonRegion
+        val i = spinnerPsiphonRegion.selectedItemPosition
+        return psiphonRegionCodes.getOrElse(i) { "" }
+    }
+
+    /**
+     * Rebuild the region list from the core.
+     *
+     * Psiphon only learns which egress regions exist after a successful
+     * handshake, so before the first connect this is just "Auto". Called on
+     * load and again once connected, which is when the real list appears.
+     */
+    private fun refreshPsiphonRegions() {
+        if (!::spinnerPsiphonRegion.isInitialized) return
+        val codes = try {
+            NativeEngine.nativePsiphonRegions()
+                .split(',')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+
+        val newCodes = listOf("") + codes
+        if (newCodes == psiphonRegionCodes) return
+        psiphonRegionCodes = newCodes
+
+        val labels = newCodes.map { if (it.isEmpty()) "Auto (fastest)" else it }
+        spinnerPsiphonRegion.adapter =
+            ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+
+        // Restore the user's pick if it is still on offer; otherwise fall
+        // back to Auto rather than silently selecting someone else's region.
+        val want = savedPsiphonRegion
+        val at = newCodes.indexOf(want)
+        spinnerPsiphonRegion.setSelection(if (at >= 0) at else 0)
     }
 
     private fun h2FromSelection(): Boolean = spinnerProtocol.selectedItemPosition == 1
 
     /** Old saved prefs keep protocol (0-2) + h2 (bool); map back to the
-     *  spinner position so existing configs load unchanged. */
-    private fun selectionPositionFromPrefs(protocol: Int, h2: Boolean): Int =
-        if (protocol == 0) { if (h2) 1 else 0 } else protocol + 1
+     *  spinner position so existing configs load unchanged.
+     *
+     *  The mapping is no longer a simple +1 now that Tor (core 4) and Psiphon
+     *  (core 3, via the backend) sit at the end of the list. */
+    private fun selectionPositionFromPrefs(protocol: Int, h2: Boolean, backend: Int = 0): Int =
+        when {
+            backend == 1 -> 5          // Psiphon
+            protocol == 4 -> 4         // Tor only
+            protocol == 0 -> if (h2) 1 else 0
+            else -> protocol + 1       // 1=wg -> 2, 2=gool -> 3
+        }
 
     // Manual formatting avoids String.format() which creates a Formatter +
     // StringBuilder internally on every call — this runs 4× per poll tick.

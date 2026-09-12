@@ -60,9 +60,23 @@ object NativeEngine {
         // Aether engine verbosity: 0=off 1=error 2=warn 3=info 4=debug 5=trace.
         // Not the FFI's own log level -- that stays at info.
         engineLog: Int,
+        // 0 = Aether, 1 = Psiphon (FcaeBackend).
+        backend: Int,
+        // Tor's own SOCKS listener; must differ from socksPort/httpPort.
+        torSocksPort: Int,
+        // Psiphon config JSON (the whole object, not a path), "" if unused.
+        psiphonConfig: String,
+        // ISO country code, or "" for automatic.
+        psiphonRegion: String,
+        // Psiphon's own proxy ports; 0 lets Psiphon choose.
+        psiphonSocksPort: Int,
+        psiphonHttpPort: Int,
     ): Boolean
     @JvmStatic external fun nativeStop()
     @JvmStatic external fun nativeFree()
+    /// Psiphon egress regions as comma-separated ISO codes, or "" before the
+    /// first successful connect.
+    @JvmStatic external fun nativePsiphonRegions(): String
     @JvmStatic external fun nativeGetLogs(): String
     @JvmStatic external fun nativeClearLogs()
 
