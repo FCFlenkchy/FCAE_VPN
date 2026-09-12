@@ -89,6 +89,14 @@ impl Backend for PsiphonBackend {
     }
 
     #[cfg(not(all(feature = "enabled", psiphon_linked)))]
+    fn availability(&self) -> std::result::Result<(), String> {
+        Err("Psiphon is registered but this build has no tunnel core linked; \
+             rebuild with --features psiphon-live (needs the core/psiphon \
+             submodule and a Go toolchain)"
+            .to_string())
+    }
+
+    #[cfg(not(all(feature = "enabled", psiphon_linked)))]
     async fn start(&self, cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
         // Validate anyway, so a misconfiguration is reported identically in a
         // build that cannot run Psiphon and one that can.

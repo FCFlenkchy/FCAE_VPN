@@ -131,13 +131,43 @@ impl Backend for AetherBackend {
         // Log-scraping for "socks5 ... listening" (the old approach) silently
         // broke whenever a message was reworded, and never fired at all in
         // TUN mode without LAN sharing.
-        let socks_addr: SocketAddr = format!("{}:{}", "127.0.0.1", cfg.socks_port)
+        let engine_socks: SocketAddr = format!("{}:{}", "127.0.0.1", cfg.socks_port)
             .parse()
             .map_err(|e| CoreError::InvalidConfig(format!("bad socks address: {e}")))?;
 
+        // WHICH proxy the TUN must use.
+        //
+        // In Chain and Only mode the traffic only reaches the tor network via
+        // the SOCKS port tor itself opens (AETHER_TOR_BIND, default
+        // 127.0.0.1:1820). The engine's own port is the *plain* tunnel: in
+        // Chain mode it is the carrier tor dials out through, so pointing the
+        // TUN at it bypasses tor completely -- the UI said "tor ready" while
+        // every packet left through plain WARP, which is why check sites
+        // reported a Cloudflare address instead of a tor exit.
+        //
+        // Reverse mode is the opposite: tor is the carrier *underneath* the
+        // tunnel, so the engine's SOCKS port is already the correct exit.
+        let tor_socks: Option<SocketAddr> = match cfg.tor.mode {
+            FcaeTorMode::Chain | FcaeTorMode::Only => Some(
+                cfg.tor
+                    .bind
+                    .as_deref()
+                    .unwrap_or("127.0.0.1:1820")
+                    .parse()
+                    .map_err(|e| {
+                        CoreError::InvalidConfig(format!("bad tor socks address: {e}"))
+                    })?,
+            ),
+            FcaeTorMode::Off | FcaeTorMode::Reverse => None,
+        };
+        let socks_addr = tor_socks.unwrap_or(engine_socks);
+
         cx.report(FcaeState::Connecting, "Establishing tunnel…");
 
-        let ready = wait_for_listener(socks_addr, cfg.start_timeout(), &finished).await;
+        // Wait for the engine's own listener first: in Chain mode tor cannot
+        // bootstrap until the carrier tunnel is up, so waiting on tor's port
+        // directly would time out for the wrong reason.
+        let ready = wait_for_listener(engine_socks, cfg.start_timeout(), &finished).await;
 
         if !ready {
             // Either the engine died, or it never opened the port.
@@ -148,11 +178,34 @@ impl Backend for AetherBackend {
                 .and_then(|r| r.err())
                 .unwrap_or_else(|| {
                     format!(
-                        "the Aether engine did not open its SOCKS listener on {socks_addr} within {:?}",
+                        "the Aether engine did not open its SOCKS listener on {engine_socks} within {:?}",
                         cfg.start_timeout()
                     )
                 });
             return Err(CoreError::StartFailed(msg));
+        }
+
+        // Tor bootstrap happens after the carrier is up and can take minutes
+        // over bridges. Only report connected once tor is actually accepting,
+        // otherwise the TUN is pointed at a port nothing is listening on yet
+        // and the first packets are silently dropped.
+        if let Some(tor_addr) = tor_socks {
+            cx.report(FcaeState::Connecting, "Bootstrapping Tor…");
+            if !wait_for_listener(tor_addr, cfg.tor_start_timeout(), &finished).await {
+                engine_task.abort();
+                let msg = outcome
+                    .lock()
+                    .clone()
+                    .and_then(|r| r.err())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "tor did not open its SOCKS listener on {tor_addr} within {:?}",
+                            cfg.tor_start_timeout()
+                        )
+                    });
+                return Err(CoreError::StartFailed(msg));
+            }
+            log::info!("[tor] egress ready on {tor_addr}; tun traffic routed through tor");
         }
 
         Ok(Box::new(AetherHandle {

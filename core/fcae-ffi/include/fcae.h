@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 4
+#define FCAE_ABI_VERSION 5
 
 /* ── Enumerations ──────────────────────────────────────────────────── */
 
@@ -62,6 +62,32 @@ typedef enum {
     FCAE_BACKEND_AETHER  = 0,
     FCAE_BACKEND_PSIPHON = 1
 } FcaeBackend;
+
+/* What a backend supports, so the UI can describe it rather than hardcoding
+ * per-backend behaviour.
+ *
+ * fcae_available_backends() returns bare ids, which cannot express "compiled
+ * in but a stub" (Psiphon without psiphon-live) or "ignores scan modes".
+ * Iterate fcae_backend_count() and fill one of these per index. */
+typedef struct {
+    uint32_t        struct_size;
+    uint32_t        abi_version;
+
+    FcaeBackend     backend;
+    char            id[32];                  /* "aether", "psiphon"        */
+    char            display_name[64];        /* for a menu entry           */
+
+    bool            available;               /* registered AND can start   */
+    char            unavailable_reason[192]; /* empty when available       */
+
+    bool            supports_socks;
+    bool            supports_http_proxy;
+    bool            supports_gateway_scanning; /* false for Psiphon        */
+    bool            supports_routing_rules;
+    bool            requires_privileges;
+
+    uint64_t        _reserved[4];
+} FcaeBackendInfo;
 
 typedef enum {
     FCAE_PROTOCOL_MASQUE    = 0,
@@ -339,6 +365,14 @@ uint32_t   fcae_abi_version(void);
  * total count. Pass NULL/0 to query the count only. */
 uint32_t   fcae_available_backends(FcaeBackend *out, uint32_t max);
 
+/* Describe backend `index` (0 .. fcae_backend_count()-1). Call after
+ * fcae_init(): backends register during init. Returns FCAE_INVALID_CONFIG if
+ * the index is out of range. */
+FcaeStatus fcae_backend_info(uint32_t index, FcaeBackendInfo *out);
+
+/* How many backends fcae_backend_info() can describe. */
+uint32_t   fcae_backend_count(void);
+
 /* Release everything. fcae_init() must be called again afterwards. */
 FcaeStatus fcae_shutdown(void);
 
@@ -366,4 +400,4 @@ FcaeStatus fcae_poll_update(FcaeUpdateInfo *out);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x9fa239f6661f663d */
+/* fcae-abi-fingerprint: 0xed18462b5ae255d1 */

@@ -119,8 +119,16 @@ impl Supervisor {
         &self.telemetry
     }
 
+    /// True only while the session thread is actually alive.
+    ///
+    /// A finished-but-unreaped session must not report as running, or the UI
+    /// keeps showing "establishing" for a tunnel that already died and never
+    /// re-enables its connect button.
     pub fn is_running(&self) -> bool {
-        self.running.lock().is_some()
+        self.running
+            .lock()
+            .as_ref()
+            .is_some_and(|r| !r.thread.is_finished())
     }
 
     /// Start a session. Returns as soon as the worker thread is spawned; the
@@ -138,6 +146,20 @@ impl Supervisor {
         }
 
         let mut slot = self.running.lock();
+        // Reap a session that already ended by itself.
+        //
+        // `running` is only cleared by stop(). When the engine terminated on
+        // its own -- it errored, the tunnel dropped, or run_session returned
+        // -- the thread finished but the slot stayed occupied, so every later
+        // start() returned AlreadyRunning. The UI's connect did nothing and
+        // it sat on "Disconnected"/"Establishing" until the app was killed,
+        // which is exactly the connect-once-then-never-again symptom.
+        if slot.as_ref().is_some_and(|r| r.thread.is_finished()) {
+            if let Some(dead) = slot.take() {
+                let _ = dead.thread.join();
+            }
+            log::info!("[session] reaped a session that had already exited");
+        }
         if slot.is_some() {
             return Err(CoreError::AlreadyRunning);
         }

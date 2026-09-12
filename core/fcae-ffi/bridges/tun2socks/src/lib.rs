@@ -319,12 +319,22 @@ impl TunBridge for Tun2SocksBridge {
             .map_err(|_| CoreError::Internal("device string contains a NUL".into()))?;
         let c_proxy = CString::new(proxy.clone())
             .map_err(|_| CoreError::Internal("proxy string contains a NUL".into()))?;
-        let c_level = CString::new(if log::log_enabled!(log::Level::Debug) {
-            "debug"
-        } else {
-            "info"
-        })
-        .expect("static string");
+        // tun2socks is silent by default. It logged a line per connection,
+        // which on a busy device is thousands of useless entries an hour that
+        // bury the engine's own messages -- and the data plane is not
+        // something the user can act on anyway. "silent" still leaves the
+        // fatal path intact: installNonFatalLogger() clamps the level to
+        // Fatal so zap's OnFatal hook keeps converting a would-be os.Exit
+        // into a recoverable panic.
+        //
+        // Opt back in with FCAE_TUN2SOCKS_LOG=debug|info|warn|error when
+        // debugging the data plane.
+        let level = std::env::var("FCAE_TUN2SOCKS_LOG")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| matches!(v.as_str(), "debug" | "info" | "warn" | "error" | "silent"))
+            .unwrap_or_else(|| "silent".to_string());
+        let c_level = CString::new(level).expect("level has no NUL");
 
         let rc = unsafe {
             t2s_start(
@@ -378,6 +388,15 @@ impl TunBridge for Tun2SocksBridge {
             // Only ever our dup — never the JVM's original.
             unsafe { libc::close(fd) };
         }
+
+        // Forget the platform descriptor too. The JVM closes its
+        // ParcelFileDescriptor on disconnect and the kernel immediately
+        // recycles that small integer onto an unrelated file, so a latched
+        // value makes the *next* connect dup a stranger's fd: tun2socks then
+        // reads from something that is not a tun device and the session hangs
+        // in "establishing" forever. FCAEVpnService always calls
+        // nativeSetTunFd() again before the next start.
+        self.clear_android_fd();
 
         self.running.store(false, Ordering::SeqCst);
         log::info!("[tun] down");

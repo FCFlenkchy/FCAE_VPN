@@ -186,7 +186,18 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         config::check_init_options(opts)?;
         let opts = &*opts;
 
-        if RUNTIME.get().is_some() {
+        // Re-arm after a previous fcae_shutdown().
+        //
+        // RUNTIME is a process-wide OnceCell, so the Runtime itself (and the
+        // supervisor inside it) is deliberately built only once. But
+        // fcae_shutdown() detaches the log callback and the state hook, and
+        // a plain early return here left them detached forever: the second
+        // fcae_init() was a no-op, so the UI's state_cb never fired again and
+        // the app sat on "Disconnected"/"Establishing" no matter what the
+        // session actually did. Re-attach the host's callbacks instead.
+        if let Some(rt) = RUNTIME.get() {
+            logger::install(opts.log_cb, opts.user_data, opts.max_log_level);
+            rt.telemetry.set_state_hook(state_hook(opts));
             return Ok(());
         }
 
@@ -196,14 +207,7 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
 
         // Forward state transitions to the host callback, so a UI can react
         // on the edge instead of polling telemetry every frame.
-        if let Some(cb) = opts.state_cb {
-            let ud = opts.user_data as usize;
-            telemetry.set_state_hook(Some(Box::new(move |state| {
-                // SAFETY: user_data is opaque to us and the host guarantees
-                // it outlives the library (documented in fcae.h).
-                unsafe { cb(state, ud as *mut c_void) };
-            })));
-        }
+        telemetry.set_state_hook(state_hook(opts));
 
         // Discover the LAN IP off the critical path.
         {
@@ -408,6 +412,75 @@ pub unsafe extern "C" fn fcae_available_backends(out: *mut FcaeBackend, max: u32
     available.len() as u32
 }
 
+/// Describe one backend: name, whether it can actually run, and what it
+/// supports.
+///
+/// Pairs with [`fcae_available_backends`], which only yields bare ids. Ids
+/// alone cannot express "compiled in but a stub" or "ignores scan modes", so
+/// every UI ended up hardcoding that per backend. Iterate
+/// [`fcae_backend_count`] and call this for each index.
+///
+/// Returns `InvalidConfig` if `index` is out of range. Call this *after*
+/// [`fcae_init`]: backends register during init, so before that every entry
+/// reports unavailable.
+///
+/// # Safety
+/// `out` must point to a valid, correctly-stamped [`FcaeBackendInfo`].
+#[no_mangle]
+pub unsafe extern "C" fn fcae_backend_info(index: u32, out: *mut FcaeBackendInfo) -> FcaeStatus {
+    guard("fcae_backend_info", move || {
+        let out = out.as_mut().ok_or(CoreError::NullArgument("out"))?;
+        if out.abi_version != FCAE_ABI_VERSION
+            || out.struct_size as usize != std::mem::size_of::<FcaeBackendInfo>()
+        {
+            return Err(CoreError::AbiMismatch("FcaeBackendInfo".into()));
+        }
+
+        let id = *fcae_runtime::registry::ALL
+            .get(index as usize)
+            .ok_or_else(|| {
+                CoreError::InvalidConfig(format!(
+                    "backend index {index} is out of range (fcae_backend_count() = {})",
+                    fcae_runtime::registry::ALL.len()
+                ))
+            })?;
+
+        let (available, reason, caps) = fcae_runtime::registry::describe(id);
+
+        out.backend = id;
+        fill(&mut out.id, backend_id_str(id));
+        fill(&mut out.display_name, backend_display_name(id));
+        out.available = available;
+        fill(&mut out.unavailable_reason, &reason);
+        out.supports_socks = caps.socks;
+        out.supports_http_proxy = caps.http_proxy;
+        out.supports_gateway_scanning = caps.gateway_scanning;
+        out.supports_routing_rules = caps.routing_rules;
+        out.requires_privileges = caps.requires_privileges;
+        Ok(())
+    })
+}
+
+/// How many backends [`fcae_backend_info`] can describe.
+#[no_mangle]
+pub extern "C" fn fcae_backend_count() -> u32 {
+    fcae_runtime::registry::ALL.len() as u32
+}
+
+fn backend_id_str(id: FcaeBackend) -> &'static str {
+    match id {
+        FcaeBackend::Aether => "aether",
+        FcaeBackend::Psiphon => "psiphon",
+    }
+}
+
+fn backend_display_name(id: FcaeBackend) -> &'static str {
+    match id {
+        FcaeBackend::Aether => "Aether (WARP / MASQUE)",
+        FcaeBackend::Psiphon => "Psiphon",
+    }
+}
+
 /// Tear everything down and release resources. After this, `fcae_init` must
 /// be called again before any other function.
 #[no_mangle]
@@ -416,10 +489,26 @@ pub extern "C" fn fcae_shutdown() -> FcaeStatus {
         if let Some(rt) = RUNTIME.get() {
             let _ = rt.supervisor.stop();
             rt.telemetry.set_state_hook(None);
+            // Drop any Android descriptor from the finished session. It is a
+            // small integer that the JVM will recycle onto an unrelated file,
+            // so a latched value makes the next start dup a stranger's fd.
+            #[cfg(feature = "tun")]
+            rt.bridge.clear_android_fd();
         }
         logger::uninstall();
         Ok(())
     })
+}
+
+/// Build the telemetry state hook that forwards to the host's `state_cb`.
+fn state_hook(opts: &FcaeInitOptions) -> Option<Box<dyn Fn(FcaeState) + Send + Sync>> {
+    let cb = opts.state_cb?;
+    let ud = opts.user_data as usize;
+    Some(Box::new(move |state| {
+        // SAFETY: user_data is opaque to us and the host guarantees it
+        // outlives the library (documented in fcae.h).
+        unsafe { cb(state, ud as *mut c_void) };
+    }))
 }
 
 // ── Update checking ─────────────────────────────────────────────────────

@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 4;
+pub const FCAE_ABI_VERSION: u32 = 5;
 
 // ── Enumerations ────────────────────────────────────────────────────────
 
@@ -51,6 +51,45 @@ pub enum FcaeBackend {
     /// Psiphon tunnel core. Reserved; `fcae_start` returns
     /// [`FcaeStatus::BackendUnavailable`] until the backend is compiled in.
     Psiphon = 1,
+}
+
+/// What a backend supports, so the UI can describe it instead of hardcoding
+/// per-backend special cases.
+///
+/// Previously the only backend introspection was
+/// [`fcae_available_backends`], which returns bare ids: the UI had no way to
+/// tell "Psiphon is compiled in and ready" from "Psiphon is a stub that will
+/// fail on start", and no way to know Psiphon ignores scan modes and gateway
+/// pinning. Both had to be hardcoded UI-side and silently went stale.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FcaeBackendInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+
+    pub backend: FcaeBackend,
+    /// Stable lowercase id, e.g. "aether", "psiphon".
+    pub id: [c_char; 32],
+    /// Human-readable name for a menu, e.g. "Psiphon".
+    pub display_name: [c_char; 64],
+
+    /// Registered AND able to actually start a tunnel.
+    pub available: bool,
+    /// Why it is unavailable; empty when `available` is true.
+    pub unavailable_reason: [c_char; 192],
+
+    /// Exposes a local SOCKS5 endpoint (required for TUN mode).
+    pub supports_socks: bool,
+    /// Exposes its own HTTP CONNECT endpoint.
+    pub supports_http_proxy: bool,
+    /// Honours `scan_mode` and `force_peer`; false for Psiphon.
+    pub supports_gateway_scanning: bool,
+    /// Applies split-tunnel rules internally.
+    pub supports_routing_rules: bool,
+    /// Needs elevation even in proxy mode.
+    pub requires_privileges: bool,
+
+    pub _reserved: [u64; 4],
 }
 
 /// Transport selected *within* a backend.

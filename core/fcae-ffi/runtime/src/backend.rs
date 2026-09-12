@@ -205,5 +205,14 @@ pub trait Backend: Send + Sync {
 
     /// Best-effort global cleanup for state this backend may have left behind
     /// after a crash or a hard kill in a *previous* process lifetime.
+    /// Whether a start would actually work, without attempting one.
+    ///
+    /// A registered backend may still be a compile-time stub; returning the
+    /// reason here lets the UI grey the entry out up front instead of after
+    /// the user hits Connect.
+    fn availability(&self) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
     fn recover_stale_state(&self) {}
 }

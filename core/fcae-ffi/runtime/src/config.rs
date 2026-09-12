@@ -240,6 +240,22 @@ impl SessionConfig {
             FcaeScanMode::Thorough | FcaeScanMode::Ironclad => Duration::from_secs(150),
         }
     }
+
+    /// How long to wait for tor to open its SOCKS port, on top of the carrier
+    /// tunnel already being up.
+    ///
+    /// Bootstrapping a tor circuit is far slower than opening a local
+    /// listener, and slower again over obfs4/snowflake bridges where the
+    /// engine retries whole waves of them, so this is deliberately generous
+    /// compared to [`start_timeout`](Self::start_timeout).
+    pub fn tor_start_timeout(&self) -> Duration {
+        let base = match self.tor.bridges {
+            FcaeTorBridges::None => Duration::from_secs(120),
+            // Bridge bootstrap probes run to 360s per wave in the engine.
+            _ => Duration::from_secs(420),
+        };
+        base + self.start_timeout()
+    }
 }
 
 /// Validate the caller's struct header. Checked *before* any field is read,

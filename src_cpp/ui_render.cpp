@@ -1147,6 +1147,32 @@ void render_ui() {
             ImGui::Combo("Sysprofile", &g_app.sys_profile, sysprofiles, 4);
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("Backends in this build");
+            // Queried from the core rather than hardcoded here, so a build
+            // without psiphon-live says so instead of the UI quietly implying
+            // the backend works.
+            {
+                uint32_t n = fcae_backend_count();
+                for (uint32_t i = 0; i < n; ++i) {
+                    FcaeBackendInfo bi;
+                    memset(&bi, 0, sizeof(bi));
+                    bi.struct_size = (uint32_t)sizeof(bi);
+                    bi.abi_version = FCAE_ABI_VERSION;
+                    if (fcae_backend_info(i, &bi) != FCAE_OK) continue;
+
+                    if (bi.available) {
+                        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
+                                           "  %s - ready", bi.display_name);
+                    } else {
+                        ImGui::TextColored(ImVec4(0.70f, 0.70f, 0.75f, 1.0f),
+                                           "  %s - unavailable", bi.display_name);
+                        if (bi.unavailable_reason[0] && ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", bi.unavailable_reason);
+                    }
+                }
+            }
+
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Engine log level");
             // Verbosity of the aether engine itself, not of this UI's log
             // pane -- the FFI always reports to the host at info.
