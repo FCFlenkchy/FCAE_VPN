@@ -232,6 +232,19 @@ impl<'a> CArchive<'a> {
             "resolve Go dependencies (go mod tidy)",
         )?;
 
+        let mut ldflags = self.ldflags.clone();
+        if shared {
+            // Android 15 ships 16 KB memory pages. A shared object linked with
+            // the historical 4 KB alignment is rejected by the loader there,
+            // so every Go .so we stage into jniLibs needs this. It goes
+            // through -extldflags because the NDK linker does the final
+            // layout, not the Go linker. Psiphon's own make.bash passes the
+            // same flag.
+            ldflags.push(
+                "-extldflags=-Wl,-z,max-page-size=16384,-z,common-page-size=16384".into(),
+            );
+        }
+
         let mut cmd = Command::new(&go);
         cmd.current_dir(self.module_dir)
             .arg("build")
@@ -241,8 +254,8 @@ impl<'a> CArchive<'a> {
         if !self.tags.is_empty() {
             cmd.arg("-tags").arg(self.tags.join(","));
         }
-        if !self.ldflags.is_empty() {
-            cmd.arg("-ldflags").arg(self.ldflags.join(" "));
+        if !ldflags.is_empty() {
+            cmd.arg("-ldflags").arg(ldflags.join(" "));
         }
         cmd.arg("-o").arg(&archive).arg(self.package);
 

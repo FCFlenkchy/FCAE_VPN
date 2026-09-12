@@ -54,6 +54,17 @@ fn main() {
     let mut archive = fcae_build::go::CArchive::new(&go_dir, ".", "libpsiphon_bridge");
     archive.target = target;
 
+    // Required by an in-proxy dependency: github.com/wlynxg/anet does
+    //
+    //     //go:linkname zoneCache net.zoneCache
+    //
+    // a pull-style linkname into a private stdlib variable. Go 1.23 started
+    // rejecting those at link time with "invalid reference to net.zoneCache",
+    // so the build fails once it reaches the linker. Upstream hits exactly
+    // this and disables the check the same way -- see the -checklinkname=0 in
+    // core/psiphon/MobileLibrary/Android/make.bash.
+    archive.ldflags.push("-checklinkname=0".into());
+
     match archive.build() {
         Ok(built) => {
             // Android builds a c-shared .so (Go rejects c-archive there), so
