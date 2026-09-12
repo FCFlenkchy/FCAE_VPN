@@ -161,6 +161,33 @@ impl<'a> CArchive<'a> {
     }
 
     /// Build the archive into `OUT_DIR`.
+    /// Run an auxiliary `go` subcommand (module resolution, etc.) in
+    /// `module_dir`, surfacing its stderr verbatim when it fails.
+    fn run_go_step(
+        go: &str,
+        module_dir: &Path,
+        args: &[&str],
+        what: &str,
+    ) -> Result<(), GoError> {
+        crate::note(format!("{what}..."));
+        let output = Command::new(go)
+            .current_dir(module_dir)
+            .args(args)
+            .env("GOFLAGS", "-mod=mod")
+            .env("CGO_ENABLED", "0")
+            .output()
+            .map_err(|e| GoError::Build(format!("could not run `go {}`: {e}", args.join(" "))))?;
+
+        if !output.status.success() {
+            return Err(GoError::Build(format!(
+                "failed to {what}: {}\n--- stderr ---\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(())
+    }
+
     pub fn build(&self) -> Result<Built, GoError> {
         let go = Self::go_bin()?;
         let cc = Self::cc_for(self.target, self.android_api)?;
@@ -185,6 +212,25 @@ impl<'a> CArchive<'a> {
             self.target.goos(),
             self.target.goarch()
         ));
+
+        // Resolve the module graph before building.
+        //
+        // The bridge module `replace`s tun2socks with the submodule checkout,
+        // so the submodule is compiled as *source* and its own go.sum does not
+        // apply: Go demands that the MAIN module (this bridge) carry go.sum
+        // entries for every transitive dependency (gvisor, zap, chi, x/crypto,
+        // ...). We deliberately do not vendor or hand-maintain that list, so
+        // `go mod tidy` synthesises go.mod/go.sum here instead of failing with
+        // a wall of "missing go.sum entry" errors.
+        //
+        // GOFLAGS=-mod=mod lets tidy write the files; the build below then runs
+        // against a complete, consistent graph.
+        Self::run_go_step(
+            &go,
+            self.module_dir,
+            &["mod", "tidy"],
+            "resolve Go dependencies (go mod tidy)",
+        )?;
 
         let mut cmd = Command::new(&go);
         cmd.current_dir(self.module_dir)
