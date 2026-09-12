@@ -1180,10 +1180,16 @@ pub struct AetherUpdateInfoOut {
     pub release_notes: [u8; 1024],
     pub download_url: [u8; 512],
     pub status_message: [u8; 256],
+    /// The offered release is a pre-release (UI shows a BETA tag).
+    pub is_prerelease: bool,
+    pub release_date: [u8; 32],
 }
 
 #[no_mangle]
-pub extern "C" fn aether_check_update_async(current_version: *const c_char) {
+pub extern "C" fn aether_check_update_async(
+    current_version: *const c_char,
+    include_prereleases: bool,
+) {
     let cur_ver = cstr_opt(current_version).unwrap_or_else(|| "dev".to_string());
 
     // Mark check as in progress
@@ -1217,7 +1223,11 @@ pub extern "C" fn aether_check_update_async(current_version: *const c_char) {
         let result = rt.block_on(async {
             match aether_engine::version_checker::fetch_latest_version().await {
                 Ok(info) => {
-                    let r = aether_engine::version_checker::compare_versions(&cur_ver, &info);
+                    let r = aether_engine::version_checker::compare_versions(
+                        &cur_ver,
+                        &info,
+                        include_prereleases,
+                    );
                     Ok(r)
                 }
                 Err(e) => Err(e),
@@ -1230,8 +1240,11 @@ pub extern "C" fn aether_check_update_async(current_version: *const c_char) {
         match result {
             Ok(r) => {
                 if r.update_available {
-                    state.status_message =
-                        format!("Update available: {}", r.latest_version);
+                    state.status_message = if r.is_prerelease {
+                        format!("Pre-release available: {}", r.latest_version)
+                    } else {
+                        format!("Update available: {}", r.latest_version)
+                    };
                 } else {
                     state.status_message = format!("Up to date ({})", r.current_version);
                 }
@@ -1259,13 +1272,16 @@ pub extern "C" fn aether_poll_update(out: *mut AetherUpdateInfoOut) -> bool {
     if let Some(ref r) = state.result {
         unsafe {
             (*out).update_available = r.update_available;
+            (*out).is_prerelease = r.is_prerelease;
             copy_str_to_buf(&mut (*out).latest_version, &r.latest_version);
             copy_str_to_buf(&mut (*out).release_notes, &r.release_notes);
             copy_str_to_buf(&mut (*out).download_url, &r.download_url);
+            copy_str_to_buf(&mut (*out).release_date, &r.release_date);
         }
     } else {
         unsafe {
             (*out).update_available = false;
+            (*out).is_prerelease = false;
         }
     }
 
@@ -1282,6 +1298,7 @@ pub extern "C" fn aether_poll_update(out: *mut AetherUpdateInfoOut) -> bool {
 pub extern "C" fn aether_check_update_from_json(
     current_version: *const c_char,
     json: *const c_char,
+    include_prereleases: bool,
 ) -> bool {
     let cur = cstr_opt(current_version).unwrap_or_else(|| "dev".to_string());
     let json_str = match cstr_opt(json) {
@@ -1296,13 +1313,17 @@ pub extern "C" fn aether_check_update_from_json(
         }
     };
 
-    match aether_engine::version_checker::check_from_json(&cur, &json_str) {
+    match aether_engine::version_checker::check_from_json(&cur, &json_str, include_prereleases) {
         Ok(r) => {
             let mut state = UPDATE_STATE.lock();
             state.check_in_progress = false;
             state.check_done = true;
             if r.update_available {
-                state.status_message = format!("Update available: {}", r.latest_version);
+                state.status_message = if r.is_prerelease {
+                    format!("Pre-release available: {}", r.latest_version)
+                } else {
+                    format!("Update available: {}", r.latest_version)
+                };
             } else {
                 state.status_message = format!("Up to date ({})", r.current_version);
             }
