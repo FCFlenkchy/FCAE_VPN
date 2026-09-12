@@ -10,6 +10,25 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class FCAEVpnService extends VpnService {
+
+    /**
+     * MTU of the VpnService interface.
+     *
+     * The native side must configure tun2socks with exactly this value --
+     * see cfg.tun_mtu in android_jni.cpp. If the two disagree the tunnel
+     * establishes and then silently drops oversized packets.
+     *
+     * This is the MTU of the LOCAL tun device only; it is not the tunnel MTU.
+     * tun2socks terminates TCP on this interface and re-dials through SOCKS,
+     * so apps' segments are rebuilt by the engine to fit whatever the tunnel
+     * carries (TUNNEL_MTU 1280, H2_TUNNEL_MTU 1500, INNER_MTU 1200 for
+     * warp-in-warp). A larger local MTU therefore means fewer, bigger reads
+     * across the JNI/gVisor boundary rather than oversized wire packets.
+     *
+     * Do NOT go below 1280: this interface carries an IPv6 address (fd00::2)
+     * and Android/Linux reject IPv6 on links with MTU < 1280.
+     */
+    static final int kVpnServiceMtu = 1500;
     private static final String TAG = "FCAE_VPN";
 
     public static final String ACTION_STOP       = "com.fc.fcaevpn.STOP";
@@ -179,6 +198,10 @@ public class FCAEVpnService extends VpnService {
         final String accessEm  = intent.getStringExtra("accessEmail");
         final String routesF   = intent.getStringExtra("routesFile");
         final String routesI   = intent.getStringExtra("routesInline");
+        final int torMode      = intent.getIntExtra("torMode", 0);
+        final int torBridges   = intent.getIntExtra("torBridges", 0);
+        final String torLines  = intent.getStringExtra("torBridgeLines");
+        final String torLinesV = (torLines == null) ? "" : torLines;
         final String teamVal   = (teamName == null) ? "" : teamName;
         final String tokenVal  = (accessTok == null) ? "" : accessTok;
         final String emailVal  = (accessEm == null) ? "" : accessEm;
@@ -189,14 +212,10 @@ public class FCAEVpnService extends VpnService {
             try {
                 Builder builder = new Builder();
                 builder.setSession("FCAE VPN");
-                // 1280 matches the engine's tunnel MTU (TUNNEL_MTU). Do NOT
-                // go below 1280: this interface carries an IPv6 address
-                // (fd00::2) and Android/Linux reject IPv6 on links with
-                // MTU < 1280, making establish() fail outright.
-                // Warp-in-warp: the inner tunnel runs at INNER_MTU (1200),
-                // and the engine's netstack fragments inner packets to fit.
-                // The OUTER tunnel gets WIW_OUTER_MTU (1400) headroom.
-                builder.setMtu(1280);
+                // See kVpnServiceMtu: this is the local tun device MTU, not
+                // the tunnel MTU. Must stay in sync with cfg.tun_mtu on the
+                // native side.
+                builder.setMtu(kVpnServiceMtu);
                 builder.addAddress("10.0.0.2", 32);
                 builder.addAddress("fd00::2", 128);
                 builder.addRoute("0.0.0.0", 0);
@@ -232,7 +251,8 @@ public class FCAEVpnService extends VpnService {
                     false, 16, 32, 2, 10, socksPortForMode, http,
                     peerVal, cfgPath, h2, ech,
                     sniVal, sysProfile,
-                    teamVal, tokenVal, emailVal, routesVal, routesIVal
+                    teamVal, tokenVal, emailVal, routesVal, routesIVal,
+                    torMode, torBridges, torLinesV
                 );
                 if (!ok) {
                     handler.post(this::fullShutdown);

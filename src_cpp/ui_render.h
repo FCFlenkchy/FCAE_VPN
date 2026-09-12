@@ -65,6 +65,11 @@ struct AppState {
     char routes_inline[2048] = {};
     int sys_profile       = 0;   // 0=Auto, 1=Low, 2=Medium, 3=High
 
+    // Tor egress (inside the Aether engine, not a separate backend).
+    int  tor_mode    = 0;        // FcaeTorMode
+    int  tor_bridges = 0;        // FcaeTorBridges
+    char tor_bridge_lines[2048] = {};
+
     FcaeTelemetry telem = {};
     double last_telem_t = 0.0;
 
@@ -151,6 +156,10 @@ struct AppState {
         c.zero_trust.team_name    = team_name[0] ? team_name : nullptr;
         c.zero_trust.access_token = access_token[0] ? access_token : nullptr;
         c.zero_trust.access_email = access_email[0] ? access_email : nullptr;
+
+        c.tor.mode         = (FcaeTorMode)tor_mode;
+        c.tor.bridges      = (FcaeTorBridges)tor_bridges;
+        c.tor.bridge_lines = tor_bridge_lines[0] ? tor_bridge_lines : nullptr;
 
         return c;
     }

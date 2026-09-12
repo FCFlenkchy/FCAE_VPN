@@ -359,11 +359,20 @@ async fn run_session(
         }
 
         // Raise TUN once the backend's SOCKS endpoint is actually live.
+        //
+        // Proxy mode deliberately falls through: the backend's own SOCKS/HTTP
+        // listeners are the entire product there, and tun2socks must never be
+        // started -- no device, no routes, no Go stack.
         if config.mode == FcaeMode::Tun {
             if let Err(e) = tun_bridge.start(&config, &endpoints) {
                 let _ = handle.stop(stop_timeout).await;
                 return Err(e);
             }
+        } else {
+            debug_assert!(
+                !tun_bridge.is_running(),
+                "proxy mode must never leave a TUN device up"
+            );
         }
 
         sink.set_state(

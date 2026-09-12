@@ -37,6 +37,7 @@ use fcae_abi::FcaeState;
 use fcae_runtime::backend::{
     Backend, BackendContext, BackendHandle, BackendId, Capabilities, Counters, Endpoints,
 };
+use fcae_abi::FcaeTorMode;
 use fcae_runtime::config::{env_compat, SessionConfig};
 use fcae_runtime::error::{CoreError, Result};
 use fcae_runtime::telemetry::TelemetrySink;
@@ -75,6 +76,18 @@ impl Backend for AetherBackend {
         // Project the typed config onto the engine's env vars. This always
         // writes *every* variable it owns, so nothing leaks in from the
         // previous session.
+        // Fail fast on a Tor request this binary cannot honour. Without this
+        // the engine starts, runs, and only reports "this build has no tor
+        // support" from deep inside the egress setup -- by which point the UI
+        // is already showing "Connecting".
+        if cfg.tor.is_enabled() && !cfg!(feature = "tor") {
+            return Err(CoreError::InvalidConfig(format!(
+                "tor mode `{}` was requested but this build has no tor support; \
+                 rebuild with `--features tor`",
+                tor_mode_label(cfg.tor.mode)
+            )));
+        }
+
         env_compat::apply(&cfg);
         aether_engine::reset_stats();
 
@@ -243,6 +256,15 @@ impl BackendHandle for AetherHandle {
             tx_bytes_sec: tx,
             rtt_ms: aether_engine::rtt_ms() as u32,
         }
+    }
+}
+
+fn tor_mode_label(mode: FcaeTorMode) -> &'static str {
+    match mode {
+        FcaeTorMode::Off => "off",
+        FcaeTorMode::Chain => "chain",
+        FcaeTorMode::Reverse => "reverse",
+        FcaeTorMode::Only => "only",
     }
 }
 

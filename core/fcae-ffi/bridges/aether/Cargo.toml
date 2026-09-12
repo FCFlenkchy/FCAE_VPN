@@ -10,6 +10,14 @@ description = "Aether (MASQUE/WireGuard/Gool) backend plugin for the FCAE FFI."
 name = "fcae_bridge_aether"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Forward to the engine's own default-off tor feature. Tor is an egress
+# *inside* aether, not a separate fcae-ffi backend, so there is no bridge to
+# register -- enabling this only makes the engine's tor.rs compile for real
+# instead of returning "this build has no tor support".
+tor = ["aether-engine/tor"]
+
 [dependencies]
 fcae-abi.workspace = true
 fcae-runtime.workspace = true

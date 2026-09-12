@@ -25,6 +25,10 @@ psiphon = ["dep:fcae-bridge-psiphon"]
 psiphon-live = ["psiphon", "fcae-bridge-psiphon/enabled"]
 # Link the in-process tun2socks bridge.
 tun = ["dep:fcae-bridge-tun2socks"]
+# Tor egress inside the Aether engine. OFF by default: it pulls in arti-client
+# and a statically built liblzma, which need a C cross-toolchain on the
+# Android and Windows-cross runners.
+tor = ["aether", "fcae-bridge-aether/tor"]
 
 [dependencies]
 fcae-abi.workspace = true

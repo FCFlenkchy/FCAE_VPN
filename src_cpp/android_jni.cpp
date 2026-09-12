@@ -123,7 +123,10 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jstring accessToken,
     jstring accessEmail,
     jstring routesFile,
-    jstring routesInline
+    jstring routesInline,
+    jint torMode,
+    jint torBridges,
+    jstring torBridgeLines
 ) {
     ensure_init();
 
@@ -138,6 +141,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     std::string emailOwned = jstr(env, accessEmail);
     std::string routesOwned = jstr(env, routesFile);
     std::string routesInlineOwned = jstr(env, routesInline);
+    std::string torLinesOwned = jstr(env, torBridgeLines);
 
     FcaeConfig cfg;
     fcae_config_default(&cfg);
@@ -173,6 +177,13 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.routing.rules_file   = routesOwned.empty() ? nullptr : routesOwned.c_str();
     cfg.routing.rules_inline = routesInlineOwned.empty() ? nullptr : routesInlineOwned.c_str();
 
+    // Tor is an egress inside the Aether engine, not a separate backend, so
+    // it rides along on the same config struct. The state dir is left NULL so
+    // the core puts it under data_dir (app-private storage).
+    cfg.tor.mode         = (FcaeTorMode)torMode;
+    cfg.tor.bridges      = (FcaeTorBridges)torBridges;
+    cfg.tor.bridge_lines = torLinesOwned.empty() ? nullptr : torLinesOwned.c_str();
+
     // The data directory is a real config field now, not a smuggled env var.
     std::string dataDir;
     if (!cfgOwned.empty()) {
@@ -186,6 +197,14 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     // The VpnService fd was handed over by nativeSetTunFd; passing -1 here
     // keeps the value the bridge already holds.
     cfg.tun_fd = -1;
+
+    // The MTU must match the one FCAEVpnService.Builder.setMtu() used when it
+    // established the interface. Leaving it at 0 let the core default to 1500
+    // independently of whatever the Builder picked: when the two disagreed,
+    // gVisor built segments the interface silently dropped, so the tunnel came
+    // up and passed no traffic. Keep this in sync with kVpnServiceMtu in
+    // FCAEVpnService.java.
+    cfg.tun_mtu = (cfg.mode == FCAE_MODE_TUN) ? 1500 : 0;
 
     FcaeStatus st = fcae_start(&cfg);
     if (st != FCAE_OK) {

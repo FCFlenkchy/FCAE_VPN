@@ -213,6 +213,18 @@ impl Tun2SocksBridge {
         self.external_fd.store(fd, Ordering::SeqCst);
     }
 
+    /// Forget a previously supplied descriptor.
+    ///
+    /// The fd belongs to a single VpnService instance. Once that session ends
+    /// the number is meaningless -- and, worse, the kernel will hand the same
+    /// integer to an unrelated file later. Leaving it latched made a
+    /// subsequent *proxy* session look pre-authorised for TUN and let
+    /// `device_spec` dup a stranger's descriptor, which is why proxy mode
+    /// appeared to "use tun2socks" when it should not touch it at all.
+    pub fn clear_android_fd(&self) {
+        self.external_fd.store(-1, Ordering::SeqCst);
+    }
+
     /// The TUN fd handed over by the platform (Android's VpnService), if any.
     ///
     /// This is the authorisation to run TUN mode without elevation: the JVM
@@ -400,6 +412,28 @@ mod tests {
         assert!(!bridge.is_running());
         // stop() on an idle bridge must be a no-op, not a crash.
         bridge.stop(Duration::from_secs(1));
+    }
+
+    /// Regression: the Android fd must not survive its VpnService session.
+    ///
+    /// A stale descriptor made the supervisor treat a later *proxy* session as
+    /// pre-authorised for TUN, and `device_spec` would happily dup whatever
+    /// unrelated file the kernel had since assigned to that number.
+    #[test]
+    fn clearing_the_android_fd_drops_preauthorisation() {
+        let bridge = Tun2SocksBridge::new();
+        assert!(bridge.android_fd().is_none(), "starts unarmed");
+
+        bridge.set_android_fd(114);
+        assert_eq!(bridge.android_fd(), Some(114));
+        assert_eq!(bridge.preauthorised_fd(), Some(114));
+
+        bridge.clear_android_fd();
+        assert!(bridge.android_fd().is_none());
+        assert!(
+            bridge.preauthorised_fd().is_none(),
+            "a cleared bridge must not authorise TUN"
+        );
     }
 
     #[test]

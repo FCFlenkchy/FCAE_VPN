@@ -153,6 +153,14 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
             egress_region: std::ptr::null(),
             data_root_dir: std::ptr::null(),
         },
+        tor: FcaeTor {
+            mode: FcaeTorMode::Off,
+            bridges: FcaeTorBridges::None,
+            bind: std::ptr::null(),
+            state_dir: std::ptr::null(),
+            bridge_lines: std::ptr::null(),
+            pt_path: std::ptr::null(),
+        },
         tun_name: std::ptr::null(),
         tun_mtu: 0,
         tun_fd: -1,
@@ -261,9 +269,17 @@ pub unsafe extern "C" fn fcae_start(cfg: *const FcaeConfig) -> FcaeStatus {
         let parsed = config::parse(cfg)?;
 
         // Hand the Android descriptor to the bridge before the session runs.
+        //
+        // In proxy mode the TUN bridge must stay completely out of the way, so
+        // any descriptor left over from an earlier TUN session is dropped
+        // here. Otherwise the stale fd kept the bridge looking "armed": the
+        // supervisor saw a pre-authorised fd and a proxy-only run could still
+        // reach into tun2socks.
         #[cfg(feature = "tun")]
-        if let Some(fd) = parsed.tun.fd {
-            rt.bridge.set_android_fd(fd);
+        match (parsed.mode, parsed.tun.fd) {
+            (fcae_abi::FcaeMode::Tun, Some(fd)) => rt.bridge.set_android_fd(fd),
+            (fcae_abi::FcaeMode::Tun, None) => {}
+            (fcae_abi::FcaeMode::Proxy, _) => rt.bridge.clear_android_fd(),
         }
 
         rt.supervisor.start(parsed)

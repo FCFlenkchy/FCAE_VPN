@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 2;
+pub const FCAE_ABI_VERSION: u32 = 3;
 
 // ── Enumerations ────────────────────────────────────────────────────────
 
@@ -73,6 +73,38 @@ pub enum FcaeMode {
     /// Proxies plus a system-wide TUN device fed by the in-process
     /// tun2socks bridge.
     Tun = 1,
+}
+
+/// Tor egress, mirroring the engine's own `AETHER_TOR` modes.
+///
+/// Tor is an egress *inside* the Aether engine, not a separate backend: there
+/// is no fcae-ffi bridge for it. These values are projected onto `AETHER_TOR`
+/// and friends by `env_compat::apply`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FcaeTorMode {
+    /// No Tor. The default.
+    Off = 0,
+    /// Tor reached *through* the tunnel (tunnel -> tor -> internet).
+    Chain = 1,
+    /// The tunnel carried *over* Tor (tor -> tunnel -> internet).
+    Reverse = 2,
+    /// Tor alone, with no WARP tunnel at all.
+    Only = 3,
+}
+
+/// Which built-in bridge family to request when Tor is censored.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FcaeTorBridges {
+    /// Connect directly to the Tor network.
+    None = 0,
+    /// Built-in obfs4 bridges.
+    Obfs4 = 1,
+    /// Built-in snowflake bridges.
+    Snowflake = 2,
+    /// Use the lines supplied in `FcaeTor::bridge_lines`.
+    Custom = 3,
 }
 
 #[repr(C)]
@@ -208,6 +240,23 @@ pub struct FcaeZeroTrust {
     pub access_email: *const c_char,
 }
 
+/// Tor egress configuration. Consumed by the Aether backend only.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FcaeTor {
+    pub mode: FcaeTorMode,
+    pub bridges: FcaeTorBridges,
+    /// "ip:port" for the local Tor SOCKS listener in `Only` mode.
+    /// NULL = 127.0.0.1:1820.
+    pub bind: *const c_char,
+    /// State/cache directory for the Arti client. NULL = under `data_dir`.
+    pub state_dir: *const c_char,
+    /// Newline-separated bridge lines, used when `bridges == Custom`.
+    pub bridge_lines: *const c_char,
+    /// Path to a pluggable-transport binary (lyrebird/snowflake), or NULL.
+    pub pt_path: *const c_char,
+}
+
 /// Psiphon-specific inputs. Present in the ABI *now* so that enabling the
 /// backend later does not change the struct layout and does not invalidate
 /// prebuilt UI binaries.
@@ -264,6 +313,7 @@ pub struct FcaeConfig {
     pub routing: FcaeRouting,
     pub zero_trust: FcaeZeroTrust,
     pub psiphon: FcaePsiphon,
+    pub tor: FcaeTor,
 
     /// TUN device name. NULL = "FCAE_VPN".
     pub tun_name: *const c_char,

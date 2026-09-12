@@ -118,6 +118,38 @@ impl Default for TunConfig {
     }
 }
 
+/// Tor egress settings. Tor lives *inside* the Aether engine, so this is
+/// projected onto the engine's `AETHER_TOR*` env vars rather than driving a
+/// separate backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TorConfig {
+    pub mode: FcaeTorMode,
+    pub bridges: FcaeTorBridges,
+    pub bind: Option<String>,
+    pub state_dir: Option<String>,
+    pub bridge_lines: Option<String>,
+    pub pt_path: Option<String>,
+}
+
+impl Default for TorConfig {
+    fn default() -> Self {
+        Self {
+            mode: FcaeTorMode::Off,
+            bridges: FcaeTorBridges::None,
+            bind: None,
+            state_dir: None,
+            bridge_lines: None,
+            pt_path: None,
+        }
+    }
+}
+
+impl TorConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.mode != FcaeTorMode::Off
+    }
+}
+
 /// Fully validated session configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionConfig {
@@ -144,6 +176,7 @@ pub struct SessionConfig {
     pub routing: RoutingConfig,
     pub zero_trust: ZeroTrustConfig,
     pub psiphon: PsiphonConfig,
+    pub tor: TorConfig,
     pub tun: TunConfig,
 }
 
@@ -169,6 +202,7 @@ impl Default for SessionConfig {
             routing: RoutingConfig::default(),
             zero_trust: ZeroTrustConfig::default(),
             psiphon: PsiphonConfig::default(),
+            tor: TorConfig::default(),
             tun: TunConfig::default(),
         }
     }
@@ -361,6 +395,52 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         embedded_server_list: cstr_opt(raw.psiphon.embedded_server_list),
         egress_region: cstr_opt(raw.psiphon.egress_region),
         data_root_dir: cstr_opt(raw.psiphon.data_root_dir),
+    };
+
+    // ── Tor ─────────────────────────────────────────────────────────────
+    let t = &raw.tor;
+    if let Some(bind) = cstr_opt(t.bind) {
+        if bind.parse::<std::net::SocketAddr>().is_err() {
+            return Err(CoreError::InvalidConfig(format!(
+                "tor.bind={bind:?} is not a valid ip:port"
+            )));
+        }
+    }
+    let bridge_lines = cstr_opt(t.bridge_lines);
+    if t.bridges == FcaeTorBridges::Custom
+        && bridge_lines.as_deref().map(str::trim).unwrap_or("").is_empty()
+    {
+        return Err(CoreError::InvalidConfig(
+            "tor.bridges = Custom but tor.bridge_lines is empty".into(),
+        ));
+    }
+    // Tor `Only` means "no WARP tunnel at all", so a pinned gateway or a
+    // protocol choice would be silently ignored. Say so rather than pretend.
+    if t.mode == FcaeTorMode::Only && cfg.force_peer.is_some() {
+        return Err(CoreError::InvalidConfig(
+            "tor.mode = Only runs without a WARP tunnel, so force_peer cannot apply".into(),
+        ));
+    }
+    // Reverse carries the tunnel *over* Tor, and Tor is TCP-only. WARP's
+    // WireGuard endpoints answer on UDP alone, so they can never be reached
+    // this way. The engine rejects this too, but only after a full scan.
+    if t.mode == FcaeTorMode::Reverse
+        && matches!(cfg.protocol, FcaeProtocol::WireGuard | FcaeProtocol::Gool)
+    {
+        return Err(CoreError::InvalidConfig(
+            "tor.mode = Reverse dials the tunnel through tor, which is TCP-only, but the \
+             selected protocol is UDP-based (WireGuard/WARP-in-WARP). Use MASQUE, or put \
+             tor inside the tunnel with tor.mode = Chain."
+                .into(),
+        ));
+    }
+    cfg.tor = TorConfig {
+        mode: t.mode,
+        bridges: t.bridges,
+        bind: cstr_opt(t.bind),
+        state_dir: cstr_opt(t.state_dir),
+        bridge_lines,
+        pt_path: cstr_opt(t.pt_path),
     };
 
     // ── TUN ─────────────────────────────────────────────────────────────
@@ -582,6 +662,43 @@ pub mod env_compat {
         set("AETHER_TEAM", cfg.zero_trust.team_name.as_deref());
         set("AETHER_ACCESS_TOKEN", cfg.zero_trust.access_token.as_deref());
         set("AETHER_ACCESS_EMAIL", cfg.zero_trust.access_email.as_deref());
+
+        // ── Tor ─────────────────────────────────────────────────────────
+        // Tor is an egress inside the engine, so it is configured the same
+        // way the engine configures itself: through AETHER_TOR*. Every
+        // variable is written unconditionally (or removed) so a previous
+        // session can never leak Tor settings into a non-Tor one.
+        set(
+            "AETHER_TOR",
+            Some(match cfg.tor.mode {
+                FcaeTorMode::Off => "off",
+                FcaeTorMode::Chain => "chain",
+                FcaeTorMode::Reverse => "reverse",
+                FcaeTorMode::Only => "only",
+            }),
+        );
+
+        if cfg.tor.is_enabled() {
+            set("AETHER_TOR_BIND", cfg.tor.bind.as_deref());
+            set("AETHER_TOR_DIR", cfg.tor.state_dir.as_deref());
+            set("AETHER_TOR_PT", cfg.tor.pt_path.as_deref());
+            // The engine reads one variable for both "which family" and
+            // "these exact lines": a keyword means built-in, anything else is
+            // treated as literal bridge lines.
+            set(
+                "AETHER_TOR_BRIDGES",
+                match cfg.tor.bridges {
+                    FcaeTorBridges::None => Some("off".to_string()),
+                    FcaeTorBridges::Obfs4 | FcaeTorBridges::Snowflake => Some("auto".to_string()),
+                    FcaeTorBridges::Custom => cfg.tor.bridge_lines.clone(),
+                },
+            );
+        } else {
+            set("AETHER_TOR_BIND", None::<&str>);
+            set("AETHER_TOR_DIR", None::<&str>);
+            set("AETHER_TOR_PT", None::<&str>);
+            set("AETHER_TOR_BRIDGES", None::<&str>);
+        }
     }
 }
 
@@ -609,6 +726,40 @@ mod tests {
         let (block, direct) = parse_inline_routes(Some("# note\n\n[block]\nx.com\n"));
         assert_eq!(block, vec!["x.com"]);
         assert!(direct.is_empty());
+    }
+
+    // env_compat writes process-global state, so the tor cases share one test
+    // rather than racing each other under the parallel test runner.
+    #[test]
+    fn tor_env_projection_round_trip() {
+        let mut cfg = SessionConfig::default();
+        cfg.tor = TorConfig {
+            mode: FcaeTorMode::Chain,
+            bridges: FcaeTorBridges::Obfs4,
+            bind: Some("127.0.0.1:9150".into()),
+            ..Default::default()
+        };
+        env_compat::apply(&cfg);
+        assert_eq!(std::env::var("AETHER_TOR").unwrap(), "chain");
+        assert_eq!(std::env::var("AETHER_TOR_BRIDGES").unwrap(), "auto");
+        assert_eq!(std::env::var("AETHER_TOR_BIND").unwrap(), "127.0.0.1:9150");
+
+        // Custom bridge lines reach the engine verbatim.
+        cfg.tor.bridges = FcaeTorBridges::Custom;
+        cfg.tor.bridge_lines = Some("obfs4 1.2.3.4:443 CERT=xyz".into());
+        env_compat::apply(&cfg);
+        assert_eq!(
+            std::env::var("AETHER_TOR_BRIDGES").unwrap(),
+            "obfs4 1.2.3.4:443 CERT=xyz"
+        );
+
+        // Regression: turning tor off must clear every variable, or a later
+        // non-tor session inherits them.
+        cfg.tor = TorConfig::default();
+        env_compat::apply(&cfg);
+        assert_eq!(std::env::var("AETHER_TOR").unwrap(), "off");
+        assert!(std::env::var("AETHER_TOR_BRIDGES").is_err());
+        assert!(std::env::var("AETHER_TOR_BIND").is_err());
     }
 
     #[test]

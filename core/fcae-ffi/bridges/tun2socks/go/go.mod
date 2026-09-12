@@ -11,7 +11,14 @@ module github.com/FCFlenkchy/FCAE_VPN/core/fcae-ffi/bridges/tun2socks
 // the main module declares. Bump this whenever the submodule is updated.
 go 1.26.3
 
-require github.com/xjasonlyu/tun2socks/v2 v2.6.0
+require (
+	github.com/xjasonlyu/tun2socks/v2 v2.6.0
+	// Needed to install a non-fatal logger: engine.Start/Stop report errors
+	// via log.Fatalf, and zap's default fatal hook calls os.Exit(1), which a
+	// linked library must never do. zap is already an indirect dependency of
+	// tun2socks, so this pulls in nothing new.
+	go.uber.org/zap v1.28.0
+)
 
 // Always build against the submodule at core/tun2socks.
 replace github.com/xjasonlyu/tun2socks/v2 => ../../../../tun2socks

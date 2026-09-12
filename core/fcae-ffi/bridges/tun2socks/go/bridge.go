@@ -39,11 +39,15 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"unsafe"
 
 	"github.com/xjasonlyu/tun2socks/v2/engine"
+	t2slog "github.com/xjasonlyu/tun2socks/v2/log"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -56,19 +60,29 @@ const (
 var (
 	mu      sync.Mutex
 	running bool
-	logFn   C.t2s_log_fn
+
+	// logMu guards logFn and is DELIBERATELY separate from mu.
+	//
+	// emit() is called from inside t2s_start/t2s_stop, which already hold mu.
+	// Go's sync.Mutex is not reentrant, so guarding logFn with mu too meant
+	// the very first emit() inside t2s_start deadlocked against its own
+	// caller: the Go runtime blocked forever on a cgo thread, t2s_start never
+	// returned, and the Rust side sat in fcae_start with the TUN fd dup'd but
+	// no netstack -- exactly the "stops after 'using VpnService fd'" hang.
+	logMu sync.Mutex
+	logFn C.t2s_log_fn
 )
 
 // emit forwards a message to the host logger. Never panics if no callback is
-// registered yet.
+// registered yet, and never touches mu -- see the comment above.
 func emit(level int, format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
-	mu.Lock()
+	logMu.Lock()
 	fn := logFn
-	mu.Unlock()
+	logMu.Unlock()
 	if fn == nil {
 		return
 	}
+	msg := fmt.Sprintf(format, args...)
 	c := C.CString(msg)
 	defer C.free(unsafe.Pointer(c))
 	C.t2s_invoke_log(fn, C.int(level), c)
@@ -78,9 +92,58 @@ func emit(level int, format string, args ...any) {
 //
 // Register (or clear, with NULL) the host log sink.
 func t2s_set_log_callback(fn C.t2s_log_fn) {
-	mu.Lock()
+	logMu.Lock()
 	logFn = fn
-	mu.Unlock()
+	logMu.Unlock()
+}
+
+// installNonFatalLogger routes tun2socks' global logger into emit() and makes
+// Fatal records panic instead of calling os.Exit(1).
+//
+// Two reasons this exists:
+//
+//  1. A library must never exit the host process. engine.Stop() reports
+//     failures with log.Fatalf, and zap's default fatal hook is
+//     WriteThenFatal -> os.Exit(1), which would kill the VPN app on
+//     disconnect. WriteThenPanic turns that into a recoverable panic.
+//  2. Without it, tun2socks logs go to zap's production logger on stderr,
+//     which on Android goes nowhere useful.
+//
+// NOTE: this can only be installed *after* engine.Start(). The first thing
+// engine.start() does is general(), which calls log.SetLogger() with its own
+// logger built from Key.LogLevel -- anything installed beforehand is
+// discarded. That is why the start path relies on pre-validation instead.
+func installNonFatalLogger(level string) {
+	lvl, err := t2slog.ParseLevel(level)
+	if err != nil {
+		lvl = zapcore.InfoLevel
+	}
+	// SilentLevel is defined as InvalidLevel+1, i.e. ABOVE FatalLevel, so a
+	// silent logger would filter the fatal record out before OnFatal ever
+	// ran -- and zap would then exit anyway. Clamp so Fatal is always
+	// enabled; ordinary records stay suppressed by the level check below.
+	if lvl > zapcore.FatalLevel {
+		lvl = zapcore.FatalLevel
+	}
+
+	core := zapcore.NewCore(
+		zapcore.NewConsoleEncoder(zap.NewProductionEncoderConfig()),
+		zapcore.AddSync(hostWriter{}),
+		lvl,
+	)
+	// OnFatal=WriteThenPanic converts zap's os.Exit into a panic the caller
+	// can recover from.
+	logger := zap.New(core, zap.OnFatal(zapcore.WriteThenPanic))
+
+	t2slog.SetLogger(logger)
+}
+
+// hostWriter forwards zap output to the Rust log callback.
+type hostWriter struct{}
+
+func (hostWriter) Write(p []byte) (int, error) {
+	emit(logInfo, "%s", strings.TrimRight(string(p), "\n"))
+	return len(p), nil
 }
 
 // validateKey checks everything engine.Start would otherwise reject.
@@ -111,6 +174,39 @@ func validateKey(k *engine.Key) error {
 	}
 	if k.MTU < 0 || k.MTU > 65535 {
 		return fmt.Errorf("mtu %d out of range", k.MTU)
+	}
+
+	// The device string is parsed by engine.parseDevice, whose failures also
+	// reach log.Fatalf. Mirror its accepted drivers here so a typo returns -2
+	// instead of taking the process down.
+	dev := k.Device
+	if !strings.Contains(dev, "://") {
+		dev = "tun://" + dev
+	}
+	du, err := url.Parse(dev)
+	if err != nil {
+		return fmt.Errorf("invalid device url %q: %w", k.Device, err)
+	}
+	switch strings.ToLower(du.Scheme) {
+	case "tun":
+		if du.Host == "" {
+			return fmt.Errorf("device %q has no interface name", k.Device)
+		}
+	case "fd":
+		// fd://<n> -- the descriptor must be a plain non-negative integer, or
+		// gvisor's fdbased.New fails deep inside the stack.
+		n, convErr := strconv.Atoi(du.Host)
+		if convErr != nil || n < 0 {
+			return fmt.Errorf("device %q is not a valid fd", k.Device)
+		}
+	default:
+		return fmt.Errorf("unsupported device driver %q", du.Scheme)
+	}
+
+	// log.ParseLevel is the very first thing engine.start() does, and it is
+	// also on the Fatalf path.
+	if _, err := t2slog.ParseLevel(k.LogLevel); err != nil {
+		return fmt.Errorf("invalid log level %q", k.LogLevel)
 	}
 	return nil
 }
@@ -153,13 +249,17 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char) C.int
 		return -2
 	}
 
-	// engine.Start can still log.Fatalf on an unforeseen failure; recover
-	// from anything that surfaces as a panic so the host survives.
+	// engine.Start() reports failure with log.Fatalf, and zap's Fatal hook
+	// calls os.Exit(1) -- it does NOT panic, so the recover() below cannot
+	// catch it, and a logger installed here would be thrown away by
+	// general() anyway (see installNonFatalLogger). validateKey() above is
+	// therefore the real protection: it rejects everything engine.start()
+	// would reject, so the Fatalf path stays unreachable in practice.
 	var startErr error
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				startErr = fmt.Errorf("panic in engine.Start: %v", r)
+				startErr = fmt.Errorf("engine.Start failed: %v", r)
 			}
 		}()
 		engine.Insert(key)
@@ -175,6 +275,11 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char) C.int
 		}()
 		return -3
 	}
+
+	// Now that general() has installed its own logger, replace it with ours:
+	// runtime logs reach the host, and a Fatalf during Stop panics (which
+	// t2s_stop recovers) instead of killing the process.
+	installNonFatalLogger(key.LogLevel)
 
 	running = true
 	emit(logInfo, "[bridge] tun2socks running in-process: %s <-> %s", key.Device, key.Proxy)

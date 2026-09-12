@@ -51,6 +51,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerScan: Spinner
     private lateinit var spinnerIpVersion: Spinner
     private lateinit var spinnerNoize: Spinner
+    private lateinit var spinnerTor: Spinner
+    private lateinit var spinnerTorBridges: Spinner
+    private lateinit var editTorBridgeLines: android.widget.EditText
     private lateinit var switchEch: SwitchMaterial
     private lateinit var switchQuick: SwitchMaterial
     private lateinit var switchLan: SwitchMaterial
@@ -237,6 +240,9 @@ class MainActivity : AppCompatActivity() {
         spinnerScan = findViewById(R.id.spinnerScan)
         spinnerIpVersion = findViewById(R.id.spinnerIpVersion)
         spinnerNoize = findViewById(R.id.spinnerNoize)
+        spinnerTor = findViewById(R.id.spinnerTor)
+        spinnerTorBridges = findViewById(R.id.spinnerTorBridges)
+        editTorBridgeLines = findViewById(R.id.editTorBridgeLines)
         switchEch = findViewById(R.id.switchEch)
         switchQuick = findViewById(R.id.switchQuick)
         switchLan = findViewById(R.id.switchLan)
@@ -316,7 +322,48 @@ class MainActivity : AppCompatActivity() {
             this, android.R.layout.simple_spinner_dropdown_item,
             listOf("Auto", "Low", "Medium", "High"),
         )
+        // Tor is an egress inside the Aether engine (AETHER_TOR), not a
+        // separate backend. Positions map 1:1 onto FcaeTorMode.
+        spinnerTor.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            listOf(
+                "Off",
+                "Tor through the tunnel",
+                "Tunnel through Tor (MASQUE only)",
+                "Tor only (no WARP)",
+            ),
+        )
+        // Positions map 1:1 onto FcaeTorBridges.
+        spinnerTorBridges.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            listOf("No bridges", "obfs4", "snowflake", "Custom lines"),
+        )
+        spinnerTorBridges.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: android.widget.AdapterView<*>?,
+                view: android.view.View?,
+                position: Int,
+                id: Long
+            ) {
+                applyTorLock()
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+        spinnerTor.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: android.widget.AdapterView<*>?,
+                view: android.view.View?,
+                position: Int,
+                id: Long
+            ) {
+                applyTorLock()
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
         loadSettings()
+        applyTorLock()
 
         // Running build, spelled out: version + which channel it is. A build
         // produced by a pre-release workflow run carries the tag as its
@@ -611,6 +658,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Tor sub-options only mean something when Tor is on, and custom bridge
+     * lines only when "Custom lines" is picked. Grey out the rest so the UI
+     * cannot express a config the core would reject.
+     */
+    private fun applyTorLock() {
+        if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
+        val torOn = spinnerTor.selectedItemPosition != 0
+        spinnerTorBridges.isEnabled = torOn
+        spinnerTorBridges.alpha = if (torOn) 1.0f else 0.5f
+
+        val custom = torOn && spinnerTorBridges.selectedItemPosition == 3
+        editTorBridgeLines.isEnabled = custom
+        editTorBridgeLines.alpha = if (custom) 1.0f else 0.5f
+    }
+
     private fun saveSettings() {
         prefs.edit().apply {
             putInt("protocol", coreProtocolFromSelection())
@@ -618,6 +681,9 @@ class MainActivity : AppCompatActivity() {
             putInt("scan", spinnerScan.selectedItemPosition)
             putInt("ipVersion", spinnerIpVersion.selectedItemPosition)
             putInt("noize", spinnerNoize.selectedItemPosition)
+            putInt("tor", spinnerTor.selectedItemPosition)
+            putInt("torBridges", spinnerTorBridges.selectedItemPosition)
+            putString("torBridgeLines", editTorBridgeLines.text.toString().trim())
             putBoolean("h2", h2FromSelection())
             putBoolean("ech", switchEch.isChecked)
             putBoolean("quick", switchQuick.isChecked)
@@ -650,6 +716,9 @@ class MainActivity : AppCompatActivity() {
         spinnerScan.setSelection(prefs.getInt("scan", 0))
         spinnerIpVersion.setSelection(prefs.getInt("ipVersion", 0))
         spinnerNoize.setSelection(prefs.getInt("noize", 2))
+        spinnerTor.setSelection(prefs.getInt("tor", 0))
+        spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
+        editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", false)
         switchLan.isChecked = prefs.getBoolean("lan", false)
@@ -714,6 +783,9 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("accessEmail", editAccessEmail.text.toString().trim())
         i.putExtra("routesFile", editRoutesFile.text.toString().trim())
         i.putExtra("routesInline", editRoutesInline.text.toString().trim())
+        i.putExtra("torMode", spinnerTor.selectedItemPosition)
+        i.putExtra("torBridges", spinnerTorBridges.selectedItemPosition)
+        i.putExtra("torBridgeLines", editTorBridgeLines.text.toString().trim())
         startForegroundService(i)
         // Poll is started by the VPN_STATE_CHANGED broadcast from the service
         // AFTER nativeStart() succeeds — NOT here, to avoid calling native
@@ -754,6 +826,9 @@ class MainActivity : AppCompatActivity() {
         val accessEmail = editAccessEmail.text.toString().trim()
         val routesFile = editRoutesFile.text.toString().trim()
         val routesInline = editRoutesInline.text.toString().trim()
+        val torMode = spinnerTor.selectedItemPosition
+        val torBridges = spinnerTorBridges.selectedItemPosition
+        val torBridgeLines = editTorBridgeLines.text.toString().trim()
 
         bgExecutor.execute {
             // Ensure previous engine is fully stopped before starting.
@@ -789,6 +864,9 @@ class MainActivity : AppCompatActivity() {
                     accessEmail = accessEmail,
                     routesFile = routesFile,
                     routesInline = routesInline,
+                    torMode = torMode,
+                    torBridges = torBridges,
+                    torBridgeLines = torBridgeLines,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }

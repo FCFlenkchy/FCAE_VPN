@@ -52,6 +52,11 @@ object NativeEngine {
         accessEmail: String,
         routesFile: String,
         routesInline: String,
+        // Tor egress. torMode: 0=off 1=chain 2=reverse 3=only.
+        // torBridges: 0=none 1=obfs4 2=snowflake 3=custom.
+        torMode: Int,
+        torBridges: Int,
+        torBridgeLines: String,
     ): Boolean
     @JvmStatic external fun nativeStop()
     @JvmStatic external fun nativeFree()

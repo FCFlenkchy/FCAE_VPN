@@ -122,6 +122,9 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.h2_enabled);
     h = fnv_value(h, g_app.ech_enabled);
     h = fnv_value(h, g_app.sys_profile);
+    h = fnv_value(h, g_app.tor_mode);
+    h = fnv_value(h, g_app.tor_bridges);
+    h = fnv_cstr(h, g_app.tor_bridge_lines);
     h = fnv_cstr(h, g_app.noize_profile);
     h = fnv_cstr(h, g_app.force_peer);
     h = fnv_cstr(h, g_app.config_path);
@@ -344,6 +347,10 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "auto_update_check") g_app.auto_update_check = atoi(val.c_str()) != 0;
     else if (key == "prerelease_updates") g_app.prerelease_updates = atoi(val.c_str()) != 0;
     else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
+    else if (key == "tor_mode") g_app.tor_mode = atoi(val.c_str());
+    else if (key == "tor_bridges") g_app.tor_bridges = atoi(val.c_str());
+    else if (key == "tor_bridge_lines")
+        snprintf(g_app.tor_bridge_lines, sizeof(g_app.tor_bridge_lines), "%s", val.c_str());
     else if (key == "team_name")
         snprintf(g_app.team_name, sizeof(g_app.team_name), "%s", val.c_str());
     else if (key == "access_token")
@@ -395,6 +402,20 @@ static void save_config() {
     fprintf(f, "auto_update_check=%d\n", g_app.auto_update_check ? 1 : 0);
     fprintf(f, "prerelease_updates=%d\n", g_app.prerelease_updates ? 1 : 0);
     fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
+    fprintf(f, "tor_mode=%d\n", g_app.tor_mode);
+    fprintf(f, "tor_bridges=%d\n", g_app.tor_bridges);
+    // The cfg file is line-based, so newlines in a value would corrupt it on
+    // reload. The engine accepts ';' as a bridge-line separator too, so store
+    // the multi-line box that way. (routes_inline has the same shape and the
+    // same pre-existing caveat.)
+    {
+        char tor_lines[sizeof(g_app.tor_bridge_lines)];
+        snprintf(tor_lines, sizeof(tor_lines), "%s", g_app.tor_bridge_lines);
+        for (char* p = tor_lines; *p; ++p) {
+            if (*p == '\n' || *p == '\r') *p = ';';
+        }
+        fprintf(f, "tor_bridge_lines=%s\n", tor_lines);
+    }
     fprintf(f, "team_name=%s\n", g_app.team_name);
     fprintf(f, "access_token=%s\n", g_app.access_token);
     fprintf(f, "access_client_id=%s\n", g_app.access_client_id);
@@ -1121,6 +1142,29 @@ void render_ui() {
             ImGui::Text("Sysprofile (performance tuning)");
             const char* sysprofiles[] = { "Auto", "Low", "Medium", "High" };
             ImGui::Combo("Sysprofile", &g_app.sys_profile, sysprofiles, 4);
+
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("Tor egress");
+            // Tor is an egress inside the Aether engine (AETHER_TOR), not a
+            // separate backend, so it needs no bridge of its own.
+            const char* tor_modes[] = {
+                "Off",
+                "Tor through the tunnel",
+                "Tunnel through Tor (MASQUE only)",
+                "Tor only (no WARP)",
+            };
+            ImGui::Combo("Tor", &g_app.tor_mode, tor_modes, 4);
+            if (g_app.tor_mode == 0) ImGui::BeginDisabled();
+            const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };
+            ImGui::Combo("Bridges", &g_app.tor_bridges, tor_bridges, 4);
+            if (g_app.tor_bridges != 3) ImGui::BeginDisabled();
+            ImGui::InputTextMultiline("##tor_bridge_lines", g_app.tor_bridge_lines,
+                                      sizeof(g_app.tor_bridge_lines), ImVec2(0, 60));
+            if (g_app.tor_bridges != 3) ImGui::EndDisabled();
+            if (g_app.tor_mode == 0) ImGui::EndDisabled();
+            if (g_app.tor_mode == 2 && (g_app.protocol == 1 || g_app.protocol == 2))
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                                   "Tor is TCP-only: pick MASQUE for this mode.");
             ImGui::EndChild();
             ImGui::EndTabItem();
         }

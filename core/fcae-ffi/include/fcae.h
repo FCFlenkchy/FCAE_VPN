@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 2
+#define FCAE_ABI_VERSION 3
 
 /* ── Enumerations ──────────────────────────────────────────────────── */
 
@@ -74,6 +74,22 @@ typedef enum {
     FCAE_MODE_PROXY = 0,
     FCAE_MODE_TUN   = 1
 } FcaeMode;
+
+/* Tor egress, mirroring the engine's own AETHER_TOR modes. Tor lives INSIDE
+ * the Aether engine -- it is not a separate backend. */
+typedef enum {
+    FCAE_TOR_OFF     = 0,
+    FCAE_TOR_CHAIN   = 1,  /* tunnel -> tor -> internet                     */
+    FCAE_TOR_REVERSE = 2,  /* tor -> tunnel -> internet (MASQUE only)       */
+    FCAE_TOR_ONLY    = 3   /* tor alone, no WARP tunnel                     */
+} FcaeTorMode;
+
+typedef enum {
+    FCAE_TOR_BRIDGES_NONE      = 0,
+    FCAE_TOR_BRIDGES_OBFS4     = 1,
+    FCAE_TOR_BRIDGES_SNOWFLAKE = 2,
+    FCAE_TOR_BRIDGES_CUSTOM    = 3   /* use FcaeTor.bridge_lines            */
+} FcaeTorBridges;
 
 typedef enum {
     FCAE_SCAN_TURBO     = 0,
@@ -164,6 +180,16 @@ typedef struct {
     const char *data_root_dir;
 } FcaePsiphon;
 
+/* Tor egress configuration. Consumed by the Aether backend only. */
+typedef struct {
+    FcaeTorMode     mode;
+    FcaeTorBridges  bridges;
+    const char     *bind;          /* NULL = 127.0.0.1:1820                */
+    const char     *state_dir;     /* NULL = under data_dir                */
+    const char     *bridge_lines;  /* newline-separated, for CUSTOM        */
+    const char     *pt_path;       /* pluggable transport binary, or NULL  */
+} FcaeTor;
+
 typedef struct {
     uint32_t        struct_size;   /* = sizeof(FcaeConfig)                 */
     uint32_t        abi_version;   /* = FCAE_ABI_VERSION                   */
@@ -189,6 +215,7 @@ typedef struct {
     FcaeRouting     routing;
     FcaeZeroTrust   zero_trust;
     FcaePsiphon     psiphon;
+    FcaeTor         tor;
 
     const char     *tun_name;      /* NULL = "FCAE_VPN"                    */
     uint32_t        tun_mtu;       /* 576..9000, or 0 for 1500             */
@@ -324,4 +351,4 @@ FcaeStatus fcae_poll_update(FcaeUpdateInfo *out);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x0af991035dc99bf7 */
+/* fcae-abi-fingerprint: 0x26918b8efe6fe73c */
