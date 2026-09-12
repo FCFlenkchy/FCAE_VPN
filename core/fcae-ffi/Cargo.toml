@@ -14,7 +14,7 @@ members = [
     "bridges/aether",
     "bridges/psiphon",
 ]
-exclude = ["../Aether/aether-engine", "../quiche"]
+exclude = ["../Aether", "../quiche"]
 resolver = "2"
 
 [workspace.package]
@@ -30,7 +30,7 @@ fcae-build = { path = "buildtools" }
 fcae-bridge-tun2socks = { path = "bridges/tun2socks" }
 fcae-bridge-aether = { path = "bridges/aether" }
 fcae-bridge-psiphon = { path = "bridges/psiphon" }
-aether-engine = { path = "../Aether/aether-engine" }
+aether-engine = { path = "../Aether" }
 
 
 anyhow = "1"

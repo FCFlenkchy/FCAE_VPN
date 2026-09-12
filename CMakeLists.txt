@@ -137,9 +137,10 @@ function(fcae_link_go_bridges target_name abi)
             message(STATUS "linking Go bridge: ${so}")
         endif()
     endforeach()
-    # The .so lives next to our library inside the APK; the loader finds it
-    # there at runtime.
-    target_link_options(${target_name} PRIVATE "-Wl,-rpath,$ORIGIN")
+    # The .so sits next to our library in the APK's native lib dir. Escape the
+    # $ so CMake passes $ORIGIN through literally instead of expanding it to an
+    # empty variable.
+    target_link_options(${target_name} PRIVATE "-Wl,-rpath,\$ORIGIN")
 endfunction()
 
 # ── Target-specific configuration ────────────────────────────────────────

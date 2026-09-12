@@ -256,9 +256,20 @@ impl<'a> CArchive<'a> {
             cmd.env("GOARM", goarm);
         }
         if self.target.is_android() {
-            cmd.env("CGO_CFLAGS", "-O2 -fPIC")
+            // -soname is essential for the c-shared build. Without it the ELF
+            // has no SONAME, so whatever links against it records the full
+            // build-time path in DT_NEEDED (e.g. /home/runner/work/.../
+            // libtun2socks_bridge.so). That path does not exist on the device,
+            // so System.loadLibrary() fails at runtime with a dlopen error and
+            // NOTHING starts -- no engine, no TUN. With the SONAME set, the
+            // loader looks for a bare "libtun2socks_bridge.so" and finds the
+            // copy Gradle packaged in the APK's native library dir.
+            let soname = format!("{}.so", self.lib_name);
+            cmd.env("CGO_CFLAGS", "-O2 -fPIC").env(
+                "CGO_LDFLAGS",
                 // 16 KiB pages are required by recent Android releases.
-                .env("CGO_LDFLAGS", "-Wl,-z,max-page-size=16384");
+                format!("-Wl,-z,max-page-size=16384 -Wl,-soname,{soname}"),
+            );
         }
         if self.target.is_apple() {
             if let Ok(v) = std::env::var("MACOSX_DEPLOYMENT_TARGET") {
