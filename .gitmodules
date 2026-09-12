@@ -8,7 +8,3 @@
 	path = core/psiphon
 	url = https://github.com/Psiphon-Labs/psiphon-tunnel-core.git
 	branch = master
-[submodule "core/psiphon"]
-	path = core/psiphon
-	url = https://github.com/Psiphon-Labs/psiphon-tunnel-core.git
-	branch = master
