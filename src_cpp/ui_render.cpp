@@ -36,6 +36,8 @@ static char s_update_latest[32] = {};
 static char s_update_notes[1024] = {};
 static char s_update_dl_url[512] = {};
 static bool s_update_popup_open = false;
+static bool s_update_is_pre = false;      // offered update is a pre-release
+static char s_update_date[32] = {};
 static std::chrono::steady_clock::time_point s_check_start_time = std::chrono::steady_clock::now();
 static bool s_update_in_progress = false;
 
@@ -50,6 +52,12 @@ static bool s_text_input = false;     // a text field is focused (blinking caret
 
 /// Monotonic seconds. Shared by the telemetry poll and the render gate so both
 /// use one clock (ImGui::GetTime() is only meaningful inside a frame).
+/// True when the running build came from a pre-release workflow run. The tag is
+/// the build's own version (FCAE_VERSION), e.g. "v1.4.0-beta.2" vs "v1.3.2".
+bool build_is_prerelease() {
+    return strchr(FCAE_VERSION, '-') != nullptr;
+}
+
 double ui_now_seconds() {
     using clock = std::chrono::steady_clock;
     return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
@@ -126,6 +134,7 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, g_app.save_status);
     h = fnv_cstr(h, g_app.copy_status);
     h = fnv_value(h, g_app.start_busy.load());
+    h = fnv_value(h, g_app.prerelease_updates);
 
     // Update panel (button label, "Checking... (Ns)" counter, popup contents).
     h = fnv_value(h, s_update_checked);
@@ -136,6 +145,7 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, s_update_latest);
     h = fnv_cstr(h, s_update_notes);
     h = fnv_cstr(h, s_update_dl_url);
+    h = fnv_value(h, s_update_is_pre);
     return h;
 }
 
@@ -330,6 +340,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
     else if (key == "auto_update_check") g_app.auto_update_check = atoi(val.c_str()) != 0;
+    else if (key == "prerelease_updates") g_app.prerelease_updates = atoi(val.c_str()) != 0;
     else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
     else if (key == "team_name")
         snprintf(g_app.team_name, sizeof(g_app.team_name), "%s", val.c_str());
@@ -380,6 +391,7 @@ static void save_config() {
     fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
     fprintf(f, "auto_scroll=%d\n", g_app.auto_scroll ? 1 : 0);
     fprintf(f, "auto_update_check=%d\n", g_app.auto_update_check ? 1 : 0);
+    fprintf(f, "prerelease_updates=%d\n", g_app.prerelease_updates ? 1 : 0);
     fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
     fprintf(f, "team_name=%s\n", g_app.team_name);
     fprintf(f, "access_token=%s\n", g_app.access_token);
@@ -532,7 +544,7 @@ void ui_init() {
 
     // Auto-trigger update check once on startup if enabled
     if (g_app.auto_update_check) {
-        aether_check_update_async(FCAE_VERSION);
+        aether_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
     }
 }
 
@@ -601,6 +613,25 @@ void render_ui() {
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
         ImGui::Text("FCAE VPN");
         ImGui::PopStyleColor();
+
+        // Which build is running: the version string, then an explicit channel
+        // chip. A build produced by a pre-release workflow run carries a suffix
+        // in its own version (v1.4.0-beta.2), so say "PRE-RELEASE" instead of
+        // making the user read the absence of a BETA mark as "release".
+        ImGui::SameLine(0, 10);
+        ImGui::TextColored(ImVec4(0.62f, 0.66f, 0.74f, 1.0f), "%s", FCAE_VERSION);
+        ImGui::SameLine(0, 8);
+        if (build_is_prerelease()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.20f, 1.0f), "PRE-RELEASE");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("This build is a pre-release (" FCAE_VERSION ").\n"
+                                  "It may contain unfinished work — the update channel\n"
+                                  "that finds it is the \"Include pre-releases\" toggle.");
+        } else {
+            ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.52f, 1.0f), "RELEASE");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("This build is a release (" FCAE_VERSION ").");
+        }
         ImGui::SameLine(0, 10);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.75f, 0.80f, 1.0f));
         ImGui::Text("|");
@@ -757,6 +788,8 @@ void render_ui() {
         // The render gate watches this so the "Checking... (Ns)" counter keeps
         // ticking (1 Hz) even when the user is not touching the window.
         s_update_in_progress = info.check_in_progress;
+        s_update_is_pre = info.is_prerelease;
+        snprintf(s_update_date, sizeof(s_update_date), "%s", info.release_date);
 
         if (info.check_in_progress) {
             // Safety timeout: if check takes >15s, show timeout message
@@ -768,7 +801,7 @@ void render_ui() {
                 s_update_available = false;
                 snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    aether_check_update_async(FCAE_VERSION);
+                    aether_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
                     s_update_checked = false;
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
@@ -790,7 +823,8 @@ void render_ui() {
 
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
-                if (ImGui::Button("Update Available!", ImVec2(btn_width, 34))) {
+                const char* label = info.is_prerelease ? "Pre-release Available!" : "Update Available!";
+                if (ImGui::Button(label, ImVec2(btn_width, 34))) {
                     s_update_popup_open = true;
                 }
                 ImGui::PopStyleColor(2);
@@ -800,14 +834,14 @@ void render_ui() {
                 s_update_checked = true;
                 snprintf(s_update_status, sizeof(s_update_status), "%.127s", info.status_message);
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    aether_check_update_async(FCAE_VERSION);
+                    aether_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
                     s_update_checked = false;
                     s_update_available = false;
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
             } else {
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    aether_check_update_async(FCAE_VERSION);
+                    aether_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
                     s_update_checked = false;
                     s_update_available = false;
                     s_check_start_time = std::chrono::steady_clock::now();
@@ -836,10 +870,19 @@ void render_ui() {
             }
             if (ImGui::BeginPopupModal("##update_popup", nullptr,
                     ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::Text("Update Available");
+                ImGui::Text(s_update_is_pre ? "Pre-release Available" : "Update Available");
+                if (s_update_is_pre) {
+                    ImGui::SameLine(0, 8);
+                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.20f, 1.0f), "BETA");
+                }
                 ImGui::Spacing();
-                ImGui::Text("Current: " FCAE_VERSION);
-                ImGui::Text("Latest:  %s", s_update_latest);
+                ImGui::Text("Current: %s  (%s)", FCAE_VERSION,
+                            build_is_prerelease() ? "pre-release" : "release");
+                ImGui::Text("Latest:  %s%s", s_update_latest,
+                            s_update_is_pre ? "  (pre-release)" : "  (release)");
+                if (s_update_date[0]) {
+                    ImGui::Text("Released: %s", s_update_date);
+                }
                 ImGui::Spacing();
                 if (s_update_notes[0]) {
                     ImGui::Text("Release Notes:");
@@ -1154,6 +1197,12 @@ void render_ui() {
             ImGui::Checkbox("Auto-scroll", &g_app.auto_scroll);
             ImGui::SameLine(0, 12);
             ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
+            ImGui::SameLine(0, 20);
+            ImGui::Checkbox("Include pre-releases", &g_app.prerelease_updates);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Off (default): only released versions are offered.\n"
+                                  "On: version.json's pre-release entry also counts and the\n"
+                                  "newer of the two is offered (betas, RCs).");
             ImGui::SameLine(0, 12);
             if (ImGui::Button("Clear")) g_app.logs.clear();
             ImGui::SameLine(0, 8);

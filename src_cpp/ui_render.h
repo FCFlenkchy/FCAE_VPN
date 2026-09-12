@@ -75,6 +75,10 @@ struct AppState {
     int  prev_log_count = 0;
     bool logging_enabled = true;
     bool auto_update_check = true;
+    /// "Pre-releases" toggle (default off): when on, version.json's
+    /// `prerelease` block takes part in the update check and the highest of the
+    /// two versions is offered; when off only the stable release is considered.
+    bool prerelease_updates = false;
     char save_status[128] = {};
     char copy_status[64] = {};
 

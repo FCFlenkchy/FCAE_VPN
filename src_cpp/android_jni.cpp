@@ -318,12 +318,13 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeGetTrafficStats(JNIEnv* env, jclass) {
 // ── Version checker JNI ──────────────────────────────────────────────────
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeCheckForUpdates(JNIEnv* env, jclass, jstring currentVersion) {
+Java_com_fc_fcaevpn_NativeEngine_nativeCheckForUpdates(JNIEnv* env, jclass, jstring currentVersion, jboolean includePrereleases) {
     ensure_init();
     const char* ver = env->GetStringUTFChars(currentVersion, nullptr);
-    aether_check_update_async(ver);
+    aether_check_update_async(ver, includePrereleases == JNI_TRUE);
+    LOGI("Version check started (current=%s, prereleases=%s)", ver,
+         includePrereleases == JNI_TRUE ? "on" : "off");
     env->ReleaseStringUTFChars(currentVersion, ver);
-    LOGI("Version check started (current=%s)", ver);
 }
 
 extern "C" JNIEXPORT jobject JNICALL
@@ -342,6 +343,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
     jfieldID fid_notes = env->GetFieldID(cls, "releaseNotes", "Ljava/lang/String;");
     jfieldID fid_dl = env->GetFieldID(cls, "downloadUrl", "Ljava/lang/String;");
     jfieldID fid_status = env->GetFieldID(cls, "statusMessage", "Ljava/lang/String;");
+    jfieldID fid_isPre = env->GetFieldID(cls, "isPrerelease", "Z");
+    jfieldID fid_date = env->GetFieldID(cls, "releaseDate", "Ljava/lang/String;");
 
     // Create object
     jobject obj = env->AllocObject(cls);
@@ -356,17 +359,19 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
     env->SetObjectField(obj, fid_notes, env->NewStringUTF(info.release_notes));
     env->SetObjectField(obj, fid_dl, env->NewStringUTF(info.download_url));
     env->SetObjectField(obj, fid_status, env->NewStringUTF(info.status_message));
+    env->SetBooleanField(obj, fid_isPre, info.is_prerelease ? JNI_TRUE : JNI_FALSE);
+    env->SetObjectField(obj, fid_date, env->NewStringUTF(info.release_date));
 
     return obj;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeCheckUpdateFromJson(JNIEnv* env, jclass, jstring currentVersion, jstring json) {
+Java_com_fc_fcaevpn_NativeEngine_nativeCheckUpdateFromJson(JNIEnv* env, jclass, jstring currentVersion, jstring json, jboolean includePrereleases) {
     ensure_init();
     const char* ver = env->GetStringUTFChars(currentVersion, nullptr);
     const char* js = env->GetStringUTFChars(json, nullptr);
 
-    bool ok = aether_check_update_from_json(ver, js);
+    bool ok = aether_check_update_from_json(ver, js, includePrereleases == JNI_TRUE);
 
     env->ReleaseStringUTFChars(currentVersion, ver);
     env->ReleaseStringUTFChars(json, js);
