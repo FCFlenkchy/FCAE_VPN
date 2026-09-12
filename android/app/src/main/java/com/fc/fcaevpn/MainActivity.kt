@@ -70,6 +70,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editRoutesInline: android.widget.EditText
     private lateinit var outerScroll: ScrollView
 
+    // TUN mode always needs the engine's local SOCKS5 listener (tun2socks dials
+    // it), so while TUN is selected the SOCKS5 switch is forced ON and shown
+    // grayed out — the same "auto" behaviour the desktop UI has. The user's own
+    // Proxy-mode choice is remembered here and restored when they switch back.
+    private var socksChoiceForProxyMode = true
+
     private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         val t = Thread(r, "bgExecutor")
         t.isDaemon = true
@@ -304,6 +310,24 @@ class MainActivity : AppCompatActivity() {
             listOf("Auto", "Low", "Medium", "High"),
         )
         loadSettings()
+
+        // TUN mode forces SOCKS5 on (tun2socks needs the local SOCKS5 listener),
+        // so keep the switch locked/grayed while TUN is selected. Applied after
+        // loadSettings() so the saved Proxy-mode preference is captured first.
+        spinnerMode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: android.widget.AdapterView<*>?,
+                view: android.view.View?,
+                position: Int,
+                id: Long
+            ) {
+                applyModeSocksLock()
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+        applyModeSocksLock()
+
         onBackPressedDispatcher.addCallback(this, backPressedCallback)
 
         logText.text = ""
@@ -536,6 +560,38 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    private fun isTunModeSelected(): Boolean = spinnerMode.selectedItemPosition == 1
+
+    /**
+     * SOCKS5 is mandatory in TUN mode: tun2socks dials the engine's local SOCKS5
+     * listener for every connection (and the core also starts an internal SOCKS5
+     * on 1819 when TUN is active). So while TUN is selected the SOCKS5 switch is
+     * forced ON and grayed out, and the port field is locked too — the same
+     * auto/locked behaviour the desktop UI has for its SOCKS5 checkbox.
+     * Switching back to Proxy mode restores the user's own choice.
+     */
+    private fun applyModeSocksLock() {
+        if (!::spinnerMode.isInitialized || !::switchSocks.isInitialized) return
+        if (spinnerMode.selectedItemPosition == 1) {
+            // Capture the user's Proxy-mode choice before overriding it. While
+            // locked the switch is disabled, so this only happens once.
+            if (switchSocks.isEnabled) socksChoiceForProxyMode = switchSocks.isChecked
+            switchSocks.isChecked = true
+            switchSocks.isEnabled = false
+            editSocksPort.isEnabled = false
+            switchSocks.alpha = 0.5f
+            editSocksPort.alpha = 0.5f
+            switchSocks.text = "SOCKS5 proxy (auto — required for TUN)"
+        } else {
+            switchSocks.isEnabled = true
+            editSocksPort.isEnabled = true
+            switchSocks.alpha = 1.0f
+            editSocksPort.alpha = 1.0f
+            switchSocks.isChecked = socksChoiceForProxyMode
+            switchSocks.text = "SOCKS5 proxy"
+        }
+    }
+
     private fun saveSettings() {
         prefs.edit().apply {
             putInt("protocol", coreProtocolFromSelection())
@@ -548,7 +604,9 @@ class MainActivity : AppCompatActivity() {
             putBoolean("quick", switchQuick.isChecked)
             putBoolean("lan", switchLan.isChecked)
             putBoolean("logging", switchLogging.isChecked)
-            putBoolean("socks", switchSocks.isChecked)
+            // In TUN mode the switch is force-locked to ON, so persist the
+            // remembered Proxy-mode preference instead of the forced value.
+            putBoolean("socks", if (isTunModeSelected()) socksChoiceForProxyMode else switchSocks.isChecked)
             putBoolean("http", switchHttp.isChecked)
             putBoolean("autoUpdate", switchAutoUpdate.isChecked)
             putString("sni", editSni.text.toString().trim())

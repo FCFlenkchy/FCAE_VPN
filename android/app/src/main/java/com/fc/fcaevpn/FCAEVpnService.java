@@ -212,12 +212,20 @@ public class FCAEVpnService extends VpnService {
                 try {
                     String nativeDir = getApplicationInfo().nativeLibraryDir;
                     NativeEngine.nativeSetNativeLibDir(nativeDir);
+                    // tun2socks ships exactly ONCE in an Android build: as
+                    // libtun2socks.so inside the APK's native library dir (the
+                    // engine .so no longer embeds a second copy). Point the
+                    // engine straight at it so TUN mode runs that single binary.
+                    java.io.File t2s = new java.io.File(nativeDir, "libtun2socks.so");
+                    if (t2s.exists()) {
+                        NativeEngine.nativeSetTun2socksBin(t2s.getAbsolutePath());
+                    }
                 } catch (Exception ignored) {}
 
                 boolean ok = NativeEngine.nativeStart(
                     protocol, mode, lan, scanMode,
                     ipVersion, quick, noizeVal,
-                    false, 16, 32, 2, 10, socks, http,
+                    false, 16, 32, 2, 10, socksPortForMode, http,
                     peerVal, cfgPath, h2, ech,
                     sniVal, sysProfile,
                     teamVal, tokenVal, emailVal, routesVal, routesIVal
