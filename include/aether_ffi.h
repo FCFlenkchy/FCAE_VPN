@@ -95,6 +95,8 @@ typedef struct {
     char release_notes[1024];
     char download_url[512];
     char status_message[256];
+    bool is_prerelease;       // the offered version is a pre-release
+    char release_date[32];
 } AetherUpdateInfo;
 
 // C-FFI Lifecycle & Controller API
@@ -108,11 +110,13 @@ void aether_free(void);
 bool aether_is_admin(void);  // Check if running with admin/root privileges (needed for TUN mode)
 
 // Version checker – start async check (non-blocking). Call aether_poll_update() to get result.
-void aether_check_update_async(const char* current_version);
+// include_prereleases = the user's "pre-releases" toggle (default false). When false only
+// the stable slot of version.json is considered.
+void aether_check_update_async(const char* current_version, bool include_prereleases);
 
 // Version checker for Android – pass JSON fetched by Kotlin (avoids DNS/network issues in native threads).
 // Returns true on success, fills result accessible via aether_poll_update().
-bool aether_check_update_from_json(const char* current_version, const char* json);
+bool aether_check_update_from_json(const char* current_version, const char* json, bool include_prereleases);
 
 // Poll update check status. Fills info struct. Returns true if check completed.
 bool aether_poll_update(AetherUpdateInfo* out_info);
