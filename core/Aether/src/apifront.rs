@@ -4,7 +4,6 @@ use std::time::Duration;
 use boring::ssl::{SslConnector, SslMethod, SslVersion};
 use rand::RngExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 use crate::error::{AetherError, Result};
 use crate::fragment::{FragmentConfig, FragmentingStream};
@@ -151,7 +150,10 @@ async fn candidates(host: &str) -> Vec<SocketAddr> {
     }
 
     if let Ok(resolved) = tokio::net::lookup_host((host, 443)).await {
-        for address in resolved.filter(|entry| entry.is_ipv4()).take(RESOLVED_SAMPLES) {
+        for address in resolved
+            .filter(|entry| entry.is_ipv4())
+            .take(RESOLVED_SAMPLES)
+        {
             if !list.contains(&address) {
                 list.push(address);
             }
@@ -185,13 +187,13 @@ fn render_request(request: &ApiRequest) -> Vec<u8> {
 }
 
 fn parse_response(raw: &[u8]) -> Result<(u16, String)> {
-    let text = String::from_utf8_lossy(raw);
-    let split = text
-        .find("\r\n\r\n")
+    let split = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
         .ok_or_else(|| AetherError::Api("truncated response head".into()))?;
 
-    let head = &text[..split];
-    let mut body = text[split + 4..].to_string();
+    let head = String::from_utf8_lossy(&raw[..split]);
+    let mut body = raw[split + 4..].to_vec();
 
     let mut lines = head.split("\r\n");
     let status_line = lines
@@ -212,29 +214,33 @@ fn parse_response(raw: &[u8]) -> Result<(u16, String)> {
         body = dechunk(&body);
     }
 
-    Ok((status, body))
+    Ok((status, String::from_utf8_lossy(&body).into_owned()))
 }
 
-fn dechunk(body: &str) -> String {
-    let mut out = String::new();
+fn dechunk(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
     let mut cursor = 0usize;
 
     while cursor < body.len() {
-        let line_end = match body[cursor..].find("\r\n") {
+        let line_end = match body[cursor..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+        {
             Some(offset) => cursor + offset,
             None => break,
         };
-        let token = body[cursor..line_end].split(';').next().unwrap_or("").trim();
+        let line = String::from_utf8_lossy(&body[cursor..line_end]);
+        let token = line.split(';').next().unwrap_or("").trim();
         let size = match usize::from_str_radix(token, 16) {
             Ok(0) | Err(_) => break,
             Ok(value) => value,
         };
         let start = line_end + 2;
-        let end = start + size;
-        if end > body.len() {
-            break;
-        }
-        out.push_str(&body[start..end]);
+        let end = match start.checked_add(size) {
+            Some(end) if end <= body.len() => end,
+            _ => break,
+        };
+        out.extend_from_slice(&body[start..end]);
         cursor = end + 2;
     }
 
@@ -250,8 +256,10 @@ async fn exchange(
         Some(proxy) => tokio::time::timeout(CONNECT_TIMEOUT, proxy.connect(address))
             .await
             .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
-            .map_err(|e| AetherError::Api(format!("connect to {address} through the proxy: {e}")))?,
-        None => tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
+            .map_err(|e| {
+                AetherError::Api(format!("connect to {address} through the proxy: {e}"))
+            })?,
+        None => tokio::time::timeout(CONNECT_TIMEOUT, crate::egress::tcp_connect(address))
             .await
             .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
             .map_err(|e| AetherError::Api(format!("connect to {address}: {e}")))?,
@@ -348,8 +356,7 @@ pub async fn fetch(request: &ApiRequest) -> Result<ApiResponse> {
         return Ok(response);
     }
 
-    Err(failure
-        .unwrap_or_else(|| AetherError::Api("every camouflaged route failed".into())))
+    Err(failure.unwrap_or_else(|| AetherError::Api("every camouflaged route failed".into())))
 }
 
 #[cfg(test)]
@@ -430,6 +437,25 @@ mod tests {
     #[test]
     fn a_headless_response_is_an_error() {
         assert!(parse_response(b"garbage").is_err());
+    }
+
+    #[test]
+    fn a_chunked_body_is_joined_on_bytes_without_panicking() {
+        let text = "ééé".as_bytes();
+        let mut raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        raw.extend_from_slice(format!("{:x}\r\n", 3).as_bytes());
+        raw.extend_from_slice(&text[..3]);
+        raw.extend_from_slice(format!("\r\n{:x}\r\n", text.len() - 3).as_bytes());
+        raw.extend_from_slice(&text[3..]);
+        raw.extend_from_slice(b"\r\n0\r\n\r\n");
+        let (status, body) = parse_response(&raw).expect("parsed");
+        assert_eq!(status, 200);
+        assert_eq!(body, "ééé");
+
+        let raw =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nabc\r\n";
+        let (_, body) = parse_response(raw).expect("parsed");
+        assert!(body.is_empty());
     }
 
     #[test]

@@ -231,7 +231,6 @@ impl BackendHandle for AetherHandle {
         })
         .await;
 
-        aether_engine::tun_t2s::close_all_fds();
         Ok(())
     }
 

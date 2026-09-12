@@ -161,11 +161,11 @@ fn looks_like_ip_packet(data: &[u8]) -> bool {
     }
 }
 
-const MAX_CAPSULE_BUF: usize = 256 * 1024;
-
 pub struct CapsuleParser {
     buf: Vec<u8>,
 }
+
+const MAX_CAPSULE_BUF: usize = 256 * 1024;
 
 impl CapsuleParser {
     pub fn new() -> Self {
@@ -205,7 +205,7 @@ impl CapsuleParser {
             CAPSULE_ADDRESS_REQUEST => Capsule::AddressRequest,
             CAPSULE_ROUTE_ADVERTISEMENT => {
                 Capsule::RouteAdvertisement(parse_route_advertisement(&value)?)
-            },
+            }
             CAPSULE_DATAGRAM => Capsule::Datagram(value),
             other => Capsule::Unknown {
                 kind: other,
@@ -382,6 +382,43 @@ mod tests {
     }
 
     #[test]
+    fn several_packets_appended_in_a_row_stay_separable() {
+        let first = ip_packet();
+        let mut second = ip_packet();
+        second[19] = 9;
+
+        let mut batch = Vec::new();
+        append_datagram_capsule(&mut batch, &first);
+        append_datagram_capsule(&mut batch, &second);
+
+        assert_eq!(
+            batch,
+            [
+                encode_datagram_capsule(&first),
+                encode_datagram_capsule(&second)
+            ]
+            .concat(),
+            "appending has to lay the capsules down exactly as encoding each one would"
+        );
+
+        let mut parser = CapsuleParser::new();
+        parser.push(&batch);
+
+        let mut seen = Vec::new();
+        while let Ok(Some(capsule)) = parser.next() {
+            if let Capsule::Datagram(payload) = capsule {
+                seen.push(strip_datagram_context(&payload).expect("an ip packet"));
+            }
+        }
+
+        assert_eq!(
+            seen,
+            vec![first, second],
+            "both packets should come back out"
+        );
+    }
+
+    #[test]
     fn a_capsule_round_trips_through_the_receive_path() {
         let packet = ip_packet();
         let value = capsule_value(&encode_datagram_capsule(&packet));
@@ -407,7 +444,9 @@ mod tests {
     fn the_h3_path_still_carries_the_context_id() {
         let packet = ip_packet();
         let h3 = encode_ip_datagram(8, &packet).expect("h3 encoding");
-        let decoded = decode_ip_datagram(&h3, 8).expect("h3 decoding").expect("payload");
+        let decoded = decode_ip_datagram(&h3, 8)
+            .expect("h3 decoding")
+            .expect("payload");
         assert_eq!(decoded, packet);
     }
 }

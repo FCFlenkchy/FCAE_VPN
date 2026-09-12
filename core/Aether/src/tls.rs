@@ -123,8 +123,8 @@ fn announce_once(message: String) {
 }
 
 pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
-    let mut builder = SslContextBuilder::new(SslMethod::tls())
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
+    let mut builder =
+        SslContextBuilder::new(SslMethod::tls()).map_err(|e| AetherError::Tls(e.to_string()))?;
 
     builder
         .set_min_proto_version(Some(SslVersion::TLS1_3))
@@ -135,7 +135,11 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
 
     builder.set_grease_enabled(true);
     let groups = std::env::var("AETHER_TLS_GROUPS").ok();
-    let groups = groups.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(CHROME_GROUPS);
+    let groups = groups
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(CHROME_GROUPS);
     builder
         .set_curves_list(groups)
         .map_err(|e| AetherError::Tls(e.to_string()))?;
@@ -148,8 +152,8 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
         .map_err(|e| AetherError::Tls(e.to_string()))?;
 
     let cert = X509::from_pem(params.cert_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
-    let key = PKey::private_key_from_pem(params.key_pem)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
+    let key =
+        PKey::private_key_from_pem(params.key_pem).map_err(|e| AetherError::Tls(e.to_string()))?;
     builder
         .set_certificate(&cert)
         .map_err(|e| AetherError::Tls(e.to_string()))?;

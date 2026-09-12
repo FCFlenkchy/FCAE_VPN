@@ -228,12 +228,7 @@ fn http_client() -> Result<reqwest::Client> {
         .timeout(std::time::Duration::from_secs(20));
 
     if let Some(upstream) = crate::upstream::configured() {
-        match upstream.as_reqwest_proxy() {
-            Ok(proxy) => builder = builder.proxy(proxy),
-            Err(error) => {
-                log::warn!("[-] the api calls could not be sent through the proxy: {error}")
-            }
-        }
+        builder = builder.proxy(upstream.as_reqwest_proxy()?);
     }
 
     builder.build().map_err(|e| AetherError::Api(e.to_string()))
@@ -262,7 +257,9 @@ fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Durati
 fn refuses_identity(status: reqwest::StatusCode) -> bool {
     matches!(
         status,
-        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+        reqwest::StatusCode::UNAUTHORIZED
+            | reqwest::StatusCode::NOT_FOUND
+            | reqwest::StatusCode::GONE
     )
 }
 
@@ -327,11 +324,15 @@ async fn fallback_call(
     let response = apifront::fetch(&request).await?;
 
     if (200..300).contains(&response.status) {
-        log::info!("[+] {label} went through the camouflaged route ({})", response.route);
+        log::info!(
+            "[+] {label} went through the camouflaged route ({})",
+            response.route
+        );
         return serde_json::from_str::<AccountData>(&response.body).map_err(|e| {
             AetherError::Api(format!(
-                "{label} decode over {}: {e}; body={}",
-                response.route, response.body
+                "{label} decode over {}: {e} ({} byte answer)",
+                response.route,
+                response.body.len()
             ))
         });
     }
@@ -359,18 +360,22 @@ fn describe_rejection(status: reqwest::StatusCode, body: &str) -> String {
         let trimmed = body.trim();
         if trimmed.is_empty() {
             "no details returned".to_string()
-        } else if trimmed.len() > 220 {
-            format!("{}…", &trimmed[..220])
+        } else if trimmed.chars().count() > 220 {
+            format!("{}…", trimmed.chars().take(220).collect::<String>())
         } else {
             trimmed.to_string()
         }
     });
 
     let hint = match status.as_u16() {
-        403 => " (cloudflare refused this network; the address looks flagged, \
-                try again later, switch network, or import an existing identity)",
-        429 => " (too many registrations from this address; wait a few minutes \
-                before trying again)",
+        403 => {
+            " (cloudflare refused this network; the address looks flagged, \
+                try again later, switch network, or import an existing identity)"
+        }
+        429 => {
+            " (too many registrations from this address; wait a few minutes \
+                before trying again)"
+        }
         _ => "",
     };
 
@@ -382,16 +387,16 @@ fn extract_api_error(body: &str) -> Option<String> {
     let errors = value.get("errors")?.as_array()?;
     let parts: Vec<String> = errors
         .iter()
-        .filter_map(|entry| {
+        .map(|entry| {
             let message = entry
                 .get("message")
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown");
             let code = entry.get("code").and_then(|value| value.as_i64());
-            Some(match code {
+            match code {
                 Some(code) => format!("{message} (code {code})"),
                 None => message.to_string(),
-            })
+            }
         })
         .collect();
 
@@ -436,8 +441,9 @@ where
             .map_err(|e| AetherError::Api(format!("{label}: {e}")))?;
 
         if status.is_success() {
-            return serde_json::from_str::<AccountData>(&body)
-                .map_err(|e| AetherError::Api(format!("{label} decode: {e}; body={body}")));
+            return serde_json::from_str::<AccountData>(&body).map_err(|e| {
+                AetherError::Api(format!("{label} decode: {e} ({} byte answer)", body.len()))
+            });
         }
 
         let described = format!("{label}: {}", describe_rejection(status, &body));
@@ -466,7 +472,10 @@ where
 fn base_headers() -> reqwest::header::HeaderMap {
     use reqwest::header::{HeaderMap, HeaderValue, CONNECTION, CONTENT_TYPE};
     let mut h = HeaderMap::new();
-    h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=UTF-8"));
+    h.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=UTF-8"),
+    );
     h.insert(CONNECTION, HeaderValue::from_static("Keep-Alive"));
     h.insert(
         "CF-Client-Version",
@@ -501,7 +510,11 @@ fn tos_timestamp() -> String {
         .to_string()
 }
 
-pub async fn register(model: &str, locale: &str, jwt: Option<&str>) -> Result<(AccountData, [u8; 32])> {
+pub async fn register(
+    model: &str,
+    locale: &str,
+    jwt: Option<&str>,
+) -> Result<(AccountData, [u8; 32])> {
     let (wg_private, wg_public) = generate_x25519_keypair();
 
     let body = Registration {
@@ -538,16 +551,7 @@ pub async fn register(model: &str, locale: &str, jwt: Option<&str>) -> Result<(A
         Ok(account) => account,
         Err(primary) => {
             log::warn!("[!] registration failed over the direct route: {primary}");
-            match fallback_call(
-                "registration",
-                "POST",
-                &path,
-                Some(encoded),
-                None,
-                jwt,
-            )
-            .await
-            {
+            match fallback_call("registration", "POST", &path, Some(encoded), None, jwt).await {
                 Ok(account) => account,
                 Err(secondary) => {
                     return Err(AetherError::Api(format!(
@@ -768,7 +772,9 @@ pub async fn refresh_profile(identity: Identity) -> Identity {
         );
     }
     if !gateway_proxy.is_empty() {
-        log::debug!("[zerotrust] the organization publishes a gateway http proxy at {gateway_proxy}");
+        log::debug!(
+            "[zerotrust] the organization publishes a gateway http proxy at {gateway_proxy}"
+        );
     }
 
     Identity {
@@ -791,13 +797,22 @@ fn finish_provision(reg: AccountData, wg_private: [u8; 32]) -> Result<Identity> 
 
     let mut client_id_arr = [0u8; 3];
     if !reg.config.client_id.is_empty() {
-        log::debug!("[account] received client_id from API: {:?}", reg.config.client_id);
-        if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &reg.config.client_id) {
+        log::debug!(
+            "[account] received client_id from API: {:?}",
+            reg.config.client_id
+        );
+        if let Ok(decoded) = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &reg.config.client_id,
+        ) {
             if decoded.len() == 3 {
                 client_id_arr.copy_from_slice(&decoded);
                 log::debug!("[account] decoded client_id: {:02x?}", client_id_arr);
             } else {
-                log::warn!("[account] client_id decoded but wrong length: {}", decoded.len());
+                log::warn!(
+                    "[account] client_id decoded but wrong length: {}",
+                    decoded.len()
+                );
             }
         } else {
             log::warn!("[account] failed to decode client_id base64");
@@ -877,7 +892,14 @@ pub async fn ensure_masque_enrolled(identity: &Identity) -> Result<MasqueEnrollm
     }
 
     let keypair = generate_masque_keypair()?;
-    match enroll_key(&identity.device_id, &identity.access_token, &keypair.spki_der, None).await {
+    match enroll_key(
+        &identity.device_id,
+        &identity.access_token,
+        &keypair.spki_der,
+        None,
+    )
+    .await
+    {
         Ok(_) => {
             log::info!("[+] MASQUE key enrolled");
             Ok(MasqueEnrollment {
@@ -937,6 +959,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_long_rejection_in_any_script_is_cut_without_panicking() {
+        let body = format!("{}{}", "x".repeat(219), "é".repeat(200));
+        let described = describe_rejection(reqwest::StatusCode::BAD_REQUEST, &body);
+        assert!(described.contains('…'));
+    }
+
+    #[test]
     fn the_certificate_lives_far_longer_than_a_day() {
         assert!(MASQUE_CERT_LIFETIME_DAYS >= 365);
         assert!(MASQUE_CERT_LIFETIME_SECS > 86_400 * 300);
@@ -972,8 +1001,16 @@ mod tests {
         Identity {
             device_id: "device".to_string(),
             access_token: "token".to_string(),
-            cert_pem: if with_cert { b"cert".to_vec() } else { Vec::new() },
-            key_pem: if with_cert { b"key".to_vec() } else { Vec::new() },
+            cert_pem: if with_cert {
+                b"cert".to_vec()
+            } else {
+                Vec::new()
+            },
+            key_pem: if with_cert {
+                b"key".to_vec()
+            } else {
+                Vec::new()
+            },
             cert_issued_at,
             ipv4: "172.16.0.2".to_string(),
             ipv6: String::new(),
@@ -1082,7 +1119,10 @@ mod tests {
             .await
             .expect("the camouflaged route should register a device");
 
-        println!("device={} ipv4={}", account.id, account.config.interface.addresses.v4);
+        println!(
+            "device={} ipv4={}",
+            account.id, account.config.interface.addresses.v4
+        );
         assert!(!account.id.is_empty());
         assert!(!account.token.is_empty());
         assert!(!account.config.peers.is_empty());
@@ -1094,5 +1134,61 @@ mod tests {
         assert!(!pair.cert_pem.is_empty());
         assert!(!pair.key_pem.is_empty());
         assert!(!masque_cert_expiring(now_unix()));
+    }
+}
+
+#[cfg(test)]
+mod identity_refusal_tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn the_codes_that_mean_the_identity_is_gone() {
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+            StatusCode::GONE,
+        ] {
+            assert!(refuses_identity(status), "{status} means a dead identity");
+        }
+    }
+
+    #[test]
+    fn a_flagged_network_is_not_mistaken_for_a_dead_identity() {
+        assert!(
+            !refuses_identity(StatusCode::FORBIDDEN),
+            "403 is cloudflare refusing the address, the identity may be fine"
+        );
+        assert!(
+            !refuses_identity(StatusCode::TOO_MANY_REQUESTS),
+            "429 is rate limiting, not a dead identity"
+        );
+    }
+
+    #[test]
+    fn a_server_or_transport_problem_is_not_a_dead_identity() {
+        for status in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+            StatusCode::REQUEST_TIMEOUT,
+        ] {
+            assert!(
+                !refuses_identity(status),
+                "{status} should be retried, not treated as a dead identity"
+            );
+        }
+    }
+
+    #[test]
+    fn anything_worth_retrying_is_never_called_a_dead_identity() {
+        for code in 400..600u16 {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert!(
+                !(worth_retrying(status) && refuses_identity(status)),
+                "{status} cannot be both retryable and a dead identity"
+            );
+        }
     }
 }

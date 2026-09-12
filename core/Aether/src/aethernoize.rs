@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rand::{RngExt, Rng};
+use rand::{Rng, RngExt};
 use regex::Regex;
 use tokio::net::UdpSocket;
 
@@ -129,7 +129,10 @@ fn parse_range(data: &str) -> usize {
 pub fn parse_cps(spec: &str) -> Vec<u8> {
     let mut out = Vec::new();
 
-    let tag_regex = Regex::new(r"<([a-z]+)\s*([^>]*)>").unwrap();
+    let tag_regex = {
+        static TAG_REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+        TAG_REGEX.get_or_init(|| Regex::new(r"<([a-z]+)\s*([^>]*)>").expect("static tag pattern"))
+    };
 
     for cap in tag_regex.captures_iter(spec) {
         let tag_type = cap.get(1).map_or("", |m| m.as_str());
@@ -232,8 +235,8 @@ fn wrap_ikev2(payload: &[u8]) -> Vec<u8> {
     header.extend_from_slice(&sa_payload_length.to_be_bytes());
 
     header.extend_from_slice(&[
-        0x00, 0x00, 0x00, 0x14, 0x01, 0x01, 0x00, 0x04, 0x03, 0x00, 0x00, 0x08, 0x01, 0x00,
-        0x00, 0x0c, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x14, 0x01, 0x01, 0x00, 0x04, 0x03, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00,
+        0x0c, 0x00, 0x00, 0x00, 0x00,
     ]);
 
     header.extend_from_slice(payload);
@@ -256,7 +259,11 @@ fn generate_junk(cfg: &AetherNoizeConfig) -> Vec<u8> {
     };
 
     if size == 0 {
-        return if cfg.allow_zero_size { vec![] } else { vec![0x00] };
+        return if cfg.allow_zero_size {
+            vec![]
+        } else {
+            vec![0x00]
+        };
     }
 
     let mut junk = vec![0u8; size];
@@ -313,7 +320,11 @@ pub async fn apply_obfuscation(sock: &UdpSocket, _peer: SocketAddr, cfg: &Aether
     }
 }
 
-pub async fn send_post_handshake_junk(sock: &UdpSocket, _peer: SocketAddr, cfg: &AetherNoizeConfig) {
+pub async fn send_post_handshake_junk(
+    sock: &UdpSocket,
+    _peer: SocketAddr,
+    cfg: &AetherNoizeConfig,
+) {
     for _ in 0..cfg.jc_after_hs {
         let junk = generate_junk(cfg);
         send_connected(sock, &junk).await;

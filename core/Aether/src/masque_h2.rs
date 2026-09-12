@@ -98,6 +98,7 @@ fn validation_timeout() -> Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
+        .map(|v| v.min(86_400))
         .unwrap_or(10);
     Duration::from_secs(secs)
 }
@@ -109,6 +110,7 @@ fn h2_keepalive_interval() -> Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
+        .map(|v| v.min(86_400))
         .unwrap_or(15);
     Duration::from_secs(secs)
 }
@@ -118,6 +120,7 @@ fn h2_keepalive_timeout() -> Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
+        .map(|v| v.min(86_400))
         .unwrap_or(20);
     Duration::from_secs(secs)
 }
@@ -215,7 +218,9 @@ fn build_connect_request(cfg: &H2TunnelConfig) -> Result<http::Request<()>> {
 pub async fn dial(peer: std::net::SocketAddr) -> Result<TcpStream> {
     match crate::upstream::configured() {
         Some(proxy) => proxy.connect(peer).await,
-        None => TcpStream::connect(peer).await.map_err(AetherError::Io),
+        None => crate::egress::tcp_connect(peer)
+            .await
+            .map_err(AetherError::Io),
     }
 }
 
@@ -235,10 +240,12 @@ pub async fn verify_h2(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Durati
             .handshake(tls)
             .await
             .map_err(|e| AetherError::Masque(format!("h2 handshake: {e}")))?;
-        let driver = tokio::spawn(async move {
-            let _ = connection.await;
-        })
-        .abort_handle();
+        let _driver = AbortOnDrop(
+            tokio::spawn(async move {
+                let _ = connection.await;
+            })
+            .abort_handle(),
+        );
         let mut h2 = h2
             .ready()
             .await
@@ -252,7 +259,6 @@ pub async fn verify_h2(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Durati
             .map_err(|e| AetherError::Masque(format!("await response: {e}")))?;
         let status = response.status();
         if !status.is_success() {
-            driver.abort();
             return Err(AetherError::Masque(format!(
                 "h2 connect-ip status {}",
                 status.as_u16()
@@ -260,7 +266,6 @@ pub async fn verify_h2(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Durati
         }
 
         if !data_check {
-            driver.abort();
             return Ok(());
         }
 
@@ -268,10 +273,7 @@ pub async fn verify_h2(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Durati
         let mut capsules = CapsuleParser::new();
         let probe = masque::build_dns_probe_packet(cfg.local_ipv4);
         let framed = masque::encode_datagram_capsule(&probe);
-        if let Err(e) = send_capsule(&mut send_stream, Bytes::from(framed)).await {
-            driver.abort();
-            return Err(e);
-        }
+        send_capsule(&mut send_stream, Bytes::from(framed)).await?;
 
         let mut probe_successes: u32 = 0;
 
@@ -285,16 +287,10 @@ pub async fn verify_h2(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Durati
                             Ok(Some(Capsule::Datagram(_))) => {
                                 probe_successes += 1;
                                 if probe_successes >= DATA_PROBE_REQUIRED_SUCCESSES {
-                                    driver.abort();
                                     return Ok(());
                                 }
                                 let framed = masque::encode_datagram_capsule(&probe);
-                                if let Err(e) =
-                                    send_capsule(&mut send_stream, Bytes::from(framed)).await
-                                {
-                                    driver.abort();
-                                    return Err(e);
-                                }
+                                send_capsule(&mut send_stream, Bytes::from(framed)).await?;
                             }
                             Ok(Some(_)) => continue,
                             Ok(None) => break,
@@ -303,11 +299,9 @@ pub async fn verify_h2(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Durati
                     }
                 }
                 Some(Err(e)) => {
-                    driver.abort();
                     return Err(AetherError::Masque(format!("h2 body: {e}")));
                 }
                 None => {
-                    driver.abort();
                     return Err(AetherError::Masque("h2 stream closed before data".into()));
                 }
             }
@@ -318,6 +312,13 @@ pub async fn verify_h2(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Durati
         Ok(Ok(())) => Ok(start.elapsed()),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(AetherError::Other("h2 verify timeout".into())),
+    }
+}
+
+async fn sleep_until_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -343,20 +344,26 @@ pub async fn run(
 
     let frag_cfg = FragmentConfig::from_env();
     if frag_cfg.enabled {
-        log_or_debug(quiet, format!(
-            "[h2] fragmenting client hello: size={}..{} delay={}..{}ms",
-            frag_cfg.size_min, frag_cfg.size_max, frag_cfg.delay_min_ms, frag_cfg.delay_max_ms
-        ));
+        log_or_debug(
+            quiet,
+            format!(
+                "[h2] fragmenting client hello: size={}..{} delay={}..{}ms",
+                frag_cfg.size_min, frag_cfg.size_max, frag_cfg.delay_min_ms, frag_cfg.delay_max_ms
+            ),
+        );
     }
     let fragment = FragmentingStream::new(tcp, frag_cfg);
 
     let tls = tokio_boring::connect(tls_config, &cfg.sni, fragment)
         .await
         .map_err(|e| AetherError::Tls(format!("h2 tls handshake: {e}")))?;
-    log_or_debug(quiet, format!(
-        "[h2] tls established; alpn={}",
-        String::from_utf8_lossy(tls.ssl().selected_alpn_protocol().unwrap_or(b""))
-    ));
+    log_or_debug(
+        quiet,
+        format!(
+            "[h2] tls established; alpn={}",
+            String::from_utf8_lossy(tls.ssl().selected_alpn_protocol().unwrap_or(b""))
+        ),
+    );
 
     let (h2, mut connection) = h2_builder()
         .handshake(tls)
@@ -366,16 +373,19 @@ pub async fn run(
     // Worth saying out loud: this is the ceiling on a download, at
     // window / round-trip-time, and it is the first thing to look at when the
     // HTTP/2 carrier is slower than the line underneath it.
-    log_or_debug(quiet, format!(
-        "[h2] flow control: stream window {}KB, connection window {}KB, max frame {}KB",
-        crate::sysprofile::h2_stream_window_bytes() / 1024,
-        crate::sysprofile::h2_connection_window_bytes() / 1024,
-        H2_MAX_FRAME_SIZE / 1024,
-    ));
+    log_or_debug(
+        quiet,
+        format!(
+            "[h2] flow control: stream window {}KB, connection window {}KB, max frame {}KB",
+            crate::sysprofile::h2_stream_window_bytes() / 1024,
+            crate::sysprofile::h2_connection_window_bytes() / 1024,
+            H2_MAX_FRAME_SIZE / 1024,
+        ),
+    );
 
-    let mut ping_pong = connection.ping_pong().ok_or_else(|| {
-        AetherError::Masque("h2 connection does not support ping".into())
-    })?;
+    let mut ping_pong = connection
+        .ping_pong()
+        .ok_or_else(|| AetherError::Masque("h2 connection does not support ping".into()))?;
 
     let driver_handle = tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -394,13 +404,19 @@ pub async fn run(
     let (resp_fut, send_stream) = h2
         .send_request(req, false)
         .map_err(|e| AetherError::Masque(format!("send_request: {e}")))?;
-    log_or_debug(quiet, format!("[h2] connect-ip request sent to {}", cfg.authority));
+    log_or_debug(
+        quiet,
+        format!("[h2] connect-ip request sent to {}", cfg.authority),
+    );
 
     let response = resp_fut
         .await
         .map_err(|e| AetherError::Masque(format!("await response: {e}")))?;
     let status = response.status();
-    log_or_debug(quiet, format!("[h2] connect-ip status: {}", status.as_u16()));
+    log_or_debug(
+        quiet,
+        format!("[h2] connect-ip status: {}", status.as_u16()),
+    );
     if !status.is_success() {
         return Err(AetherError::Masque(format!(
             "h2 connect-ip status {}",
@@ -432,7 +448,10 @@ pub async fn run(
             log::debug!("[h2] initial data-plane probe: the send path is gone");
         }
         validate_deadline = Some(Instant::now() + validation_timeout());
-        log_or_debug(quiet, "[h2] validating data-plane (end-to-end probe) before exposing socks5".to_string());
+        log_or_debug(
+            quiet,
+            "[h2] validating data-plane (end-to-end probe) before exposing socks5".to_string(),
+        );
     } else if !ready_fired {
         ready_fired = true;
         if let Some(tx) = ready_tx.take() {
@@ -511,6 +530,8 @@ pub async fn run(
                     log::trace!("[h2] data-plane probe resend was dropped");
                 }
             }
+
+            _ = sleep_until_deadline(pong_deadline) => {}
 
             ctrl = ctrl_rx.recv() => {
                 match ctrl {
@@ -632,11 +653,9 @@ async fn pump_outbound(
                     }
                 }
 
-                let framed = std::mem::replace(
-                    &mut batch,
-                    Vec::with_capacity(H2_SEND_BATCH_BYTES),
-                );
-                send_capsule(&mut send, Bytes::from(framed)).await?;
+                let framed = Bytes::copy_from_slice(&batch);
+                batch.clear();
+                send_capsule(&mut send, framed).await?;
             }
         }
     }

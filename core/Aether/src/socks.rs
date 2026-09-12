@@ -1,9 +1,12 @@
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 use crate::error::{AetherError, Result};
 use crate::netstack::{StackHandle, TcpSender, UdpSender};
@@ -58,50 +61,6 @@ static ROUTES: std::sync::OnceLock<RuleSet> = std::sync::OnceLock::new();
 
 fn routes() -> &'static RuleSet {
     ROUTES.get_or_init(RuleSet::from_env)
-}
-
-fn decide_route(
-    set: &RuleSet,
-    target: &Target,
-    sniffed: Option<&str>,
-    port: u16,
-) -> Action {
-    match sniffed {
-        Some(name) => match set.decide(Host::Domain(name), port) {
-            Action::Proxy => set.decide(host_of(target), port),
-            decided => decided,
-        },
-        None => set.decide(host_of(target), port),
-    }
-}
-
-fn sniff_enabled() -> bool {
-    !matches!(
-        std::env::var("AETHER_ROUTE_SNIFF").as_deref(),
-        Ok("0") | Ok("off") | Ok("false")
-    )
-}
-
-fn sniff_window() -> Duration {
-    let ms = std::env::var("AETHER_ROUTE_SNIFF_MS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(400);
-    Duration::from_millis(ms)
-}
-
-async fn read_sniff_head(sock: &mut TcpStream) -> Option<Vec<u8>> {
-    let mut head = vec![0u8; crate::sniff::PEEK_BUDGET];
-    match tokio::time::timeout(sniff_window(), sock.read(&mut head)).await {
-        Ok(Ok(0)) => None,
-        Ok(Ok(read)) => {
-            head.truncate(read);
-            Some(head)
-        }
-        Ok(Err(_)) => None,
-        Err(_) => Some(Vec::new()),
-    }
 }
 
 fn host_of(target: &Target) -> Host<'_> {
@@ -169,39 +128,163 @@ pub(crate) fn warn_if_world_reachable(kind: &str, listen: SocketAddr) {
     );
 }
 
-pub async fn serve(listen: SocketAddr, stack: StackHandle) -> Result<()> {
-    let listener = TcpListener::bind(listen).await?;
-    log::info!("socks5 listening on {listen}");
+pub async fn bind_listener(kind: &str, listen: SocketAddr) -> Result<TcpListener> {
+    TcpListener::bind(listen).await.map_err(|error| {
+        AetherError::Other(format!(
+            "the {kind} listener cannot use {listen}: {error}{}",
+            bind_hint(&error)
+        ))
+    })
+}
+
+fn bind_hint(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::AddrInUse => {
+            "; another program already listens there, so stop it or choose another port with --bind"
+        }
+        std::io::ErrorKind::PermissionDenied if cfg!(windows) => {
+            "; Windows reserves some port ranges for Hyper-V and WSL (see `netsh interface ipv4 show \
+             excludedportrange protocol=tcp`), so choose a port outside them with --bind"
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            "; ports below 1024 need extra privileges, so choose a higher one with --bind"
+        }
+        std::io::ErrorKind::AddrNotAvailable => {
+            "; that address does not belong to this machine"
+        }
+        _ => "",
+    }
+}
+
+pub async fn serve(listener: TcpListener, stack: StackHandle) -> Result<()> {
+    let listen = listener.local_addr()?;
+    log::info!("[+] socks5 server listening on {listen}");
     warn_if_world_reachable("socks5", listen);
     let bind_ip = listen.ip();
 
+    accept_clients(listener, "socks5", client_limit(), move |sock, peer| {
+        let stack = stack.clone();
+        async move {
+            if let Err(e) = handle_client(sock, stack, bind_ip).await {
+                log::debug!("socks client {peer} ended: {e}");
+            }
+        }
+    })
+    .await
+}
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+const ACCEPT_WARN_EVERY: Duration = Duration::from_secs(10);
+
+fn client_limit() -> usize {
+    if let Some(limit) = std::env::var("AETHER_MAX_CLIENTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0)
+    {
+        return limit;
+    }
+
+    let by_tier = match crate::sysprofile::tuning().tier {
+        crate::sysprofile::Tier::Low => 512,
+        crate::sysprofile::Tier::Medium => 2048,
+        crate::sysprofile::Tier::High => 8192,
+    };
+
+    match crate::sysprofile::open_file_limit() {
+        Some(files) => by_tier.min((files.saturating_sub(64) / 2).max(32)),
+        None => by_tier,
+    }
+}
+
+async fn accept_clients<F, Fut>(
+    listener: TcpListener,
+    kind: &'static str,
+    max: usize,
+    serve_one: F,
+) -> Result<()>
+where
+    F: Fn(TcpStream, SocketAddr) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let limit = Arc::new(Semaphore::new(max));
     let mut clients = tokio::task::JoinSet::new();
+    let mut last_accept_warning: Option<std::time::Instant> = None;
+    let mut last_limit_warning: Option<std::time::Instant> = None;
+
     loop {
+        if limit.available_permits() == 0 && due(&mut last_limit_warning, ACCEPT_WARN_EVERY) {
+            log::warn!(
+                "{kind}: {max} clients are connected, the most served at once; new ones wait \
+                 until one finishes (AETHER_MAX_CLIENTS raises the limit)"
+            );
+        }
+
         tokio::select! {
-            accept = listener.accept() => {
-                let (sock, peer) = match accept {
+            Some(_) = clients.join_next(), if !clients.is_empty() => {}
+            permit = Arc::clone(&limit).acquire_owned() => {
+                let permit = permit.expect("the client limit is never closed");
+                let (sock, peer) = match listener.accept().await {
                     Ok(accepted) => accepted,
                     Err(error) => {
                         if let Some(delay) = accept_backoff(&error) {
-                            log::warn!(
-                                "socks5 accept failed: {error}; the listener stays open and retries"
-                            );
+                            if due(&mut last_accept_warning, ACCEPT_WARN_EVERY) {
+                                log::warn!(
+                                    "{kind} accept failed: {error}; the listener stays open and retries"
+                                );
+                            }
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        log::error!("socks5 listener cannot continue: {error}");
+                        log::error!("{kind} listener cannot continue: {error}");
                         return Err(error.into());
                     }
                 };
-                let stack = stack.clone();
+                enable_keepalive(&sock);
+                let client = serve_one(sock, peer);
                 clients.spawn(async move {
-                    if let Err(e) = handle_client(sock, stack, bind_ip).await {
-                        log::debug!("socks client {peer} ended: {e}");
-                    }
+                    client.await;
+                    drop(permit);
                 });
             }
-            Some(_) = clients.join_next(), if !clients.is_empty() => {}
         }
+    }
+}
+
+fn due(last: &mut Option<std::time::Instant>, every: Duration) -> bool {
+    let now = std::time::Instant::now();
+    if last.is_some_and(|at| now.duration_since(at) < every) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+fn enable_keepalive(sock: &TcpStream) {
+    let idle = crate::netstack::tcp_keepalive();
+    let probes = socket2::TcpKeepalive::new().with_time(idle);
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "windows"
+    ))]
+    let probes =
+        probes.with_interval((idle / 4).clamp(Duration::from_secs(5), Duration::from_secs(30)));
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd"
+    ))]
+    let probes = probes.with_retries(4);
+
+    if let Err(error) = socket2::SockRef::from(sock).set_tcp_keepalive(&probes) {
+        log::debug!("could not enable keep-alive on a connection: {error}");
     }
 }
 
@@ -223,14 +306,32 @@ pub fn accept_backoff(error: &std::io::Error) -> Option<std::time::Duration> {
     }
 
     match error.raw_os_error() {
-        Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS)
-        | Some(libc::ENOMEM) => Some(Duration::from_millis(100)),
+        Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM) => {
+            Some(Duration::from_millis(100))
+        }
         _ => None,
     }
 }
 
 async fn handle_client(mut sock: TcpStream, stack: StackHandle, bind_ip: IpAddr) -> Result<()> {
-    handshake(&mut sock).await?;
+    let (cmd, target, port) = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_request(&mut sock))
+        .await
+        .map_err(|_| {
+            AetherError::Other("the client did not finish the socks5 handshake in time".into())
+        })??;
+
+    match cmd {
+        CMD_CONNECT => handle_connect(sock, stack, target, port).await,
+        CMD_UDP_ASSOCIATE => handle_udp_associate(sock, stack, bind_ip, target, port).await,
+        _ => {
+            reply(&mut sock, REP_NOT_SUPPORTED).await?;
+            Err(AetherError::Other("unsupported socks command".into()))
+        }
+    }
+}
+
+async fn read_request(sock: &mut TcpStream) -> Result<(u8, Target, u16)> {
+    handshake(sock).await?;
 
     let mut head = [0u8; 4];
     sock.read_exact(&mut head).await?;
@@ -238,20 +339,8 @@ async fn handle_client(mut sock: TcpStream, stack: StackHandle, bind_ip: IpAddr)
         return Err(AetherError::Other("bad socks version".into()));
     }
 
-    let cmd = head[1];
-    let atyp = head[3];
-    let (target, port) = read_target(&mut sock, atyp).await?;
-
-    match cmd {
-        CMD_CONNECT => handle_connect(sock, stack, target, port).await,
-        CMD_UDP_ASSOCIATE => {
-            handle_udp_associate(sock, stack, bind_ip, target, port).await
-        }
-        _ => {
-            reply(&mut sock, REP_NOT_SUPPORTED).await?;
-            Err(AetherError::Other("unsupported socks command".into()))
-        }
-    }
+    let (target, port) = read_target(sock, head[3]).await?;
+    Ok((head[1], target, port))
 }
 
 async fn handshake(sock: &mut TcpStream) -> Result<()> {
@@ -527,6 +616,45 @@ fn skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
     }
 }
 
+fn decide_route(set: &RuleSet, target: &Target, sniffed: Option<&str>, port: u16) -> Action {
+    match sniffed {
+        Some(name) => match set.decide(Host::Domain(name), port) {
+            Action::Proxy => set.decide(host_of(target), port),
+            decided => decided,
+        },
+        None => set.decide(host_of(target), port),
+    }
+}
+
+fn sniff_enabled() -> bool {
+    !matches!(
+        std::env::var("AETHER_ROUTE_SNIFF").as_deref(),
+        Ok("0") | Ok("off") | Ok("false")
+    )
+}
+
+fn sniff_window() -> Duration {
+    let ms = std::env::var("AETHER_ROUTE_SNIFF_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(400);
+    Duration::from_millis(ms)
+}
+
+async fn read_sniff_head(sock: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut head = vec![0u8; crate::sniff::PEEK_BUDGET];
+    match tokio::time::timeout(sniff_window(), sock.read(&mut head)).await {
+        Ok(Ok(0)) => None,
+        Ok(Ok(read)) => {
+            head.truncate(read);
+            Some(head)
+        }
+        Ok(Err(_)) => None,
+        Err(_) => Some(Vec::new()),
+    }
+}
+
 async fn handle_connect(
     mut sock: TcpStream,
     stack: StackHandle,
@@ -631,48 +759,244 @@ async fn handle_connect(
         reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
     }
 
-    let (sender, mut from_stack, leftover) = conn;
+    let (sender, from_stack, leftover) = conn;
 
     if !head.is_empty() && sender.send(head).await.is_err() {
         return Ok(());
     }
 
-    let (mut rd, mut wr) = sock.into_split();
-
-    if !leftover.is_empty() && wr.write_all(&leftover).await.is_err() {
+    if !leftover.is_empty() && sock.write_all(&leftover).await.is_err() {
         return Ok(());
     }
 
-    let up = tokio::spawn(async move {
-        let mut buf = vec![0u8; 16384];
-        loop {
-            match rd.read(&mut buf).await {
-                Ok(0) => {
-                    sender.close().await;
-                    break;
-                }
-                Ok(n) => {
-                    if sender.send(buf[..n].to_vec()).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    sender.close().await;
-                    break;
-                }
+    relay_tunneled(sock, sender, from_stack, half_close_linger()).await;
+    Ok(())
+}
+
+pub(crate) async fn serve_connector<F, Fut, S>(
+    listener: TcpListener,
+    kind: &'static str,
+    connect: F,
+) -> Result<()>
+where
+    F: Fn(String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = std::io::Result<S>> + Send,
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let listen = listener.local_addr()?;
+    log::info!("[+] {kind} listening on {listen}");
+    warn_if_world_reachable(kind, listen);
+
+    accept_clients(listener, kind, client_limit(), move |sock, peer| {
+        let connect = connect.clone();
+        async move {
+            if let Err(e) = serve_one_through(sock, connect).await {
+                log::debug!("{kind} client {peer} ended: {e}");
             }
         }
-    });
+    })
+    .await
+}
 
-    while let Some(chunk) = from_stack.recv().await {
-        if wr.write_all(&chunk).await.is_err() {
-            break;
+async fn serve_one_through<F, Fut, S>(mut sock: TcpStream, connect: F) -> Result<()>
+where
+    F: Fn(String, u16) -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let (cmd, target, port) = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_request(&mut sock))
+        .await
+        .map_err(|_| {
+            AetherError::Other("the client did not finish the socks5 handshake in time".into())
+        })??;
+
+    if cmd != CMD_CONNECT {
+        let _ = reply(&mut sock, REP_NOT_SUPPORTED).await;
+        return Err(AetherError::Other(
+            "only connect is carried on this listener".into(),
+        ));
+    }
+
+    let host = match &target {
+        Target::Domain(name) => name.clone(),
+        Target::Ip(ip) => ip.to_string(),
+    };
+
+    match connect(host.clone(), port).await {
+        Ok(remote) => {
+            reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
+            relay_generic(sock, remote, half_close_linger()).await;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = reply(&mut sock, REP_GENERAL).await;
+            Err(AetherError::Other(format!("{host}:{port}: {error}")))
+        }
+    }
+}
+
+pub(crate) async fn relay_generic<A, B>(client: A, remote: B, linger: Duration)
+where
+    A: AsyncRead + AsyncWrite + Send + Unpin,
+    B: AsyncRead + AsyncWrite + Send + Unpin,
+{
+    let (mut client_rd, mut client_wr) = tokio::io::split(client);
+    let (mut remote_rd, mut remote_wr) = tokio::io::split(remote);
+    let activity = Activity::new();
+
+    let upload = async {
+        let _ = pump(&mut client_rd, &mut remote_wr, &activity).await;
+        let _ = remote_wr.shutdown().await;
+    };
+
+    let download = async {
+        if pump(&mut remote_rd, &mut client_wr, &activity)
+            .await
+            .is_ok()
+        {
+            let _ = client_wr.shutdown().await;
+        }
+    };
+
+    relay_halves(upload, download, &activity, linger).await;
+}
+
+const RELAY_CHUNK: usize = 16384;
+
+pub(crate) fn half_close_linger() -> Duration {
+    let secs = std::env::var("AETHER_HALF_CLOSE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .map(|v| v.min(86_400))
+        .unwrap_or(30);
+    Duration::from_secs(secs)
+}
+
+struct Activity {
+    started: tokio::time::Instant,
+    last_ms: AtomicU64,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            started: tokio::time::Instant::now(),
+            last_ms: AtomicU64::new(0),
         }
     }
 
-    let _ = wr.shutdown().await;
-    up.abort();
-    Ok(())
+    fn touch(&self) {
+        let elapsed = self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        self.last_ms.store(elapsed, Ordering::Relaxed);
+    }
+
+    fn quiet_until(&self, idle: Duration) -> tokio::time::Instant {
+        self.started + Duration::from_millis(self.last_ms.load(Ordering::Relaxed)) + idle
+    }
+}
+
+async fn relay_halves<U, D>(upload: U, download: D, activity: &Activity, linger: Duration)
+where
+    U: Future<Output = ()>,
+    D: Future<Output = ()>,
+{
+    tokio::pin!(upload);
+    tokio::pin!(download);
+
+    tokio::select! {
+        _ = &mut download => return,
+        _ = &mut upload => {}
+    }
+
+    activity.touch();
+    loop {
+        tokio::select! {
+            _ = &mut download => return,
+            _ = tokio::time::sleep_until(activity.quiet_until(linger)) => {
+                if activity.quiet_until(linger) <= tokio::time::Instant::now() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+pub(crate) async fn relay_tunneled(
+    sock: TcpStream,
+    sender: TcpSender,
+    mut from_stack: mpsc::Receiver<Vec<u8>>,
+    linger: Duration,
+) {
+    let (mut rd, mut wr) = sock.into_split();
+    let activity = Activity::new();
+
+    let upload = async {
+        let mut buf = vec![0u8; RELAY_CHUNK];
+        loop {
+            match rd.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if sender.send(buf[..n].to_vec()).await.is_err() {
+                        return;
+                    }
+                    activity.touch();
+                }
+            }
+        }
+        sender.close().await;
+    };
+
+    let download = async {
+        while let Some(chunk) = from_stack.recv().await {
+            if wr.write_all(&chunk).await.is_err() {
+                return;
+            }
+            activity.touch();
+        }
+        let _ = wr.shutdown().await;
+    };
+
+    relay_halves(upload, download, &activity, linger).await;
+}
+
+async fn relay_direct(client: TcpStream, remote: TcpStream, linger: Duration) {
+    let (mut client_rd, mut client_wr) = client.into_split();
+    let (mut remote_rd, mut remote_wr) = remote.into_split();
+    let activity = Activity::new();
+
+    let upload = async {
+        let _ = pump(&mut client_rd, &mut remote_wr, &activity).await;
+        let _ = remote_wr.shutdown().await;
+    };
+
+    let download = async {
+        if pump(&mut remote_rd, &mut client_wr, &activity)
+            .await
+            .is_ok()
+        {
+            let _ = client_wr.shutdown().await;
+        }
+    };
+
+    relay_halves(upload, download, &activity, linger).await;
+}
+
+async fn pump<R, W>(from: &mut R, to: &mut W, activity: &Activity) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = vec![0u8; RELAY_CHUNK];
+    loop {
+        let n = from.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        to.write_all(&buf[..n]).await?;
+        to.flush().await?;
+        activity.touch();
+    }
 }
 
 fn normalize_ip(ip: IpAddr) -> IpAddr {
@@ -692,11 +1016,7 @@ fn expected_udp_source(control_peer: SocketAddr, requested: &Target) -> IpAddr {
     }
 }
 
-fn udp_source_allowed(
-    expected_ip: IpAddr,
-    latched: Option<SocketAddr>,
-    from: SocketAddr,
-) -> bool {
+fn udp_source_allowed(expected_ip: IpAddr, latched: Option<SocketAddr>, from: SocketAddr) -> bool {
     match latched {
         Some(known) => known == from,
         None => normalize_ip(from.ip()) == normalize_ip(expected_ip),
@@ -710,35 +1030,37 @@ async fn handle_direct(
     head: Vec<u8>,
     replied: bool,
 ) -> Result<()> {
-    let address = match &target {
-        Target::Domain(name) => format!("{name}:{port}"),
-        Target::Ip(ip) => SocketAddr::new(*ip, port).to_string(),
+    let host = match &target {
+        Target::Domain(name) => name.clone(),
+        Target::Ip(ip) => ip.to_string(),
     };
+    let client = sock.peer_addr()?.ip();
 
-    let mut upstream = match tokio::time::timeout(
-        Duration::from_secs(10),
-        TcpStream::connect(&address),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(error)) => {
-            log::debug!("[route] direct connect to {address} failed: {error}");
-            if !replied {
-                let _ = reply(&mut sock, REP_GENERAL).await;
+    let mut upstream =
+        match tokio::time::timeout(DIRECT_CONNECT_TIMEOUT, connect_direct(&host, port, client))
+            .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                log::debug!("[route] direct connect to {host}:{port} failed: {error}");
+                if !replied {
+                    let code = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        REP_NOT_ALLOWED
+                    } else {
+                        REP_GENERAL
+                    };
+                    let _ = reply(&mut sock, code).await;
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-        Err(_) => {
-            log::debug!("[route] direct connect to {address} timed out");
-            if !replied {
-                let _ = reply(&mut sock, REP_GENERAL).await;
+            Err(_) => {
+                log::debug!("[route] direct connect to {host}:{port} timed out");
+                if !replied {
+                    let _ = reply(&mut sock, REP_GENERAL).await;
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-    };
-
-    let _ = upstream.set_nodelay(true);
+        };
 
     if !head.is_empty() && upstream.write_all(&head).await.is_err() {
         return Ok(());
@@ -748,14 +1070,47 @@ async fn handle_direct(
         reply_bound(&mut sock, "0.0.0.0:0".parse().unwrap()).await?;
     }
 
-    let (mut client_rd, mut client_wr) = sock.into_split();
-    let (mut remote_rd, mut remote_wr) = upstream.into_split();
-
-    let up = tokio::spawn(async move { tokio::io::copy(&mut client_rd, &mut remote_wr).await });
-    let _ = tokio::io::copy(&mut remote_rd, &mut client_wr).await;
-    let _ = client_wr.shutdown().await;
-    up.abort();
+    relay_direct(sock, upstream, half_close_linger()).await;
     Ok(())
+}
+
+const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn direct_target_allowed(client: IpAddr, address: IpAddr) -> bool {
+    let address = normalize_ip(address);
+    if address.is_loopback() || address.is_unspecified() {
+        return normalize_ip(client).is_loopback();
+    }
+    true
+}
+
+async fn connect_direct(host: &str, port: u16, client: IpAddr) -> std::io::Result<TcpStream> {
+    let mut last_error = None;
+    for address in tokio::net::lookup_host((host, port)).await? {
+        if !direct_target_allowed(client, address.ip()) {
+            last_error = Some(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{address} is this machine's own loopback, which only local clients may reach"
+                ),
+            ));
+            continue;
+        }
+        match crate::egress::tcp_connect(address).await {
+            Ok(stream) => {
+                let _ = stream.set_nodelay(true);
+                enable_keepalive(&stream);
+                return Ok(stream);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{host} did not resolve to any address"),
+        )
+    }))
 }
 
 const GATEWAY_HEAD_LIMIT: usize = 8192;
@@ -778,7 +1133,9 @@ async fn open_through_gateway(
 ) -> Result<GatewayChannel> {
     let conn = tokio::time::timeout(GATEWAY_PROBE_TIMEOUT, stack.open_tcp(proxy))
         .await
-        .map_err(|_| AetherError::Other(format!("gateway {proxy} did not accept a connection")))??;
+        .map_err(|_| {
+            AetherError::Other(format!("gateway {proxy} did not accept a connection"))
+        })??;
     let (sender, mut from_stack) = conn.into_split();
 
     sender.send(build_proxy_connect(authority, port)).await?;
@@ -822,7 +1179,6 @@ async fn open_through_gateway(
     }
 }
 
-
 async fn handle_udp_associate(
     mut sock: TcpStream,
     stack: StackHandle,
@@ -840,7 +1196,7 @@ async fn handle_udp_associate(
     let udp = stack.open_udp().await?;
     let (sender, mut from_stack) = udp.into_split();
 
-    let direct_relay = UdpSocket::bind("0.0.0.0:0").await?;
+    let direct_relay = crate::egress::udp_bind("0.0.0.0:0".parse().expect("a wildcard address"))?;
 
     let mut client: Option<SocketAddr> = None;
     let mut refused: u64 = 0;
@@ -885,6 +1241,11 @@ async fn handle_udp_associate(
                                 }
                             };
                             match outside {
+                                Some(addr) if !direct_target_allowed(control_peer.ip(), addr.ip()) => {
+                                    log::debug!(
+                                        "[route] direct udp to {addr} refused: only local clients may reach this machine's loopback"
+                                    );
+                                }
                                 Some(addr) => {
                                     log::trace!("[route] direct udp {dst}:{dst_port}");
                                     let _ = direct_relay.send_to(&payload.1, addr).await;
@@ -995,6 +1356,175 @@ fn build_udp_reply(src: SocketAddr, data: &[u8]) -> Vec<u8> {
     pkt.extend_from_slice(&src.port().to_be_bytes());
     pkt.extend_from_slice(data);
     pkt
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+
+    async fn pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (dialed, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+        (dialed.unwrap(), accepted.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn a_far_end_that_never_closes_does_not_pin_a_half_closed_client() {
+        let (mut client, proxied) = pair().await;
+        let (dialed, mut far_end) = pair().await;
+        let relay = tokio::spawn(relay_direct(proxied, dialed, Duration::from_millis(200)));
+
+        client.write_all(b"request").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut request = Vec::new();
+        far_end.read_to_end(&mut request).await.unwrap();
+        assert_eq!(request, b"request");
+
+        tokio::time::timeout(Duration::from_secs(5), relay)
+            .await
+            .expect("the relay must let go once the answer stops coming")
+            .unwrap();
+
+        let mut rest = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut rest))
+            .await
+            .expect("the client must see the connection end");
+        assert_eq!(read.unwrap(), 0);
+        drop(far_end);
+    }
+
+    #[tokio::test]
+    async fn the_answer_to_a_half_closed_request_still_arrives_whole() {
+        let (mut client, proxied) = pair().await;
+        let (dialed, mut far_end) = pair().await;
+        let relay = tokio::spawn(relay_direct(proxied, dialed, Duration::from_secs(5)));
+
+        client.write_all(b"GET").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut request = Vec::new();
+        far_end.read_to_end(&mut request).await.unwrap();
+        far_end.write_all(b"the answer").await.unwrap();
+        drop(far_end);
+
+        let mut answer = Vec::new();
+        client.read_to_end(&mut answer).await.unwrap();
+        assert_eq!(answer, b"the answer");
+        tokio::time::timeout(Duration::from_secs(5), relay)
+            .await
+            .expect("the relay ends with the far end")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_keeps_moving_outlives_the_linger() {
+        let (mut client, proxied) = pair().await;
+        let (dialed, mut far_end) = pair().await;
+        let relay = tokio::spawn(relay_direct(proxied, dialed, Duration::from_millis(500)));
+
+        client.shutdown().await.unwrap();
+        let mut request = Vec::new();
+        far_end.read_to_end(&mut request).await.unwrap();
+
+        for byte in 0..20u8 {
+            far_end.write_all(&[byte]).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(far_end);
+
+        let mut answer = Vec::new();
+        client.read_to_end(&mut answer).await.unwrap();
+        assert_eq!(answer, (0..20u8).collect::<Vec<_>>());
+        relay.await.unwrap();
+    }
+
+    #[test]
+    fn only_local_clients_may_reach_this_machines_loopback_directly() {
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let lan: IpAddr = "192.168.1.20".parse().unwrap();
+        assert!(direct_target_allowed(local, "127.0.0.1".parse().unwrap()));
+        assert!(direct_target_allowed(
+            "::1".parse().unwrap(),
+            "127.0.0.1".parse().unwrap()
+        ));
+        assert!(!direct_target_allowed(lan, "127.0.0.1".parse().unwrap()));
+        assert!(!direct_target_allowed(lan, "127.8.9.10".parse().unwrap()));
+        assert!(!direct_target_allowed(lan, "::1".parse().unwrap()));
+        assert!(!direct_target_allowed(
+            lan,
+            "::ffff:127.0.0.1".parse().unwrap()
+        ));
+        assert!(!direct_target_allowed(lan, "0.0.0.0".parse().unwrap()));
+        assert!(direct_target_allowed(lan, "192.168.1.1".parse().unwrap()));
+        assert!(direct_target_allowed(lan, "93.184.216.34".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn a_lan_client_is_refused_a_loopback_target() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let refused = connect_direct("127.0.0.1", port, "192.168.1.20".parse().unwrap())
+            .await
+            .expect_err("a lan client must not reach this machine's loopback");
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+
+        assert!(
+            connect_direct("127.0.0.1", port, "127.0.0.1".parse().unwrap())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn clients_past_the_limit_wait_for_a_free_slot() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (served_tx, mut served) = mpsc::unbounded_channel::<SocketAddr>();
+
+        let server = tokio::spawn(accept_clients(
+            listener,
+            "test",
+            1,
+            move |mut sock, peer| {
+                let served_tx = served_tx.clone();
+                async move {
+                    let _ = served_tx.send(peer);
+                    let mut buf = [0u8; 16];
+                    while let Ok(read) = sock.read(&mut buf).await {
+                        if read == 0 {
+                            break;
+                        }
+                    }
+                }
+            },
+        ));
+
+        let first = TcpStream::connect(address).await.unwrap();
+        let first_served = tokio::time::timeout(Duration::from_secs(2), served.recv())
+            .await
+            .expect("the first client is served")
+            .unwrap();
+        assert_eq!(first_served, first.local_addr().unwrap());
+
+        let second = TcpStream::connect(address).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), served.recv())
+                .await
+                .is_err(),
+            "the second client must wait while the first holds the only slot"
+        );
+
+        drop(first);
+        let second_served = tokio::time::timeout(Duration::from_secs(2), served.recv())
+            .await
+            .expect("the second client is served once the slot frees up")
+            .unwrap();
+        assert_eq!(second_served, second.local_addr().unwrap());
+        server.abort();
+    }
 }
 
 #[cfg(test)]
@@ -1294,34 +1824,20 @@ mod tests {
 
 const HTTP_HEAD_LIMIT: usize = 16 * 1024;
 
-pub async fn serve_http(listen: SocketAddr, stack: StackHandle) -> Result<()> {
-    let listener = TcpListener::bind(listen).await?;
-    log::info!("http proxy listening on {listen}");
+pub async fn serve_http(listener: TcpListener, stack: StackHandle) -> Result<()> {
+    let listen = listener.local_addr()?;
+    log::info!("[+] http proxy listening on {listen}");
     warn_if_world_reachable("http proxy", listen);
 
-    loop {
-        let (sock, peer) = match listener.accept().await {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                if let Some(delay) = accept_backoff(&error) {
-                    log::warn!(
-                        "http proxy accept failed: {error}; the listener stays open and retries"
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-                log::error!("http proxy listener cannot continue: {error}");
-                return Err(error.into());
-            }
-        };
-
+    accept_clients(listener, "http proxy", client_limit(), move |sock, peer| {
         let stack = stack.clone();
-        tokio::spawn(async move {
+        async move {
             if let Err(e) = handle_http_client(sock, stack).await {
                 log::debug!("http proxy client {peer} ended: {e}");
             }
-        });
-    }
+        }
+    })
+    .await
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1394,47 +1910,33 @@ pub fn parse_request_line(line: &str) -> Option<HttpRequestLine> {
     })
 }
 
-async fn read_head(sock: &mut TcpStream) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; HTTP_HEAD_LIMIT + 4];
-    let mut seen = 0usize;
+async fn read_head(sock: &mut TcpStream) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 2048];
 
     loop {
-        let window = (seen + 1024).min(buf.len());
-        let available = sock.peek(&mut buf[..window]).await?;
-        if available == 0 {
+        let read = sock.read(&mut chunk).await?;
+        if read == 0 {
             return Err(AetherError::Other(
                 "the http client closed before sending a request".into(),
             ));
         }
 
-        let search_from = seen.saturating_sub(3);
-        if let Some(pos) = buf[..available]
-            .windows(4)
-            .skip(search_from)
-            .position(|w| w == b"\r\n\r\n")
-        {
-            let end = search_from + pos + 4;
-            let mut head = vec![0u8; end];
-            sock.read_exact(&mut head).await?;
-            return Ok(head);
+        let search_from = buf.len().saturating_sub(3);
+        buf.extend_from_slice(&chunk[..read]);
+
+        if let Some(pos) = buf[search_from..].windows(4).position(|w| w == b"\r\n\r\n") {
+            let early = buf.split_off(search_from + pos + 4);
+            return Ok((buf, early));
         }
 
-        if available > HTTP_HEAD_LIMIT {
+        if buf.len() > HTTP_HEAD_LIMIT {
             return Err(AetherError::Other("http request head too large".into()));
         }
-
-        if available == seen {
-            sock.readable().await?;
-        }
-        seen = available;
     }
 }
 
-async fn open_tunneled(
-    stack: &StackHandle,
-    target: Target,
-    port: u16,
-) -> Result<GatewayChannel> {
+async fn open_tunneled(stack: &StackHandle, target: Target, port: u16) -> Result<GatewayChannel> {
     let via_gateway = gateway_proxy().filter(|_| should_use_gateway(port));
 
     if let Some(proxy) = via_gateway {
@@ -1455,7 +1957,11 @@ async fn open_tunneled(
 }
 
 async fn handle_http_client(mut sock: TcpStream, stack: StackHandle) -> Result<()> {
-    let head = read_head(&mut sock).await?;
+    let (head, early) = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_head(&mut sock))
+        .await
+        .map_err(|_| {
+            AetherError::Other("the client did not send a request head in time".into())
+        })??;
     let text = String::from_utf8_lossy(&head).to_string();
     let first_line = text.lines().next().unwrap_or_default();
 
@@ -1486,7 +1992,7 @@ async fn handle_http_client(mut sock: TcpStream, stack: StackHandle) -> Result<(
         }
         Action::Direct => {
             log::debug!("[route] direct http {}:{}", request.authority, request.port);
-            return relay_http_direct(sock, &request, &head).await;
+            return relay_http_direct(sock, &request, &head, &early).await;
         }
         Action::Proxy => match open_tunneled(&stack, target, request.port).await {
             Ok(channel) => channel,
@@ -1499,7 +2005,7 @@ async fn handle_http_client(mut sock: TcpStream, stack: StackHandle) -> Result<(
         },
     };
 
-    let (sender, mut from_stack, leftover) = channel;
+    let (sender, from_stack, leftover) = channel;
 
     let preamble = match &request.rewritten {
         Some(line) => {
@@ -1514,9 +2020,7 @@ async fn handle_http_client(mut sock: TcpStream, stack: StackHandle) -> Result<(
             .await?;
     }
 
-    let (mut rd, mut wr) = sock.into_split();
-
-    if !leftover.is_empty() && wr.write_all(&leftover).await.is_err() {
+    if !leftover.is_empty() && sock.write_all(&leftover).await.is_err() {
         return Ok(());
     }
     if let Some(bytes) = preamble {
@@ -1524,36 +2028,11 @@ async fn handle_http_client(mut sock: TcpStream, stack: StackHandle) -> Result<(
             return Ok(());
         }
     }
-
-    let up = tokio::spawn(async move {
-        let mut buf = vec![0u8; 16384];
-        loop {
-            match rd.read(&mut buf).await {
-                Ok(0) => {
-                    sender.close().await;
-                    break;
-                }
-                Ok(n) => {
-                    if sender.send(buf[..n].to_vec()).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    sender.close().await;
-                    break;
-                }
-            }
-        }
-    });
-
-    while let Some(chunk) = from_stack.recv().await {
-        if wr.write_all(&chunk).await.is_err() {
-            break;
-        }
+    if !early.is_empty() && sender.send(early).await.is_err() {
+        return Ok(());
     }
 
-    let _ = wr.shutdown().await;
-    up.abort();
+    relay_tunneled(sock, sender, from_stack, half_close_linger()).await;
     Ok(())
 }
 
@@ -1561,19 +2040,33 @@ async fn relay_http_direct(
     mut sock: TcpStream,
     request: &HttpRequestLine,
     head: &[u8],
+    early: &[u8],
 ) -> Result<()> {
-    let upstream = tokio::net::TcpStream::connect((
-        request.authority.as_str(),
-        request.port,
-    ))
-    .await;
+    let client = sock.peer_addr()?.ip();
+    let upstream = tokio::time::timeout(
+        DIRECT_CONNECT_TIMEOUT,
+        connect_direct(&request.authority, request.port, client),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "direct connect to {}:{} timed out",
+                request.authority, request.port
+            ),
+        ))
+    });
 
     let mut upstream = match upstream {
         Ok(stream) => stream,
         Err(error) => {
-            let _ = sock
-                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
-                .await;
+            let answer: &[u8] = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"
+            } else {
+                b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n"
+            };
+            let _ = sock.write_all(answer).await;
             return Err(error.into());
         }
     };
@@ -1591,14 +2084,74 @@ async fn relay_http_direct(
                 .await?;
         }
     }
+    if !early.is_empty() {
+        upstream.write_all(early).await?;
+    }
 
-    let _ = tokio::io::copy_bidirectional(&mut sock, &mut upstream).await;
+    relay_direct(sock, upstream, half_close_linger()).await;
     Ok(())
 }
 
 #[cfg(test)]
 mod http_proxy_tests {
-    use super::{parse_authority, parse_request_line};
+    use super::{parse_authority, parse_request_line, read_head};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn head_over_socket(chunks: &[&[u8]]) -> (Vec<u8>, Vec<u8>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let owned: Vec<Vec<u8>> = chunks.iter().map(|c| c.to_vec()).collect();
+        let writer = tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.expect("connect");
+            for chunk in owned {
+                client.write_all(&chunk).await.expect("write");
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            client.flush().await.expect("flush");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let (mut server, _) = listener.accept().await.expect("accept");
+        let (head, mut leftover) = read_head(&mut server).await.expect("head");
+
+        let mut more = vec![0u8; 64];
+        let n = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            server.read(&mut more),
+        )
+        .await
+        .map(|r| r.unwrap_or(0))
+        .unwrap_or(0);
+        leftover.extend_from_slice(&more[..n]);
+
+        writer.abort();
+        (head, leftover)
+    }
+
+    #[tokio::test]
+    async fn a_head_arriving_in_one_piece_is_read_exactly() {
+        let (head, leftover) =
+            head_over_socket(&[b"CONNECT a:443 HTTP/1.1\r\nHost: a\r\n\r\n"]).await;
+        assert_eq!(head, b"CONNECT a:443 HTTP/1.1\r\nHost: a\r\n\r\n");
+        assert!(leftover.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_head_split_across_writes_is_still_assembled() {
+        let (head, _) =
+            head_over_socket(&[b"CONNECT a:443 HT", b"TP/1.1\r\nHos", b"t: a\r\n", b"\r\n"]).await;
+        assert_eq!(head, b"CONNECT a:443 HTTP/1.1\r\nHost: a\r\n\r\n");
+    }
+
+    #[tokio::test]
+    async fn bytes_after_the_head_are_kept_for_the_far_end() {
+        let (head, leftover) =
+            head_over_socket(&[b"CONNECT a:443 HTTP/1.1\r\n\r\n\x16\x03\x01pipelined"]).await;
+        assert_eq!(head, b"CONNECT a:443 HTTP/1.1\r\n\r\n");
+        assert_eq!(leftover, b"\x16\x03\x01pipelined");
+    }
 
     #[test]
     fn a_connect_request_carries_the_host_and_port() {
@@ -1617,9 +2170,8 @@ mod http_proxy_tests {
 
     #[test]
     fn an_absolute_get_is_rewritten_to_origin_form() {
-        let parsed =
-            parse_request_line("GET http://ip-api.com/json/?fields=query HTTP/1.1")
-                .expect("parsed");
+        let parsed = parse_request_line("GET http://ip-api.com/json/?fields=query HTTP/1.1")
+            .expect("parsed");
         assert_eq!(parsed.authority, "ip-api.com");
         assert_eq!(parsed.port, 80);
         assert_eq!(
@@ -1636,8 +2188,7 @@ mod http_proxy_tests {
 
     #[test]
     fn an_explicit_port_in_an_absolute_url_is_honoured() {
-        let parsed =
-            parse_request_line("GET http://example.com:8080/x HTTP/1.1").expect("parsed");
+        let parsed = parse_request_line("GET http://example.com:8080/x HTTP/1.1").expect("parsed");
         assert_eq!(parsed.port, 8080);
         assert_eq!(parsed.authority, "example.com");
     }
@@ -1666,5 +2217,115 @@ mod http_proxy_tests {
     fn a_malformed_line_is_rejected() {
         assert!(parse_request_line("").is_none());
         assert!(parse_request_line("CONNECT").is_none());
+    }
+}
+
+#[cfg(test)]
+mod sniff_route_tests {
+    use super::*;
+
+    fn ip(value: &str) -> Target {
+        Target::Ip(value.parse().unwrap())
+    }
+
+    #[test]
+    fn a_domain_rule_reaches_traffic_that_arrived_as_an_address() {
+        let set = RuleSet::parse("ads.example", "");
+        assert_eq!(
+            decide_route(&set, &ip("93.184.216.34"), None, 443),
+            Action::Proxy
+        );
+        assert_eq!(
+            decide_route(&set, &ip("93.184.216.34"), Some("ads.example"), 443),
+            Action::Block
+        );
+        assert_eq!(
+            decide_route(&set, &ip("93.184.216.34"), Some("tracker.ads.example"), 443),
+            Action::Block
+        );
+    }
+
+    #[test]
+    fn a_sniffed_name_can_send_traffic_direct() {
+        let set = RuleSet::parse("", "internal.example");
+        assert_eq!(
+            decide_route(&set, &ip("10.1.2.3"), Some("internal.example"), 443),
+            Action::Direct
+        );
+    }
+
+    #[test]
+    fn an_address_rule_still_applies_when_the_name_says_nothing() {
+        let set = RuleSet::parse("10.0.0.0/8", "");
+        assert_eq!(
+            decide_route(&set, &ip("10.1.2.3"), Some("unlisted.example"), 443),
+            Action::Block
+        );
+    }
+
+    #[test]
+    fn a_name_that_matches_nothing_leaves_the_address_decision_alone() {
+        let set = RuleSet::parse("ads.example", "private");
+        assert_eq!(
+            decide_route(&set, &ip("192.168.1.5"), Some("unlisted.example"), 443),
+            Action::Direct
+        );
+    }
+
+    #[test]
+    fn a_domain_target_is_decided_on_its_own_name() {
+        let set = RuleSet::parse("ads.example", "");
+        let target = Target::Domain("ads.example".to_string());
+        assert_eq!(decide_route(&set, &target, None, 443), Action::Block);
+    }
+
+    #[tokio::test]
+    async fn a_server_speaks_first_protocol_survives_the_sniff_window() {
+        std::env::set_var("AETHER_ROUTE_SNIFF_MS", "50");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let quiet = tokio::spawn(async move {
+            let _client = tokio::net::TcpStream::connect(address).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+        let head = read_sniff_head(&mut server).await;
+        std::env::remove_var("AETHER_ROUTE_SNIFF_MS");
+
+        assert_eq!(
+            head,
+            Some(Vec::new()),
+            "a client that waits for a greeting must not be treated as gone"
+        );
+        quiet.abort();
+    }
+
+    #[tokio::test]
+    async fn a_client_that_hangs_up_is_reported_as_gone() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let client = tokio::net::TcpStream::connect(address).await.unwrap();
+            drop(client);
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+        assert_eq!(read_sniff_head(&mut server).await, None);
+    }
+
+    #[test]
+    fn sniffing_is_on_unless_it_is_turned_off() {
+        std::env::remove_var("AETHER_ROUTE_SNIFF");
+        assert!(sniff_enabled());
+        std::env::set_var("AETHER_ROUTE_SNIFF", "0");
+        assert!(!sniff_enabled());
+        std::env::set_var("AETHER_ROUTE_SNIFF", "off");
+        assert!(!sniff_enabled());
+        std::env::set_var("AETHER_ROUTE_SNIFF", "1");
+        assert!(sniff_enabled());
+        std::env::remove_var("AETHER_ROUTE_SNIFF");
     }
 }

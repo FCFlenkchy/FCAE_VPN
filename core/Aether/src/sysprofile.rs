@@ -1,4 +1,4 @@
-use parking_lot::Mutex;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
@@ -22,7 +22,7 @@ pub struct Tuning {
     pub h2_connection_window: u32,
 }
 
-static TUNING: Mutex<Option<Tuning>> = Mutex::new(None);
+static TUNING: OnceLock<Tuning> = OnceLock::new();
 
 fn detected_cpus() -> usize {
     std::thread::available_parallelism()
@@ -210,17 +210,8 @@ fn build_tuning() -> Tuning {
     }
 }
 
-pub fn tuning() -> Tuning {
-    let mut guard = TUNING.lock();
-    if guard.is_none() {
-        *guard = Some(build_tuning());
-    }
-    *guard.as_ref().unwrap()
-}
-
-/// Reset the cached tuning so the next call to tuning() re-detects system resources.
-pub fn reset() {
-    *TUNING.lock() = None;
+pub fn tuning() -> &'static Tuning {
+    TUNING.get_or_init(build_tuning)
 }
 
 pub fn log_summary() {
@@ -248,6 +239,85 @@ pub fn log_summary() {
         t.h2_stream_window / 1024,
         t.h2_connection_window / 1024,
     );
+}
+
+#[cfg(unix)]
+pub fn raise_fd_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return;
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut wanted = limit.rlim_max;
+    #[cfg(target_os = "macos")]
+    {
+        wanted = wanted.min(macos_max_files_per_proc());
+    }
+
+    if wanted <= limit.rlim_cur {
+        return;
+    }
+
+    let raised = libc::rlimit {
+        rlim_cur: wanted,
+        rlim_max: limit.rlim_max,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
+        log::debug!(
+            "[*] open file limit raised from {} to {}",
+            limit.rlim_cur,
+            wanted
+        );
+    }
+}
+
+#[cfg(not(unix))]
+pub fn raise_fd_limit() {}
+
+#[cfg(target_os = "macos")]
+fn macos_max_files_per_proc() -> libc::rlim_t {
+    const OPEN_MAX: libc::rlim_t = 10240;
+
+    let mut value: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let name = b"kern.maxfilesperproc\0";
+    let ret = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr() as *const libc::c_char,
+            &mut value as *mut libc::c_int as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret == 0 && value > 0 {
+        value as libc::rlim_t
+    } else {
+        OPEN_MAX
+    }
+}
+
+#[cfg(unix)]
+pub fn open_file_limit() -> Option<usize> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0
+        || limit.rlim_cur == libc::RLIM_INFINITY
+    {
+        return None;
+    }
+    usize::try_from(limit.rlim_cur).ok()
+}
+
+#[cfg(not(unix))]
+pub fn open_file_limit() -> Option<usize> {
+    None
 }
 
 pub fn cap_concurrency(requested: usize) -> usize {
