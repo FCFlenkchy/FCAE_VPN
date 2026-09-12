@@ -125,31 +125,10 @@ fn main() {
             match status {
                 Ok(s) if s.success() => {
                     println!("cargo:warning=tun2socks built successfully for {goos}/{goarch}");
-
-                    // For Android targets: automatically populate android/app/src/main/jniLibs/<abi>/libtun2socks.so
-                    // so Gradle packages it directly into the APK's native library directory at build time!
-                    if target_os == "android" {
-                        let android_abi = match target_arch.as_str() {
-                            "aarch64" => "arm64-v8a",
-                            "arm" | "armv7" | "thumbv7neon" | "armv7a" => "armeabi-v7a",
-                            "x86_64" => "x86_64",
-                            "i686" | "x86" | "i386" | "i586" => "x86",
-                            _ => "arm64-v8a",
-                        };
-                        let jni_dir = workspace_root
-                            .join("android")
-                            .join("app")
-                            .join("src")
-                            .join("main")
-                            .join("jniLibs")
-                            .join(android_abi);
-                        if fs::create_dir_all(&jni_dir).is_ok() {
-                            let jni_so = jni_dir.join("libtun2socks.so");
-                            if fs::copy(&bin_path, &jni_so).is_ok() {
-                                println!("cargo:warning=Copied tun2socks to Android jniLibs: {}", jni_so.display());
-                            }
-                        }
-                    }
+                    // NOTE: the Android jniLibs packaging happens exactly once,
+                    // after this block, via package_android_tun2socks() — it runs
+                    // for both freshly built and pre-built binaries. Do not copy
+                    // here as well or the binary ends up packaged twice.
                 }
                 Ok(s) => {
                     println!("cargo:warning=go build failed with exit code: {:?}", s.code());
@@ -195,30 +174,16 @@ fn main() {
         }
     }
 
-    // ── Android: automatically copy tun2socks to jniLibs ─────────────
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| String::from("unknown"));
+    // ── Android: package tun2socks EXACTLY ONCE ─────────────────────
+    // The binary ships as android/app/src/main/jniLibs/<abi>/libtun2socks.so, so
+    // Gradle puts it in the APK's native library directory, where the engine runs
+    // it directly (the manifest sets android:extractNativeLibs="true", which is
+    // what makes a file in nativeLibraryDir executable). See
+    // package_android_tun2socks() for why the compile-time embedding inside
+    // libfcaevpn_native.so is deliberately disabled on Android.
     if target_os == "android" {
         let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| String::from("unknown"));
-        let android_abi = match target_arch.as_str() {
-            "aarch64" => "arm64-v8a",
-            "arm" | "armv7" | "thumbv7neon" | "armv7a" => "armeabi-v7a",
-            "x86_64" => "x86_64",
-            "i686" | "x86" | "i386" | "i586" => "x86",
-            _ => "arm64-v8a",
-        };
-        let jni_dir = workspace_root
-            .join("android")
-            .join("app")
-            .join("src")
-            .join("main")
-            .join("jniLibs")
-            .join(android_abi);
-        if fs::create_dir_all(&jni_dir).is_ok() {
-            let jni_so = jni_dir.join("libtun2socks.so");
-            if fs::copy(&bin_path, &jni_so).is_ok() {
-                println!("cargo:warning=Copied tun2socks to Android jniLibs: {}", jni_so.display());
-            }
-        }
+        package_android_tun2socks(&workspace_root, &bin_path, &target_arch);
     }
 
     // ── Windows: embed wintun.dll ───────────────────────────────────
@@ -238,8 +203,82 @@ fn main() {
         embed_wintun_dll(&tun2socks_src, &out_dir, wintun_arch);
     }
 
-    println!("cargo:rustc-env=TUN2SOCKS_EMBEDDED={}", bin_path.display());
-    println!("cargo:warning=tun2socks embedded at: {}", bin_path.display());
+    if target_os == "android" {
+        // Android never embeds the bytes: the binary is packaged once by Gradle
+        // from jniLibs, so TUN2SOCKS_EMBEDDED stays unset for this target and
+        // tun_t2s.rs' embedded-bytes fallback is compiled out on purpose.
+        println!("cargo:warning=tun2socks packaged once for Android via jniLibs (no embedded copy in the .so)");
+    } else {
+        println!("cargo:rustc-env=TUN2SOCKS_EMBEDDED={}", bin_path.display());
+        println!("cargo:warning=tun2socks embedded at: {}", bin_path.display());
+    }
+}
+
+// ── Android: tun2socks packaging ────────────────────────────────────────
+
+/// Map a Rust target arch to the Android ABI directory name used by jniLibs.
+fn android_abi_for_arch(target_arch: &str) -> &'static str {
+    match target_arch {
+        "aarch64" => "arm64-v8a",
+        "arm" | "armv7" | "thumbv7neon" | "armv7a" => "armeabi-v7a",
+        "x86_64" => "x86_64",
+        "i686" | "x86" | "i386" | "i586" => "x86",
+        _ => "arm64-v8a",
+    }
+}
+
+/// Android: place the tun2socks binary into
+/// `android/app/src/main/jniLibs/<abi>/libtun2socks.so` so Gradle packages it
+/// into the APK's native library directory, where the engine executes it.
+///
+/// This is the ONLY copy of the binary in an Android build. The engine's
+/// tun_t2s.rs does not `include_bytes!` it on Android (that would embed a second
+/// identical multi-megabyte Go binary inside libfcaevpn_native.so and inflate
+/// every APK), and this function is idempotent: if the destination is already up
+/// to date it does nothing, so an incremental build never copies twice.
+fn package_android_tun2socks(workspace_root: &PathBuf, bin_path: &PathBuf, target_arch: &str) {
+    let abi = android_abi_for_arch(target_arch);
+    let jni_dir = workspace_root
+        .join("android")
+        .join("app")
+        .join("src")
+        .join("main")
+        .join("jniLibs")
+        .join(abi);
+
+    if let Err(e) = fs::create_dir_all(&jni_dir) {
+        println!(
+            "cargo:warning=Android: cannot create {} ({e}) — tun2socks will NOT be packaged into the APK",
+            jni_dir.display()
+        );
+        return;
+    }
+
+    let dest = jni_dir.join("libtun2socks.so");
+
+    // Already current? Then leave it alone (no second copy, no rebuild churn).
+    let up_to_date = match (fs::metadata(bin_path), fs::metadata(&dest)) {
+        (Ok(src), Ok(dst)) => src.len() == dst.len(),
+        _ => false,
+    };
+    if up_to_date {
+        println!(
+            "cargo:warning=Android: tun2socks already packaged (single copy) at {}",
+            dest.display()
+        );
+        return;
+    }
+
+    match fs::copy(bin_path, &dest) {
+        Ok(_) => println!(
+            "cargo:warning=Android: tun2socks packaged (single copy) as {}",
+            dest.display()
+        ),
+        Err(e) => println!(
+            "cargo:warning=Android: failed to copy tun2socks to {}: {e}",
+            dest.display()
+        ),
+    }
 }
 
 // ── Windows: wintun.dll embedding ───────────────────────────────────────
