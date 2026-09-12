@@ -65,6 +65,10 @@ struct AppState {
     char routes_inline[2048] = {};
     int sys_profile       = 0;   // 0=Auto, 1=Low, 2=Medium, 3=High
 
+    // Verbosity of the aether ENGINE (FcaeEngineLog). 3 = info = default.
+    // The FFI's own log callback level is fixed at info and not exposed.
+    int  engine_log  = 3;
+
     // Tor egress (inside the Aether engine, not a separate backend).
     int  tor_mode    = 0;        // FcaeTorMode
     int  tor_bridges = 0;        // FcaeTorBridges
@@ -156,6 +160,8 @@ struct AppState {
         c.zero_trust.team_name    = team_name[0] ? team_name : nullptr;
         c.zero_trust.access_token = access_token[0] ? access_token : nullptr;
         c.zero_trust.access_email = access_email[0] ? access_email : nullptr;
+
+        c.engine_log       = (FcaeEngineLog)engine_log;
 
         c.tor.mode         = (FcaeTorMode)tor_mode;
         c.tor.bridges      = (FcaeTorBridges)tor_bridges;

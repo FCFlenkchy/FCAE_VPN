@@ -202,6 +202,7 @@ public class FCAEVpnService extends VpnService {
         final int torBridges   = intent.getIntExtra("torBridges", 0);
         final String torLines  = intent.getStringExtra("torBridgeLines");
         final String torLinesV = (torLines == null) ? "" : torLines;
+        final int engineLog    = intent.getIntExtra("engineLog", 3);
         final String teamVal   = (teamName == null) ? "" : teamName;
         final String tokenVal  = (accessTok == null) ? "" : accessTok;
         final String emailVal  = (accessEm == null) ? "" : accessEm;
@@ -252,7 +253,7 @@ public class FCAEVpnService extends VpnService {
                     peerVal, cfgPath, h2, ech,
                     sniVal, sysProfile,
                     teamVal, tokenVal, emailVal, routesVal, routesIVal,
-                    torMode, torBridges, torLinesV
+                    torMode, torBridges, torLinesV, engineLog
                 );
                 if (!ok) {
                     handler.post(this::fullShutdown);

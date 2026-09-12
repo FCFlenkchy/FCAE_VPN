@@ -120,6 +120,7 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
         config_path: std::ptr::null(),
         data_dir: std::ptr::null(),
         udp_buf_kb: 0,
+        engine_log: FcaeEngineLog::Info,
         obfuscation: FcaeObfuscation {
             noize_profile: std::ptr::null(),
             fragment_enabled: false,

@@ -54,6 +54,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerTor: Spinner
     private lateinit var spinnerTorBridges: Spinner
     private lateinit var editTorBridgeLines: android.widget.EditText
+    private lateinit var spinnerEngineLog: Spinner
     private lateinit var switchEch: SwitchMaterial
     private lateinit var switchQuick: SwitchMaterial
     private lateinit var switchLan: SwitchMaterial
@@ -243,6 +244,7 @@ class MainActivity : AppCompatActivity() {
         spinnerTor = findViewById(R.id.spinnerTor)
         spinnerTorBridges = findViewById(R.id.spinnerTorBridges)
         editTorBridgeLines = findViewById(R.id.editTorBridgeLines)
+        spinnerEngineLog = findViewById(R.id.spinnerEngineLog)
         switchEch = findViewById(R.id.switchEch)
         switchQuick = findViewById(R.id.switchQuick)
         switchLan = findViewById(R.id.switchLan)
@@ -337,6 +339,12 @@ class MainActivity : AppCompatActivity() {
         spinnerTorBridges.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
             listOf("No bridges", "obfs4", "snowflake", "Custom lines"),
+        )
+        // Verbosity of the aether ENGINE. Positions map 1:1 onto
+        // FcaeEngineLog; index 3 = info is the default.
+        spinnerEngineLog.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            listOf("Off", "Error", "Warn", "Info (default)", "Debug", "Trace"),
         )
         spinnerTorBridges.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -684,6 +692,7 @@ class MainActivity : AppCompatActivity() {
             putInt("tor", spinnerTor.selectedItemPosition)
             putInt("torBridges", spinnerTorBridges.selectedItemPosition)
             putString("torBridgeLines", editTorBridgeLines.text.toString().trim())
+            putInt("engineLog", spinnerEngineLog.selectedItemPosition)
             putBoolean("h2", h2FromSelection())
             putBoolean("ech", switchEch.isChecked)
             putBoolean("quick", switchQuick.isChecked)
@@ -719,6 +728,7 @@ class MainActivity : AppCompatActivity() {
         spinnerTor.setSelection(prefs.getInt("tor", 0))
         spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
         editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
+        spinnerEngineLog.setSelection(prefs.getInt("engineLog", 3))
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", false)
         switchLan.isChecked = prefs.getBoolean("lan", false)
@@ -786,6 +796,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("torMode", spinnerTor.selectedItemPosition)
         i.putExtra("torBridges", spinnerTorBridges.selectedItemPosition)
         i.putExtra("torBridgeLines", editTorBridgeLines.text.toString().trim())
+        i.putExtra("engineLog", spinnerEngineLog.selectedItemPosition)
         startForegroundService(i)
         // Poll is started by the VPN_STATE_CHANGED broadcast from the service
         // AFTER nativeStart() succeeds — NOT here, to avoid calling native
@@ -829,6 +840,7 @@ class MainActivity : AppCompatActivity() {
         val torMode = spinnerTor.selectedItemPosition
         val torBridges = spinnerTorBridges.selectedItemPosition
         val torBridgeLines = editTorBridgeLines.text.toString().trim()
+        val engineLog = spinnerEngineLog.selectedItemPosition
 
         bgExecutor.execute {
             // Ensure previous engine is fully stopped before starting.
@@ -867,6 +879,7 @@ class MainActivity : AppCompatActivity() {
                     torMode = torMode,
                     torBridges = torBridges,
                     torBridgeLines = torBridgeLines,
+                    engineLog = engineLog,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }

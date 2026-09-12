@@ -122,6 +122,7 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.h2_enabled);
     h = fnv_value(h, g_app.ech_enabled);
     h = fnv_value(h, g_app.sys_profile);
+    h = fnv_value(h, g_app.engine_log);
     h = fnv_value(h, g_app.tor_mode);
     h = fnv_value(h, g_app.tor_bridges);
     h = fnv_cstr(h, g_app.tor_bridge_lines);
@@ -347,6 +348,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "auto_update_check") g_app.auto_update_check = atoi(val.c_str()) != 0;
     else if (key == "prerelease_updates") g_app.prerelease_updates = atoi(val.c_str()) != 0;
     else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
+    else if (key == "engine_log") g_app.engine_log = atoi(val.c_str());
     else if (key == "tor_mode") g_app.tor_mode = atoi(val.c_str());
     else if (key == "tor_bridges") g_app.tor_bridges = atoi(val.c_str());
     else if (key == "tor_bridge_lines")
@@ -402,6 +404,7 @@ static void save_config() {
     fprintf(f, "auto_update_check=%d\n", g_app.auto_update_check ? 1 : 0);
     fprintf(f, "prerelease_updates=%d\n", g_app.prerelease_updates ? 1 : 0);
     fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
+    fprintf(f, "engine_log=%d\n", g_app.engine_log);
     fprintf(f, "tor_mode=%d\n", g_app.tor_mode);
     fprintf(f, "tor_bridges=%d\n", g_app.tor_bridges);
     // The cfg file is line-based, so newlines in a value would corrupt it on
@@ -1142,6 +1145,15 @@ void render_ui() {
             ImGui::Text("Sysprofile (performance tuning)");
             const char* sysprofiles[] = { "Auto", "Low", "Medium", "High" };
             ImGui::Combo("Sysprofile", &g_app.sys_profile, sysprofiles, 4);
+
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("Engine log level");
+            // Verbosity of the aether engine itself, not of this UI's log
+            // pane -- the FFI always reports to the host at info.
+            const char* engine_logs[] = {
+                "Off", "Error", "Warn", "Info (default)", "Debug", "Trace",
+            };
+            ImGui::Combo("Engine log", &g_app.engine_log, engine_logs, 6);
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Tor egress");

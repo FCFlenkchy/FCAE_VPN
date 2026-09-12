@@ -170,6 +170,8 @@ pub struct SessionConfig {
     pub config_path: String,
     pub data_dir: Option<String>,
     pub udp_buf_kb: Option<u32>,
+    /// Verbosity of the engine's own logging.
+    pub engine_log: FcaeEngineLog,
 
     pub obfuscation: ObfuscationConfig,
     pub dns: DnsConfig,
@@ -197,6 +199,7 @@ impl Default for SessionConfig {
             config_path: "aether.toml".into(),
             data_dir: None,
             udp_buf_kb: None,
+            engine_log: FcaeEngineLog::Info,
             obfuscation: ObfuscationConfig::default(),
             dns: DnsConfig::default(),
             routing: RoutingConfig::default(),
@@ -284,6 +287,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         config_path: cstr_opt(raw.config_path).unwrap_or_else(|| "aether.toml".into()),
         data_dir: cstr_opt(raw.data_dir),
         udp_buf_kb: None,
+        engine_log: raw.engine_log,
         ..SessionConfig::default()
     };
 
@@ -572,6 +576,10 @@ pub mod env_compat {
         set("AETHER_IP", Some(ip));
         set("AETHER_CONFIG", Some(&cfg.config_path));
         set("AETHER_NONINTERACTIVE", Some("1"));
+        // Engine verbosity. The FFI's own log callback level is separate and
+        // deliberately fixed at info; this only controls how chatty the
+        // aether engine itself is.
+        set("AETHER_LOG_LEVEL", Some(cfg.engine_log.as_str()));
 
         // Listeners.
         let host = cfg.socks_bind_host();

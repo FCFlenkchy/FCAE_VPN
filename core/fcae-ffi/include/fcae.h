@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 3
+#define FCAE_ABI_VERSION 4
 
 /* ── Enumerations ──────────────────────────────────────────────────── */
 
@@ -74,6 +74,20 @@ typedef enum {
     FCAE_MODE_PROXY = 0,
     FCAE_MODE_TUN   = 1
 } FcaeMode;
+
+/* Verbosity of the AETHER ENGINE's own logging (AETHER_LOG_LEVEL).
+ *
+ * Distinct from FcaeLogLevel, which filters what the FFI hands to the host
+ * log callback. The FFI itself needs no knob (it always reports at info);
+ * the engine is chatty, so its level is exposed. */
+typedef enum {
+    FCAE_ENGINE_LOG_OFF   = 0,
+    FCAE_ENGINE_LOG_ERROR = 1,
+    FCAE_ENGINE_LOG_WARN  = 2,
+    FCAE_ENGINE_LOG_INFO  = 3,   /* default                                */
+    FCAE_ENGINE_LOG_DEBUG = 4,
+    FCAE_ENGINE_LOG_TRACE = 5
+} FcaeEngineLog;
 
 /* Tor egress, mirroring the engine's own AETHER_TOR modes. Tor lives INSIDE
  * the Aether engine -- it is not a separate backend. */
@@ -209,6 +223,7 @@ typedef struct {
     const char     *config_path;
     const char     *data_dir;
     uint32_t        udp_buf_kb;    /* 64..8192, or 0 for default           */
+    FcaeEngineLog   engine_log;   /* engine verbosity; default INFO       */
 
     FcaeObfuscation obfuscation;
     FcaeDnsConfig   dns;
@@ -351,4 +366,4 @@ FcaeStatus fcae_poll_update(FcaeUpdateInfo *out);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x26918b8efe6fe73c */
+/* fcae-abi-fingerprint: 0x9fa239f6661f663d */

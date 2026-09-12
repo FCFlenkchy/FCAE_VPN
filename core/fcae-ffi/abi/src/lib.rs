@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 3;
+pub const FCAE_ABI_VERSION: u32 = 4;
 
 // ── Enumerations ────────────────────────────────────────────────────────
 
@@ -73,6 +73,38 @@ pub enum FcaeMode {
     /// Proxies plus a system-wide TUN device fed by the in-process
     /// tun2socks bridge.
     Tun = 1,
+}
+
+/// Verbosity of the **Aether engine's** own logging (`AETHER_LOG_LEVEL`).
+///
+/// This is distinct from [`FcaeLogLevel`], which filters what the FFI passes
+/// to the host's log callback. The FFI needs no knob -- it always reports at
+/// info -- but the engine is chatty and its level is worth exposing.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FcaeEngineLog {
+    /// Engine logging disabled entirely.
+    Off = 0,
+    Error = 1,
+    Warn = 2,
+    /// The default.
+    Info = 3,
+    Debug = 4,
+    Trace = 5,
+}
+
+impl FcaeEngineLog {
+    /// The value `AETHER_LOG_LEVEL` expects.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FcaeEngineLog::Off => "off",
+            FcaeEngineLog::Error => "error",
+            FcaeEngineLog::Warn => "warn",
+            FcaeEngineLog::Info => "info",
+            FcaeEngineLog::Debug => "debug",
+            FcaeEngineLog::Trace => "trace",
+        }
+    }
 }
 
 /// Tor egress, mirroring the engine's own `AETHER_TOR` modes.
@@ -307,6 +339,8 @@ pub struct FcaeConfig {
     pub data_dir: *const c_char,
     /// UDP socket buffer in KiB; 0 = default (512).
     pub udp_buf_kb: u32,
+    /// Verbosity of the engine's own logging. Defaults to `Info`.
+    pub engine_log: FcaeEngineLog,
 
     pub obfuscation: FcaeObfuscation,
     pub dns: FcaeDnsConfig,

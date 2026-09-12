@@ -476,22 +476,14 @@ pub unsafe extern "C" fn aether_tunnel_start(identity: u64, payload: *const c_ch
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn aether_core_start(arguments: *const c_char) -> *mut c_char {
+/// `arguments` is accepted for source compatibility with upstream and is
+/// ignored: the CLI parser it used to feed was removed (this product is
+/// native, not a command line), and the engine is configured purely through
+/// the environment that `core/fcae-ffi` writes before starting it.
+pub unsafe extern "C" fn aether_core_start(_arguments: *const c_char) -> *mut c_char {
     respond(|| {
-        let arguments: Vec<String> = if arguments.is_null() {
-            Vec::new()
-        } else {
-            let text = unsafe { read_str(arguments) }?;
-            match text.trim().is_empty() {
-                true => Vec::new(),
-                false => serde_json::from_str(&text).map_err(|e| {
-                    format!("the argument list is not a json array of strings: {e}")
-                })?,
-            }
-        };
-
         spawn_job(move |cancel| async move {
-            let attempt = crate::run_with(arguments);
+            let attempt = crate::run_from_env();
             tokio::select! {
                 biased;
                 _ = cancel.wait() => Ok(json!({"state": "stopped"})),

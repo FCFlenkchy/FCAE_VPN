@@ -4,7 +4,6 @@ pub mod aethernoize;
 pub mod api;
 pub mod apifront;
 pub mod bridges;
-pub mod cli;
 pub mod config;
 pub mod consts;
 pub mod dns;
@@ -81,32 +80,91 @@ fn masque_tunnel_mtu() -> usize {
 }
 const DEFAULT_CONFIG: &str = "aether.toml";
 
-pub async fn run() -> Result<()> {
-    run_with(std::env::args().skip(1).collect()).await
-}
-
 /// Entry point used by `core/fcae-ffi` (the `bridges/aether` adapter).
 ///
-/// Upstream replaced `run_from_env()` with the CLI-shaped [`run_with`], but
-/// the library is still configured entirely through environment variables --
-/// `run_with` only parses argv *before* reading them. Passing no arguments
-/// therefore reproduces the old behaviour exactly, and keeps the FFI from
-/// having to synthesise a fake argv.
+/// The engine is configured entirely through environment variables, which the
+/// FFI writes via `env_compat::apply` before calling this.
 pub async fn run_from_env() -> Result<()> {
-    run_with(Vec::new()).await
+    // A fresh run must not inherit the previous one's cancellation.
+    shutdown::reset();
+
+    let result = run_inner().await;
+
+    // Whatever happened, make sure nothing from this run is left listening.
+    shutdown::request();
+    result
 }
 
-pub async fn run_with(args: Vec<String>) -> Result<()> {
-    if cli::parse_args(args)? == cli::Parsed::Done {
-        return Ok(());
-    }
+/// Log level the engine was configured with, for diagnostics.
+pub fn log_level() -> String {
+    resolve_log_level()
+}
 
-    let level = std::env::var("AETHER_LOG_LEVEL")
+/// Valid values for `AETHER_LOG_LEVEL`, most to least verbose.
+pub const LOG_LEVELS: [&str; 6] = ["trace", "debug", "info", "warn", "error", "off"];
+
+fn resolve_log_level() -> String {
+    std::env::var("AETHER_LOG_LEVEL")
         .ok()
         .map(|v| v.trim().to_lowercase())
-        .filter(|v| matches!(v.as_str(), "error" | "warn" | "info" | "debug" | "trace"))
-        .unwrap_or_else(|| "info".to_string());
-    let default_filter = format!("info,aether={level}");
+        .filter(|v| LOG_LEVELS.contains(&v.as_str()))
+        .unwrap_or_else(|| "info".to_string())
+}
+
+/// Cooperative shutdown for the engine's detached tasks.
+///
+/// The engine spawns roughly a dozen background tasks (SOCKS/HTTP listeners,
+/// netstacks, tunnel drivers). Aborting only the top-level future left those
+/// children running with their listeners still bound, so the next connect hit
+/// "address already in use" forever and the app had to be restarted. Every
+/// long-lived task now races itself against [`cancelled`].
+pub mod shutdown {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static FLAG: AtomicBool = AtomicBool::new(false);
+    /// Bumped on every reset so a stale task cannot clear a newer request.
+    static EPOCH: AtomicU64 = AtomicU64::new(0);
+    static NOTIFY: once_cell::sync::Lazy<tokio::sync::Notify> =
+        once_cell::sync::Lazy::new(tokio::sync::Notify::new);
+
+    /// Arm a new run. Clears any previous cancellation.
+    pub fn reset() {
+        EPOCH.fetch_add(1, Ordering::SeqCst);
+        FLAG.store(false, Ordering::SeqCst);
+    }
+
+    /// Ask every engine task to wind down. Idempotent.
+    pub fn request() {
+        FLAG.store(true, Ordering::SeqCst);
+        NOTIFY.notify_waiters();
+    }
+
+    /// True once [`request`] has been called for the current run.
+    pub fn is_cancelled() -> bool {
+        FLAG.load(Ordering::SeqCst)
+    }
+
+    /// Resolves as soon as shutdown is requested; returns immediately if it
+    /// already was.
+    pub async fn cancelled() {
+        if is_cancelled() {
+            return;
+        }
+        let waiter = NOTIFY.notified();
+        // Re-check after registering, or a request between the check above
+        // and the await would be missed.
+        if is_cancelled() {
+            return;
+        }
+        waiter.await;
+    }
+}
+
+async fn run_inner() -> Result<()> {
+    let level = resolve_log_level();
+    // `off` silences the engine's own modules but keeps the FFI's logger able
+    // to report errors, which is why the filter is built per-module.
+    let default_filter = format!("{level},aether={level},aether_engine={level}");
     let _ =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
             .format_timestamp_millis()
@@ -130,7 +188,11 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
     let base_config = std::env::var("AETHER_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
 
     if tor::mode() == tor::Mode::Only {
-        return tor::run_only(listen, tor::state_dir(&base_config)).await;
+        return tokio::select! {
+            biased;
+            _ = shutdown::cancelled() => Ok(()),
+            result = tor::run_only(listen, tor::state_dir(&base_config)) => result,
+        };
     }
 
     // A malformed address is worth reporting before an account is provisioned.
@@ -151,7 +213,11 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
     };
 
     if tor::mode() == tor::Mode::Only {
-        return tor::run_only(listen, tor::state_dir(&base_config)).await;
+        return tokio::select! {
+            biased;
+            _ = shutdown::cancelled() => Ok(()),
+            result = tor::run_only(listen, tor::state_dir(&base_config)) => result,
+        };
     }
 
     if protocol != Protocol::WarpInWarp && !pinned_wiw.is_empty() {
@@ -1444,12 +1510,28 @@ async fn run_masque_tunnel(
         tasks.push(task.abort_handle());
     }
 
-    let tunnel_result = (&mut hop.exit).await;
+    // Race the tunnel against a stop request, otherwise fcae_stop() can only
+    // abort the outer future and these listeners stay bound.
+    let tunnel_result = tokio::select! {
+        biased;
+        _ = shutdown::cancelled() => {
+            hop.exit.abort();
+            let _ = (&mut hop.exit).await;
+            if let Some(task) = &http_task {
+                task.abort();
+            }
+            socks_task.abort();
+            let _ = socks_task.await;
+            return Ok(());
+        }
+        result = &mut hop.exit => result,
+    };
 
     if let Some(task) = &http_task {
         task.abort();
     }
     socks_task.abort();
+    let _ = socks_task.await;
 
     match tunnel_result {
         Ok(Ok(())) => Ok(()),
@@ -1665,9 +1747,13 @@ async fn run_masque_in_masque(
         Outer,
         Inner,
         Socks,
+        /// Nothing finished; a stop was requested.
+        None,
     }
 
     let (outcome, winner) = tokio::select! {
+        biased;
+        _ = shutdown::cancelled() => (Ok(()), Winner::None),
         result = &mut outer.exit => (join_outcome("outer masque tunnel", result), Winner::Outer),
         result = &mut inner.exit => (join_outcome("inner masque tunnel", result), Winner::Inner),
         result = &mut socks_task => (join_outcome("socks5 server", result), Winner::Socks),
@@ -2218,7 +2304,11 @@ async fn run_wireguard_tunnel(
         tasks.push(task.abort_handle());
     }
 
-    let tunnel_result = tunnel.run(outbound_rx).await;
+    let tunnel_result = tokio::select! {
+        biased;
+        _ = shutdown::cancelled() => Ok(()),
+        result = tunnel.run(outbound_rx) => result,
+    };
 
     if let Some(task) = &http_task {
         task.abort();
@@ -2452,9 +2542,13 @@ async fn run_warp_in_warp(
         Outer,
         Inner,
         Socks,
+        /// Nothing finished; a stop was requested.
+        None,
     }
 
     let (outcome, winner) = tokio::select! {
+        biased;
+        _ = shutdown::cancelled() => (Ok(()), Winner::None),
         result = &mut outer_exit => (join_outcome("outer wireguard tunnel", result), Winner::Outer),
         result = &mut inner_exit => (join_outcome("inner wireguard tunnel", result), Winner::Inner),
         result = &mut socks_task => (join_outcome("socks5 server", result), Winner::Socks),

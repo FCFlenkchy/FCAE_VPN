@@ -232,17 +232,29 @@ impl BackendHandle for AetherHandle {
             return Ok(());
         };
 
-        // The engine has no cooperative shutdown entry point, so aborting the
-        // task is still how it ends. The crucial difference from before: no
-        // child process, no TUN device and no OS state depend on this task
-        // unwinding cleanly — the bridge and the supervisor already own those,
-        // and they are torn down first.
-        task.abort();
+        // Ask the engine to wind down first, THEN abort.
+        //
+        // Aborting alone only cancels the top-level future. The engine spawns
+        // a dozen detached tasks (SOCKS/HTTP listeners, netstacks, tunnel
+        // drivers) that survived it with their sockets still bound, so the
+        // next connect failed on "address already in use" until the whole
+        // process was restarted -- the "connects once, then never again"
+        // bug. run_from_env() races every long-lived await against this
+        // signal, so the listeners are dropped before we stop waiting.
+        aether_engine::shutdown::request();
 
-        let _ = tokio::time::timeout(timeout, async {
+        // Give it the full budget to unwind on its own, then abort whatever
+        // is left. abort() on an already-finished task is a no-op.
+        let mut task = task;
+        let drained = tokio::time::timeout(timeout, &mut task).await.is_ok();
+
+        if !drained {
+            log::warn!(
+                "[aether] engine did not wind down within {timeout:?}; aborting the task"
+            );
+            task.abort();
             let _ = task.await;
-        })
-        .await;
+        }
 
         Ok(())
     }

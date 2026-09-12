@@ -126,7 +126,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jstring routesInline,
     jint torMode,
     jint torBridges,
-    jstring torBridgeLines
+    jstring torBridgeLines,
+    jint engineLog
 ) {
     ensure_init();
 
@@ -183,6 +184,10 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.tor.mode         = (FcaeTorMode)torMode;
     cfg.tor.bridges      = (FcaeTorBridges)torBridges;
     cfg.tor.bridge_lines = torLinesOwned.empty() ? nullptr : torLinesOwned.c_str();
+
+    // Verbosity of the aether engine itself. The FFI's own log callback stays
+    // at info regardless -- this only changes how much the engine emits.
+    cfg.engine_log = (FcaeEngineLog)engineLog;
 
     // The data directory is a real config field now, not a smuggled env var.
     std::string dataDir;
