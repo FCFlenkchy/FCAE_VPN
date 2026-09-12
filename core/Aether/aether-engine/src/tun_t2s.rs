@@ -209,19 +209,64 @@ fn spawn_detached_platform_cleanup(cfg: &TunConfig, pid: u32) {
         });
 }
 
-// Embed tun2socks binary at compile time
+// Embed the tun2socks binary at compile time — EXCEPT on Android.
+//
+// Android ships the binary EXACTLY ONCE: as `libtun2socks.so` inside the APK's
+// native library directory (`android/app/src/main/jniLibs/<abi>/`, populated by
+// build.rs). Embedding it into libfcaevpn_native.so as well would put a second
+// identical copy of a multi-megabyte Go binary into every APK, so on Android the
+// embedded-bytes fallback below is compiled out on purpose. The manifest sets
+// `android:extractNativeLibs="true"`, which is what makes the packaged
+// libtun2socks.so extracted into nativeLibraryDir and executable directly.
+#[cfg(not(target_os = "android"))]
 static TUN2SOCKS_BYTES: &[u8] = include_bytes!(env!("TUN2SOCKS_EMBEDDED"));
 
 // Embed wintun.dll on Windows
 #[cfg(all(not(target_os = "android"), wintun_embedded))]
 static WINTUN_DLL_BYTES: &[u8] = include_bytes!(env!("WINTUN_EMBEDDED"));
 
-/// Extract and return path to the embedded tun2socks binary.
-/// On first call, writes the binary to a cache/temp directory and returns the path.
-/// On Windows, also ensures wintun.dll is extracted to the same directory.
-fn get_tun2socks_path() -> Result<std::path::PathBuf> {
-    use std::io::Write;
+/// Directories that can hold the Android build's single tun2socks copy
+/// (`libtun2socks.so`) inside the APK's native library directory.
+#[cfg(target_os = "android")]
+fn android_native_lib_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(lib_dir) = std::env::var("AETHER_NATIVE_LIB_DIR") {
+        if !lib_dir.trim().is_empty() {
+            dirs.push(std::path::PathBuf::from(lib_dir));
+        }
+    }
+    dirs.push(std::path::PathBuf::from("/data/data/com.fc.fcaevpn/lib"));
+    dirs.push(std::path::PathBuf::from("/data/user/0/com.fc.fcaevpn/lib"));
+    dirs
+}
 
+/// Locate the Android tun2socks binary among the app's native library
+/// directories (packaged there once, by Gradle, from jniLibs).
+#[cfg(target_os = "android")]
+fn find_android_tun2socks() -> Option<std::path::PathBuf> {
+    for dir in android_native_lib_dirs() {
+        for name in ["libtun2socks.so", "tun2socks"] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                log::info!(
+                    "[tun_t2s] Found native tun2socks binary at: {}",
+                    candidate.display()
+                );
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Return the path of the tun2socks binary to run.
+///
+/// The binary is delivered exactly once per platform:
+/// - Android: as `libtun2socks.so` in the APK's native library directory
+///   (packaged by build.rs from jniLibs; never embedded in the .so).
+/// - Desktop (Windows/Linux/macOS): embedded in this library at compile time and
+///   extracted into a writable cache directory on first use.
+fn get_tun2socks_path() -> Result<std::path::PathBuf> {
     // Check TUN2SOCKS_BIN / AETHER_TUN2SOCKS_BIN override first
     for env_var in ["TUN2SOCKS_BIN", "AETHER_TUN2SOCKS_BIN"] {
         if let Ok(path) = std::env::var(env_var) {
@@ -235,24 +280,37 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
 
     #[cfg(target_os = "android")]
     {
-        // Check for libtun2socks.so in native library directories
-        let mut native_dirs = Vec::new();
-        if let Ok(lib_dir) = std::env::var("AETHER_NATIVE_LIB_DIR") {
-            native_dirs.push(std::path::PathBuf::from(lib_dir));
+        if let Some(found) = find_android_tun2socks() {
+            return Ok(found);
         }
-        native_dirs.push(std::path::PathBuf::from("/data/data/com.fc.fcaevpn/lib"));
-        native_dirs.push(std::path::PathBuf::from("/data/user/0/com.fc.fcaevpn/lib"));
 
-        for dir in native_dirs {
-            for name in ["libtun2socks.so", "tun2socks"] {
-                let candidate = dir.join(name);
-                if candidate.exists() {
-                    log::info!("[tun_t2s] Found native tun2socks library at: {}", candidate.display());
-                    return Ok(candidate);
-                }
-            }
-        }
+        // No embedded fallback here on purpose: on Android the binary is
+        // packaged once, by Gradle, from
+        // android/app/src/main/jniLibs/<abi>/libtun2socks.so.
+        let dirs = android_native_lib_dirs()
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(AetherError::Other(format!(
+            "tun2socks binary not found in the app's native library directories ({dirs}). \
+             The APK was built without jniLibs/<abi>/libtun2socks.so — rebuild so that the \
+             build script can package the tun2socks binary for this ABI."
+        )));
     }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        extract_embedded_tun2socks()
+    }
+}
+
+/// Desktop: write the compile-time embedded tun2socks binary into a writable
+/// directory (once) and return its path. On Windows, also places wintun.dll
+/// next to it.
+#[cfg(not(target_os = "android"))]
+fn extract_embedded_tun2socks() -> Result<std::path::PathBuf> {
+    use std::io::Write;
 
     // Determine target directory: probe candidate directories for write permission
     let mut candidate_dirs: Vec<std::path::PathBuf> = Vec::new();
@@ -267,13 +325,6 @@ fn get_tun2socks_path() -> Result<std::path::PathBuf> {
                 candidate_dirs.push(parent.join("bin"));
             }
         }
-    }
-    #[cfg(target_os = "android")]
-    {
-        candidate_dirs.push(std::path::PathBuf::from("/data/data/com.fc.fcaevpn/files/bin"));
-        candidate_dirs.push(std::path::PathBuf::from("/data/user/0/com.fc.fcaevpn/files/bin"));
-        candidate_dirs.push(std::path::PathBuf::from("/data/data/com.fc.fcaevpn/cache/bin"));
-        candidate_dirs.push(std::path::PathBuf::from("/data/user/0/com.fc.fcaevpn/cache/bin"));
     }
     candidate_dirs.push(std::env::temp_dir().join("fcaevpn"));
 

@@ -1500,6 +1500,15 @@ fn spawn_http_proxy(stack: &netstack::StackHandle) -> Option<TunnelExit> {
     }))
 }
 
+/// Establish a WireGuard tunnel and return its netstack plus the task that
+/// drives it.
+///
+/// `count_stats` decides whether this tunnel's netstack feeds the global
+/// download/upload counters. In warp-in-warp the INNER tunnel carries the
+/// user's traffic, so it must be metered (`true`); the OUTER tunnel only wraps
+/// the inner one (its UDP payload *is* the inner tunnel's WG datagrams), so it
+/// must stay unmetered (`false`) — otherwise every byte would be counted twice
+/// and the UI would show the encapsulated size instead of the real traffic.
 async fn establish_wg(
     identity: &account::Identity,
     peer: SocketAddr,
@@ -1507,6 +1516,7 @@ async fn establish_wg(
     obfuscate: bool,
     keepalive: u16,
     label: &'static str,
+    count_stats: bool,
 ) -> Result<(netstack::StackHandle, TunnelExit)> {
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
@@ -1541,9 +1551,22 @@ async fn establish_wg(
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(sysprofile::channel_capacity());
 
     let tunnel = wireguard::WgTunnel::from_established(session, std::sync::Arc::new(profile), inbound_tx, ipv4);
-    // Outer tunnel in warp-in-warp: internal plumbing, so don't count its
-    // traffic (the inner stack already counts the real user traffic).
-    let stack = netstack::spawn_unmetered(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
+    // Warp-in-warp has two stacks: the outer one is internal plumbing (its
+    // traffic is just the inner tunnel's encapsulated WG datagrams, so counting
+    // it would double-count), while the inner one is the stack the SOCKS5
+    // server / tun2socks actually serve — i.e. the real user traffic that the
+    // download/upload counters are supposed to show. Pick the metered stack for
+    // the inner hop, otherwise warp-in-warp reports 0 B/s and 0 B totals while
+    // MASQUE H3/H2 and plain WireGuard count normally.
+    let stack = if count_stats {
+        netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?
+    } else {
+        netstack::spawn_unmetered(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?
+    };
+    log::info!(
+        "[+] [{label}] netstack up (mtu {mtu}, traffic counters: {})",
+        if count_stats { "on" } else { "off (encapsulating tunnel)" }
+    );
 
     let exit = tokio::spawn(async move {
         match tunnel.run(outbound_rx).await {
@@ -1649,14 +1672,18 @@ async fn run_warp_in_warp(
     }
 
     log::info!("[*] establishing outer WARP tunnel to {peer}...");
-    let (outer_stack, mut outer_exit) = establish_wg(&primary, peer, WIW_OUTER_MTU, true, 5, "outer").await?;
+    // Outer hop: unmetered — it only carries the inner tunnel's datagrams.
+    let (outer_stack, mut outer_exit) =
+        establish_wg(&primary, peer, WIW_OUTER_MTU, true, 5, "outer", false).await?;
 
     let (forwarder, _forwarder_guard) = spawn_udp_forwarder(&outer_stack, inner_peer).await?;
     log::info!("[+] inner endpoint {inner_peer} tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
+    // Inner hop: metered — this is where the user's traffic flows (SOCKS5 /
+    // tun2socks are served on this stack), so it drives the RX/TX counters.
     let (inner_stack, mut inner_exit) =
-        establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
+        establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner", true).await?;
 
     let (socks_task, http_task) = spawn_local_proxies(inner_stack.clone(), listen, http_listen).await;
 
