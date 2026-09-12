@@ -58,6 +58,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchSocks: SwitchMaterial
     private lateinit var switchHttp: SwitchMaterial
     private lateinit var switchAutoUpdate: SwitchMaterial
+    private lateinit var switchPreRelease: SwitchMaterial
     private lateinit var spinnerSysprofile: Spinner
     private lateinit var editSni: android.widget.EditText
     private lateinit var editForcePeer: android.widget.EditText
@@ -75,6 +76,11 @@ class MainActivity : AppCompatActivity() {
     // grayed out — the same "auto" behaviour the desktop UI has. The user's own
     // Proxy-mode choice is remembered here and restored when they switch back.
     private var socksChoiceForProxyMode = true
+
+    /// True when this build came from a pre-release workflow run: its own
+    /// version carries a suffix (v1.4.0-beta.2 vs v1.3.2). Drives the channel
+    /// label in the header and in the update dialog.
+    private val buildIsPrerelease = BuildConfig.APP_VERSION.contains('-')
 
     private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         val t = Thread(r, "bgExecutor")
@@ -238,6 +244,7 @@ class MainActivity : AppCompatActivity() {
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
         switchAutoUpdate = findViewById(R.id.switchAutoUpdate)
+        switchPreRelease = findViewById(R.id.switchPreRelease)
         spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
         editSni = findViewById(R.id.editSni)
         editForcePeer = findViewById(R.id.editForcePeer)
@@ -310,6 +317,18 @@ class MainActivity : AppCompatActivity() {
             listOf("Auto", "Low", "Medium", "High"),
         )
         loadSettings()
+
+        // Running build, spelled out: version + which channel it is. A build
+        // produced by a pre-release workflow run carries the tag as its
+        // versionName (e.g. "v1.4.0-beta.2"), so mark it amber instead of
+        // leaving the user to infer the channel from a missing BETA badge.
+        findViewById<TextView>(R.id.versionText).apply {
+            text = if (buildIsPrerelease)
+                "${BuildConfig.APP_VERSION}  \u00b7  pre-release (BETA)"
+            else
+                "${BuildConfig.APP_VERSION}  \u00b7  release"
+            setTextColor(Color.parseColor(if (buildIsPrerelease) "#FFF0B429" else "#FF8A93A6"))
+        }
 
         // TUN mode forces SOCKS5 on (tun2socks needs the local SOCKS5 listener),
         // so keep the switch locked/grayed while TUN is selected. Applied after
@@ -609,6 +628,7 @@ class MainActivity : AppCompatActivity() {
             putBoolean("socks", if (isTunModeSelected()) socksChoiceForProxyMode else switchSocks.isChecked)
             putBoolean("http", switchHttp.isChecked)
             putBoolean("autoUpdate", switchAutoUpdate.isChecked)
+            putBoolean("preRelease", switchPreRelease.isChecked)
             putString("sni", editSni.text.toString().trim())
             putString("forcePeer", editForcePeer.text.toString().trim())
             putInt("sysprofile", spinnerSysprofile.selectedItemPosition)
@@ -637,6 +657,7 @@ class MainActivity : AppCompatActivity() {
         switchSocks.isChecked = prefs.getBoolean("socks", true)
         switchHttp.isChecked = prefs.getBoolean("http", true)
         switchAutoUpdate.isChecked = prefs.getBoolean("autoUpdate", true)
+        switchPreRelease.isChecked = prefs.getBoolean("preRelease", false)
         editSni.setText(prefs.getString("sni", ""))
         editForcePeer.setText(prefs.getString("forcePeer", ""))
         spinnerSysprofile.setSelection(prefs.getInt("sysprofile", 0))
@@ -836,7 +857,7 @@ class MainActivity : AppCompatActivity() {
         // Use the core's native async update checker (reqwest-based HTTP fetch).
         // The core spawns a background tokio runtime, fetches version.json from
         // GitHub, parses it, and stores the result. We poll with nativePollUpdate().
-        NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION)
+        NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION, switchPreRelease.isChecked)
 
         // Poll for result on a background thread
         Thread {
@@ -862,7 +883,7 @@ class MainActivity : AppCompatActivity() {
                 handler.post {
                     btnCheckUpdates.isEnabled = true
                     if (info.updateAvailable) {
-                        btnCheckUpdates.text = "Update Available!"
+                        btnCheckUpdates.text = if (info.isPrerelease) "Pre-release!" else "Update Available!"
                         btnCheckUpdates.setTextColor(COLOR_UPDATE_AVAILABLE)
                         updateStatus.text = info.statusMessage
                         // Don't auto-show dialog — just update the button.
@@ -893,8 +914,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun showUpdateDialog(info: AetherUpdateInfo) {
         val msg = buildString {
-            append("Current: ${BuildConfig.APP_VERSION}\n")
-            append("Latest: ${info.latestVersion}\n\n")
+            append("Current: ${BuildConfig.APP_VERSION}  (${if (buildIsPrerelease) "pre-release" else "release"})\n")
+            append("Latest: ${info.latestVersion}  (${if (info.isPrerelease) "pre-release" else "release"})\n")
+            if (info.releaseDate.isNotEmpty()) append("Released: ${info.releaseDate}\n")
+            append("\n")
             if (info.releaseNotes.isNotEmpty()) {
                 append("Release Notes:\n${info.releaseNotes}\n\n")
             }

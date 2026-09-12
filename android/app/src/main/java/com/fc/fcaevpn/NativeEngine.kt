@@ -53,9 +53,9 @@ object NativeEngine {
     @JvmStatic external fun nativeGetLastError(): String
 
     // ── version checker ─────────────────────────────────────────────
-    @JvmStatic external fun nativeCheckForUpdates(currentVersion: String)
+    @JvmStatic external fun nativeCheckForUpdates(currentVersion: String, includePrereleases: Boolean)
     @JvmStatic external fun nativePollUpdate(): AetherUpdateInfo
-    @JvmStatic external fun nativeCheckUpdateFromJson(currentVersion: String, json: String): Boolean
+    @JvmStatic external fun nativeCheckUpdateFromJson(currentVersion: String, json: String, includePrereleases: Boolean): Boolean
 }
 
 /**
@@ -69,5 +69,8 @@ data class AetherUpdateInfo(
     val latestVersion: String = "",
     val releaseNotes: String = "",
     val downloadUrl: String = "",
-    val statusMessage: String = ""
+    val statusMessage: String = "",
+    /** The offered version is a pre-release (shown as BETA in the UI). */
+    val isPrerelease: Boolean = false,
+    val releaseDate: String = ""
 )
