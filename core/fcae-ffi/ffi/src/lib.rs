@@ -13,6 +13,10 @@
 //! * `fcae_*` — the whole API. There is no legacy `aether_*` surface: the old
 //!   symbols are gone and every caller moves to this header.
 
+// Backend futures are boxed through this crate; raise the query depth
+// limit here too (the attribute is per-crate, not inherited).
+#![recursion_limit = "512"]
+
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Arc;
 

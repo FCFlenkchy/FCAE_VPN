@@ -1,3 +1,7 @@
+// The engine composes deeply nested async blocks: tunnel futures that
+// select! over netstack, socks, http and the shutdown signal. Computing
+// their layout overflows the default 128-deep query limit.
+#![recursion_limit = "512"]
 #![allow(dead_code)]
 pub mod account;
 pub mod aethernoize;
@@ -9,7 +13,6 @@ pub mod consts;
 pub mod dns;
 pub mod egress;
 pub mod error;
-pub mod ffi;
 pub mod fragment;
 pub mod lastconn;
 pub mod masque;

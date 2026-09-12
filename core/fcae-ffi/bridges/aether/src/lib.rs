@@ -27,6 +27,11 @@
 //! When the engine eventually grows a `run(config)` entry point, only this
 //! file changes.
 
+// The aether engine future this crate awaits is deeply nested; its layout
+// is computed here too, so the raised limit has to be repeated (the
+// attribute is per-crate, not inherited).
+#![recursion_limit = "512"]
+
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
