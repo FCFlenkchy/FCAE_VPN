@@ -213,6 +213,15 @@ impl Tun2SocksBridge {
         self.external_fd.store(fd, Ordering::SeqCst);
     }
 
+    /// The TUN fd handed over by the platform (Android's VpnService), if any.
+    ///
+    /// This is the authorisation to run TUN mode without elevation: the JVM
+    /// already created the interface, so there is nothing left to privilege.
+    pub fn android_fd(&self) -> Option<i32> {
+        let fd = self.external_fd.load(Ordering::SeqCst);
+        if fd >= 0 { Some(fd) } else { None }
+    }
+
     fn install_log_hook(&self) {
         if !self.log_installed.swap(true, Ordering::SeqCst) {
             unsafe { t2s_set_log_callback(Some(go_log_trampoline)) };
@@ -360,6 +369,10 @@ impl TunBridge for Tun2SocksBridge {
 
         self.running.store(false, Ordering::SeqCst);
         log::info!("[tun] down");
+    }
+
+    fn preauthorised_fd(&self) -> Option<i32> {
+        self.android_fd()
     }
 
     fn is_running(&self) -> bool {

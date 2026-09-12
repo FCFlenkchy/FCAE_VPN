@@ -37,6 +37,16 @@ pub trait TunBridge: Send + Sync {
     fn stop(&self, timeout: Duration);
     /// True if a device is currently up.
     fn is_running(&self) -> bool;
+
+    /// A TUN fd the platform already created and handed to us, if any.
+    ///
+    /// Android's VpnService creates the interface in the JVM and passes the
+    /// descriptor down, which IS the authorisation to run TUN mode -- there is
+    /// no elevation to acquire and `geteuid() == 0` is never true for an app.
+    /// Bridges that create the device themselves keep the default of `None`.
+    fn preauthorised_fd(&self) -> Option<i32> {
+        None
+    }
 }
 
 /// A no-op bridge used when the build has no TUN support (or in tests).
@@ -136,7 +146,14 @@ impl Supervisor {
             // On Android the VpnService fd is the authorisation; elsewhere we
             // need real elevation. Check before doing any work so the user
             // gets an immediate, specific error.
-            let android_fd = config.tun.fd.is_some();
+            //
+            // The fd can arrive by either route: in the config (desktop/tests)
+            // or -- on Android -- through fcae_set_tun_fd() straight into the
+            // bridge, before fcae_start() is ever called. Only consulting
+            // config.tun.fd made Android always look unprivileged, so every
+            // TUN start failed with "requires administrator/root privileges".
+            let android_fd =
+                config.tun.fd.is_some() || self.cfg.tun_bridge.preauthorised_fd().is_some();
             if !android_fd && !(self.cfg.is_privileged)() {
                 return Err(CoreError::PermissionDenied(
                     "TUN mode requires administrator/root privileges. \
@@ -420,6 +437,38 @@ mod tests {
     use crate::backend::{Backend, BackendId, Capabilities, Counters};
     use async_trait::async_trait;
     use fcae_abi::FcaeBackend;
+
+    /// A bridge that reports a platform-supplied fd, like Android's.
+    struct PreauthorisedBridge;
+
+    impl TunBridge for PreauthorisedBridge {
+        fn start(&self, _cfg: &SessionConfig, _e: &Endpoints) -> Result<()> {
+            Ok(())
+        }
+        fn stop(&self, _timeout: Duration) {}
+        fn is_running(&self) -> bool {
+            false
+        }
+        fn preauthorised_fd(&self) -> Option<i32> {
+            Some(42)
+        }
+    }
+
+    #[test]
+    fn a_bridge_held_fd_authorises_tun_without_elevation() {
+        // Regression: fcae_set_tun_fd() stores the VpnService fd in the BRIDGE,
+        // while the config still carries tun_fd = -1. Checking only the config
+        // made every Android TUN start fail with "requires administrator/root
+        // privileges" even though the JVM had already created the interface.
+        assert!(
+            PreauthorisedBridge.preauthorised_fd().is_some(),
+            "the bridge must surface the platform-supplied fd"
+        );
+        assert!(
+            NullTunBridge.preauthorised_fd().is_none(),
+            "a bridge that creates its own device has nothing pre-authorised"
+        );
+    }
 
     struct FakeHandle;
 
