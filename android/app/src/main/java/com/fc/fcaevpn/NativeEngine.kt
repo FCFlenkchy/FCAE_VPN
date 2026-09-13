@@ -2,27 +2,28 @@ package com.fc.fcaevpn
 
 object NativeEngine {
     init {
-        // Load the Go bridges BEFORE libfcaevpn_native.so.
-        //
-        // tun2socks_bridge is a hard dependency (always needed for TUN).
-        // psiphon_bridge is a soft dependency — its Go runtime init can
-        // crash natively (SIGSEGV) on some Android devices, and Java
-        // try/catch cannot catch native signals.  If it fails, weak C
-        // stubs in android_jni.cpp take over and Psiphon reports as
-        // unavailable.  Catch Throwable (not just UnsatisfiedLinkError)
-        // because Go's runtime can surface errors as various types.
+        // tun2socks_bridge: hard dependency for TUN mode.
         try {
             System.loadLibrary("tun2socks_bridge")
         } catch (_: Throwable) {
-            // Not packaged in this build/ABI — fine.
         }
-        // psiphon_bridge: DISABLED — Go runtime init crashes on some devices.
-        // TODO: re-enable once root cause is fixed.
-        // try {
-        //     System.loadLibrary("psiphon_bridge")
-        // } catch (_: Throwable) {
-        // }
+
+        // Load our native library BEFORE psiphon_bridge.  It contains weak
+        // stubs for every psi_* symbol — safe no-ops that return "engine
+        // failed".  This guarantees fcaevpn_native.so always loads even if
+        // psiphon_bridge.so crashes.
         System.loadLibrary("fcaevpn_native")
+
+        // Now try to load the Go psiphon bridge via crash-safe dlopen.
+        // Go's runtime init (.init_array) can SIGSEGV on some devices;
+        // the native side catches the signal so the app survives.
+        // If it succeeds, Go's strong psi_* definitions override the weak
+        // stubs via ELF symbol interposition.
+        try {
+            nativeLoadPsiphonBridge()
+        } catch (_: Throwable) {
+            // JNI method not found or other error — weak stubs remain.
+        }
     }
 
     /**
@@ -38,6 +39,7 @@ object NativeEngine {
         // Referencing the object is enough; `init` has already run by here.
     }
 
+    @JvmStatic external fun nativeLoadPsiphonBridge(): Boolean
     @JvmStatic external fun nativeInit()
     @JvmStatic external fun nativeSetNativeLibDir(path: String)
     @JvmStatic external fun nativeStart(

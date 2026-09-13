@@ -83,7 +83,7 @@ impl Default for SupervisorConfig {
         Self {
             tun_bridge: Arc::new(NullTunBridge),
             is_privileged: || true,
-            stop_timeout: Duration::from_secs(10),
+            stop_timeout: Duration::from_secs(2),
             auto_reconnect: true,
             max_reconnects: 0,
         }
