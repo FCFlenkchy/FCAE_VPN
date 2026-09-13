@@ -761,7 +761,7 @@ class MainActivity : AppCompatActivity() {
             1 -> "Proxy mode: point SOCKS clients at the Tor SOCKS port; the tunnel's own ports stay plain (un-tor'ed)."
             2 -> "Proxy mode: use the tunnel's SOCKS/HTTP ports as usual; tor is the carrier underneath them."
             else -> if (spinnerProtocol.selectedItemPosition == 4)
-                "Proxy mode: the tunnel's SOCKS port IS tor (Tor-only transport)."
+                "Proxy mode: dial the Tor SOCKS port; Tor-only has no WARP tunnel."
             else ""
         }
         textTorHint.text = hint

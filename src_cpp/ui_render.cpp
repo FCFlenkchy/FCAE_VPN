@@ -1309,7 +1309,7 @@ void render_ui() {
                         "tor is the carrier underneath them.");
                 else if (g_app.protocol == 4 || g_app.tor_mode == 3)
                     ImGui::TextDisabled(
-                        "Proxy mode: the tunnel's SOCKS port IS tor (Tor-only transport).");
+                        "Proxy mode: dial the Tor SOCKS port below; Tor-only has no WARP tunnel.");
             }
             if (g_app.tor_mode == 0) ImGui::BeginDisabled();
             ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port);

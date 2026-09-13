@@ -473,17 +473,6 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             "tor.mode = Only runs without a WARP tunnel, so force_peer cannot apply".into(),
         ));
     }
-    // In Only mode tor serves on the session's own SOCKS port (there is no
-    // tunnel listener to give it a port of its own). TUN mode already forced
-    // a port above; in proxy mode a zeroed port means tor would have nowhere
-    // to listen, so reject it up front instead of serving on an ephemeral
-    // port nobody can dial.
-    if t.mode == FcaeTorMode::Only && cfg.mode == FcaeMode::Proxy && cfg.socks_port == 0 {
-        return Err(CoreError::InvalidConfig(
-            "tor.mode = Only serves on the session's SOCKS port, but socks_port is disabled (0); enable a SOCKS port"
-                .into(),
-        ));
-    }
     // Reverse carries the tunnel *over* Tor, and Tor is TCP-only. WARP's
     // WireGuard endpoints answer on UDP alone, so they can never be reached
     // this way. The engine rejects this too, but only after a full scan.
@@ -514,7 +503,10 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         } else {
             DEFAULT_TOR_SOCKS_PORT
         });
-    if t.mode != FcaeTorMode::Off {
+    if t.mode != FcaeTorMode::Off && t.mode != FcaeTorMode::Only {
+        // In Only mode the tor port IS the session endpoint (the engine
+        // serves tor on AETHER_SOCKS) and no WARP listener exists, so a
+        // "clash" with socks_port or http_port is the intended layout.
         check_port_clash("tor", tor_port, cfg.socks_port, "socks_port")?;
         check_port_clash("tor", tor_port, cfg.http_port, "http_port")?;
     }
@@ -692,8 +684,16 @@ pub mod env_compat {
         set("AETHER_LOG_LEVEL", Some(cfg.engine_log.as_str()));
 
         // Listeners.
+        //
+        // Only mode has no WARP tunnel: the engine's tor-only path binds tor
+        // directly to AETHER_SOCKS (tor::run_only), so that variable must
+        // carry the Tor SOCKS port from the config (default 127.0.0.1:1821)
+        // instead of the session's socks port, which is unused in this mode.
         let host = cfg.socks_bind_host();
-        if cfg.socks_port != 0 {
+        if cfg.tor.mode == FcaeTorMode::Only {
+            set("AETHER_SOCKS", cfg.tor.bind.clone());
+            set("AETHER_SOCKS_DISABLED", None::<&str>);
+        } else if cfg.socks_port != 0 {
             set("AETHER_SOCKS", Some(format!("{host}:{}", cfg.socks_port)));
             set("AETHER_SOCKS_DISABLED", None::<&str>);
         } else {
@@ -890,6 +890,21 @@ mod tests {
             std::env::var("AETHER_TOR_BRIDGES").unwrap(),
             "obfs4 1.2.3.4:443 CERT=xyz"
         );
+
+        // In Only mode the engine serves tor ON AETHER_SOCKS
+        // (tor::run_only binds to it), so the variable must carry the Tor
+        // SOCKS port, not the session's socks port -- otherwise the UI says
+        // "1821" while tor actually listens on the session port.
+        cfg.tor = TorConfig {
+            mode: FcaeTorMode::Only,
+            bridges: FcaeTorBridges::None,
+            bind: Some("127.0.0.1:9150".into()),
+            ..Default::default()
+        };
+        cfg.socks_port = 9151;
+        env_compat::apply(&cfg);
+        assert_eq!(std::env::var("AETHER_SOCKS").unwrap(), "127.0.0.1:9150");
+        assert!(std::env::var("AETHER_SOCKS_DISABLED").is_err());
 
         // Regression: turning tor off must clear every variable, or a later
         // non-tor session inherits them.
