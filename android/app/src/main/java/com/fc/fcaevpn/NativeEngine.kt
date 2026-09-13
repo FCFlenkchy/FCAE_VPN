@@ -4,22 +4,23 @@ object NativeEngine {
     init {
         // Load the Go bridges BEFORE libfcaevpn_native.so.
         //
-        // tun2socks is built as a c-shared .so on Android (Go rejects
-        // c-archive there), so libfcaevpn_native.so has a DT_NEEDED entry for
-        // it. Android's loader does resolve that from the APK's native lib
-        // dir, but only once the library is actually present; loading it
-        // explicitly first turns an obscure dlopen failure deep inside
-        // loadLibrary("fcaevpn_native") into a clear, attributable error.
-        //
-        // Wrapped in try/catch: these are optional (a build without the tun
-        // feature has no bridge), and if one is genuinely missing the failure
-        // surfaces on the main library load below.
-        for (dep in arrayOf("tun2socks_bridge", "psiphon_bridge")) {
-            try {
-                System.loadLibrary(dep)
-            } catch (_: UnsatisfiedLinkError) {
-                // Not packaged in this build/ABI — fine, see above.
-            }
+        // tun2socks_bridge is a hard dependency (always needed for TUN).
+        // psiphon_bridge is a soft dependency — its Go runtime init can
+        // crash natively (SIGSEGV) on some Android devices, and Java
+        // try/catch cannot catch native signals.  If it fails, weak C
+        // stubs in android_jni.cpp take over and Psiphon reports as
+        // unavailable.  Catch Throwable (not just UnsatisfiedLinkError)
+        // because Go's runtime can surface errors as various types.
+        try {
+            System.loadLibrary("tun2socks_bridge")
+        } catch (_: Throwable) {
+            // Not packaged in this build/ABI — fine.
+        }
+        try {
+            System.loadLibrary("psiphon_bridge")
+        } catch (_: Throwable) {
+            // Missing, wrong ABI, or Go runtime init failed.  Weak stubs
+            // in android_jni.cpp provide safe defaults.
         }
         System.loadLibrary("fcaevpn_native")
     }

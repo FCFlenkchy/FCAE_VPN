@@ -13,6 +13,53 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+// ── Weak stubs for Psiphon Go bridge symbols ──────────────────────────
+//
+// libpsiphon_bridge.so is loaded at runtime via System.loadLibrary BEFORE
+// fcaevpn_native.so.  If it loads successfully, Go's strong definitions
+// override these weak stubs via ELF symbol interposition.
+//
+// If psiphon_bridge.so is missing or its Go runtime init crashes
+// (SIGSEGV — Java try/catch cannot catch native signals), these safe
+// defaults remain and Psiphon gracefully reports as "unavailable".
+// Without stubs, the Rust psiphon bridge has extern "C" references that
+// would crash on first call if never resolved.
+//
+// The signatures must match the Go //export declarations in bridge.go.
+
+typedef void (*psi_log_cb)(int level, const char *message);
+typedef int  (*psi_protect_cb)(int fd);
+
+extern "C" __attribute__((weak))
+void psi_set_log_callback(psi_log_cb cb) { (void)cb; }
+
+extern "C" __attribute__((weak))
+void psi_set_protect_callback(psi_protect_cb cb) { (void)cb; }
+
+extern "C" __attribute__((weak))
+int psi_start(const char *configJSON, const char *embedded, int useBinder) {
+    (void)configJSON; (void)embedded; (void)useBinder;
+    return -3; // "engine failed" — Psiphon unavailable
+}
+
+extern "C" __attribute__((weak))
+int psi_stop(void) { return 0; }
+
+extern "C" __attribute__((weak))
+int psi_state(void) { return 0; } // stateStopped
+
+extern "C" __attribute__((weak))
+int psi_socks_port(void) { return 0; }
+
+extern "C" __attribute__((weak))
+int psi_http_port(void) { return 0; }
+
+extern "C" __attribute__((weak))
+char* psi_regions(void) { return nullptr; }
+
+extern "C" __attribute__((weak))
+void psi_string_free(char *s) { (void)s; }
+
 static std::mutex g_log_mu;
 static std::deque<std::string> g_logs;
 static constexpr size_t kMaxLogs = 30;

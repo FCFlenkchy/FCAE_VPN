@@ -130,17 +130,30 @@ endfunction()
 # otherwise ld.lld reports "undefined symbol: t2s_start" and friends.
 function(fcae_link_go_bridges target_name abi)
     set(jni_dir ${CMAKE_SOURCE_DIR}/android/app/src/main/jniLibs/${abi})
-    foreach(bridge tun2socks_bridge psiphon_bridge)
-        set(so ${jni_dir}/lib${bridge}.so)
-        if(EXISTS "${so}")
-            target_link_libraries(${target_name} PRIVATE "${so}")
-            message(STATUS "linking Go bridge: ${so}")
-        endif()
-    endforeach()
-    # The .so sits next to our library in the APK's native lib dir. Escape the
-    # $ so CMake passes $ORIGIN through literally instead of expanding it to an
-    # empty variable.
-    target_link_options(${target_name} PRIVATE "-Wl,-rpath,\$ORIGIN")
+    # tun2socks_bridge is a hard dependency: TUN mode always needs it.
+    set(t2s ${jni_dir}/libtun2socks_bridge.so)
+    if(EXISTS "${t2s}")
+        target_link_libraries(${target_name} PRIVATE "${t2s}")
+        message(STATUS "linking Go bridge: ${t2s}")
+    endif()
+
+    # psiphon_bridge is NOT linked as DT_NEEDED.  Its Go runtime init can
+    # crash (SIGSEGV) on some Android devices, and because that is a native
+    # signal Java try/catch cannot catch -- the process just dies.
+    #
+    # Instead, android_jni.cpp provides WEAK C stubs for every psi_*
+    # symbol.  At runtime System.loadLibrary loads psiphon_bridge.so BEFORE
+    # fcaevpn_native.so; if it succeeds Go's strong definitions override
+    # the stubs via ELF symbol interposition.  If psiphon_bridge fails to
+    # load (missing .so, Go crash, ABI mismatch) the stubs stay and
+    # Psiphon gracefully reports "unavailable".
+    set(psi ${jni_dir}/libpsiphon_bridge.so)
+    if(EXISTS "${psi}")
+        message(STATUS "psiphon bridge staged (runtime-loaded): ${psi}")
+    endif()
+
+    # The .so sits next to our library in the APK's native lib dir.
+    target_link_options(${target_name} PRIVATE "-Wl,-rpath,\\$ORIGIN")
 endfunction()
 
 # Link the Psiphon bridge on desktop, where it is a c-shared library.
