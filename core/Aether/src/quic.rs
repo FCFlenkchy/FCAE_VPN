@@ -776,8 +776,8 @@ pub fn default_path() -> &'static str {
     "/"
 }
 
-pub fn default_sni() -> &'static str {
-    consts::CONNECT_SNI
+pub fn default_sni() -> String {
+    consts::connect_sni()
 }
 
 #[derive(Clone)]

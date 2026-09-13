@@ -3,6 +3,26 @@ pub const API_VERSION: &str = "v0a4471";
 
 pub const CONNECT_SNI: &str = "consumer-masque.cloudflareclient.com";
 pub const L4_CONNECT_SNI: &str = "consumer-masque-proxy.cloudflareclient.com";
+
+/// The SNI to present on MASQUE TLS handshakes.
+///
+/// Defaults to [`CONNECT_SNI`], overridden by `AETHER_SNI`. The name is a
+/// censorship-relevant knob: it is the one field of the handshake a DPI box
+/// reads in cleartext (when ECH is off), so a network that blocklists the
+/// stock name can be worked around by presenting another. The endpoints are
+/// verified by certificate pinning rather than hostname matching, so a
+/// substituted name does not weaken the connection -- see the
+/// `set_verify_hostname` call in `masque_h2`.
+///
+/// Callers must use this instead of reading `CONNECT_SNI` directly, or the
+/// override applies to some handshakes and not others.
+pub fn connect_sni() -> String {
+    std::env::var("AETHER_SNI")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| CONNECT_SNI.to_string())
+}
 pub const CONNECT_URI: &str = "https://cloudflareaccess.com";
 
 pub const ECH_PUBLIC_NAME: &str = "cloudflare-ech.com";
@@ -63,3 +83,33 @@ pub const MASQUE_PINS: &[&[u8]] = &[
     // Returned when SNI=cloudflareaccess.com
     b"\x3f\xbb\x1d\x74\x52\xd3\x2b\x38\x81\xeb\x4b\x5d\x48\x42\x14\x45\xb6\xb9\xd8\xf5\x22\x59\x59\xf0\x33\x53\x2d\x50\x26\x37\xb0\x40",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // AETHER_SNI is process-global, so the cases share one test rather than
+    // racing each other under the parallel runner.
+    #[test]
+    fn the_connect_sni_can_be_overridden() {
+        std::env::remove_var("AETHER_SNI");
+        assert_eq!(connect_sni(), CONNECT_SNI);
+
+        std::env::set_var("AETHER_SNI", "example.invalid");
+        assert_eq!(connect_sni(), "example.invalid");
+
+        // Surrounding whitespace comes from a text field, not intent.
+        std::env::set_var("AETHER_SNI", "  spaced.invalid  ");
+        assert_eq!(connect_sni(), "spaced.invalid");
+
+        // An empty or all-whitespace value means "unset", not "send an empty
+        // SNI" -- an empty SNI is a distinct and very fingerprintable
+        // handshake.
+        std::env::set_var("AETHER_SNI", "   ");
+        assert_eq!(connect_sni(), CONNECT_SNI);
+        std::env::set_var("AETHER_SNI", "");
+        assert_eq!(connect_sni(), CONNECT_SNI);
+
+        std::env::remove_var("AETHER_SNI");
+    }
+}

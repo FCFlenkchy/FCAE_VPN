@@ -26,4 +26,20 @@ require (
 replace github.com/xjasonlyu/tun2socks/v2 => ../../../../tun2socks
 
 replace github.com/Psiphon-Labs/psiphon-tunnel-core => ../../../../psiphon
+
+// The tunnel core's own go.mod carries two replace directives, and Go honours
+// replaces ONLY from the main module. Here the tunnel core is a dependency, so
+// both are dropped and the build silently resolves different code than the one
+// upstream builds and tests:
+//
+//   - pion/dtls/v2 must come from the patched tree vendored at replace/dtls;
+//     the unpatched upstream release lacks the changes the DTLS-based
+//     transports rely on.
+//   - gitlab.com/yawning/obfs4.git is redirected to a maintained fork.
+//
+// Restate both here. They must be kept in step with core/psiphon/go.mod.
+replace github.com/pion/dtls/v2 => ../../../../psiphon/replace/dtls
+
+replace gitlab.com/yawning/obfs4.git => github.com/jmwample/obfs4 v0.0.0-20230725223418-2d2e5b4a16ba
+
 replace github.com/vishvananda/netlink => github.com/vishvananda/netlink v1.2.1-beta.2

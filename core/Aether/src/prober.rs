@@ -716,8 +716,10 @@ mod tests {
         rand::rng().fill(&mut scid[..]);
         let scid = quiche::ConnectionId::from_ref(&scid);
 
-        let sni = crate::consts::CONNECT_SNI;
-        let mut conn = quiche::connect(Some(sni), &scid, local, peer, &mut config).ok()?;
+        // Must match the SNI the real tunnel will present, or the probe
+        // measures a handshake the tunnel never performs.
+        let sni = crate::consts::connect_sni();
+        let mut conn = quiche::connect(Some(&sni), &scid, local, peer, &mut config).ok()?;
 
         let mut out = [0u8; 1350];
         let (written, _) = conn.send(&mut out).ok()?;

@@ -670,14 +670,11 @@ pub mod env_compat {
         };
 
         set("AETHER_PROTOCOL", Some(protocol));
+        // Ironclad rides along in AETHER_SCAN, which the engine parses with
+        // ScanMode::parse. There is no separate AETHER_VALIDATE.
         set("AETHER_SCAN", Some(scan));
-        set(
-            "AETHER_VALIDATE",
-            (cfg.scan_mode == FcaeScanMode::Ironclad).then_some("ironclad"),
-        );
         set("AETHER_IP", Some(ip));
         set("AETHER_CONFIG", Some(&cfg.config_path));
-        set("AETHER_NONINTERACTIVE", Some("1"));
         // Engine verbosity. The FFI's own log callback level is separate and
         // deliberately fixed at info; this only controls how chatty the
         // aether engine itself is.
@@ -690,31 +687,42 @@ pub mod env_compat {
         // carry the Tor SOCKS port from the config (default 127.0.0.1:1821)
         // instead of the session's socks port, which is unused in this mode.
         let host = cfg.socks_bind_host();
+        // There is no "disable" for the engine's SOCKS listener: it always
+        // binds one, and AETHER_SOCKS_DISABLED was never read. Port 0 asks the
+        // OS for an ephemeral port, which is what "no public listener" means
+        // here -- the supervisor's TUN bridge still needs somewhere to dial.
         if cfg.tor.mode == FcaeTorMode::Only {
             set("AETHER_SOCKS", cfg.tor.bind.clone());
-            set("AETHER_SOCKS_DISABLED", None::<&str>);
         } else if cfg.socks_port != 0 {
             set("AETHER_SOCKS", Some(format!("{host}:{}", cfg.socks_port)));
-            set("AETHER_SOCKS_DISABLED", None::<&str>);
         } else {
-            set("AETHER_SOCKS", Some("0.0.0.0:0"));
-            set("AETHER_SOCKS_DISABLED", Some("1"));
+            set("AETHER_SOCKS", Some(format!("{host}:0")));
         }
+        // The engine reads exactly one variable for the HTTP proxy:
+        // AETHER_HTTP_PROXY, an ip:port it parses with SocketAddr::parse.
+        // An unset or empty value means "no http proxy" -- there is no
+        // separate disable flag, and "0.0.0.0:0" is NOT a disable: it parses
+        // fine and binds a real listener on an ephemeral port.
+        //
+        // AETHER_HTTP / AETHER_HTTP_PORT / AETHER_HTTP_DISABLED are names
+        // nothing in the engine ever reads, so the http proxy silently never
+        // came up, and in tor Only mode the "0.0.0.0:0" branch could bind a
+        // stray listener instead of staying off. Write the name the engine
+        // actually reads, and clear it to disable.
         if cfg.http_port != 0 {
-            set("AETHER_HTTP", Some(format!("{host}:{}", cfg.http_port)));
-            set("AETHER_HTTP_PORT", Some(cfg.http_port.to_string()));
-            set("AETHER_HTTP_DISABLED", None::<&str>);
+            set("AETHER_HTTP_PROXY", Some(format!("{host}:{}", cfg.http_port)));
         } else {
-            set("AETHER_HTTP", Some("0.0.0.0:0"));
-            set("AETHER_HTTP_PORT", Some("0"));
-            set("AETHER_HTTP_DISABLED", Some("1"));
+            set("AETHER_HTTP_PROXY", None::<&str>);
         }
 
-        // Mode. The engine must NOT raise TUN itself any more — the
-        // supervisor owns the in-process bridge — so it always runs in proxy
-        // mode and we expose the user's choice separately.
-        set("AETHER_MODE", Some("proxy"));
-        flag("AETHER_LAN_SHARING", cfg.lan_sharing);
+        // The engine must NOT raise TUN itself any more -- the supervisor owns
+        // the in-process bridge -- so it always runs in proxy mode. That is
+        // the engine's only behaviour under run_from_env(), so there is
+        // nothing to select; AETHER_MODE was never read.
+        //
+        // LAN sharing likewise needs no variable: it is expressed by the host
+        // part of AETHER_SOCKS / AETHER_HTTP_PROXY above, which
+        // socks_bind_host() sets to 0.0.0.0 when sharing is on.
         set(
             "AETHER_QUICK_RECONNECT",
             Some(if cfg.quick_reconnect { "1" } else { "0" }),
@@ -737,20 +745,26 @@ pub mod env_compat {
         }
 
         // DNS / TLS.
+        //
+        // AETHER_DNS is a comma/space/semicolon separated list of resolvers,
+        // each "ip" or "ip:port"; unparsable entries are skipped and an empty
+        // list falls back to the engine's own defaults.
         set("AETHER_DNS", cfg.dns.server.as_deref());
-        set("AETHER_DNS_MODE", cfg.dns.use_doh.then_some("doh"));
-        set("AETHER_DOH_URL", cfg.dns.doh_url.as_deref());
-        set(
-            "AETHER_DNS_IP",
-            Some(match cfg.dns.ip_prefer {
-                6 => "v6",
-                10 => "both",
-                _ => "v4",
-            }),
-        );
+        // The IP-family preference for the *tunnel* is carried by AETHER_IP
+        // (set above from the same cfg.dns.ip_prefer). AETHER_DNS_IP was a
+        // second name for it that nothing reads.
         set("AETHER_TLS_GROUPS", cfg.dns.tls_groups.as_deref());
+        // Overrides the SNI presented on MASQUE TLS handshakes; empty means
+        // the engine's built-in name.
         set("AETHER_SNI", cfg.dns.sni.as_deref());
-        set("AETHER_UDP_BUF_KB", cfg.udp_buf_kb.map(|v| v.to_string()));
+        // NOTE: cfg.dns.use_doh / cfg.dns.doh_url are accepted by the ABI but
+        // cannot be honoured: the engine resolves over plain UDP (see
+        // socks::resolver_addresses) and has no DoH client. They were
+        // projected as AETHER_DNS_MODE / AETHER_DOH_URL, which nothing reads,
+        // so enabling DoH silently changed nothing. Left unprojected rather
+        // than faking support; wiring a real DoH resolver is a separate job.
+        //
+        // cfg.udp_buf_kb is in the same position (no AETHER_UDP_BUF_KB reader).
 
         set(
             "AETHER_PERF_PROFILE",
@@ -763,7 +777,9 @@ pub mod env_compat {
         );
 
         set("AETHER_PEER", cfg.force_peer.as_deref());
-        set("AETHER_DATA_DIR", cfg.data_dir.as_deref());
+        // cfg.data_dir reaches the engine as the directory part of
+        // AETHER_CONFIG, which is what it derives its sibling paths (identity,
+        // lastconn, the tor state dir) from. AETHER_DATA_DIR was never read.
 
         // Routing.
         set("AETHER_ROUTES_FILE", cfg.routing.rules_file.as_deref());
@@ -904,7 +920,23 @@ mod tests {
         cfg.socks_port = 9151;
         env_compat::apply(&cfg);
         assert_eq!(std::env::var("AETHER_SOCKS").unwrap(), "127.0.0.1:9150");
-        assert!(std::env::var("AETHER_SOCKS_DISABLED").is_err());
+
+        // The http proxy is projected under the name the engine actually
+        // reads. It used to be written as AETHER_HTTP, which nothing reads,
+        // so the proxy never bound; and http_port = 0 was projected as
+        // "0.0.0.0:0", which parses and binds rather than disabling.
+        cfg.http_port = 8087;
+        env_compat::apply(&cfg);
+        assert_eq!(
+            std::env::var("AETHER_HTTP_PROXY").unwrap(),
+            "127.0.0.1:8087"
+        );
+        cfg.http_port = 0;
+        env_compat::apply(&cfg);
+        assert!(
+            std::env::var("AETHER_HTTP_PROXY").is_err(),
+            "http_port = 0 must clear the variable, not bind an ephemeral port"
+        );
 
         // Regression: turning tor off must clear every variable, or a later
         // non-tor session inherits them.
