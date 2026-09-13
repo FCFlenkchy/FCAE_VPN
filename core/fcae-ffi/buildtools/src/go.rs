@@ -249,13 +249,17 @@ impl<'a> CArchive<'a> {
         )?;
 
         let mut ldflags = self.ldflags.clone();
-        if shared {
+        if shared && self.target.is_android() {
             // Android 15 ships 16 KB memory pages. A shared object linked with
             // the historical 4 KB alignment is rejected by the loader there,
             // so every Go .so we stage into jniLibs needs this. It goes
             // through -extldflags because the NDK linker does the final
             // layout, not the Go linker. Psiphon's own make.bash passes the
             // same flag.
+            //
+            // Android ONLY: `-z max-page-size` is an ELF concept. Passing it
+            // on Windows reaches mingw's ld, which rejects `-z` outright
+            // ("unrecognized option '-z'") and fails the link.
             ldflags.push(
                 "-extldflags=-Wl,-z,max-page-size=16384,-z,common-page-size=16384".into(),
             );

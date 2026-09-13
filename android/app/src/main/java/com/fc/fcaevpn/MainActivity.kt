@@ -885,6 +885,12 @@ class MainActivity : AppCompatActivity() {
         val torBridges = spinnerTorBridges.selectedItemPosition
         val torBridgeLines = editTorBridgeLines.text.toString().trim()
         val engineLog = spinnerEngineLog.selectedItemPosition
+        val backend = backendFromSelection()
+        val torSocksPort = editTorSocksPort.text.toString().toIntOrNull() ?: 1821
+        val psiphonConfig = editPsiphonConfig.text.toString().trim()
+        val psiphonRegion = selectedPsiphonRegion()
+        val psiphonSocksPort = editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0
+        val psiphonHttpPort = editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0
 
         bgExecutor.execute {
             // Ensure previous engine is fully stopped before starting.
@@ -924,6 +930,12 @@ class MainActivity : AppCompatActivity() {
                     torBridges = torBridges,
                     torBridgeLines = torBridgeLines,
                     engineLog = engineLog,
+                    backend = backend,
+                    torSocksPort = torSocksPort,
+                    psiphonConfig = psiphonConfig,
+                    psiphonRegion = psiphonRegion,
+                    psiphonSocksPort = psiphonSocksPort,
+                    psiphonHttpPort = psiphonHttpPort,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }

@@ -241,6 +241,22 @@ impl Backend for AetherBackend {
     }
 }
 
+/// One connect attempt against the tunnel's SOCKS listener.
+///
+/// Used as a liveness probe: the engine unbinds the listener while it
+/// re-dials and rebinds it once a tunnel is serving again, so this tracks the
+/// real tunnel state without needing any instrumentation inside the engine.
+///
+/// Runs on the blocking pool because `connect_timeout` is synchronous; the
+/// 250 ms cap keeps a wedged loopback socket from stalling the poll.
+async fn probe_listener(addr: SocketAddr) -> bool {
+    tokio::task::spawn_blocking(move || {
+        TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Poll-connect until the listener answers, the engine dies, or we time out.
 async fn wait_for_listener(addr: SocketAddr, timeout: Duration, finished: &AtomicBool) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
@@ -293,14 +309,19 @@ impl BackendHandle for AetherHandle {
 
     async fn wait(&self) -> Result<()> {
         // The engine reconnects internally: run_from_env() loops forever, so
-        // the task only ends on a fatal error or shutdown. That means this
-        // future cannot be used to observe a dropped tunnel -- and because the
-        // supervisor only reacts when wait() returns, its own reconnect path
+        // the task only ends on a fatal error or shutdown. This future
+        // therefore cannot observe a dropped tunnel by itself -- and because
+        // the supervisor only reacts when wait() returns, its reconnect path
         // never ran and the UI kept showing "Connected" through an outage.
         //
-        // So poll the engine's liveness flag alongside the task and report the
-        // transitions. Reconnecting is left to the engine, which already does
-        // it with the right backoff and gateway memory; duplicating it here
+        // Detect liveness from OUT HERE rather than instrumenting the engine:
+        // the tunnel's SOCKS listener is torn down while it re-dials and
+        // rebound once a tunnel serves again, so a connect() to the port we
+        // already know is an accurate, dependency-free probe. Keeping this in
+        // the bridge leaves the upstream engine untouched.
+        //
+        // Reconnecting itself is left to the engine, which already does it
+        // with the right backoff and gateway memory; racing it from here
         // would tear down a tunnel that is busy recovering.
         let mut was_up = true;
         loop {
@@ -311,10 +332,10 @@ impl BackendHandle for AetherHandle {
             tokio::select! {
                 biased;
                 _ = self.done.notified() => break,
-                _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                _ = tokio::time::sleep(Duration::from_millis(1000)) => {}
             }
 
-            let up = aether_engine::tunnel_up();
+            let up = probe_listener(self.socks_addr).await;
             if up != was_up {
                 was_up = up;
                 if up {

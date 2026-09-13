@@ -37,8 +37,8 @@ pub mod zerotrust;
 
 // Re-exported for core/fcae-ffi, which reads the live counters for telemetry.
 pub use stats::{
-    add_rx, add_tx, cached_rates, rates, reset as reset_stats, rtt_ms, set_rtt_ms, set_tunnel_down,
-    set_tunnel_up, total_rx, total_tx, tunnel_up,
+    add_rx, add_tx, cached_rates, rates, reset as reset_stats, rtt_ms, set_rtt_ms, total_rx,
+    total_tx,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -640,9 +640,6 @@ async fn run_gool(
             Ok(()) => log::warn!("[-] gool tunnel closed; reconnecting"),
             Err(e) => log::warn!("[-] gool tunnel ended: {e}; reconnecting"),
         }
-        // The task keeps running, so the FFI cannot see this drop from the
-        // outside; publish it so the UI stops claiming "Connected".
-        stats::set_tunnel_down();
         consecutive_fails += 1;
 
         tokio::time::sleep(wg_reconnect_delay()).await;
@@ -1356,7 +1353,6 @@ async fn run_masque(
             Ok(()) => log::warn!("[-] MASQUE tunnel closed; reconnecting"),
             Err(e) => log::warn!("[-] MASQUE tunnel ended: {e}; reconnecting"),
         }
-        stats::set_tunnel_down();
 
         tokio::time::sleep(masque_reconnect_delay()).await;
     }
@@ -1509,9 +1505,6 @@ async fn run_masque_tunnel(
     let mut tasks = TaskGuard::new();
 
     let socks_stack = hop.stack.clone();
-    // Serving traffic now: publish liveness so the FFI can distinguish a live
-    // tunnel from one the engine is silently re-dialling.
-    stats::set_tunnel_up();
     let socks_task = tokio::spawn(async move { socks::serve(socks_listener, socks_stack).await });
     tasks.push(socks_task.abort_handle());
 
@@ -1747,10 +1740,7 @@ async fn run_masque_in_masque(
 
     let socks_stack = inner.stack.clone();
     let mut socks_task =
-        {
-            stats::set_tunnel_up();
-            tokio::spawn(async move { socks::serve(socks_listener, socks_stack).await })
-        };
+        tokio::spawn(async move { socks::serve(socks_listener, socks_stack).await });
     tasks.push(socks_task.abort_handle());
 
     log::info!("[+] masque-in-masque ready: {peer} (outer) and {inner_peer} (inner)");
@@ -1883,7 +1873,6 @@ async fn run_mim(
             Ok(()) => log::warn!("[-] masque-in-masque tunnel closed; reconnecting"),
             Err(e) => log::warn!("[-] masque-in-masque tunnel ended: {e}; reconnecting"),
         }
-        stats::set_tunnel_down();
         consecutive_fails += 1;
 
         tokio::time::sleep(masque_reconnect_delay()).await;
@@ -2235,12 +2224,10 @@ async fn run_wireguard(
 
         match run_wireguard_tunnel(identity.clone(), peer, profile, listen).await {
             Ok(()) => {
-                stats::set_tunnel_down();
                 log::warn!("[-] WireGuard tunnel closed; reconnecting");
                 consecutive_fails_on_peer += 1;
             }
             Err(e) => {
-                stats::set_tunnel_down();
                 log::warn!("[-] WireGuard tunnel ended: {e}; reconnecting");
                 consecutive_fails_on_peer += 1;
             }
@@ -2312,9 +2299,6 @@ async fn run_wireguard_tunnel(
     let http_listener = bind_http_proxy().await?;
 
     let socks_stack = stack.clone();
-    // Serving traffic now: publish liveness so the FFI can distinguish a live
-    // tunnel from one the engine is silently re-dialling.
-    stats::set_tunnel_up();
     let socks_task = tokio::spawn(async move { socks::serve(socks_listener, socks_stack).await });
     tasks.push(socks_task.abort_handle());
 
@@ -2553,10 +2537,7 @@ async fn run_warp_in_warp(
         tasks.push(task.abort_handle());
     }
     let mut socks_task =
-        {
-            stats::set_tunnel_up();
-            tokio::spawn(async move { socks::serve(socks_listener, inner_stack).await })
-        };
+        tokio::spawn(async move { socks::serve(socks_listener, inner_stack).await });
     tasks.push(socks_task.abort_handle());
 
     #[derive(PartialEq)]
