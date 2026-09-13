@@ -366,7 +366,13 @@ impl Built {
     /// the previous design shipped a tun2socks **binary** here and spawned it
     /// as a child process. Same directory, entirely different mechanism.
     pub fn stage_android_so(&self, repo_root: &Path, target: Target) -> Result<(), GoError> {
-        if !self.shared {
+        // `shared` alone is no longer the Android test: Psiphon now builds
+        // c-shared on desktop too (two Go c-archives cannot be statically
+        // linked into one binary). Without the target check this copied
+        // libpsiphon_bridge.dll into android/app/src/main/jniLibs/x86_64/ --
+        // android_abi() has a catch-all `_ => "x86_64"` arm, so a Windows
+        // build silently polluted the APK's native libraries with a DLL.
+        if !self.shared || !target.is_android() {
             return Ok(());
         }
         let abi = target.android_abi();

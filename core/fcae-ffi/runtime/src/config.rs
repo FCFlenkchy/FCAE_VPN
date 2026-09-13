@@ -786,6 +786,20 @@ pub mod env_compat {
         );
 
         if cfg.tor.is_enabled() {
+            // Pluggable transports are separate executables (lyrebird,
+            // snowflake-client) that the engine spawns. Android ships none of
+            // them and cannot exec arbitrary binaries from app storage, so a
+            // bridge request there can only ever fail -- and it fails late,
+            // after a long bootstrap, which reads as "tor is broken". Ask for
+            // a direct connection instead and say so once.
+            #[cfg(target_os = "android")]
+            if !matches!(cfg.tor.bridges, FcaeTorBridges::None) {
+                log::warn!(
+                    "[tor] bridges need a pluggable-transport binary, which this build cannot \
+                     provide on Android; connecting to tor directly instead"
+                );
+            }
+
             set("AETHER_TOR_BIND", cfg.tor.bind.as_deref());
             set("AETHER_TOR_DIR", cfg.tor.state_dir.as_deref());
             set("AETHER_TOR_PT", cfg.tor.pt_path.as_deref());
@@ -796,6 +810,12 @@ pub mod env_compat {
                 "AETHER_TOR_BRIDGES",
                 match cfg.tor.bridges {
                     FcaeTorBridges::None => Some("off".to_string()),
+                    // "auto" forces bridges on and lets the engine pick from
+                    // whatever pluggable transports it can find. Obfs4 and
+                    // Snowflake both land here because the engine selects the
+                    // transport per bridge line rather than taking a family
+                    // name -- the UI distinction is a hint, not a hard
+                    // selection, so do not promise more than that.
                     FcaeTorBridges::Obfs4 | FcaeTorBridges::Snowflake => Some("auto".to_string()),
                     FcaeTorBridges::Custom => cfg.tor.bridge_lines.clone(),
                 },

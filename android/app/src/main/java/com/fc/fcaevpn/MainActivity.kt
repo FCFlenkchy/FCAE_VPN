@@ -392,7 +392,20 @@ class MainActivity : AppCompatActivity() {
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
-        loadSettings()
+        // loadSettings() reads ~40 views and, through refreshPsiphonRegions(),
+        // makes the app's first native call. A failure anywhere in there used
+        // to propagate out of onCreate and kill the process before any UI
+        // existed, which looks like "crashes on open" with no clue why.
+        //
+        // None of it is load-bearing for showing the window: every value has a
+        // default. So report the cause and carry on with defaults rather than
+        // dying.
+        try {
+            loadSettings()
+        } catch (t: Throwable) {
+            android.util.Log.e("FCAE_VPN", "loadSettings failed; using defaults", t)
+            Toast.makeText(this, "Settings failed to load: ${t.message}", Toast.LENGTH_LONG).show()
+        }
         applyTorLock()
 
         // Running build, spelled out: version + which channel it is. A build

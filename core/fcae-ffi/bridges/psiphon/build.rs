@@ -94,7 +94,14 @@ fn main() {
                 "cargo:rustc-env=FCAE_PSIPHON_HEADER={}",
                 built.header.display()
             );
-            fcae_build::note("psiphon MobileLibrary linked in-process");
+            // "MobileLibrary" is just upstream's package name -- psi.go
+            // carries no build tags and imports nothing platform-specific,
+            // so it compiles for desktop too. We use it everywhere because
+            // it is the only variant exposing BindToDevice, which Android
+            // needs; desktop passes useDeviceBinder=false and ignores it.
+            fcae_build::note(
+                "psiphon linked in-process (upstream MobileLibrary/psi, portable Go)",
+            );
         }
         Err(e) => panic!(
             "failed to build the Psiphon bridge c-archive: {e}\n\
