@@ -238,9 +238,10 @@ impl Drop for StartGuard {
 #[derive(Debug, Clone)]
 #[cfg_attr(not(all(feature = "enabled", psiphon_linked)), allow(dead_code))]
 pub(crate) struct StartInputs {
+    /// Already carries EgressRegion and DataRootDirectory: psi.Start() takes
+    /// the config object and nothing else.
     pub config_json: String,
     pub embedded_server_list: String,
-    pub data_root_dir: String,
 }
 
 /// Validate config up front so the user gets the same quality of error as
@@ -271,16 +272,32 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
         ));
     }
 
-    let data_root_dir = p
+    // Psiphon needs a writable datastore. Prefer an explicit
+    // psiphon.data_root_dir, but fall back to a subdirectory of the session
+    // data_dir so a caller that already set one does not have to repeat it.
+    let data_root_dir = match p
         .data_root_dir
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            CoreError::InvalidConfig(
-                "psiphon.data_root_dir is required (Psiphon needs a writable datastore)".into(),
-            )
-        })?;
+    {
+        Some(d) => d.to_string(),
+        None => {
+            let base = cfg
+                .data_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    CoreError::InvalidConfig(
+                        "psiphon needs a writable datastore: set psiphon.data_root_dir \
+                         (or data_dir, which it will use a `psiphon` subdirectory of)"
+                            .into(),
+                    )
+                })?;
+            format!("{}/psiphon", base.trim_end_matches('/'))
+        }
+    };
 
     // Psiphon takes the egress region from the config JSON, and
     // MobileLibrary has no setter for it, so splice it in. "" means auto,
@@ -296,46 +313,76 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
         None => config_json.to_string(),
     };
 
+    // MobileLibrary's psi.Start() takes the config JSON and nothing else --
+    // unlike ClientLibrary, which had a dedicated dataRootDirectory parameter.
+    // Psiphon reads it from Config.DataRootDirectory, so it has to go into the
+    // object. Without this the field was computed, validated and then thrown
+    // away (the compiler's "never read" warning), and Psiphon fell back to the
+    // process working directory -- not writable on Android.
+    let config_json = inject_string_field(&config_json, "DataRootDirectory", &data_root_dir)?;
+
     Ok(StartInputs {
         config_json,
         embedded_server_list: p.embedded_server_list.clone().unwrap_or_default(),
-        data_root_dir: data_root_dir.to_string(),
     })
 }
 
 /// Set `EgressRegion` in a Psiphon config object.
-///
-/// Done textually rather than with serde: the crate is compiled into every
-/// build and the rest of this bridge is already dependency-free. The value is
-/// an ISO country code that we validate, so there is nothing to escape.
 fn inject_egress_region(config_json: &str, region: &str) -> Result<String> {
     if !region.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(CoreError::InvalidConfig(format!(
             "psiphon.egress_region {region:?} is not an alphanumeric country code"
         )));
     }
+    inject_string_field(config_json, "EgressRegion", region)
+}
+
+/// Set a string field in a flat Psiphon config object.
+///
+/// Done textually rather than with serde: the crate is compiled into every
+/// build and the rest of this bridge is already dependency-free.
+///
+/// `value` is JSON-escaped, because unlike a country code a filesystem path
+/// can legitimately contain a backslash (Windows) or a quote.
+fn inject_string_field(config_json: &str, key: &str, value: &str) -> Result<String> {
+    let escaped = json_escape(value);
+    let needle = format!("\"{key}\"");
 
     // Replace an existing key rather than adding a duplicate: Go's json
     // decoder takes the LAST occurrence, so a duplicate would work by
     // accident on one decoder and break on another.
-    if let Some(at) = config_json.find("\"EgressRegion\"") {
-        let after = &config_json[at + "\"EgressRegion\"".len()..];
+    if let Some(at) = config_json.find(&needle) {
+        let after = &config_json[at + needle.len()..];
         let colon = after.find(':').ok_or_else(|| {
-            CoreError::InvalidConfig("psiphon.config_json has a malformed EgressRegion".into())
+            CoreError::InvalidConfig(format!("psiphon.config_json has a malformed {key}"))
         })?;
         let rest = &after[colon + 1..];
         let q1 = rest.find('"').ok_or_else(|| {
-            CoreError::InvalidConfig("psiphon.config_json EgressRegion is not a string".into())
+            CoreError::InvalidConfig(format!("psiphon.config_json {key} is not a string"))
         })?;
-        let q2 = rest[q1 + 1..].find('"').ok_or_else(|| {
-            CoreError::InvalidConfig("psiphon.config_json EgressRegion is unterminated".into())
+        // Find the closing quote, skipping escaped ones.
+        let body = &rest[q1 + 1..];
+        let mut end = None;
+        let mut esc = false;
+        for (i, c) in body.char_indices() {
+            if esc {
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                end = Some(i);
+                break;
+            }
+        }
+        let end = end.ok_or_else(|| {
+            CoreError::InvalidConfig(format!("psiphon.config_json {key} is unterminated"))
         })?;
-        let head_len = at + "\"EgressRegion\"".len() + colon + 1 + q1 + 1;
+        let head_len = at + needle.len() + colon + 1 + q1 + 1;
         return Ok(format!(
             "{}{}{}",
             &config_json[..head_len],
-            region,
-            &config_json[head_len + q2..]
+            escaped,
+            &config_json[head_len + end..]
         ));
     }
 
@@ -344,11 +391,29 @@ fn inject_egress_region(config_json: &str, region: &str) -> Result<String> {
         CoreError::InvalidConfig("psiphon.config_json is not a JSON object".into())
     })?;
     Ok(format!(
-        "{}\"EgressRegion\":\"{}\",{}",
+        "{}\"{}\":\"{}\",{}",
         &config_json[..=open],
-        region,
+        key,
+        escaped,
         &config_json[open + 1..]
     ))
+}
+
+/// Minimal JSON string escaping for the values we splice in.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The cgo boundary. Only compiled when the archive is actually linked.
@@ -573,17 +638,56 @@ mod tests {
     }
 
     #[test]
-    fn data_root_dir_is_required() {
+    fn data_root_dir_is_required_when_no_data_dir() {
         let cfg = make_config(Some("{}"), None);
         let err = validate(&cfg).unwrap_err();
         assert!(format!("{err}").contains("data_root_dir"), "got: {err}");
+    }
+
+    /// psi.Start() takes only the config object, so the datastore path has to
+    /// be spliced into it -- it used to be computed and then dropped.
+    #[test]
+    fn data_root_dir_lands_in_the_config_json() {
+        let cfg = make_config(Some(r#"{"PropagationChannelId":"x"}"#), Some("/tmp/psi"));
+        let inputs = validate(&cfg).expect("should validate");
+        assert!(
+            inputs.config_json.contains(r#""DataRootDirectory":"/tmp/psi""#),
+            "got: {}",
+            inputs.config_json
+        );
+    }
+
+    /// Falls back to <data_dir>/psiphon so a caller that already set data_dir
+    /// does not have to repeat it.
+    #[test]
+    fn data_root_dir_falls_back_to_the_session_data_dir() {
+        let mut cfg = make_config(Some("{}"), None);
+        cfg.data_dir = Some("/var/app".into());
+        let inputs = validate(&cfg).expect("should validate");
+        assert!(
+            inputs.config_json.contains(r#""DataRootDirectory":"/var/app/psiphon""#),
+            "got: {}",
+            inputs.config_json
+        );
+    }
+
+    /// A Windows path contains backslashes, which must not corrupt the JSON.
+    #[test]
+    fn a_path_with_backslashes_is_escaped() {
+        let cfg = make_config(Some("{}"), Some(r"C:\Users\me\psi"));
+        let inputs = validate(&cfg).expect("should validate");
+        assert!(
+            inputs.config_json.contains(r#""DataRootDirectory":"C:\\Users\\me\\psi""#),
+            "got: {}",
+            inputs.config_json
+        );
     }
 
     #[test]
     fn a_valid_config_passes() {
         let cfg = make_config(Some(r#"{"PropagationChannelId":"x"}"#), Some("/tmp/psi"));
         let inputs = validate(&cfg).expect("should validate");
-        assert_eq!(inputs.data_root_dir, "/tmp/psi");
+        assert!(inputs.config_json.contains(r#""PropagationChannelId":"x""#));
         assert!(inputs.embedded_server_list.is_empty());
     }
 

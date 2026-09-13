@@ -130,6 +130,15 @@ impl Target {
         "a"
     }
 
+    /// Dynamic library extension for the target.
+    pub fn shared_lib_ext(&self) -> &'static str {
+        match self.os {
+            Os::Windows => "dll",
+            Os::MacOS | Os::Ios => "dylib",
+            _ => "so",
+        }
+    }
+
     pub fn is_windows(&self) -> bool {
         self.os == Os::Windows
     }

@@ -590,6 +590,10 @@ jobs:
           set -euo pipefail
           mkdir -p package
           cp build/fcaevpn* package/ 2>/dev/null || true
+          # The Psiphon bridge is a Go c-shared library (only one Go
+          # c-archive can be statically linked per binary), so it ships
+          # alongside the executable and must be packaged with it.
+          cp build/libpsiphon_bridge.* package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
 
           if [ "${{ matrix.name }}" = "linux-x64" ]; then
@@ -601,8 +605,9 @@ jobs:
               printf '%s\n' \
                 '#!/bin/sh' \
                 'DIR="$(cd "$(dirname "$0")" && pwd)"' \
-                'export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"' \
-                'exec "$DIR/fcaevpn" "$@"' > package/fcaevpn.sh
+                '# $DIR covers libpsiphon_bridge.so, which sits next to the binary.' \
+                'export LD_LIBRARY_PATH="$DIR/lib:$DIR:$LD_LIBRARY_PATH"' \
+                'exec "$DIR/FCAE_VPN-linux-x64" "$@"' > package/fcaevpn.sh
               chmod +x package/fcaevpn.sh
             fi
           fi

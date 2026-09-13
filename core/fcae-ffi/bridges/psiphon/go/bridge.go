@@ -39,6 +39,7 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"unsafe"
@@ -82,6 +83,20 @@ var (
 	logCb     C.psi_log_cb
 	protectCb C.psi_protect_cb
 )
+
+// dataRootFromConfig pulls DataRootDirectory out of the config object.
+//
+// Decoding into a map rather than a struct keeps every other field untouched:
+// this shim never rewrites the config, it only needs to read one path.
+func dataRootFromConfig(configJSON string) string {
+	var probe struct {
+		DataRootDirectory string `json:"DataRootDirectory"`
+	}
+	if err := json.Unmarshal([]byte(configJSON), &probe); err != nil {
+		return ""
+	}
+	return probe.DataRootDirectory
+}
 
 func emit(level int, format string, args ...interface{}) {
 	logMu.Lock()
@@ -243,6 +258,18 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	if cfg == "" {
 		emit(logError, "[psiphon] empty config json")
 		return -2
+	}
+
+	// Psiphon creates its datastore *inside* DataRootDirectory with os.Mkdir,
+	// which is a single level -- so the root itself has to exist first, or
+	// Commit() fails with "failed to create datastore directory". Ours is a
+	// fresh subdirectory (filesDir/psiphon, or <exe>/psiphon on desktop) that
+	// nothing else creates, so make it here where both platforms share a path.
+	if dir := dataRootFromConfig(cfg); dir != "" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			emit(logError, "[psiphon] cannot create data dir %s: %v", dir, err)
+			return -2
+		}
 	}
 
 	// Reset per-session cached state. Ports and regions belong to the

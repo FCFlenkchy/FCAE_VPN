@@ -224,6 +224,7 @@ impl Backend for AetherBackend {
         Ok(Box::new(AetherHandle {
             cfg,
             socks_addr,
+            sink: cx.telemetry.clone(),
             task: Mutex::new(Some(engine_task)),
             done,
             finished,
@@ -266,6 +267,8 @@ async fn wait_for_listener(addr: SocketAddr, timeout: Duration, finished: &Atomi
 struct AetherHandle {
     cfg: SessionConfig,
     socks_addr: SocketAddr,
+    /// Used to publish reconnects the engine performs internally.
+    sink: TelemetrySink,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     done: Arc<Notify>,
     finished: Arc<AtomicBool>,
@@ -289,9 +292,43 @@ impl BackendHandle for AetherHandle {
     }
 
     async fn wait(&self) -> Result<()> {
-        while !self.finished.load(Ordering::SeqCst) {
-            self.done.notified().await;
+        // The engine reconnects internally: run_from_env() loops forever, so
+        // the task only ends on a fatal error or shutdown. That means this
+        // future cannot be used to observe a dropped tunnel -- and because the
+        // supervisor only reacts when wait() returns, its own reconnect path
+        // never ran and the UI kept showing "Connected" through an outage.
+        //
+        // So poll the engine's liveness flag alongside the task and report the
+        // transitions. Reconnecting is left to the engine, which already does
+        // it with the right backoff and gateway memory; duplicating it here
+        // would tear down a tunnel that is busy recovering.
+        let mut was_up = true;
+        loop {
+            if self.finished.load(Ordering::SeqCst) {
+                break;
+            }
+
+            tokio::select! {
+                biased;
+                _ = self.done.notified() => break,
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            }
+
+            let up = aether_engine::tunnel_up();
+            if up != was_up {
+                was_up = up;
+                if up {
+                    self.sink
+                        .set_state(FcaeState::Connected, "Reconnected".into());
+                } else {
+                    self.sink.set_state(
+                        FcaeState::Reconnecting,
+                        "Tunnel dropped; reconnecting…".into(),
+                    );
+                }
+            }
         }
+
         match self.outcome.lock().clone() {
             Some(Ok(())) | None => Ok(()),
             Some(Err(msg)) => Err(CoreError::Internal(msg)),
@@ -350,10 +387,6 @@ fn tor_mode_label(mode: FcaeTorMode) -> &'static str {
         FcaeTorMode::Only => "only",
     }
 }
-
-/// Unused today, kept so the file documents where the sink is threaded.
-#[allow(dead_code)]
-fn _sink_type_check(_s: &TelemetrySink) {}
 
 // ── Update-check provider ───────────────────────────────────────────────
 

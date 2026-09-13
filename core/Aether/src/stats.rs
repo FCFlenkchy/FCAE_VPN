@@ -8,6 +8,31 @@ static WINDOW_RX: AtomicU64 = AtomicU64::new(0);
 static WINDOW_TX: AtomicU64 = AtomicU64::new(0);
 static RTT_MS: AtomicU64 = AtomicU64::new(0);
 
+/// Whether a tunnel is currently carrying traffic.
+///
+/// The engine reconnects internally in an infinite loop, so the task never
+/// exits and the FFI's `wait()` never returns -- which means the supervisor's
+/// own reconnect logic is unreachable and the UI kept showing "Connected"
+/// while the tunnel was actually down and re-dialling. This flag lets the
+/// bridge report the real state instead.
+static TUNNEL_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mark the tunnel as established. Called once a tunnel starts serving.
+pub fn set_tunnel_up() {
+    TUNNEL_UP.store(true, Ordering::SeqCst);
+}
+
+/// Mark the tunnel as down: it dropped and the engine is re-dialling.
+pub fn set_tunnel_down() {
+    TUNNEL_UP.store(false, Ordering::SeqCst);
+}
+
+/// True while a tunnel is up. False during the initial scan and during every
+/// internal reconnect.
+pub fn tunnel_up() -> bool {
+    TUNNEL_UP.load(Ordering::SeqCst)
+}
+
 struct RateState {
     last: Instant,
     rx_bps: u64,
@@ -93,6 +118,7 @@ pub fn cached_rates() -> (u64, u64) {
 }
 
 pub fn reset() {
+    TUNNEL_UP.store(false, Ordering::SeqCst);
     TOTAL_RX.store(0, Ordering::Relaxed);
     TOTAL_TX.store(0, Ordering::Relaxed);
     WINDOW_RX.store(0, Ordering::Relaxed);

@@ -323,6 +323,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "backend") g_app.backend = atoi(val.c_str());
     else if (key == "tor_socks_port") g_app.tor_socks_port = atoi(val.c_str());
     else if (key == "psiphon_region") snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region), "%s", val.c_str());
+    else if (key == "psiphon_data_dir") snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir), "%s", val.c_str());
     else if (key == "psiphon_socks_port") g_app.psiphon_socks_port = atoi(val.c_str());
     else if (key == "psiphon_http_port") g_app.psiphon_http_port = atoi(val.c_str());
     else if (key == "mode") g_app.mode = atoi(val.c_str());
@@ -388,6 +389,7 @@ static void save_config() {
     fprintf(f, "backend=%d\n", g_app.backend);
     fprintf(f, "tor_socks_port=%d\n", g_app.tor_socks_port);
     fprintf(f, "psiphon_region=%s\n", g_app.psiphon_region);
+    fprintf(f, "psiphon_data_dir=%s\n", g_app.psiphon_data_dir);
     fprintf(f, "psiphon_socks_port=%d\n", g_app.psiphon_socks_port);
     fprintf(f, "psiphon_http_port=%d\n", g_app.psiphon_http_port);
     fprintf(f, "mode=%d\n", g_app.mode);
@@ -591,6 +593,25 @@ void ui_init() {
     }
     g_app.add_log(4, ("[ui] settings file: " + get_config_path()).c_str());
     g_app.add_log(4, (std::string("[ui] identity file: ") + g_app.config_path).c_str());
+
+    // Psiphon keeps a persistent datastore and refuses to start without a
+    // writable directory for it. Default it next to the executable, in its own
+    // subdirectory so it never collides with the engine's state. The user can
+    // still override it in the config file.
+    if (g_app.psiphon_data_dir[0] == '\0') {
+        std::string dir = exe_dir();
+        if (!dir.empty()) {
+            char sep =
+#if defined(_WIN32)
+                '\\';
+#else
+                '/';
+#endif
+            std::string full = dir + sep + "psiphon";
+            snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir),
+                     "%s", full.c_str());
+        }
+    }
 
     // Auto-trigger update check once on startup if enabled
     if (g_app.auto_update_check) {

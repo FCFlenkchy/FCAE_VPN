@@ -65,12 +65,28 @@ fn main() {
     // core/psiphon/MobileLibrary/Android/make.bash.
     archive.ldflags.push("-checklinkname=0".into());
 
+    // Build dynamic everywhere, not just on Android.
+    //
+    // Only ONE Go c-archive can be statically linked into a binary: each
+    // embeds a complete Go runtime, so a second one redefines
+    // _cgo_topofstack, crosscall2, _cgo_panic and the rest, and the link dies
+    // in duplicate symbols. tun2socks keeps the static slot because it is
+    // always present; Psiphon is optional, so it takes the dynamic one.
+    // Android already did this for both bridges, which is why only the
+    // desktop targets ever hit the clash.
+    archive.force_shared = true;
+
     match archive.build() {
         Ok(built) => {
             // Android builds a c-shared .so (Go rejects c-archive there), so
             // it has to land in jniLibs/<abi>/ for the loader. No-op elsewhere.
             if let Err(e) = built.stage_android_so(&repo_root, target) {
                 panic!("failed to stage the Psiphon bridge for Android: {e}");
+            }
+            // Desktop: put the shared library beside the Rust artifacts so
+            // CMake can find it and copy it next to the executable.
+            if let Err(e) = built.stage_desktop_shared(target) {
+                panic!("failed to stage the Psiphon bridge: {e}");
             }
             built.emit_link_directives("libpsiphon_bridge", target);
             println!("cargo:rustc-cfg=psiphon_linked");
