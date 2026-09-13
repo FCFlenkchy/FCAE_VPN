@@ -348,13 +348,14 @@ class MainActivity : AppCompatActivity() {
         )
         // Tor is an egress inside the Aether engine (AETHER_TOR), not a
         // separate backend. Positions map 1:1 onto FcaeTorMode.
+        // "Tor only" is deliberately NOT here: it is the Tor entry of the
+        // protocol list above, so it appears once.
         spinnerTor.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
             listOf(
                 "Off",
                 "Tor through the tunnel",
                 "Tunnel through Tor (MASQUE only)",
-                "Tor only (no WARP)",
             ),
         )
         // Positions map 1:1 onto FcaeTorBridges.
@@ -770,7 +771,21 @@ class MainActivity : AppCompatActivity() {
         spinnerScan.setSelection(prefs.getInt("scan", 0))
         spinnerIpVersion.setSelection(prefs.getInt("ipVersion", 0))
         spinnerNoize.setSelection(prefs.getInt("noize", 2))
-        spinnerTor.setSelection(prefs.getInt("tor", 0))
+        // "Tor only" left the egress list: it is the Tor entry of the
+        // protocol list now (position 4). A saved egress position of 3 (the
+        // old "Tor only") maps back onto the protocol list, so an existing
+        // setup keeps the same effective config. Psiphon ignores the tor
+        // fields entirely, so there is nothing to migrate for that backend
+        // -- the egress entry just resets to Off.
+        val savedTor = prefs.getInt("tor", 0)
+        if (savedTor >= 3) {
+            if (prefs.getInt("backend", 0) != 1) {
+                spinnerProtocol.setSelection(4) // "Tor only (no WARP)"
+            }
+            spinnerTor.setSelection(0)
+        } else {
+            spinnerTor.setSelection(savedTor)
+        }
         spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
         editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
         spinnerEngineLog.setSelection(prefs.getInt("engineLog", 3))

@@ -6,9 +6,6 @@
 #include <deque>
 #include <mutex>
 #include <string>
-#include <dlfcn.h>
-#include <signal.h>
-#include <setjmp.h>
 
 #include "fcae.h"
 
@@ -18,15 +15,18 @@
 
 // ── Weak stubs for Psiphon Go bridge symbols ──────────────────────────
 //
-// libpsiphon_bridge.so is loaded at runtime via System.loadLibrary BEFORE
-// fcaevpn_native.so.  If it loads successfully, Go's strong definitions
-// override these weak stubs via ELF symbol interposition.
+// On Android these stubs are the effective implementation: the Go
+// psiphon bridge (libpsiphon_bridge.so) is no longer loaded at runtime,
+// because its Go runtime init (.init_array) can SIGSEGV on some devices
+// and a native signal kills the process no matter how the load is
+// wrapped.
 //
-// If psiphon_bridge.so is missing or its Go runtime init crashes
-// (SIGSEGV — Java try/catch cannot catch native signals), these safe
-// defaults remain and Psiphon gracefully reports as "unavailable".
-// Without stubs, the Rust psiphon bridge has extern "C" references that
-// would crash on first call if never resolved.
+// The stubs exist so that the Rust psiphon bridge (built with
+// `psiphon-live`) links at all, and so Psiphon gracefully reports as
+// "unavailable" instead of crashing on a never-resolved extern "C"
+// reference. If a loader is ever reintroduced and the .so loads, Go's
+// strong definitions override these weak stubs via ELF symbol
+// interposition.
 //
 // The signatures must match the Go //export declarations in bridge.go.
 
@@ -62,72 +62,6 @@ char* psi_regions(void) { return nullptr; }
 
 extern "C" __attribute__((weak))
 void psi_string_free(char *s) { (void)s; }
-
-// ── Crash-safe Psiphon bridge loader ───────────────────────────────────
-//
-// System.loadLibrary("psiphon_bridge") runs Go's runtime init (.init_array),
-// which can SIGSEGV on some Android devices.  Java try/catch cannot catch
-// native signals — the process just dies.
-//
-// Instead, we load fcaevpn_native FIRST (which has the weak stubs above),
-// then call this function via JNI to dlopen psiphon_bridge.so from C++ with
-// a signal handler that catches SIGSEGV/SIGBUS.  If the load succeeds, Go's
-// strong definitions override the weak stubs via ELF symbol interposition.
-// If it crashes, the handler catches it and the stubs remain.
-
-static sigjmp_buf g_dlopen_jmp;
-static volatile sig_atomic_t g_dlopen_crashed;
-
-static void dlopen_sig_handler(int /*sig*/) {
-    g_dlopen_crashed = 1;
-    siglongjmp(g_dlopen_jmp, 1);
-}
-
-/// Try to dlopen psiphon_bridge.so with crash protection.
-/// Returns true if the library loaded successfully.
-static bool try_load_psiphon_bridge() {
-    // Already loaded?
-    if (dlopen("libpsiphon_bridge.so", RTLD_NOLOAD | RTLD_NOW)) {
-        return true;
-    }
-
-    g_dlopen_crashed = 0;
-
-    // Install crash handlers
-    struct sigaction sa_new = {};
-    sa_new.sa_handler = dlopen_sig_handler;
-    sigemptyset(&sa_new.sa_mask);
-    sa_new.sa_flags = 0;
-
-    struct sigaction old_segv, old_bus;
-    sigaction(SIGSEGV, &sa_new, &old_segv);
-    sigaction(SIGBUS,  &sa_new, &old_bus);
-
-    bool loaded = false;
-    if (sigsetjmp(g_dlopen_jmp, 1) == 0) {
-        void* handle = dlopen("libpsiphon_bridge.so", RTLD_NOW | RTLD_GLOBAL);
-        if (handle) {
-            loaded = true;
-            LOGI("psiphon_bridge.so loaded via crash-safe dlopen");
-        } else {
-            LOGI("psiphon_bridge.so not available: %s", dlerror());
-        }
-    } else {
-        LOGE("psiphon_bridge.so crashed during Go runtime init (signal); "
-             "Psiphon will be unavailable");
-    }
-
-    // Restore original handlers
-    sigaction(SIGSEGV, &old_segv, nullptr);
-    sigaction(SIGBUS,  &old_bus,  nullptr);
-
-    return loaded;
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_fc_fcaevpn_NativeEngine_nativeLoadPsiphonBridge(JNIEnv*, jclass) {
-    return try_load_psiphon_bridge() ? JNI_TRUE : JNI_FALSE;
-}
 
 static std::mutex g_log_mu;
 static std::deque<std::string> g_logs;

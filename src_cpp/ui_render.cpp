@@ -1131,7 +1131,8 @@ void render_ui() {
             }
             if (ImGui::RadioButton("Tor only (no WARP)", &transport, 4)) {
                 // FcaeProtocol::Tor; the core normalises this to
-                // tor.mode = Only, so the Tor dropdown below is redundant here.
+                // tor.mode = Only. This is the only place Tor-only can be
+                // picked -- the Tor egress combo below has no "Only" entry.
                 g_app.protocol = 4; g_app.backend = 0;
             }
             if (ImGui::RadioButton("Psiphon", &transport, 5)) {
@@ -1281,13 +1282,18 @@ void render_ui() {
             ImGui::Text("Tor egress");
             // Tor is an egress inside the Aether engine (AETHER_TOR), not a
             // separate backend, so it needs no bridge of its own.
+            // "Tor only (no WARP)" is deliberately not a mode here: it is a
+            // Transport entry above (FcaeProtocol::Tor), so it appears once.
+            // (A saved tor_mode=3 from older builds still works; it is just
+            // no longer selectable.)
             const char* tor_modes[] = {
                 "Off",
                 "Tor through the tunnel",
                 "Tunnel through Tor (MASQUE only)",
-                "Tor only (no WARP)",
             };
-            ImGui::Combo("Tor", &g_app.tor_mode, tor_modes, 4);
+            ImGui::Combo("Tor", &g_app.tor_mode, tor_modes, 3);
+            if (g_app.tor_mode == 3)
+                ImGui::TextDisabled("\"Tor only\" lives in the Transport list above.");
             if (g_app.tor_mode == 0) ImGui::BeginDisabled();
             ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port);
             const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };

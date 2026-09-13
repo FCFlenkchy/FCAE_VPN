@@ -137,19 +137,18 @@ function(fcae_link_go_bridges target_name abi)
         message(STATUS "linking Go bridge: ${t2s}")
     endif()
 
-    # psiphon_bridge is NOT linked as DT_NEEDED.  Its Go runtime init can
-    # crash (SIGSEGV) on some Android devices, and because that is a native
-    # signal Java try/catch cannot catch -- the process just dies.
+    # psiphon_bridge is NOT linked as DT_NEEDED and is no longer loaded at
+    # runtime either: its Go runtime init can crash (SIGSEGV) on some
+    # Android devices, and because that is a native signal Java try/catch
+    # cannot catch -- the process just dies.
     #
-    # Instead, android_jni.cpp provides WEAK C stubs for every psi_*
-    # symbol.  At runtime System.loadLibrary loads psiphon_bridge.so BEFORE
-    # fcaevpn_native.so; if it succeeds Go's strong definitions override
-    # the stubs via ELF symbol interposition.  If psiphon_bridge fails to
-    # load (missing .so, Go crash, ABI mismatch) the stubs stay and
-    # Psiphon gracefully reports "unavailable".
+    # android_jni.cpp provides WEAK C stubs for every psi_* symbol, so the
+    # Rust bridge links and Psiphon gracefully reports "unavailable".  If
+    # the staged .so is ever loaded again, Go's strong definitions would
+    # override the stubs via ELF symbol interposition.
     set(psi ${jni_dir}/libpsiphon_bridge.so)
     if(EXISTS "${psi}")
-        message(STATUS "psiphon bridge staged (runtime-loaded): ${psi}")
+        message(STATUS "psiphon bridge staged (not loaded at runtime): ${psi}")
     endif()
 
     # The .so sits next to our library in the APK's native lib dir.

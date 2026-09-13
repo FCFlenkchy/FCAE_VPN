@@ -8,22 +8,12 @@ object NativeEngine {
         } catch (_: Throwable) {
         }
 
-        // Load our native library BEFORE psiphon_bridge.  It contains weak
-        // stubs for every psi_* symbol — safe no-ops that return "engine
-        // failed".  This guarantees fcaevpn_native.so always loads even if
-        // psiphon_bridge.so crashes.
+        // fcaevpn_native contains weak stubs for every psi_* symbol, so it
+        // always loads. The Go psiphon bridge is intentionally NOT loaded
+        // here: its Go runtime init (.init_array) crashes on some devices,
+        // and a native SIGSEGV kills the process no matter how the load is
+        // wrapped. Through the stubs Psiphon simply reports "unavailable".
         System.loadLibrary("fcaevpn_native")
-
-        // Now try to load the Go psiphon bridge via crash-safe dlopen.
-        // Go's runtime init (.init_array) can SIGSEGV on some devices;
-        // the native side catches the signal so the app survives.
-        // If it succeeds, Go's strong psi_* definitions override the weak
-        // stubs via ELF symbol interposition.
-        try {
-            nativeLoadPsiphonBridge()
-        } catch (_: Throwable) {
-            // JNI method not found or other error — weak stubs remain.
-        }
     }
 
     /**
@@ -39,7 +29,6 @@ object NativeEngine {
         // Referencing the object is enough; `init` has already run by here.
     }
 
-    @JvmStatic external fun nativeLoadPsiphonBridge(): Boolean
     @JvmStatic external fun nativeInit()
     @JvmStatic external fun nativeSetNativeLibDir(path: String)
     @JvmStatic external fun nativeStart(
