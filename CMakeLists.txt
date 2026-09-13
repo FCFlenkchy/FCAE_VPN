@@ -122,7 +122,7 @@ endfunction()
 # Link the Go bridges that were built as c-shared objects (Android only).
 #
 # On Android the Go toolchain rejects -buildmode=c-archive, so the tun2socks
-# bridge is built as libtun2socks_bridge.so and staged into jniLibs/<abi>/.
+# bridge is built as libfcae_go_bridge.so and staged into jniLibs/<abi>/.
 # It is therefore NOT inside libfcae_ffi.a: the Rust side only *references*
 # t2s_start/t2s_stop/... and cargo emits `rustc-link-lib=dylib=...` directives
 # that apply when rustc links a final artifact. Here CMake performs the link,
@@ -131,91 +131,20 @@ endfunction()
 function(fcae_link_go_bridges target_name abi)
     set(jni_dir ${CMAKE_SOURCE_DIR}/android/app/src/main/jniLibs/${abi})
     # tun2socks_bridge is a hard dependency: TUN mode always needs it.
-    set(t2s ${jni_dir}/libtun2socks_bridge.so)
+    set(t2s ${jni_dir}/libfcae_go_bridge.so)
     if(EXISTS "${t2s}")
         target_link_libraries(${target_name} PRIVATE "${t2s}")
         message(STATUS "linking Go bridge: ${t2s}")
     endif()
 
-    # psiphon_bridge is NOT linked as DT_NEEDED and is no longer loaded at
-    # runtime either: its Go runtime init can crash (SIGSEGV) on some
-    # Android devices, and because that is a native signal Java try/catch
-    # cannot catch -- the process just dies.
-    #
-    # android_jni.cpp provides WEAK C stubs for every psi_* symbol, so the
-    # Rust bridge links and Psiphon gracefully reports "unavailable".  If
-    # the staged .so is ever loaded again, Go's strong definitions would
-    # override the stubs via ELF symbol interposition.
-    set(psi ${jni_dir}/libpsiphon_bridge.so)
-    if(EXISTS "${psi}")
-        message(STATUS "psiphon bridge staged (not loaded at runtime): ${psi}")
-    endif()
+    # This is one Go shared library containing both tun2socks and Psiphon.
+    # Loading one Go runtime avoids the Android multi-runtime crash.
 
     # The .so sits next to our library in the APK's native lib dir.
     target_link_options(${target_name} PRIVATE "-Wl,-rpath,\\$ORIGIN")
 endfunction()
 
-# Link the Psiphon bridge on desktop, where it is a c-shared library.
-#
-# Only ONE Go c-archive can be statically linked into a binary: each embeds a
-# complete Go runtime, so a second one duplicates _cgo_topofstack, crosscall2,
-# _cgo_panic and friends and the link fails. tun2socks keeps the static slot
-# (it is always present); Psiphon is therefore built dynamic, exactly as both
-# bridges already are on Android.
-#
-# Cargo's `rustc-link-lib=dylib=...` directive does not reach this link because
-# CMake, not rustc, produces the executable -- the same reason
-# fcae_link_go_bridges() exists for Android. So name the library explicitly,
-# and rely on the $ORIGIN/@executable_path rpaths set per-target below to find
-# it next to the binary at runtime.
-function(fcae_link_psiphon_shared target_name ffi_lib_path)
-    # _psi_name is the file that must SHIP next to the executable;
-    # _psi_link is what the linker consumes. They differ on Windows, where a
-    # DLL is loaded at runtime but linking goes through its import library
-    # (libpsiphon_bridge.dll.a, emitted by Go alongside the DLL). Handing the
-    # .dll straight to mingw's ld happens to work sometimes, but the import
-    # library is the supported input.
-    if(WIN32)
-        set(_psi_name "libpsiphon_bridge.dll")
-        set(_psi_link_name "libpsiphon_bridge.dll.a")
-    elseif(APPLE)
-        set(_psi_name "libpsiphon_bridge.dylib")
-        set(_psi_link_name "libpsiphon_bridge.dylib")
-    else()
-        set(_psi_name "libpsiphon_bridge.so")
-        set(_psi_link_name "libpsiphon_bridge.so")
-    endif()
-
-    # The build script stages it beside the Rust artifacts.
-    get_filename_component(_rust_dir "${ffi_lib_path}" DIRECTORY)
-    set(_psi "${_rust_dir}/${_psi_name}")
-    set(_psi_link "${_rust_dir}/${_psi_link_name}")
-    # Fall back to the shipped file if the import library is absent.
-    if(NOT EXISTS "${_psi_link}")
-        set(_psi_link "${_psi}")
-    endif()
-
-    if(EXISTS "${_psi}")
-        target_link_libraries(${target_name} PRIVATE "${_psi_link}")
-        message(STATUS "linking Go bridge: ${_psi_link}")
-        # Find it beside the executable at runtime. Windows searches the
-        # .exe's own directory already, so it needs nothing.
-        if(APPLE)
-            target_link_options(${target_name} PRIVATE
-                "-Wl,-rpath,@executable_path")
-        elseif(NOT WIN32)
-            # Escape the $ so CMake passes $ORIGIN through literally.
-            target_link_options(${target_name} PRIVATE "-Wl,-rpath,\$ORIGIN")
-        endif()
-        # Ship it beside the executable, which is where the rpath points.
-        add_custom_command(TARGET ${target_name} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${_psi}" "$<TARGET_FILE_DIR:${target_name}>/${_psi_name}"
-            COMMENT "staging ${_psi_name} next to the executable")
-    else()
-        message(STATUS "psiphon bridge not built (${_psi}); skipping")
-    endif()
-endfunction()
+# Psiphon is part of the combined fcae_go_bridge; there is no second Go library.
 
 # ── Target-specific configuration ────────────────────────────────────────
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
@@ -378,7 +307,6 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-pc-windows-gnu)
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
-    fcae_link_psiphon_shared(fcaevpn "${FCAE_FFI_A}")
 
     # System libs only — crypto is inside the Rust staticlib (BoringSSL), not OpenSSL.
     # pthread MUST come after libfcae_ffi.a (BoringSSL thread_pthread needs it).
@@ -470,7 +398,6 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         endif()
     endif()
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
-    fcae_link_psiphon_shared(fcaevpn "${FCAE_FFI_A}")
 
     # Link GLFW: use target if available (static), otherwise fall back to lib name
     if(TARGET glfw)
@@ -543,7 +470,6 @@ elseif(UNIX)
 
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-unknown-linux-gnu)
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
-    fcae_link_psiphon_shared(fcaevpn "${FCAE_FFI_A}")
 
     # Link GLFW: use imported target if available, otherwise raw lib name
     if(TARGET glfw)

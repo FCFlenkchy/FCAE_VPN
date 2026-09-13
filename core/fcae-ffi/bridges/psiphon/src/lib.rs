@@ -177,7 +177,9 @@ impl Backend for PsiphonBackend {
         let deadline = std::time::Instant::now() + cx.config.start_timeout();
         let socks_port = loop {
             if cx.cancel.is_cancelled() {
-                ffi::stop();
+                tokio::task::spawn_blocking(ffi::stop)
+                    .await
+                    .map_err(|e| CoreError::Internal(format!("psiphon stop task panicked: {e}")))?;
                 return Err(CoreError::StartFailed("cancelled".into()));
             }
             if ffi::state() == ffi::STATE_CONNECTED {
@@ -188,7 +190,9 @@ impl Backend for PsiphonBackend {
             }
             if std::time::Instant::now() >= deadline {
                 // Leave nothing running behind a failed start.
-                ffi::stop();
+                tokio::task::spawn_blocking(ffi::stop)
+                    .await
+                    .map_err(|e| CoreError::Internal(format!("psiphon stop task panicked: {e}")))?;
                 return Err(CoreError::StartFailed(format!(
                     "Psiphon did not establish a tunnel within {:?}",
                     cx.config.start_timeout()
@@ -319,7 +323,8 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     // object. Without this the field was computed, validated and then thrown
     // away (the compiler's "never read" warning), and Psiphon fell back to the
     // process working directory -- not writable on Android.
-    let config_json = inject_string_field(&config_json, "DataRootDirectory", &data_root_dir)?;
+    let mut config_json = inject_string_field(&config_json, "DataRootDirectory", &data_root_dir)?;
+    config_json = inject_psiphon_ports(&config_json, p.socks_port, p.http_port)?;
 
     Ok(StartInputs {
         config_json,
@@ -345,76 +350,36 @@ fn inject_egress_region(config_json: &str, region: &str) -> Result<String> {
 /// `value` is JSON-escaped, because unlike a country code a filesystem path
 /// can legitimately contain a backslash (Windows) or a quote.
 fn inject_string_field(config_json: &str, key: &str, value: &str) -> Result<String> {
-    let escaped = json_escape(value);
-    let needle = format!("\"{key}\"");
-
-    // Replace an existing key rather than adding a duplicate: Go's json
-    // decoder takes the LAST occurrence, so a duplicate would work by
-    // accident on one decoder and break on another.
-    if let Some(at) = config_json.find(&needle) {
-        let after = &config_json[at + needle.len()..];
-        let colon = after.find(':').ok_or_else(|| {
-            CoreError::InvalidConfig(format!("psiphon.config_json has a malformed {key}"))
-        })?;
-        let rest = &after[colon + 1..];
-        let q1 = rest.find('"').ok_or_else(|| {
-            CoreError::InvalidConfig(format!("psiphon.config_json {key} is not a string"))
-        })?;
-        // Find the closing quote, skipping escaped ones.
-        let body = &rest[q1 + 1..];
-        let mut end = None;
-        let mut esc = false;
-        for (i, c) in body.char_indices() {
-            if esc {
-                esc = false;
-            } else if c == '\\' {
-                esc = true;
-            } else if c == '"' {
-                end = Some(i);
-                break;
-            }
-        }
-        let end = end.ok_or_else(|| {
-            CoreError::InvalidConfig(format!("psiphon.config_json {key} is unterminated"))
-        })?;
-        let head_len = at + needle.len() + colon + 1 + q1 + 1;
-        return Ok(format!(
-            "{}{}{}",
-            &config_json[..head_len],
-            escaped,
-            &config_json[head_len + end..]
-        ));
-    }
-
-    // No key yet: insert right after the opening brace.
-    let open = config_json.find('{').ok_or_else(|| {
-        CoreError::InvalidConfig("psiphon.config_json is not a JSON object".into())
+    let mut object: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
+        CoreError::InvalidConfig(format!("psiphon.config_json is invalid JSON: {e}"))
     })?;
-    Ok(format!(
-        "{}\"{}\":\"{}\",{}",
-        &config_json[..=open],
-        key,
-        escaped,
-        &config_json[open + 1..]
-    ))
+    let map = object.as_object_mut().ok_or_else(|| {
+        CoreError::InvalidConfig("psiphon.config_json must be a JSON object".into())
+    })?;
+    map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+    serde_json::to_string(&object).map_err(|e| {
+        CoreError::InvalidConfig(format!("could not render psiphon.config_json: {e}"))
+    })
 }
 
-/// Minimal JSON string escaping for the values we splice in.
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
+/// Apply the FCAE Psiphon port fields to the real Psiphon config names.
+/// Zero removes an existing value so Psiphon is free to choose a port.
+fn inject_psiphon_ports(config_json: &str, socks: u16, http: u16) -> Result<String> {
+    let mut object: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
+        CoreError::InvalidConfig(format!("psiphon.config_json is invalid JSON: {e}"))
+    })?;
+    let map = object.as_object_mut().ok_or_else(|| {
+        CoreError::InvalidConfig("psiphon.config_json must be a JSON object".into())
+    })?;
+    if socks == 0 { map.remove("LocalSocksProxyPort"); }
+    else { map.insert("LocalSocksProxyPort".into(), serde_json::Value::from(socks)); }
+    if http == 0 { map.remove("LocalHttpProxyPort"); }
+    else { map.insert("LocalHttpProxyPort".into(), serde_json::Value::from(http)); }
+    serde_json::to_string(&object).map_err(|e| {
+        CoreError::InvalidConfig(format!("could not render psiphon.config_json: {e}"))
+    })
 }
+
 
 /// The cgo boundary. Only compiled when the archive is actually linked.
 #[cfg(all(feature = "enabled", psiphon_linked))]

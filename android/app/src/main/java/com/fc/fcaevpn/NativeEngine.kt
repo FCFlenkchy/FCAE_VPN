@@ -2,27 +2,14 @@ package com.fc.fcaevpn
 
 object NativeEngine {
     init {
-        // tun2socks_bridge: hard dependency for TUN mode.
-        try {
-            System.loadLibrary("tun2socks_bridge")
-        } catch (_: Throwable) {
-        }
+        // One Go shared library contains both tun2socks and Psiphon. It must
+        // be loaded before the Rust JNI library, which references both sets
+        // of C symbols. Do not swallow this error: a missing bridge is a
+        // packaging/build failure, not an optional runtime feature.
+        System.loadLibrary("fcae_go_bridge")
 
-        // fcaevpn_native contains weak stubs for every psi_* symbol, so it
-        // always loads. The Go psiphon bridge is intentionally NOT loaded
-        // here: its Go runtime init (.init_array) crashes on some devices,
-        // and a native SIGSEGV kills the process no matter how the load is
-        // wrapped. Through the stubs Psiphon simply reports "unavailable".
         System.loadLibrary("fcaevpn_native")
 
-        // DISABLED (see the commented loader in src_cpp/android_jni.cpp):
-        // re-enable together with that block once the Go init crash is
-        // sorted out.
-        // try {
-        //     nativeLoadPsiphonBridge()
-        // } catch (_: Throwable) {
-        //     // JNI method not found or other error — weak stubs remain.
-        // }
     }
 
     /**
@@ -39,7 +26,6 @@ object NativeEngine {
     }
 
     // Pairs with the commented loader in android_jni.cpp (see DISABLED note).
-    // @JvmStatic external fun nativeLoadPsiphonBridge(): Boolean
     @JvmStatic external fun nativeInit()
     @JvmStatic external fun nativeSetNativeLibDir(path: String)
     @JvmStatic external fun nativeStart(

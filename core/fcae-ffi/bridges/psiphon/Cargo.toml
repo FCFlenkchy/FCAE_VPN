@@ -23,6 +23,7 @@ fcae-runtime.workspace = true
 async-trait.workspace = true
 log.workspace = true
 parking_lot.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 
 [build-dependencies]

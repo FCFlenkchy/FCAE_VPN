@@ -40,7 +40,7 @@ fn main() {
     fcae_build::go::track_sources(&go_dir);
     fcae_build::rerun_if_changed(submodule.join("go.mod"));
 
-    let mut archive = fcae_build::go::CArchive::new(&go_dir, ".", "libtun2socks_bridge");
+    let mut archive = fcae_build::go::CArchive::new(&go_dir, ".", "libfcae_go_bridge");
     archive.target = target;
 
     match archive.build() {
@@ -50,7 +50,7 @@ fn main() {
             if let Err(e) = built.stage_android_so(&fcae_build::repo_root(), target) {
                 panic!("failed to stage the tun2socks bridge for Android: {e}");
             }
-            built.emit_link_directives("libtun2socks_bridge", target);
+            built.emit_link_directives("libfcae_go_bridge", target);
             println!("cargo:rustc-cfg=tun2socks_linked");
             println!(
                 "cargo:rustc-env=FCAE_TUN2SOCKS_HEADER={}",

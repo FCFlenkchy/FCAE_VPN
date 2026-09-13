@@ -23,7 +23,7 @@ psiphon = ["dep:fcae-bridge-psiphon"]
 # Psiphon that actually runs: also builds and links the MobileLibrary/psi
 # c-archive (ClientLibrary lacks BindToDevice, so it cannot work on Android).
 # Needs the core/psiphon submodule and a Go toolchain.
-psiphon-live = ["psiphon", "fcae-bridge-psiphon/enabled"]
+psiphon-live = ["psiphon", "tun", "fcae-bridge-psiphon/enabled"]
 # Link the in-process tun2socks bridge.
 tun = ["dep:fcae-bridge-tun2socks"]
 # Tor egress inside the Aether engine. OFF by default: it pulls in arti-client

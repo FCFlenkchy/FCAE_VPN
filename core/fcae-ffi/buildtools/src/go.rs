@@ -37,7 +37,7 @@ pub struct CArchive<'a> {
     pub module_dir: &'a Path,
     /// Package path within the module, e.g. `.`.
     pub package: &'a str,
-    /// Output archive name without extension, e.g. `libtun2socks_bridge`.
+    /// Output archive name without extension, e.g. `libfcae_go_bridge`.
     pub lib_name: &'a str,
     pub target: Target,
     /// Android API level for the NDK toolchain.
@@ -292,10 +292,10 @@ impl<'a> CArchive<'a> {
             // -soname is essential for the c-shared build. Without it the ELF
             // has no SONAME, so whatever links against it records the full
             // build-time path in DT_NEEDED (e.g. /home/runner/work/.../
-            // libtun2socks_bridge.so). That path does not exist on the device,
+            // libfcae_go_bridge.so). That path does not exist on the device,
             // so System.loadLibrary() fails at runtime with a dlopen error and
             // NOTHING starts -- no engine, no TUN. With the SONAME set, the
-            // loader looks for a bare "libtun2socks_bridge.so" and finds the
+            // loader looks for a bare "libfcae_go_bridge.so" and finds the
             // copy Gradle packaged in the APK's native library dir.
             let soname = format!("{}.so", self.lib_name);
             cmd.env("CGO_CFLAGS", "-O2 -fPIC").env(
@@ -369,7 +369,7 @@ impl Built {
         // `shared` alone is no longer the Android test: Psiphon now builds
         // c-shared on desktop too (two Go c-archives cannot be statically
         // linked into one binary). Without the target check this copied
-        // libpsiphon_bridge.dll into android/app/src/main/jniLibs/x86_64/ --
+        // libfcae_go_bridge.dll into android/app/src/main/jniLibs/x86_64/ --
         // android_abi() has a catch-all `_ => "x86_64"` arm, so a Windows
         // build silently polluted the APK's native libraries with a DLL.
         if !self.shared || !target.is_android() {

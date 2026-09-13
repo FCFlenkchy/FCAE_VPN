@@ -301,7 +301,7 @@ public class FCAEVpnService extends VpnService {
                 NativeEngine.nativeInit();
                 try {
                     // tun2socks runs IN-PROCESS: its Go code is linked into
-                    // libtun2socks_bridge.so, which the dynamic linker loads
+                    // libfcae_go_bridge.so, which the dynamic linker loads
                     // alongside libfcaevpn_native.so. There is no tun2socks
                     // binary to locate or execute any more, so the old
                     // nativeSetTun2socksBin() handshake is gone; the TUN fd set

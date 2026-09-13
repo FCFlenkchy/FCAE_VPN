@@ -18,7 +18,10 @@ require (
 	// linked library must never do. zap is already an indirect dependency of
 	// tun2socks, so this pulls in nothing new.
 	go.uber.org/zap v1.28.0
+	github.com/Psiphon-Labs/psiphon-tunnel-core v0.0.0
 )
 
 // Always build against the submodule at core/tun2socks.
 replace github.com/xjasonlyu/tun2socks/v2 => ../../../../tun2socks
+
+replace github.com/Psiphon-Labs/psiphon-tunnel-core => ../../../../psiphon

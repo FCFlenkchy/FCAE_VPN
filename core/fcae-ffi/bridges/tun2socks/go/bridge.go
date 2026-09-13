@@ -2,7 +2,7 @@
 // in-process library instead of a subprocess.
 //
 // It is compiled with `go build -buildmode=c-archive`, producing
-// libtun2socks_bridge.a + .h, which the Rust crate links statically. The Go
+// libfcae_go_bridge.a + .h, which the Rust crate links statically. The Go
 // runtime then lives inside libfcae_ffi.a, so there is no tun2socks
 // executable to extract, no fd inheritance across execve, no taskkill, and no
 // antivirus flagging an unsigned binary dropped into %TEMP%.
