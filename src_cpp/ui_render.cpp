@@ -1129,11 +1129,11 @@ void render_ui() {
             if (ImGui::RadioButton("WARP-in-WARP (Gool)", &transport, 3)) {
                 g_app.protocol = 2; g_app.backend = 0;
             }
-            if (ImGui::RadioButton("Tor only (no WARP)", &transport, 4)) {
+            if (ImGui::RadioButton("Tor only", &transport, 4)) {
                 // FcaeProtocol::Tor; the core normalises this to
                 // tor.mode = Only. This is the only place Tor-only can be
                 // picked -- the Tor egress combo below has no "Only" entry.
-                g_app.protocol = 4; g_app.backend = 0;
+                g_app.protocol = 4; g_app.backend = 0; g_app.tor_mode = 0;
             }
             if (ImGui::RadioButton("Psiphon", &transport, 5)) {
                 // Psiphon picks its own transport, hence FcaeProtocol::Auto.
@@ -1291,9 +1291,13 @@ void render_ui() {
                 "Tor through the tunnel",
                 "Tunnel through Tor (MASQUE only)",
             };
+            if (g_app.protocol == 4) g_app.tor_mode = 0;
+            if (g_app.tor_mode < 0 || g_app.tor_mode > 2) g_app.tor_mode = 0;
+            if (g_app.protocol == 4) ImGui::BeginDisabled();
             ImGui::Combo("Tor", &g_app.tor_mode, tor_modes, 3);
-            if (g_app.tor_mode == 3)
-                ImGui::TextDisabled("\"Tor only\" lives in the Transport list above.");
+            if (g_app.protocol == 4) ImGui::EndDisabled();
+            if (g_app.protocol == 4)
+                ImGui::TextDisabled("Tor only is selected above; the egress combo stays Off.");
             // In TUN mode the routing to the right port happens internally,
             // but in proxy mode the user dials the ports by hand -- tell
             // them which one actually carries tor traffic, or they will use
@@ -1311,7 +1315,10 @@ void render_ui() {
                     ImGui::TextDisabled(
                         "Proxy mode: dial the Tor SOCKS port below; Tor-only has no WARP tunnel.");
             }
-            if (g_app.tor_mode == 0) ImGui::BeginDisabled();
+            // Protocol Tor (Tor only) still needs the SOCKS port and bridge
+            // knobs even though the egress combo is locked to Off.
+            const bool tor_opts = g_app.tor_mode != 0 || g_app.protocol == 4;
+            if (!tor_opts) ImGui::BeginDisabled();
             ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port);
             const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };
             ImGui::Combo("Bridges", &g_app.tor_bridges, tor_bridges, 4);
@@ -1319,7 +1326,7 @@ void render_ui() {
             ImGui::InputTextMultiline("##tor_bridge_lines", g_app.tor_bridge_lines,
                                       sizeof(g_app.tor_bridge_lines), ImVec2(0, 60));
             if (g_app.tor_bridges != 3) ImGui::EndDisabled();
-            if (g_app.tor_mode == 0) ImGui::EndDisabled();
+            if (!tor_opts) ImGui::EndDisabled();
             if (g_app.tor_mode == 2 && (g_app.protocol == 1 || g_app.protocol == 2))
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
                                    "Tor is TCP-only: pick MASQUE for this mode.");

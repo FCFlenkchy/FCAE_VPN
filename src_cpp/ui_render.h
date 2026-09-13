@@ -176,7 +176,13 @@ struct AppState {
 
         c.engine_log       = (FcaeEngineLog)engine_log;
 
-        c.tor.mode         = (FcaeTorMode)tor_mode;
+        // Protocol Tor is its own transport. A leftover tor_mode of 3 (the
+        // old "Tor only" egress entry) or Chain/Reverse stacked on top of
+        // protocol Tor is not a valid combo — clamp to Off so the 3-item
+        // combo cannot OOB and the engine never sees Tor+Chain.
+        int tm = tor_mode;
+        if (protocol == 4 || tm < 0 || tm > 2) tm = 0;
+        c.tor.mode         = (FcaeTorMode)tm;
         c.tor.bridges      = (FcaeTorBridges)tor_bridges;
         c.tor.bridge_lines = tor_bridge_lines[0] ? tor_bridge_lines : nullptr;
         c.tor.socks_port   = (uint16_t)tor_socks_port;

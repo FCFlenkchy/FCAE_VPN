@@ -319,7 +319,7 @@ class MainActivity : AppCompatActivity() {
             // (backend, protocol, torMode) triple the FFI wants.
             listOf(
                 "MASQUE (HTTP/3)", "MASQUE (HTTP/2)", "WireGuard", "WARP-in-WARP",
-                "Tor only (no WARP)", "Psiphon",
+                "Tor only", "Psiphon",
             ),
         )
         spinnerMode.adapter = ArrayAdapter(
@@ -450,6 +450,12 @@ class MainActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
+                // Tor-only is a transport, not an egress. Keep the combo on
+                // Off so we never send protocol Tor + "Tor through the tunnel".
+                if (position == 4 && spinnerTor.selectedItemPosition != 0) {
+                    spinnerTor.setSelection(0)
+                }
+                applyTorLock()
                 updateTorHint()
             }
 
@@ -735,7 +741,14 @@ class MainActivity : AppCompatActivity() {
      */
     private fun applyTorLock() {
         if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
-        val torOn = spinnerTor.selectedItemPosition != 0
+        val torOnly = ::spinnerProtocol.isInitialized && spinnerProtocol.selectedItemPosition == 4
+        if (torOnly && spinnerTor.selectedItemPosition != 0) {
+            spinnerTor.setSelection(0)
+        }
+        spinnerTor.isEnabled = !torOnly
+        spinnerTor.alpha = if (torOnly) 0.5f else 1.0f
+        // Tor-only still uses bridges; only the egress combo is locked Off.
+        val torOn = torOnly || spinnerTor.selectedItemPosition != 0
         spinnerTorBridges.isEnabled = torOn
         spinnerTorBridges.alpha = if (torOn) 1.0f else 0.5f
 
@@ -910,7 +923,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("accessEmail", editAccessEmail.text.toString().trim())
         i.putExtra("routesFile", editRoutesFile.text.toString().trim())
         i.putExtra("routesInline", editRoutesInline.text.toString().trim())
-        i.putExtra("torMode", spinnerTor.selectedItemPosition)
+        i.putExtra("torMode", if (spinnerProtocol.selectedItemPosition == 4) 0 else spinnerTor.selectedItemPosition)
         i.putExtra("torBridges", spinnerTorBridges.selectedItemPosition)
         i.putExtra("torBridgeLines", editTorBridgeLines.text.toString().trim())
         i.putExtra("engineLog", spinnerEngineLog.selectedItemPosition)
@@ -960,7 +973,7 @@ class MainActivity : AppCompatActivity() {
         val accessEmail = editAccessEmail.text.toString().trim()
         val routesFile = editRoutesFile.text.toString().trim()
         val routesInline = editRoutesInline.text.toString().trim()
-        val torMode = spinnerTor.selectedItemPosition
+        val torMode = if (spinnerProtocol.selectedItemPosition == 4) 0 else spinnerTor.selectedItemPosition
         val torBridges = spinnerTorBridges.selectedItemPosition
         val torBridgeLines = editTorBridgeLines.text.toString().trim()
         val engineLog = spinnerEngineLog.selectedItemPosition

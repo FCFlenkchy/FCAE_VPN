@@ -182,9 +182,22 @@ impl Backend for AetherBackend {
                 done.notify_waiters();
             })
         };
-        // Sole owner of the handle: the failure paths below abort through
-        // it, stop() takes it, and the next start reaps it.
-        *LAST_ENGINE.lock() = Some(engine_task);
+        // Do not publish the task to LAST_ENGINE until start() returns a
+        // handle. If the supervisor cancels (disconnect) or the outer
+        // start-timeout fires, this future is dropped while wait_for_* is
+        // still looping — without the guard the engine task kept running,
+        // held the SOCKS port, and the next connect aborted the *new*
+        // engine instead. Drop aborts *this* task only.
+        struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                if let Some(h) = self.0.take() {
+                    aether_engine::shutdown::request();
+                    h.abort();
+                }
+            }
+        }
+        let mut engine_guard = AbortOnDrop(Some(engine_task));
 
         // Readiness = the SOCKS listener actually accepting connections.
         // Log-scraping for "socks5 ... listening" (the old approach) silently
@@ -260,7 +273,6 @@ impl Backend for AetherBackend {
             cx.report(FcaeState::Connecting, "Bootstrapping Tor…");
             let ready = wait_for_socks(engine_socks, cfg.tor_start_timeout(), &finished).await;
             if !ready {
-                abort_current_engine();
                 let msg = outcome
                     .lock()
                     .clone()
@@ -294,7 +306,6 @@ impl Backend for AetherBackend {
 
             if !ready {
                 // Either the engine died, or it never opened the port.
-                abort_current_engine();
                 let msg = outcome
                     .lock()
                     .clone()
@@ -315,7 +326,6 @@ impl Backend for AetherBackend {
             if let Some(tor_addr) = tor_socks {
                 cx.report(FcaeState::Connecting, "Bootstrapping Tor…");
                 if !wait_for_socks(tor_addr, cfg.tor_start_timeout(), &finished).await {
-                    abort_current_engine();
                     let msg = outcome
                         .lock()
                         .clone()
@@ -331,6 +341,12 @@ impl Backend for AetherBackend {
                 log::info!("[tor] egress ready on {tor_addr}; tun traffic routed through tor");
             }
         }
+
+        let engine_task = engine_guard
+            .0
+            .take()
+            .expect("engine task is still owned by the start guard");
+        *LAST_ENGINE.lock() = Some(engine_task);
 
         Ok(Box::new(AetherHandle {
             cfg,
@@ -352,7 +368,9 @@ impl Backend for AetherBackend {
 }
 
 /// Abort whatever engine task is currently registered (if any).
+#[allow(dead_code)]
 fn abort_current_engine() {
+    aether_engine::shutdown::request();
     if let Some(h) = LAST_ENGINE.lock().as_ref() {
         h.abort();
     }
@@ -433,8 +451,9 @@ async fn socks5_greeting(addr: SocketAddr) -> bool {
         };
         let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
         let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-        // Version 5, one method: no auth.
-        stream.write_all(&[0x05, 0x01, 0x01]).is_ok()
+        // Version 5, one method: no auth (0x00). 0x01 is GSSAPI and a
+        // strict SOCKS5 server (including tor) would reply 0xFF.
+        stream.write_all(&[0x05, 0x01, 0x00]).is_ok()
             && {
                 let mut reply = [0u8; 2];
                 stream.read_exact(&mut reply).is_ok() && reply[0] == 0x05 && reply[1] == 0x00

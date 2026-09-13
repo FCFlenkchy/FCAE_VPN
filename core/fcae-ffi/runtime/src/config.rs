@@ -460,8 +460,18 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // the protocol list rather than setting the egress modifier by hand.
     // Normalise here, before the checks below, so both routes validate
     // identically and everything downstream only has to look at tor.mode.
+    //
+    // Tor + "Tor through the tunnel" (Chain) is not a real combo: there is
+    // no WARP carrier to chain through. Overwrite instead of erroring so a
+    // stale saved config cannot crash or deadlock the engine.
     let mut t = *t;
     if cfg.protocol == FcaeProtocol::Tor {
+        if t.mode != FcaeTorMode::Off && t.mode != FcaeTorMode::Only {
+            log::warn!(
+                "[tor] protocol Tor plus egress mode {} is not a valid combo; using Tor only",
+                t.mode as i32
+            );
+        }
         t.mode = FcaeTorMode::Only;
     }
     let t = &t;

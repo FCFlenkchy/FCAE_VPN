@@ -800,7 +800,7 @@ where
 
 async fn serve_one_through<F, Fut, S>(mut sock: TcpStream, connect: F) -> Result<()>
 where
-    F: Fn(String, u16) -> Fut,
+    F: Fn(String, u16) -> Fut + Clone,
     Fut: Future<Output = std::io::Result<S>>,
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
@@ -810,11 +810,15 @@ where
             AetherError::Other("the client did not finish the socks5 handshake in time".into())
         })??;
 
-    if cmd != CMD_CONNECT {
-        let _ = reply(&mut sock, REP_NOT_SUPPORTED).await;
-        return Err(AetherError::Other(
-            "only connect is carried on this listener".into(),
-        ));
+    match cmd {
+        CMD_CONNECT => {}
+        CMD_UDP_ASSOCIATE => return serve_udp_dns_over_tcp(sock, connect).await,
+        _ => {
+            let _ = reply(&mut sock, REP_NOT_SUPPORTED).await;
+            return Err(AetherError::Other(
+                "only connect (and dns-over-tcp udp/53) is carried on this listener".into(),
+            ));
+        }
     }
 
     let host = match &target {
@@ -833,6 +837,128 @@ where
             Err(AetherError::Other(format!("{host}:{port}: {error}")))
         }
     }
+}
+
+/// Tor is TCP-only. tun2socks still sends UDP ASSOCIATE (DNS/53, QUIC, …);
+/// carry DNS as DNS-over-TCP CONNECT :53 and drop every other datagram.
+async fn serve_udp_dns_over_tcp<F, Fut, S>(mut sock: TcpStream, connect: F) -> Result<()>
+where
+    F: Fn(String, u16) -> Fut + Clone,
+    Fut: Future<Output = std::io::Result<S>>,
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let bind_ip = sock
+        .local_addr()
+        .map(|a| a.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let relay = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
+    let relay_addr = relay.local_addr()?;
+    reply_bound(&mut sock, relay_addr).await?;
+
+    let mut client: Option<SocketAddr> = None;
+    let mut cbuf = vec![0u8; 65535];
+    let mut ctrl = [0u8; 256];
+
+    loop {
+        tokio::select! {
+            r = relay.recv_from(&mut cbuf) => {
+                let (n, from) = match r { Ok(v) => v, Err(_) => break };
+                if client.is_none() {
+                    client = Some(from);
+                } else if client != Some(from) {
+                    continue;
+                }
+                let Some((dst, (dst_port, query))) = parse_udp_request(&cbuf[..n]) else {
+                    continue;
+                };
+                if dst_port != 53 {
+                    log::debug!(
+                        "[tor] dropping udp {dst}:{dst_port} (tor is tcp-only; dns/53 uses dns-over-tcp)"
+                    );
+                    continue;
+                }
+                let host = match &dst {
+                    Target::Domain(name) => name.clone(),
+                    Target::Ip(ip) => ip.to_string(),
+                };
+                let connect = connect.clone();
+                let answer = match tokio::time::timeout(
+                    Duration::from_secs(8),
+                    dns_query_over_tcp(connect, host, &query),
+                )
+                .await
+                {
+                    Ok(Ok(body)) => body,
+                    _ => continue,
+                };
+                let pkt = build_udp_reply_target(&dst, dst_port, &answer);
+                let _ = relay.send_to(&pkt, from).await;
+            }
+            r = sock.read(&mut ctrl) => {
+                match r { Ok(0) | Err(_) => break, Ok(_) => {} }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn dns_query_over_tcp<F, Fut, S>(
+    connect: F,
+    host: String,
+    query: &[u8],
+) -> std::io::Result<Vec<u8>>
+where
+    F: Fn(String, u16) -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if query.len() > u16::MAX as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "dns query too large",
+        ));
+    }
+    let mut remote = connect(host, 53).await?;
+    let len = (query.len() as u16).to_be_bytes();
+    remote.write_all(&len).await?;
+    remote.write_all(query).await?;
+    remote.flush().await?;
+    let mut hdr = [0u8; 2];
+    remote.read_exact(&mut hdr).await?;
+    let n = u16::from_be_bytes(hdr) as usize;
+    if n == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "empty dns-over-tcp answer",
+        ));
+    }
+    let mut body = vec![0u8; n];
+    remote.read_exact(&mut body).await?;
+    Ok(body)
+}
+
+fn build_udp_reply_target(dst: &Target, port: u16, data: &[u8]) -> Vec<u8> {
+    let mut pkt = vec![0x00, 0x00, 0x00];
+    match dst {
+        Target::Ip(IpAddr::V4(v4)) => {
+            pkt.push(ATYP_V4);
+            pkt.extend_from_slice(&v4.octets());
+        }
+        Target::Ip(IpAddr::V6(v6)) => {
+            pkt.push(ATYP_V6);
+            pkt.extend_from_slice(&v6.octets());
+        }
+        Target::Domain(name) => {
+            let bytes = name.as_bytes();
+            let n = bytes.len().min(255);
+            pkt.push(ATYP_DOMAIN);
+            pkt.push(n as u8);
+            pkt.extend_from_slice(&bytes[..n]);
+        }
+    }
+    pkt.extend_from_slice(&port.to_be_bytes());
+    pkt.extend_from_slice(data);
+    pkt
 }
 
 pub(crate) async fn relay_generic<A, B>(client: A, remote: B, linger: Duration)
@@ -2209,6 +2335,127 @@ mod http_proxy_tests {
     }
 
     #[test]
+    fn https_absolute_urls_are_refused_since_clients_must_use_connect() {
+        assert!(parse_request_line("GET https://example.com/ HTTP/1.1").is_none());
+    }
+
+    #[test]
+    fn a_malformed_line_is_rejected() {
+        assert!(parse_request_line("").is_none());
+        assert!(parse_request_line("CONNECT").is_none());
+    }
+}
+
+#[cfg(test)]
+mod sniff_route_tests {
+    use super::*;
+
+    fn ip(value: &str) -> Target {
+        Target::Ip(value.parse().unwrap())
+    }
+
+    #[test]
+    fn a_domain_rule_reaches_traffic_that_arrived_as_an_address() {
+        let set = RuleSet::parse("ads.example", "");
+        assert_eq!(
+            decide_route(&set, &ip("93.184.216.34"), None, 443),
+            Action::Proxy
+        );
+        assert_eq!(
+            decide_route(&set, &ip("93.184.216.34"), Some("ads.example"), 443),
+            Action::Block
+        );
+        assert_eq!(
+            decide_route(&set, &ip("93.184.216.34"), Some("tracker.ads.example"), 443),
+            Action::Block
+        );
+    }
+
+    #[test]
+    fn a_sniffed_name_can_send_traffic_direct() {
+        let set = RuleSet::parse("", "internal.example");
+        assert_eq!(
+            decide_route(&set, &ip("10.1.2.3"), Some("internal.example"), 443),
+            Action::Direct
+        );
+    }
+
+    #[test]
+    fn an_address_rule_still_applies_when_the_name_says_nothing() {
+        let set = RuleSet::parse("10.0.0.0/8", "");
+        assert_eq!(
+            decide_route(&set, &ip("10.1.2.3"), Some("unlisted.example"), 443),
+            Action::Block
+        );
+    }
+
+    #[test]
+    fn a_name_that_matches_nothing_leaves_the_address_decision_alone() {
+        let set = RuleSet::parse("ads.example", "private");
+        assert_eq!(
+            decide_route(&set, &ip("192.168.1.5"), Some("unlisted.example"), 443),
+            Action::Direct
+        );
+    }
+
+    #[test]
+    fn a_domain_target_is_decided_on_its_own_name() {
+        let set = RuleSet::parse("ads.example", "");
+        let target = Target::Domain("ads.example".to_string());
+        assert_eq!(decide_route(&set, &target, None, 443), Action::Block);
+    }
+
+    #[tokio::test]
+    async fn a_server_speaks_first_protocol_survives_the_sniff_window() {
+        std::env::set_var("AETHER_ROUTE_SNIFF_MS", "50");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let quiet = tokio::spawn(async move {
+            let _client = tokio::net::TcpStream::connect(address).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+        let head = read_sniff_head(&mut server).await;
+        std::env::remove_var("AETHER_ROUTE_SNIFF_MS");
+
+        assert_eq!(
+            head,
+            Some(Vec::new()),
+            "a client that waits for a greeting must not be treated as gone"
+        );
+        quiet.abort();
+    }
+
+    #[tokio::test]
+    async fn a_client_that_hangs_up_is_reported_as_gone() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let client = tokio::net::TcpStream::connect(address).await.unwrap();
+            drop(client);
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+        assert_eq!(read_sniff_head(&mut server).await, None);
+    }
+
+    #[test]
+    fn sniffing_is_on_unless_it_is_turned_off() {
+        std::env::remove_var("AETHER_ROUTE_SNIFF");
+        assert!(sniff_enabled());
+        std::env::set_var("AETHER_ROUTE_SNIFF", "0");
+        assert!(!sniff_enabled());
+        std::env::set_var("AETHER_ROUTE_SNIFF", "off");
+        assert!(!sniff_enabled());
+        std::env::set_var("AETHER_ROUTE_SNIFF", "1");
+        assert!(sniff_enabled());
+        std::env::remove_var("AETHER_ROUTE_SNIFF");
+    }
+}
+[test]
     fn https_absolute_urls_are_refused_since_clients_must_use_connect() {
         assert!(parse_request_line("GET https://example.com/ HTTP/1.1").is_none());
     }

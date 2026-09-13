@@ -83,7 +83,11 @@ impl Default for SupervisorConfig {
         Self {
             tun_bridge: Arc::new(NullTunBridge),
             is_privileged: || true,
-            stop_timeout: Duration::from_secs(2),
+            // 2s was too short: a cancelled start still has to abort the
+            // engine task and shut the runtime down, and dropping the
+            // JoinHandle instead leaked that work into a later connect
+            // (crash / "address already in use").
+            stop_timeout: Duration::from_secs(8),
             auto_reconnect: true,
             max_reconnects: 0,
         }
@@ -101,8 +105,9 @@ pub struct Supervisor {
     telemetry: Arc<TelemetryCell>,
     running: Mutex<Option<Running>>,
     /// Set while a stop is in progress so a concurrent start waits rather
-    /// than racing the teardown.
-    stopping: AtomicBool,
+    /// than racing the teardown. Arc so a timed-out join can still clear it
+    /// from the reaper thread once the session actually exits.
+    stopping: Arc<AtomicBool>,
 }
 
 impl Supervisor {
@@ -111,7 +116,7 @@ impl Supervisor {
             cfg,
             telemetry,
             running: Mutex::new(None),
-            stopping: AtomicBool::new(false),
+            stopping: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -250,7 +255,7 @@ impl Supervisor {
                 // runtime is dropped, because its stop path may need to run
                 // blocking OS commands.
                 tun_bridge.stop(stop_timeout);
-                rt.shutdown_timeout(Duration::from_secs(2));
+                rt.shutdown_timeout(stop_timeout);
 
                 match outcome {
                     Ok(Ok(())) => {
@@ -312,16 +317,26 @@ impl Supervisor {
         // TUN device (and on Android the VpnService fd) immediately.
         self.cfg.tun_bridge.stop(self.cfg.stop_timeout);
 
-        let result = join_bounded(running.thread, self.cfg.stop_timeout);
-        self.stopping.store(false, Ordering::SeqCst);
-
-        if !result {
-            // Deliberately not fatal: the thread is detached and will finish
-            // its cleanup. Report it so it shows up in logs.
-            log::warn!(
-                "[session] session thread did not finish within {:?}; continuing detached",
-                self.cfg.stop_timeout
-            );
+        match join_bounded(running.thread, self.cfg.stop_timeout) {
+            Ok(()) => self.stopping.store(false, Ordering::SeqCst),
+            Err(handle) => {
+                // Do not drop the JoinHandle: that detaches the session
+                // thread while it still owns a tokio runtime, and the next
+                // start races it (ports, LAST_ENGINE, tun2socks). Reap it
+                // in the background and keep `stopping` set until then so
+                // start() waits.
+                log::warn!(
+                    "[session] session thread did not finish within {:?}; waiting in background",
+                    self.cfg.stop_timeout
+                );
+                let flag = self.stopping.clone();
+                let _ = std::thread::Builder::new()
+                    .name("fcae-session-reaper".into())
+                    .spawn(move || {
+                        let _ = handle.join();
+                        flag.store(false, Ordering::SeqCst);
+                    });
+            }
         }
         self.telemetry
             .set_state(FcaeState::Disconnected, "Disconnected".into());
@@ -330,16 +345,22 @@ impl Supervisor {
 }
 
 /// Join with a timeout — `JoinHandle` has no such API, so poll `is_finished`.
-fn join_bounded(handle: std::thread::JoinHandle<()>, timeout: Duration) -> bool {
+///
+/// On timeout the handle is returned so the caller can reap it instead of
+/// detaching (Drop of JoinHandle detaches, which leaked the old engine).
+fn join_bounded(
+    handle: std::thread::JoinHandle<()>,
+    timeout: Duration,
+) -> std::result::Result<(), std::thread::JoinHandle<()>> {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         if handle.is_finished() {
             let _ = handle.join();
-            return true;
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    false
+    Err(handle)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -376,12 +397,20 @@ async fn run_session(
 
         // Race the backend start against cancellation and a hard timeout, so
         // a stuck scan can never wedge the session thread forever.
+        // Tor bootstrap is far slower than a WARP scan; using only
+        // start_timeout() cancelled a healthy tor start, dropped the
+        // engine task, and the next disconnect/connect crashed.
+        let start_budget = if config.tor.is_enabled() {
+            config.tor_start_timeout()
+        } else {
+            config.start_timeout()
+        };
         let handle = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(()),
             started = backend.start(cx) => started,
-            _ = tokio::time::sleep(config.start_timeout()) => {
-                Err(CoreError::Timeout(config.start_timeout()))
+            _ = tokio::time::sleep(start_budget) => {
+                Err(CoreError::Timeout(start_budget))
             }
         };
 

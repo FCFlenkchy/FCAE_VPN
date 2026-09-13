@@ -459,6 +459,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     // Tor is an egress inside the Aether engine, not a separate backend, so
     // it rides along on the same config struct. The state dir is left NULL so
     // the core puts it under data_dir (app-private storage).
+    // Protocol Tor is Tor-only; ignore a leftover Chain/Reverse so the combo
+    // cannot deadlock the engine.
+    if (protocol == 4) torMode = 0;
     cfg.tor.mode         = (FcaeTorMode)torMode;
     cfg.tor.bridges      = (FcaeTorBridges)torBridges;
     cfg.tor.bridge_lines = torLinesOwned.empty() ? nullptr : torLinesOwned.c_str();
@@ -727,6 +730,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
     env->SetObjectField(obj, fid_status, env->NewStringUTF(info.status_message));
     env->SetBooleanField(obj, fid_isPre, info.is_prerelease ? JNI_TRUE : JNI_FALSE);
     env->SetObjectField(obj, fid_date, env->NewStringUTF(info.release_date));
+    env->DeleteLocalRef(cls);
 
     return obj;
 }
