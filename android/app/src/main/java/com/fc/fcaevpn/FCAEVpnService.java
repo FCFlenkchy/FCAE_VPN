@@ -1,12 +1,16 @@
 package com.fc.fcaevpn;
 
+import android.app.Notification;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.VpnService;
+import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
@@ -211,17 +215,8 @@ public class FCAEVpnService extends VpnService {
                 // The BSSID distinguishes access points. It needs location
                 // permission on newer releases; without it the platform
                 // returns a placeholder, which still beats one global id.
-                try {
-                    WifiManager wm = (WifiManager)
-                        getApplicationContext().getSystemService(WIFI_SERVICE);
-                    if (wm != null && wm.getConnectionInfo() != null) {
-                        String bssid = wm.getConnectionInfo().getBSSID();
-                        if (bssid != null && !bssid.isEmpty()
-                                && !bssid.equals("02:00:00:00:00:00")) {
-                            return "WIFI-" + bssid;
-                        }
-                    }
-                } catch (Throwable ignored) {}
+                String bssid = wifiBssid(caps);
+                if (bssid != null) return "WIFI-" + bssid;
                 return "WIFI";
             }
 
@@ -273,6 +268,57 @@ public class FCAEVpnService extends VpnService {
             Log.w(TAG, "underlyingNetwork failed: " + t);
         }
         return best;
+    }
+
+    /**
+     * BSSID of the current Wi-Fi network, or null when unknown.
+     *
+     * WifiManager.getConnectionInfo() is deprecated on API 31+; prefer
+     * NetworkCapabilities.getTransportInfo() there.
+     */
+    @SuppressWarnings("deprecation")
+    private String wifiBssid(NetworkCapabilities caps) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                Object ti = caps.getTransportInfo();
+                if (ti instanceof WifiInfo) {
+                    String bssid = ((WifiInfo) ti).getBSSID();
+                    if (isUsableBssid(bssid)) return bssid;
+                }
+            } catch (Throwable ignored) {}
+        }
+        try {
+            WifiManager wm = (WifiManager)
+                getApplicationContext().getSystemService(WIFI_SERVICE);
+            if (wm != null) {
+                WifiInfo info = wm.getConnectionInfo();
+                if (info != null && isUsableBssid(info.getBSSID())) {
+                    return info.getBSSID();
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private static boolean isUsableBssid(String bssid) {
+        return bssid != null && !bssid.isEmpty()
+            && !bssid.equals("02:00:00:00:00:00");
+    }
+
+    /**
+     * startForeground(int, Notification) is deprecated on API 34; pass the
+     * specialUse type already declared in the manifest.
+     */
+    @SuppressWarnings("deprecation")
+    private void startFg(Notification n) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                VpnNotification.NOTIFICATION_ID,
+                n,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else {
+            startForeground(VpnNotification.NOTIFICATION_ID, n);
+        }
     }
 
     /**
@@ -412,16 +458,14 @@ public class FCAEVpnService extends VpnService {
                         startVpn(intent);
                     } else {
                         notification.show("FCAE VPN — Ready (tap Connect in app)", false);
-                        startForeground(VpnNotification.NOTIFICATION_ID,
-                            notification.build("FCAE VPN — Ready (tap Connect in app)", false));
+                        startFg(notification.build("FCAE VPN — Ready (tap Connect in app)", false));
                     }
                     return START_STICKY;
             }
         }
 
         notification.show("FCAE VPN — Ready (tap Connect in app)", false);
-        startForeground(VpnNotification.NOTIFICATION_ID,
-            notification.build("FCAE VPN — Ready (tap Connect in app)", false));
+        startFg(notification.build("FCAE VPN — Ready (tap Connect in app)", false));
         return START_STICKY;
     }
 
@@ -448,8 +492,7 @@ public class FCAEVpnService extends VpnService {
         vpnInterface = null;
 
         notification.show("FCAE VPN — Connecting...", false);
-        startForeground(VpnNotification.NOTIFICATION_ID,
-            notification.build("FCAE VPN — Connecting...", false));
+        startFg(notification.build("FCAE VPN — Connecting...", false));
 
         final int protocol    = intent.getIntExtra("protocol", 0);
         final int mode        = intent.getIntExtra("mode", 1);

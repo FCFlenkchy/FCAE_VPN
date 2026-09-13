@@ -1,8 +1,9 @@
-//go:build psiphon
+//go:build ignore
 
 // TEMP: Psiphon is commented out of the Go bridge for now (other bugs first).
-// Do not delete this file. Drop the build tag and restore go.mod / psiphon-live
-// to load the library again.
+// `ignore` keeps this file in the tree but go mod tidy / go build skip it.
+// Do not delete. Drop the build tag and restore go.mod / psiphon-live to
+// load the library again.
 
 // Package main is a C-ABI shim over Psiphon's MobileLibrary/psi.
 //
