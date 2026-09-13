@@ -24,6 +24,19 @@ object NativeEngine {
         System.loadLibrary("fcaevpn_native")
     }
 
+    /**
+     * Force this object's initialiser to run, loading the native libraries.
+     *
+     * Callers that only use JNI methods declared on *another* class (such as
+     * FCAEVpnService) would otherwise never touch NativeEngine, so nothing
+     * would have loaded libfcaevpn_native.so and their first native call
+     * would throw UnsatisfiedLinkError.
+     */
+    @JvmStatic
+    fun ensureLoaded() {
+        // Referencing the object is enough; `init` has already run by here.
+    }
+
     @JvmStatic external fun nativeInit()
     @JvmStatic external fun nativeSetNativeLibDir(path: String)
     @JvmStatic external fun nativeStart(

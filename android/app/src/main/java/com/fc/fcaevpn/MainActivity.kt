@@ -1266,12 +1266,19 @@ class MainActivity : AppCompatActivity() {
      */
     private fun refreshPsiphonRegions() {
         if (!::spinnerPsiphonRegion.isInitialized) return
+        // Catch Throwable, not Exception: this runs from loadSettings() during
+        // onCreate, before the background nativeInit(), so the very first call
+        // may be what loads libfcaevpn_native.so. A missing library raises
+        // UnsatisfiedLinkError -- an Error, not an Exception -- which would
+        // escape a narrower catch and kill the app on launch. The region list
+        // is cosmetic until Psiphon connects, so degrade to "Auto".
         val codes = try {
             NativeEngine.nativePsiphonRegions()
                 .split(',')
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            android.util.Log.w("FCAE_VPN", "psiphon regions unavailable: $t")
             emptyList()
         }
 

@@ -416,16 +416,46 @@ impl Built {
             .file_name()
             .ok_or_else(|| GoError::Build("built library has no file name".into()))?;
 
-        // OUT_DIR is target/<triple>/<profile>/build/<pkg>-<hash>/out; the
-        // artifact directory is four levels up.
+        // self.archive is OUT_DIR/<lib>.<ext>, and OUT_DIR is
+        // target/<triple>/<profile>/build/<pkg>-<hash>/out. Cargo puts the
+        // final artifacts in target/<triple>/<profile>, so:
+        //
+        //   pop 1 -> .../out          (drops the file name)
+        //   pop 2 -> .../<pkg>-<hash>
+        //   pop 3 -> .../build
+        //   pop 4 -> target/<triple>/<profile>   <-- what we want
+        //
+        // It was 5, which landed on target/<triple> -- a directory that
+        // exists, so the copy silently "succeeded" into the wrong place and
+        // CMake reported "psiphon bridge not built".
         let mut artifact_dir = self.archive.clone();
-        for _ in 0..5 {
+        for _ in 0..4 {
             artifact_dir.pop();
+        }
+
+        // On Windows Go emits an import library next to the DLL; CMake links
+        // against that rather than the DLL itself, so it has to travel too.
+        let mut extras: Vec<std::ffi::OsString> = Vec::new();
+        if target.is_windows() {
+            let mut imp = file_name.to_os_string();
+            imp.push(".a");
+            if self.archive.with_file_name(&imp).is_file() {
+                extras.push(imp);
+            }
         }
 
         for dir in [artifact_dir.clone(), artifact_dir.join("deps")] {
             if !dir.is_dir() {
                 continue;
+            }
+            for name in &extras {
+                let src = self.archive.with_file_name(name);
+                let dst = dir.join(name);
+                if let Err(e) = std::fs::copy(&src, &dst) {
+                    crate::note(format!("could not stage {}: {e}", dst.display()));
+                } else {
+                    crate::note(format!("staged {}", dst.display()));
+                }
             }
             let dest = dir.join(file_name);
             // A running binary may hold the old copy open on Windows; a failed
@@ -490,7 +520,13 @@ impl Built {
                     "mswsock", "shell32", "user32", "dnsapi", "wintrust",
                     "version", "netapi32", "wtsapi32", "setupapi", "cfgmgr32",
                     // COM / OLE (go-ole).
-                    "ole32", "oleaut32", "combase",
+                    //
+                    // combase is deliberately absent: mingw-w64 ships no
+                    // libcombase.a, so naming it fails the link outright with
+                    // "cannot find -lcombase". Everything go-ole actually
+                    // resolves at link time lives in ole32/oleaut32; the rest
+                    // it loads lazily through LoadLibrary at runtime.
+                    "ole32", "oleaut32",
                     // Performance counters (gopsutil).
                     "pdh",
                 ] {

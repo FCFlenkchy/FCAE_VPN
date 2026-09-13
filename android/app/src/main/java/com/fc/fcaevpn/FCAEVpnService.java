@@ -109,9 +109,28 @@ public class FCAEVpnService extends VpnService {
     public void onCreate() {
         super.onCreate();
         instance = this;
-        // Register before any tunnel starts: Psiphon may call protect() as
-        // soon as it begins dialling.
-        try { nativeRegisterVpnService(); } catch (Throwable ignored) {}
+
+        // Force the native libraries to load before calling ANY native method
+        // on this class.
+        //
+        // The JNI entry points live in libfcaevpn_native.so, but only
+        // NativeEngine's static initialiser loads it. This service never
+        // referenced NativeEngine before its first native call, so
+        // nativeRegisterVpnService() below could be the very first one --
+        // throwing UnsatisfiedLinkError and killing the process on launch.
+        // Touching NativeEngine first runs that initialiser.
+        //
+        // Wrapped because a build/ABI without the libraries must degrade to a
+        // broken tunnel, never a crash on startup.
+        try {
+            NativeEngine.ensureLoaded();
+            // Register before any tunnel starts: Psiphon may call protect()
+            // as soon as it begins dialling.
+            nativeRegisterVpnService();
+        } catch (Throwable t) {
+            android.util.Log.e("FCAE_VPN", "native register failed: " + t);
+        }
+
         handler = new Handler(Looper.getMainLooper());
         notification = new VpnNotification(this);
     }

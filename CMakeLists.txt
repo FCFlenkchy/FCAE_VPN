@@ -157,21 +157,35 @@ endfunction()
 # and rely on the $ORIGIN/@executable_path rpaths set per-target below to find
 # it next to the binary at runtime.
 function(fcae_link_psiphon_shared target_name ffi_lib_path)
+    # _psi_name is the file that must SHIP next to the executable;
+    # _psi_link is what the linker consumes. They differ on Windows, where a
+    # DLL is loaded at runtime but linking goes through its import library
+    # (libpsiphon_bridge.dll.a, emitted by Go alongside the DLL). Handing the
+    # .dll straight to mingw's ld happens to work sometimes, but the import
+    # library is the supported input.
     if(WIN32)
         set(_psi_name "libpsiphon_bridge.dll")
+        set(_psi_link_name "libpsiphon_bridge.dll.a")
     elseif(APPLE)
         set(_psi_name "libpsiphon_bridge.dylib")
+        set(_psi_link_name "libpsiphon_bridge.dylib")
     else()
         set(_psi_name "libpsiphon_bridge.so")
+        set(_psi_link_name "libpsiphon_bridge.so")
     endif()
 
     # The build script stages it beside the Rust artifacts.
     get_filename_component(_rust_dir "${ffi_lib_path}" DIRECTORY)
     set(_psi "${_rust_dir}/${_psi_name}")
+    set(_psi_link "${_rust_dir}/${_psi_link_name}")
+    # Fall back to the shipped file if the import library is absent.
+    if(NOT EXISTS "${_psi_link}")
+        set(_psi_link "${_psi}")
+    endif()
 
     if(EXISTS "${_psi}")
-        target_link_libraries(${target_name} PRIVATE "${_psi}")
-        message(STATUS "linking Go bridge: ${_psi}")
+        target_link_libraries(${target_name} PRIVATE "${_psi_link}")
+        message(STATUS "linking Go bridge: ${_psi_link}")
         # Find it beside the executable at runtime. Windows searches the
         # .exe's own directory already, so it needs nothing.
         if(APPLE)
