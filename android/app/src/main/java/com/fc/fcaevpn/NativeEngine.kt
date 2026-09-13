@@ -16,12 +16,12 @@ object NativeEngine {
         } catch (_: Throwable) {
             // Not packaged in this build/ABI — fine.
         }
-        try {
-            System.loadLibrary("psiphon_bridge")
-        } catch (_: Throwable) {
-            // Missing, wrong ABI, or Go runtime init failed.  Weak stubs
-            // in android_jni.cpp provide safe defaults.
-        }
+        // psiphon_bridge: DISABLED — Go runtime init crashes on some devices.
+        // TODO: re-enable once root cause is fixed.
+        // try {
+        //     System.loadLibrary("psiphon_bridge")
+        // } catch (_: Throwable) {
+        // }
         System.loadLibrary("fcaevpn_native")
     }
 
