@@ -19,9 +19,11 @@ require (
 	// tun2socks, so this pulls in nothing new.
 	go.uber.org/zap v1.28.0
 	github.com/Psiphon-Labs/psiphon-tunnel-core v0.0.0
+	github.com/vishvananda/netlink v1.2.1-beta.2
 )
 
 // Always build against the submodule at core/tun2socks.
 replace github.com/xjasonlyu/tun2socks/v2 => ../../../../tun2socks
 
 replace github.com/Psiphon-Labs/psiphon-tunnel-core => ../../../../psiphon
+replace github.com/vishvananda/netlink => github.com/vishvananda/netlink v1.2.1-beta.2

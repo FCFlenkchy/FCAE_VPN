@@ -464,7 +464,7 @@ async fn wait_for_socks(addr: SocketAddr, timeout: Duration, finished: &AtomicBo
 /// The address a local client (the TUN bridge, or a same-host SOCKS client)
 /// must dial to reach a listener bound on `bound`: wildcard binds are
 /// reached through the loopback.
-fn local_dial_addr(bound: &str) -> Result<SocketAddr, CoreError> {
+fn local_dial_addr(bound: &str) -> Result<SocketAddr> {
     let addr: SocketAddr = bound
         .parse()
         .map_err(|e| CoreError::InvalidConfig(format!("bad tor socks address: {e}")))?;
@@ -518,6 +518,48 @@ struct AetherHandle {
     done: Arc<Notify>,
     finished: Arc<AtomicBool>,
     outcome: Arc<Mutex<Option<std::result::Result<(), String>>>>,
+}
+
+impl AetherHandle {
+    fn held_addrs(&self) -> Vec<SocketAddr> {
+        let mut addrs: Vec<SocketAddr> = Vec::new();
+        // The engine's own listeners are probed as wildcards (see
+        // addrs_free); tor's is probed on the exact host the user set.
+        let push_wild = |addrs: &mut Vec<SocketAddr>, port: u16| {
+            if port != 0 {
+                let a = SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), port);
+                if !addrs.contains(&a) {
+                    addrs.push(a);
+                }
+            }
+        };
+        let push_exact = |addrs: &mut Vec<SocketAddr>, bound: &str| {
+            if let Ok(a) = bound.parse::<SocketAddr>() {
+                if !addrs.contains(&a) {
+                    addrs.push(a);
+                }
+            }
+        };
+        match self.cfg.tor.mode {
+            FcaeTorMode::Only => {
+                if let Some(b) = self.cfg.tor.bind.as_deref() {
+                    push_exact(&mut addrs, b);
+                }
+            }
+            FcaeTorMode::Chain | FcaeTorMode::Reverse => {
+                push_wild(&mut addrs, self.cfg.socks_port);
+                push_wild(&mut addrs, self.cfg.http_port);
+                if let Some(b) = self.cfg.tor.bind.as_deref() {
+                    push_exact(&mut addrs, b);
+                }
+            }
+            FcaeTorMode::Off => {
+                push_wild(&mut addrs, self.cfg.socks_port);
+                push_wild(&mut addrs, self.cfg.http_port);
+            }
+        }
+        addrs
+    }
 }
 
 #[async_trait]
@@ -647,45 +689,7 @@ impl BackendHandle for AetherHandle {
     /// listener, the HTTP proxy, and -- whenever tor is on -- tor's own
     /// listener (in Only mode tor IS the session endpoint, so only its
     /// address matters).
-    fn held_addrs(&self) -> Vec<SocketAddr> {
-        let mut addrs: Vec<SocketAddr> = Vec::new();
-        // The engine's own listeners are probed as wildcards (see
-        // addrs_free); tor's is probed on the exact host the user set.
-        let mut push_wild = |addrs: &mut Vec<SocketAddr>, port: u16| {
-            if port != 0 {
-                let a = SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), port);
-                if !addrs.contains(&a) {
-                    addrs.push(a);
-                }
-            }
-        };
-        let mut push_exact = |addrs: &mut Vec<SocketAddr>, bound: &str| {
-            if let Ok(a) = bound.parse::<SocketAddr>() {
-                if !addrs.contains(&a) {
-                    addrs.push(a);
-                }
-            }
-        };
-        match self.cfg.tor.mode {
-            FcaeTorMode::Only => {
-                if let Some(b) = self.cfg.tor.bind.as_deref() {
-                    push_exact(&mut addrs, b);
-                }
-            }
-            FcaeTorMode::Chain | FcaeTorMode::Reverse => {
-                push_wild(&mut addrs, self.cfg.socks_port);
-                push_wild(&mut addrs, self.cfg.http_port);
-                if let Some(b) = self.cfg.tor.bind.as_deref() {
-                    push_exact(&mut addrs, b);
-                }
-            }
-            FcaeTorMode::Off => {
-                push_wild(&mut addrs, self.cfg.socks_port);
-                push_wild(&mut addrs, self.cfg.http_port);
-            }
-        }
-        addrs
-    }
+
 
     fn counters(&self) -> Counters {
         let (rx, tx) = aether_engine::rates();
