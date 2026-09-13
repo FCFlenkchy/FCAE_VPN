@@ -42,6 +42,11 @@ fn main() {
 
     let mut archive = fcae_build::go::CArchive::new(&go_dir, ".", "libfcae_go_bridge");
     archive.target = target;
+    // Psiphon pulls in github.com/wlynxg/anet, which uses a linkname into
+    // net.zoneCache. Go 1.23+ rejects this reference unless the check is
+    // explicitly disabled. The combined bridge must carry this flag here;
+    // the old standalone Psiphon build used to add it in its own build.rs.
+    archive.ldflags.push("-checklinkname=0".into());
 
     match archive.build() {
         Ok(built) => {
