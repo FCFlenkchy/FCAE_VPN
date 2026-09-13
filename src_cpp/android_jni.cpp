@@ -45,9 +45,18 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
 static int psiphon_protect(int fd) {
     std::lock_guard<std::mutex> lock(g_protect_mu);
     if (!g_vm || !g_vpn_service || !g_protect_mid) {
-        // No service registered (desktop-style run, or called after
-        // teardown). Report success: there is no VPN to escape from.
-        return 1;
+        // This file is only ever compiled into the Android app, where a
+        // missing service is never benign: our TUN is up and this socket
+        // would be captured by it, so Psiphon would dial the internet
+        // through its own tunnel and hang until the start timeout with
+        // nothing in the log explaining why.
+        //
+        // Reporting success here is what turned that into a silent hang.
+        // Fail loudly instead; the caller aborts the dial and the error
+        // reaches the UI.
+        LOGE("psiphon_protect(%d): no VpnService registered — refusing to "
+             "leave the socket inside our own tunnel", fd);
+        return 0;
     }
 
     JNIEnv* env = nullptr;
@@ -72,6 +81,138 @@ static int psiphon_protect(int fd) {
     return ok == JNI_TRUE ? 1 : 0;
 }
 
+// ── Psiphon network state ───────────────────────────────────────────────
+//
+// Psiphon needs three facts about the *underlying* network (the one beneath
+// our TUN): its resolvers, whether it is usable at all, and an identity to
+// key its dial-parameter cache on. All three are answered by the VpnService,
+// which holds a ConnectivityManager.
+//
+// Like protect(), these are invoked from Go goroutines with no JNIEnv, so the
+// thread is attached on demand. Every returned string is strdup'd because
+// ownership passes to the Go side, which frees it.
+static jmethodID g_dns_mid = nullptr;
+static jmethodID g_connectivity_mid = nullptr;
+static jmethodID g_network_id_mid = nullptr;
+
+namespace {
+
+// Scoped JNIEnv that attaches the calling thread if needed and detaches on
+// destruction. Returns a null env when the VM is gone.
+class ScopedEnv {
+public:
+    ScopedEnv() {
+        if (!g_vm) return;
+        if (g_vm->GetEnv((void**)&env_, JNI_VERSION_1_6) != JNI_OK) {
+            if (g_vm->AttachCurrentThread(&env_, nullptr) != JNI_OK) {
+                env_ = nullptr;
+                return;
+            }
+            attached_ = true;
+        }
+    }
+    ~ScopedEnv() {
+        if (attached_ && g_vm) g_vm->DetachCurrentThread();
+    }
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+    JNIEnv* get() const { return env_; }
+
+private:
+    JNIEnv* env_ = nullptr;
+    bool attached_ = false;
+};
+
+// Call a no-argument Java method returning String and hand the result to the
+// caller as a malloc'd C string (which the Go side frees).
+char* call_string_method(jmethodID mid) {
+    std::lock_guard<std::mutex> lock(g_protect_mu);
+    if (!g_vpn_service || !mid) return nullptr;
+
+    ScopedEnv scoped;
+    JNIEnv* env = scoped.get();
+    if (!env) return nullptr;
+
+    jobject result = env->CallObjectMethod(g_vpn_service, mid);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        if (result) env->DeleteLocalRef(result);
+        return nullptr;
+    }
+    if (!result) return nullptr;
+
+    const char* utf = env->GetStringUTFChars((jstring)result, nullptr);
+    char* out = utf ? strdup(utf) : nullptr;
+    if (utf) env->ReleaseStringUTFChars((jstring)result, utf);
+    env->DeleteLocalRef(result);
+    return out;
+}
+
+}  // namespace
+
+static char* psiphon_dns_servers() {
+    return call_string_method(g_dns_mid);
+}
+
+static char* psiphon_network_id() {
+    return call_string_method(g_network_id_mid);
+}
+
+// 1 when a usable underlying network exists, 0 otherwise.
+//
+// Answering a constant 1 made tunnel-core exhaust its candidate list while
+// the device was offline, so a network handover looked like a tunnel stuck
+// on "establishing" forever.
+static int psiphon_has_connectivity() {
+    std::lock_guard<std::mutex> lock(g_protect_mu);
+    if (!g_vpn_service || !g_connectivity_mid) {
+        // Unknown: claim connectivity so we never stall a tunnel that could
+        // have worked. The dial will fail on its own if it cannot.
+        return 1;
+    }
+
+    ScopedEnv scoped;
+    JNIEnv* env = scoped.get();
+    if (!env) return 1;
+
+    jboolean ok = env->CallBooleanMethod(g_vpn_service, g_connectivity_mid);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return 1;
+    }
+    return ok == JNI_TRUE ? 1 : 0;
+}
+
+// ── Deferred TUN establishment ──────────────────────────────────────────
+//
+// The interface used to be created before the engine started, so the system
+// routes were live while the backend was still dialling. This callback lets
+// the core ask for the device at the moment it actually needs one, which is
+// after a backend has reported a live SOCKS endpoint.
+static jmethodID g_establish_mid = nullptr;
+
+// Returns the TUN fd, or negative if the interface could not be created.
+static int establish_tun() {
+    std::lock_guard<std::mutex> lock(g_protect_mu);
+    if (!g_vpn_service || !g_establish_mid) {
+        LOGE("establish_tun: no VpnService registered");
+        return -1;
+    }
+
+    ScopedEnv scoped;
+    JNIEnv* env = scoped.get();
+    if (!env) return -1;
+
+    jint fd = env->CallIntMethod(g_vpn_service, g_establish_mid);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGE("establish_tun: the service threw while establishing");
+        return -1;
+    }
+    LOGI("establish_tun -> fd %d", (int)fd);
+    return (int)fd;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_FCAEVpnService_nativeRegisterVpnService(JNIEnv* env, jobject thiz) {
     std::lock_guard<std::mutex> lock(g_protect_mu);
@@ -83,25 +224,63 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeRegisterVpnService(JNIEnv* env, jobject
     jclass cls = env->GetObjectClass(thiz);
     // VpnService.protect(int) -> boolean
     g_protect_mid = env->GetMethodID(cls, "protect", "(I)Z");
-    env->DeleteLocalRef(cls);
     if (!g_protect_mid) {
         env->ExceptionClear();
+        env->DeleteLocalRef(cls);
         LOGE("could not resolve VpnService.protect(int)");
         return;
     }
+
+    // Network state, implemented on FCAEVpnService. Missing methods are not
+    // fatal on their own -- the hooks simply stay unset and the backend
+    // refuses to start with a clear message -- but they must not leave a
+    // pending exception behind.
+    g_dns_mid = env->GetMethodID(cls, "psiphonDnsServers", "()Ljava/lang/String;");
+    if (!g_dns_mid) {
+        env->ExceptionClear();
+        LOGE("could not resolve psiphonDnsServers()");
+    }
+    g_connectivity_mid = env->GetMethodID(cls, "psiphonHasConnectivity", "()Z");
+    if (!g_connectivity_mid) {
+        env->ExceptionClear();
+        LOGE("could not resolve psiphonHasConnectivity()");
+    }
+    g_network_id_mid = env->GetMethodID(cls, "psiphonNetworkId", "()Ljava/lang/String;");
+    if (!g_network_id_mid) {
+        env->ExceptionClear();
+        LOGE("could not resolve psiphonNetworkId()");
+    }
+    g_establish_mid = env->GetMethodID(cls, "establishTunNow", "()I");
+    if (!g_establish_mid) {
+        env->ExceptionClear();
+        LOGE("could not resolve establishTunNow()");
+    }
+    env->DeleteLocalRef(cls);
+
+    fcae_set_tun_fd_provider(g_establish_mid ? establish_tun : nullptr);
     fcae_set_psiphon_protect(psiphon_protect);
-    LOGI("psiphon socket protection registered");
+    fcae_set_psiphon_network_callbacks(
+        g_dns_mid ? psiphon_dns_servers : nullptr,
+        g_connectivity_mid ? psiphon_has_connectivity : nullptr,
+        g_network_id_mid ? psiphon_network_id : nullptr);
+    LOGI("psiphon socket protection and network hooks registered");
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_FCAEVpnService_nativeUnregisterVpnService(JNIEnv* env, jclass) {
+    fcae_set_tun_fd_provider(nullptr);
     fcae_set_psiphon_protect(nullptr);
+    fcae_set_psiphon_network_callbacks(nullptr, nullptr, nullptr);
     std::lock_guard<std::mutex> lock(g_protect_mu);
     if (g_vpn_service) {
         env->DeleteGlobalRef(g_vpn_service);
         g_vpn_service = nullptr;
     }
     g_protect_mid = nullptr;
+    g_establish_mid = nullptr;
+    g_dns_mid = nullptr;
+    g_connectivity_mid = nullptr;
+    g_network_id_mid = nullptr;
 }
 
 static void jni_log_cb(FcaeLogLevel level, const char* message, void* /*user*/) {
@@ -313,8 +492,13 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
         }
     }
 
-    // The VpnService fd was handed over by nativeSetTunFd; passing -1 here
-    // keeps the value the bridge already holds.
+    // -1 means "no descriptor from the config".
+    //
+    // The interface is created on demand by the fd provider (establishTunNow)
+    // once a backend reports a live SOCKS endpoint, so at this point there is
+    // deliberately no fd to pass. nativeSetTunFd() still exists for callers
+    // that establish up front; passing -1 here leaves whatever the bridge
+    // already holds untouched.
     cfg.tun_fd = -1;
 
     // The MTU must match the one FCAEVpnService.Builder.setMtu() used when it

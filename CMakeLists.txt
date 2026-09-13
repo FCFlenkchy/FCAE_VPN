@@ -119,6 +119,27 @@ function(fcae_link_ffi target_name lib_path)
     target_include_directories(${target_name} PRIVATE ${FCAE_FFI_INCLUDE_DIR})
 endfunction()
 
+# Give an Android shared object 16 KB-aligned LOAD segments.
+#
+# Android 15 runs with 16 KB memory pages on new devices, and its loader
+# rejects a .so whose segments are laid out for the historical 4 KB pages.
+# The Go bridge already asks for this through CGO_LDFLAGS in buildtools/go.rs,
+# but libfcaevpn_native.so is linked here by CMake and inherited none of it --
+# so on a 16 KB device System.loadLibrary() threw UnsatisfiedLinkError from
+# NativeEngine's static initialiser and the process died at launch.
+#
+# NDK r27+ honours ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES; the explicit linker
+# flags cover older NDKs and cost nothing on newer ones.
+#
+# Verify with:  llvm-readelf -l libfcaevpn_native.so | grep LOAD   (Align 0x4000)
+function(fcae_align_16k target_name)
+    target_link_options(${target_name} PRIVATE
+        "-Wl,-z,max-page-size=16384"
+        "-Wl,-z,common-page-size=16384"
+    )
+    message(STATUS "16 KB page alignment enabled for ${target_name}")
+endfunction()
+
 # Link the Go bridges that were built as c-shared objects (Android only).
 #
 # On Android the Go toolchain rejects -buildmode=c-archive, so the tun2socks
@@ -175,6 +196,7 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
         ${log-lib} ${android-lib} m
     )
     target_link_options(fcaevpn_native PRIVATE -Wl,--export-dynamic)
+    fcae_align_16k(fcaevpn_native)
 
 elseif(AETHER_TARGET STREQUAL "ANDROID_ARM32")
 
@@ -204,6 +226,7 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_ARM32")
         ${log-lib} ${android-lib} m
     )
     target_link_options(fcaevpn_native PRIVATE -Wl,--export-dynamic)
+    fcae_align_16k(fcaevpn_native)
 
 elseif(AETHER_TARGET STREQUAL "ANDROID_X86_64")
 
@@ -233,6 +256,7 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_X86_64")
         ${log-lib} ${android-lib} m
     )
     target_link_options(fcaevpn_native PRIVATE -Wl,--export-dynamic)
+    fcae_align_16k(fcaevpn_native)
 
 elseif(AETHER_TARGET STREQUAL "ANDROID_UNIVERSAL")
 
@@ -277,6 +301,7 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_UNIVERSAL")
         ${log-lib} ${android-lib} m
     )
     target_link_options(fcaevpn_native PRIVATE -Wl,--export-dynamic)
+    fcae_align_16k(fcaevpn_native)
 
 elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 

@@ -389,6 +389,33 @@ pub extern "C" fn fcae_set_tun_fd(fd: i32) -> FcaeStatus {
     })
 }
 
+/// Install a callback that creates the TUN device on demand.
+///
+/// Without this the host must call `fcae_set_tun_fd` up front, which means
+/// `VpnService.Builder.establish()` runs *before* the backend has connected:
+/// the system routes are live while the tunnel is still dialling, so the
+/// backend's own traffic survives only as long as the protect hook catches
+/// every socket, and anything missed loops back into our own tunnel.
+///
+/// With a provider installed the interface is created only once a backend has
+/// reported a live SOCKS endpoint. The callback returns a file descriptor, or
+/// a negative value if the interface could not be established. The host keeps
+/// ownership of the descriptor; the library dups what it needs. Pass NULL to
+/// clear.
+#[no_mangle]
+pub extern "C" fn fcae_set_tun_fd_provider(
+    provider: Option<unsafe extern "C" fn() -> std::ffi::c_int>,
+) -> FcaeStatus {
+    guard("fcae_set_tun_fd_provider", move || {
+        let _rt = runtime()?;
+        #[cfg(feature = "tun")]
+        _rt.bridge.set_fd_provider(provider);
+        #[cfg(not(feature = "tun"))]
+        let _ = provider;
+        Ok(())
+    })
+}
+
 /// True if the process can create a TUN device (admin/root).
 #[no_mangle]
 pub extern "C" fn fcae_is_privileged() -> bool {
@@ -539,6 +566,32 @@ pub extern "C" fn fcae_set_psiphon_protect(
         fcae_bridge_psiphon::set_protect_callback(cb);
         #[cfg(not(feature = "psiphon"))]
         let _ = cb;
+        Ok(())
+    })
+}
+
+/// Install the host's view of the underlying network for Psiphon.
+///
+/// `dns` returns a comma-delimited list of the resolvers in use on the
+/// underlying network, `connectivity` returns 1 when a usable network exists,
+/// and `network_id` returns an identity for the active network. The strings
+/// must be `malloc`/`strdup` allocated: ownership passes to the library, which
+/// releases them with `free`.
+///
+/// `dns` is mandatory on Android. Once the protect hook is installed upstream
+/// stops using the platform resolver, so without this the tunnel has no DNS
+/// servers at all and every dial fails. Pass NULL for any of them to clear.
+#[no_mangle]
+pub extern "C" fn fcae_set_psiphon_network_callbacks(
+    dns: Option<unsafe extern "C" fn() -> *mut c_char>,
+    connectivity: Option<unsafe extern "C" fn() -> std::ffi::c_int>,
+    network_id: Option<unsafe extern "C" fn() -> *mut c_char>,
+) -> FcaeStatus {
+    guard("fcae_set_psiphon_network_callbacks", || {
+        #[cfg(feature = "psiphon")]
+        fcae_bridge_psiphon::set_network_callbacks(dns, connectivity, network_id);
+        #[cfg(not(feature = "psiphon"))]
+        let _ = (dns, connectivity, network_id);
         Ok(())
     })
 }

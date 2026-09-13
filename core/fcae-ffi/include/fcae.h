@@ -410,6 +410,34 @@ uint32_t   fcae_psiphon_regions(char *out, uint32_t cap);
  * need this. */
 FcaeStatus fcae_set_psiphon_protect(int (*protect)(int fd));
 
+/* Install the host's view of the underlying network for Psiphon.
+ *
+ *   dns          -> comma-delimited resolver list ("8.8.8.8,1.1.1.1")
+ *   connectivity -> 1 when a usable network exists, 0 otherwise
+ *   network_id   -> identity of the active network, e.g. "WIFI-<bssid>"
+ *
+ * Returned strings must be malloc/strdup allocated; ownership passes to the
+ * library, which frees them.
+ *
+ * dns is REQUIRED on Android: with the protect hook installed, Psiphon stops
+ * using the platform resolver, so this is its only source of DNS servers.
+ * Pass NULL for any callback to clear it. */
+FcaeStatus fcae_set_psiphon_network_callbacks(char *(*dns)(void),
+                                              int   (*connectivity)(void),
+                                              char *(*network_id)(void));
+
+/* Install a callback that creates the TUN device on demand.
+ *
+ * Without it the host must publish a descriptor up front, which forces
+ * VpnService.Builder.establish() to run before the backend has connected: the
+ * system routes go live while the tunnel is still dialling. With a provider
+ * the interface is created only once a backend reports a live SOCKS endpoint.
+ *
+ * The callback returns a file descriptor, or a negative value if the
+ * interface could not be established. The host keeps ownership; the library
+ * dups what it needs. NULL clears. */
+FcaeStatus fcae_set_tun_fd_provider(int (*provider)(void));
+
 /* Release everything. fcae_init() must be called again afterwards. */
 FcaeStatus fcae_shutdown(void);
 

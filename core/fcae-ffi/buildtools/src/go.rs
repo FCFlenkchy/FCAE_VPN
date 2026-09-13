@@ -95,7 +95,11 @@ impl<'a> CArchive<'a> {
             package,
             lib_name,
             target: Target::from_cargo_env(),
-            android_api: 21,
+            // Must match android/app/build.gradle.kts `minSdk` and the
+            // `...24-clang` the CI workflow selects. At 21 the Go bridge was
+            // compiled against older NDK headers than everything it links
+            // with.
+            android_api: 24,
             ldflags: vec!["-s".into(), "-w".into()],
             tags: Vec::new(),
             force_shared: false,
@@ -241,12 +245,29 @@ impl<'a> CArchive<'a> {
         //
         // GOFLAGS=-mod=mod lets tidy write the files; the build below then runs
         // against a complete, consistent graph.
-        Self::run_go_step(
-            &go,
-            self.module_dir,
-            &["mod", "tidy"],
-            "resolve Go dependencies (go mod tidy)",
-        )?;
+        //
+        // `go mod tidy` resolves from the network, so running it on every
+        // build makes the artifact depend on what the module proxy served
+        // that day -- two builds of the same commit could link different
+        // versions of the transitive graph. Once a go.sum exists it is the
+        // pinned record, so skip tidy and build in `-mod=readonly`, which
+        // fails loudly if anything is missing instead of silently changing
+        // the graph. Set FCAE_GO_TIDY=1 to refresh it deliberately.
+        let go_sum = self.module_dir.join("go.sum");
+        let force_tidy = std::env::var("FCAE_GO_TIDY").is_ok_and(|v| v != "0");
+        if force_tidy || !go_sum.is_file() {
+            Self::run_go_step(
+                &go,
+                self.module_dir,
+                &["mod", "tidy"],
+                "resolve Go dependencies (go mod tidy)",
+            )?;
+            crate::note(
+                "go.sum refreshed -- commit it so the build is reproducible",
+            );
+        } else {
+            crate::note("using the committed go.sum (set FCAE_GO_TIDY=1 to refresh)");
+        }
 
         let mut ldflags = self.ldflags.clone();
         if shared && self.target.is_android() {
@@ -284,6 +305,13 @@ impl<'a> CArchive<'a> {
             .env("GOOS", self.target.goos())
             .env("GOARCH", self.target.goarch())
             .env("CC", &cc);
+
+        // Build against the committed graph. Without this an incomplete
+        // go.sum would be silently amended mid-build, which is the
+        // reproducibility hole the tidy skip above exists to close.
+        if !force_tidy {
+            cmd.env("GOFLAGS", "-mod=readonly");
+        }
 
         if let Some(goarm) = self.target.goarm() {
             cmd.env("GOARM", goarm);
@@ -369,13 +397,22 @@ impl Built {
         // `shared` alone is no longer the Android test: Psiphon now builds
         // c-shared on desktop too (two Go c-archives cannot be statically
         // linked into one binary). Without the target check this copied
-        // libfcae_go_bridge.dll into android/app/src/main/jniLibs/x86_64/ --
-        // android_abi() has a catch-all `_ => "x86_64"` arm, so a Windows
-        // build silently polluted the APK's native libraries with a DLL.
+        // libfcae_go_bridge.dll into android/app/src/main/jniLibs/x86_64/,
+        // silently polluting the APK's native libraries with a DLL.
         if !self.shared || !target.is_android() {
             return Ok(());
         }
-        let abi = target.android_abi();
+        // android_abi() no longer guesses: an architecture with no ABI
+        // mapping is a build error, not a library quietly staged into the
+        // wrong directory and discovered as a device-side load failure.
+        let abi = target.android_abi().ok_or_else(|| {
+            GoError::Build(format!(
+                "no Android ABI directory is defined for {}/{}; refusing to guess \
+                 which jniLibs directory to stage into",
+                target.goos(),
+                target.goarch()
+            ))
+        })?;
         let dest_dir = repo_root
             .join("android/app/src/main/jniLibs")
             .join(abi);

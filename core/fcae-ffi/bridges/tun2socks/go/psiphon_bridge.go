@@ -31,8 +31,25 @@ package main
 typedef int  (*psi_protect_cb)(int fd);
 typedef void (*psi_log_cb)(int level, const char *message);
 
+// Network-state callbacks. The host owns the strings it returns and hands
+// ownership to Go, which releases them with free(); they must therefore come
+// from malloc/strdup, never from a static buffer or a C++ new.
+//
+// dns_cb returns a comma-delimited list of the resolvers currently in use on
+// the underlying network ("8.8.8.8,1.1.1.1"), or NULL when unknown.
+// connectivity_cb returns 1 when a usable network exists, 0 otherwise.
+// network_id_cb returns an identity for the active network, used by Psiphon
+// to key its tactics and dial-parameter caches.
+typedef char *(*psi_dns_cb)(void);
+typedef int   (*psi_connectivity_cb)(void);
+typedef char *(*psi_network_id_cb)(void);
+
 static int  psi_call_protect(psi_protect_cb cb, int fd)                 { return cb ? cb(fd) : 1; }
 static void psi_call_log(psi_log_cb cb, int level, const char *message) { if (cb) cb(level, message); }
+
+static char *psi_call_dns(psi_dns_cb cb)                   { return cb ? cb() : NULL; }
+static int   psi_call_connectivity(psi_connectivity_cb cb) { return cb ? cb() : 1; }
+static char *psi_call_network_id(psi_network_id_cb cb)     { return cb ? cb() : NULL; }
 */
 import "C"
 
@@ -82,7 +99,27 @@ var (
 	psiLogMu     sync.Mutex
 	psiLogCb     C.psi_log_cb
 	psiProtectCb C.psi_protect_cb
+
+	// Network-state hooks, guarded by psiLogMu for the same reason as the
+	// others: tunnel-core calls them from its own goroutines at arbitrary
+	// times, including while start/stop holds psiMu.
+	psiDnsCb          C.psi_dns_cb
+	psiConnectivityCb C.psi_connectivity_cb
+	psiNetworkIDCb    C.psi_network_id_cb
 )
+
+// psiTakeCString converts a host-allocated C string and releases it.
+//
+// The host allocates with strdup, so ownership crosses the boundary here and
+// the buffer must be freed with free() -- not by any Go allocator.
+func psiTakeCString(raw *C.char) string {
+	if raw == nil {
+		return ""
+	}
+	out := C.GoString(raw)
+	C.free(unsafe.Pointer(raw))
+	return out
+}
 
 // psiDataRootFromConfig pulls DataRootDirectory out of the config object.
 //
@@ -136,11 +173,53 @@ func (p *psiProvider) BindToDevice(fd int) (string, error) {
 	return "", nil
 }
 
-func (p *psiProvider) HasNetworkConnectivity() int          { return 1 }
-func (p *psiProvider) GetNetworkID() string                 { return "FCAE" }
-func (p *psiProvider) GetDNSServersAsString() string        { return "" }
-func (p *psiProvider) IPv6Synthesize(ipv4 string) string    { return "" }
-func (p *psiProvider) HasIPv6Route() int                    { return 0 }
+// HasNetworkConnectivity reports whether a usable underlying network exists.
+//
+// Returning a hardcoded 1 made tunnel-core burn through its entire candidate
+// list while the device was actually offline, so a Wi-Fi/mobile handover
+// looked like a tunnel that was permanently "establishing". With a real
+// answer the controller parks and resumes instead.
+func (p *psiProvider) HasNetworkConnectivity() int {
+	psiLogMu.Lock()
+	cb := psiConnectivityCb
+	psiLogMu.Unlock()
+	return int(C.psi_call_connectivity(cb))
+}
+
+// GetNetworkID identifies the underlying network.
+//
+// Psiphon keys its tactics, server affinity and dial parameters on this
+// value. A single constant meant parameters learned on an uncensored Wi-Fi
+// network were replayed on a censored mobile carrier and vice versa, so
+// every network change started from a poisoned cache.
+func (p *psiProvider) GetNetworkID() string {
+	psiLogMu.Lock()
+	cb := psiNetworkIDCb
+	psiLogMu.Unlock()
+	if id := psiTakeCString(C.psi_call_network_id(cb)); id != "" {
+		return id
+	}
+	return "UNKNOWN"
+}
+
+// GetDNSServersAsString returns the underlying network's resolvers, comma
+// delimited.
+//
+// This is not optional on Android. Once DeviceBinder is configured, upstream
+// disables the standard library resolver (it would route inside the VPN), so
+// this list is the ONLY source of DNS servers. Returning "" left the resolver
+// with an empty server set and every lookup failed with "no DNS servers" --
+// no remote server list fetch, no fronted dials, no tunnel, and no error that
+// pointed at DNS.
+func (p *psiProvider) GetDNSServersAsString() string {
+	psiLogMu.Lock()
+	cb := psiDnsCb
+	psiLogMu.Unlock()
+	return psiTakeCString(C.psi_call_dns(cb))
+}
+
+func (p *psiProvider) IPv6Synthesize(ipv4 string) string { return "" }
+func (p *psiProvider) HasIPv6Route() int                 { return 0 }
 
 // psiNoticeEnvelope is the common shape of every psi notice.
 type psiNoticeEnvelope struct {
@@ -198,14 +277,14 @@ func psiHandleNotice(noticeJSON string) {
 		// Only sent after a handshake, so this is the moment the UI can stop
 		// showing "Auto" as the only choice.
 		var d struct {
-			Regions []string `json:"psiRegions"`
+			Regions []string `json:"regions"`
 		}
 		if json.Unmarshal(n.Data, &d) == nil && len(d.Regions) > 0 {
 			sort.Strings(d.Regions)
 			psiMu.Lock()
 			psiRegions = d.Regions
 			psiMu.Unlock()
-			psiEmit(psiLogInfo, "[psiphon] %d egress psiRegions available", len(d.Regions))
+			psiEmit(psiLogInfo, "[psiphon] %d egress regions available", len(d.Regions))
 		}
 
 	case "Error", "Alert":
@@ -232,6 +311,23 @@ func psi_set_protect_callback(cb C.psi_protect_cb) {
 	psiLogMu.Unlock()
 }
 
+// psi_set_network_callbacks installs the host's view of the underlying
+// network. Passing NULL for any of them restores the safe default
+// (connectivity assumed, no resolvers, unknown network id).
+//
+//export psi_set_network_callbacks
+func psi_set_network_callbacks(
+	dns C.psi_dns_cb,
+	connectivity C.psi_connectivity_cb,
+	networkID C.psi_network_id_cb,
+) {
+	psiLogMu.Lock()
+	psiDnsCb = dns
+	psiConnectivityCb = connectivity
+	psiNetworkIDCb = networkID
+	psiLogMu.Unlock()
+}
+
 // psi_start launches the controller.
 //
 //	configJSON  - the Psiphon config, already rendered by the caller
@@ -247,15 +343,16 @@ func psi_set_protect_callback(cb C.psi_protect_cb) {
 //export psi_start
 func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	psiMu.Lock()
-	defer psiMu.Unlock()
 
 	if psiRunning {
-		psiEmit(psiLogWarn, "[psiphon] start ignored: already psiRunning")
+		psiMu.Unlock()
+		psiEmit(psiLogWarn, "[psiphon] start ignored: already running")
 		return -1
 	}
 
 	cfg := C.GoString(configJSON)
 	if cfg == "" {
+		psiMu.Unlock()
 		psiEmit(psiLogError, "[psiphon] empty config json")
 		return -2
 	}
@@ -267,6 +364,7 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	// nothing else creates, so make it here where both platforms share a path.
 	if dir := psiDataRootFromConfig(cfg); dir != "" {
 		if err := os.MkdirAll(dir, 0700); err != nil {
+			psiMu.Unlock()
 			psiEmit(psiLogError, "[psiphon] cannot create data dir %s: %v", dir, err)
 			return -2
 		}
@@ -279,15 +377,31 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	psiHttpPort = 0
 	psiRegions = nil
 	psiState = psiStateStarting
+	// Claim the slot before releasing the lock, so a concurrent psi_start
+	// still loses the race even though psi.Start() below runs unlocked.
+	psiRunning = true
+	embeddedList := C.GoString(embedded)
+	psiMu.Unlock()
 
-	err := psi.Start(cfg, C.GoString(embedded), "", &psiProvider{}, useBinder != 0, false, false)
+	// psi.Start() is deliberately called WITHOUT psiMu held.
+	//
+	// It performs the whole datastore open and embedded-server-list import
+	// before returning, and it emits notices the entire time. Holding psiMu
+	// across it blocked every notice callback, and -- worse -- blocked
+	// psi_stop() too, so a cancel arriving during start could not be
+	// serviced until start had finished on its own. psi.Start() takes its
+	// own controllerMutex upstream, so concurrent entry is still refused
+	// there; psiRunning above makes us refuse it earlier and more clearly.
+	err := psi.Start(cfg, embeddedList, "", &psiProvider{}, useBinder != 0, false, false)
 	if err != nil {
+		psiMu.Lock()
+		psiRunning = false
 		psiState = psiStateStopped
+		psiMu.Unlock()
 		psiEmit(psiLogError, "[psiphon] start failed: %v", err)
 		return -3
 	}
 
-	psiRunning = true
 	psiEmit(psiLogInfo, "[psiphon] controller started")
 	return 0
 }

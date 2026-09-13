@@ -73,6 +73,14 @@ android {
                 arguments += listOf(
                     "-DCMAKE_BUILD_TYPE=Release",
                     "-DANDROID_STL=c++_shared",
+                    // Android 15 uses 16 KB memory pages on new devices and
+                    // its loader rejects shared objects laid out for 4 KB
+                    // pages, so System.loadLibrary() throws
+                    // UnsatisfiedLinkError from NativeEngine's static
+                    // initialiser and the app dies at launch. Honoured by NDK
+                    // r27+; CMakeLists.txt also passes the raw linker flags
+                    // for older NDKs.
+                    "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
                     "-DAETHER_TARGET=${cmakeTarget}"
                 )
             }

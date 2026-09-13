@@ -1,11 +1,18 @@
 package com.fc.fcaevpn;
 
 import android.content.Intent;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.VpnService;
+import android.net.wifi.WifiManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.telephony.TelephonyManager;
 import android.util.Log;
+import java.net.InetAddress;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -45,6 +52,16 @@ public class FCAEVpnService extends VpnService {
     private static FCAEVpnService instance; // ADDED for instant UI disconnect
 
     private volatile long cleanupGeneration = 0;
+    /**
+     * Generation the in-flight connect belongs to.
+     *
+     * establishTunNow() runs on a core thread, long after startVpn() returned,
+     * so it needs its own record of which session asked for the interface. A
+     * disconnect that lands mid-handshake bumps cleanupGeneration and the
+     * establish is refused rather than leaving a live TUN behind a UI that
+     * already says DISCONNECTED.
+     */
+    private volatile long pendingSessionGen = -1;
     private volatile ParcelFileDescriptor vpnInterface;
     private volatile Thread vpnThread;
     private volatile boolean running = false;
@@ -91,6 +108,239 @@ public class FCAEVpnService extends VpnService {
         }
     };
 
+    // ── Psiphon network state (called from native via JNI) ──────────────
+    //
+    // These three describe the network BENEATH our tunnel. Psiphon dials on
+    // that network with its sockets protected, so it must not be told about
+    // the VPN's own interface.
+    //
+    // Resolved reflectively by name/signature in android_jni.cpp; keep the
+    // names and signatures in sync with the GetMethodID calls there, and keep
+    // them out of ProGuard's reach (proguard-rules.pro keeps this package).
+
+    /**
+     * Resolvers of the underlying (non-VPN) network, comma delimited.
+     *
+     * Mandatory: once the protect hook is installed, Psiphon stops using the
+     * platform resolver, so this list is its only source of DNS servers. An
+     * empty answer means no name resolution at all, which surfaces as a
+     * tunnel that never establishes rather than as a DNS error.
+     */
+    @SuppressWarnings("unused")
+    public String psiphonDnsServers() {
+        StringBuilder out = new StringBuilder();
+        try {
+            ConnectivityManager cm =
+                (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return fallbackDnsServers();
+
+            Network active = underlyingNetwork(cm);
+            if (active == null) return fallbackDnsServers();
+
+            LinkProperties lp = cm.getLinkProperties(active);
+            if (lp == null) return fallbackDnsServers();
+
+            for (InetAddress addr : lp.getDnsServers()) {
+                String host = addr.getHostAddress();
+                if (host == null || host.isEmpty()) continue;
+                // Strip any IPv6 scope id ("fe80::1%wlan0"); Psiphon parses
+                // these as plain addresses.
+                int pct = host.indexOf('%');
+                if (pct >= 0) host = host.substring(0, pct);
+                if (out.length() > 0) out.append(',');
+                out.append(host);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "psiphonDnsServers failed: " + t);
+        }
+        if (out.length() == 0) return fallbackDnsServers();
+        return out.toString();
+    }
+
+    /**
+     * Last resort when the platform will not name its resolvers.
+     *
+     * Returning "" here would leave Psiphon with no servers at all, so prefer
+     * public resolvers: they are reached over protected sockets on the
+     * underlying network, exactly like every other Psiphon dial.
+     */
+    private String fallbackDnsServers() {
+        return "1.1.1.1,8.8.8.8";
+    }
+
+    /** True when a usable underlying network exists. */
+    @SuppressWarnings("unused")
+    public boolean psiphonHasConnectivity() {
+        try {
+            ConnectivityManager cm =
+                (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return true;
+            Network active = underlyingNetwork(cm);
+            if (active == null) return false;
+            NetworkCapabilities caps = cm.getNetworkCapabilities(active);
+            if (caps == null) return false;
+            return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        } catch (Throwable t) {
+            // Unknown: claim connectivity rather than stalling a tunnel that
+            // might have worked.
+            return true;
+        }
+    }
+
+    /**
+     * Identity of the underlying network.
+     *
+     * Psiphon keys its tactics, server affinity and dial parameters on this.
+     * A constant value meant parameters learned on an uncensored Wi-Fi link
+     * were replayed on a censored mobile carrier, so each network change
+     * started from a poisoned cache. Mirrors the scheme upstream's own client
+     * uses: transport type plus a per-network discriminator.
+     */
+    @SuppressWarnings("unused")
+    public String psiphonNetworkId() {
+        try {
+            ConnectivityManager cm =
+                (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return "UNKNOWN";
+            Network active = underlyingNetwork(cm);
+            if (active == null) return "UNKNOWN";
+            NetworkCapabilities caps = cm.getNetworkCapabilities(active);
+            if (caps == null) return "UNKNOWN";
+
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                // The BSSID distinguishes access points. It needs location
+                // permission on newer releases; without it the platform
+                // returns a placeholder, which still beats one global id.
+                try {
+                    WifiManager wm = (WifiManager)
+                        getApplicationContext().getSystemService(WIFI_SERVICE);
+                    if (wm != null && wm.getConnectionInfo() != null) {
+                        String bssid = wm.getConnectionInfo().getBSSID();
+                        if (bssid != null && !bssid.isEmpty()
+                                && !bssid.equals("02:00:00:00:00:00")) {
+                            return "WIFI-" + bssid;
+                        }
+                    }
+                } catch (Throwable ignored) {}
+                return "WIFI";
+            }
+
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                try {
+                    TelephonyManager tm =
+                        (TelephonyManager) getSystemService(TELEPHONY_SERVICE);
+                    if (tm != null) {
+                        String operator = tm.getNetworkOperator();
+                        if (operator != null && !operator.isEmpty()) {
+                            return "MOBILE-" + operator;
+                        }
+                    }
+                } catch (Throwable ignored) {}
+                return "MOBILE";
+            }
+
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
+                return "ETHERNET";
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "psiphonNetworkId failed: " + t);
+        }
+        return "UNKNOWN";
+    }
+
+    /**
+     * The active network excluding our own VPN.
+     *
+     * getActiveNetwork() returns the VPN itself once our interface is up, and
+     * its LinkProperties carry the DNS servers we configured on the Builder.
+     * Handing those to Psiphon would point it at resolvers reachable only
+     * through the tunnel it is still trying to build.
+     */
+    private Network underlyingNetwork(ConnectivityManager cm) {
+        Network best = null;
+        try {
+            for (Network n : cm.getAllNetworks()) {
+                NetworkCapabilities caps = cm.getNetworkCapabilities(n);
+                if (caps == null) continue;
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
+                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue;
+                if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                    return n;
+                }
+                if (best == null) best = n;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "underlyingNetwork failed: " + t);
+        }
+        return best;
+    }
+
+    /**
+     * Create the VPN interface and return its descriptor, or -1 on failure.
+     *
+     * Called from the core (via the fd provider registered in
+     * android_jni.cpp) once a backend has reported a live SOCKS endpoint, so
+     * the system routes only start pointing at us after there is something on
+     * the other end to receive the traffic.
+     *
+     * The descriptor stays owned by this service: the native side dups it.
+     * Resolved reflectively by name/signature in android_jni.cpp.
+     */
+    @SuppressWarnings("unused")
+    public int establishTunNow() {
+        // A disconnect may have arrived while the backend was still dialling.
+        // Building an interface for a session nobody wants any more is what
+        // used to strand a live TUN behind a disconnected UI.
+        if (shuttingDown || pendingSessionGen != cleanupGeneration) {
+            Log.w(TAG, "establishTunNow: session is stale, refusing");
+            return -1;
+        }
+
+        try {
+            Builder builder = new Builder();
+            builder.setSession("FCAE VPN");
+            // See kVpnServiceMtu: this is the local tun device MTU, not the
+            // tunnel MTU. Must stay in sync with cfg.tun_mtu on the native
+            // side.
+            builder.setMtu(kVpnServiceMtu);
+            builder.addAddress("10.0.0.2", 32);
+            builder.addAddress("fd00::2", 128);
+            builder.addRoute("0.0.0.0", 0);
+            builder.addRoute("::", 0);
+            try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
+            builder.addDnsServer("1.1.1.1");
+            builder.addDnsServer("1.0.0.1");
+            builder.addDnsServer("2606:4700:4700::1111");
+            builder.addDnsServer("2606:4700:4700::1001");
+
+            ParcelFileDescriptor pfd = builder.establish();
+            if (pfd == null) {
+                Log.e(TAG, "establishTunNow: the system refused to create the interface");
+                return -1;
+            }
+
+            // Re-check: establish() can block, and the session may have gone
+            // stale while it did.
+            if (shuttingDown || pendingSessionGen != cleanupGeneration) {
+                try { pfd.close(); } catch (Exception ignored) {}
+                Log.w(TAG, "establishTunNow: session went stale while establishing");
+                return -1;
+            }
+
+            vpnInterface = pfd;
+            return pfd.getFd();
+        } catch (Throwable t) {
+            Log.e(TAG, "establishTunNow failed: " + t);
+            return -1;
+        }
+    }
+
+    /**
+     * Publish a descriptor up front.
+     *
+     * Unused by the normal connect path, which defers creation to
+     * establishTunNow(). Kept for callers that already hold an interface.
+     */
     private static native void nativeSetTunFd(int fd);
     // Hands this VpnService to the native side so Psiphon's own sockets can be
     // excluded from the tunnel via protect(fd).
@@ -263,49 +513,23 @@ public class FCAEVpnService extends VpnService {
                 }
                 try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
 
-                Builder builder = new Builder();
-                builder.setSession("FCAE VPN");
-                // See kVpnServiceMtu: this is the local tun device MTU, not
-                // the tunnel MTU. Must stay in sync with cfg.tun_mtu on the
-                // native side.
-                builder.setMtu(kVpnServiceMtu);
-                builder.addAddress("10.0.0.2", 32);
-                builder.addAddress("fd00::2", 128);
-                builder.addRoute("0.0.0.0", 0);
-                builder.addRoute("::", 0);
-                try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
-                builder.addDnsServer("1.1.1.1");
-                builder.addDnsServer("1.0.0.1");
-                builder.addDnsServer("2606:4700:4700::1111");
-                builder.addDnsServer("2606:4700:4700::1001");
-
-                vpnInterface = builder.establish();
-                if (vpnInterface == null) {
-                    handler.post(this::fullShutdown);
-                    return;
-                }
-
-                // A disconnect/pause may have arrived while the interface was
-                // being established: this session is already stale. Drop the
-                // interface we just built instead of committing to it — that
-                // used to leave a live TUN + notification behind a UI that
-                // already showed DISCONNECTED.
-                if (sessionGen != cleanupGeneration || shuttingDown) {
-                    try { vpnInterface.close(); } catch (Exception ignored) {}
-                    vpnInterface = null;
-                    return;
-                }
-
-                int fd = vpnInterface.getFd();
-                nativeSetTunFd(fd);
+                // The interface is NOT established here.
+                //
+                // Doing so put the system routes in place before the backend
+                // had connected, so every packet of the handshake depended on
+                // the protect hook catching every socket; anything it missed
+                // looped straight back into our own half-built tunnel. The
+                // core now calls establishTunNow() through the fd provider,
+                // once a backend has reported a live SOCKS endpoint. Proxy
+                // mode never calls it at all, so no interface is created.
+                pendingSessionGen = sessionGen;
                 NativeEngine.nativeInit();
                 try {
                     // tun2socks runs IN-PROCESS: its Go code is linked into
                     // libfcae_go_bridge.so, which the dynamic linker loads
                     // alongside libfcaevpn_native.so. There is no tun2socks
-                    // binary to locate or execute any more, so the old
-                    // nativeSetTun2socksBin() handshake is gone; the TUN fd set
-                    // above via nativeSetTunFd() is all the bridge needs.
+                    // binary to locate or execute any more, and the TUN fd is
+                    // supplied on demand by establishTunNow().
                     NativeEngine.nativeSetNativeLibDir(getApplicationInfo().nativeLibraryDir);
                 } catch (Exception ignored) {}
 

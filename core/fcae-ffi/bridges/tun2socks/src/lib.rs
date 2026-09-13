@@ -189,7 +189,14 @@ pub struct Tun2SocksBridge {
     log_installed: AtomicBool,
     /// Android VpnService descriptor set out-of-band via the FFI.
     external_fd: AtomicI32,
+    /// Host hook that creates the TUN device on demand; see
+    /// [`Tun2SocksBridge::set_fd_provider`].
+    fd_provider: std::sync::atomic::AtomicPtr<std::ffi::c_void>,
 }
+
+/// Host callback returning a TUN file descriptor, or a negative value on
+/// failure. The host retains ownership; the bridge dups what it needs.
+pub type FdProvider = unsafe extern "C" fn() -> std::ffi::c_int;
 
 impl Default for Tun2SocksBridge {
     fn default() -> Self {
@@ -204,6 +211,7 @@ impl Tun2SocksBridge {
             running: AtomicBool::new(false),
             log_installed: AtomicBool::new(false),
             external_fd: AtomicI32::new(-1),
+            fd_provider: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         }
     }
 
@@ -211,6 +219,37 @@ impl Tun2SocksBridge {
     /// before `fcae_start`; the bridge never takes ownership of this fd.
     pub fn set_android_fd(&self, fd: i32) {
         self.external_fd.store(fd, Ordering::SeqCst);
+    }
+
+    /// Install a callback that creates the TUN device on demand.
+    ///
+    /// This exists to fix an ordering problem. The host used to call
+    /// `VpnService.Builder.establish()` *before* starting the backend, so the
+    /// system routes were live while the backend was still dialling and every
+    /// packet it sent depended on the protect hook catching every socket.
+    /// Anything the hook missed silently looped back into our own tunnel.
+    ///
+    /// With a provider the host can wait: `device_spec` calls it only once a
+    /// backend has reported a live SOCKS endpoint, so the interface appears
+    /// after the tunnel is already usable. Returning a negative value means
+    /// the host could not build the device.
+    ///
+    /// Desktop leaves this unset and tun2socks creates the device itself.
+    pub fn set_fd_provider(&self, provider: Option<FdProvider>) {
+        let raw = match provider {
+            Some(f) => f as *mut std::ffi::c_void,
+            None => std::ptr::null_mut(),
+        };
+        self.fd_provider.store(raw, Ordering::SeqCst);
+    }
+
+    fn fd_provider(&self) -> Option<FdProvider> {
+        let raw = self.fd_provider.load(Ordering::SeqCst);
+        if raw.is_null() {
+            return None;
+        }
+        // SAFETY: only ever stored by set_fd_provider from this exact type.
+        Some(unsafe { std::mem::transmute::<*mut std::ffi::c_void, FdProvider>(raw) })
     }
 
     /// Forget a previously supplied descriptor.
@@ -245,13 +284,34 @@ impl Tun2SocksBridge {
     /// Returns the device string plus the fd we own (if any).
     fn device_spec(&self, cfg: &SessionConfig) -> Result<(String, Option<i32>)> {
         // Android (or any caller that hands us a descriptor).
-        let external = match cfg.tun.fd {
+        let mut external = match cfg.tun.fd {
             Some(fd) if fd >= 0 => Some(fd),
             _ => {
                 let fd = self.external_fd.load(Ordering::SeqCst);
                 (fd >= 0).then_some(fd)
             }
         };
+
+        // Nothing handed over yet: ask the host to build the device now.
+        //
+        // This is the point where the backend is already up and its SOCKS
+        // endpoint is live, which is exactly when the system routes should
+        // start pointing at us -- not before the first dial, as the old
+        // establish()-then-connect order did.
+        if external.is_none() {
+            if let Some(provide) = self.fd_provider() {
+                let fd = unsafe { provide() };
+                if fd >= 0 {
+                    log::info!("[tun] host provided VpnService fd {fd} on demand");
+                    self.external_fd.store(fd, Ordering::SeqCst);
+                    external = Some(fd);
+                } else {
+                    return Err(CoreError::Internal(
+                        "the host could not establish the VPN interface".into(),
+                    ));
+                }
+            }
+        }
 
         if let Some(fd) = external {
             // Dup so Go's device.Close() never closes the JVM's descriptor.
@@ -403,7 +463,17 @@ impl TunBridge for Tun2SocksBridge {
     }
 
     fn preauthorised_fd(&self) -> Option<i32> {
-        self.android_fd()
+        // A provider counts as authorisation even before it has run.
+        //
+        // The supervisor checks this to decide whether TUN mode needs
+        // elevation. With deferred creation there is no descriptor yet at
+        // that point, so reporting None would make Android look unprivileged
+        // and every TUN session would be refused outright.
+        if let Some(fd) = self.android_fd() {
+            return Some(fd);
+        }
+        // -1 is never dup'd: device_spec calls the provider for the real one.
+        self.fd_provider().map(|_| -1)
     }
 
     fn is_running(&self) -> bool {
@@ -453,6 +523,29 @@ mod tests {
             bridge.preauthorised_fd().is_none(),
             "a cleared bridge must not authorise TUN"
         );
+    }
+
+    /// A provider authorises TUN before any descriptor exists, otherwise the
+    /// supervisor would refuse every deferred-establish session as needing
+    /// elevation.
+    #[test]
+    fn an_fd_provider_authorises_tun_before_it_has_run() {
+        unsafe extern "C" fn provider() -> std::ffi::c_int {
+            77
+        }
+
+        let bridge = Tun2SocksBridge::new();
+        assert!(bridge.preauthorised_fd().is_none(), "starts unarmed");
+
+        bridge.set_fd_provider(Some(provider));
+        assert_eq!(
+            bridge.preauthorised_fd(),
+            Some(-1),
+            "a provider authorises, but yields no descriptor until it runs"
+        );
+
+        bridge.set_fd_provider(None);
+        assert!(bridge.preauthorised_fd().is_none());
     }
 
     #[test]

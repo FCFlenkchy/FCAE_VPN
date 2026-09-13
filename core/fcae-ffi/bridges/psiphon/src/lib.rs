@@ -79,6 +79,61 @@ pub fn set_protect_callback(cb: Option<unsafe extern "C" fn(std::ffi::c_int) -> 
     PROTECT.store(raw, Ordering::SeqCst);
 }
 
+/// Host view of the underlying network, supplied by the platform layer.
+///
+/// Android must provide all three: once `DeviceBinder` is set, upstream stops
+/// using the standard library resolver, so `dns` becomes the only source of
+/// DNS servers and an absent hook means no name resolution at all.
+pub type DnsFn = unsafe extern "C" fn() -> *mut std::ffi::c_char;
+pub type ConnectivityFn = unsafe extern "C" fn() -> std::ffi::c_int;
+pub type NetworkIdFn = unsafe extern "C" fn() -> *mut std::ffi::c_char;
+
+static DNS_HOOK: std::sync::atomic::AtomicPtr<std::ffi::c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static CONNECTIVITY_HOOK: std::sync::atomic::AtomicPtr<std::ffi::c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static NETWORK_ID_HOOK: std::sync::atomic::AtomicPtr<std::ffi::c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// Install (or clear, with `None`) the network-state callbacks.
+pub fn set_network_callbacks(
+    dns: Option<DnsFn>,
+    connectivity: Option<ConnectivityFn>,
+    network_id: Option<NetworkIdFn>,
+) {
+    // `as` casts rather than transmutes: a function item coerces to a plain
+    // data pointer directly, so there is nothing unsafe to get wrong here.
+    let dns = dns.map_or(std::ptr::null_mut(), |f| f as *mut std::ffi::c_void);
+    let connectivity =
+        connectivity.map_or(std::ptr::null_mut(), |f| f as *mut std::ffi::c_void);
+    let network_id =
+        network_id.map_or(std::ptr::null_mut(), |f| f as *mut std::ffi::c_void);
+
+    DNS_HOOK.store(dns, Ordering::SeqCst);
+    CONNECTIVITY_HOOK.store(connectivity, Ordering::SeqCst);
+    NETWORK_ID_HOOK.store(network_id, Ordering::SeqCst);
+}
+
+#[cfg(all(feature = "enabled", psiphon_linked))]
+fn network_hooks() -> (Option<DnsFn>, Option<ConnectivityFn>, Option<NetworkIdFn>) {
+    let dns = DNS_HOOK.load(Ordering::SeqCst);
+    let connectivity = CONNECTIVITY_HOOK.load(Ordering::SeqCst);
+    let network_id = NETWORK_ID_HOOK.load(Ordering::SeqCst);
+
+    // SAFETY: each slot only ever holds a pointer stored by
+    // set_network_callbacks, from a value of exactly the matching
+    // function-pointer type.
+    unsafe {
+        (
+            (!dns.is_null()).then(|| std::mem::transmute::<_, DnsFn>(dns)),
+            (!connectivity.is_null())
+                .then(|| std::mem::transmute::<_, ConnectivityFn>(connectivity)),
+            (!network_id.is_null())
+                .then(|| std::mem::transmute::<_, NetworkIdFn>(network_id)),
+        )
+    }
+}
+
 #[cfg(all(feature = "enabled", psiphon_linked))]
 fn protect_hook() -> Option<unsafe extern "C" fn(std::ffi::c_int) -> std::ffi::c_int> {
     let raw = PROTECT.load(Ordering::SeqCst);
@@ -160,7 +215,32 @@ impl Backend for PsiphonBackend {
         // Android hands the protect hook in through
         // fcae_set_psiphon_protect(); on desktop it stays unset and
         // BindToDevice is a no-op.
-        ffi::set_protect(protect_hook());
+        let protect = protect_hook();
+        if cfg!(target_os = "android") && protect.is_none() {
+            // Starting here would dial with every socket captured by our own
+            // TUN: the tunnel tries to reach the internet through itself and
+            // hangs until the start timeout with nothing in the log to say
+            // why. Refuse instead of reproducing that silently.
+            return Err(CoreError::StartFailed(
+                "the VpnService protect hook is not installed; refusing to start Psiphon \
+                 inside our own tunnel (call fcae_set_psiphon_protect first)"
+                    .into(),
+            ));
+        }
+        ffi::set_protect(protect);
+
+        let (dns, connectivity, network_id) = network_hooks();
+        if cfg!(target_os = "android") && dns.is_none() {
+            // With DeviceBinder set, upstream disables the standard library
+            // resolver, so without this hook there are no DNS servers at all
+            // and every dial fails with an opaque resolver error.
+            return Err(CoreError::StartFailed(
+                "no DNS hook installed; with VpnService protection enabled Psiphon has no \
+                 resolver (call fcae_set_psiphon_network_callbacks first)"
+                    .into(),
+            ));
+        }
+        ffi::set_network_callbacks(dns, connectivity, network_id);
 
         cx.report(FcaeState::Connecting, "Starting Psiphon…");
 
@@ -325,6 +405,7 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     // process working directory -- not writable on Android.
     let mut config_json = inject_string_field(&config_json, "DataRootDirectory", &data_root_dir)?;
     config_json = inject_psiphon_ports(&config_json, p.socks_port, p.http_port)?;
+    config_json = inject_android_resolver_policy(&config_json)?;
 
     Ok(StartInputs {
         config_json,
@@ -381,6 +462,40 @@ fn inject_psiphon_ports(config_json: &str, socks: u16, http: u16) -> Result<Stri
 }
 
 
+/// Permit the platform resolver even though BindToDevice is configured.
+///
+/// Upstream disables the standard library resolver whenever a DeviceBinder is
+/// set, because the system resolver may route inside the VPN:
+///
+/// ```text
+/// return c.BindToDevice == nil || c.AllowDefaultResolverWithBindToDevice
+/// ```
+///
+/// On Android that is too strict for us: the host OS keeps DNS out of the VPN
+/// already, and `VpnService.Builder.addDisallowedApplication(ourselves)` means
+/// our own lookups are never captured. Without this flag the resolver is left
+/// with whatever `GetDNSServersAsString` returned and nothing else, so a
+/// momentary gap in that list turned into "no DNS servers" and killed the
+/// connect. The flag is a no-op off Android, where BindToDevice is never set.
+fn inject_android_resolver_policy(config_json: &str) -> Result<String> {
+    if !cfg!(target_os = "android") {
+        return Ok(config_json.to_string());
+    }
+    let mut object: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
+        CoreError::InvalidConfig(format!("psiphon.config_json is invalid JSON: {e}"))
+    })?;
+    let map = object.as_object_mut().ok_or_else(|| {
+        CoreError::InvalidConfig("psiphon.config_json must be a JSON object".into())
+    })?;
+    // Only set it when the caller has not expressed an opinion, so a config
+    // that deliberately turns it off keeps working.
+    map.entry("AllowDefaultDNSResolverWithBindToDevice")
+        .or_insert(serde_json::Value::Bool(true));
+    serde_json::to_string(&object).map_err(|e| {
+        CoreError::InvalidConfig(format!("could not render psiphon.config_json: {e}"))
+    })
+}
+
 /// The cgo boundary. Only compiled when the archive is actually linked.
 #[cfg(all(feature = "enabled", psiphon_linked))]
 mod ffi {
@@ -390,6 +505,11 @@ mod ffi {
     extern "C" {
         fn psi_set_log_callback(cb: Option<unsafe extern "C" fn(c_int, *const c_char)>);
         fn psi_set_protect_callback(cb: Option<unsafe extern "C" fn(c_int) -> c_int>);
+        fn psi_set_network_callbacks(
+            dns: Option<super::DnsFn>,
+            connectivity: Option<super::ConnectivityFn>,
+            network_id: Option<super::NetworkIdFn>,
+        );
         fn psi_start(config_json: *const c_char, embedded: *const c_char, use_binder: c_int)
             -> c_int;
         fn psi_stop() -> c_int;
@@ -427,6 +547,19 @@ mod ffi {
     /// tunnel deadlocks reaching the internet through itself.
     pub(super) fn set_protect(cb: Option<unsafe extern "C" fn(c_int) -> c_int>) {
         unsafe { psi_set_protect_callback(cb) };
+    }
+
+    /// Install the host's view of the underlying network.
+    ///
+    /// `dns` is mandatory on Android: with BindToDevice configured upstream
+    /// refuses the standard library resolver, so this is the only place DNS
+    /// servers can come from.
+    pub(super) fn set_network_callbacks(
+        dns: Option<super::DnsFn>,
+        connectivity: Option<super::ConnectivityFn>,
+        network_id: Option<super::NetworkIdFn>,
+    ) {
+        unsafe { psi_set_network_callbacks(dns, connectivity, network_id) };
     }
 
     pub(super) fn start(inputs: &super::StartInputs, use_binder: bool) -> Result<()> {
@@ -643,6 +776,54 @@ mod tests {
         let inputs = validate(&cfg).expect("should validate");
         assert!(
             inputs.config_json.contains(r#""DataRootDirectory":"C:\\Users\\me\\psi""#),
+            "got: {}",
+            inputs.config_json
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "android")]
+    fn android_allows_the_default_resolver_alongside_bind_to_device() {
+        let cfg = make_config(Some(r#"{"PropagationChannelId":"x"}"#), Some("/tmp/psi"));
+        let inputs = validate(&cfg).expect("should validate");
+        assert!(
+            inputs
+                .config_json
+                .contains(r#""AllowDefaultDNSResolverWithBindToDevice":true"#),
+            "got: {}",
+            inputs.config_json
+        );
+    }
+
+    /// An explicit `false` is a deliberate choice and must survive.
+    #[test]
+    #[cfg(target_os = "android")]
+    fn an_explicit_resolver_policy_is_not_overwritten() {
+        let cfg = make_config(
+            Some(r#"{"AllowDefaultDNSResolverWithBindToDevice":false}"#),
+            Some("/tmp/psi"),
+        );
+        let inputs = validate(&cfg).expect("should validate");
+        assert!(
+            inputs
+                .config_json
+                .contains(r#""AllowDefaultDNSResolverWithBindToDevice":false"#),
+            "got: {}",
+            inputs.config_json
+        );
+    }
+
+    /// Desktop never sets BindToDevice, so the flag must stay absent rather
+    /// than being written unconditionally.
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    fn desktop_does_not_touch_the_resolver_policy() {
+        let cfg = make_config(Some(r#"{"PropagationChannelId":"x"}"#), Some("/tmp/psi"));
+        let inputs = validate(&cfg).expect("should validate");
+        assert!(
+            !inputs
+                .config_json
+                .contains("AllowDefaultDNSResolverWithBindToDevice"),
             "got: {}",
             inputs.config_json
         );

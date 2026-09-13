@@ -94,12 +94,18 @@ impl Target {
     }
 
     /// Android NDK ABI directory name.
-    pub fn android_abi(&self) -> &'static str {
+    pub fn android_abi(&self) -> Option<&'static str> {
         match self.arch {
-            Arch::Aarch64 => "arm64-v8a",
-            Arch::Arm => "armeabi-v7a",
-            Arch::X86 => "x86",
-            _ => "x86_64",
+            Arch::Aarch64 => Some("arm64-v8a"),
+            Arch::Arm => Some("armeabi-v7a"),
+            Arch::X86 => Some("x86"),
+            Arch::X86_64 => Some("x86_64"),
+            // No catch-all: the old `_ => "x86_64"` arm silently mapped every
+            // unrecognised architecture onto the x86_64 jniLibs directory, so
+            // a mismatched build staged the wrong library into the APK and
+            // only failed on the device, as an UnsatisfiedLinkError on some
+            // ABIs and not others.
+            Arch::Riscv64 | Arch::Other => None,
         }
     }
 
@@ -164,8 +170,19 @@ mod tests {
         };
         assert_eq!(t.goos(), "android");
         assert_eq!(t.goarch(), "arm64");
-        assert_eq!(t.android_abi(), "arm64-v8a");
+        assert_eq!(t.android_abi(), Some("arm64-v8a"));
         assert_eq!(t.ndk_clang_triple(21), "aarch64-linux-android21");
+    }
+
+    /// The catch-all used to map riscv64 (and anything unknown) to x86_64,
+    /// which staged a library into the wrong jniLibs directory.
+    #[test]
+    fn an_unmapped_arch_has_no_android_abi() {
+        let t = Target {
+            os: Os::Android,
+            arch: Arch::Riscv64,
+        };
+        assert_eq!(t.android_abi(), None);
     }
 
     #[test]
