@@ -91,6 +91,16 @@ public class ProxyNotification extends Service {
             return START_NOT_STICKY;
         }
 
+        if (intent == null) {
+            // Sticky re-delivery (system restarts the service, typically
+            // after a process death). The engine runs IN-PROCESS, so nothing
+            // survives a process death: tearing down here instead of
+            // re-announcing "Proxy connecting..." for an engine that is
+            // gone (and re-bumping the shared generation counter for it).
+            stopProxy();
+            return START_NOT_STICKY;
+        }
+
         // A fresh proxy session: bump the shared generation counter so this
         // session's later disconnect broadcast is never mistaken for a stale
         // one from a previous connect/disconnect cycle.

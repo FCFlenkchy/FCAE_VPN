@@ -144,22 +144,28 @@ impl Backend for AetherBackend {
             .parse()
             .map_err(|e| CoreError::InvalidConfig(format!("bad socks address: {e}")))?;
 
-        // WHICH proxy the TUN must use.
+        // WHICH proxy the traffic must use.
         //
-        // In Chain and Only mode the traffic only reaches the tor network via
-        // the SOCKS port tor itself opens (AETHER_TOR_BIND, default
-        // 127.0.0.1:1821). The engine's own port is the *plain* tunnel: in
-        // Chain mode it is the carrier tor dials out through, so pointing the
-        // TUN at it bypasses tor completely -- the UI said "tor ready" while
-        // every packet left through plain WARP, which is why check sites
-        // reported a Cloudflare address instead of a tor exit.
+        // Chain mode: traffic only reaches the tor network via the SOCKS port
+        // tor itself opens (AETHER_TOR_BIND, default 127.0.0.1:1821). The
+        // engine's own port is the *plain* tunnel: in Chain mode it is the
+        // carrier tor dials out through, so pointing the TUN (or a SOCKS
+        // client) at it bypasses tor completely -- the UI said "tor ready"
+        // while every packet left through plain WARP, which is why check
+        // sites reported a Cloudflare address instead of a tor exit.
+        //
+        // Only mode: there is no tunnel and therefore no second listener, so
+        // the engine runs tor on the SESSION's socks port itself (it serves
+        // where the tunnel's listener would have been). Waiting for and
+        // routing to tor.bind here is how Tor-only "never came up": the
+        // bridge waited on 1821 while tor was actually listening on 1819.
         //
         // Reverse mode is the opposite: tor is the carrier *underneath* the
         // tunnel, so the engine's SOCKS port is already the correct exit.
         let tor_socks: Option<SocketAddr> = match cfg.tor.mode {
             // config::parse always resolves tor.bind, so there is no default
             // to re-derive here -- doing so twice is how the port drifted.
-            FcaeTorMode::Chain | FcaeTorMode::Only => Some(
+            FcaeTorMode::Chain => Some(
                 cfg.tor
                     .bind
                     .as_deref()
@@ -171,6 +177,7 @@ impl Backend for AetherBackend {
                         CoreError::InvalidConfig(format!("bad tor socks address: {e}"))
                     })?,
             ),
+            FcaeTorMode::Only => Some(engine_socks),
             FcaeTorMode::Off | FcaeTorMode::Reverse => None,
         };
         let socks_addr = tor_socks.unwrap_or(engine_socks);
@@ -180,7 +187,17 @@ impl Backend for AetherBackend {
         // Wait for the engine's own listener first: in Chain mode tor cannot
         // bootstrap until the carrier tunnel is up, so waiting on tor's port
         // directly would time out for the wrong reason.
-        let ready = wait_for_listener(engine_socks, cfg.start_timeout(), &finished).await;
+        //
+        // Reverse mode is the mirror image: the tunnel is dialled THROUGH
+        // tor, so its listener cannot open until tor has bootstrapped --
+        // minutes over bridges, not seconds. It needs the tor budget or a
+        // slow-but-healthy bootstrap reads as a failed start.
+        let first_wait = if cfg.tor.mode == FcaeTorMode::Reverse {
+            cfg.tor_start_timeout()
+        } else {
+            cfg.start_timeout()
+        };
+        let ready = wait_for_listener(engine_socks, first_wait, &finished).await;
 
         if !ready {
             // Either the engine died, or it never opened the port.
@@ -191,8 +208,7 @@ impl Backend for AetherBackend {
                 .and_then(|r| r.err())
                 .unwrap_or_else(|| {
                     format!(
-                        "the Aether engine did not open its SOCKS listener on {engine_socks} within {:?}",
-                        cfg.start_timeout()
+                        "the Aether engine did not open its SOCKS listener on {engine_socks} within {first_wait:?}"
                     )
                 });
             return Err(CoreError::StartFailed(msg));
@@ -296,7 +312,9 @@ impl BackendHandle for AetherHandle {
     fn endpoints(&self) -> Endpoints {
         Endpoints {
             socks: Some(self.socks_addr),
-            http: (self.cfg.http_port != 0)
+            // In Only mode there is no WARP tunnel, so the engine's HTTP
+            // listener never exists -- do not advertise it.
+            http: (self.cfg.http_port != 0 && self.cfg.tor.mode != FcaeTorMode::Only)
                 .then(|| format!("127.0.0.1:{}", self.cfg.http_port).parse().ok())
                 .flatten(),
             peer_ip: self.cfg.force_peer.as_ref().and_then(|p| {
@@ -372,14 +390,26 @@ impl BackendHandle for AetherHandle {
         // signal, so the listeners are dropped before we stop waiting.
         aether_engine::shutdown::request();
 
-        // Give it the full budget to unwind on its own, then abort whatever
-        // is left. abort() on an already-finished task is a no-op.
+        // Short grace, then abort -- and the abort is the NORMAL outcome on a
+        // user disconnect.
+        //
+        // The engine's reconnect loops sleep a backoff between attempts and
+        // that sleep is not woken by the shutdown signal, so the top-level
+        // task can never exit quickly on its own: after the tunnel runner
+        // returns it sits in backoff long past any stop budget. Waiting out
+        // the full `timeout` (2s) made every disconnect take 2s and end with
+        // a scary warning for what is a designed path. The detached engine
+        // tasks DO race against shutdown::cancelled() (requested above), so
+        // the grace only needs to cover the active tunnel runner finishing
+        // its own teardown (closing connections, unbinding listeners); after
+        // that, aborting the task is safe and the rest winds down on its own.
+        let grace = Duration::from_millis(300).min(timeout);
         let mut task = task;
-        let drained = tokio::time::timeout(timeout, &mut task).await.is_ok();
+        let drained = tokio::time::timeout(grace, &mut task).await.is_ok();
 
         if !drained {
-            log::warn!(
-                "[aether] engine did not wind down within {timeout:?}; aborting the task"
+            log::info!(
+                "[aether] engine still in its reconnect backoff after {grace:?}; aborting the task"
             );
             task.abort();
             let _ = task.await;

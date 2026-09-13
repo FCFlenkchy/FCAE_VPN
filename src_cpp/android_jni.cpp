@@ -63,6 +63,72 @@ char* psi_regions(void) { return nullptr; }
 extern "C" __attribute__((weak))
 void psi_string_free(char *s) { (void)s; }
 
+// ── Psiphon bridge loader (DISABLED) ──────────────────────────────────
+//
+// Deliberately NOT compiled yet: loading libpsiphon_bridge.so runs Go's
+// runtime init (.init_array), which can SIGSEGV on some devices, and a
+// native signal kills the process no matter how the load is wrapped.
+// While disabled, the weak stubs above are the effective implementation
+// and Psiphon reports "unavailable".
+//
+// To re-enable: uncomment this block, restore the three #includes below,
+// and re-add the nativeLoadPsiphonBridge() call in NativeEngine.kt.
+// (Needs: #include <dlfcn.h>  #include <signal.h>  #include <setjmp.h>)
+//
+// static sigjmp_buf g_dlopen_jmp;
+// static volatile sig_atomic_t g_dlopen_crashed;
+//
+// static void dlopen_sig_handler(int /*sig*/) {
+//     g_dlopen_crashed = 1;
+//     siglongjmp(g_dlopen_jmp, 1);
+// }
+//
+// /// Try to dlopen psiphon_bridge.so with crash protection.
+// /// Returns true if the library loaded successfully.
+// static bool try_load_psiphon_bridge() {
+//     // Already loaded?
+//     if (dlopen("libpsiphon_bridge.so", RTLD_NOLOAD | RTLD_NOW)) {
+//         return true;
+//     }
+//
+//     g_dlopen_crashed = 0;
+//
+//     // Install crash handlers
+//     struct sigaction sa_new = {};
+//     sa_new.sa_handler = dlopen_sig_handler;
+//     sigemptyset(&sa_new.sa_mask);
+//     sa_new.sa_flags = 0;
+//
+//     struct sigaction old_segv, old_bus;
+//     sigaction(SIGSEGV, &sa_new, &old_segv);
+//     sigaction(SIGBUS,  &sa_new, &old_bus);
+//
+//     bool loaded = false;
+//     if (sigsetjmp(g_dlopen_jmp, 1) == 0) {
+//         void* handle = dlopen("libpsiphon_bridge.so", RTLD_NOW | RTLD_GLOBAL);
+//         if (handle) {
+//             loaded = true;
+//             LOGI("psiphon_bridge.so loaded via crash-safe dlopen");
+//         } else {
+//             LOGI("psiphon_bridge.so not available: %s", dlerror());
+//         }
+//     } else {
+//         LOGE("psiphon_bridge.so crashed during Go runtime init (signal); "
+//              "Psiphon will be unavailable");
+//     }
+//
+//     // Restore original handlers
+//     sigaction(SIGSEGV, &old_segv, nullptr);
+//     sigaction(SIGBUS,  &old_bus,  nullptr);
+//
+//     return loaded;
+// }
+//
+// extern "C" JNIEXPORT jboolean JNICALL
+// Java_com_fc_fcaevpn_NativeEngine_nativeLoadPsiphonBridge(JNIEnv*, jclass) {
+//     return try_load_psiphon_bridge() ? JNI_TRUE : JNI_FALSE;
+// }
+
 static std::mutex g_log_mu;
 static std::deque<std::string> g_logs;
 static constexpr size_t kMaxLogs = 30;

@@ -178,6 +178,10 @@ public class FCAEVpnService extends VpnService {
     private void startVpn(Intent intent) {
         sGeneration.incrementAndGet();
         cleanupGeneration++;
+        // The worker validates this after every slow step (establish,
+        // nativeStart): a disconnect/pause/new connect that lands in the
+        // connect window must not be overridden by a late "running=true".
+        final long sessionGen = cleanupGeneration;
         vpnPaused = false;
         shuttingDown = false;
         nativeFreed = false;
@@ -281,6 +285,17 @@ public class FCAEVpnService extends VpnService {
                     return;
                 }
 
+                // A disconnect/pause may have arrived while the interface was
+                // being established: this session is already stale. Drop the
+                // interface we just built instead of committing to it — that
+                // used to leave a live TUN + notification behind a UI that
+                // already showed DISCONNECTED.
+                if (sessionGen != cleanupGeneration || shuttingDown) {
+                    try { vpnInterface.close(); } catch (Exception ignored) {}
+                    vpnInterface = null;
+                    return;
+                }
+
                 int fd = vpnInterface.getFd();
                 nativeSetTunFd(fd);
                 NativeEngine.nativeInit();
@@ -307,6 +322,19 @@ public class FCAEVpnService extends VpnService {
                 );
                 if (!ok) {
                     handler.post(this::fullShutdown);
+                    return;
+                }
+
+                // The handshake is the long pole: the user can disconnect
+                // (app or notification) in the middle of it. If this session
+                // went stale, tear the engine down again and exit WITHOUT
+                // claiming "running" — the disconnect already broadcast its
+                // own state, so no extra notifyUi() here.
+                if (sessionGen != cleanupGeneration || shuttingDown) {
+                    try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
+                    try { vpnInterface.close(); } catch (Exception ignored) {}
+                    vpnInterface = null;
+                    try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
                     return;
                 }
 
@@ -435,6 +463,10 @@ public class FCAEVpnService extends VpnService {
 
     private void pauseVpn() {
         sGeneration.incrementAndGet();
+        // Invalidate any in-flight startVpn() session: without this bump a
+        // pause landing in the connect window would not stop the worker, and
+        // it would resurrect "running" (live TUN) after the pause.
+        cleanupGeneration++;
         running = false;
         vpnPaused = true;
 

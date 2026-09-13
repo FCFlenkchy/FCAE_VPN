@@ -333,6 +333,15 @@
                 android:popupBackground="#FF1E1E2C" />
 
             <TextView
+                android:id="@+id/textTorHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textColor="#FF5A6478"
+                android:textSize="12sp"
+                android:visibility="gone" />
+
+            <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"

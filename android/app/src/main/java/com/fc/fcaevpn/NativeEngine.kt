@@ -14,6 +14,15 @@ object NativeEngine {
         // and a native SIGSEGV kills the process no matter how the load is
         // wrapped. Through the stubs Psiphon simply reports "unavailable".
         System.loadLibrary("fcaevpn_native")
+
+        // DISABLED (see the commented loader in src_cpp/android_jni.cpp):
+        // re-enable together with that block once the Go init crash is
+        // sorted out.
+        // try {
+        //     nativeLoadPsiphonBridge()
+        // } catch (_: Throwable) {
+        //     // JNI method not found or other error — weak stubs remain.
+        // }
     }
 
     /**
@@ -29,6 +38,8 @@ object NativeEngine {
         // Referencing the object is enough; `init` has already run by here.
     }
 
+    // Pairs with the commented loader in android_jni.cpp (see DISABLED note).
+    // @JvmStatic external fun nativeLoadPsiphonBridge(): Boolean
     @JvmStatic external fun nativeInit()
     @JvmStatic external fun nativeSetNativeLibDir(path: String)
     @JvmStatic external fun nativeStart(

@@ -1294,6 +1294,23 @@ void render_ui() {
             ImGui::Combo("Tor", &g_app.tor_mode, tor_modes, 3);
             if (g_app.tor_mode == 3)
                 ImGui::TextDisabled("\"Tor only\" lives in the Transport list above.");
+            // In TUN mode the routing to the right port happens internally,
+            // but in proxy mode the user dials the ports by hand -- tell
+            // them which one actually carries tor traffic, or they will use
+            // the tunnel's plain port and wonder why "tor" did nothing.
+            if (g_app.mode == 0) {
+                if (g_app.tor_mode == 1)
+                    ImGui::TextDisabled(
+                        "Proxy mode: point SOCKS clients at the Tor SOCKS port below; "
+                        "the tunnel's own SOCKS/HTTP ports stay plain (un-tor'ed).");
+                else if (g_app.tor_mode == 2)
+                    ImGui::TextDisabled(
+                        "Proxy mode: use the tunnel's SOCKS/HTTP ports as usual; "
+                        "tor is the carrier underneath them.");
+                else if (g_app.protocol == 4 || g_app.tor_mode == 3)
+                    ImGui::TextDisabled(
+                        "Proxy mode: the tunnel's SOCKS port IS tor (Tor-only transport).");
+            }
             if (g_app.tor_mode == 0) ImGui::BeginDisabled();
             ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port);
             const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };

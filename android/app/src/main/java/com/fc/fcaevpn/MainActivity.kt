@@ -53,6 +53,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerNoize: Spinner
     private lateinit var spinnerTor: Spinner
     private lateinit var spinnerTorBridges: Spinner
+    private lateinit var textTorHint: android.widget.TextView
     private lateinit var editTorBridgeLines: android.widget.EditText
     private lateinit var spinnerEngineLog: Spinner
     private lateinit var editTorSocksPort: android.widget.EditText
@@ -252,6 +253,7 @@ class MainActivity : AppCompatActivity() {
         spinnerNoize = findViewById(R.id.spinnerNoize)
         spinnerTor = findViewById(R.id.spinnerTor)
         spinnerTorBridges = findViewById(R.id.spinnerTorBridges)
+        textTorHint = findViewById(R.id.textTorHint)
         editTorBridgeLines = findViewById(R.id.editTorBridgeLines)
         spinnerEngineLog = findViewById(R.id.spinnerEngineLog)
         editTorSocksPort = findViewById(R.id.editTorSocksPort)
@@ -438,6 +440,23 @@ class MainActivity : AppCompatActivity() {
         }
         applyModeSocksLock()
 
+        // The protocol list owns "Tor only", so the tor hint (which port
+        // carries tor traffic in proxy mode) must refresh on protocol change
+        // too, not just on the egress spinner.
+        spinnerProtocol.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: android.widget.AdapterView<*>?,
+                view: android.view.View?,
+                position: Int,
+                id: Long
+            ) {
+                updateTorHint()
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+        updateTorHint()
+
         onBackPressedDispatcher.addCallback(this, backPressedCallback)
 
         logText.text = ""
@@ -510,15 +529,17 @@ class MainActivity : AppCompatActivity() {
             // stale the user can disconnect from the UI.
             try {
                 val state = NativeEngine.nativeGetState()
-                if (state in 1..4) {
+                // 1..4 = running, 6 = Reconnecting (session alive, the engine
+                // is recovering on its own). Anything else is terminal.
+                if (state in 1..4 || state == 6) {
                     handler.post {
                         vpnActive = true
                         engineRunning = true
-                        connecting = state in 1..3
+                        connecting = state in 1..3 || state == 6
                         updateButton()
                         handler.post(poll)
                     }
-                } else if (state == 0) {
+                } else if (state == 0 || state == 5) {
                     // Engine is not running — ensure UI reflects that
                     handler.post {
                         vpnActive = false
@@ -590,10 +611,13 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val state = NativeEngine.nativeGetState()
                     handler.post {
-                        if (state in 1..4) {
+                        // 6 = Reconnecting is a live session: keep the UI
+                        // active instead of resetting to DISCONNECTED while
+                        // the engine is still recovering.
+                        if (state in 1..4 || state == 6) {
                             vpnActive = true
                             engineRunning = true
-                            connecting = state in 1..3
+                            connecting = state in 1..3 || state == 6
                             updateButton()
                             handler.removeCallbacks(poll)
                             // Force an immediate poll tick to refresh UI instantly
@@ -629,11 +653,11 @@ class MainActivity : AppCompatActivity() {
             bgExecutor.execute {
                 try {
                     val state = NativeEngine.nativeGetState()
-                    if (state in 1..4) {
+                    if (state in 1..4 || state == 6) {
                         handler.post {
                             vpnActive = true
                             engineRunning = true
-                            connecting = state in 1..3
+                            connecting = state in 1..3 || state == 6
                             updateButton()
                             handler.removeCallbacks(poll)
                             handler.post(poll)
@@ -700,6 +724,8 @@ class MainActivity : AppCompatActivity() {
             switchSocks.isChecked = socksChoiceForProxyMode
             switchSocks.text = "SOCKS5 proxy"
         }
+        // The tor hint depends on which mode is active.
+        updateTorHint()
     }
 
     /**
@@ -716,6 +742,31 @@ class MainActivity : AppCompatActivity() {
         val custom = torOn && spinnerTorBridges.selectedItemPosition == 3
         editTorBridgeLines.isEnabled = custom
         editTorBridgeLines.alpha = if (custom) 1.0f else 0.5f
+
+        updateTorHint()
+    }
+
+    /**
+     * In TUN mode the traffic is routed to the right port internally, but in
+     * proxy mode the user dials the ports by hand -- say which one actually
+     * carries tor traffic, or the tor setting looks broken (they dial the
+     * tunnel's plain port and wonder why it is not tor'ed).
+     */
+    private fun updateTorHint() {
+        if (!::textTorHint.isInitialized || !::spinnerMode.isInitialized ||
+            !::spinnerProtocol.isInitialized || !::spinnerTor.isInitialized) return
+        val hint = if (spinnerMode.selectedItemPosition != 0) {
+            "" // TUN mode: routing is automatic
+        } else when (spinnerTor.selectedItemPosition) {
+            1 -> "Proxy mode: point SOCKS clients at the Tor SOCKS port; the tunnel's own ports stay plain (un-tor'ed)."
+            2 -> "Proxy mode: use the tunnel's SOCKS/HTTP ports as usual; tor is the carrier underneath them."
+            else -> if (spinnerProtocol.selectedItemPosition == 4)
+                "Proxy mode: the tunnel's SOCKS port IS tor (Tor-only transport)."
+            else ""
+        }
+        textTorHint.text = hint
+        textTorHint.visibility =
+            if (hint.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
     }
 
     private fun saveSettings() {
@@ -1011,11 +1062,19 @@ class MainActivity : AppCompatActivity() {
             // TUN mode: fullShutdown() handles nativeStop + nativeFree
             FCAEVpnService.disconnectNow()
         } else {
-            // Proxy mode: stopProxy() handles nativeStop + nativeFree
+            // Proxy mode: stopProxy() handles nativeStop + nativeFree.
+            //
+            // startForegroundService, not startService: (a) startService from
+            // a backgrounded app is blocked on Android 12+, and the old
+            // catch-all silently swallowed that — the engine kept running
+            // while the UI showed DISCONNECTED; (b) if the notification
+            // service already died (watchdog teardown, system reclaim), this
+            // restarts it, stopProxy() runs, and its disconnect broadcast
+            // reaches the UI — self-healing a stuck "CONNECTED" state.
             try {
                 val i = Intent(this, ProxyNotification::class.java)
                 i.action = ProxyNotification.ACTION_STOP
-                startService(i)
+                startForegroundService(i)
             } catch (_: Throwable) {}
         }
     }, "Disconnect-Background").start()
@@ -1142,14 +1201,24 @@ class MainActivity : AppCompatActivity() {
             // service broadcasts. In TUN mode, broadcasts may also update
             // these, but the poll always has the freshest data.
             if (vpnActive) {
-                engineRunning = state in 1..4
-                connecting = state in 1..3
+                // State 6 = Reconnecting: the session is still alive and the
+                // engine is recovering the tunnel on its own. Treat it as an
+                // active session (button stays DISCONNECT), not a dead one —
+                // showing CONNECT here invited a second session on top of a
+                // live one.
+                engineRunning = state in 1..4 || state == 6
+                connecting = state in 1..3 || state == 6
                 // Psiphon reports its egress regions only after a successful
                 // handshake, so this is the first moment the real list can be
                 // read. Cheap and idempotent: it no-ops unless the set changed.
                 if (state == 4 && isPsiphonSelected()) refreshPsiphonRegions()
-                // Detect engine stopped while we thought it was active
-                if (state == 0 && !userInitiatedDisconnect) {
+                // Detect engine stopped while we thought it was active.
+                // 0 = idle/stopped, 5 = terminal error. The FFI keeps state
+                // 5 sticky after the session thread ends, so without the 5
+                // check vpnActive would survive a dead engine and the first
+                // tap on the (CONNECT-looking) button would call
+                // disconnectAll() instead of connecting.
+                if ((state == 0 || state == 5) && !userInitiatedDisconnect) {
                     // Engine died on its own — reset state
                     vpnActive = false
                     engineRunning = false
@@ -1168,6 +1237,7 @@ class MainActivity : AppCompatActivity() {
                     if (isTun) "CONNECTED (TUN)" else "CONNECTED (PROXY)"
                 }
                 5 -> "ERROR"
+                6 -> "RECONNECTING"
                 else -> "UNKNOWN"
             }
             // If error state, show the error message directly instead of label + message concatenation

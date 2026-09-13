@@ -473,6 +473,17 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             "tor.mode = Only runs without a WARP tunnel, so force_peer cannot apply".into(),
         ));
     }
+    // In Only mode tor serves on the session's own SOCKS port (there is no
+    // tunnel listener to give it a port of its own). TUN mode already forced
+    // a port above; in proxy mode a zeroed port means tor would have nowhere
+    // to listen, so reject it up front instead of serving on an ephemeral
+    // port nobody can dial.
+    if t.mode == FcaeTorMode::Only && cfg.mode == FcaeMode::Proxy && cfg.socks_port == 0 {
+        return Err(CoreError::InvalidConfig(
+            "tor.mode = Only serves on the session's SOCKS port, but socks_port is disabled (0); enable a SOCKS port"
+                .into(),
+        ));
+    }
     // Reverse carries the tunnel *over* Tor, and Tor is TCP-only. WARP's
     // WireGuard endpoints answer on UDP alone, so they can never be reached
     // this way. The engine rejects this too, but only after a full scan.
