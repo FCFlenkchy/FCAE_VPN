@@ -32,8 +32,9 @@
                 android:textSize="24sp"
                 android:textStyle="bold" />
 
-            <!-- Running build: "<version>  ·  release" or "…  ·  pre-release (BETA)".
-                 Filled in from BuildConfig.APP_VERSION at startup. -->
+            <!-- Running build, compact "ver · type": "<version> · release"
+                 or "<version> · pre-release". Filled in from BuildConfig at
+                 startup (base version; the type word carries the channel). -->
             <TextView
                 android:id="@+id/versionText"
                 android:layout_width="match_parent"

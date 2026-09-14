@@ -515,14 +515,12 @@ class MainActivity : AppCompatActivity() {
         applyTorLock()
 
         // Running build, spelled out: version + which channel it is. A build
-        // produced by a pre-release workflow run carries the tag as its
-        // versionName (e.g. "v1.4.0-beta.2"), so mark it amber instead of
-        // leaving the user to infer the channel from a missing BETA badge.
+        // Compact "ver · type": a pre-release build stamps "-prerelease" into
+        // the version itself, so show the base version and let the single
+        // type word carry the channel — no duplication, no "(BETA)" shout.
         findViewById<TextView>(R.id.versionText).apply {
-            text = if (buildIsPrerelease)
-                "${BuildConfig.APP_VERSION}  \u00b7  pre-release (BETA)"
-            else
-                "${BuildConfig.APP_VERSION}  \u00b7  release"
+            val baseVersion = BuildConfig.APP_VERSION.substringBefore('-')
+            text = "$baseVersion  \u00b7  ${if (buildIsPrerelease) "pre-release" else "release"}"
             setTextColor(Color.parseColor(if (buildIsPrerelease) "#FFF0B429" else "#FF8A93A6"))
         }
 

@@ -689,19 +689,24 @@ void render_ui() {
         ImGui::Text("FCAE VPN");
         ImGui::PopStyleColor();
 
-        // Which build is running: the version string, then an explicit channel
-        // chip. A build produced by a pre-release workflow run carries a suffix
-        // in its own version (v1.4.0-beta.2), so say "PRE-RELEASE" instead of
-        // making the user read the absence of a BETA mark as "release".
+        // Which build is running, compact "ver · type": the version with any
+        // "-prerelease" suffix trimmed (the chip right after it says the
+        // channel — saying it twice is redundant), amber when pre-release.
         ImGui::SameLine(0, 10);
-        ImGui::TextColored(ImVec4(0.62f, 0.66f, 0.74f, 1.0f), "%s", FCAE_VERSION);
+        {
+            const char* dash = strchr(FCAE_VERSION, '-');
+            ImGui::TextColored(ImVec4(0.62f, 0.66f, 0.74f, 1.0f), "%.*s",
+                               dash ? (int)(dash - FCAE_VERSION)
+                                    : (int)strlen(FCAE_VERSION),
+                               FCAE_VERSION);
+        }
         ImGui::SameLine(0, 8);
         if (build_is_prerelease()) {
             ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.20f, 1.0f), "PRE-RELEASE");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("This build is a pre-release (" FCAE_VERSION ").\n"
-                                  "It may contain unfinished work — the update channel\n"
-                                  "that finds it is the \"Include pre-releases\" toggle.");
+                                  "It may contain unfinished work; update checks\n"
+                                  "only ever offer stable releases.");
         } else {
             ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.52f, 1.0f), "RELEASE");
             if (ImGui::IsItemHovered())

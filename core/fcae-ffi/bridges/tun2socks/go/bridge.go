@@ -36,8 +36,11 @@ static void t2s_invoke_log(t2s_log_fn fn, int level, const char *msg) {
 import "C"
 
 import (
+	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strconv"
 	"strings"
@@ -45,6 +48,7 @@ import (
 	"unsafe"
 
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/xjasonlyu/tun2socks/v2/engine"
@@ -105,14 +109,142 @@ func (c *blackholeConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *blackholeConn) SetWriteDeadline(time.Time) error { return nil }
 
 // udpDroppingProxy wraps a SOCKS5 proxy and replaces its UDP path with a
-// silent blackhole.
+// silent blackhole -- except port 53: DNS queries are answered by relaying
+// them as DNS-over-TCP through the upstream CONNECT, so system DNS keeps
+// working on egresses that cannot carry UDP (every Tor mode, Psiphon's
+// CONNECT-only proxy). Without this a TUN session in Tor-only mode leaves
+// the whole device unable to resolve anything.
 type udpDroppingProxy struct {
 	proxy.Proxy
 }
 
-func (p udpDroppingProxy) DialUDP(*metadata.Metadata) (net.PacketConn, error) {
+func (p udpDroppingProxy) DialUDP(m *metadata.Metadata) (net.PacketConn, error) {
+	if m.DstPort == 53 && m.DstIP.IsValid() {
+		return &dnsRelayConn{
+			inner:   p.Proxy,
+			resolver: m.DstIP,
+			replies: make(chan dnsReply, 8),
+			done:    make(chan struct{}),
+		}, nil
+	}
 	return &blackholeConn{done: make(chan struct{})}, nil
 }
+
+// dnsRelayTimeout bounds one DNS-over-TCP exchange. A warmed Tor circuit
+// answers in ~1s; 8s leaves margin for a fresh one without parking a
+// goroutine forever when the egress is truly gone.
+const dnsRelayTimeout = 8 * time.Second
+
+// dnsReply is one completed DNS-over-TCP answer plus the address it must be
+// reported from (the queried resolver -- apps match src+ID).
+type dnsReply struct {
+	payload []byte
+	src     net.Addr
+	err     error
+}
+
+// dnsRelayConn is the PacketConn handed to one UDP flow whose destination is
+// a resolver. The wire format of a DNS message is identical over UDP and
+// TCP -- only a 2-byte length prefix differs -- so no DNS parsing is needed
+// here; frames are relayed byte for byte.
+type dnsRelayConn struct {
+	inner   proxy.Proxy
+	resolver netip.Addr // flow destination; every WriteTo is expected to match
+	replies chan dnsReply
+	done    chan struct{}
+	once    sync.Once
+}
+
+func (c *dnsRelayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	udpAddr, ok := addr.(*net.UDPAddr)
+	if !ok || len(p) == 0 || len(p) > 0xffff {
+		// Swallow silently like the blackhole: never inject errors into the
+		// NAT loop for traffic we deliberately refuse to carry.
+		return len(p), nil
+	}
+	// Each query gets its own exchange goroutine; apps de-multiplex by the
+	// DNS header ID, so reply order is irrelevant and bursts cannot block
+	// the stack's NAT goroutine.
+	payload := append([]byte(nil), p...)
+	go func() {
+		resp, err := c.dnsOverTCP(payload, udpAddr)
+		select {
+		case c.replies <- dnsReply{payload: resp, src: udpAddr, err: err}:
+		case <-c.done:
+		}
+	}()
+	return len(p), nil
+}
+
+// dnsOverTCP dials the resolver through the upstream proxy (plain SOCKS5
+// CONNECT by IP -- spoken by the tor and aether socks servers; tor exits
+// allow tcp/53) and shuttles one query/answer pair.
+func (c *dnsRelayConn) dnsOverTCP(query []byte, dst *net.UDPAddr) ([]byte, error) {
+	resolver := c.resolver
+	if dstIP, ok := netip.AddrFromSlice(dst.IP); ok {
+		resolver = dstIP // use the packet's own resolver (1.1.1.1, ::1111, ...)
+	}
+	md := &metadata.Metadata{
+		Network: metadata.TCP,
+		DstIP:   resolver,
+		DstPort: 53,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dnsRelayTimeout)
+	defer cancel()
+	conn, err := c.inner.DialContext(ctx, md)
+	if err != nil {
+		return nil, fmt.Errorf("dns: connect %s: %w", resolver, err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(dnsRelayTimeout))
+
+	frame := make([]byte, 2, 2+len(query))
+	binary.BigEndian.PutUint16(frame, uint16(len(query)))
+	frame = append(frame, query...)
+	if _, err := conn.Write(frame); err != nil {
+		return nil, fmt.Errorf("dns: write: %w", err)
+	}
+	var hdr [2]byte
+	if _, err := io.ReadFull(conn, hdr[:]); err != nil {
+		return nil, fmt.Errorf("dns: read header: %w", err)
+	}
+	n := int(binary.BigEndian.Uint16(hdr[:]))
+	if n == 0 || n > 4096 {
+		return nil, fmt.Errorf("dns: unexpected reply length %d", n)
+	}
+	resp := make([]byte, n)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		return nil, fmt.Errorf("dns: read body: %w", err)
+	}
+	return resp, nil
+}
+
+func (c *dnsRelayConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	select {
+	case r := <-c.replies:
+		if r.err != nil {
+			return 0, nil, r.err
+		}
+		if len(r.payload) > len(p) {
+			return 0, nil, io.ErrShortBuffer
+		}
+		return copy(p, r.payload), r.src, nil
+	case <-c.done:
+		return 0, nil, net.ErrClosed
+	case <-time.After(dnsRelayTimeout):
+		return 0, nil, errors.New("dns: no answer within " + dnsRelayTimeout.String())
+	}
+}
+
+func (c *dnsRelayConn) Close() error {
+	c.once.Do(func() { close(c.done) })
+	return nil
+}
+
+func (c *dnsRelayConn) LocalAddr() net.Addr              { return nil }
+func (c *dnsRelayConn) SetDeadline(time.Time) error      { return nil }
+func (c *dnsRelayConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *dnsRelayConn) SetWriteDeadline(time.Time) error { return nil }
 
 // parseSocks5t reuses the upstream socks5 parser (its init registers only the
 // "socks5" scheme) by rewriting the scheme on the incoming URL.

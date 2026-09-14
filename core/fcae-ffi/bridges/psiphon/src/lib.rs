@@ -347,6 +347,12 @@ pub(crate) struct StartInputs {
 ///
 /// Takes the config rather than the whole `BackendContext` so it is directly
 /// unit-testable without constructing a telemetry sink and cancel token.
+///
+/// Everything from here to the SERVER_LIST key is only consumed by the
+/// desktop live path (`#[cfg(all(feature = "enabled", psiphon_linked)))]`
+/// `start()`) and by unit tests. The Android/AAR attach stub builds configs
+/// on the Java side, so these are gated out there instead of warning.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<StartInputs> {
     let p = &cfg.psiphon;
 
@@ -490,18 +496,21 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
 /// Legacy PUBLIC remote server list served by Psiphon's old S3 bucket — the
 /// bootstrap source of the open-source Psiphon 3 clients. Still reachable;
 /// hosted and signed by Psiphon infrastructure; may be retired at any time.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 pub(crate) const DEFAULT_SERVER_LIST_URL: &str =
     "https://s3.amazonaws.com//psiphon/web/mjr4-p23r-puwl/server_list_compressed";
 
 /// Standard ed25519 public key used to verify individually signed server
 /// entries (DSL fetches, server-pushed updates) — the same value the
 /// open-source Psiphon clients embed. Public; not provisioning.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 pub(crate) const DEFAULT_SERVER_ENTRY_SIGNATURE_KEY: &str =
     "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA=";
 
 /// Signature public key that authenticates the legacy public remote server
 /// list payload (the same value embedded in the open-source Psiphon 3
 /// clients). Pairs with [`DEFAULT_SERVER_LIST_URL`].
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 pub(crate) const DEFAULT_SERVER_LIST_SIGNATURE_KEY: &str = concat!(
     "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH",
     "5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5",
@@ -516,6 +525,7 @@ pub(crate) const DEFAULT_SERVER_LIST_SIGNATURE_KEY: &str = concat!(
 );
 
 /// True when at least one tunnel-core server-entry source is configured.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 fn has_server_entry_source(config_json: &str, embedded: Option<&str>) -> bool {
     if embedded.map(str::trim).unwrap_or("") != "" {
         return true;
@@ -532,6 +542,7 @@ fn has_server_entry_source(config_json: &str, embedded: Option<&str>) -> bool {
 }
 
 /// Set `EgressRegion` in a Psiphon config object.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 fn inject_egress_region(config_json: &str, region: &str) -> Result<String> {
     if !region.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(CoreError::InvalidConfig(format!(
@@ -542,6 +553,7 @@ fn inject_egress_region(config_json: &str, region: &str) -> Result<String> {
 }
 
 /// Set a bool field in a flat Psiphon config object.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 fn inject_bool_field(config_json: &str, key: &str, value: bool) -> Result<String> {
     let mut object: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
         CoreError::InvalidConfig(format!("psiphon.config_json is invalid JSON: {e}"))
@@ -562,6 +574,7 @@ fn inject_bool_field(config_json: &str, key: &str, value: bool) -> Result<String
 ///
 /// `value` is JSON-escaped, because unlike a country code a filesystem path
 /// can legitimately contain a backslash (Windows) or a quote.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 fn inject_string_field(config_json: &str, key: &str, value: &str) -> Result<String> {
     let mut object: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
         CoreError::InvalidConfig(format!("psiphon.config_json is invalid JSON: {e}"))
@@ -577,6 +590,7 @@ fn inject_string_field(config_json: &str, key: &str, value: &str) -> Result<Stri
 
 /// Apply the FCAE Psiphon port fields to the real Psiphon config names.
 /// Zero removes an existing value so Psiphon is free to choose a port.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 fn inject_psiphon_ports(config_json: &str, socks: u16, http: u16) -> Result<String> {
     let mut object: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
         CoreError::InvalidConfig(format!("psiphon.config_json is invalid JSON: {e}"))
@@ -609,6 +623,7 @@ fn inject_psiphon_ports(config_json: &str, socks: u16, http: u16) -> Result<Stri
 /// with whatever `GetDNSServersAsString` returned and nothing else, so a
 /// momentary gap in that list turned into "no DNS servers" and killed the
 /// connect. The flag is a no-op off Android, where BindToDevice is never set.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 fn inject_android_resolver_policy(config_json: &str) -> Result<String> {
     if !cfg!(target_os = "android") {
         return Ok(config_json.to_string());
