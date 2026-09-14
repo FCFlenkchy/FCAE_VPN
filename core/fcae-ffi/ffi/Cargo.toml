@@ -8,9 +8,10 @@ description = "The FCAE VPN C ABI: the only crate that exports symbols."
 
 [lib]
 name = "fcae_ffi"
-# staticlib for the desktop/Android native builds; cdylib so bindings
-# (Python/C#/Node) and quick testing can dlopen it.
-crate-type = ["staticlib", "cdylib", "rlib"]
+# The app only links libfcae_ffi.a (CMake). Emitting cdylib + rlib as well
+# made rustc codegen the same crate three times; the extra .so/.rlib were
+# never packaged. staticlib is the only artifact the native build uses.
+crate-type = ["staticlib"]
 path = "src/lib.rs"
 
 [features]
