@@ -87,6 +87,33 @@ fn addr_of(cidr: &str) -> &str {
     cidr.split('/').next().unwrap_or(cidr)
 }
 
+/// Poll `probe` until it reports ready or `budget` elapses; returns the last
+/// probe result.
+///
+/// The device almost always exists by the first check, so the common path is
+/// one probe and zero sleeping. When a wait really is needed, the interval
+/// escalates 5→10→20→…→100 ms instead of a flat 100 ms — the flat poll added
+/// up to ~100 ms of dead time to *every* connect even on a healthy machine.
+#[cfg(any(windows, target_os = "linux"))]
+fn wait_until(mut probe: impl FnMut() -> bool, budget: Duration) -> bool {
+    const MAX_SLICE: Duration = Duration::from_millis(100);
+    let deadline = std::time::Instant::now() + budget;
+    let mut slice = Duration::from_millis(5);
+    loop {
+        if probe() {
+            return true;
+        }
+        let remain = deadline.saturating_duration_since(std::time::Instant::now());
+        if remain.is_zero() {
+            // One final look: the device may have appeared during the last
+            // sleep.
+            return probe();
+        }
+        std::thread::sleep(slice.min(remain));
+        slice = (slice * 2).min(MAX_SLICE);
+    }
+}
+
 /// True when the process can create a TUN device.
 pub fn is_privileged() -> bool {
     #[cfg(unix)]
@@ -224,17 +251,12 @@ fn configure_windows(cfg: &SessionConfig, peer_ip: Option<&str>, undo: &mut TunU
     let ip = addr_of(&cfg.tun.ipv4);
 
     // Wait for the adapter to appear; wintun creation is asynchronous.
-    let mut ready = false;
-    for _ in 0..40 {
-        if capture("netsh", &["interface", "ip", "show", "config", &format!("name={name}")])
-            .is_some()
-        {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    if !ready {
+    // First probe is immediate, so a promptly-created adapter costs nothing.
+    let show = format!("name={name}");
+    if !wait_until(
+        || capture("netsh", &["interface", "ip", "show", "config", &show]).is_some(),
+        Duration::from_secs(4),
+    ) {
         return Err(CoreError::Internal(format!(
             "TUN adapter `{name}` did not appear within 4s"
         )));
@@ -313,12 +335,14 @@ fn restore_windows(undo: &TunUndo) {
 fn configure_linux(cfg: &SessionConfig, peer_ip: Option<&str>, undo: &mut TunUndo) -> Result<()> {
     let name = &cfg.tun.name;
 
-    for _ in 0..30 {
-        if capture("ip", &["link", "show", name]).is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    // Same settle wait as Windows: immediate first probe, escalating
+    // interval, ~3 s budget (previously a flat 30×100 ms poll). The budget
+    // lapsing is not fatal here either — the `ip` calls below surface a real
+    // failure.
+    let _ = wait_until(
+        || capture("ip", &["link", "show", name]).is_some(),
+        Duration::from_secs(3),
+    );
 
     run("ip", &["addr", "add", &cfg.tun.ipv4, "dev", name]);
     if let Some(v6) = &cfg.tun.ipv6 {

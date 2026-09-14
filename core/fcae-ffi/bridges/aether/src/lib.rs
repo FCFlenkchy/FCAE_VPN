@@ -414,7 +414,9 @@ async fn wait_for_listener(addr: SocketAddr, timeout: Duration, finished: &Atomi
         if probe {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Loopback probes cost well under a millisecond; a 100 ms cadence
+        // shaves up to 100 ms off every connect for free.
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -456,7 +458,10 @@ async fn wait_for_socks(addr: SocketAddr, timeout: Duration, finished: &AtomicBo
         if socks5_greeting(addr).await {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // A bare 3-packet greeting on loopback; polling at 100 ms (was
+        // 500 ms) removes up to ~400 ms of pure polling dead time from the
+        // connect path, which is the dominant "slow to show Connected" cost.
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

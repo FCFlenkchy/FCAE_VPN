@@ -229,7 +229,10 @@ jobs:
             libxrandr-dev libxinerama-dev libxxf86vm-dev \
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
             libevent-dev protobuf-compiler nasm cmake ninja-build
-          curl -fsSL https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
+          # GitHub's codeload endpoint occasionally answers 5xx/connection
+          # resets on fresh runners; retry instead of failing the job.
+          curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
+            https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
           tar xzf glfw.tar.gz
           cd glfw-3.4
           cmake -B build -G Ninja \
@@ -283,7 +286,20 @@ jobs:
           # `go` intentionally omitted: the setup-go step above provisions a
           # toolchain new enough for the tun2socks submodule, and brew's would
           # only compete with it on PATH.
-          brew install cmake ninja nasm protobuf
+          #
+          # Bottle downloads go through ghcr.io and intermittently hit 5xx on
+          # brand-new runner images; give brew a few attempts rather than
+          # failing the whole job on one bad fetch.
+          brew_ok=0
+          for attempt in 1 2 3; do
+            brew install cmake ninja nasm protobuf && { brew_ok=1; break; }
+            echo "::warning::brew install failed (attempt $attempt/3); retrying in 15s"
+            sleep 15
+          done
+          if [ "$brew_ok" != 1 ]; then
+            echo "::error::brew install failed after 3 attempts"
+            exit 1
+          fi
           if [ "${{ matrix.name }}" = "macos-x64" ]; then
             ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
             GLFW_PREFIX=/usr/local/glfw_x64
@@ -291,7 +307,10 @@ jobs:
             ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
             GLFW_PREFIX=/usr/local/glfw_arm64
           fi
-          curl -fsSL https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
+          # Same transient-5xx hardening as the Linux step: codeload 504s on
+          # fresh runners used to kill this step (curl exit 56).
+          curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
+            https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
           tar xzf glfw.tar.gz
           cd glfw-3.4
           cmake -B build -G Ninja \
@@ -360,7 +379,7 @@ jobs:
           if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
             mkdir -p "$ANDROID_HOME/cmdline-tools"
             cd "$ANDROID_HOME/cmdline-tools"
-            wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
+            wget -q --tries=3 --timeout=60 https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
             unzip -q tools.zip
             mv cmdline-tools latest
           fi
@@ -383,6 +402,22 @@ jobs:
 
           export GO111MODULE=off
           export ANDROID_PLATFORM_VERSION=34
+
+          # gomobile's -androidapi defaults to 16 (x/mobile `minAndroidAPI`),
+          # and its ndkRoot check validates that against the NDK's
+          # meta/platforms.json — NDK r27 supports 21..35, so the build died
+          # with:  ANDROID_NDK_HOME specifies ..., which is unusable:
+          # unsupported API version 16 (not in 21..35)
+          # make.bash pins no -androidapi, so inject the app's minSdk
+          # (android/app/build.gradle.kts: 24 — the same level the *24-clang
+          # toolchains in "build rust" link against). Inserted first: if a
+          # future make.bash pins its own value, Go's last-flag-wins rule
+          # lets upstream override this.
+          sed -i 's/^gomobile bind /gomobile bind -androidapi=24 /' \
+            core/psiphon/MobileLibrary/Android/make.bash
+          grep -n -- '-androidapi' core/psiphon/MobileLibrary/Android/make.bash \
+            || echo '::warning::-androidapi not present in make.bash; upstream moved the gomobile invocation. If gomobile rejects the NDK API range again, update the sed above.'
+
           cd core/psiphon/MobileLibrary/Android
           ./make.bash
 
@@ -589,7 +624,7 @@ jobs:
           if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
             mkdir -p "$ANDROID_HOME/cmdline-tools"
             cd "$ANDROID_HOME/cmdline-tools"
-            wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
+            wget -q --tries=3 --timeout=60 https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
             unzip -q tools.zip
             mv cmdline-tools latest
           fi

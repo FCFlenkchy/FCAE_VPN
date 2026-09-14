@@ -289,7 +289,10 @@ impl Backend for PsiphonBackend {
                     cx.config.start_timeout()
                 )));
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            // state()/socks_port() are cheap cgo getters: poll at 50 ms
+            // (was 250 ms) so a completed handshake is reported to the UI
+            // at once instead of up to a quarter second late.
+            tokio::time::sleep(Duration::from_millis(50)).await;
         };
 
         let found = ffi::regions();
@@ -784,23 +787,44 @@ mod ffi {
 }
 
 /// Rate calculation state for [`ffi::counters`]: totals are cumulative, the
-/// UI wants bytes/sec, so keep the previous sample here.
+/// UI wants bytes/sec, so keep the previous sample here. Everything is
+/// lock-free: three atomic snapshots plus a single `OnceLock` epoch that
+/// anchors the monotonic clock.
 #[cfg(all(feature = "enabled", psiphon_linked))]
 mod counters_state {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
     use std::time::Instant;
 
     static LAST_UP: AtomicU64 = AtomicU64::new(0);
     static LAST_DOWN: AtomicU64 = AtomicU64::new(0);
-    static LAST_AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    /// Milliseconds since [`EPOCH`] at the previous sample; 0 = never sampled.
+    static LAST_MS: AtomicU64 = AtomicU64::new(0);
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
 
     pub fn sample(up: u64, down: u64) -> (u64, u64, u64, u64) {
+        let now_ms = EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64;
+        let prev_ms = LAST_MS.swap(now_ms, Ordering::Relaxed);
         let prev_up = LAST_UP.swap(up, Ordering::Relaxed);
         let prev_down = LAST_DOWN.swap(down, Ordering::Relaxed);
-        let now = Instant::now();
-        let dt = LAST_AT.get_or_init(now).elapsed().as_secs().max(1);
-        let up_rate = up.saturating_sub(prev_up) / dt;
-        let down_rate = down.saturating_sub(prev_down) / dt;
+        // The first sample has no baseline: report the totals with zero rates
+        // rather than a one-off spike of (lifetime bytes / 1s).
+        if prev_ms == 0 {
+            return (up, down, 0, 0);
+        }
+        // bytes/sec between successive samples (~500 ms apart), computed in
+        // milliseconds so a fast pump does not collapse to 0/1. Saturating
+        // end to end: a restarted shim resets its counters to 0 and the
+        // deltas must clamp instead of wrapping.
+        let dt_ms = now_ms.saturating_sub(prev_ms).max(1);
+        let up_rate = up
+            .saturating_sub(prev_up)
+            .saturating_mul(1_000)
+            / dt_ms;
+        let down_rate = down
+            .saturating_sub(prev_down)
+            .saturating_mul(1_000)
+            / dt_ms;
         (up, down, up_rate, down_rate)
     }
 }
