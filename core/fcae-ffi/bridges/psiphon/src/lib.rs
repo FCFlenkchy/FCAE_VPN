@@ -17,9 +17,12 @@
 //! tunnel tries to reach the internet through itself.
 //!
 //! `MobileLibrary/psi` exposes `BindToDevice` — the hook that maps onto
-//! `VpnService.protect(fd)` — but it is a gobind package with no C surface, so
-//! `go/bridge.go` wraps it. Desktop uses the same shim with
-//! `useDeviceBinder=false`.
+//! `VpnService.protect(fd)` — but it is a gobind package with no C surface.
+//!
+//! **Android:** official Psiphon AAR (`android/psiphon`). Do not compile
+//! `psi` into `libfcae_go_bridge.so`.
+//! **Desktop:** `go/bridge.go` wraps psi; that module is a second Go runtime
+//! (`force_shared`) and is not built while `enabled` is off.
 //!
 //! ## Lifecycle
 //!

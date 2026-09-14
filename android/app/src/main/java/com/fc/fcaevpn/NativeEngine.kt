@@ -2,9 +2,9 @@ package com.fc.fcaevpn
 
 object NativeEngine {
     init {
-        // One Go shared library contains both tun2socks and Psiphon. It must
-        // be loaded before the Rust JNI library, which references both sets
-        // of C symbols. Do not swallow this error: a missing bridge is a
+        // tun2socks Go runtime. Must load before the Rust JNI library, which
+        // references t2s_* symbols. Psiphon is not in this .so (official AAR
+        // when re-enabled). Do not swallow this error: a missing bridge is a
         // packaging/build failure, not an optional runtime feature.
         System.loadLibrary("fcae_go_bridge")
 
@@ -77,10 +77,8 @@ object NativeEngine {
     @JvmStatic external fun nativeStop()
 
     /**
-     * Cancel the session and drop the TUN device without waiting for the
-     * worker thread. Returns in milliseconds, so the VPN interface (and the
-     * status-bar key icon) goes away immediately; follow with nativeStop()
-     * to reap the session.
+     * Cancel the session and drop the TUN fds without waiting for Go or the
+     * worker thread. Returns in ~1ms; follow with nativeStop() to reap.
      */
     @JvmStatic external fun nativeStopBegin()
     @JvmStatic external fun nativeFree()

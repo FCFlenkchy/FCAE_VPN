@@ -189,6 +189,16 @@ pub struct Tun2SocksBridge {
     log_installed: AtomicBool,
     /// Android VpnService descriptor set out-of-band via the FFI.
     external_fd: AtomicI32,
+    /// Dup created in `device_spec` before `Active` is published. Stop
+    /// closes this immediately so a notification Disconnect cannot leave
+    /// the kernel TUN up while `engine.Start()` still holds the Go mutex.
+    pending_fd: AtomicI32,
+    /// Set by `stop`/`abort` so an in-flight `start` aborts instead of
+    /// bringing the interface up after the user already disconnected.
+    closing: AtomicBool,
+    /// Routes/DNS undo saved by `abort` for `stop` to apply without
+    /// waiting on it during Disconnect.
+    stashed_undo: Mutex<Option<platform::TunUndo>>,
     /// Host hook that creates the TUN device on demand; see
     /// [`Tun2SocksBridge::set_fd_provider`].
     fd_provider: std::sync::atomic::AtomicPtr<std::ffi::c_void>,
@@ -211,6 +221,9 @@ impl Tun2SocksBridge {
             running: AtomicBool::new(false),
             log_installed: AtomicBool::new(false),
             external_fd: AtomicI32::new(-1),
+            pending_fd: AtomicI32::new(-1),
+            closing: AtomicBool::new(false),
+            stashed_undo: Mutex::new(None),
             fd_provider: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         }
     }
@@ -323,6 +336,19 @@ impl Tun2SocksBridge {
                 )));
             }
             log::info!("[tun] using VpnService fd {fd} (dup -> {dup}), in-process");
+            self.pending_fd.store(dup, Ordering::SeqCst);
+            if self.closing.load(Ordering::SeqCst) {
+                if self
+                    .pending_fd
+                    .compare_exchange(dup, -1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    unsafe { libc::close(dup) };
+                }
+                return Err(CoreError::Internal(
+                    "TUN establish cancelled (session is stopping)".into(),
+                ));
+            }
             return Ok((format!("fd://{dup}"), Some(dup)));
         }
 
@@ -356,10 +382,19 @@ impl TunBridge for Tun2SocksBridge {
             ));
         }
 
-        let mut slot = self.active.lock();
-        if slot.is_some() {
-            log::warn!("[tun] start called while a device is already up; ignoring");
-            return Ok(());
+        self.closing.store(false, Ordering::SeqCst);
+        {
+            let slot = self.active.lock();
+            if slot.is_some() {
+                log::warn!("[tun] start called while a device is already up; ignoring");
+                return Ok(());
+            }
+        }
+
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(CoreError::Internal(
+                "TUN start cancelled (session is stopping)".into(),
+            ));
         }
 
         let socks = endpoints.socks.ok_or_else(|| {
@@ -406,9 +441,11 @@ impl TunBridge for Tun2SocksBridge {
         };
 
         if rc != 0 {
-            if let Some(fd) = owned_fd {
-                unsafe { libc::close(fd) };
+            let leftover = self.pending_fd.swap(-1, Ordering::SeqCst);
+            if leftover >= 0 {
+                unsafe { libc::close(leftover) };
             }
+            let _ = owned_fd;
             return Err(CoreError::Internal(match rc {
                 -1 => "tun2socks is already running".to_string(),
                 -2 => format!("tun2socks rejected the configuration (device={device}, proxy={proxy})"),
@@ -423,42 +460,62 @@ impl TunBridge for Tun2SocksBridge {
         // the tunnel.
         let undo = platform::configure(cfg, endpoints.peer_ip.as_deref())?;
 
+        if self.closing.load(Ordering::SeqCst) {
+            platform::restore(undo, Duration::from_millis(250));
+            let _ = unsafe { t2s_stop() };
+            let leftover = self.pending_fd.swap(-1, Ordering::SeqCst);
+            if leftover >= 0 {
+                unsafe { libc::close(leftover) };
+            }
+            return Err(CoreError::Internal(
+                "TUN start cancelled after engine.Start (session is stopping)".into(),
+            ));
+        }
+
         self.running.store(true, Ordering::SeqCst);
-        *slot = Some(Active { owned_fd, undo });
+        *self.active.lock() = Some(Active { owned_fd, undo });
         log::info!("[tun] up: {device} <-> {proxy} (in-process)");
         Ok(())
     }
 
-    fn stop(&self, timeout: Duration) {
-        let Some(active) = self.active.lock().take() else {
-            return;
-        };
+    fn abort(&self) {
+        self.closing.store(true, Ordering::SeqCst);
 
-        // Order matters: undo the OS configuration first (while the device
-        // still exists, so the route/DNS commands can name it), then stop the
-        // stack, then release the descriptor.
-        platform::restore(active.undo, timeout);
+        // Close every TUN fd we own. Do not call t2s_stop(): it waits on
+        // the same Go mutex as engine.Start(), which is how Disconnect
+        // used to stall for tens of milliseconds with the kernel interface
+        // still up.
+        let pending = self.pending_fd.swap(-1, Ordering::SeqCst);
+        if pending >= 0 {
+            unsafe { libc::close(pending) };
+        }
+
+        if let Some(active) = self.active.lock().take() {
+            if let Some(fd) = active.owned_fd {
+                if fd != pending {
+                    unsafe { libc::close(fd) };
+                }
+            }
+            *self.stashed_undo.lock() = Some(active.undo);
+        }
+
+        self.clear_android_fd();
+        self.running.store(false, Ordering::SeqCst);
+    }
+
+    fn stop(&self, timeout: Duration) {
+        self.abort();
+
+        if let Some(undo) = self.stashed_undo.lock().take() {
+            platform::restore(undo, timeout);
+        }
 
         let rc = unsafe { t2s_stop() };
         if rc != 0 {
             log::warn!("[tun] t2s_stop returned {rc}");
         }
 
-        if let Some(fd) = active.owned_fd {
-            // Only ever our dup — never the JVM's original.
-            unsafe { libc::close(fd) };
-        }
-
-        // Forget the platform descriptor too. The JVM closes its
-        // ParcelFileDescriptor on disconnect and the kernel immediately
-        // recycles that small integer onto an unrelated file, so a latched
-        // value makes the *next* connect dup a stranger's fd: tun2socks then
-        // reads from something that is not a tun device and the session hangs
-        // in "establishing" forever. FCAEVpnService always calls
-        // nativeSetTunFd() again before the next start.
-        self.clear_android_fd();
-
-        self.running.store(false, Ordering::SeqCst);
+        // Leave `closing` set. The next start() clears it.
         log::info!("[tun] down");
     }
 

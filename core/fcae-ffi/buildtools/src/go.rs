@@ -1,9 +1,13 @@
 //! Cross-compiling Go packages for **in-process** linking.
 //!
-//! This is what makes tun2socks (and later Psiphon, which is also Go) run
-//! in-process. Instead of `go build -o tun2socks.exe` and shipping an
-//! executable, we build a linkable library and hand it to rustc, so the Go
-//! runtime lives inside our own binary.
+//! This is what makes tun2socks run in-process. Instead of
+//! `go build -o tun2socks.exe` and shipping an executable, we build a
+//! linkable library and hand it to rustc, so the Go runtime lives inside
+//! our own binary.
+//!
+//! Desktop Psiphon (when enabled later) is a *second* Go module built with
+//! [`CArchive::force_shared`]. Android Psiphon is the official AAR, not a
+//! Go c-shared next to tun2socks.
 //!
 //! ## Why Android differs
 //!
@@ -394,11 +398,9 @@ impl Built {
     /// the previous design shipped a tun2socks **binary** here and spawned it
     /// as a child process. Same directory, entirely different mechanism.
     pub fn stage_android_so(&self, repo_root: &Path, target: Target) -> Result<(), GoError> {
-        // `shared` alone is no longer the Android test: Psiphon now builds
-        // c-shared on desktop too (two Go c-archives cannot be statically
-        // linked into one binary). Without the target check this copied
-        // libfcae_go_bridge.dll into android/app/src/main/jniLibs/x86_64/,
-        // silently polluting the APK's native libraries with a DLL.
+        // `shared` alone is not the Android test: a desktop second Go
+        // runtime (Psiphon, force_shared) is also c-shared. Without the
+        // target check this copied a DLL into jniLibs and polluted the APK.
         if !self.shared || !target.is_android() {
             return Ok(());
         }

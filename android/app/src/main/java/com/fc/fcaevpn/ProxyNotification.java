@@ -174,6 +174,8 @@ public class ProxyNotification extends Service {
         // UI listens for these actions to clear its CONNECTED indicator; omit
         // this and the app keeps showing a live session after the engine died.
         broadcastStopped();
+        // Abort the engine immediately, then reap on the cleanup thread.
+        try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
         try {
             stopForeground(STOP_FOREGROUND_REMOVE);
         } catch (Exception e) {
@@ -207,8 +209,8 @@ public class ProxyNotification extends Service {
         if (nativeFreed) return;
         nativeFreed = true;
         new Thread(() -> {
+            try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
             try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
         }, "FCAE-ProxyStop").start();
     }

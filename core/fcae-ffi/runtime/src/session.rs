@@ -35,6 +35,15 @@ pub trait TunBridge: Send + Sync {
     fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()>;
     /// Stop forwarding and release the device. Must be idempotent.
     fn stop(&self, timeout: Duration);
+    /// Drop the TUN fds immediately. Must not wait on the data-plane engine.
+    ///
+    /// Default calls [`stop`] with a zero timeout. Bridges whose `stop`
+    /// waits on a Go mutex (tun2socks `engine.Start`) must override this so
+    /// notification Disconnect can tear the kernel interface down in
+    /// microseconds.
+    fn abort(&self) {
+        self.stop(Duration::ZERO);
+    }
     /// True if a device is currently up.
     fn is_running(&self) -> bool;
 
@@ -142,12 +151,14 @@ impl Supervisor {
         // A stop that is still draining must finish first, otherwise the new
         // session's TUN setup races the old session's DNS restore — the
         // classic "reconnect leaves DNS pointing at a dead adapter" bug.
-        let deadline = std::time::Instant::now() + self.cfg.stop_timeout;
+        // Drain wait is independent of the 2ms join in stop(): reconnect
+        // must wait for the background reaper, not fail in 2ms.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while self.stopping.load(Ordering::SeqCst) {
             if std::time::Instant::now() >= deadline {
-                return Err(CoreError::Timeout(self.cfg.stop_timeout));
+                return Err(CoreError::Timeout(Duration::from_secs(2)));
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(1));
         }
 
         let mut slot = self.running.lock();
@@ -290,12 +301,12 @@ impl Supervisor {
     ///
     /// Safe to call more than once, and safe to follow with [`stop`].
     pub fn begin_stop(&self) {
-        let Some(running) = self.running.lock().as_ref().map(|r| r.cancel.clone()) else {
-            return;
-        };
         self.stopping.store(true, Ordering::SeqCst);
-        running.cancel();
-        self.cfg.tun_bridge.stop(self.cfg.stop_timeout);
+        if let Some(running) = self.running.lock().as_ref().map(|r| r.cancel.clone()) {
+            running.cancel();
+        }
+        // Abort only: close TUN fds, do not wait on Go. `stop()` reaps.
+        self.cfg.tun_bridge.abort();
     }
 
     /// Request shutdown and wait (bounded) for the session thread to finish.
@@ -319,7 +330,9 @@ impl Supervisor {
         // TUN device (and on Android the VpnService fd) immediately.
         self.cfg.tun_bridge.stop(self.cfg.stop_timeout);
 
-        match join_bounded(running.thread, self.cfg.stop_timeout) {
+        // 2ms then background reaper — do not sit on a 250ms poll after
+        // the TUN is already gone.
+        match join_bounded(running.thread, Duration::from_millis(2)) {
             Ok(()) => self.stopping.store(false, Ordering::SeqCst),
             Err(handle) => {
                 // Do not drop the JoinHandle: that detaches the session
@@ -328,8 +341,7 @@ impl Supervisor {
                 // in the background and keep `stopping` set until then so
                 // start() waits.
                 log::warn!(
-                    "[session] session thread did not finish within {:?}; waiting in background",
-                    self.cfg.stop_timeout
+                    "[session] session thread did not finish within 2ms; waiting in background",
                 );
                 let flag = self.stopping.clone();
                 let _ = std::thread::Builder::new()
@@ -354,13 +366,29 @@ fn join_bounded(
     handle: std::thread::JoinHandle<()>,
     timeout: Duration,
 ) -> std::result::Result<(), std::thread::JoinHandle<()>> {
+    if handle.is_finished() {
+        let _ = handle.join();
+        return Ok(());
+    }
+    if timeout.is_zero() {
+        return Err(handle);
+    }
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         if handle.is_finished() {
             let _ = handle.join();
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(25));
+        let remain = deadline.saturating_duration_since(std::time::Instant::now());
+        let slice = Duration::from_millis(1).min(remain);
+        if slice.is_zero() {
+            break;
+        }
+        std::thread::sleep(slice);
+    }
+    if handle.is_finished() {
+        let _ = handle.join();
+        return Ok(());
     }
     Err(handle)
 }
@@ -445,9 +473,18 @@ async fn run_session(
         // listeners are the entire product there, and tun2socks must never be
         // started -- no device, no routes, no Go stack.
         if config.mode == FcaeMode::Tun {
+            if cancel.is_cancelled() {
+                let _ = handle.stop(stop_timeout).await;
+                return Ok(());
+            }
             if let Err(e) = tun_bridge.start(&config, &endpoints) {
                 let _ = handle.stop(stop_timeout).await;
                 return Err(e);
+            }
+            if cancel.is_cancelled() {
+                tun_bridge.stop(stop_timeout);
+                let _ = handle.stop(stop_timeout).await;
+                return Ok(());
             }
         } else {
             debug_assert!(

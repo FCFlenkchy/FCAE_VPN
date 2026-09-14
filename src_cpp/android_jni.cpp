@@ -13,10 +13,10 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// Psiphon and tun2socks are exported by the single fcae_go_bridge library.
-// No weak fallbacks are provided: silently falling back to stubs can hide a
-// broken native dependency and, more importantly, permits symbol interposition
-// between two Go runtimes.
+// tun2socks is exported by libfcae_go_bridge.so. Psiphon is not in that
+// library: Android uses the official AAR, not a second Go runtime.
+// No weak fallbacks are provided for t2s_*: silently falling back to stubs
+// can hide a broken native dependency.
 
 static std::mutex g_log_mu;
 static std::deque<std::string> g_logs;

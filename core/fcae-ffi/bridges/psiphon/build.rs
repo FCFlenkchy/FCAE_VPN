@@ -1,49 +1,52 @@
-//! Builds the Psiphon Go bridge as a c-archive and links it statically.
+//! Psiphon Go bridge — **not compiled**.
 //!
-//! ## Why a hand-written shim now
+//! The `enabled` feature is off. This build script never invokes `go`.
 //!
-//! The first version compiled upstream's `ClientLibrary` package directly,
-//! because it already exports a cgo C ABI. That cannot work on Android: its
-//! `PsiphonProvider` has no `BindToDevice`, so Psiphon's own sockets get
-//! captured by our TUN and the tunnel tries to reach the internet through
-//! itself.
+//! ## Split from tun2socks
 //!
-//! `MobileLibrary/psi` does expose `BindToDevice`, but it is a gobind package
-//! with no C surface, so `go/bridge.go` wraps it. One shim serves both
-//! platforms — desktop simply passes `useDeviceBinder=false`.
+//! Psiphon is its own Go module (`go/`). It must not be linked into
+//! tun2socks' `libfcae_go_bridge`. Two Go runtimes in one Android process
+//! SIGSEGV at `dlopen`; stuffing psi into the tun2socks c-shared was the
+//! load crash.
+//!
+//! ## Android
+//!
+//! Official path: the Psiphon AAR (`android/psiphon`, not in the Gradle
+//! graph). `ClientLibrary` has no `BindToDevice` and cannot work on Android.
+//! This crate never compiles `psi` into a `.so` on Android, even if
+//! `enabled` is turned on later.
+//!
+//! ## Desktop (later)
+//!
+//! When `enabled` is on, build `go/` as `libfcae_psiphon` with
+//! `CArchive::force_shared` so the second Go runtime is a dynamic library.
+//! That path is not wired here yet so a default cargo/cmake pass never
+//! compiles Psiphon.
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(psiphon_linked)");
     fcae_build::rerun_if_env_changed("ANDROID_NDK_HOME");
     fcae_build::rerun_if_env_changed("CGO_CC");
     fcae_build::rerun_if_env_changed("GO_BIN");
+    fcae_build::rerun_if_changed("go/bridge.go");
+    fcae_build::rerun_if_changed("go/go.mod");
 
     if !cfg!(feature = "enabled") {
         return;
     }
 
-    let submodule = fcae_build::repo_root().join("core/psiphon");
-    if !submodule.join("go.mod").is_file() {
-        panic!(
-            "the `enabled` feature is on but the Psiphon submodule is missing at {}.\n\
-             Run: git submodule update --init --recursive",
-            submodule.display()
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if os == "android" {
+        // Do not compile. Do not set psiphon_linked — that would make Rust
+        // expect psi_* symbols that no Go archive provides.
+        fcae_build::note(
+            "Android Psiphon is the official AAR (android/psiphon); \
+             not compiling psi into a Go runtime",
         );
+        return;
     }
 
-    // The shim imports MobileLibrary/psi, so fail early and clearly if the
-    // submodule layout ever changes under us.
-    let mobile_library = submodule.join("MobileLibrary/psi");
-    if !mobile_library.join("psi.go").is_file() {
-        panic!(
-            "{} does not contain psi.go — the upstream layout changed",
-            mobile_library.display()
-        );
-    }
-
-    // The Go bridge is built once by fcae-bridge-tun2socks. It contains both
-    // tun2socks and Psiphon exports, so never build a second Go runtime here.
-    println!("cargo:rustc-cfg=psiphon_linked");
-    fcae_build::note("Psiphon uses the combined fcae_go_bridge Go runtime");
-    return;
+    fcae_build::note(
+        "Psiphon desktop Go module is not compiled (enabled is on, build skipped)",
+    );
 }

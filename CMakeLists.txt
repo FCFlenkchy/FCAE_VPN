@@ -140,15 +140,19 @@ function(fcae_align_16k target_name)
     message(STATUS "16 KB page alignment enabled for ${target_name}")
 endfunction()
 
-# Link the Go bridges that were built as c-shared objects (Android only).
+# Link the tun2socks Go bridge (Android only).
 #
-# On Android the Go toolchain rejects -buildmode=c-archive, so the tun2socks
-# bridge is built as libfcae_go_bridge.so and staged into jniLibs/<abi>/.
+# On Android the Go toolchain rejects -buildmode=c-archive, so tun2socks
+# is built as libfcae_go_bridge.so and staged into jniLibs/<abi>/.
 # It is therefore NOT inside libfcae_ffi.a: the Rust side only *references*
 # t2s_start/t2s_stop/... and cargo emits `rustc-link-lib=dylib=...` directives
 # that apply when rustc links a final artifact. Here CMake performs the link,
 # so cargo's directives never reach it and we must name the .so explicitly --
 # otherwise ld.lld reports "undefined symbol: t2s_start" and friends.
+#
+# Psiphon is not in this .so. Android Psiphon is the official AAR
+# (android/psiphon, not in the Gradle graph). Do not link a second Go
+# runtime next to this library — that SIGSEGVs at dlopen.
 function(fcae_link_go_bridges target_name abi)
     set(jni_dir ${CMAKE_SOURCE_DIR}/android/app/src/main/jniLibs/${abi})
     # tun2socks_bridge is a hard dependency: TUN mode always needs it.
@@ -158,14 +162,11 @@ function(fcae_link_go_bridges target_name abi)
         message(STATUS "linking Go bridge: ${t2s}")
     endif()
 
-    # This is one Go shared library containing both tun2socks and Psiphon.
-    # Loading one Go runtime avoids the Android multi-runtime crash.
-
     # The .so sits next to our library in the APK's native lib dir.
     target_link_options(${target_name} PRIVATE "-Wl,-rpath,\\$ORIGIN")
 endfunction()
 
-# Psiphon is part of the combined fcae_go_bridge; there is no second Go library.
+# Android Psiphon: official AAR, not a second Go library.
 
 # ── Target-specific configuration ────────────────────────────────────────
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64")

@@ -21,9 +21,10 @@ aether = ["dep:fcae-bridge-aether"]
 # Compile the Psiphon backend in. On its own this registers the backend so the
 # UI can list it, but starting a tunnel reports BackendUnavailable.
 psiphon = ["dep:fcae-bridge-psiphon"]
-# Psiphon that actually runs: also builds and links the MobileLibrary/psi
-# c-archive (ClientLibrary lacks BindToDevice, so it cannot work on Android).
-# Needs the core/psiphon submodule and a Go toolchain.
+# Psiphon that actually runs. Off — do not compile.
+# Desktop: bridges/psiphon/go as a second Go runtime (force_shared).
+# Android: do not use this feature; use the official AAR (android/psiphon).
+# ClientLibrary lacks BindToDevice and cannot work on Android.
 psiphon-live = ["psiphon", "tun", "fcae-bridge-psiphon/enabled"]
 # Link the in-process tun2socks bridge.
 tun = ["dep:fcae-bridge-tun2socks"]

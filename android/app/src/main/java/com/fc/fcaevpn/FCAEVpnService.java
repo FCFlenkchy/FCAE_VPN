@@ -56,7 +56,7 @@ public class FCAEVpnService extends VpnService {
     static final AtomicLong sGeneration = new AtomicLong(0);
     private static FCAEVpnService instance; // ADDED for instant UI disconnect
 
-    private volatile long cleanupGeneration = 0;
+    private final AtomicLong cleanupGeneration = new AtomicLong(0);
     /**
      * Generation the in-flight connect belongs to.
      *
@@ -67,6 +67,8 @@ public class FCAEVpnService extends VpnService {
      * already says DISCONNECTED.
      */
     private volatile long pendingSessionGen = -1;
+    /** Serialises TUN fd ownership between establishTunNow and teardown. */
+    private final Object tunLock = new Object();
     private volatile ParcelFileDescriptor vpnInterface;
     private volatile Thread vpnThread;
     private volatile boolean running = false;
@@ -343,9 +345,11 @@ public class FCAEVpnService extends VpnService {
         // A disconnect may have arrived while the backend was still dialling.
         // Building an interface for a session nobody wants any more is what
         // used to strand a live TUN behind a disconnected UI.
-        if (shuttingDown || pendingSessionGen != cleanupGeneration) {
-            Log.w(TAG, "establishTunNow: session is stale, refusing");
-            return -1;
+        synchronized (tunLock) {
+            if (shuttingDown || pendingSessionGen != cleanupGeneration.get()) {
+                Log.w(TAG, "establishTunNow: session is stale, refusing");
+                return -1;
+            }
         }
 
         try {
@@ -371,16 +375,19 @@ public class FCAEVpnService extends VpnService {
                 return -1;
             }
 
-            // Re-check: establish() can block, and the session may have gone
-            // stale while it did.
-            if (shuttingDown || pendingSessionGen != cleanupGeneration) {
-                try { pfd.close(); } catch (Exception ignored) {}
-                Log.w(TAG, "establishTunNow: session went stale while establishing");
-                return -1;
+            // Re-check under the same lock as teardown. establish() can block;
+            // a notification Disconnect that lands in that window used to
+            // snapshot vpnInterface==null and then we assigned the new PFD
+            // afterwards — live TUN, UI already DISCONNECTED.
+            synchronized (tunLock) {
+                if (shuttingDown || pendingSessionGen != cleanupGeneration.get()) {
+                    closeQuiet(pfd);
+                    Log.w(TAG, "establishTunNow: session went stale while establishing");
+                    return -1;
+                }
+                vpnInterface = pfd;
+                return pfd.getFd();
             }
-
-            vpnInterface = pfd;
-            return pfd.getFd();
         } catch (Throwable t) {
             Log.e(TAG, "establishTunNow failed: " + t);
             return -1;
@@ -476,7 +483,12 @@ public class FCAEVpnService extends VpnService {
         synchronized (cmdLock) {
             queuedStart = null;
         }
-        if (vpnInterface == null && vpnThread == null && !running && !engineOpInFlight) {
+        // Connecting defers Builder.establish() until SOCKS is up, so
+        // vpnInterface is often still null. Still fullShutdown() — that
+        // invalidates the session so a late establishTunNow cannot leave
+        // a TUN up after notification Disconnect.
+        if (vpnInterface == null && vpnThread == null && !running
+                && !engineOpInFlight && !uiConnecting) {
             handler.removeCallbacks(statsRunnable);
             notification.dismiss();
             stopForeground(STOP_FOREGROUND_REMOVE);
@@ -551,11 +563,10 @@ public class FCAEVpnService extends VpnService {
 
     private void startVpn(Intent intent) {
         sGeneration.incrementAndGet();
-        cleanupGeneration++;
         // The worker validates this after every slow step (establish,
         // nativeStart): a disconnect/pause/new connect that lands in the
         // connect window must not be overridden by a late "running=true".
-        final long sessionGen = cleanupGeneration;
+        final long sessionGen = cleanupGeneration.incrementAndGet();
         vpnPaused = false;
         shuttingDown = false;
         nativeFreed = false;
@@ -569,8 +580,11 @@ public class FCAEVpnService extends VpnService {
         // stop_timeout. Doing it here froze the UI and, past 5s, tripped an
         // ANR: changing a setting while connected looked like "stuck on
         // establishing, nothing happens".
-        final ParcelFileDescriptor oldPfd = vpnInterface;
-        vpnInterface = null;
+        final ParcelFileDescriptor oldPfd;
+        synchronized (tunLock) {
+            oldPfd = vpnInterface;
+            vpnInterface = null;
+        }
 
         rememberStart(intent);
         notification.show("FCAE VPN — Connecting...", VpnNotification.BUTTONS_CONNECTING);
@@ -681,10 +695,9 @@ public class FCAEVpnService extends VpnService {
                 // went stale, tear the engine down again and exit WITHOUT
                 // claiming "running" — the disconnect already broadcast its
                 // own state, so no extra notifyUi() here.
-                if (sessionGen != cleanupGeneration || shuttingDown) {
+                if (sessionGen != cleanupGeneration.get() || shuttingDown) {
                     try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
-                    try { vpnInterface.close(); } catch (Exception ignored) {}
-                    vpnInterface = null;
+                    sweepTun();
                     try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
                     synchronized (cmdLock) { engineOpInFlight = false; }
                     return;
@@ -732,11 +745,29 @@ public class FCAEVpnService extends VpnService {
         t.start();
     }
     
+    private static void closeQuiet(ParcelFileDescriptor pfd) {
+        if (pfd == null) return;
+        try { pfd.close(); } catch (Exception ignored) {}
+    }
+
+    /** Close any TUN PFD that landed after teardown snapped a null. */
+    private void sweepTun() {
+        final ParcelFileDescriptor pfd;
+        synchronized (tunLock) {
+            pfd = vpnInterface;
+            vpnInterface = null;
+        }
+        closeQuiet(pfd);
+    }
+
     private void fullShutdown() {
         sGeneration.incrementAndGet();
+        final long myGen = cleanupGeneration.incrementAndGet();
         running = false;
         vpnPaused = false;
         uiConnecting = false;
+        shuttingDown = true;
+        pendingSessionGen = -1;
         synchronized (cmdLock) {
             queuedStart = null;
             engineOpInFlight = true;
@@ -748,15 +779,22 @@ public class FCAEVpnService extends VpnService {
             shutdownLatch = null;
         }
 
-        if (!shuttingDown) {
-            shuttingDown = true;
-        }
-
         final Thread t = vpnThread;
         vpnThread = null;
-        final ParcelFileDescriptor pfd = vpnInterface;
-        vpnInterface = null;
+        final ParcelFileDescriptor pfd;
+        synchronized (tunLock) {
+            pfd = vpnInterface;
+            vpnInterface = null;
+        }
         lastStartIntent = null;
+
+        // Close our VpnService fd immediately. The native dup is a
+        // different number; abort (nativeStopBegin) closes that without
+        // waiting on Go. Together that drops the kernel TUN in ~1ms.
+        closeQuiet(pfd);
+        try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
+        sweepTun();
+        if (t != null) t.interrupt();
 
         // 1. INSTANT UI & NOTIFICATION CLEANUP
         Runnable uiCleanup = () -> {
@@ -772,50 +810,17 @@ public class FCAEVpnService extends VpnService {
             handler.post(uiCleanup);
         }
 
-        // 2. TUN TEARDOWN -- two phases, neither on the main thread.
-        //
-        // Phase A (fcae_stop_begin) only cancels the session and drops the
-        // TUN device, closing the native dup of our VpnService fd. It does
-        // NOT join the worker thread, so it returns in milliseconds. That
-        // matters because the kernel keeps the VPN alive -- key icon in the
-        // status bar, traffic still captured -- until every descriptor for
-        // the interface is closed. Previously the only path that released
-        // them was the blocking fcae_stop(), so the tunnel lingered for
-        // seconds after the user tapped disconnect.
-        //
-        // Order is still load-bearing: our own PFD may only be closed once
-        // the native side has released its dup, or the Go stack reads a
-        // descriptor the kernel has already recycled.
-        //
-        // Phase B (fcae_stop) reaps the session thread and can block; it
-        // runs after the interface is already gone, so nobody is waiting.
-        final long myGen = cleanupGeneration;
+        // 2. Reap only. TUN and UI are already down — do not join the
+        // worker (join(0) waits forever in Java; join(50) was a 50ms stall).
         Thread cleanupThread = new Thread(() -> {
-            if (myGen != cleanupGeneration) return;
-
-            try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
-
-            if (pfd != null) {
-                try { pfd.close(); } catch (Exception ignored) {}
-            }
-
-            // The interface is down by here; the UI is already free.
+            if (myGen != cleanupGeneration.get()) return;
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-
-            if (t != null) {
-                t.interrupt();
-                try { t.join(50); } catch (InterruptedException ignored) {}
-            }
-
+            sweepTun();
             handler.post(this::stopSelf);
-
             synchronized (cmdLock) {
                 engineOpInFlight = false;
                 queuedStart = null;
             }
-
-            // Disconnect from the notification (or UI) asked the process
-            // to die when the activity is not in front — obey that.
             if (!MainActivity.activityAlive) {
                 freeNativeOnce();
                 android.os.Process.killProcess(android.os.Process.myPid());
@@ -830,10 +835,11 @@ public class FCAEVpnService extends VpnService {
         // Invalidate any in-flight startVpn() session: without this bump a
         // pause landing in the connect window would not stop the worker, and
         // it would resurrect "running" (live TUN) after the pause.
-        cleanupGeneration++;
+        final long myGen = cleanupGeneration.incrementAndGet();
         running = false;
         vpnPaused = true;
         uiConnecting = false;
+        pendingSessionGen = -1;
         synchronized (cmdLock) {
             engineOpInFlight = true;
         }
@@ -845,8 +851,14 @@ public class FCAEVpnService extends VpnService {
 
         final Thread t = vpnThread;
         vpnThread = null;
-        final ParcelFileDescriptor pfd = vpnInterface;
-        vpnInterface = null;
+        final ParcelFileDescriptor pfd;
+        synchronized (tunLock) {
+            pfd = vpnInterface;
+            vpnInterface = null;
+        }
+        closeQuiet(pfd);
+        try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
+        if (t != null) t.interrupt();
 
         // 1. INSTANT UI & NOTIFICATION UPDATE
         Runnable uiCleanup = () -> {
@@ -861,42 +873,17 @@ public class FCAEVpnService extends VpnService {
             handler.post(uiCleanup);
         }
 
-        // 2. TUN TEARDOWN -- same two-phase release as fullShutdown(), so the
-        // interface disappears immediately instead of after the join.
+        // 2. Reap only. TUN already down. No join.
         //
         // freeNativeOnce() is deliberately absent: pause is resumable, and
         // releasing the library here meant resuming had to re-init a
         // shut-down FFI.
-        final long myGen = cleanupGeneration;
         Thread cleanupThread = new Thread(() -> {
-            if (myGen != cleanupGeneration) {
+            if (myGen != cleanupGeneration.get()) {
                 finishEngineOp();
                 return;
             }
-
-            try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
-
-            if (myGen != cleanupGeneration) {
-                finishEngineOp();
-                return;
-            }
-
-            if (pfd != null) {
-                try { pfd.close(); } catch (Exception ignored) {}
-            }
-
-            if (myGen != cleanupGeneration) {
-                finishEngineOp();
-                return;
-            }
-
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-
-            if (t != null) {
-                t.interrupt();
-                try { t.join(1000); } catch (InterruptedException ignored) {}
-            }
-
             finishEngineOp();
         }, "FCAE-PauseCleanup");
         cleanupThread.setDaemon(true);

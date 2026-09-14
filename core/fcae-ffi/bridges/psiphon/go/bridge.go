@@ -1,11 +1,9 @@
-//go:build ignore
-
-// TEMP: Psiphon is commented out of the Go bridge for now (other bugs first).
-// `ignore` keeps this file in the tree but go mod tidy / go build skip it.
-// Do not delete. Drop the build tag and restore go.mod / psiphon-live to
-// load the library again.
-
 // Package main is a C-ABI shim over Psiphon's MobileLibrary/psi.
+//
+// Desktop only. Android must use the official Psiphon AAR
+// (ca.psiphon:psiphontunnel / android/psiphon), not this c-archive.
+// Stuffing psi into tun2socks' Go runtime, or loading a second Go
+// runtime next to libfcae_go_bridge.so, SIGSEGVs at dlopen.
 //
 // Why not ClientLibrary?
 //
@@ -489,4 +487,5 @@ func psi_string_free(s *C.char) {
 	}
 }
 
-// The combined bridge has one main function in bridge.go.
+// c-archive / c-shared require a main package.
+func main() {}
