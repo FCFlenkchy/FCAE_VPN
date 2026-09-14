@@ -278,6 +278,74 @@
                 android:textColorHint="#FF6B7280"
                 android:textSize="14sp" />
 
+            <!-- Server-entry sources: tunnel-core learns its first server
+                 entries from an embedded list OR the remote server list.
+                 With neither, Psiphon sits on CandidateServers count 0
+                 forever (the "no capable servers" / "no broker specs" log
+                 spam). PsiphonTunnelService reads these into the config. -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Psiphon remote server list URL"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editPsiphonRemoteUrl"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:hint="https://.../server_list (empty = none)"
+                android:inputType="textUri"
+                android:padding="10dp"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF6B7280"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Psiphon server list signature key"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editPsiphonRemoteKey"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:hint="base64 signature public key"
+                android:inputType="text"
+                android:padding="10dp"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF6B7280"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Psiphon embedded entries file"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editPsiphonEmbeddedFile"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:hint="/path/to/server_entries (empty = none)"
+                android:inputType="text"
+                android:padding="10dp"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF6B7280"
+                android:textSize="14sp" />
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

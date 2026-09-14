@@ -844,10 +844,32 @@ void render_ui() {
                         g_app.add_log(3, ("[ui] psiphon embedded list not readable: " +
                                           std::string(g_app.psiphon_embedded_file)).c_str());
                     }
-                } else if (!g_app.psiphon_remote_url[0]) {
-                    g_app.add_log(3,
-                        "[ui] psiphon has no server-entry source (embedded file or remote "
-                        "server list URL): on a fresh datastore it can never connect");
+                } else {
+                    // No explicit entries file. Auto-load psiphon_servers.txt
+                    // from the executable's directory when it exists and has
+                    // content: the drop-in bundled-entries slot. Put entries
+                    // you are ENTITLED to distribute there (your own servers
+                    // or Psiphon-Labs provisioning) — never entries extracted
+                    // from other clients; redistributing the Psiphon
+                    // network's server addresses unprovisioned is what gets
+                    // repositories taken down.
+                    std::string bundled = exe_dir() + "/psiphon_servers.txt";
+                    std::ifstream f(bundled, std::ios::binary);
+                    if (f) {
+                        std::ostringstream ss;
+                        ss << f.rdbuf();
+                        o->psi_embedded = ss.str();
+                        if (!o->psi_embedded.empty()) {
+                            g_app.add_log(3, ("[ui] psiphon embedded server list: " +
+                                              std::to_string(o->psi_embedded.size()) +
+                                              " bytes from " + bundled).c_str());
+                        }
+                    }
+                    if (o->psi_embedded.empty() && !g_app.psiphon_remote_url[0]) {
+                        g_app.add_log(3,
+                            "[ui] psiphon has no user server-entry source; the core will "
+                            "fall back to the built-in legacy public remote server list");
+                    }
                 }
                 o->c.obfuscation.noize_profile = o->noize.c_str();
                 o->c.force_peer                = o->peer.empty() ? nullptr : o->peer.c_str();
@@ -1163,8 +1185,9 @@ void render_ui() {
                 g_app.protocol = 2; g_app.backend = 0;
             }
             if (ImGui::RadioButton("Tor", &transport, 4)) {
-                // FcaeProtocol::Tor. Do not reset the egress combo — gray it
-                // and apply Off at start so switching protocol restores it.
+                // FcaeProtocol::Tor. Do not reset the egress combo — the
+                // Tor entries gray out and "Psiphon through the tunnel"
+                // stays available (chains behind the Tor-only engine).
                 g_app.protocol = 4; g_app.backend = 0;
             }
             if (ImGui::RadioButton("Psiphon", &transport, 5)) {
@@ -1328,22 +1351,40 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Egress");
             // Tor modes are an Aether-engine hop. Psiphon is a backend.
-            // Protocol Tor / Protocol Psiphon gray this combo without
-            // resetting it, so switching protocol restores the last pick.
-            // Index 3 = Psiphon (applied only when protocol is a WARP transport).
-            const char* egress_modes[] = {
+            // Index 3 = Psiphon (chained behind the engine's SOCKS).
+            static const char* kEgressModes[4] = {
                 "Off",
                 "Tor through the tunnel",
                 "Tunnel through Tor (MASQUE only)",
                 "Psiphon through the tunnel",
             };
+            // Protocol Tor: Off and "Psiphon through the tunnel" are valid
+            // (the chain runs Aether(Tor-only) -> Psiphon); the two Tor
+            // entries would be Tor on Tor, so they are relabeled and snap
+            // back if a stale config still points at them.
+            const bool proto_tor = (g_app.protocol == 4);
+            if (proto_tor && (g_app.tor_mode == 1 || g_app.tor_mode == 2))
+                g_app.tor_mode = 0;
+            const char* egress_labels[4] = {
+                kEgressModes[0],
+                proto_tor ? "Tor through the tunnel (n/a: already Tor)" : kEgressModes[1],
+                proto_tor ? "Tunnel through Tor (n/a: already Tor)"   : kEgressModes[2],
+                kEgressModes[3],
+            };
             if (g_app.tor_mode < 0 || g_app.tor_mode > 3) g_app.tor_mode = 0;
-            const bool lock_egress = (g_app.protocol == 4 || g_app.backend == 1);
+            // Only Protocol Psiphon locks the combo: there is no engine to
+            // apply an egress to then. Do not reset the value, so switching
+            // protocol restores the last pick.
+            const bool lock_egress = (g_app.backend == 1);
             if (lock_egress) ImGui::BeginDisabled();
-            ImGui::Combo("Egress", &g_app.tor_mode, egress_modes, 4);
+            ImGui::Combo("Egress", &g_app.tor_mode, egress_labels, 4);
             if (lock_egress) ImGui::EndDisabled();
-            if (g_app.protocol == 4)
-                ImGui::TextDisabled("Tor is selected above; egress is unused until you change protocol.");
+            if (g_app.backend == 1)
+                ImGui::TextDisabled("Psiphon is the transport; egress applies to Aether sessions only.");
+            else if (proto_tor && g_app.tor_mode == 3)
+                ImGui::TextDisabled("Psiphon chains through the Tor-only SOCKS (UpstreamProxyURL): Tor first, then Psiphon exits.");
+            else if (proto_tor)
+                ImGui::TextDisabled("Tor-only engine. Egress can chain Psiphon through it.");
             else if (g_app.backend == 1)
                 ImGui::TextDisabled("Psiphon is the transport; egress is unused.");
             // In TUN mode the routing to the right port happens internally,

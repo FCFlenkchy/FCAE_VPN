@@ -102,7 +102,7 @@ func main() {
 		embedded = string(raw)
 	}
 
-	warnNoServerEntrySource(config, embedded)
+	config = ensureServerEntrySource(config, embedded)
 
 	if err := os.MkdirAll(*dataRoot, 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "fcae-psiphon-console: creating -data-root: %v\n", err)
@@ -260,16 +260,33 @@ func renderConfig(raw []byte, opts renderOptions) ([]byte, error) {
 	return out, nil
 }
 
-// warnNoServerEntrySource matches the diagnostic in the desktop shim and the
-// Rust bridge: without one of the three bootstrap sources the controller can
-// never leave CandidateServers count 0.
-func warnNoServerEntrySource(config []byte, embedded string) {
+// Legacy PUBLIC remote server list + signature key from the open-source
+// Psiphon 3 clients (community clients embed the same values). Fallback so
+// the console can bootstrap without provisioning.
+const (
+	defaultServerListURL = "https://s3.amazonaws.com//psiphon/web/mjr4-p23r-puwl/server_list_compressed"
+	defaultServerListKey = "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH" +
+		"5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5" +
+		"OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42Kcot" +
+		"LFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6" +
+		"/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7G" +
+		"stZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1O" +
+		"geF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8" +
+		"u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz" +
+		"31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xal" +
+		"KxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM="
+)
+
+// ensureServerEntrySource mirrors the desktop shim: embedded list wins, then
+// any remote/obfuscated list already in the config, then the legacy public
+// remote server list so a fresh datastore can bootstrap.
+func ensureServerEntrySource(config []byte, embedded string) []byte {
 	if embedded != "" {
-		return
+		return config
 	}
 	var probe map[string]json.RawMessage
-	if json.Unmarshal(config, &probe) != nil {
-		return
+	if err := json.Unmarshal(config, &probe); err != nil {
+		return config
 	}
 	for _, key := range []string{
 		"RemoteServerListUrl", "RemoteServerListURLs",
@@ -277,14 +294,16 @@ func warnNoServerEntrySource(config []byte, embedded string) {
 		"TargetServerEntry",
 	} {
 		if _, ok := probe[key]; ok {
-			return
+			return config
 		}
 	}
-	fmt.Fprintln(os.Stderr, strings.Join([]string{
-		"fcae-psiphon-console: WARNING no server entry source configured:",
-		"  pass -embedded <file> (encoded server entries), or set RemoteServerListUrl",
-		"  + RemoteServerListSignaturePublicKey in the config JSON. Without one of",
-		"  these, the controller stalls on CandidateServers count 0 forever",
-		"  (\"no capable servers\", \"no broker specs\").",
-	}, "\n"))
+	probe["RemoteServerListUrl"] = json.RawMessage(`"` + defaultServerListURL + `"`)
+	probe["RemoteServerListSignaturePublicKey"] = json.RawMessage(`"` + defaultServerListKey + `"`)
+	out, err := json.Marshal(probe)
+	if err != nil {
+		return config
+	}
+	fmt.Fprintln(os.Stderr,
+		"fcae-psiphon-console: no server-entry source configured; using the built-in legacy public remote server list")
+	return out
 }

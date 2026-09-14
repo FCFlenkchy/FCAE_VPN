@@ -64,6 +64,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerPsiphonRegion: Spinner
     private lateinit var editPsiphonSocksPort: android.widget.EditText
     private lateinit var editPsiphonHttpPort: android.widget.EditText
+    // Server-entry sources (remote list URL + signature key, or a local file
+    // with encoded entries). At least one must be set or Psiphon can never
+    // bootstrap its first server entries on a fresh datastore.
+    private lateinit var editPsiphonRemoteUrl: android.widget.EditText
+    private lateinit var editPsiphonRemoteKey: android.widget.EditText
+    private lateinit var editPsiphonEmbeddedFile: android.widget.EditText
+    // Which egress entries are available for the current protocol; -1 = not
+    // built yet. The adapter is rebuilt only when this changes, because
+    // replacing a Spinner adapter resets its selection.
+    private var egressAvailSig = -1
     /// Regions currently offered, index 0 always "Auto" (empty code).
     private var psiphonRegionCodes: List<String> = listOf("")
     /// Region chosen before the list was known, restored once it arrives.
@@ -337,6 +347,9 @@ class MainActivity : AppCompatActivity() {
         spinnerPsiphonRegion = findViewById(R.id.spinnerPsiphonRegion)
         editPsiphonSocksPort = findViewById(R.id.editPsiphonSocksPort)
         editPsiphonHttpPort = findViewById(R.id.editPsiphonHttpPort)
+        editPsiphonRemoteUrl = findViewById(R.id.editPsiphonRemoteUrl)
+        editPsiphonRemoteKey = findViewById(R.id.editPsiphonRemoteKey)
+        editPsiphonEmbeddedFile = findViewById(R.id.editPsiphonEmbeddedFile)
         switchEch = findViewById(R.id.switchEch)
         switchQuick = findViewById(R.id.switchQuick)
         switchLan = findViewById(R.id.switchLan)
@@ -527,8 +540,9 @@ class MainActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
-                // Gray egress when Tor-only or Psiphon is the transport.
-                // Do not reset the combo — restoring protocol restores the pick.
+                // Gray unavailable egress entries (Psiphon protocol locks the
+                // combo; Tor protocol grays the two Tor entries). Do not reset
+                // the combo — restoring protocol restores the pick.
                 applyTorLock()
                 updateTorHint()
             }
@@ -819,9 +833,15 @@ class MainActivity : AppCompatActivity() {
      */
     private fun applyTorLock() {
         if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
-        val lockEgress = isTorOnly() || isPsiphonProtocol()
+        // Only Protocol=Psiphon locks the whole combo (the engine is not the
+        // transport then, so no egress applies). Protocol=Tor keeps the
+        // spinner enabled: "Psiphon through the tunnel" chains the AAR behind
+        // the Tor-only engine; the two Tor entries are grayed per-item by
+        // applyEgressAvailability() because Tor-on-Tor is meaningless.
+        val lockEgress = isPsiphonProtocol()
         spinnerTor.isEnabled = !lockEgress
         spinnerTor.alpha = if (lockEgress) 0.5f else 1.0f
+        applyEgressAvailability()
         // Tor-only still uses bridges; egress is unused (value kept for restore).
         val torOn = isTorOnly() || (!isPsiphonProtocol() && spinnerTor.selectedItemPosition in 1..2)
         spinnerTorBridges.isEnabled = torOn
@@ -832,6 +852,59 @@ class MainActivity : AppCompatActivity() {
         editTorBridgeLines.alpha = if (custom) 1.0f else 0.5f
 
         updateTorHint()
+    }
+
+    /**
+     * Gray the egress entries the current protocol cannot combine with.
+     *
+     * A plain ArrayAdapter cannot disable individual rows, so this installs a
+     * BaseAdapter whose disabled rows render gray and cannot be picked from
+     * the dropdown. Rebuilt only when the availability set actually changes
+     * (egressAvailSig), because swapping an adapter resets the selection and
+     * re-fires the item listener.
+     *
+     *   Protocol WARP   -> all four entries selectable (unchanged behaviour).
+     *   Protocol Tor    -> Off + "Psiphon through the tunnel" selectable; the
+     *                      two Tor entries are gray (Tor on Tor is a no-op).
+     *   Protocol Psiphon-> whole spinner disabled by applyTorLock().
+     */
+    private fun applyEgressAvailability() {
+        if (!::spinnerTor.isInitialized) return
+        val sig = if (isTorOnly()) 1 else 0
+        if (sig == egressAvailSig) return
+        egressAvailSig = sig
+
+        val labels = listOf(
+            "Off",
+            "Tor through the tunnel",
+            "Tunnel through Tor (MASQUE only)",
+            "Psiphon through the tunnel",
+        )
+        val disabled = if (isTorOnly()) setOf(1, 2) else emptySet()
+        val inflater = android.view.LayoutInflater.from(this)
+        spinnerTor.adapter = object : android.widget.BaseAdapter() {
+            override fun getCount(): Int = labels.size
+            override fun getItem(position: Int): Any = labels[position]
+            override fun getItemId(position: Int): Long = position.toLong()
+            override fun isEnabled(position: Int): Boolean = position !in disabled
+            override fun areAllItemsEnabled(): Boolean = disabled.isEmpty()
+            private fun bind(v: android.view.View?, parent: android.view.ViewGroup, position: Int): android.view.View {
+                val tv = (v ?: inflater.inflate(
+                    android.R.layout.simple_spinner_dropdown_item, parent, false)) as android.widget.TextView
+                tv.text = labels[position]
+                tv.alpha = if (position in disabled) 0.4f else 1.0f
+                return tv
+            }
+            override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View =
+                bind(convertView, parent, position)
+            override fun getDropDownView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View =
+                bind(convertView, parent, position)
+        }
+        // Keep the current pick when it stays valid; otherwise fall back to
+        // Off. setSelection(…, false) suppresses the animation, and the
+        // listener re-running applyTorLock is harmless (sig unchanged).
+        val keep = spinnerTor.selectedItemPosition.coerceIn(0, 3)
+        spinnerTor.setSelection(if (keep in disabled) 0 else keep, false)
     }
 
     /**
@@ -847,13 +920,17 @@ class MainActivity : AppCompatActivity() {
             "" // TUN mode: routing is automatic
         } else if (isPsiphonProtocol()) {
             "Psiphon reaches its servers on its own; tun2socks uses Psiphon SOCKS. Egress is unused."
+        } else if (isTorOnly() && isEgressPsiphon()) {
+            // user -> Psiphon -> Tor -> internet: the AAR dials its servers
+            // through the Tor-only engine SOCKS (UpstreamProxyURL).
+            "Psiphon chains through the Tor-only tunnel (UpstreamProxyURL): Tor first, then Psiphon exits."
         } else if (isEgressPsiphon()) {
             "Aether connects first; Psiphon then dials through Aether SOCKS (UpstreamProxyURL)."
         } else when (spinnerTor.selectedItemPosition) {
             1 -> "Proxy mode: point SOCKS clients at the Tor SOCKS port; the tunnel's own ports stay plain (un-tor'ed)."
             2 -> "Proxy mode: use the tunnel's SOCKS/HTTP ports as usual; tor is the carrier underneath them."
             else -> if (isTorOnly())
-                "Proxy mode: dial the Tor SOCKS port; Tor has no WARP tunnel. Egress is unused until you change protocol."
+                "Proxy mode: dial the Tor SOCKS port; Tor has no WARP tunnel. Egress can chain Psiphon through it."
             else ""
         }
         textTorHint.text = hint
@@ -873,6 +950,9 @@ class MainActivity : AppCompatActivity() {
             putString("torBridgeLines", editTorBridgeLines.text.toString().trim())
             putInt("engineLog", spinnerEngineLog.selectedItemPosition)
             putInt("backend", if (isPsiphonProtocol()) 1 else 0)
+            putString("psiphonRemoteUrl", editPsiphonRemoteUrl.text.toString().trim())
+            putString("psiphonRemoteKey", editPsiphonRemoteKey.text.toString().trim())
+            putString("psiphonEmbeddedFile", editPsiphonEmbeddedFile.text.toString().trim())
             putString("torSocksPort", editTorSocksPort.text.toString().trim())
             putString("psiphonRegion", selectedPsiphonRegion())
             putString("psiphonSocksPort", editPsiphonSocksPort.text.toString().trim())
@@ -920,6 +1000,7 @@ class MainActivity : AppCompatActivity() {
         // fields entirely, so there is nothing to migrate for that backend
         // -- the egress entry just resets to Off.
         val savedTor = prefs.getInt("tor", 0)
+        val savedProto = prefs.getInt("protocol", 0)
         if (savedTor > 3) {
             // Pre-Psiphon-egress: 3+ was the old "Tor only" egress entry.
             if (prefs.getInt("backend", 0) != 1) {
@@ -927,7 +1008,10 @@ class MainActivity : AppCompatActivity() {
             }
             spinnerTor.setSelection(0)
         } else {
-            spinnerTor.setSelection(savedTor.coerceIn(0, 3))
+            // Protocol=Tor grays egress 1/2 (Tor-on-Tor); restore Off instead
+            // of a grayed entry. 3 (Psiphon through the tunnel) stays valid.
+            val pos = savedTor.coerceIn(0, 3)
+            spinnerTor.setSelection(if (savedProto == 4 && pos in 1..2) 0 else pos)
         }
         spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
         editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
@@ -935,6 +1019,9 @@ class MainActivity : AppCompatActivity() {
         editTorSocksPort.setText(prefs.getString("torSocksPort", "1821"))
         editPsiphonSocksPort.setText(prefs.getString("psiphonSocksPort", "0"))
         editPsiphonHttpPort.setText(prefs.getString("psiphonHttpPort", "0"))
+        editPsiphonRemoteUrl.setText(prefs.getString("psiphonRemoteUrl", ""))
+        editPsiphonRemoteKey.setText(prefs.getString("psiphonRemoteKey", ""))
+        editPsiphonEmbeddedFile.setText(prefs.getString("psiphonEmbeddedFile", ""))
         savedPsiphonRegion = prefs.getString("psiphonRegion", "") ?: ""
         refreshPsiphonRegions()
         switchEch.isChecked = prefs.getBoolean("ech", true)
@@ -1011,6 +1098,15 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
         i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
+        // Server-entry sources: without one of these the controller sits on
+        // CandidateServers count 0 forever on a fresh datastore. The service
+        // also persists them, so restarts keep working.
+        val psiUrl = editPsiphonRemoteUrl.text.toString().trim()
+        val psiKey = editPsiphonRemoteKey.text.toString().trim()
+        val psiList = editPsiphonEmbeddedFile.text.toString().trim()
+        if (psiUrl.isNotEmpty()) i.putExtra("psiphonRemoteUrl", psiUrl)
+        if (psiKey.isNotEmpty()) i.putExtra("psiphonRemoteKey", psiKey)
+        if (psiList.isNotEmpty()) i.putExtra("psiphonEmbeddedListFile", psiList)
         if (!upstream.isNullOrBlank()) i.putExtra("upstreamProxy", upstream)
         startForegroundService(i)
     }
@@ -1535,13 +1631,24 @@ class MainActivity : AppCompatActivity() {
     private fun isPsiphonProtocol(): Boolean =
         ::spinnerProtocol.isInitialized && spinnerProtocol.selectedItemPosition == 5
 
-    /** Egress Psiphon while a WARP transport is selected. Protocol=Psiphon does not apply this. */
+    /**
+     * Egress "Psiphon through the tunnel": valid with any Aether-backed
+     * protocol — WARP transports AND Protocol=Tor (the chain then runs
+     * Aether(Tor-only) -> Psiphon). Only Protocol=Psiphon excludes it, since
+     * there is no engine to chain through then.
+     */
     private fun isEgressPsiphon(): Boolean =
-        ::spinnerTor.isInitialized && !isTorOnly() && !isPsiphonProtocol() &&
+        ::spinnerTor.isInitialized && !isPsiphonProtocol() &&
             spinnerTor.selectedItemPosition == 3
 
+    /**
+     * Only Protocol=Psiphon runs the Psiphon attach backend. Egress "Psiphon
+     * through the tunnel" keeps backend Aether: the engine session stays up
+     * and this activity chains the AAR in front of it afterwards (mirrors
+     * the desktop supervisor's _reserved[0] through-tunnel flag).
+     */
     private fun backendFromSelection(): Int =
-        if (isPsiphonProtocol() || isEgressPsiphon()) 1 else 0
+        if (isPsiphonProtocol()) 1 else 0
 
     /** Protocol Psiphon only. Egress Psiphon starts Aether first, then the AAR. */
     private fun isPsiphonSelected(): Boolean = isPsiphonProtocol()

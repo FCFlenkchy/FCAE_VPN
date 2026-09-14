@@ -418,7 +418,35 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     config_json = inject_psiphon_ports(&config_json, p.socks_port, p.http_port)?;
     config_json = inject_android_resolver_policy(&config_json)?;
 
-    warn_when_no_server_entry_source(&config_json, &p.embedded_server_list);
+    // A fresh datastore with no server-entry source can never connect (the
+    // bootstrap chicken-and-egg). Fall back to the LEGACY PUBLIC remote
+    // server list — the same URL + signature key the open-source Psiphon 3
+    // clients shipped (and community clients like Oblivion still ship) — so
+    // an unprovisioned build works out of the box. Explicit user config
+    // (embedded list / remote list / obfuscated lists / target entry) always
+    // wins. NOTE: this is legacy infrastructure; partner provisioning from
+    // Psiphon-Labs remains the supported long-term path.
+    let mut fell_back = false;
+    if !has_server_entry_source(&config_json, p.embedded_server_list.as_deref()) {
+        config_json = inject_string_field(
+            &config_json,
+            "RemoteServerListUrl",
+            DEFAULT_SERVER_LIST_URL,
+        )?;
+        config_json = inject_string_field(
+            &config_json,
+            "RemoteServerListSignaturePublicKey",
+            DEFAULT_SERVER_LIST_SIGNATURE_KEY,
+        )?;
+        fell_back = true;
+    }
+    if fell_back {
+        log::info!(
+            "[psiphon] no server-entry source configured; using the built-in legacy public \
+             remote server list (set psiphon.embedded_server_list or RemoteServerListUrl to \
+             override)"
+        );
+    }
 
     Ok(StartInputs {
         config_json,
@@ -426,40 +454,27 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     })
 }
 
-/// Explain — loudly but non-fatally — when the session has no way to learn
-/// about any Psiphon server.
-///
-/// tunnel-core bootstraps its first server entries from exactly three
-/// sources: the embedded server entry list (psi.Start's second parameter),
-/// RemoteServerListUrl(s) + RemoteServerListSignaturePublicKey, or
-/// ObfuscatedServerListRootURL(s). With none of them the server entry store
-/// is empty and the session fails exactly like this:
-///
-/// ```text
-/// Info: awaiting embedded server entry list import
-/// Warning: tactics request aborted: no capable servers
-/// Error: untunneled DSL fetch failed: ... no broker specs
-/// CandidateServers: {"count":0, ...}
-/// ```
-///
-/// ("no broker specs" is a downstream symptom, not the cause: the untunneled
-/// DSL fetcher rides in-proxy broker clients, and broker specs are derived
-/// from server entries — of which there are none.)
-///
-/// Entries may also survive in the datastore from a previous run, which is
-/// why this warns instead of erroring.
-fn warn_when_no_server_entry_source(config_json: &str, embedded: &Option<String>) {
-    if has_server_entry_source(config_json, embedded.as_deref()) {
-        return;
-    }
-    log::warn!(
-        "[psiphon] no server entry source: config_json sets neither RemoteServerListUrl \
-         (+RemoteServerListSignaturePublicKey) nor an embedded server entry list, so on a \
-         fresh datastore Psiphon can never establish a tunnel (CandidateServers count 0). \
-         Set psiphon.embedded_server_list, or add RemoteServerListUrl and \
-         RemoteServerListSignaturePublicKey to psiphon.config_json."
-    );
-}
+/// Legacy PUBLIC remote server list served by Psiphon's old S3 bucket — the
+/// bootstrap source of the open-source Psiphon 3 clients. Still reachable;
+/// hosted and signed by Psiphon infrastructure; may be retired at any time.
+pub(crate) const DEFAULT_SERVER_LIST_URL: &str =
+    "https://s3.amazonaws.com//psiphon/web/mjr4-p23r-puwl/server_list_compressed";
+
+/// Signature public key that authenticates the legacy public remote server
+/// list payload (the same value embedded in the open-source Psiphon 3
+/// clients). Pairs with [`DEFAULT_SERVER_LIST_URL`].
+pub(crate) const DEFAULT_SERVER_LIST_SIGNATURE_KEY: &str = concat!(
+    "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH",
+    "5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5",
+    "OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42Kcot",
+    "LFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6",
+    "/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7G",
+    "stZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1O",
+    "geF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8",
+    "u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz",
+    "31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xal",
+    "KxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=",
+);
 
 /// True when at least one tunnel-core server-entry source is configured.
 fn has_server_entry_source(config_json: &str, embedded: Option<&str>) -> bool {
@@ -903,6 +918,28 @@ mod tests {
         let inputs = validate(&cfg).expect("should validate");
         assert!(inputs.config_json.contains(r#""PropagationChannelId":"x""#));
         assert!(inputs.embedded_server_list.is_empty());
+    }
+
+    /// The out-of-the-box path: a bare config (the all-F sponsor IDs ship no
+    /// entries) must gain a server-entry source via the legacy public list
+    /// fallback — otherwise a fresh datastore stalls on CandidateServers 0.
+    #[test]
+    fn the_bare_config_falls_back_to_the_legacy_public_list() {
+        let bare = r#"{"PropagationChannelId":"FFFFFFFFFFFFFFFF","SponsorId":"FFFFFFFFFFFFFFFF"}"#;
+        assert!(!has_server_entry_source(bare, None));
+
+        // What validate() does when the predicate says "no source":
+        let json = inject_string_field(bare, "RemoteServerListUrl", DEFAULT_SERVER_LIST_URL).unwrap();
+        let json = inject_string_field(
+            &json,
+            "RemoteServerListSignaturePublicKey",
+            DEFAULT_SERVER_LIST_SIGNATURE_KEY,
+        )
+        .unwrap();
+        assert!(has_server_entry_source(&json, None));
+        assert!(json.contains("server_list_compressed"));
+        // User fields survive the splice.
+        assert!(json.contains(r#""PropagationChannelId":"FFFFFFFFFFFFFFFF""#));
     }
 
     /// With neither an embedded list nor a remote/obfuscated server list in

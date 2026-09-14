@@ -345,8 +345,9 @@ func psi_set_network_callbacks(
 //	-2 invalid argument
 //	-3 psi.Start failed
 //
-// Before launching the controller, psi_start emits a warning notice when no
-// server-entry source is configured; see psiWarnNoServerEntrySource below.
+// Before launching the controller, psi_start guarantees a server-entry
+// source by falling back to the legacy public remote server list; see
+// psiEnsureServerEntrySource below.
 //
 //export psi_start
 func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
@@ -391,7 +392,7 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	embeddedList := C.GoString(embedded)
 	psiMu.Unlock()
 
-	psiWarnNoServerEntrySource(cfg, embeddedList)
+	cfg = psiEnsureServerEntrySource(cfg, embeddedList)
 
 	// psi.Start() is deliberately called WITHOUT psiMu held.
 	//
@@ -416,30 +417,38 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	return 0
 }
 
-// psiWarnNoServerEntrySource mirrors the Rust bridge's startup diagnostic for
-// hosts that drive this shim directly (the console binary).
-//
-// tunnel-core bootstraps its first server entries from exactly three sources:
-// the embedded server entry list, RemoteServerListUrl(s) +
-// RemoteServerListSignaturePublicKey, or ObfuscatedServerListRootURL(s). With
-// none of them the server entry store is empty and the session dies as:
-//
-//	Info: awaiting embedded server entry list import
-//	Warning: tactics request aborted: no capable servers
-//	Error: untunneled DSL fetch failed: ... no broker specs
-//	CandidateServers: {"count":0, ...}
-//
-// "no broker specs" is a downstream symptom, not the cause: the untunneled
-// DSL fetcher rides in-proxy broker clients, and broker specs are derived
-// from server entries — of which there are none. Entries may survive in the
-// datastore from a previous run, hence warn rather than fail.
-func psiWarnNoServerEntrySource(configJSON, embedded string) {
+// Legacy PUBLIC remote server list + signature key, as shipped in the
+// open-source Psiphon 3 clients (community clients like Oblivion embed the
+// same values). Bootstrap fallback for configs without any server-entry
+// source; legacy infrastructure that may be retired upstream.
+const (
+	psiDefaultServerListURL = "https://s3.amazonaws.com//psiphon/web/mjr4-p23r-puwl/server_list_compressed"
+	psiDefaultServerListKey = "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH" +
+		"5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5" +
+		"OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42Kcot" +
+		"LFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6" +
+		"/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7G" +
+		"stZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1O" +
+		"geF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8" +
+		"u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz" +
+		"31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xal" +
+		"KxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM="
+)
+
+// psiEnsureServerEntrySource returns configJSON with a server-entry source
+// guaranteed: an embedded list counts (the caller passes it to Start), and
+// otherwise the config is probed for the remote/obfuscated list fields. When
+// none is present, the legacy public remote server list is injected so a
+// fresh datastore can bootstrap instead of dying on CandidateServers count 0
+// ("no capable servers", then "untunneled DSL fetch ... no broker specs" —
+// broker specs are derived from server entries). User config always wins.
+func psiEnsureServerEntrySource(configJSON, embedded string) string {
 	if embedded != "" {
-		return
+		return configJSON
 	}
 	var probe map[string]json.RawMessage
-	if json.Unmarshal([]byte(configJSON), &probe) != nil {
-		return
+	if err := json.Unmarshal([]byte(configJSON), &probe); err != nil {
+		return configJSON // psi.Start will report the malformed config
 	}
 	for _, key := range []string{
 		"RemoteServerListUrl", "RemoteServerListURLs",
@@ -447,13 +456,18 @@ func psiWarnNoServerEntrySource(configJSON, embedded string) {
 		"TargetServerEntry",
 	} {
 		if _, ok := probe[key]; ok {
-			return
+			return configJSON
 		}
 	}
-	psiEmit(psiLogWarn,
-		"[psiphon] no server entry source: set an embedded server entry list, or add "+
-			"RemoteServerListUrl and RemoteServerListSignaturePublicKey to the config; "+
-			"otherwise Psiphon can never establish its first tunnel")
+	probe["RemoteServerListUrl"] = json.RawMessage(`"` + psiDefaultServerListURL + `"`)
+	probe["RemoteServerListSignaturePublicKey"] = json.RawMessage(`"` + psiDefaultServerListKey + `"`)
+	out, err := json.Marshal(probe)
+	if err != nil {
+		return configJSON
+	}
+	psiEmit(psiLogInfo,
+		"[psiphon] no server entry source configured; using the built-in legacy public remote server list")
+	return string(out)
 }
 
 //export psi_stop

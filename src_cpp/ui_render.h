@@ -187,13 +187,19 @@ struct AppState {
 
         c.engine_log       = (FcaeEngineLog)engine_log;
 
-        // Protocol Tor / Protocol Psiphon do not apply the egress combo
-        // (value is kept in the UI for when the user switches back).
-        // Egress index 3 is Psiphon, not a FcaeTorMode.
+        // Protocol Psiphon does not apply the egress combo (value kept in
+        // the UI for when the user switches back). Protocol Tor DOES combine
+        // with egress 3: the chain runs Aether(Tor-only) -> Psiphon via
+        // UpstreamProxyURL. Egress index 3 is Psiphon, not a FcaeTorMode.
         const bool proto_psiphon = (backend == 1);
-        const bool egress_psiphon = (!proto_psiphon && protocol != 4 && tor_mode == 3);
+        const bool proto_tor     = (protocol == 4);
+        const bool egress_psiphon = (!proto_psiphon && tor_mode == 3);
         int tm = tor_mode;
-        if (protocol == 4 || proto_psiphon || egress_psiphon || tm < 0 || tm > 2) tm = 0;
+        if (proto_psiphon || egress_psiphon || tm < 0 || tm > 2) tm = 0;
+        // Protocol Tor normalises tor.mode to Only inside the runtime no
+        // matter what we pass, so keep sending 0 for the non-chain case (a
+        // stale Chain value would only produce a normalization warning).
+        if (proto_tor) tm = 0;
         c.tor.mode         = (FcaeTorMode)tm;
         c.tor.bridges      = (FcaeTorBridges)tor_bridges;
         c.tor.bridge_lines = tor_bridge_lines[0] ? tor_bridge_lines : nullptr;

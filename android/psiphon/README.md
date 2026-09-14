@@ -18,21 +18,25 @@ Do not compile `MobileLibrary/psi` into `libfcae_go_bridge.so`.
 ## Server-entry sources (required)
 
 The sponsor/propagation IDs in `getPsiphonConfig()` ship **no** server
-entries. Without one of the sources below the controller stalls on
-`CandidateServers: {"count":0}` forever (and logs the misleading
-`untunneled DSL fetch failed ... no broker specs` — broker specs are
-derived from server entries). Configured in this priority order:
+entries, so at least one source must exist. In priority order:
 
-1. Intent extras on `ACTION_START`: `psiphonEmbeddedListFile` (path to an
-   encoded server-entry list), `psiphonRemoteUrl` + `psiphonRemoteKey`
-   (remote server list).
-2. `filesDir/psiphon_settings.json` — the push-without-rebuild path
-   (`adb shell run-as com.fc.fcaevpn` on a debug build):
-   `{"RemoteServerListUrl": "https://.../server_list",
-   "RemoteServerListSignaturePublicKey": "base64 key",
-   "EmbeddedServerEntryListFile": "/path/to/entries"}`
-3. `filesDir/psiphon_server_list.txt` (raw encoded entries), then the
-   bundled asset `assets/psiphon_server_list.txt`.
+1. The in-app Psiphon fields (sent to the service as `psiphonRemoteUrl` +
+   `psiphonRemoteKey` and `psiphonEmbeddedListFile` extras on
+   `ACTION_START`, and persisted across service restarts).
+2. The optional bundled asset `assets/psiphon_servers.txt` (see below;
+   absent by default).
+3. The built-in legacy public remote server list — automatic fallback, so
+   an unprovisioned build connects out of the box.
+
+### Optional: bundling entries as psiphon_servers.txt
+
+No asset ships with the repo — add `assets/psiphon_servers.txt` yourself if
+you want entries bundled into the APK. Put entries you are **entitled to
+distribute** there — from servers you run yourself (the psiphon-tunnel-core
+submodule includes the server code) or from provisioning Psiphon-Labs issued
+to you. Do **not** commit or ship entries extracted from other clients:
+redistributing the Psiphon network's server addresses without provisioning
+is exactly what gets repositories taken down.
 
 The embedded list is passed to `startTunneling()`; the remote list goes
 into the config JSON as `RemoteServerListUrl` +

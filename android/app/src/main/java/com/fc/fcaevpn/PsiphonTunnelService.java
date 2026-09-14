@@ -55,6 +55,23 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private static final String CHANNEL_ID = "fcaevpn_psiphon";
     private static final int NOTIF_ID = 3;
 
+    // Legacy PUBLIC remote server list + signature key from the open-source
+    // Psiphon 3 clients (same values community clients embed). Bootstrap
+    // fallback for builds without provisioning; may be retired upstream.
+    private static final String DEFAULT_SERVER_LIST_URL =
+            "https://s3.amazonaws.com//psiphon/web/mjr4-p23r-puwl/server_list_compressed";
+    private static final String DEFAULT_SERVER_LIST_SIGNATURE_KEY =
+            "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH"
+          + "5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5"
+          + "OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42Kcot"
+          + "LFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6"
+          + "/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7G"
+          + "stZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1O"
+          + "geF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8"
+          + "u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz"
+          + "31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xal"
+          + "KxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=";
+
     private PsiphonTunnel tunnel;
     private String region = "";
     private volatile String lastRegions = "";
@@ -107,20 +124,17 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             String up = intent.getStringExtra("upstreamProxy");
             upstreamProxy = up == null ? "" : up.trim();
         }
-        // Server-entry sources: intent extras first (the host may rotate
-        // them), then filesDir/psiphon_settings.json (the provisioning file —
-        // the only path that works without shipping a new APK), then the
-        // persisted values from previous starts. Everything non-empty is
-        // stored so a restart (region switch, process death) keeps working
-        // without the host having to repeat it.
+        // Server-entry sources: the in-app Psiphon fields (sent as intent
+        // extras) first, then the persisted values from previous starts so a
+        // sticky-service restart with a null intent keeps working. The
+        // bundled asset is consumed later, in readEmbeddedServerList().
         SharedPreferences p = getSharedPreferences("fcae_psiphon", MODE_PRIVATE);
         String extraUrl = intent == null ? null : intent.getStringExtra("psiphonRemoteUrl");
         String extraKey = intent == null ? null : intent.getStringExtra("psiphonRemoteKey");
         String extraList = intent == null ? null : intent.getStringExtra("psiphonEmbeddedListFile");
-        String[] fromFile = readProvisioningFile();
-        remoteServerListUrl = firstNonEmpty(extraUrl, fromFile[0], p.getString("psiphonRemoteUrl", ""));
-        remoteServerListKey = firstNonEmpty(extraKey, fromFile[1], p.getString("psiphonRemoteKey", ""));
-        embeddedListPath = firstNonEmpty(extraList, fromFile[2], p.getString("psiphonEmbeddedListFile", ""));
+        remoteServerListUrl = firstNonEmpty(extraUrl, p.getString("psiphonRemoteUrl", ""));
+        remoteServerListKey = firstNonEmpty(extraKey, p.getString("psiphonRemoteKey", ""));
+        embeddedListPath = firstNonEmpty(extraList, p.getString("psiphonEmbeddedListFile", ""));
         p.edit()
                 .putString("psiphonRemoteUrl", remoteServerListUrl)
                 .putString("psiphonRemoteKey", remoteServerListKey)
@@ -150,6 +164,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         return START_STICKY;
     }
 
+    // startForeground(int, Notification) (no type) is deprecated on API 34,
+    // but is the correct call on < 34 — same deliberate fallback as
+    // FCAEVpnService. Suppressed here rather than gated to keep one call site.
+    @SuppressWarnings("deprecation")
     private void promoteForeground(String text) {
         Notification n = buildNotification(text);
         if (Build.VERSION.SDK_INT >= 34) {
@@ -255,6 +273,18 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 if (!remoteServerListKey.isEmpty()) {
                     o.put("RemoteServerListSignaturePublicKey", remoteServerListKey);
                 }
+            } else if (embeddedListPath.isEmpty()) {
+                // Nothing user-provisioned: fall back to the LEGACY PUBLIC
+                // remote server list (the URL + signature key the
+                // open-source Psiphon 3 clients shipped — community clients
+                // like Oblivion still embed them). This is what makes an
+                // unprovisioned build connect on a fresh datastore instead
+                // of sitting on CandidateServers count 0. Legacy
+                // infrastructure: partner provisioning remains the
+                // supported long-term path.
+                o.put("RemoteServerListUrl", DEFAULT_SERVER_LIST_URL);
+                o.put("RemoteServerListSignaturePublicKey", DEFAULT_SERVER_LIST_SIGNATURE_KEY);
+                emitLog("no server-entry source configured; using the built-in legacy public remote server list");
             }
             return o.toString();
         } catch (Exception e) {
@@ -272,37 +302,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         return u;
     }
 
-    /**
-     * Optional provisioning file: filesDir/psiphon_settings.json.
-     *
-     * Recognised keys (all optional):
-     * { "RemoteServerListUrl": "https://…/server_list",
-     *   "RemoteServerListSignaturePublicKey": "base64 key",
-     *   "EmbeddedServerEntryListFile": "/path/to/server_entries" }
-     *
-     * This is the one provisioning path that needs neither a new APK (asset)
-     * nor host code (extras): push the file with run-as on a debug build and
-     * restart Psiphon. Returns {url, key, embeddedPath}, empty strings when
-     * absent.
-     */
-    private String[] readProvisioningFile() {
-        String[] out = {"", "", ""};
-        try {
-            File f = new File(getFilesDir(), "psiphon_settings.json");
-            if (!f.isFile()) return out;
-            JSONObject o = new JSONObject(new String(readAll(f), "UTF-8"));
-            out[0] = o.optString("RemoteServerListUrl", "").trim();
-            out[1] = o.optString("RemoteServerListSignaturePublicKey", "").trim();
-            out[2] = o.optString("EmbeddedServerEntryListFile", "").trim();
-            emitLog("provisioning file: " + f.getAbsolutePath()
-                    + (out[0].isEmpty() ? "" : " (remote list)")
-                    + (out[2].isEmpty() ? "" : " (embedded list file)"));
-        } catch (Exception e) {
-            emitLog("could not parse psiphon_settings.json: " + e.getMessage());
-        }
-        return out;
-    }
-
     /** One-line summary of which server-entry sources are configured. */
     private String sourceSummary() {
         java.util.List<String> s = new java.util.ArrayList<>();
@@ -316,10 +315,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     /**
      * Load the embedded server entry list for startTunneling().
      *
-     * Order: the file given via psiphonEmbeddedListFile (extra or pref), then
-     * an asset named psiphon_server_list.txt shipped in the APK. Returns ""
-     * when neither exists — which is legitimate only when a remote server
-     * list is configured or the datastore still holds entries.
+     * Order: the file given via the Psiphon "embedded entries file" field
+     * (extra or pref), then the bundled asset assets/psiphon_servers.txt.
+     * Returns "" when neither has content; the config's legacy public
+     * remote server list then bootstraps.
      */
     private String readEmbeddedServerList() {
         if (!embeddedListPath.isEmpty()) {
@@ -335,35 +334,25 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 emitLog("could not read embedded list " + embeddedListPath + ": " + e.getMessage());
             }
         }
-        // filesDir/psiphon_server_list.txt: the push-without-rebuild path,
-        // same provisioning idea as psiphon_settings.json.
-        File sideLoaded = new File(getFilesDir(), "psiphon_server_list.txt");
-        if (sideLoaded.isFile() && sideLoaded.length() > 0) {
-            try {
-                byte[] raw = readAll(sideLoaded);
-                emitLog("importing embedded server entries from " + sideLoaded
-                        + " (" + raw.length + " bytes)");
-                return new String(raw, "UTF-8");
-            } catch (Exception e) {
-                emitLog("could not read " + sideLoaded + ": " + e.getMessage());
-            }
-        }
-        try (java.io.InputStream in = getAssets().open("psiphon_server_list.txt")) {
+        // Optional bundled asset: psiphon_servers.txt is NOT in the repo by
+        // default (an empty placeholder would be dead weight and imply we
+        // ship entries). If you bundle entries — your own servers or
+        // Psiphon-Labs provisioning, never entries extracted from other
+        // clients — add assets/psiphon_servers.txt to the app module and it
+        // is picked up automatically. Without it, the config's legacy public
+        // remote server list is the bootstrap source.
+        try (java.io.InputStream in = getAssets().open("psiphon_servers.txt")) {
             java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
             byte[] buf = new byte[8192];
             int n;
             while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
             if (out.size() > 0) {
-                emitLog("importing embedded server entries from assets"
+                emitLog("importing embedded server entries from assets/psiphon_servers.txt"
                         + " (" + out.size() + " bytes)");
                 return out.toString("UTF-8");
             }
         } catch (Exception ignored) {
             // No bundled asset — the normal case.
-        }
-        if (remoteServerListUrl.isEmpty()) {
-            emitLog("WARNING: no server-entry source (embedded list, asset or remote server"
-                    + " list URL): on a fresh datastore Psiphon can never connect");
         }
         return "";
     }
@@ -525,6 +514,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         }
     }
 
+    // The no-channel Notification.Builder is deprecated since API 26 and only
+    // reached on 24/25 (minSdk 24), where channels do not exist. Deliberate
+    // fallback, same as FCAEVpnService.
+    @SuppressWarnings("deprecation")
     private Notification buildNotification(String text) {
         Intent main = new Intent(this, MainActivity.class);
         PendingIntent piMain = PendingIntent.getActivity(this, 30, main,

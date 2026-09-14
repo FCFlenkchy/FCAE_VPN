@@ -69,3 +69,13 @@ Flags inject `DataRootDirectory`, `EgressRegion`, `LocalSocksProxyPort`,
 `LocalHttpProxyPort` and `UpstreamProxyURL` into the config, so a minimal
 sponsor/propagation JSON is enough. Exit codes: 0 connected / clean
 Ctrl-C, 1 usage, 2 start failure, 3 no tunnel within `-wait`.
+
+## Bundled entries: psiphon_servers.txt
+
+The desktop app auto-loads `psiphon_servers.txt` from the executable's
+directory (the GUI also accepts an explicit path). The repo ships no such
+file: add it yourself, filled only with entries you are entitled to
+distribute (your own servers or Psiphon-Labs provisioning). Never ship
+entries extracted from other clients — that is what gets repositories taken
+down. With no entries file, the built-in legacy public remote server list
+is the bootstrap source.

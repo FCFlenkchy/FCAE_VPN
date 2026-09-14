@@ -148,6 +148,15 @@ android {
     }
 }
 
+// javac only prints "Some input files use or override a deprecated API" and
+// asks for -Xlint:deprecation; turn that on unconditionally so every build
+// lists exactly which file:line uses a deprecated API instead of hiding the
+// details. Remaining hits are deliberate pre-API-26/34 fallbacks, each kept
+// quiet at the call site with @SuppressWarnings("deprecation") + a comment.
+tasks.withType<JavaCompile>().configureEach {
+    options.compilerArgs.add("-Xlint:deprecation")
+}
+
 dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
