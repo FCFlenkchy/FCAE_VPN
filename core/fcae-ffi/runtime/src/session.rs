@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use fcae_abi::{FcaeMode, FcaeState};
+use fcae_abi::{FcaeBackend, FcaeMode, FcaeState};
 use parking_lot::Mutex;
 
 use crate::backend::{BackendContext, BackendHandle, CancelToken, Endpoints};
@@ -462,7 +462,7 @@ async fn run_session(
             }
         };
 
-        let mut handle = handle;
+        // `handle` needs no `mut` (only `endpoints` below is reassigned).
         let mut endpoints = handle.endpoints();
         if let Some(peer) = &endpoints.peer_ip {
             sink.set_peer(peer.clone());
@@ -470,6 +470,13 @@ async fn run_session(
 
         // Egress "Psiphon through the tunnel": Aether is up; start Psiphon
         // with UpstreamProxyURL = Aether SOCKS, then tun2socks dials Psiphon.
+        //
+        // psi_handle owns the second hop and MUST be stopped on every exit
+        // path below, in teardown order: TUN first, then Psiphon (it dials
+        // through Aether), then Aether. Skipping the psi stop left the
+        // controller and its SOCKS listener running after a disconnect --
+        // and the next connect failed with "already running" (which is how
+        // the unused-variable warning earned its keep as a real leak).
         let mut psi_handle: Option<Box<dyn BackendHandle>> = None;
         if config.psiphon.through_tunnel {
             match start_psiphon_through_tunnel(&config, &endpoints, &sink, &cancel).await {
@@ -500,16 +507,16 @@ async fn run_session(
         // started -- no device, no routes, no Go stack.
         if config.mode == FcaeMode::Tun {
             if cancel.is_cancelled() {
-                let _ = handle.stop(stop_timeout).await;
+                stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
                 return Ok(());
             }
             if let Err(e) = tun_bridge.start(&config, &endpoints) {
-                let _ = handle.stop(stop_timeout).await;
+                stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
                 return Err(e);
             }
             if cancel.is_cancelled() {
                 tun_bridge.stop(stop_timeout);
-                let _ = handle.stop(stop_timeout).await;
+                stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
                 return Ok(());
             }
         } else {
@@ -531,8 +538,8 @@ async fn run_session(
         let outcome = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                let _ = handle.stop(stop_timeout).await;
                 tun_bridge.stop(stop_timeout);
+                stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
                 return Ok(());
             }
             r = handle.wait() => r,
@@ -541,9 +548,10 @@ async fn run_session(
 
         // Tunnel ended. Tear the bridge down before retrying so the new
         // session gets a clean device instead of inheriting a half-configured
-        // one.
+        // one. Psiphon (the chained hop) goes down with the bridge, before
+        // Aether, so it never outlives its own upstream.
         tun_bridge.stop(stop_timeout);
-        let _ = handle.stop(stop_timeout).await;
+        stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
 
         match outcome {
             Ok(()) if cancel.is_cancelled() => return Ok(()),
@@ -560,6 +568,20 @@ async fn run_session(
             return Ok(());
         }
     }
+}
+
+/// Stop the chained Psiphon hop (if any) and then the primary backend, in
+/// that order: psi dials through Aether's SOCKS, so it must not outlive it.
+/// Both stops are best-effort and idempotent (each handle guards itself).
+async fn stop_chained_handles(
+    psi: &Option<Box<dyn BackendHandle>>,
+    primary: &Box<dyn BackendHandle>,
+    timeout: Duration,
+) {
+    if let Some(psi) = psi.as_ref() {
+        let _ = psi.stop(timeout).await;
+    }
+    let _ = primary.stop(timeout).await;
 }
 
 /// Start Psiphon as the egress hop in front of an already-up Aether SOCKS.
