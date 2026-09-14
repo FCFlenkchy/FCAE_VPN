@@ -1302,9 +1302,12 @@ void render_ui() {
             // them which one actually carries tor traffic, or they will use
             // the tunnel's plain port and wonder why "tor" did nothing.
             if (g_app.mode == 0) {
-                if (g_app.backend == 1 || (g_app.protocol != 4 && g_app.tor_mode == 3))
+                if (g_app.backend == 1)
                     ImGui::TextDisabled(
                         "Psiphon reaches its servers on its own; tun2socks uses Psiphon SOCKS.");
+                else if (g_app.protocol != 4 && g_app.tor_mode == 3)
+                    ImGui::TextDisabled(
+                        "Aether connects first; Psiphon dials through Aether SOCKS.");
                 else if (g_app.tor_mode == 1)
                     ImGui::TextDisabled(
                         "Proxy mode: point SOCKS clients at the Tor SOCKS port below; "

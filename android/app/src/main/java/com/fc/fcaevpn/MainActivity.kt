@@ -33,6 +33,8 @@ class MainActivity : AppCompatActivity() {
     private var pendingAfterVpnPermission = false
     @Volatile private var pendingPsiSocks = 0
     @Volatile private var pendingPsiHttp = 0
+    /// Egress "Psiphon through the tunnel": AAR is started after Aether is up.
+    @Volatile private var psiEgressStarted = false
     private var lastLogHash = 0L
     @Volatile private var vpnActive = false
     private var wasAtBottom = true
@@ -846,7 +848,7 @@ class MainActivity : AppCompatActivity() {
         } else if (isPsiphonProtocol()) {
             "Psiphon reaches its servers on its own; tun2socks uses Psiphon SOCKS. Egress is unused."
         } else if (isEgressPsiphon()) {
-            "Psiphon reaches its servers on its own; tun2socks uses Psiphon SOCKS."
+            "Aether connects first; Psiphon then dials through Aether SOCKS (UpstreamProxyURL)."
         } else when (spinnerTor.selectedItemPosition) {
             1 -> "Proxy mode: point SOCKS clients at the Tor SOCKS port; the tunnel's own ports stay plain (un-tor'ed)."
             2 -> "Proxy mode: use the tunnel's SOCKS/HTTP ports as usual; tor is the carrier underneath them."
@@ -959,6 +961,7 @@ class MainActivity : AppCompatActivity() {
         userInitiatedDisconnect = false
         commandPaused = false
         commandConnecting = true
+        psiEgressStarted = false
         if (isPsiphonSelected()) {
             if (isTunModeSelected()) {
                 val prep = VpnService.prepare(this)
@@ -986,18 +989,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startPsiphon() {
-        connecting = true
-        vpnActive = true
-        updateButton()
-        saveSettings()
-        statusText.text = "CONNECTING (PSIPHON)"
-        statusText.setTextColor(COLOR_PROGRESS)
-        ingestPsiphonLog("[psiphon] connecting")
+        startPsiphonWithUpstream(null)
+    }
+
+    /** AAR start. `upstream` is socks5://127.0.0.1:<aether> for through-tunnel. */
+    private fun startPsiphonWithUpstream(upstream: String?) {
+        if (upstream == null) {
+            connecting = true
+            vpnActive = true
+            updateButton()
+            saveSettings()
+            statusText.text = "CONNECTING (PSIPHON)"
+            statusText.setTextColor(COLOR_PROGRESS)
+        }
+        ingestPsiphonLog(
+            if (upstream.isNullOrBlank()) "[psiphon] connecting"
+            else "[psiphon] connecting through $upstream"
+        )
         val i = Intent(this, PsiphonTunnelService::class.java)
         i.action = PsiphonTunnelService.ACTION_START
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
         i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
+        if (!upstream.isNullOrBlank()) i.putExtra("upstreamProxy", upstream)
         startForegroundService(i)
     }
 
@@ -1376,7 +1390,14 @@ class MainActivity : AppCompatActivity() {
                 // Psiphon reports its egress regions only after a successful
                 // handshake, so this is the first moment the real list can be
                 // read. Cheap and idempotent: it no-ops unless the set changed.
-                if (state == 4 && isPsiphonSelected()) refreshPsiphonRegions()
+                if (state == 4 && (isPsiphonSelected() || isEgressPsiphon())) refreshPsiphonRegions()
+                if (state == 4 && isEgressPsiphon() && !psiEgressStarted) {
+                    psiEgressStarted = true
+                    val port = if (switchSocks.isChecked)
+                        editSocksPort.text.toString().toIntOrNull() ?: 1819
+                    else 1819
+                    startPsiphonWithUpstream("socks5://127.0.0.1:$port")
+                }
                 // Detect engine stopped while we thought it was active.
                 // 0 = idle/stopped, 5 = terminal error. The FFI keeps state
                 // 5 sticky after the session thread ends, so without the 5
@@ -1522,7 +1543,8 @@ class MainActivity : AppCompatActivity() {
     private fun backendFromSelection(): Int =
         if (isPsiphonProtocol() || isEgressPsiphon()) 1 else 0
 
-    private fun isPsiphonSelected(): Boolean = isPsiphonProtocol() || isEgressPsiphon()
+    /** Protocol Psiphon only. Egress Psiphon starts Aether first, then the AAR. */
+    private fun isPsiphonSelected(): Boolean = isPsiphonProtocol()
 
     /** Tor modes 1/2 only. Protocol Tor/Psiphon and egress Psiphon send Off. */
     private fun effectiveTorMode(): Int {

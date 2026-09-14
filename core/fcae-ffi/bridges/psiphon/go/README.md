@@ -6,10 +6,9 @@ it does not share a runtime with tun2socks.
 | Platform | How Psiphon runs |
 | --- | --- |
 | Android | Official `.aar` (`android/psiphon`). **Not this directory.** |
-| Desktop | This module, `-buildmode=c-archive` with `force_shared`, only when `fcae-bridge-psiphon/enabled` is on. |
+| Desktop | This module, `-buildmode=c-shared` (`force_shared`) as `libfcae_psiphon`, when `psiphon-live` is on. |
 
 Do not compile psi into `libfcae_go_bridge.so`. Two Go runtimes in one
-Android process crash at `dlopen`. `ClientLibrary` has no `BindToDevice`
-and cannot work on Android.
-
-The `enabled` feature is off. Nothing here is built.
+Android process crash at `dlopen`. Two static Go archives in one desktop
+binary fail the link. `ClientLibrary` has no `BindToDevice` and cannot
+work on Android.

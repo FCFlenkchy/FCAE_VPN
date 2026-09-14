@@ -12,9 +12,8 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# Off. Do not compile the Go module. Android uses the official AAR
-# (android/psiphon), not a c-shared. Desktop would build go/ with
-# force_shared when this is turned on later.
+# Desktop: compile go/ as libfcae_psiphon (force_shared). Android ignores
+# this and keeps the official AAR.
 enabled = []
 
 [dependencies]

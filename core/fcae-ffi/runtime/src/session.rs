@@ -462,9 +462,35 @@ async fn run_session(
             }
         };
 
-        let endpoints = handle.endpoints();
+        let mut handle = handle;
+        let mut endpoints = handle.endpoints();
         if let Some(peer) = &endpoints.peer_ip {
             sink.set_peer(peer.clone());
+        }
+
+        // Egress "Psiphon through the tunnel": Aether is up; start Psiphon
+        // with UpstreamProxyURL = Aether SOCKS, then tun2socks dials Psiphon.
+        let mut psi_handle: Option<Box<dyn BackendHandle>> = None;
+        if config.psiphon.through_tunnel {
+            match start_psiphon_through_tunnel(&config, &endpoints, &sink, &cancel).await {
+                Ok(h) => {
+                    let psi_ep = h.endpoints();
+                    if psi_ep.socks.is_some() {
+                        endpoints = psi_ep;
+                    }
+                    psi_handle = Some(h);
+                }
+                Err(e) => {
+                    // Android: the official AAR owns the second hop; the
+                    // attach backend cannot start without a SOCKS port yet.
+                    // Keep Aether and let the host start :psiphon with the
+                    // same UpstreamProxyURL.
+                    log::warn!(
+                        "[session] psiphon through-tunnel not started in-process ({e}); \
+                         Aether stays up for the host to attach Psiphon"
+                    );
+                }
+            }
         }
 
         // Raise TUN once the backend's SOCKS endpoint is actually live.
@@ -534,6 +560,40 @@ async fn run_session(
             return Ok(());
         }
     }
+}
+
+/// Start Psiphon as the egress hop in front of an already-up Aether SOCKS.
+async fn start_psiphon_through_tunnel(
+    config: &SessionConfig,
+    aether: &Endpoints,
+    sink: &TelemetrySink,
+    cancel: &CancelToken,
+) -> Result<Box<dyn BackendHandle>> {
+    let socks = aether.socks.ok_or_else(|| {
+        CoreError::StartFailed(
+            "Psiphon through the tunnel needs Aether's SOCKS listener".into(),
+        )
+    })?;
+    let url = format!("socks5://{socks}");
+    let mut psi_cfg = config.clone();
+    psi_cfg.backend = FcaeBackend::Psiphon;
+    psi_cfg.psiphon.through_tunnel = false;
+    let json = psi_cfg
+        .psiphon
+        .config_json
+        .as_deref()
+        .unwrap_or("{}");
+    psi_cfg.psiphon.config_json = Some(crate::config::inject_upstream_proxy_url(json, &url));
+
+    let backend = registry::resolve(FcaeBackend::Psiphon)?;
+    sink.set_state(
+        FcaeState::Connecting,
+        format!("Starting Psiphon through {url}…"),
+    );
+    let cx = BackendContext::new(psi_cfg, sink.clone(), cancel.clone());
+    let handle = backend.start(cx).await?;
+    log::info!("[session] Psiphon through-tunnel via {url}");
+    Ok(handle)
 }
 
 fn should_retry(auto: bool, max: u32, attempt: u32, cancel: &CancelToken) -> bool {

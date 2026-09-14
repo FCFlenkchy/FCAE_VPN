@@ -96,6 +96,12 @@ pub struct PsiphonConfig {
     pub socks_port: u16,
     /// Local HTTP CONNECT port for Psiphon; 0 = Psiphon chooses.
     pub http_port: u16,
+    /// Egress "Psiphon through the tunnel": start Aether first, then Psiphon
+    /// with UpstreamProxyURL = Aether's SOCKS. User traffic then enters
+    /// Psiphon (tun2socks → Psiphon → Aether → Psiphon servers).
+    ///
+    /// Signalled via FcaeConfig._reserved[0] != 0 so the ABI does not shift.
+    pub through_tunnel: bool,
 }
 
 /// TUN parameters. Owned by the supervisor, not the backend: whichever
@@ -259,6 +265,22 @@ impl SessionConfig {
             _ => Duration::from_secs(420),
         };
         base + self.start_timeout()
+    }
+}
+
+/// Insert `UpstreamProxyURL` into a Psiphon config object.
+///
+/// Used when Psiphon is the egress hop: it must dial through Aether's SOCKS
+/// rather than the underlay. The URL is a loopback socks5 URI and contains
+/// no characters that need JSON escaping.
+pub fn inject_upstream_proxy_url(config_json: &str, url: &str) -> String {
+    let trimmed = config_json.trim();
+    let body = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(trimmed);
+    let body = body.trim().trim_end_matches(',');
+    if body.is_empty() {
+        format!("{{\"UpstreamProxyURL\":\"{url}\"}}")
+    } else {
+        format!("{{{body},\"UpstreamProxyURL\":\"{url}\"}}")
     }
 }
 
@@ -975,5 +997,15 @@ mod tests {
         assert_eq!(cfg.socks_bind_host(), "127.0.0.1");
         cfg.lan_sharing = true;
         assert_eq!(cfg.socks_bind_host(), "0.0.0.0");
+    }
+
+    #[test]
+    fn upstream_proxy_url_is_spliced_into_the_object() {
+        let out = inject_upstream_proxy_url(
+            r#"{"PropagationChannelId":"X"}"#,
+            "socks5://127.0.0.1:1819",
+        );
+        assert!(out.contains(r#""UpstreamProxyURL":"socks5://127.0.0.1:1819""#), "{out}");
+        assert!(out.contains(r#""PropagationChannelId":"X""#), "{out}");
     }
 }

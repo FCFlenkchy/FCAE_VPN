@@ -187,9 +187,11 @@ struct AppState {
         c.tor.bridge_lines = tor_bridge_lines[0] ? tor_bridge_lines : nullptr;
         c.tor.socks_port   = (uint16_t)tor_socks_port;
 
+        // Egress "Psiphon through the tunnel" keeps Aether as the backend
+        // (so WARP comes up first). _reserved[0] tells the supervisor to
+        // start Psiphon next with UpstreamProxyURL = Aether SOCKS.
         if (egress_psiphon) {
-            c.backend  = FCAE_BACKEND_PSIPHON;
-            c.protocol = FCAE_PROTOCOL_AUTO;
+            c._reserved[0] = 1;
         }
 
         // Built in-process. Process-lifetime pointer is safe for fcae_start.

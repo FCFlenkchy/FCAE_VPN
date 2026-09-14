@@ -468,9 +468,9 @@ jobs:
               test -f "$DEST"
             fi
           else
-            # Non-Android builds (linux, windows, macos)
-            # TEMP: psiphon-live commented out — do not load the Psiphon library for now.
-            cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor #,psiphon-live
+            # Non-Android: compile desktop Psiphon as libfcae_psiphon (force_shared).
+            # Android keeps AAR-only (no psiphon-live).
+            cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon-live
 
             DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
             ls -lh "$DEST"
@@ -594,10 +594,10 @@ jobs:
           set -euo pipefail
           mkdir -p package
           cp build/fcaevpn* package/ 2>/dev/null || true
-          # The Psiphon bridge is a Go c-shared library (only one Go
-          # c-archive can be statically linked per binary), so it ships
-          # alongside the executable and must be packaged with it.
-          cp build/libfcae_go_bridge.* package/ 2>/dev/null || true
+          # Desktop Psiphon is libfcae_psiphon (c-shared). tun2socks is inside
+          # libfcae_ffi.a on desktop — do not look for libfcae_go_bridge here.
+          cp build/libfcae_psiphon.* package/ 2>/dev/null || true
+          cp build/fcae_psiphon.dll package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
 
           if [ "${{ matrix.name }}" = "linux-x64" ]; then
@@ -729,6 +729,9 @@ jobs:
 
           cp build/fcaevpn "$APP/Contents/MacOS/fcaevpn"
           chmod +x "$APP/Contents/MacOS/fcaevpn"
+          if [ -f build/libfcae_psiphon.dylib ]; then
+            cp build/libfcae_psiphon.dylib "$APP/Contents/MacOS/"
+          fi
 
           # ── App icon ────────────────────────────────────────────────
           # Build a real .icns from src_cpp/icon_48.png. Finder and the Dock

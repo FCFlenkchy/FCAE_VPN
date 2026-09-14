@@ -166,6 +166,49 @@ function(fcae_link_go_bridges target_name abi)
     target_link_options(${target_name} PRIVATE "-Wl,-rpath,\\$ORIGIN")
 endfunction()
 
+# Desktop Psiphon: second Go runtime as libfcae_psiphon (c-shared). Cargo
+# stages it next to libfcae_ffi.a. CMake must link and copy it because rustc's
+# dylib directives never reach this link. Missing is a warning so a build
+# without psiphon-live still configures.
+function(fcae_link_psiphon target_name triple)
+    set(dirs
+        ${CMAKE_SOURCE_DIR}/target/${triple}/release
+        ${CMAKE_SOURCE_DIR}/core/fcae-ffi/target/${triple}/release
+    )
+    set(found "")
+    set(found_dir "")
+    foreach(d ${dirs})
+        if(EXISTS "${d}/libfcae_psiphon.dll")
+            set(found "${d}/libfcae_psiphon.dll")
+            set(found_dir "${d}")
+            break()
+        elseif(EXISTS "${d}/libfcae_psiphon.so")
+            set(found "${d}/libfcae_psiphon.so")
+            set(found_dir "${d}")
+            break()
+        elseif(EXISTS "${d}/libfcae_psiphon.dylib")
+            set(found "${d}/libfcae_psiphon.dylib")
+            set(found_dir "${d}")
+            break()
+        endif()
+    endforeach()
+    if(found STREQUAL "")
+        message(STATUS "libfcae_psiphon not staged for ${triple} (psiphon-live off?)")
+        return()
+    endif()
+    message(STATUS "linking desktop Psiphon: ${found}")
+    if(EXISTS "${found_dir}/libfcae_psiphon.dll.a")
+        target_link_libraries(${target_name} PRIVATE "${found_dir}/libfcae_psiphon.dll.a")
+    else()
+        target_link_libraries(${target_name} PRIVATE "${found}")
+    endif()
+    add_custom_command(TARGET ${target_name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${found}" "$<TARGET_FILE_DIR:${target_name}>"
+        COMMENT "stage libfcae_psiphon next to ${target_name}"
+    )
+endfunction()
+
 # Android Psiphon: official AAR, not a second Go library.
 
 # ── Target-specific configuration ────────────────────────────────────────
@@ -333,6 +376,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-pc-windows-gnu)
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
+    fcae_link_psiphon(fcaevpn x86_64-pc-windows-gnu)
 
     # System libs only — crypto is inside the Rust staticlib (BoringSSL), not OpenSSL.
     # pthread MUST come after libfcae_ffi.a (BoringSSL thread_pthread needs it).
@@ -424,6 +468,17 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         endif()
     endif()
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
+    if(AETHER_TARGET STREQUAL "MACOS_ARM64")
+        fcae_link_psiphon(fcaevpn aarch64-apple-darwin)
+    elseif(AETHER_TARGET STREQUAL "MACOS_X64")
+        fcae_link_psiphon(fcaevpn x86_64-apple-darwin)
+    else()
+        if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+            fcae_link_psiphon(fcaevpn aarch64-apple-darwin)
+        else()
+            fcae_link_psiphon(fcaevpn x86_64-apple-darwin)
+        endif()
+    endif()
 
     # Link GLFW: use target if available (static), otherwise fall back to lib name
     if(TARGET glfw)
@@ -496,6 +551,7 @@ elseif(UNIX)
 
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-unknown-linux-gnu)
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
+    fcae_link_psiphon(fcaevpn x86_64-unknown-linux-gnu)
 
     # Link GLFW: use imported target if available, otherwise raw lib name
     if(TARGET glfw)

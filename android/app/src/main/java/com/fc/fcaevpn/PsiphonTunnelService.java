@@ -57,6 +57,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private PsiphonTunnel tunnel;
     private String region = "";
     private volatile String lastRegions = "";
+    private String upstreamProxy = "";
     private int wantSocks;
     private int wantHttp;
     private final AtomicInteger socksPort = new AtomicInteger(0);
@@ -93,9 +94,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             region = r == null ? "" : r.trim();
             wantSocks = intent.getIntExtra("psiphonSocksPort", 0);
             wantHttp = intent.getIntExtra("psiphonHttpPort", 0);
+            String up = intent.getStringExtra("upstreamProxy");
+            upstreamProxy = up == null ? "" : up.trim();
         }
         stopping = false;
-        emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")"));
+        emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")")
+                + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy));
         final PsiphonTunnel t = tunnel;
         new Thread(() -> {
             try {
