@@ -400,6 +400,35 @@ jobs:
           ln -sfn "$GITHUB_WORKSPACE/core/psiphon" \
             "$GOPATH_DIR/src/github.com/Psiphon-Labs/psiphon-tunnel-core"
 
+          # gobind -lang=go,java copies support sources (bind/seq.go.support,
+          # bind/java/Seq.java, seq_android.*) out of package
+          # golang.org/x/mobile/bind, and the generated gobind package later
+          # imports golang.org/x/mobile/bind/... — all resolved through plain
+          # GOPATH because make.bash forces GO111MODULE=off. But
+          # `go install .../cmd/gobind@latest` only populates the module
+          # cache, which GOPATH mode cannot see:
+          #   '"golang.org/x/mobile/bind" is not found; run go get ...'
+          # Point GOPATH at the exact module-cache extraction the gobind
+          # binary was built from — same commit as the codegen, so the copied
+          # support files can never mismatch the binary, and no network round
+          # trip. The cache copy is read-only; gobind only reads it.
+          GOMODCACHE_DIR="$(go env GOMODCACHE)"
+          XMOBILE_VER=$(go version -m "$(command -v gobind)" \
+            | awk '$1 == "mod" && $2 == "golang.org/x/mobile" {print $3; exit}')
+          XMOBILE_DIR="${GOMODCACHE_DIR}/golang.org/x/mobile@${XMOBILE_VER}"
+          if [ ! -d "$XMOBILE_DIR" ]; then
+            # Fallback: whatever extraction the cache holds (there is one).
+            XMOBILE_DIR=$(ls -d "${GOMODCACHE_DIR}"/golang.org/x/mobile@* 2>/dev/null \
+              | sort -V | tail -1 || true)
+          fi
+          if [ -z "${XMOBILE_DIR:-}" ] || [ ! -d "$XMOBILE_DIR" ]; then
+            echo "::error::golang.org/x/mobile source missing from module cache; gobind cannot generate bindings"
+            exit 1
+          fi
+          mkdir -p "$GOPATH_DIR/src/golang.org/x"
+          ln -sfn "$XMOBILE_DIR" "$GOPATH_DIR/src/golang.org/x/mobile"
+          echo "staged in GOPATH: $GOPATH_DIR/src/golang.org/x/mobile -> $(readlink -f "$GOPATH_DIR/src/golang.org/x/mobile")"
+
           export GO111MODULE=off
           export ANDROID_PLATFORM_VERSION=34
 
