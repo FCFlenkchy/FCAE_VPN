@@ -102,15 +102,6 @@
                 android:visibility="gone" />
 
             <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/switchPreRelease"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:checked="false"
-                android:text="Pre-release updates (beta)"
-                android:textColor="#FFE0E4EE" />
-
-            <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/switchAutoUpdate"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

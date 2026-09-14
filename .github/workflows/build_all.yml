@@ -184,7 +184,7 @@ jobs:
       - name: update version.json for build
         run: |
           set -euo pipefail
-          export TAG="${{ github.event.inputs.release_tag }}"
+          export TAG="${{ github.event.inputs.release_tag }}${{ inputs.prerelease && '-prerelease' || '' }}"
           export DATE=$(date +%Y-%m-%d)
           export NOTES="${{ github.event.inputs.extra_notes }}"
           export DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases"
@@ -620,7 +620,7 @@ jobs:
           cmake .. -G Ninja -DCMAKE_CXX_COMPILER=g++ \
             -DCMAKE_PREFIX_PATH=/usr/local/glfw_static \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}"
+            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}${{ inputs.prerelease && '-prerelease' || '' }}"
           cmake --build . --config Release
 
       - name: build frontend (windows)
@@ -629,7 +629,7 @@ jobs:
           mkdir -p build && cd build
           cmake .. -G Ninja \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}"
+            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}${{ inputs.prerelease && '-prerelease' || '' }}"
           cmake --build . --config Release
 
       - name: build frontend (macOS)
@@ -643,7 +643,7 @@ jobs:
           fi
           cmake .. -G Ninja \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}"
+            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}${{ inputs.prerelease && '-prerelease' || '' }}"
           cmake --build . --config Release
 
       - name: build apk
@@ -1034,7 +1034,12 @@ jobs:
           ls -lah release-zips/
           test $(ls -1 release-zips/* 2>/dev/null | wc -l) -ge 1
 
-      - name: update version.json
+      - name: skip version.json bump (pre-release)
+        if: ${{ inputs.prerelease }}
+        run: echo "pre-release run, leaving version.json (stable channel) untouched"
+
+      - name: update version.json (stable only)
+        if: ${{ inputs.prerelease != true }}
         run: |
           set -euo pipefail
           export TAG="${{ github.event.inputs.release_tag }}"
@@ -1061,7 +1066,8 @@ jobs:
           print(open('version.json').read())
           PYEOF
 
-      - name: commit and push version.json
+      - name: commit and push version.json (stable only)
+        if: ${{ inputs.prerelease != true }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

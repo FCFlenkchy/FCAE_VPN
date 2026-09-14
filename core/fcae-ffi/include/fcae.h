@@ -130,8 +130,8 @@ typedef enum {
 
 typedef enum {
     FCAE_TOR_BRIDGES_NONE      = 0,
-    FCAE_TOR_BRIDGES_OBFS4     = 1,
-    FCAE_TOR_BRIDGES_SNOWFLAKE = 2,
+    FCAE_TOR_BRIDGES_OBFS4     = 1,  /* built-in set; bridge_lines override */
+    FCAE_TOR_BRIDGES_SNOWFLAKE = 2,  /* built-in set; bridge_lines override */
     FCAE_TOR_BRIDGES_CUSTOM    = 3   /* use FcaeTor.bridge_lines            */
 } FcaeTorBridges;
 
@@ -239,7 +239,7 @@ typedef struct {
     const char     *bind;          /* NULL = 127.0.0.1:<socks_port>        */
     uint16_t        socks_port;    /* tor's own SOCKS5 port; 0 = 1821      */
     const char     *state_dir;     /* NULL = under data_dir                */
-    const char     *bridge_lines;  /* newline-separated, for CUSTOM        */
+    const char     *bridge_lines;  /* newline-separated; CUSTOM, or override for OBFS4/SNOWFLAKE */
     const char     *pt_path;       /* pluggable transport binary, or NULL  */
 } FcaeTor;
 

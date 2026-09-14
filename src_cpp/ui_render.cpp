@@ -139,7 +139,6 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, g_app.save_status);
     h = fnv_cstr(h, g_app.copy_status);
     h = fnv_value(h, g_app.start_busy.load());
-    h = fnv_value(h, g_app.prerelease_updates);
 
     // Update panel (button label, "Checking... (Ns)" counter, popup contents).
     h = fnv_value(h, s_update_checked);
@@ -323,6 +322,8 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "backend") g_app.backend = atoi(val.c_str());
     else if (key == "tor_socks_port") g_app.tor_socks_port = atoi(val.c_str());
     else if (key == "psiphon_region") snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region), "%s", val.c_str());
+    else if (key == "psiphon_region_list")
+        snprintf(g_app.psiphon_region_list, sizeof(g_app.psiphon_region_list), "%s", val.c_str());
     else if (key == "psiphon_transport") g_app.psiphon_transport = atoi(val.c_str());
     else if (key == "psiphon_data_dir") snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir), "%s", val.c_str());
     else if (key == "psiphon_socks_port") g_app.psiphon_socks_port = atoi(val.c_str());
@@ -354,7 +355,6 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
     else if (key == "auto_update_check") g_app.auto_update_check = atoi(val.c_str()) != 0;
-    else if (key == "prerelease_updates") g_app.prerelease_updates = atoi(val.c_str()) != 0;
     else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
     else if (key == "engine_log") g_app.engine_log = atoi(val.c_str());
     else if (key == "tor_mode") g_app.tor_mode = atoi(val.c_str());
@@ -390,6 +390,7 @@ static void save_config() {
     fprintf(f, "backend=%d\n", g_app.backend);
     fprintf(f, "tor_socks_port=%d\n", g_app.tor_socks_port);
     fprintf(f, "psiphon_region=%s\n", g_app.psiphon_region);
+    fprintf(f, "psiphon_region_list=%s\n", g_app.psiphon_region_list);
     fprintf(f, "psiphon_transport=%d\n", g_app.psiphon_transport);
     fprintf(f, "psiphon_data_dir=%s\n", g_app.psiphon_data_dir);
     fprintf(f, "psiphon_socks_port=%d\n", g_app.psiphon_socks_port);
@@ -417,7 +418,6 @@ static void save_config() {
     fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
     fprintf(f, "auto_scroll=%d\n", g_app.auto_scroll ? 1 : 0);
     fprintf(f, "auto_update_check=%d\n", g_app.auto_update_check ? 1 : 0);
-    fprintf(f, "prerelease_updates=%d\n", g_app.prerelease_updates ? 1 : 0);
     fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
     fprintf(f, "engine_log=%d\n", g_app.engine_log);
     fprintf(f, "tor_mode=%d\n", g_app.tor_mode);
@@ -617,7 +617,7 @@ void ui_init() {
 
     // Auto-trigger update check once on startup if enabled
     if (g_app.auto_update_check) {
-        fcae_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
+        fcae_check_update_async(FCAE_VERSION, /*include_prereleases=*/false); // stable releases only
     }
 }
 
@@ -924,7 +924,7 @@ void render_ui() {
                 s_update_available = false;
                 snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    fcae_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
+                    fcae_check_update_async(FCAE_VERSION, /*include_prereleases=*/false); // stable releases only
                     s_update_checked = false;
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
@@ -957,14 +957,14 @@ void render_ui() {
                 s_update_checked = true;
                 snprintf(s_update_status, sizeof(s_update_status), "%.127s", info.status_message);
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    fcae_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
+                    fcae_check_update_async(FCAE_VERSION, /*include_prereleases=*/false); // stable releases only
                     s_update_checked = false;
                     s_update_available = false;
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
             } else {
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    fcae_check_update_async(FCAE_VERSION, g_app.prerelease_updates);
+                    fcae_check_update_async(FCAE_VERSION, /*include_prereleases=*/false); // stable releases only
                     s_update_checked = false;
                     s_update_available = false;
                     s_check_start_time = std::chrono::steady_clock::now();
@@ -1278,20 +1278,48 @@ void render_ui() {
                 static char region_buf[1024];
                 static std::vector<std::string> codes;
                 static double last_poll = 0.0;
+                static bool seeded = false;
+                if (!seeded) {
+                    // Seed from the persisted list (cfg psiphon_region_list) so
+                    // the combo starts populated from previous sessions — the
+                    // engine only reports regions after a fresh handshake.
+                    seeded = true;
+                    codes.push_back("");           // Auto
+                    const char* q = g_app.psiphon_region_list;
+                    while (*q) {
+                        const char* comma = strchr(q, ',');
+                        size_t len = comma ? (size_t)(comma - q) : strlen(q);
+                        if (len > 0) codes.push_back(std::string(q, len));
+                        if (!comma) break;
+                        q = comma + 1;
+                    }
+                }
                 double now = ImGui::GetTime();
                 if (now - last_poll > 2.0) {
                     last_poll = now;
                     region_buf[0] = '\0';
                     fcae_psiphon_regions(region_buf, (uint32_t)sizeof(region_buf));
-                    codes.clear();
-                    codes.push_back("");           // Auto
-                    const char* p = region_buf;
-                    while (*p) {
-                        const char* comma = strchr(p, ',');
-                        size_t len = comma ? (size_t)(comma - p) : strlen(p);
-                        if (len > 0) codes.push_back(std::string(p, len));
-                        if (!comma) break;
-                        p = comma + 1;
+                    // Authoritative only when non-empty: an empty reply means
+                    // "nothing learned yet this session" and must not wipe the
+                    // persisted list (that is what collapsed the combo to Auto
+                    // and made region selection look broken).
+                    if (region_buf[0]) {
+                        codes.clear();
+                        codes.push_back("");       // Auto
+                        const char* p = region_buf;
+                        while (*p) {
+                            const char* comma = strchr(p, ',');
+                            size_t len = comma ? (size_t)(comma - p) : strlen(p);
+                            if (len > 0) codes.push_back(std::string(p, len));
+                            if (!comma) break;
+                            p = comma + 1;
+                        }
+                        // Persist newly learned regions for the next launch.
+                        if (strcmp(g_app.psiphon_region_list, region_buf) != 0) {
+                            snprintf(g_app.psiphon_region_list,
+                                     sizeof(g_app.psiphon_region_list), "%s", region_buf);
+                            save_config();
+                        }
                     }
                 }
 
@@ -1301,7 +1329,7 @@ void render_ui() {
 
                 std::vector<const char*> labels;
                 for (auto& c : codes)
-                    labels.push_back(c.empty() ? "Auto (fastest)" : c.c_str());
+                    labels.push_back(c.empty() ? "Auto" : c.c_str());
 
                 if (ImGui::Combo("Psiphon region", &sel, labels.data(), (int)labels.size()))
                     snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region),
@@ -1397,10 +1425,12 @@ void render_ui() {
             ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port);
             const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };
             ImGui::Combo("Bridges", &g_app.tor_bridges, tor_bridges, 4);
-            if (g_app.tor_bridges != 3) ImGui::BeginDisabled();
+            // Writable for obfs4/snowflake too: pasted lines override the
+            // built-in set in the engine; empty box = built-in "auto".
+            if (g_app.tor_bridges == 0) ImGui::BeginDisabled();
             ImGui::InputTextMultiline("##tor_bridge_lines", g_app.tor_bridge_lines,
                                       sizeof(g_app.tor_bridge_lines), ImVec2(0, 60));
-            if (g_app.tor_bridges != 3) ImGui::EndDisabled();
+            if (g_app.tor_bridges == 0) ImGui::EndDisabled();
             if (!tor_opts) ImGui::EndDisabled();
             if (g_app.tor_mode == 2 && (g_app.protocol == 1 || g_app.protocol == 2))
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
@@ -1510,12 +1540,6 @@ void render_ui() {
             ImGui::Checkbox("Auto-scroll", &g_app.auto_scroll);
             ImGui::SameLine(0, 12);
             ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
-            ImGui::SameLine(0, 20);
-            ImGui::Checkbox("Include pre-releases", &g_app.prerelease_updates);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Off (default): only released versions are offered.\n"
-                                  "On: version.json's pre-release entry also counts and the\n"
-                                  "newer of the two is offered (betas, RCs).");
             ImGui::SameLine(0, 12);
             if (ImGui::Button("Clear")) g_app.logs.clear();
             ImGui::SameLine(0, 8);

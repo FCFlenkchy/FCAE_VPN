@@ -479,6 +479,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.engine_log = (FcaeEngineLog)engineLog;
 
     // Tor's own listener, kept off the engine's and Psiphon's ports.
+    // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
+    // passed through verbatim — do NOT substitute a literal here.
     cfg.tor.socks_port = (uint16_t)torSocksPort;
 
     // Psiphon. Its datastore must be writable and app-private; the Kotlin

@@ -136,8 +136,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         stopping = false;
         bytesUp.set(0);
         bytesDown.set(0);
+        // Read the embedded server-entry list once per start: it feeds both
+        // the log line and startTunneling() (two reads would double-log the
+        // "importing embedded server entries" notice).
+        final String embeddedList = readEmbeddedServerList();
         emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")")
-                + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy));
+                + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy)
+                + sourceSummary(embeddedList));
         final PsiphonTunnel t = tunnel;
         new Thread(() -> {
             try {
@@ -145,7 +150,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 // list (same format as a remote server_list payload); ""
                 // falls back to whatever the datastore still holds plus any
                 // remote server list configured in getPsiphonConfig().
-                if (t != null) t.startTunneling(readEmbeddedServerList());
+                if (t != null) t.startTunneling(embeddedList);
                 else throw new Exception("Psiphon tunnel not created");
             } catch (Exception e) {
                 Log.e(TAG, "startTunneling failed", e);
@@ -326,14 +331,17 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         return u;
     }
 
-    /** One-line summary of which server-entry sources are configured. */
-    private String sourceSummary() {
+    /**
+     * One-line summary of which server-entry sources are active. Takes the
+     * already-read embedded list (see onStartCommand) rather than a path:
+     * the asset location is fixed (assets/psiphon_servers.txt), and the
+     * remote server list is always injected by getPsiphonConfig().
+     */
+    private String sourceSummary(String embeddedList) {
         java.util.List<String> s = new java.util.ArrayList<>();
-        if (!embeddedListPath.isEmpty()) s.add("embedded:" + embeddedListPath);
-        if (!remoteServerListUrl.isEmpty()) s.add("remote-list:" + remoteServerListUrl);
-        return s.isEmpty()
-                ? " [no server-entry source — configure one or Psiphon cannot bootstrap]"
-                : " [server entries: " + String.join(", ", s) + "]";
+        if (!embeddedList.isEmpty()) s.add("embedded:assets/psiphon_servers.txt");
+        s.add("remote-list:" + DEFAULT_SERVER_LIST_URL);
+        return " [server entries: " + String.join(", ", s) + "]";
     }
 
     /**

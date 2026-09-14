@@ -71,12 +71,21 @@ struct AppState {
     // The FFI's own log callback level is fixed at info and not exposed.
     int  engine_log  = 3;
 
+    // The aether engine's default Tor SOCKS port (config.rs
+    // DEFAULT_TOR_SOCKS_PORT). Shown in the field, but an untouched field
+    // defers to the engine (to_config() sends 0) instead of pinning the
+    // literal, so bumping the engine default re-tunes every saved config.
+    static constexpr int kEngineDefaultTorSocksPort = 1821;
     // Tor's own SOCKS listener. Must differ from socks_port/http_port: in
     // Chain mode tor and the engine are both listening.
-    int  tor_socks_port = 1821;
+    int  tor_socks_port = kEngineDefaultTorSocksPort;
 
     // Psiphon. Config JSON is built automatically (no paste field).
     char psiphon_region[8]    = {0};   // ISO code, "" = auto
+    // Learned egress regions (CSV). Persists in the cfg so the region combo
+    // starts populated even before this session's first Psiphon handshake;
+    // refreshed by the engine poll whenever a non-empty list arrives.
+    char psiphon_region_list[512] = {0};
     int  psiphon_transport = 0;        // index into kPsiphonTransports, 0 = auto
     char psiphon_data_dir[512] = {0};
     int  psiphon_socks_port = 0;       // 0 = Psiphon chooses
@@ -106,10 +115,9 @@ struct AppState {
     int  prev_log_count = 0;
     bool logging_enabled = true;
     bool auto_update_check = true;
-    /// "Pre-releases" toggle (default off): when on, version.json's
-    /// `prerelease` block takes part in the update check and the highest of the
-    /// two versions is offered; when off only the stable release is considered.
-    bool prerelease_updates = false;
+    // NOTE: there is no pre-release update channel. Update checks always pass
+    // include_prereleases=false (ui_render.cpp), so only stable releases are
+    // ever advertised. The old "Include pre-releases" toggle was removed.
     char save_status[128] = {};
     char copy_status[64] = {};
 
@@ -201,7 +209,9 @@ struct AppState {
         c.tor.mode         = (FcaeTorMode)tm;
         c.tor.bridges      = (FcaeTorBridges)tor_bridges;
         c.tor.bridge_lines = tor_bridge_lines[0] ? tor_bridge_lines : nullptr;
-        c.tor.socks_port   = (uint16_t)tor_socks_port;
+        // Field == engine default -> send 0 (defer); explicit edit -> verbatim.
+        c.tor.socks_port   = (uint16_t)(tor_socks_port == kEngineDefaultTorSocksPort
+                                        ? 0 : tor_socks_port);
 
         // Egress "Psiphon through the tunnel" keeps Aether as the backend
         // (so WARP comes up first). _reserved[0] tells the supervisor to

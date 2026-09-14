@@ -179,11 +179,13 @@ pub enum FcaeTorMode {
 pub enum FcaeTorBridges {
     /// Connect directly to the Tor network.
     None = 0,
-    /// Built-in obfs4 bridges.
+    /// Built-in obfs4 bridges; non-empty `FcaeTor::bridge_lines` override
+    /// with user-supplied lines.
     Obfs4 = 1,
-    /// Built-in snowflake bridges.
+    /// Built-in snowflake bridges; non-empty `FcaeTor::bridge_lines` override
+    /// with user-supplied lines.
     Snowflake = 2,
-    /// Use the lines supplied in `FcaeTor::bridge_lines`.
+    /// Use the lines supplied in `FcaeTor::bridge_lines` (must be non-empty).
     Custom = 3,
 }
 

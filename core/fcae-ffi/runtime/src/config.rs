@@ -881,11 +881,18 @@ pub mod env_compat {
                     FcaeTorBridges::None => Some("off".to_string()),
                     // "auto" forces bridges on and lets the engine pick from
                     // whatever pluggable transports it can find. Obfs4 and
-                    // Snowflake both land here because the engine selects the
-                    // transport per bridge line rather than taking a family
-                    // name -- the UI distinction is a hint, not a hard
-                    // selection, so do not promise more than that.
-                    FcaeTorBridges::Obfs4 | FcaeTorBridges::Snowflake => Some("auto".to_string()),
+                    // Snowflake land here only while the lines box is empty:
+                    // as soon as the user pastes their own lines those are
+                    // used verbatim -- the engine selects the transport per
+                    // bridge line rather than taking a family name. Makes the
+                    // bridge-lines field meaningful for every bridge mode,
+                    // not just "Custom lines".
+                    FcaeTorBridges::Obfs4 | FcaeTorBridges::Snowflake => {
+                        match cfg.tor.bridge_lines.as_deref().map(str::trim) {
+                            Some(lines) if !lines.is_empty() => Some(lines.to_string()),
+                            _ => Some("auto".to_string()),
+                        }
+                    }
                     FcaeTorBridges::Custom => cfg.tor.bridge_lines.clone(),
                 },
             );

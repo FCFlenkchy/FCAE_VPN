@@ -625,7 +625,9 @@ public class FCAEVpnService extends VpnService {
         final String torLinesV = (torLines == null) ? "" : torLines;
         final int engineLog    = intent.getIntExtra("engineLog", 3);
         final int backend      = intent.getIntExtra("backend", 0);
-        final int torSocksPort = intent.getIntExtra("torSocksPort", 1821);
+        // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
+        // MainActivity sends 0 when the field still holds the default.
+        final int torSocksPort = intent.getIntExtra("torSocksPort", 0);
         final String psiphonCfg    = intent.getStringExtra("psiphonConfig");
         final String psiphonRegion = intent.getStringExtra("psiphonRegion");
         final String psiphonCfgV    = (psiphonCfg == null) ? "" : psiphonCfg;
@@ -960,7 +962,7 @@ public class FCAEVpnService extends VpnService {
         putStr(e, i, "torBridgeLines");
         putInt(e, i, "engineLog", 3);
         putInt(e, i, "backend", 0);
-        putInt(e, i, "torSocksPort", 1821);
+        putInt(e, i, "torSocksPort", 0); // 0 = engine default (defer)
         putStr(e, i, "psiphonConfig");
         putStr(e, i, "psiphonRegion");
         putInt(e, i, "psiphonSocksPort", 0);
@@ -998,7 +1000,7 @@ public class FCAEVpnService extends VpnService {
         copyStr(p, i, "torBridgeLines");
         copyInt(p, i, "engineLog", 3);
         copyInt(p, i, "backend", 0);
-        copyInt(p, i, "torSocksPort", 1821);
+        copyInt(p, i, "torSocksPort", 0); // 0 = engine default (defer)
         copyStr(p, i, "psiphonConfig");
         copyStr(p, i, "psiphonRegion");
         copyInt(p, i, "psiphonSocksPort", 0);

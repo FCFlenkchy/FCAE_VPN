@@ -80,7 +80,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchSocks: SwitchMaterial
     private lateinit var switchHttp: SwitchMaterial
     private lateinit var switchAutoUpdate: SwitchMaterial
-    private lateinit var switchPreRelease: SwitchMaterial
     private lateinit var spinnerSysprofile: Spinner
     private lateinit var editSni: android.widget.EditText
     private lateinit var editForcePeer: android.widget.EditText
@@ -350,7 +349,6 @@ class MainActivity : AppCompatActivity() {
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
         switchAutoUpdate = findViewById(R.id.switchAutoUpdate)
-        switchPreRelease = findViewById(R.id.switchPreRelease)
         spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
         editSni = findViewById(R.id.editSni)
         editForcePeer = findViewById(R.id.editForcePeer)
@@ -469,6 +467,21 @@ class MainActivity : AppCompatActivity() {
                 id: Long
             ) {
                 applyTorLock()
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+        // Record a region pick the moment it happens. Without this a later
+        // refreshPsiphonRegions()/broadcast re-applied the OLD saved value and
+        // the spinner snapped back, so selecting a region "didn't work".
+        spinnerPsiphonRegion.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: android.widget.AdapterView<*>?,
+                view: android.view.View?,
+                position: Int,
+                id: Long
+            ) {
+                savedPsiphonRegion = psiphonRegionCodes.getOrElse(position) { savedPsiphonRegion }
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
@@ -847,9 +860,13 @@ class MainActivity : AppCompatActivity() {
         spinnerTorBridges.isEnabled = torOn
         spinnerTorBridges.alpha = if (torOn) 1.0f else 0.5f
 
-        val custom = torOn && spinnerTorBridges.selectedItemPosition == 3
-        editTorBridgeLines.isEnabled = custom
-        editTorBridgeLines.alpha = if (custom) 1.0f else 0.5f
+        // Bridge lines are writable for every bridge mode, not just "Custom
+        // lines": pasting obfs4/snowflake lines while that family is picked
+        // overrides the built-in set in the engine (config.rs maps a
+        // non-empty box to the literal lines; empty = built-in "auto").
+        val linesUsable = torOn && spinnerTorBridges.selectedItemPosition in 1..3
+        editTorBridgeLines.isEnabled = linesUsable
+        editTorBridgeLines.alpha = if (linesUsable) 1.0f else 0.5f
 
         updateTorHint()
     }
@@ -965,7 +982,6 @@ class MainActivity : AppCompatActivity() {
             putBoolean("socks", if (isTunModeSelected()) socksChoiceForProxyMode else switchSocks.isChecked)
             putBoolean("http", switchHttp.isChecked)
             putBoolean("autoUpdate", switchAutoUpdate.isChecked)
-            putBoolean("preRelease", switchPreRelease.isChecked)
             putString("sni", editSni.text.toString().trim())
             putString("forcePeer", editForcePeer.text.toString().trim())
             putInt("sysprofile", spinnerSysprofile.selectedItemPosition)
@@ -1027,7 +1043,6 @@ class MainActivity : AppCompatActivity() {
         switchSocks.isChecked = prefs.getBoolean("socks", true)
         switchHttp.isChecked = prefs.getBoolean("http", true)
         switchAutoUpdate.isChecked = prefs.getBoolean("autoUpdate", true)
-        switchPreRelease.isChecked = prefs.getBoolean("preRelease", false)
         editSni.setText(prefs.getString("sni", ""))
         editForcePeer.setText(prefs.getString("forcePeer", ""))
         spinnerSysprofile.setSelection(prefs.getInt("sysprofile", 0))
@@ -1132,7 +1147,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("torBridgeLines", editTorBridgeLines.text.toString().trim())
         i.putExtra("engineLog", spinnerEngineLog.selectedItemPosition)
         i.putExtra("backend", backendFromSelection())
-        i.putExtra("torSocksPort", editTorSocksPort.text.toString().toIntOrNull() ?: 1821)
+        i.putExtra("torSocksPort", deferredTorSocksPort())
         i.putExtra("psiphonConfig", "")
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
         // Prefer the LIVE AAR ports: when this start is the Protocol=Psiphon
@@ -1188,7 +1203,7 @@ class MainActivity : AppCompatActivity() {
         val torBridgeLines = editTorBridgeLines.text.toString().trim()
         val engineLog = spinnerEngineLog.selectedItemPosition
         val backend = backendFromSelection()
-        val torSocksPort = editTorSocksPort.text.toString().toIntOrNull() ?: 1821
+        val torSocksPort = deferredTorSocksPort()
         val psiphonConfig = ""
         val psiphonRegion = selectedPsiphonRegion()
         val psiphonSocksPort = editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0
@@ -1319,7 +1334,10 @@ class MainActivity : AppCompatActivity() {
         // Use the core's native async update checker (reqwest-based HTTP fetch).
         // The core spawns a background tokio runtime, fetches version.json from
         // GitHub, parses it, and stores the result. We poll with nativePollUpdate().
-        NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION, switchPreRelease.isChecked)
+        // Stable channel only: a pre-release on GitHub must never be offered
+        // as an update (was: switchPreRelease toggle, removed from the UI —
+        // includePrereleases=false always, here and on desktop).
+        NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION, false)
 
         // Poll for result on a background thread
         Thread {
@@ -1654,6 +1672,20 @@ class MainActivity : AppCompatActivity() {
         return if (p in 0..2) p else 0
     }
 
+    /**
+     * Tor SOCKS port to hand the engine: 0 = "use the engine default"
+     * (config.rs DEFAULT_TOR_SOCKS_PORT). The field mirrors that default
+     * (1821) for display/editing; an untouched/blank/unparseable field — or
+     * one set back to the default — defers to the engine instead of pinning
+     * the literal, so a future engine-default bump can't strand configs.
+     * Any other explicit value travels as-is.
+     */
+    private fun deferredTorSocksPort(): Int {
+        val t = if (::editTorSocksPort.isInitialized) editTorSocksPort.text.toString().trim() else ""
+        val p = t.toIntOrNull() ?: return 0
+        return if (p == TOR_SOCKS_ENGINE_DEFAULT) 0 else p
+    }
+
     /** The ISO code currently chosen, or "" for automatic. */
     private fun selectedPsiphonRegion(): String {
         if (!::spinnerPsiphonRegion.isInitialized) return savedPsiphonRegion
@@ -1694,21 +1726,49 @@ class MainActivity : AppCompatActivity() {
             emptyList()
         }
 
-        applyPsiphonRegionCodes(listOf("") + codes)
+        // The core list is authoritative whenever non-empty (engine-side
+        // psiphon). On Android it stays empty because psiphon runs in the
+        // AAR service, whose broadcasts deliver the regions instead — an
+        // empty reply must never shrink the learned + persisted list,
+        // otherwise the spinner collapses to "Auto" and the chosen region
+        // appears to be forgotten after every connect.
+        if (codes.isNotEmpty()) persistRegionCodes(codes)
+        applyPsiphonRegionCodes(listOf("") + if (codes.isNotEmpty()) codes else persistedRegionCodes())
     }
+
+    /** Egress regions learned so far, persisted across restarts. Written only
+     *  from authoritative sources (service broadcast / non-empty core list). */
+    private fun persistedRegionCodes(): List<String> =
+        (prefs.getString("psiphonRegionList", "") ?: "")
+            .split(',').map { it.trim() }.filter { it.isNotEmpty() }
+
+    private fun persistRegionCodes(codes: List<String>) =
+        prefs.edit().putString("psiphonRegionList", codes.joinToString(",")).apply()
 
     /** Rebuild the region spinner. Always runs so each connect can refresh. */
     private fun applyPsiphonRegionList(csv: String) {
         savedPsiphonRegion = selectedPsiphonRegion()
         val codes = csv.split(',').map { it.trim() }.filter { it.isNotEmpty() }
-        applyPsiphonRegionCodes(listOf("") + codes)
+        // Authoritative service list: persist (regions survive restarts) and
+        // fall back to what is already stored on the odd empty broadcast.
+        if (codes.isNotEmpty()) persistRegionCodes(codes)
+        applyPsiphonRegionCodes(listOf("") + if (codes.isNotEmpty()) codes else persistedRegionCodes())
     }
 
     private fun applyPsiphonRegionCodes(newCodes: List<String>) {
         if (!::spinnerPsiphonRegion.isInitialized) return
-        val want = if (savedPsiphonRegion.isNotEmpty()) savedPsiphonRegion else selectedPsiphonRegion()
+        // Keep the user's current pick over the stale persisted value: when
+        // both exist the current selection is the newer intent (a listener
+        // writes savedPsiphonRegion on every pick, so this only differs
+        // while a fresh pick hasn't been saved yet).
+        val want = run {
+            val cur = selectedPsiphonRegion()
+            if (cur.isNotEmpty() && newCodes.contains(cur)) cur
+            else if (savedPsiphonRegion.isNotEmpty()) savedPsiphonRegion
+            else cur
+        }
         psiphonRegionCodes = newCodes
-        val labels = newCodes.map { if (it.isEmpty()) "Auto (fastest)" else it }
+        val labels = newCodes.map { if (it.isEmpty()) "Auto" else it }
         spinnerPsiphonRegion.adapter =
             ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
         val at = newCodes.indexOf(want)
@@ -1762,6 +1822,11 @@ class MainActivity : AppCompatActivity() {
         // (handshake, CandidateServers) scrolled away before the connect
         // verdict was visible.
         private const val MAX_LOG_CHARS = 24000
+
+        // Display default for the Tor SOCKS port field — equal to the aether
+        // engine's own default (config.rs DEFAULT_TOR_SOCKS_PORT). A field
+        // holding this value defers to the engine (see deferredTorSocksPort).
+        private const val TOR_SOCKS_ENGINE_DEFAULT = 1821
 
         // Set to true while the Activity is alive.  The service checks
         // this after fullShutdown() to decide whether to kill the process.

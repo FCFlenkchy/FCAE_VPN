@@ -65,6 +65,8 @@ object NativeEngine {
         // 0 = Aether, 1 = Psiphon (FcaeBackend).
         backend: Int,
         // Tor's own SOCKS listener; must differ from socksPort/httpPort.
+        // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
+        // do not substitute a literal here.
         torSocksPort: Int,
         // Psiphon config JSON (the whole object, not a path), "" if unused.
         psiphonConfig: String,
