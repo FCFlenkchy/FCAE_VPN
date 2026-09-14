@@ -151,6 +151,11 @@ pub struct Endpoints {
     /// Public IP of the selected server, excluded from TUN routes to avoid a
     /// routing loop.
     pub peer_ip: Option<String>,
+    /// Whether the SOCKS endpoint carries UDP (UDP ASSOCIATE). Psiphon's
+    /// local SOCKS is CONNECT-only, and a Tor egress has no UDP at all, so
+    /// tun2socks must not hand either one 0x03 requests: they would refuse
+    /// each one and spam the log for every app UDP flow (DNS, QUIC, ...).
+    pub udp: bool,
 }
 
 impl Endpoints {
@@ -158,6 +163,7 @@ impl Endpoints {
         socks: None,
         http: None,
         peer_ip: None,
+        udp: true,
     };
 }
 

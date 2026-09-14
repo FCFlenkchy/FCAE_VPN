@@ -19,5 +19,8 @@ android {
 }
 
 dependencies {
-    api("ca.psiphon:psiphontunnel:2.0.41")
+    // Built in CI from the core/psiphon submodule (workflow step
+    // "build psiphon AAR from submodule"), so the library always matches
+    // the pinned tunnel-core instead of a lagging Maven release.
+    api(files("libs/ca.psiphon.aar"))
 }

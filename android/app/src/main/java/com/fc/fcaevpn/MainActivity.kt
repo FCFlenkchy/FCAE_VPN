@@ -62,14 +62,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerEngineLog: Spinner
     private lateinit var editTorSocksPort: android.widget.EditText
     private lateinit var spinnerPsiphonRegion: Spinner
+    private lateinit var spinnerPsiphonTransport: Spinner
     private lateinit var editPsiphonSocksPort: android.widget.EditText
     private lateinit var editPsiphonHttpPort: android.widget.EditText
-    // Server-entry sources (remote list URL + signature key, or a local file
-    // with encoded entries). At least one must be set or Psiphon can never
-    // bootstrap its first server entries on a fresh datastore.
-    private lateinit var editPsiphonRemoteUrl: android.widget.EditText
-    private lateinit var editPsiphonRemoteKey: android.widget.EditText
-    private lateinit var editPsiphonEmbeddedFile: android.widget.EditText
     // Which egress entries are available for the current protocol; -1 = not
     // built yet. The adapter is rebuilt only when this changes, because
     // replacing a Spinner adapter resets its selection.
@@ -345,11 +340,9 @@ class MainActivity : AppCompatActivity() {
         spinnerEngineLog = findViewById(R.id.spinnerEngineLog)
         editTorSocksPort = findViewById(R.id.editTorSocksPort)
         spinnerPsiphonRegion = findViewById(R.id.spinnerPsiphonRegion)
+        spinnerPsiphonTransport = findViewById(R.id.spinnerPsiphonTransport)
         editPsiphonSocksPort = findViewById(R.id.editPsiphonSocksPort)
         editPsiphonHttpPort = findViewById(R.id.editPsiphonHttpPort)
-        editPsiphonRemoteUrl = findViewById(R.id.editPsiphonRemoteUrl)
-        editPsiphonRemoteKey = findViewById(R.id.editPsiphonRemoteKey)
-        editPsiphonEmbeddedFile = findViewById(R.id.editPsiphonEmbeddedFile)
         switchEch = findViewById(R.id.switchEch)
         switchQuick = findViewById(R.id.switchQuick)
         switchLan = findViewById(R.id.switchLan)
@@ -454,6 +447,13 @@ class MainActivity : AppCompatActivity() {
         spinnerTorBridges.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
             listOf("No bridges", "obfs4", "snowflake", "Custom lines"),
+        )
+        // Psiphon transport families. Index maps 1:1 onto
+        // PsiphonTunnelService.transportProtocols(); 0 = Auto leaves
+        // LimitTunnelProtocols unset (tunnel-core tries its full set).
+        spinnerPsiphonTransport.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            listOf("Auto", "SSH (OSSH)", "QUIC", "Unfronted meek", "Fronted meek"),
         )
         // Verbosity of the aether ENGINE. Positions map 1:1 onto
         // FcaeEngineLog; index 3 = info is the default.
@@ -950,11 +950,9 @@ class MainActivity : AppCompatActivity() {
             putString("torBridgeLines", editTorBridgeLines.text.toString().trim())
             putInt("engineLog", spinnerEngineLog.selectedItemPosition)
             putInt("backend", if (isPsiphonProtocol()) 1 else 0)
-            putString("psiphonRemoteUrl", editPsiphonRemoteUrl.text.toString().trim())
-            putString("psiphonRemoteKey", editPsiphonRemoteKey.text.toString().trim())
-            putString("psiphonEmbeddedFile", editPsiphonEmbeddedFile.text.toString().trim())
             putString("torSocksPort", editTorSocksPort.text.toString().trim())
             putString("psiphonRegion", selectedPsiphonRegion())
+            putInt("psiphonTransport", selectedPsiphonTransportIndex())
             putString("psiphonSocksPort", editPsiphonSocksPort.text.toString().trim())
             putString("psiphonHttpPort", editPsiphonHttpPort.text.toString().trim())
             putBoolean("h2", h2FromSelection())
@@ -1019,11 +1017,9 @@ class MainActivity : AppCompatActivity() {
         editTorSocksPort.setText(prefs.getString("torSocksPort", "1821"))
         editPsiphonSocksPort.setText(prefs.getString("psiphonSocksPort", "0"))
         editPsiphonHttpPort.setText(prefs.getString("psiphonHttpPort", "0"))
-        editPsiphonRemoteUrl.setText(prefs.getString("psiphonRemoteUrl", ""))
-        editPsiphonRemoteKey.setText(prefs.getString("psiphonRemoteKey", ""))
-        editPsiphonEmbeddedFile.setText(prefs.getString("psiphonEmbeddedFile", ""))
         savedPsiphonRegion = prefs.getString("psiphonRegion", "") ?: ""
         refreshPsiphonRegions()
+        spinnerPsiphonTransport.setSelection(prefs.getInt("psiphonTransport", 0).coerceIn(0, 4))
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", false)
         switchLan.isChecked = prefs.getBoolean("lan", false)
@@ -1096,17 +1092,9 @@ class MainActivity : AppCompatActivity() {
         val i = Intent(this, PsiphonTunnelService::class.java)
         i.action = PsiphonTunnelService.ACTION_START
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
+        i.putExtra("psiphonTransport", selectedPsiphonTransportIndex())
         i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
-        // Server-entry sources: without one of these the controller sits on
-        // CandidateServers count 0 forever on a fresh datastore. The service
-        // also persists them, so restarts keep working.
-        val psiUrl = editPsiphonRemoteUrl.text.toString().trim()
-        val psiKey = editPsiphonRemoteKey.text.toString().trim()
-        val psiList = editPsiphonEmbeddedFile.text.toString().trim()
-        if (psiUrl.isNotEmpty()) i.putExtra("psiphonRemoteUrl", psiUrl)
-        if (psiKey.isNotEmpty()) i.putExtra("psiphonRemoteKey", psiKey)
-        if (psiList.isNotEmpty()) i.putExtra("psiphonEmbeddedListFile", psiList)
         if (!upstream.isNullOrBlank()) i.putExtra("upstreamProxy", upstream)
         startForegroundService(i)
     }
@@ -1672,6 +1660,14 @@ class MainActivity : AppCompatActivity() {
         val i = spinnerPsiphonRegion.selectedItemPosition
         return psiphonRegionCodes.getOrElse(i) { "" }
     }
+
+    /** Transport spinner position: 0 = Auto, 1 = SSH/OSSH, 2 = QUIC,
+     *  3 = unfronted meek, 4 = fronted meek (matches the XML entries and
+     *  PsiphonTunnelService.transportProtocols). */
+    private fun selectedPsiphonTransportIndex(): Int =
+        if (!::spinnerPsiphonTransport.isInitialized)
+            prefs.getInt("psiphonTransport", 0)
+        else spinnerPsiphonTransport.selectedItemPosition
 
     /**
      * Rebuild the region list from the core.

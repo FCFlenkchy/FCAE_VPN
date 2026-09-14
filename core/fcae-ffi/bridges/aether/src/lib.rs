@@ -576,6 +576,13 @@ impl BackendHandle for AetherHandle {
                     .map(|(host, _)| host.trim_matches(['[', ']']).to_string())
                     .or_else(|| Some(p.clone()))
             }),
+            // The engine's SOCKS listener carries UDP (gVisor netstack) —
+            // but only while the egress is WARP. Tor has no UDP: every UDP
+            // flow sent there (rare stray DNS, QUIC probes) dies with a
+            // Tor-protocol error and spams the log, so advertise UDP-less
+            // whenever a Tor mode is active and let tun2socks drop those
+            // flows locally instead.
+            udp: self.cfg.tor.mode == FcaeTorMode::Off,
         }
     }
 

@@ -64,6 +64,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/MobileLibrary/psi"
@@ -92,6 +93,11 @@ var (
 
 	psiSocksPort int
 	psiHttpPort  int
+
+	// Cumulative tunneled bytes from BytesTransferred notices (deltas --
+	// accumulate). Read by psi_bytes() for the UI/notification counters.
+	psiBytesUp   uint64
+	psiBytesDown uint64
 
 	// psiRegions is the set of egress psiRegions the server reported. Psiphon only
 	// sends this after a successful handshake, which is why the UI can offer
@@ -292,6 +298,17 @@ func psiHandleNotice(noticeJSON string) {
 			psiEmit(psiLogInfo, "[psiphon] %d egress regions available", len(d.Regions))
 		}
 
+	case "BytesTransferred":
+		// Fields are deltas since the previous notice, not totals.
+		var d struct {
+			Sent     uint64 `json:"sent"`
+			Received uint64 `json:"received"`
+		}
+		if json.Unmarshal(n.Data, &d) == nil && (d.Sent > 0 || d.Received > 0) {
+			atomic.AddUint64(&psiBytesUp, d.Sent)
+			atomic.AddUint64(&psiBytesDown, d.Received)
+		}
+
 	case "Error", "Alert":
 		var d struct {
 			Message string `json:"message"`
@@ -384,6 +401,8 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	// start look like it had succeeded.
 	psiSocksPort = 0
 	psiHttpPort = 0
+	atomic.StoreUint64(&psiBytesUp, 0)
+	atomic.StoreUint64(&psiBytesDown, 0)
 	psiRegions = nil
 	psiState = psiStateStarting
 	// Claim the slot before releasing the lock, so a concurrent psi_start
@@ -514,6 +533,8 @@ func psi_stop() C.int {
 	psiState = psiStateStopped
 	psiSocksPort = 0
 	psiHttpPort = 0
+	atomic.StoreUint64(&psiBytesUp, 0)
+	atomic.StoreUint64(&psiBytesDown, 0)
 	psiMu.Unlock()
 
 	psiEmit(psiLogInfo, "[psiphon] controller stopped")
@@ -562,6 +583,18 @@ func psi_regions() *C.char {
 		out += r
 	}
 	return C.CString(out)
+}
+
+// psi_bytes reports cumulative tunneled bytes through the out-params.
+//
+//export psi_bytes
+func psi_bytes(up *C.longlong, down *C.longlong) {
+	if up != nil {
+		*up = C.longlong(atomic.LoadUint64(&psiBytesUp))
+	}
+	if down != nil {
+		*down = C.longlong(atomic.LoadUint64(&psiBytesDown))
+	}
 }
 
 //export psi_string_free

@@ -323,12 +323,10 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "backend") g_app.backend = atoi(val.c_str());
     else if (key == "tor_socks_port") g_app.tor_socks_port = atoi(val.c_str());
     else if (key == "psiphon_region") snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region), "%s", val.c_str());
+    else if (key == "psiphon_transport") g_app.psiphon_transport = atoi(val.c_str());
     else if (key == "psiphon_data_dir") snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir), "%s", val.c_str());
     else if (key == "psiphon_socks_port") g_app.psiphon_socks_port = atoi(val.c_str());
     else if (key == "psiphon_http_port") g_app.psiphon_http_port = atoi(val.c_str());
-    else if (key == "psiphon_remote_url") snprintf(g_app.psiphon_remote_url, sizeof(g_app.psiphon_remote_url), "%s", val.c_str());
-    else if (key == "psiphon_remote_key") snprintf(g_app.psiphon_remote_key, sizeof(g_app.psiphon_remote_key), "%s", val.c_str());
-    else if (key == "psiphon_embedded_file") snprintf(g_app.psiphon_embedded_file, sizeof(g_app.psiphon_embedded_file), "%s", val.c_str());
     else if (key == "mode") g_app.mode = atoi(val.c_str());
     else if (key == "lan_sharing") g_app.lan_sharing = atoi(val.c_str()) != 0;
     else if (key == "scan_mode") g_app.scan_mode = atoi(val.c_str());
@@ -392,12 +390,10 @@ static void save_config() {
     fprintf(f, "backend=%d\n", g_app.backend);
     fprintf(f, "tor_socks_port=%d\n", g_app.tor_socks_port);
     fprintf(f, "psiphon_region=%s\n", g_app.psiphon_region);
+    fprintf(f, "psiphon_transport=%d\n", g_app.psiphon_transport);
     fprintf(f, "psiphon_data_dir=%s\n", g_app.psiphon_data_dir);
     fprintf(f, "psiphon_socks_port=%d\n", g_app.psiphon_socks_port);
     fprintf(f, "psiphon_http_port=%d\n", g_app.psiphon_http_port);
-    fprintf(f, "psiphon_remote_url=%s\n", g_app.psiphon_remote_url);
-    fprintf(f, "psiphon_remote_key=%s\n", g_app.psiphon_remote_key);
-    fprintf(f, "psiphon_embedded_file=%s\n", g_app.psiphon_embedded_file);
     fprintf(f, "mode=%d\n", g_app.mode);
     fprintf(f, "lan_sharing=%d\n", g_app.lan_sharing ? 1 : 0);
     fprintf(f, "scan_mode=%d\n", g_app.scan_mode);
@@ -831,21 +827,8 @@ void render_ui() {
                 // embedded server entry list, so fcae_start only ever sees
                 // pointers owned by this worker.
                 o->psi_json = g_app.psiphon_config_json_built;
-                if (g_app.psiphon_embedded_file[0]) {
-                    std::ifstream f(g_app.psiphon_embedded_file, std::ios::binary);
-                    if (f) {
-                        std::ostringstream ss;
-                        ss << f.rdbuf();
-                        o->psi_embedded = ss.str();
-                        g_app.add_log(3, ("[ui] psiphon embedded server list: " +
-                                          std::to_string(o->psi_embedded.size()) +
-                                          " bytes from " + g_app.psiphon_embedded_file).c_str());
-                    } else {
-                        g_app.add_log(3, ("[ui] psiphon embedded list not readable: " +
-                                          std::string(g_app.psiphon_embedded_file)).c_str());
-                    }
-                } else {
-                    // No explicit entries file. Auto-load psiphon_servers.txt
+                {
+                    // Auto-load psiphon_servers.txt
                     // from the executable's directory when it exists and has
                     // content: the drop-in bundled-entries slot. Put entries
                     // you are ENTITLED to distribute there (your own servers
@@ -865,10 +848,10 @@ void render_ui() {
                                               " bytes from " + bundled).c_str());
                         }
                     }
-                    if (o->psi_embedded.empty() && !g_app.psiphon_remote_url[0]) {
+                    if (o->psi_embedded.empty()) {
                         g_app.add_log(3,
-                            "[ui] psiphon has no user server-entry source; the core will "
-                            "fall back to the built-in legacy public remote server list");
+                            "[ui] psiphon has no embedded server entries; the core will "
+                            "fall back to its built-in legacy public remote server list");
                     }
                 }
                 o->c.obfuscation.noize_profile = o->noize.c_str();
@@ -1327,26 +1310,22 @@ void render_ui() {
                     ImGui::TextDisabled("Regions appear after Psiphon connects.");
             }
 
+            // Transport family. Auto lets tunnel-core try its full default
+            // set; the other entries restrict it to one family (each maps
+            // to tunnel-core's LimitTunnelProtocols values, including the
+            // variants that only differ in handshake details).
+            {
+                static const char* kTransports[] = {
+                    "Auto", "SSH (OSSH)", "QUIC", "Unfronted meek", "Fronted meek",
+                };
+                ImGui::Combo("Psiphon transport", &g_app.psiphon_transport,
+                             kTransports, IM_ARRAYSIZE(kTransports));
+            }
+
             // Psiphon's own listeners, kept off the engine's and Tor's ports.
             ImGui::InputInt("Psiphon SOCKS port", &g_app.psiphon_socks_port);
             ImGui::InputInt("Psiphon HTTP port", &g_app.psiphon_http_port);
             ImGui::TextDisabled("0 lets Psiphon pick a free port.");
-
-            // Server-entry sources: tunnel-core learns its first server
-            // entries from an embedded list OR the remote server list. With
-            // neither, every connect dies as "CandidateServers count 0"
-            // (plus the misleading "untunneled DSL fetch ... no broker
-            // specs" error, which is only a downstream symptom).
-            ImGui::Spacing();
-            ImGui::Text("Server entries");
-            ImGui::InputText("Remote server list URL", g_app.psiphon_remote_url,
-                             sizeof(g_app.psiphon_remote_url));
-            ImGui::InputText("Server list signature key", g_app.psiphon_remote_key,
-                             sizeof(g_app.psiphon_remote_key));
-            ImGui::InputText("Embedded entries file", g_app.psiphon_embedded_file,
-                             sizeof(g_app.psiphon_embedded_file));
-            ImGui::TextDisabled("Set a remote list (URL + key), or an embedded entries file.");
-            ImGui::TextDisabled("Without one, Psiphon can never establish its first tunnel.");
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Egress");

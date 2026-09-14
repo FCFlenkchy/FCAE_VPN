@@ -77,6 +77,7 @@ struct AppState {
 
     // Psiphon. Config JSON is built automatically (no paste field).
     char psiphon_region[8]    = {0};   // ISO code, "" = auto
+    int  psiphon_transport = 0;        // index into kPsiphonTransports, 0 = auto
     char psiphon_data_dir[512] = {0};
     int  psiphon_socks_port = 0;       // 0 = Psiphon chooses
     int  psiphon_http_port  = 0;
@@ -84,9 +85,6 @@ struct AppState {
     // first server entries; with none of them the controller sits on
     // "CandidateServers: count 0" forever and the tunnel never establishes.
     // At least one must be configured.
-    char psiphon_remote_url[512]  = {0};  // RemoteServerListUrl (https://…)
-    char psiphon_remote_key[512]  = {0};  // RemoteServerListSignaturePublicKey
-    char psiphon_embedded_file[1024] = {0}; // encoded server entries file
     // Built by to_config(): the default config JSON with the server-entry
     // fields merged in. to_config() returns a FcaeConfig pointing INTO this
     // string, and the connect worker immediately snapshots it — same
@@ -227,8 +225,12 @@ struct AppState {
         // no entries by themselves, so without one of these fields Psiphon
         // can never leave CandidateServers count 0.
         std::string json = kDefaultPsiphonConfig;
-        json = merge_psiphon_string_field(json, "RemoteServerListUrl", psiphon_remote_url);
-        json = merge_psiphon_string_field(json, "RemoteServerListSignaturePublicKey", psiphon_remote_key);
+        // Server-entry sources are no longer user-configurable here: the
+        // core falls back to its built-in legacy remote list (+ embedded
+        // entries auto-loaded from exe_dir()/psiphon_servers.txt by the
+        // start worker, and the legacy-list injection in the psiphon
+        // bridge). Only the transport choice needs splicing in.
+        json = merge_psiphon_transport(json, psiphon_transport);
         psiphon_config_json_built = json;
         c.psiphon.config_json   = psiphon_config_json_built.c_str();
         c.psiphon.egress_region = psiphon_region[0] ? psiphon_region : nullptr;
@@ -237,6 +239,38 @@ struct AppState {
         c.psiphon.http_port     = (uint16_t)psiphon_http_port;
 
         return c;
+    }
+
+    /// Splice "LimitTunnelProtocols" for the selected transport family.
+    /// 0 = Auto: omit the field entirely so tunnel-core uses its full
+    /// default protocol set.
+    static std::string merge_psiphon_transport(const std::string& json, int selection) {
+        static const char* const kGroups[][4] = {
+            {nullptr},
+            {"SSH", "OSSH", nullptr},                                  // obfuscated SSH
+            {"QUIC-OSSH", nullptr},                                    // QUIC
+            {"UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH",
+             "UNFRONTED-MEEK-SESSION-TICKET-OSSH", nullptr},
+            {"FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH", nullptr},
+        };
+        if (selection <= 0 || selection >= (int)(sizeof(kGroups) / sizeof(kGroups[0])))
+            return json;
+        std::string arr = "\"LimitTunnelProtocols\":[";
+        bool first = true;
+        for (int i = 0; kGroups[selection][i]; ++i) {
+            if (!first) arr += ",";
+            arr += std::string("\"") + kGroups[selection][i] + "\"";
+            first = false;
+        }
+        arr += "]";
+        if (json.find("\"LimitTunnelProtocols\"") != std::string::npos) return json;
+        size_t close = json.find_last_of('}');
+        if (close == std::string::npos) return json;
+        std::string out = json.substr(0, close);
+        while (!out.empty() && (out.back() == ' ' || out.back() == '\n' ||
+                                out.back() == '\r' || out.back() == '\t')) out.pop_back();
+        if (!out.empty() && out.back() == ',') out.pop_back();
+        return out + "," + arr + "}";
     }
 
     /// Splice "key": "value" into a flat Psiphon config JSON object.

@@ -44,8 +44,14 @@ import (
 	"sync"
 	"unsafe"
 
+	"net"
+	"time"
+
 	"github.com/xjasonlyu/tun2socks/v2/engine"
 	t2slog "github.com/xjasonlyu/tun2socks/v2/log"
+	"github.com/xjasonlyu/tun2socks/v2/metadata"
+	"github.com/xjasonlyu/tun2socks/v2/proxy"
+	_ "github.com/xjasonlyu/tun2socks/v2/proxy/socks5" // registers the "socks5" scheme
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -56,6 +62,72 @@ const (
 	logInfo  = 3
 	logDebug = 4
 )
+
+// The plain "socks5" scheme speaks the full protocol, including the UDP
+// ASSOCIATE command (0x03). Upstreams that are CONNECT-only -- Psiphon's local
+// proxy is the one that matters here -- reject every 0x03 with a log line, so
+// every app that sends a single DNS or QUIC packet floods the tunnel log with
+// "SOCKS message field command was 0x03, not 0x01" noise. Backends like that
+// therefore get endpoints with udp=false and the Rust layer hands tun2socks a
+// "socks5t://" URL instead: same SOCKS5 handshake for TCP, while UDP flows are
+// absorbed locally in silence (the user-visible behaviour of a network with
+// no UDP route) instead of provoking per-flow errors upstream.
+const (
+	schemeSocks5  = "socks5"
+	schemeSocks5t = "socks5t"
+)
+
+// blackholeConn is a net.PacketConn that swallows every write and blocks
+// forever on read. Returning an error from DialUDP instead would make
+// tun2socks log one error per UDP flow -- the same flood, different message.
+type blackholeConn struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func (c *blackholeConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	<-c.done
+	return 0, nil, net.ErrClosed
+}
+
+func (c *blackholeConn) WriteTo(p []byte, _ net.Addr) (int, error) {
+	return len(p), nil
+}
+
+func (c *blackholeConn) Close() error {
+	c.once.Do(func() { close(c.done) })
+	return nil
+}
+
+func (c *blackholeConn) LocalAddr() net.Addr              { return nil }
+func (c *blackholeConn) SetDeadline(time.Time) error      { return nil }
+func (c *blackholeConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *blackholeConn) SetWriteDeadline(time.Time) error { return nil }
+
+// udpDroppingProxy wraps a SOCKS5 proxy and replaces its UDP path with a
+// silent blackhole.
+type udpDroppingProxy struct {
+	proxy.Proxy
+}
+
+func (p udpDroppingProxy) DialUDP(*metadata.Metadata) (net.PacketConn, error) {
+	return &blackholeConn{done: make(chan struct{})}, nil
+}
+
+// parseSocks5t reuses the upstream socks5 parser (its init registers only the
+// "socks5" scheme) by rewriting the scheme on the incoming URL.
+func parseSocks5t(u *url.URL) (proxy.Proxy, error) {
+	u.Scheme = schemeSocks5
+	inner, err := proxy.Parse(u)
+	if err != nil {
+		return nil, err
+	}
+	return udpDroppingProxy{Proxy: inner}, nil
+}
+
+func init() {
+	proxy.RegisterProtocol(schemeSocks5t, parseSocks5t)
+}
 
 var (
 	mu      sync.Mutex
@@ -165,7 +237,7 @@ func validateKey(k *engine.Key) error {
 		return fmt.Errorf("invalid proxy url %q: %w", k.Proxy, err)
 	}
 	switch strings.ToLower(u.Scheme) {
-	case "socks5", "socks4", "socks4a", "http", "https", "ss", "relay", "direct", "reject":
+	case schemeSocks5, schemeSocks5t, "socks4", "socks4a", "http", "https", "ss", "relay", "direct", "reject":
 	default:
 		return fmt.Errorf("unsupported proxy scheme %q", u.Scheme)
 	}
@@ -239,6 +311,9 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char) C.int
 		Proxy:    C.GoString(proxy),
 		MTU:      int(mtu),
 		LogLevel: C.GoString(loglevel),
+		// Expire idle UDP flows quicker than the 60s default so the NAT
+		// table (and any parked goroutines) drains promptly.
+		UDPTimeout: 30 * time.Second,
 	}
 	if key.LogLevel == "" {
 		key.LogLevel = "info"

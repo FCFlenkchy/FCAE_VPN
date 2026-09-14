@@ -688,6 +688,7 @@ mod tests {
                 socks: Some("127.0.0.1:1819".parse().unwrap()),
                 http: None,
                 peer_ip: Some("203.0.113.7".into()),
+                udp: true,
             }
         }
         async fn wait(&self) -> Result<()> {

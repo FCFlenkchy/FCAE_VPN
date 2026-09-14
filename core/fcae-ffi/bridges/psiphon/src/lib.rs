@@ -418,6 +418,21 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     config_json = inject_psiphon_ports(&config_json, p.socks_port, p.http_port)?;
     config_json = inject_android_resolver_policy(&config_json)?;
 
+    // In-proxy client participation dials WebRTC connections through STUN
+    // servers while the tunnel is still connecting; every STUN timeout then
+    // lands in the log ("Failed get server reflexive address …"). Off unless
+    // the caller explicitly opted in — the tunnel works without it.
+    for key in ["InproxyEnabled", "InproxyAllowClient"] {
+        if !config_json.contains(&format!("\"{key}\"")) {
+            config_json = inject_bool_field(&config_json, key, false)?;
+        }
+    }
+    // BytesTransferred notices feed the UI/notification counters; without
+    // this a working tunnel displays 0 B everywhere.
+    if !config_json.contains("\"EmitBytesTransferred\"") {
+        config_json = inject_bool_field(&config_json, "EmitBytesTransferred", true)?;
+    }
+
     // Server entries fetched out-of-band (tunneled DSL fetches, entry
     // updates pushed by the server) are individually signed and verified
     // against ServerEntrySignaturePublicKey. Without it every tunneled DSL
@@ -523,6 +538,20 @@ fn inject_egress_region(config_json: &str, region: &str) -> Result<String> {
     inject_string_field(config_json, "EgressRegion", region)
 }
 
+/// Set a bool field in a flat Psiphon config object.
+fn inject_bool_field(config_json: &str, key: &str, value: bool) -> Result<String> {
+    let mut object: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
+        CoreError::InvalidConfig(format!("psiphon.config_json is invalid JSON: {e}"))
+    })?;
+    let map = object.as_object_mut().ok_or_else(|| {
+        CoreError::InvalidConfig("psiphon.config_json must be a JSON object".into())
+    })?;
+    map.insert(key.to_string(), serde_json::Value::Bool(value));
+    serde_json::to_string(&object).map_err(|e| {
+        CoreError::InvalidConfig(format!("could not render psiphon.config_json: {e}"))
+    })
+}
+
 /// Set a string field in a flat Psiphon config object.
 ///
 /// Done textually rather than with serde: the crate is compiled into every
@@ -618,6 +647,7 @@ mod ffi {
         fn psi_http_port() -> c_int;
         fn psi_regions() -> *mut c_char;
         fn psi_string_free(s: *mut c_char);
+        fn psi_bytes(up: *mut i64, down: *mut i64);
     }
 
     pub(super) const STATE_STOPPED: i32 = 0;
@@ -712,6 +742,29 @@ mod ffi {
         if p > 0 { p as u16 } else { 0 }
     }
 
+    /// Live counters for the telemetry pump: cumulative totals plus a naive
+    /// bytes/sec rate between successive polls (~500 ms apart).
+    pub(super) fn counters() -> fcae_runtime::backend::Counters {
+        let (up, down) = bytes();
+        let (total_tx, total_rx, tx_rate, rx_rate) = super::counters_state::sample(up, down);
+        fcae_runtime::backend::Counters {
+            total_rx,
+            total_tx,
+            rx_bytes_sec: rx_rate,
+            tx_bytes_sec: tx_rate,
+            rtt_ms: 0,
+        }
+    }
+
+    /// Cumulative tunneled bytes from the shim's BytesTransferred notices.
+    /// Returns (up, down).
+    pub(super) fn bytes() -> (u64, u64) {
+        let mut up: i64 = 0;
+        let mut down: i64 = 0;
+        unsafe { psi_bytes(&mut up, &mut down) };
+        (up.max(0) as u64, down.max(0) as u64)
+    }
+
     /// Egress regions reported after the handshake, as country codes.
     pub(super) fn regions() -> Vec<String> {
         let raw = unsafe { psi_regions() };
@@ -727,6 +780,28 @@ mod ffi {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect()
+    }
+}
+
+/// Rate calculation state for [`ffi::counters`]: totals are cumulative, the
+/// UI wants bytes/sec, so keep the previous sample here.
+#[cfg(all(feature = "enabled", psiphon_linked))]
+mod counters_state {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    static LAST_UP: AtomicU64 = AtomicU64::new(0);
+    static LAST_DOWN: AtomicU64 = AtomicU64::new(0);
+    static LAST_AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+    pub fn sample(up: u64, down: u64) -> (u64, u64, u64, u64) {
+        let prev_up = LAST_UP.swap(up, Ordering::Relaxed);
+        let prev_down = LAST_DOWN.swap(down, Ordering::Relaxed);
+        let now = Instant::now();
+        let dt = LAST_AT.get_or_init(now).elapsed().as_secs().max(1);
+        let up_rate = up.saturating_sub(prev_up) / dt;
+        let down_rate = down.saturating_sub(prev_down) / dt;
+        (up, down, up_rate, down_rate)
     }
 }
 
@@ -751,6 +826,25 @@ impl BackendHandle for PsiphonHandle {
             // before TUN is raised, and the supervisor excludes the SOCKS
             // loopback rather than a peer IP.
             peer_ip: None,
+            // Psiphon's local SOCKS5 is CONNECT-only: no UDP ASSOCIATE.
+            udp: false,
+        }
+    }
+
+    /// Live traffic counters, fed by the shim's BytesTransferred notices
+    /// (enabled by default in validate). Without this the UI and
+    /// notification would show 0 B for a fully working Psiphon tunnel.
+    /// On Android the AAR owns the tunnel and reports through its own
+    /// notification; the shim's counters do not exist there, so report the
+    /// zero default (the TUN-side counters stay the source of truth).
+    fn counters(&self) -> fcae_runtime::backend::Counters {
+        #[cfg(all(feature = "enabled", psiphon_linked))]
+        {
+            ffi::counters()
+        }
+        #[cfg(not(all(feature = "enabled", psiphon_linked)))]
+        {
+            fcae_runtime::backend::Counters::default()
         }
     }
 
@@ -787,10 +881,12 @@ impl BackendHandle for PsiphonHandle {
         }
         #[cfg(all(feature = "enabled", psiphon_linked))]
         {
-            // PsiphonTunnelStop blocks until the controller has cleaned up.
-            tokio::task::spawn_blocking(ffi::stop)
-                .await
-                .map_err(|e| CoreError::Internal(format!("psiphon stop task panicked: {e}")))?;
+            // Fire-and-forget: psi.Stop joins the whole controller before
+            // returning, which can take seconds -- far too long to block a
+            // disconnect on. The cancel token is already set and `stopped`
+            // makes wait() exit immediately, so the tunnel is down from the
+            // caller's perspective; the blocking stop runs on its own task.
+            tokio::task::spawn_blocking(ffi::stop);
         }
         Ok(())
     }
@@ -978,7 +1074,7 @@ mod tests {
         assert!(!has_server_entry_source(bare, None));
         assert!(!has_server_entry_source(bare, Some("")));
         // Whitespace-only is still no source...
-        assert!(has_server_entry_source(bare, Some("  \n")));
+        assert!(!has_server_entry_source(bare, Some("  \n")));
 
         // An embedded list satisfies it...
         assert!(has_server_entry_source(bare, Some("oNNXuM6b5Wl3BwEX4xNw")));

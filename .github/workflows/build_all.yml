@@ -344,6 +344,53 @@ jobs:
           ndk-version: r27
           link-to-sdk: true
 
+      # The Psiphon AAR is always compiled from the core/psiphon submodule:
+      # the Maven release lags the tunnel-core fixes this repo pins. Runs
+      # before gradle so android/psiphon/libs/ca.psiphon.aar exists when the
+      # app modules assemble. Needs the SDK platform gomobile binds against,
+      # so the cmdline-tools/platform install that "build apk" would do
+      # anyway happens here first (idempotent there).
+      - name: build psiphon AAR from submodule
+        if: startsWith(matrix.name, 'android-')
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_HOME: /usr/local/lib/android/sdk
+        run: |
+          set -euo pipefail
+          if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            cd "$ANDROID_HOME/cmdline-tools"
+            wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
+            unzip -q tools.zip
+            mv cmdline-tools latest
+          fi
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" > /dev/null
+
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          gomobile init
+
+          # make.bash is a GOPATH-era script: the tunnel-core checkout must
+          # sit at its canonical import path (a symlink to the submodule
+          # keeps a single source of truth).
+          GOPATH_DIR="$(go env GOPATH)"
+          mkdir -p "$GOPATH_DIR/src/github.com/Psiphon-Labs"
+          ln -sfn "$GITHUB_WORKSPACE/core/psiphon" \
+            "$GOPATH_DIR/src/github.com/Psiphon-Labs/psiphon-tunnel-core"
+
+          export GO111MODULE=off
+          export ANDROID_PLATFORM_VERSION=34
+          cd core/psiphon/MobileLibrary/Android
+          ./make.bash
+
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p android/psiphon/libs
+          cp core/psiphon/MobileLibrary/Android/ca.psiphon.aar android/psiphon/libs/ca.psiphon.aar
+          ls -lh android/psiphon/libs/
+
       - name: fetch imgui
         run: |
           mkdir -p third_party

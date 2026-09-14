@@ -23,6 +23,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import ca.psiphon.PsiphonTunnel;
 
@@ -78,23 +79,24 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
           + "31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xal"
           + "KxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=";
 
+    // Transport families (indices into TRANSPORT_GROUPS in getPsiphonConfig).
+    // 0 = Auto: no LimitTunnelProtocols, tunnel-core uses its full set.
+    private int transport = 0;
+
     private PsiphonTunnel tunnel;
     private String region = "";
     private volatile String lastRegions = "";
     private String upstreamProxy = "";
-    // Server-entry sources. tunnel-core has exactly three ways to learn its
-    // first server entries, and without one of them the controller stalls on
-    // CandidateServers count 0 forever ("no capable servers", then the
-    // misleading "untunneled DSL fetch failed ... no broker specs" — the DSL
-    // fetcher needs in-proxy broker specs, which are derived from server
-    // entries). The embedded list wins when several are set.
-    private String remoteServerListUrl = "";
-    private String remoteServerListKey = "";
-    private String embeddedListPath = "";
     private int wantSocks;
     private int wantHttp;
     private final AtomicInteger socksPort = new AtomicInteger(0);
     private final AtomicInteger httpPort = new AtomicInteger(0);
+    // Cumulative tunneled bytes, from onBytesTransferred (EmitBytesTransferred
+    // notices — the callback reports DELTAS since the previous notice, so
+    // accumulate). Surfaced in the foreground notification.
+    private final AtomicLong bytesUp = new AtomicLong(0);
+    private final AtomicLong bytesDown = new AtomicLong(0);
+    private volatile long lastCounterNotifAt = 0;
     private volatile boolean stopping;
     private final Handler logHandler = new Handler(Looper.getMainLooper());
     private final StringBuilder logBuf = new StringBuilder();
@@ -125,31 +127,17 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (intent != null) {
             String r = intent.getStringExtra("psiphonRegion");
             region = r == null ? "" : r.trim();
+            transport = intent.getIntExtra("psiphonTransport", 0);
             wantSocks = intent.getIntExtra("psiphonSocksPort", 0);
             wantHttp = intent.getIntExtra("psiphonHttpPort", 0);
             String up = intent.getStringExtra("upstreamProxy");
             upstreamProxy = up == null ? "" : up.trim();
         }
-        // Server-entry sources: the in-app Psiphon fields (sent as intent
-        // extras) first, then the persisted values from previous starts so a
-        // sticky-service restart with a null intent keeps working. The
-        // bundled asset is consumed later, in readEmbeddedServerList().
-        SharedPreferences p = getSharedPreferences("fcae_psiphon", MODE_PRIVATE);
-        String extraUrl = intent == null ? null : intent.getStringExtra("psiphonRemoteUrl");
-        String extraKey = intent == null ? null : intent.getStringExtra("psiphonRemoteKey");
-        String extraList = intent == null ? null : intent.getStringExtra("psiphonEmbeddedListFile");
-        remoteServerListUrl = firstNonEmpty(extraUrl, p.getString("psiphonRemoteUrl", ""));
-        remoteServerListKey = firstNonEmpty(extraKey, p.getString("psiphonRemoteKey", ""));
-        embeddedListPath = firstNonEmpty(extraList, p.getString("psiphonEmbeddedListFile", ""));
-        p.edit()
-                .putString("psiphonRemoteUrl", remoteServerListUrl)
-                .putString("psiphonRemoteKey", remoteServerListKey)
-                .putString("psiphonEmbeddedListFile", embeddedListPath)
-                .apply();
         stopping = false;
+        bytesUp.set(0);
+        bytesDown.set(0);
         emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")")
-                + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy)
-                + sourceSummary());
+                + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy));
         final PsiphonTunnel t = tunnel;
         new Thread(() -> {
             try {
@@ -253,6 +241,24 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             o.put("EmitDiagnosticNotices", true);
             o.put("UseIndistinguishableTLS", true);
             o.put("AllowDefaultDNSResolverWithBindToDevice", true);
+            // Frequent byte-count notices: they feed onBytesTransferred,
+            // which drives the notification counters. Without this a working
+            // tunnel shows 0 B.
+            o.put("EmitBytesTransferred", true);
+            // In-proxy client participation dials WebRTC connections through
+            // STUN while the tunnel is still connecting; every STUN timeout
+            // then lands in the log ("Failed get server reflexive
+            // address"). Off — the tunnel works without it.
+            o.put("InproxyEnabled", false);
+            o.put("InproxyAllowClient", false);
+            // Transport family restriction: Auto (0) leaves the field out so
+            // tunnel-core tries its full default protocol set.
+            String[] protocols = transportProtocols(transport);
+            if (protocols.length > 0) {
+                org.json.JSONArray a = new org.json.JSONArray();
+                for (String pr : protocols) a.put(pr);
+                o.put("LimitTunnelProtocols", a);
+            }
             File root = new File(getFilesDir(), "psiphon");
             if (!root.exists() && !root.mkdirs()) {
                 Log.w(TAG, "could not create " + root);
@@ -275,31 +281,39 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             if (!o.has("ServerEntrySignaturePublicKey")) {
                 o.put("ServerEntrySignaturePublicKey", DEFAULT_SERVER_ENTRY_SIGNATURE_KEY);
             }
-            // Out-of-band server entries: the classic remote server list.
-            // RemoteServerListUrl is the legacy field name, still promoted
-            // upstream, so a plain https:// URL + signature key is enough.
-            if (!remoteServerListUrl.isEmpty()) {
-                o.put("RemoteServerListUrl", remoteServerListUrl);
-                if (!remoteServerListKey.isEmpty()) {
-                    o.put("RemoteServerListSignaturePublicKey", remoteServerListKey);
-                }
-            } else if (embeddedListPath.isEmpty()) {
-                // Nothing user-provisioned: fall back to the LEGACY PUBLIC
-                // remote server list (the URL + signature key the
-                // open-source Psiphon 3 clients shipped — community clients
-                // like Oblivion still embed them). This is what makes an
-                // unprovisioned build connect on a fresh datastore instead
-                // of sitting on CandidateServers count 0. Legacy
-                // infrastructure: partner provisioning remains the
-                // supported long-term path.
-                o.put("RemoteServerListUrl", DEFAULT_SERVER_LIST_URL);
-                o.put("RemoteServerListSignaturePublicKey", DEFAULT_SERVER_LIST_SIGNATURE_KEY);
-                emitLog("no server-entry source configured; using the built-in legacy public remote server list");
-            }
+            // Out-of-band server entries: the LEGACY PUBLIC remote server
+            // list (the URL + signature key the open-source Psiphon 3
+            // clients shipped — community clients like Oblivion still embed
+            // them). This is what makes an unprovisioned build connect on a
+            // fresh datastore instead of sitting on CandidateServers count 0.
+            // There is no UI for overriding it any more; a bundled
+            // assets/psiphon_servers.txt (read in readEmbeddedServerList())
+            // takes precedence as the embedded source. Legacy infrastructure:
+            // partner provisioning remains the supported long-term path.
+            o.put("RemoteServerListUrl", DEFAULT_SERVER_LIST_URL);
+            o.put("RemoteServerListSignaturePublicKey", DEFAULT_SERVER_LIST_SIGNATURE_KEY);
             return o.toString();
         } catch (Exception e) {
             Log.e(TAG, "getPsiphonConfig: " + e.getMessage());
             return "{}";
+        }
+    }
+
+    /**
+     * Map a transport spinner index to tunnel-core LimitTunnelProtocols
+     * values. Index 0 (Auto) returns an empty array: omit the field so the
+     * full default protocol set is used. Names are the exact strings from
+     * tunnel-core's config.go.
+     */
+    static String[] transportProtocols(int selection) {
+        switch (selection) {
+            case 1: return new String[]{"SSH", "OSSH"};
+            case 2: return new String[]{"QUIC-OSSH"};
+            case 3: return new String[]{
+                    "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH",
+                    "UNFRONTED-MEEK-SESSION-TICKET-OSSH"};
+            case 4: return new String[]{"FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH"};
+            default: return new String[0];
         }
     }
 
@@ -325,32 +339,18 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     /**
      * Load the embedded server entry list for startTunneling().
      *
-     * Order: the file given via the Psiphon "embedded entries file" field
-     * (extra or pref), then the bundled asset assets/psiphon_servers.txt.
-     * Returns "" when neither has content; the config's legacy public
-     * remote server list then bootstraps.
+     * Optional bundled asset: assets/psiphon_servers.txt. Returns "" when it
+     * is absent or empty; the config's legacy public remote server list then
+     * bootstraps.
      */
     private String readEmbeddedServerList() {
-        if (!embeddedListPath.isEmpty()) {
-            try {
-                byte[] raw = readAll(new File(embeddedListPath));
-                if (raw.length > 0) {
-                    emitLog("importing embedded server entries from " + embeddedListPath
-                            + " (" + raw.length + " bytes)");
-                    return new String(raw, "UTF-8");
-                }
-                emitLog("embedded list file is empty: " + embeddedListPath);
-            } catch (Exception e) {
-                emitLog("could not read embedded list " + embeddedListPath + ": " + e.getMessage());
-            }
-        }
-        // Optional bundled asset: psiphon_servers.txt is NOT in the repo by
-        // default (an empty placeholder would be dead weight and imply we
-        // ship entries). If you bundle entries — your own servers or
-        // Psiphon-Labs provisioning, never entries extracted from other
-        // clients — add assets/psiphon_servers.txt to the app module and it
-        // is picked up automatically. Without it, the config's legacy public
-        // remote server list is the bootstrap source.
+        // psiphon_servers.txt is NOT in the repo by default (an empty
+        // placeholder would be dead weight and imply we ship entries). If
+        // you bundle entries — your own servers or Psiphon-Labs
+        // provisioning, never entries extracted from other clients — add
+        // assets/psiphon_servers.txt to the app module and it is picked up
+        // automatically. Without it, the config's legacy public remote
+        // server list is the bootstrap source.
         try (java.io.InputStream in = getAssets().open("psiphon_servers.txt")) {
             java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
             byte[] buf = new byte[8192];
@@ -408,6 +408,41 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public void onListeningHttpProxyPort(int port) {
         httpPort.set(port);
         emitLog("HTTP 127.0.0.1:" + port);
+    }
+
+    @Override
+    public void onBytesTransferred(long sent, long received) {
+        // Values are deltas since the previous notice — accumulate.
+        if (sent <= 0 && received <= 0) return;
+        bytesUp.addAndGet(Math.max(0, sent));
+        bytesDown.addAndGet(Math.max(0, received));
+        maybeUpdateCounterNotification();
+    }
+
+    /** Refresh the notification's byte counters at most every 2 seconds. */
+    private void maybeUpdateCounterNotification() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (stopping || now - lastCounterNotifAt < 2000) return;
+        lastCounterNotifAt = now;
+        try {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm == null) return;
+            int s = socksPort.get();
+            String base = s > 0
+                    ? "FCAE Psiphon — SOCKS 127.0.0.1:" + s
+                    : "FCAE Psiphon — Connecting…";
+            nm.notify(NOTIF_ID, buildNotification(
+                    base + "  ·  \u2191" + fmtBytes(bytesUp.get())
+                            + " \u2193" + fmtBytes(bytesDown.get())));
+        } catch (Exception ignored) {}
+    }
+
+    private static String fmtBytes(long b) {
+        if (b < 1024) return b + " B";
+        double v = b;
+        if ((v /= 1024) < 1024) return String.format(java.util.Locale.US, "%.1f kB", v);
+        if ((v /= 1024) < 1024) return String.format(java.util.Locale.US, "%.1f MB", v);
+        return String.format(java.util.Locale.US, "%.2f GB", v / 1024);
     }
 
     @Override
