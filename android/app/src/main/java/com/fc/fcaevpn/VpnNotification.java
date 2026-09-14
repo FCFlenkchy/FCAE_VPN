@@ -116,8 +116,14 @@ public class VpnNotification {
         intent.setAction(action);
         // Explicit component + foreground service so a tap is delivered even
         // when the app is backgrounded (Android 12+).
-        PendingIntent pi = PendingIntent.getForegroundService(context, requestCode,
-            intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent pi;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            pi = PendingIntent.getForegroundService(context, requestCode,
+                intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        } else {
+            pi = PendingIntent.getService(context, requestCode,
+                intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        }
         return new Notification.Action.Builder(null, label, pi).build();
     }
 

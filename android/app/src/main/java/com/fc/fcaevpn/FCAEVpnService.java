@@ -2,6 +2,7 @@ package com.fc.fcaevpn;
 
 import android.app.Notification;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.LinkProperties;
@@ -78,6 +79,11 @@ public class FCAEVpnService extends VpnService {
     private VpnNotification notification;
     private Handler handler;
     private String lastNotifText = null;
+
+    private final Object cmdLock = new Object();
+    private volatile boolean engineOpInFlight = false;
+    private volatile Intent queuedStart = null;
+    private volatile boolean uiConnecting = false;
 
     private final Runnable statsRunnable = new Runnable() {
         @Override
