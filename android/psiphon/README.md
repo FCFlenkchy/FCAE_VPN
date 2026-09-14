@@ -1,24 +1,16 @@
 # Android Psiphon (official AAR)
 
-This is the Android Psiphon integration point. It is **not** part of the
-Gradle graph (`settings.gradle.kts` does not `include(":psiphon")`) and
-is **not compiled**.
+Maven `ca.psiphon:psiphontunnel:2.0.41` from
+https://github.com/Psiphon-Labs/psiphon-tunnel-core-Android-library
 
-## Why an AAR
+The AAR ships `libgojni.so` (a Go runtime). tun2socks ships
+`libfcae_go_bridge.so` (another Go runtime). Loading both in one process
+SIGSEGVs at `dlopen`.
 
-Psiphon's Android library is `MobileLibrary/psi`, distributed as
-`ca.psiphon.aar` / Maven `ca.psiphon:psiphontunnel`. That is a gomobile
-binding with `Start` / `Stop` / `BindToDevice`.
+`PsiphonTunnelService` therefore runs in process `:psiphon`, binds that
+process to the underlying network, and broadcasts the local SOCKS port.
+The UI process then points tun2socks at `127.0.0.1:<port>` (TUN) or the
+user points clients at it (proxy).
 
-What does **not** work:
-
-- `ClientLibrary` — no `BindToDevice`, sockets get captured by our TUN.
-- Linking `psi` into tun2socks' Go c-shared (`libfcae_go_bridge.so`).
-- Loading a second Go runtime next to tun2socks — SIGSEGV at `dlopen`.
-
-## Re-enable later
-
-1. `include(":psiphon")` in `android/settings.gradle.kts`
-2. `implementation(project(":psiphon"))` in the app module
-3. Uncomment the Maven/AAR line in `build.gradle.kts`
-4. Keep `fcae-bridge-psiphon/enabled` off for the Android cargo build
+Do not compile `MobileLibrary/psi` into `libfcae_go_bridge.so`.
+`ClientLibrary` has no `BindToDevice` and cannot work on Android.

@@ -31,6 +31,8 @@ class MainActivity : AppCompatActivity() {
     private var connecting = false
     @Volatile private var engineRunning = false
     private var pendingAfterVpnPermission = false
+    @Volatile private var pendingPsiSocks = 0
+    @Volatile private var pendingPsiHttp = 0
     private var lastLogHash = 0L
     @Volatile private var vpnActive = false
     private var wasAtBottom = true
@@ -109,7 +111,7 @@ class MainActivity : AppCompatActivity() {
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && pendingAfterVpnPermission) {
             pendingAfterVpnPermission = false
-            startTunServiceWithConfig()
+            if (isPsiphonSelected()) startPsiphon() else startTunServiceWithConfig()
         } else {
             pendingAfterVpnPermission = false
             Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
@@ -128,6 +130,63 @@ class MainActivity : AppCompatActivity() {
     private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
+                PsiphonTunnelService.BROADCAST_READY -> {
+                    val socks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, 0)
+                    val http = intent.getIntExtra(PsiphonTunnelService.EXTRA_HTTP, 0)
+                    val regions = intent.getStringExtra(PsiphonTunnelService.EXTRA_REGIONS)
+                    val regionsOnly = intent.getBooleanExtra("regionsOnly", false)
+                    handler.post {
+                        if (!regions.isNullOrBlank()) {
+                            savedPsiphonRegion = selectedPsiphonRegion()
+                            // nativePsiphonRegions stays empty on AAR builds;
+                            // seed the spinner from the AAR notice.
+                            val codes = regions.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                            val newCodes = listOf("") + codes
+                            if (newCodes != psiphonRegionCodes) {
+                                psiphonRegionCodes = newCodes
+                                val labels = newCodes.map { if (it.isEmpty()) "Auto (fastest)" else it }
+                                spinnerPsiphonRegion.adapter =
+                                    ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, labels)
+                                val at = newCodes.indexOf(savedPsiphonRegion)
+                                spinnerPsiphonRegion.setSelection(if (at >= 0) at else 0)
+                            }
+                        }
+                        if (regionsOnly) return@post
+                        pendingPsiSocks = socks
+                        pendingPsiHttp = http
+                        connecting = false
+                        engineRunning = true
+                        vpnActive = true
+                        updateButton()
+                        statusText.text = if (isTunModeSelected()) "PSIPHON UP — raising TUN" else "CONNECTED (PSIPHON)"
+                        statusText.setTextColor(COLOR_CONNECTED)
+                        if (isTunModeSelected() && socks > 0) {
+                            startTunServiceWithConfig()
+                        }
+                    }
+                }
+                PsiphonTunnelService.BROADCAST_FAILED -> {
+                    val err = intent.getStringExtra(PsiphonTunnelService.EXTRA_ERROR) ?: "Psiphon failed"
+                    handler.post {
+                        connecting = false
+                        engineRunning = false
+                        vpnActive = false
+                        updateButton()
+                        statusText.text = "ERROR: $err"
+                        statusText.setTextColor(COLOR_ERROR)
+                        Toast.makeText(this@MainActivity, err, Toast.LENGTH_LONG).show()
+                    }
+                }
+                PsiphonTunnelService.BROADCAST_STOPPED -> {
+                    handler.post {
+                        if (userInitiatedDisconnect) return@post
+                        connecting = false
+                        engineRunning = false
+                        vpnActive = false
+                        updateButton()
+                        statusText.text = "DISCONNECTED"
+                    }
+                }
                 FCAEVpnService.BROADCAST_VPN_DISCONNECTED,
                 FCAEVpnService.BROADCAST_VPN_STATE_CHANGED -> {
                     val isRunning = intent.getBooleanExtra("running", false)
@@ -534,6 +593,9 @@ class MainActivity : AppCompatActivity() {
         val filter = IntentFilter().apply {
             addAction(FCAEVpnService.BROADCAST_VPN_DISCONNECTED)
             addAction(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
+            addAction(PsiphonTunnelService.BROADCAST_READY)
+            addAction(PsiphonTunnelService.BROADCAST_FAILED)
+            addAction(PsiphonTunnelService.BROADCAST_STOPPED)
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(vpnStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -908,6 +970,24 @@ class MainActivity : AppCompatActivity() {
         userInitiatedDisconnect = false
         commandPaused = false
         commandConnecting = true
+        if (isPsiphonSelected()) {
+            val cfg = editPsiphonConfig.text.toString().trim()
+            if (cfg.isEmpty() || !cfg.startsWith("{")) {
+                Toast.makeText(this, "Paste a Psiphon config JSON first", Toast.LENGTH_LONG).show()
+                commandConnecting = false
+                return
+            }
+            if (isTunModeSelected()) {
+                val prep = VpnService.prepare(this)
+                if (prep != null) {
+                    pendingAfterVpnPermission = true
+                    vpnPermissionLauncher.launch(prep)
+                    return
+                }
+            }
+            startPsiphon()
+            return
+        }
         val mode = spinnerMode.selectedItemPosition
         if (mode == 1) {
             val prep = VpnService.prepare(this)
@@ -920,6 +1000,22 @@ class MainActivity : AppCompatActivity() {
         } else {
             startEngine()
         }
+    }
+
+    private fun startPsiphon() {
+        connecting = true
+        vpnActive = true
+        updateButton()
+        saveSettings()
+        statusText.text = "CONNECTING (PSIPHON)"
+        statusText.setTextColor(COLOR_PROGRESS)
+        val i = Intent(this, PsiphonTunnelService::class.java)
+        i.action = PsiphonTunnelService.ACTION_START
+        i.putExtra("psiphonConfig", editPsiphonConfig.text.toString().trim().ifEmpty { "{}" })
+        i.putExtra("psiphonRegion", selectedPsiphonRegion())
+        i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
+        i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
+        startForegroundService(i)
     }
 
     private fun startTunServiceWithConfig() {
@@ -1096,6 +1192,12 @@ class MainActivity : AppCompatActivity() {
     statusText.setTextColor(Color.parseColor("#8A93A6"))
     statsText.text = ""
     peerText.text = ""
+
+    try {
+        val i = Intent(this, PsiphonTunnelService::class.java)
+        i.action = PsiphonTunnelService.ACTION_STOP
+        startForegroundService(i)
+    } catch (_: Throwable) {}
 
     // 2. Trigger disconnect on a background thread
     val currentMode = spinnerMode.selectedItemPosition

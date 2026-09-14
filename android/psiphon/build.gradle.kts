@@ -1,16 +1,10 @@
 plugins {
     id("com.android.library")
-    id("org.jetbrains.kotlin.android")
 }
 
-// Official Psiphon Android library wrapper.
-//
-// NOT included in settings.gradle.kts — Gradle will not compile this
-// module. When re-enabling Psiphon:
-//   1. include(":psiphon") in settings.gradle.kts
-//   2. implementation(project(":psiphon")) in app/build.gradle.kts
-//   3. uncomment the AAR / Maven dependency below
-// Do not compile MobileLibrary/psi into libfcae_go_bridge.so.
+// Official Psiphon Android library (gomobile AAR). Loaded only in the
+// :psiphon process so libgojni.so never shares an address space with
+// tun2socks' libfcae_go_bridge.so.
 
 android {
     namespace = "com.fc.fcaevpn.psiphon"
@@ -18,10 +12,12 @@ android {
     defaultConfig {
         minSdk = 24
     }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
 }
 
 dependencies {
-    // Official distribution. Uncomment when re-enabling; pin a real version.
-    // implementation("ca.psiphon:psiphontunnel:<version>")
-    // or: implementation(files("libs/ca.psiphon.aar")) from MobileLibrary/Android
+    api("ca.psiphon:psiphontunnel:2.0.41")
 }

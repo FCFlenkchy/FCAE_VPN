@@ -186,20 +186,26 @@ impl Backend for PsiphonBackend {
 
     #[cfg(not(all(feature = "enabled", psiphon_linked)))]
     fn availability(&self) -> std::result::Result<(), String> {
-        Err("Psiphon is registered but this build has no tunnel core linked; \
-             rebuild with --features psiphon-live (needs the core/psiphon \
-             submodule and a Go toolchain)"
-            .to_string())
+        // Android: the official AAR owns the tunnel core. This backend
+        // attaches to the AAR's local SOCKS once the host passes the port.
+        Ok(())
     }
 
     #[cfg(not(all(feature = "enabled", psiphon_linked)))]
     async fn start(&self, cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
-        // Validate anyway, so a misconfiguration is reported identically in a
-        // build that cannot run Psiphon and one that can.
         let _ = validate(&cx.config)?;
-        Err(CoreError::BackendUnavailable(
-            "psiphon (build without --features fcae-bridge-psiphon/enabled)",
-        ))
+        let socks = cx.config.psiphon.socks_port;
+        if socks == 0 {
+            return Err(CoreError::StartFailed(
+                "Android Psiphon is the official AAR (process :psiphon).                  Start PsiphonTunnelService first and pass its SOCKS port."
+                    .into(),
+            ));
+        }
+        Ok(Box::new(PsiphonHandle {
+            socks_port: socks,
+            http_port: cx.config.psiphon.http_port,
+            stopped: AtomicBool::new(false),
+        }))
     }
 
     #[cfg(all(feature = "enabled", psiphon_linked))]
@@ -675,8 +681,12 @@ impl BackendHandle for PsiphonHandle {
         }
         #[cfg(not(all(feature = "enabled", psiphon_linked)))]
         {
-            std::future::pending::<()>().await;
-            Ok(())
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if self.stopped.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+            }
         }
     }
 

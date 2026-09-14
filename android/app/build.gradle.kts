@@ -151,7 +151,6 @@ android {
 dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
-    // Official Psiphon AAR — not applied. When re-enabling:
-    // implementation(project(":psiphon"))
-    // Do not compile psi into libfcae_go_bridge.so.
+    // Official AAR. Runs in process :psiphon — not inside libfcae_go_bridge.so.
+    implementation(project(":psiphon"))
 }

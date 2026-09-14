@@ -11,10 +11,12 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven {
+            url = uri("https://raw.github.com/Psiphon-Labs/psiphon-tunnel-core-Android-library/master")
+        }
     }
 }
 
 rootProject.name = "FCAE_VPN"
 include(":app")
-// Psiphon AAR wrapper lives in android/psiphon/. Not included — do not
-// compile it. When re-enabling: include(":psiphon")
+include(":psiphon")

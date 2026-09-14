@@ -49,5 +49,17 @@
                 android:value="proxy" />
         </service>
 
+        <!-- Isolated process: AAR Go runtime must not share an address space
+             with tun2socks. -->
+        <service
+            android:name=".PsiphonTunnelService"
+            android:exported="false"
+            android:process=":psiphon"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="psiphon" />
+        </service>
+
     </application>
 </manifest>

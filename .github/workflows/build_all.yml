@@ -412,8 +412,9 @@ jobs:
                 export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
                 export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
                 
-                # TEMP: psiphon-live commented out — do not load the Psiphon library for now.
-                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor #,psiphon-live
+                # psiphon = attach to the official AAR (no Go psi in this .so).
+                # psiphon-live would compile a second Go runtime — do not.
+                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon
 
                 # CARGO_TARGET_DIR (set in env: below) puts every artifact in
                 # one place, so there is no longer a fallback copy to do.
@@ -459,8 +460,8 @@ jobs:
               echo "Using NDK: $NDK"
               "$CLANG" --version | head -1
               
-              # TEMP: psiphon-live commented out — do not load the Psiphon library for now.
-              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor #,psiphon-live
+              # psiphon = attach to the official AAR. Do not enable psiphon-live.
+              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon
 
               DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
               ls -lh "$DEST"
