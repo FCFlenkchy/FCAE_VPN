@@ -187,45 +187,17 @@ impl Backend for AetherBackend {
         // start-timeout fires, this future is dropped while wait_for_* is
         // still looping — without the guard the engine task kept running,
         // held the SOCKS port, and the next connect aborted the *new*
-        // engine instead.
-        //
-        // Never abort a task that may still own arti's TorClient: abort
-        // runs Drop during unwind and set_dormant panics, which is the
-        // "disconnect Tor → crash" bug. Signal shutdown and park the
-        // handle so the next start can wait it out.
-        struct StartGuard {
-            task: Option<tokio::task::JoinHandle<()>>,
-            tor: bool,
-        }
-        impl Drop for StartGuard {
+        // engine instead. Drop aborts *this* task only.
+        struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+        impl Drop for AbortOnDrop {
             fn drop(&mut self) {
-                if let Some(mut h) = self.task.take() {
+                if let Some(h) = self.0.take() {
                     aether_engine::shutdown::request();
-                    if !self.tor {
-                        h.abort();
-                        return;
-                    }
-                    if h.is_finished() {
-                        return;
-                    }
-                    // start() is being dropped (disconnect or timeout) on
-                    // the session runtime. Join the engine HERE so
-                    // shutdown_timeout cannot abort arti mid-drop.
-                    let _ = tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            let _ = tokio::time::timeout(Duration::from_secs(8), &mut h).await;
-                        })
-                    });
-                    if !h.is_finished() {
-                        *LAST_ENGINE.lock() = Some(h);
-                    }
+                    h.abort();
                 }
             }
         }
-        let mut engine_guard = StartGuard {
-            task: Some(engine_task),
-            tor: cfg.tor.is_enabled(),
-        };
+        let mut engine_guard = AbortOnDrop(Some(engine_task));
 
         // Readiness = the SOCKS listener actually accepting connections.
         // Log-scraping for "socks5 ... listening" (the old approach) silently
@@ -371,7 +343,7 @@ impl Backend for AetherBackend {
         }
 
         let engine_task = engine_guard
-            .task
+            .0
             .take()
             .expect("engine task is still owned by the start guard");
         *LAST_ENGINE.lock() = Some(engine_task);
@@ -396,32 +368,15 @@ impl Backend for AetherBackend {
 }
 
 /// Ensure the previous engine task is fully dead before a new one starts.
-///
-/// A task that is merely signalled (stop()'s request) can outlive its
-/// listeners: the reconnect loop's backoff sleeps are not woken by the
-/// signal, so the task keeps scanning and redialling. Worse, if the next
-/// start cleared the flag first, that loop would never see the
-/// cancellation at all and the old engine would run alongside the new
-/// one, fighting it for the ports.
-///
-/// Wait for a cooperative exit first. Aborting a task that still owns
-/// arti's TorClient panics in Drop and kills the process.
 async fn reap_previous_engine() {
-    let Some(mut prev) = LAST_ENGINE.lock().take() else {
+    let Some(prev) = LAST_ENGINE.lock().take() else {
         return;
     };
     if prev.is_finished() {
         return;
     }
     aether_engine::shutdown::request();
-    let _ = tokio::time::timeout(Duration::from_secs(8), &mut prev).await;
-    if prev.is_finished() {
-        let _ = prev.await;
-        return;
-    }
-    log::warn!("[aether] previous engine still running after 8s; aborting leftover task");
     prev.abort();
-    let _ = tokio::time::timeout(Duration::from_millis(400), &mut prev).await;
 }
 
 /// One connect attempt against the tunnel's SOCKS listener.

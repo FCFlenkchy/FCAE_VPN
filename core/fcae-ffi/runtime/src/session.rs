@@ -87,7 +87,7 @@ impl Default for SupervisorConfig {
             // engine task and shut the runtime down, and dropping the
             // JoinHandle instead leaked that work into a later connect
             // (crash / "address already in use").
-            stop_timeout: Duration::from_secs(8),
+            stop_timeout: Duration::from_millis(250),
             auto_reconnect: true,
             max_reconnects: 0,
         }
@@ -255,7 +255,9 @@ impl Supervisor {
                 // runtime is dropped, because its stop path may need to run
                 // blocking OS commands.
                 tun_bridge.stop(stop_timeout);
-                rt.shutdown_timeout(stop_timeout);
+                // Do not sit on leftover tasks (warp-in-warp used to eat the
+                // full stop_timeout here). Abort already cancelled them.
+                rt.shutdown_background();
 
                 match outcome {
                     Ok(Ok(())) => {

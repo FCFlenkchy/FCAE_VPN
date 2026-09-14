@@ -804,7 +804,7 @@ public class FCAEVpnService extends VpnService {
 
             if (t != null) {
                 t.interrupt();
-                try { t.join(1000); } catch (InterruptedException ignored) {}
+                try { t.join(50); } catch (InterruptedException ignored) {}
             }
 
             handler.post(this::stopSelf);
