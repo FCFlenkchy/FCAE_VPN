@@ -1110,7 +1110,7 @@ void render_ui() {
             // "HTTP/2 Fallback" checkbox). Underlying config keeps the same
             // two fields the FFI always took: protocol (0/1/2) + h2_enabled.
             // idx 0 = MASQUE H3, 1 = MASQUE H2, 2 = WireGuard, 3 = WIW.
-            // idx 4 = Tor only, 5 = Psiphon. Both are peers of the WARP
+            // idx 4 = Tor, 5 = Psiphon. Both are peers of the WARP
             // transports to the user even though internally Tor is an engine
             // egress (tor.mode = Only) and Psiphon is a separate backend.
             int transport = (g_app.backend == 1)  ? 5
@@ -1129,7 +1129,7 @@ void render_ui() {
             if (ImGui::RadioButton("WARP-in-WARP (Gool)", &transport, 3)) {
                 g_app.protocol = 2; g_app.backend = 0;
             }
-            if (ImGui::RadioButton("Tor only", &transport, 4)) {
+            if (ImGui::RadioButton("Tor", &transport, 4)) {
                 // FcaeProtocol::Tor. Do not reset the egress combo — gray it
                 // and apply Off at start so switching protocol restores it.
                 g_app.protocol = 4; g_app.backend = 0;
@@ -1286,7 +1286,7 @@ void render_ui() {
                 "Off",
                 "Tor through the tunnel",
                 "Tunnel through Tor (MASQUE only)",
-                "Psiphon",
+                "Psiphon through the tunnel",
             };
             if (g_app.tor_mode < 0 || g_app.tor_mode > 3) g_app.tor_mode = 0;
             const bool lock_egress = (g_app.protocol == 4 || g_app.backend == 1);
@@ -1294,9 +1294,9 @@ void render_ui() {
             ImGui::Combo("Egress", &g_app.tor_mode, egress_modes, 4);
             if (lock_egress) ImGui::EndDisabled();
             if (g_app.protocol == 4)
-                ImGui::TextDisabled("Tor only is selected above; egress is unused until you change protocol.");
+                ImGui::TextDisabled("Tor is selected above; egress is unused until you change protocol.");
             else if (g_app.backend == 1)
-                ImGui::TextDisabled("Psiphon is the transport; egress Psiphon is unused.");
+                ImGui::TextDisabled("Psiphon is the transport; egress is unused.");
             // In TUN mode the routing to the right port happens internally,
             // but in proxy mode the user dials the ports by hand -- tell
             // them which one actually carries tor traffic, or they will use
@@ -1528,4 +1528,6 @@ void render_ui() {
 
     ImGui::PopStyleVar(2);
     ImGui::End();
+}
+nd();
 }

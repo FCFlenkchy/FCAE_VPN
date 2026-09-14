@@ -20,7 +20,8 @@
 
 static std::mutex g_log_mu;
 static std::deque<std::string> g_logs;
-static constexpr size_t kMaxLogs = 30;
+// Psiphon AAR notices are chatty; 30 lines vanished before the user saw them.
+static constexpr size_t kMaxLogs = 250;
 static std::atomic<bool> g_inited{false};
 
 // ── Psiphon socket protection ───────────────────────────────────────────
@@ -283,6 +284,20 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeUnregisterVpnService(JNIEnv* env, jclas
     g_network_id_mid = nullptr;
 }
 
+static void push_log_line(char prefix, const char* message) {
+    if (!message || !message[0]) return;
+    std::string line;
+    line.push_back(prefix);
+    line += " ";
+    line += message;
+    // One diagnostic notice can be a long JSON blob; keep the pane readable.
+    if (line.size() > 512) line.resize(512);
+    g_logs.push_back(std::move(line));
+    while (g_logs.size() > kMaxLogs) {
+        g_logs.pop_front();
+    }
+}
+
 static void jni_log_cb(FcaeLogLevel level, const char* message, void* /*user*/) {
     if (!message) return;
     std::lock_guard<std::mutex> lock(g_log_mu);
@@ -290,14 +305,7 @@ static void jni_log_cb(FcaeLogLevel level, const char* message, void* /*user*/) 
     if (level == FCAE_LOG_ERROR) prefix = 'E';
     else if (level == FCAE_LOG_WARN) prefix = 'W';
     else if (level == FCAE_LOG_DEBUG) prefix = 'D';
-    std::string line;
-    line.push_back(prefix);
-    line += " ";
-    line += message;
-    g_logs.push_back(std::move(line));
-    while (g_logs.size() > kMaxLogs) {
-        g_logs.pop_front();
-    }
+    push_log_line(prefix, message);
     if (level <= FCAE_LOG_WARN) {
         __android_log_print(ANDROID_LOG_WARN, LOG_TAG, "%s", message);
     } else {
@@ -651,6 +659,23 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeClearLogs(JNIEnv*, jclass) {
     std::lock_guard<std::mutex> lock(g_log_mu);
     g_logs.clear();
+}
+
+// Host-side lines (the :psiphon AAR process cannot touch this deque).
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeAppendLog(JNIEnv* env, jclass, jstring s) {
+    std::string t = jstr(env, s);
+    if (t.empty()) return;
+    std::lock_guard<std::mutex> lock(g_log_mu);
+    const char* p = t.c_str();
+    while (*p) {
+        const char* nl = strchr(p, '\n');
+        std::string one = nl ? std::string(p, (size_t)(nl - p)) : std::string(p);
+        if (!one.empty() && one.back() == '\r') one.pop_back();
+        if (!one.empty()) push_log_line('I', one.c_str());
+        if (!nl) break;
+        p = nl + 1;
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL

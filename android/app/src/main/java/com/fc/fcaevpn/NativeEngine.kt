@@ -87,6 +87,8 @@ object NativeEngine {
     @JvmStatic external fun nativePsiphonRegions(): String
     @JvmStatic external fun nativeGetLogs(): String
     @JvmStatic external fun nativeClearLogs()
+    /** Inject a host-side line (Psiphon AAR notices live in :psiphon). */
+    @JvmStatic external fun nativeAppendLog(line: String)
 
     // ── Structured telemetry getters ──
     @JvmStatic external fun nativeGetState(): Int

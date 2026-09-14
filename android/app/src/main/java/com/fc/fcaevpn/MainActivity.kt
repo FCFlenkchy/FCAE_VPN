@@ -174,6 +174,10 @@ class MainActivity : AppCompatActivity() {
                         statusText.text = "DISCONNECTED"
                     }
                 }
+                PsiphonTunnelService.BROADCAST_LOG -> {
+                    val chunk = intent.getStringExtra(PsiphonTunnelService.EXTRA_LOG) ?: return
+                    handler.post { ingestPsiphonLog(chunk) }
+                }
                 FCAEVpnService.BROADCAST_VPN_DISCONNECTED,
                 FCAEVpnService.BROADCAST_VPN_STATE_CHANGED -> {
                     val isRunning = intent.getBooleanExtra("running", false)
@@ -389,7 +393,7 @@ class MainActivity : AppCompatActivity() {
             // (backend, protocol, torMode) triple the FFI wants.
             listOf(
                 "MASQUE (HTTP/3)", "MASQUE (HTTP/2)", "WireGuard", "WARP-in-WARP",
-                "Tor only", "Psiphon",
+                "Tor", "Psiphon",
             ),
         )
         spinnerMode.adapter = ArrayAdapter(
@@ -428,7 +432,7 @@ class MainActivity : AppCompatActivity() {
                 "Off",
                 "Tor through the tunnel",
                 "Tunnel through Tor (MASQUE only)",
-                "Psiphon",
+                "Psiphon through the tunnel",
             ),
         )
         // Positions map 1:1 onto FcaeTorBridges.
@@ -580,6 +584,7 @@ class MainActivity : AppCompatActivity() {
             addAction(PsiphonTunnelService.BROADCAST_READY)
             addAction(PsiphonTunnelService.BROADCAST_FAILED)
             addAction(PsiphonTunnelService.BROADCAST_STOPPED)
+            addAction(PsiphonTunnelService.BROADCAST_LOG)
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(vpnStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -846,7 +851,7 @@ class MainActivity : AppCompatActivity() {
             1 -> "Proxy mode: point SOCKS clients at the Tor SOCKS port; the tunnel's own ports stay plain (un-tor'ed)."
             2 -> "Proxy mode: use the tunnel's SOCKS/HTTP ports as usual; tor is the carrier underneath them."
             else -> if (isTorOnly())
-                "Proxy mode: dial the Tor SOCKS port; Tor-only has no WARP tunnel. Egress is unused until you change protocol."
+                "Proxy mode: dial the Tor SOCKS port; Tor has no WARP tunnel. Egress is unused until you change protocol."
             else ""
         }
         textTorHint.text = hint
@@ -987,6 +992,7 @@ class MainActivity : AppCompatActivity() {
         saveSettings()
         statusText.text = "CONNECTING (PSIPHON)"
         statusText.setTextColor(COLOR_PROGRESS)
+        ingestPsiphonLog("[psiphon] connecting")
         val i = Intent(this, PsiphonTunnelService::class.java)
         i.action = PsiphonTunnelService.ACTION_START
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
@@ -1301,6 +1307,36 @@ class MainActivity : AppCompatActivity() {
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
     }
 
+    /** AAR notices arrive from :psiphon. The engine log deque lives here. */
+    private fun ingestPsiphonLog(chunk: String) {
+        if (chunk.isBlank()) return
+        try { NativeEngine.nativeAppendLog(chunk) } catch (_: Throwable) {}
+        if (!::switchLogging.isInitialized || !switchLogging.isChecked) return
+        val logs = try { NativeEngine.nativeGetLogs() } catch (_: Throwable) { return }
+        val h = if (logs.isEmpty()) 0L else
+            logs.length.toLong() * 31 +
+            logs[0].code.toLong() * 31 +
+            logs[logs.length - 1].code.toLong()
+        if (h == lastLogHash) return
+        lastLogHash = h
+        val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
+        val scrollWasAtBottom = wasAtBottom
+        updatingLogs = true
+        logText.text = shown
+        if (scrollWasAtBottom) {
+            logScroll.post {
+                val child = logScroll.getChildAt(0)
+                if (child != null) {
+                    val target = (child.height - logScroll.height).coerceAtLeast(0)
+                    logScroll.scrollTo(0, target)
+                }
+                updatingLogs = false
+            }
+        } else {
+            updatingLogs = false
+        }
+    }
+
     private fun applyStatus(
         state: Int,
         rtt: Int,
@@ -1466,7 +1502,7 @@ class MainActivity : AppCompatActivity() {
     private fun coreProtocolFromSelection(): Int = when (spinnerProtocol.selectedItemPosition) {
         2 -> 1    // WireGuard
         3 -> 2    // WARP-in-WARP
-        4 -> 4    // Tor only (FcaeProtocol::Tor; implies tor.mode = Only)
+        4 -> 4    // Tor (FcaeProtocol::Tor; implies tor.mode = Only)
         5 -> 3    // Psiphon picks its own transport (FcaeProtocol::Auto)
         else -> 0 // MASQUE (either HTTP version)
     }
@@ -1605,5 +1641,11 @@ class MainActivity : AppCompatActivity() {
         private val COLOR_CONNECT_BTN = Color.parseColor("#15803D")
         private val COLOR_UPDATE_AVAILABLE = Color.parseColor("#FF8C00")  // orange
         private val COLOR_UPDATE_IDLE = Color.parseColor("#60A5FA")        // blue theme
+    }
+}
+      private val COLOR_UPDATE_IDLE = Color.parseColor("#60A5FA")        // blue theme
+    }
+}
+("#60A5FA")        // blue theme
     }
 }

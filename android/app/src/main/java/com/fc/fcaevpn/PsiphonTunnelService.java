@@ -12,7 +12,9 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -42,10 +44,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String BROADCAST_READY = "com.fc.fcaevpn.PSI_READY";
     public static final String BROADCAST_FAILED = "com.fc.fcaevpn.PSI_FAILED";
     public static final String BROADCAST_STOPPED = "com.fc.fcaevpn.PSI_STOPPED";
+    public static final String BROADCAST_LOG = "com.fc.fcaevpn.PSI_LOG";
     public static final String EXTRA_SOCKS = "socksPort";
     public static final String EXTRA_HTTP = "httpPort";
     public static final String EXTRA_ERROR = "error";
     public static final String EXTRA_REGIONS = "regions";
+    public static final String EXTRA_LOG = "log";
 
     private static final String CHANNEL_ID = "fcaevpn_psiphon";
     private static final int NOTIF_ID = 3;
@@ -58,6 +62,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private final AtomicInteger socksPort = new AtomicInteger(0);
     private final AtomicInteger httpPort = new AtomicInteger(0);
     private volatile boolean stopping;
+    private final Handler logHandler = new Handler(Looper.getMainLooper());
+    private final StringBuilder logBuf = new StringBuilder();
+    private final Runnable flushLogs = this::flushLogs;
 
     @Override
     public void onCreate() {
@@ -88,6 +95,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             wantHttp = intent.getIntExtra("psiphonHttpPort", 0);
         }
         stopping = false;
+        emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")"));
         final PsiphonTunnel t = tunnel;
         new Thread(() -> {
             try {
@@ -95,6 +103,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 else throw new Exception("Psiphon tunnel not created");
             } catch (Exception e) {
                 Log.e(TAG, "startTunneling failed", e);
+                emitLog("start failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+                flushLogs();
                 broadcastFailed(e.getMessage() == null ? "Psiphon failed to start" : e.getMessage());
                 stopNow();
             }
@@ -113,6 +123,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     private void stopNow() {
         stopping = true;
+        emitLog("stopping");
+        flushLogs();
         try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Exception ignored) {}
         broadcastStopped();
         final PsiphonTunnel t = tunnel;
@@ -205,25 +217,26 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     @Override
     public void onDiagnosticMessage(String message) {
-        Log.i(TAG, message == null ? "" : message);
+        emitLog(message);
     }
 
     @Override
     public void onListeningSocksProxyPort(int port) {
         socksPort.set(port);
-        Log.i(TAG, "SOCKS " + port);
+        emitLog("SOCKS 127.0.0.1:" + port);
     }
 
     @Override
     public void onListeningHttpProxyPort(int port) {
         httpPort.set(port);
-        Log.i(TAG, "HTTP " + port);
+        emitLog("HTTP 127.0.0.1:" + port);
     }
 
     @Override
     public void onAvailableEgressRegions(List<String> regions) {
         if (regions == null || regions.isEmpty()) return;
         lastRegions = String.join(",", regions);
+        emitLog("regions: " + lastRegions);
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());
         i.putExtra("regionsOnly", true);
@@ -237,6 +250,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         int s = socksPort.get();
         if (s <= 0) s = tunnel.getLocalSocksProxyPort();
         socksPort.set(s);
+        emitLog("connected, SOCKS 127.0.0.1:" + s);
+        flushLogs();
         try {
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm != null) nm.notify(NOTIF_ID, buildNotification(
@@ -251,13 +266,63 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     @Override
     public void onExiting() {
+        emitLog("exiting");
+        flushLogs();
         if (!stopping) {
             broadcastFailed("Psiphon exited");
             stopNow();
         }
     }
 
+    /** Format a notice for the UI pane. Raw JSON is collapsed to noticeType. */
+    private static String formatNotice(String message) {
+        if (message == null) return "";
+        String m = message.trim();
+        if (m.isEmpty()) return "";
+        if (m.startsWith("{") && m.contains("\"noticeType\"")) {
+            try {
+                JSONObject o = new JSONObject(m);
+                String type = o.optString("noticeType", "");
+                Object data = o.opt("data");
+                if (!type.isEmpty() && data != null) return type + " " + data;
+                if (!type.isEmpty()) return type;
+            } catch (Exception ignored) {}
+        }
+        return m;
+    }
+
+    private void emitLog(String message) {
+        String line = formatNotice(message);
+        if (line.isEmpty()) return;
+        Log.i(TAG, line);
+        synchronized (logBuf) {
+            if (logBuf.length() > 0) logBuf.append('\n');
+            logBuf.append("[psiphon] ").append(line);
+            if (logBuf.length() > 12000) {
+                logBuf.delete(0, logBuf.length() - 8000);
+            }
+        }
+        logHandler.removeCallbacks(flushLogs);
+        logHandler.postDelayed(flushLogs, 150);
+    }
+
+    private void flushLogs() {
+        logHandler.removeCallbacks(flushLogs);
+        String chunk;
+        synchronized (logBuf) {
+            if (logBuf.length() == 0) return;
+            chunk = logBuf.toString();
+            logBuf.setLength(0);
+        }
+        Intent i = new Intent(BROADCAST_LOG);
+        i.setPackage(getPackageName());
+        i.putExtra(EXTRA_LOG, chunk);
+        sendBroadcast(i);
+    }
+
     private void broadcastFailed(String msg) {
+        emitLog("failed: " + (msg == null ? "failed" : msg));
+        flushLogs();
         Intent i = new Intent(BROADCAST_FAILED);
         i.setPackage(getPackageName());
         i.putExtra(EXTRA_ERROR, msg == null ? "failed" : msg);
