@@ -6,11 +6,20 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
 import android.util.Log;
 
 public class VpnNotification {
-    public static final String CHANNEL_ID = "fcaevpn_service";
+    // New id: Android ignores importance changes on an existing channel.
+    public static final String CHANNEL_ID = "fcaevpn_service_hi";
     public static final int NOTIFICATION_ID = 1;
+
+    /** Connecting / establishing: Disconnect cancels. */
+    public static final int BUTTONS_CONNECTING = 0;
+    /** Tunnel up: Disconnect (kill) + Stop (pause, keep process). */
+    public static final int BUTTONS_RUNNING = 1;
+    /** Paused from Stop: Disconnect + Start (resume last session). */
+    public static final int BUTTONS_PAUSED = 2;
 
     private final Context context;
     private final NotificationManager manager;
@@ -37,14 +46,20 @@ public class VpnNotification {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
                 CHANNEL_ID, "FCAE VPN",
-                NotificationManager.IMPORTANCE_LOW);
-            ch.setDescription("FCAE VPN tunnel status");
+                NotificationManager.IMPORTANCE_HIGH);
+            ch.setDescription("FCAE VPN tunnel controls");
             ch.setShowBadge(false);
-            if (manager != null) manager.createNotificationChannel(ch);
+            ch.setSound(null, null);
+            ch.enableVibration(false);
+            if (manager != null) {
+                manager.createNotificationChannel(ch);
+                // Drop the old low-importance channel so it is not used.
+                try { manager.deleteNotificationChannel("fcaevpn_service"); } catch (Exception ignored) {}
+            }
         }
     }
 
-    public Notification build(String text, boolean showStopButton) {
+    public Notification build(String text, int buttons) {
         Notification.Builder nb = new Notification.Builder(context, CHANNEL_ID);
 
         nb.setContentTitle("FCAE VPN")
@@ -53,23 +68,35 @@ public class VpnNotification {
           .setContentIntent(piMain)
           .setOngoing(true)
           .setOnlyAlertOnce(true)
+          .setCategory(Notification.CATEGORY_SERVICE)
+          .setVisibility(Notification.VISIBILITY_PUBLIC)
+          .setPriority(Notification.PRIORITY_HIGH)
           .setStyle(new Notification.BigTextStyle().bigText(text));
 
-        if (showStopButton) {
-            nb.addAction(disconnectAction);
-            nb.addAction(stopAction);
-        } else {
-            nb.addAction(disconnectAction);
-            nb.addAction(startAction);
+        // Notification actions are the command source of truth. The app UI
+        // follows whatever these send into FCAEVpnService.
+        switch (buttons) {
+            case BUTTONS_RUNNING:
+                nb.addAction(disconnectAction);
+                nb.addAction(stopAction);
+                break;
+            case BUTTONS_PAUSED:
+                nb.addAction(disconnectAction);
+                nb.addAction(startAction);
+                break;
+            case BUTTONS_CONNECTING:
+            default:
+                nb.addAction(disconnectAction);
+                break;
         }
 
         return nb.build();
     }
 
-    public void show(String text, boolean showStopButton) {
+    public void show(String text, int buttons) {
         try {
             if (manager != null) {
-                manager.notify(NOTIFICATION_ID, build(text, showStopButton));
+                manager.notify(NOTIFICATION_ID, build(text, buttons));
             }
         } catch (Exception e) {
             Log.w("VpnNotification", "show failed: " + e.getMessage());
@@ -87,7 +114,9 @@ public class VpnNotification {
     private Notification.Action buildAction(String label, String action, int requestCode) {
         Intent intent = new Intent(context, FCAEVpnService.class);
         intent.setAction(action);
-        PendingIntent pi = PendingIntent.getService(context, requestCode,
+        // Explicit component + foreground service so a tap is delivered even
+        // when the app is backgrounded (Android 12+).
+        PendingIntent pi = PendingIntent.getForegroundService(context, requestCode,
             intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Action.Builder(null, label, pi).build();
     }

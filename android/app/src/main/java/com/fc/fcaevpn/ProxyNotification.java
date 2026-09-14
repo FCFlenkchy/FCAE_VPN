@@ -11,7 +11,7 @@ import android.util.Log;
 
 public class ProxyNotification extends Service {
     private static final String TAG = "FCAE_PROXY";
-    private static final String CHANNEL_ID = "fcaevpn_proxy";
+    private static final String CHANNEL_ID = "fcaevpn_proxy_hi";
     public static final int NOTIFICATION_ID = 2;
 
     public static final String ACTION_START = "com.fc.fcaevpn.PROXY_START";
@@ -66,11 +66,16 @@ public class ProxyNotification extends Service {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             android.app.NotificationChannel ch = new android.app.NotificationChannel(
                 CHANNEL_ID, "FCAE Proxy",
-                android.app.NotificationManager.IMPORTANCE_LOW);
+                android.app.NotificationManager.IMPORTANCE_HIGH);
+            ch.setSound(null, null);
+            ch.enableVibration(false);
             ch.setDescription("FCAE VPN proxy mode status");
             ch.setShowBadge(false);
             android.app.NotificationManager mgr = getSystemService(android.app.NotificationManager.class);
-            if (mgr != null) mgr.createNotificationChannel(ch);
+            if (mgr != null) {
+                mgr.createNotificationChannel(ch);
+                try { mgr.deleteNotificationChannel("fcaevpn_proxy"); } catch (Exception ignored) {}
+            }
         }
 
         Intent mainIntent = new Intent(this, MainActivity.class);

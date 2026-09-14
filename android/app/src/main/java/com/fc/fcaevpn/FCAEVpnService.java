@@ -436,37 +436,111 @@ public class FCAEVpnService extends VpnService {
         if (intent != null && intent.getAction() != null) {
             switch (intent.getAction()) {
                 case ACTION_STOP:
-                    pauseVpn();
+                    requestPause();
                     return START_STICKY;
 
                 case ACTION_DISCONNECT:
-                    if (vpnInterface == null && vpnThread == null && !running) {
-                        handler.removeCallbacks(statsRunnable);
-                        notification.dismiss();
-                        stopForeground(STOP_FOREGROUND_REMOVE);
-                        stopSelf();
-                        return START_NOT_STICKY;
-                    }
-                    fullShutdown();
+                    requestDisconnect();
                     return START_NOT_STICKY;
 
                 case ACTION_START:
-                    if (!intent.hasExtra("protocol") && lastStartIntent != null) {
-                        startVpn(lastStartIntent);
-                    } else if (intent.hasExtra("protocol")) {
-                        lastStartIntent = new Intent(intent);
-                        startVpn(intent);
-                    } else {
-                        notification.show("FCAE VPN — Ready (tap Connect in app)", false);
-                        startFg(notification.build("FCAE VPN — Ready (tap Connect in app)", false));
-                    }
+                    requestStart(intent);
                     return START_STICKY;
             }
         }
 
-        notification.show("FCAE VPN — Ready (tap Connect in app)", false);
-        startFg(notification.build("FCAE VPN — Ready (tap Connect in app)", false));
+        showReady();
         return START_STICKY;
+    }
+
+    /**
+     * Notification / UI command: Stop. Highest priority after Disconnect.
+     * Cancels a queued Start; if a start is in flight the generation bump
+     * in pauseVpn() makes that worker exit.
+     */
+    private void requestPause() {
+        synchronized (cmdLock) {
+            queuedStart = null;
+        }
+        pauseVpn();
+    }
+
+    /** Notification / UI command: Disconnect. Kills the session and the service. */
+    private void requestDisconnect() {
+        synchronized (cmdLock) {
+            queuedStart = null;
+        }
+        if (vpnInterface == null && vpnThread == null && !running && !engineOpInFlight) {
+            handler.removeCallbacks(statsRunnable);
+            notification.dismiss();
+            stopForeground(STOP_FOREGROUND_REMOVE);
+            stopSelf();
+            return;
+        }
+        fullShutdown();
+    }
+
+    /**
+     * Notification / UI command: Start. If a stop is still joining the
+     * engine, queue this until that cleanup returns — never start on top
+     * of an aborting warp-in-warp task.
+     */
+    private void requestStart(Intent intent) {
+        Intent src = intent;
+        if (src == null || !src.hasExtra("protocol")) {
+            if (lastStartIntent != null) {
+                src = lastStartIntent;
+            } else {
+                src = recalledStart();
+            }
+        }
+        if (src == null || !src.hasExtra("protocol")) {
+            showReady();
+            return;
+        }
+        lastStartIntent = new Intent(src);
+        rememberStart(lastStartIntent);
+
+        synchronized (cmdLock) {
+            if (engineOpInFlight || (running && !vpnPaused)) {
+                if (running && !vpnPaused) {
+                    Log.i(TAG, "Start ignored: tunnel already up");
+                    return;
+                }
+                queuedStart = lastStartIntent;
+                Log.i(TAG, "Start queued until current stop finishes");
+                uiConnecting = true;
+                notification.show("FCAE VPN — Starting after stop…", VpnNotification.BUTTONS_CONNECTING);
+                startFg(notification.build("FCAE VPN — Starting after stop…", VpnNotification.BUTTONS_CONNECTING));
+                notifyUi();
+                return;
+            }
+            engineOpInFlight = true;
+        }
+        startVpn(lastStartIntent);
+    }
+
+    private void showReady() {
+        uiConnecting = false;
+        notification.show("FCAE VPN — Ready (tap Connect in app)", VpnNotification.BUTTONS_PAUSED);
+        startFg(notification.build("FCAE VPN — Ready (tap Connect in app)", VpnNotification.BUTTONS_PAUSED));
+    }
+
+    private void finishEngineOp() {
+        Intent next;
+        synchronized (cmdLock) {
+            engineOpInFlight = false;
+            next = queuedStart;
+            queuedStart = null;
+        }
+        if (next != null && !shuttingDown) {
+            Log.i(TAG, "Running queued Start from notification");
+            synchronized (cmdLock) {
+                engineOpInFlight = true;
+            }
+            final Intent src = next;
+            handler.post(() -> startVpn(src));
+        }
     }
 
     private void startVpn(Intent intent) {
@@ -479,6 +553,7 @@ public class FCAEVpnService extends VpnService {
         vpnPaused = false;
         shuttingDown = false;
         nativeFreed = false;
+        uiConnecting = true;
 
         running = false;
 
@@ -491,8 +566,10 @@ public class FCAEVpnService extends VpnService {
         final ParcelFileDescriptor oldPfd = vpnInterface;
         vpnInterface = null;
 
-        notification.show("FCAE VPN — Connecting...", false);
-        startFg(notification.build("FCAE VPN — Connecting...", false));
+        rememberStart(intent);
+        notification.show("FCAE VPN — Connecting...", VpnNotification.BUTTONS_CONNECTING);
+        startFg(notification.build("FCAE VPN — Connecting...", VpnNotification.BUTTONS_CONNECTING));
+        notifyUi();
 
         final int protocol    = intent.getIntExtra("protocol", 0);
         final int mode        = intent.getIntExtra("mode", 1);
@@ -588,6 +665,7 @@ public class FCAEVpnService extends VpnService {
                     psiphonCfgV, psiphonRegionV, psiphonSocks, psiphonHttp
                 );
                 if (!ok) {
+                    synchronized (cmdLock) { engineOpInFlight = false; }
                     handler.post(this::fullShutdown);
                     return;
                 }
@@ -602,10 +680,13 @@ public class FCAEVpnService extends VpnService {
                     try { vpnInterface.close(); } catch (Exception ignored) {}
                     vpnInterface = null;
                     try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+                    synchronized (cmdLock) { engineOpInFlight = false; }
                     return;
                 }
 
                 running = true;
+                uiConnecting = false;
+                synchronized (cmdLock) { engineOpInFlight = false; }
                 lastNotifText = null;
                 updateNotification();
                 handler.post(statsRunnable);
@@ -649,6 +730,12 @@ public class FCAEVpnService extends VpnService {
         sGeneration.incrementAndGet();
         running = false;
         vpnPaused = false;
+        uiConnecting = false;
+        synchronized (cmdLock) {
+            queuedStart = null;
+            engineOpInFlight = true;
+        }
+        forgetStart();
 
         if (shutdownLatch != null) {
             shutdownLatch.countDown();
@@ -716,9 +803,13 @@ public class FCAEVpnService extends VpnService {
 
             handler.post(this::stopSelf);
 
-            // Only release the library when the process is actually going
-            // away. On a normal disconnect it must stay initialised, or the
-            // next connect finds a shut-down FFI.
+            synchronized (cmdLock) {
+                engineOpInFlight = false;
+                queuedStart = null;
+            }
+
+            // Disconnect from the notification (or UI) asked the process
+            // to die when the activity is not in front — obey that.
             if (!MainActivity.activityAlive) {
                 freeNativeOnce();
                 android.os.Process.killProcess(android.os.Process.myPid());
@@ -736,6 +827,10 @@ public class FCAEVpnService extends VpnService {
         cleanupGeneration++;
         running = false;
         vpnPaused = true;
+        uiConnecting = false;
+        synchronized (cmdLock) {
+            engineOpInFlight = true;
+        }
 
         if (shutdownLatch != null) {
             shutdownLatch.countDown();
@@ -768,12 +863,25 @@ public class FCAEVpnService extends VpnService {
         // shut-down FFI.
         final long myGen = cleanupGeneration;
         Thread cleanupThread = new Thread(() -> {
-            if (myGen != cleanupGeneration) return;
+            if (myGen != cleanupGeneration) {
+                finishEngineOp();
+                return;
+            }
 
             try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
 
+            if (myGen != cleanupGeneration) {
+                finishEngineOp();
+                return;
+            }
+
             if (pfd != null) {
                 try { pfd.close(); } catch (Exception ignored) {}
+            }
+
+            if (myGen != cleanupGeneration) {
+                finishEngineOp();
+                return;
             }
 
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
@@ -782,6 +890,8 @@ public class FCAEVpnService extends VpnService {
                 t.interrupt();
                 try { t.join(1000); } catch (InterruptedException ignored) {}
             }
+
+            finishEngineOp();
         }, "FCAE-PauseCleanup");
         cleanupThread.setDaemon(true);
         cleanupThread.start();
@@ -791,15 +901,19 @@ public class FCAEVpnService extends VpnService {
         Intent intent = new Intent(BROADCAST_VPN_STATE_CHANGED);
         intent.setPackage(getPackageName());
         intent.putExtra("running", running);
-        intent.putExtra("paused", vpnPaused);
+        intent.putExtra("paused", vpnPaused && !uiConnecting);
+        intent.putExtra("connecting", uiConnecting);
         intent.putExtra("generation", sGeneration.get());
         sendBroadcast(intent);
     }
 
     private void updateNotification() {
-        if (vpnPaused) {
+        if (uiConnecting) {
             lastNotifText = null;
-            notification.show("FCAE VPN — Stopped (tap Start to resume)", false);
+            notification.show("FCAE VPN — Connecting...", VpnNotification.BUTTONS_CONNECTING);
+        } else if (vpnPaused) {
+            lastNotifText = null;
+            notification.show("FCAE VPN — Stopped (tap Start to resume)", VpnNotification.BUTTONS_PAUSED);
         } else if (running) {
             long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
             try {
@@ -814,12 +928,114 @@ public class FCAEVpnService extends VpnService {
                 VpnNotification.fmtBytes(totalTx), VpnNotification.fmtRate(tx));
             if (!text.equals(lastNotifText)) {
                 lastNotifText = text;
-                notification.show(text, true);
+                notification.show(text, VpnNotification.BUTTONS_RUNNING);
             }
         } else {
             lastNotifText = null;
-            notification.show("FCAE VPN — Disconnected", false);
+            notification.show("FCAE VPN — Disconnected", VpnNotification.BUTTONS_PAUSED);
         }
+    }
+
+    private static final String PREFS_LAST = "fcae_vpn_last_start";
+
+    private void rememberStart(Intent i) {
+        if (i == null) return;
+        SharedPreferences.Editor e = getSharedPreferences(PREFS_LAST, MODE_PRIVATE).edit();
+        e.putBoolean("has", true);
+        putInt(e, i, "protocol", 0);
+        putInt(e, i, "mode", 1);
+        putInt(e, i, "scanMode", 0);
+        putInt(e, i, "ipVersion", 4);
+        putBool(e, i, "quickReconnect", false);
+        putBool(e, i, "h2Enabled", true);
+        putBool(e, i, "echEnabled", true);
+        putBool(e, i, "lanSharing", false);
+        putInt(e, i, "socksPort", 1819);
+        putInt(e, i, "httpPort", 1820);
+        putStr(e, i, "noizeProfile");
+        putStr(e, i, "forcePeer");
+        putStr(e, i, "configPath");
+        putStr(e, i, "sni");
+        putInt(e, i, "sysProfile", 0);
+        putStr(e, i, "teamName");
+        putStr(e, i, "accessToken");
+        putStr(e, i, "accessEmail");
+        putStr(e, i, "routesFile");
+        putStr(e, i, "routesInline");
+        putInt(e, i, "torMode", 0);
+        putInt(e, i, "torBridges", 0);
+        putStr(e, i, "torBridgeLines");
+        putInt(e, i, "engineLog", 3);
+        putInt(e, i, "backend", 0);
+        putInt(e, i, "torSocksPort", 1821);
+        putStr(e, i, "psiphonConfig");
+        putStr(e, i, "psiphonRegion");
+        putInt(e, i, "psiphonSocksPort", 0);
+        putInt(e, i, "psiphonHttpPort", 0);
+        e.apply();
+    }
+
+    private Intent recalledStart() {
+        SharedPreferences p = getSharedPreferences(PREFS_LAST, MODE_PRIVATE);
+        if (!p.getBoolean("has", false)) return null;
+        Intent i = new Intent(this, FCAEVpnService.class);
+        i.setAction(ACTION_START);
+        copyInt(p, i, "protocol", 0);
+        copyInt(p, i, "mode", 1);
+        copyInt(p, i, "scanMode", 0);
+        copyInt(p, i, "ipVersion", 4);
+        copyBool(p, i, "quickReconnect", false);
+        copyBool(p, i, "h2Enabled", true);
+        copyBool(p, i, "echEnabled", true);
+        copyBool(p, i, "lanSharing", false);
+        copyInt(p, i, "socksPort", 1819);
+        copyInt(p, i, "httpPort", 1820);
+        copyStr(p, i, "noizeProfile");
+        copyStr(p, i, "forcePeer");
+        copyStr(p, i, "configPath");
+        copyStr(p, i, "sni");
+        copyInt(p, i, "sysProfile", 0);
+        copyStr(p, i, "teamName");
+        copyStr(p, i, "accessToken");
+        copyStr(p, i, "accessEmail");
+        copyStr(p, i, "routesFile");
+        copyStr(p, i, "routesInline");
+        copyInt(p, i, "torMode", 0);
+        copyInt(p, i, "torBridges", 0);
+        copyStr(p, i, "torBridgeLines");
+        copyInt(p, i, "engineLog", 3);
+        copyInt(p, i, "backend", 0);
+        copyInt(p, i, "torSocksPort", 1821);
+        copyStr(p, i, "psiphonConfig");
+        copyStr(p, i, "psiphonRegion");
+        copyInt(p, i, "psiphonSocksPort", 0);
+        copyInt(p, i, "psiphonHttpPort", 0);
+        return i;
+    }
+
+    private void forgetStart() {
+        getSharedPreferences(PREFS_LAST, MODE_PRIVATE).edit().clear().apply();
+        lastStartIntent = null;
+    }
+
+    private static void putInt(SharedPreferences.Editor e, Intent i, String k, int d) {
+        e.putInt(k, i.getIntExtra(k, d));
+    }
+    private static void putBool(SharedPreferences.Editor e, Intent i, String k, boolean d) {
+        e.putBoolean(k, i.getBooleanExtra(k, d));
+    }
+    private static void putStr(SharedPreferences.Editor e, Intent i, String k) {
+        String v = i.getStringExtra(k);
+        e.putString(k, v == null ? "" : v);
+    }
+    private static void copyInt(SharedPreferences p, Intent i, String k, int d) {
+        i.putExtra(k, p.getInt(k, d));
+    }
+    private static void copyBool(SharedPreferences p, Intent i, String k, boolean d) {
+        i.putExtra(k, p.getBoolean(k, d));
+    }
+    private static void copyStr(SharedPreferences p, Intent i, String k) {
+        i.putExtra(k, p.getString(k, ""));
     }
 
     @Override

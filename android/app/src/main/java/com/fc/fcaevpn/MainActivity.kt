@@ -129,6 +129,7 @@ class MainActivity : AppCompatActivity() {
                 FCAEVpnService.BROADCAST_VPN_STATE_CHANGED -> {
                     val isRunning = intent.getBooleanExtra("running", false)
                     val isPaused = intent.getBooleanExtra("paused", false)
+                    val isConnecting = intent.getBooleanExtra("connecting", false)
                     val gen = intent.getLongExtra("generation", 0)
 
                     handler.post {
@@ -136,20 +137,23 @@ class MainActivity : AppCompatActivity() {
                         // connect/disconnect cycle.
                         if (gen < lastBroadcastGeneration) return@post
 
-                        if (!isRunning && !isPaused) {
-
+                        if (isConnecting) {
+                            userInitiatedDisconnect = false
+                            commandPaused = false
+                            commandConnecting = true
                             lastBroadcastGeneration = gen
-                            connecting = false
+                            connecting = true
                             engineRunning = false
-                            vpnActive = false
+                            vpnActive = true
                             updateButton()
-                            statusText.text = "DISCONNECTED"
-                            statusText.setTextColor(Color.parseColor("#8A93A6"))
-                            statsText.text = ""
-                            peerText.text = ""
+                            statusText.text = "CONNECTING"
+                            statusText.setTextColor(COLOR_PROGRESS)
                             handler.removeCallbacks(poll)
+                            handler.post(poll)
                         } else if (isRunning) {
                             userInitiatedDisconnect = false
+                            commandPaused = false
+                            commandConnecting = false
                             lastBroadcastGeneration = gen
                             connecting = false
                             engineRunning = true
@@ -159,6 +163,8 @@ class MainActivity : AppCompatActivity() {
                             handler.post(poll)
                         } else if (isPaused) {
                             userInitiatedDisconnect = false
+                            commandPaused = true
+                            commandConnecting = false
                             lastBroadcastGeneration = gen
                             connecting = false
                             engineRunning = false
@@ -166,6 +172,22 @@ class MainActivity : AppCompatActivity() {
                             updateButton()
                             statusText.text = "STOPPED"
                             statusText.setTextColor(Color.parseColor("#8A93A6"))
+                            statsText.text = ""
+                            handler.removeCallbacks(poll)
+                        } else if (!isRunning && !isPaused) {
+
+                            lastBroadcastGeneration = gen
+                            commandPaused = false
+                            commandConnecting = false
+                            connecting = false
+                            engineRunning = false
+                            vpnActive = false
+                            updateButton()
+                            statusText.text = "DISCONNECTED"
+                            statusText.setTextColor(Color.parseColor("#8A93A6"))
+                            statsText.text = ""
+                            peerText.text = ""
+                            handler.removeCallbacks(poll)
                         }
                     }
                 }
@@ -881,6 +903,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectClicked() {
         userInitiatedDisconnect = false
+        commandPaused = false
+        commandConnecting = true
         val mode = spinnerMode.selectedItemPosition
         if (mode == 1) {
             val prep = VpnService.prepare(this)
@@ -1055,6 +1079,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun disconnectAll() {
     userInitiatedDisconnect = true
+    commandPaused = false
+    commandConnecting = false
 
     // 1. UI updates happen INSTANTLY on main thread
     vpnActive = false
@@ -1213,6 +1239,16 @@ class MainActivity : AppCompatActivity() {
             // In proxy mode, this is the ONLY source of truth — there are no
             // service broadcasts. In TUN mode, broadcasts may also update
             // these, but the poll always has the freshest data.
+            if (commandPaused) {
+                // Notification Stop owns the UI until Start/Disconnect.
+                engineRunning = false
+                connecting = false
+                vpnActive = false
+                statusText.text = "STOPPED"
+                statusText.setTextColor(Color.parseColor("#8A93A6"))
+                updateButton()
+                return
+            }
             if (vpnActive) {
                 // State 6 = Reconnecting: the session is still alive and the
                 // engine is recovering the tunnel on its own. Treat it as an
@@ -1220,7 +1256,7 @@ class MainActivity : AppCompatActivity() {
                 // showing CONNECT here invited a second session on top of a
                 // live one.
                 engineRunning = state in 1..4 || state == 6
-                connecting = state in 1..3 || state == 6
+                connecting = state in 1..3 || state == 6 || commandConnecting
                 // Psiphon reports its egress regions only after a successful
                 // handshake, so this is the first moment the real list can be
                 // read. Cheap and idempotent: it no-ops unless the set changed.
@@ -1231,7 +1267,7 @@ class MainActivity : AppCompatActivity() {
                 // check vpnActive would survive a dead engine and the first
                 // tap on the (CONNECT-looking) button would call
                 // disconnectAll() instead of connecting.
-                if ((state == 0 || state == 5) && !userInitiatedDisconnect) {
+                if ((state == 0 || state == 5) && !userInitiatedDisconnect && !commandConnecting) {
                     // Engine died on its own — reset state
                     vpnActive = false
                     engineRunning = false
