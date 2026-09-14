@@ -187,17 +187,45 @@ impl Backend for AetherBackend {
         // start-timeout fires, this future is dropped while wait_for_* is
         // still looping — without the guard the engine task kept running,
         // held the SOCKS port, and the next connect aborted the *new*
-        // engine instead. Drop aborts *this* task only.
-        struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
-        impl Drop for AbortOnDrop {
+        // engine instead.
+        //
+        // Never abort a task that may still own arti's TorClient: abort
+        // runs Drop during unwind and set_dormant panics, which is the
+        // "disconnect Tor → crash" bug. Signal shutdown and park the
+        // handle so the next start can wait it out.
+        struct StartGuard {
+            task: Option<tokio::task::JoinHandle<()>>,
+            tor: bool,
+        }
+        impl Drop for StartGuard {
             fn drop(&mut self) {
-                if let Some(h) = self.0.take() {
+                if let Some(mut h) = self.task.take() {
                     aether_engine::shutdown::request();
-                    h.abort();
+                    if !self.tor {
+                        h.abort();
+                        return;
+                    }
+                    if h.is_finished() {
+                        return;
+                    }
+                    // start() is being dropped (disconnect or timeout) on
+                    // the session runtime. Join the engine HERE so
+                    // shutdown_timeout cannot abort arti mid-drop.
+                    let _ = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            let _ = tokio::time::timeout(Duration::from_secs(8), &mut h).await;
+                        })
+                    });
+                    if !h.is_finished() {
+                        *LAST_ENGINE.lock() = Some(h);
+                    }
                 }
             }
         }
-        let mut engine_guard = AbortOnDrop(Some(engine_task));
+        let mut engine_guard = StartGuard {
+            task: Some(engine_task),
+            tor: cfg.tor.is_enabled(),
+        };
 
         // Readiness = the SOCKS listener actually accepting connections.
         // Log-scraping for "socks5 ... listening" (the old approach) silently
@@ -343,7 +371,7 @@ impl Backend for AetherBackend {
         }
 
         let engine_task = engine_guard
-            .0
+            .task
             .take()
             .expect("engine task is still owned by the start guard");
         *LAST_ENGINE.lock() = Some(engine_task);
@@ -367,15 +395,6 @@ impl Backend for AetherBackend {
     }
 }
 
-/// Abort whatever engine task is currently registered (if any).
-#[allow(dead_code)]
-fn abort_current_engine() {
-    aether_engine::shutdown::request();
-    if let Some(h) = LAST_ENGINE.lock().as_ref() {
-        h.abort();
-    }
-}
-
 /// Ensure the previous engine task is fully dead before a new one starts.
 ///
 /// A task that is merely signalled (stop()'s request) can outlive its
@@ -383,8 +402,10 @@ fn abort_current_engine() {
 /// signal, so the task keeps scanning and redialling. Worse, if the next
 /// start cleared the flag first, that loop would never see the
 /// cancellation at all and the old engine would run alongside the new
-/// one, fighting it for the ports. So: wait a short while for a
-/// signalled task to finish on its own, then abort whatever is left.
+/// one, fighting it for the ports.
+///
+/// Wait for a cooperative exit first. Aborting a task that still owns
+/// arti's TorClient panics in Drop and kills the process.
 async fn reap_previous_engine() {
     let Some(mut prev) = LAST_ENGINE.lock().take() else {
         return;
@@ -392,11 +413,15 @@ async fn reap_previous_engine() {
     if prev.is_finished() {
         return;
     }
-    // A signalled engine normally dies within milliseconds of its
-    // listeners being dropped; give it a moment, then kill it flat.
-    let _ = tokio::time::timeout(Duration::from_millis(500), &mut prev).await;
+    aether_engine::shutdown::request();
+    let _ = tokio::time::timeout(Duration::from_secs(8), &mut prev).await;
+    if prev.is_finished() {
+        let _ = prev.await;
+        return;
+    }
+    log::warn!("[aether] previous engine still running after 8s; aborting leftover task");
     prev.abort();
-    let _ = prev.await;
+    let _ = tokio::time::timeout(Duration::from_millis(400), &mut prev).await;
 }
 
 /// One connect attempt against the tunnel's SOCKS listener.
@@ -664,41 +689,40 @@ impl BackendHandle for AetherHandle {
         // signal, so the listeners are dropped before we stop waiting.
         aether_engine::shutdown::request();
 
-        // request() only sets a flag; the detached tasks drop their sockets
-        // on their next poll, a few scheduler ticks away. That lag is the
-        // whole of the "disconnect, then the next connect fails" bug: the
-        // next start() clears the flag, so any old task that has not
-        // noticed the request yet keeps its listener after the new engine
-        // has bound -- port taken, start failed. An arbitrary grace cannot
-        // fix that (it is a race), so wait for the one condition that is
-        // actually true: the port is free. In the normal case the flag is
-        // noticed in milliseconds, so this returns almost immediately.
+        // Do NOT abort first. Aborting a task that still owns arti's
+        // TorClient panics in Drop and takes the whole process down on
+        // disconnect. Ask it to wind down, wait for the task to finish,
+        // and only abort if it ignores the signal past `timeout` — and
+        // even then, never abort a Tor session (arti cannot be cancelled
+        // that way).
         let addrs = self.held_addrs();
-        let grace = Duration::from_millis(1000).min(timeout);
-        let ports_down = addrs_free(&addrs, grace).await;
-
-        // The top-level task must not outlive the stop. Its reconnect loop
-        // keeps scanning gateways and redialling in the backoff sleeps the
-        // shutdown signal does not wake -- a disconnected engine would sit
-        // there burning bandwidth until the next connect. Its listeners
-        // are gone by now (verified above), so aborting cannot strand a
-        // port; if a port was still held, the abort is what releases it.
         let mut task = task;
-        task.abort();
-        let _ = tokio::time::timeout(Duration::from_millis(200), &mut task).await;
+        let finished = tokio::time::timeout(timeout, &mut task).await.is_ok();
 
-        if !ports_down {
-            let remaining = timeout.saturating_sub(grace);
-            if !addrs_free(&addrs, remaining.max(Duration::from_millis(100))).await {
+        if !finished {
+            if self.cfg.tor.is_enabled() {
                 log::warn!(
-                    "[aether] {} still held after stop; the next start may fail until they are released",
-                    addrs
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "[aether] tor engine did not exit within {timeout:?}; leaving it to finish (aborting arti crashes)"
                 );
+                *LAST_ENGINE.lock() = Some(task);
+            } else {
+                log::warn!(
+                    "[aether] engine did not exit within {timeout:?}; aborting leftover task"
+                );
+                task.abort();
+                let _ = tokio::time::timeout(Duration::from_millis(400), &mut task).await;
             }
+        }
+
+        if !addrs_free(&addrs, Duration::from_millis(250)).await {
+            log::warn!(
+                "[aether] {} still held after stop; the next start may fail until they are released",
+                addrs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
 
         Ok(())

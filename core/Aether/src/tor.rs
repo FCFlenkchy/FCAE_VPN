@@ -687,6 +687,79 @@ mod with_tor {
         Ok(None)
     }
 
+    /// Counts payload bytes on the tor stream so Tor-only sessions feed
+    /// stats::add_rx/add_tx. Chain/reverse already count in netstack;
+    /// wrapping those streams would double-count.
+    struct Metered<S> {
+        inner: S,
+    }
+
+    impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Metered<S> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let filled = buf.filled().len();
+            match std::pin::Pin::new(&mut self.inner).poll_read(cx, buf) {
+                std::task::Poll::Ready(Ok(())) => {
+                    crate::stats::add_rx((buf.filled().len() - filled) as u64);
+                    std::task::Poll::Ready(Ok(()))
+                }
+                other => other,
+            }
+        }
+    }
+
+    impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Metered<S> {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            match std::pin::Pin::new(&mut self.inner).poll_write(cx, buf) {
+                std::task::Poll::Ready(Ok(n)) => {
+                    crate::stats::add_tx(n as u64);
+                    std::task::Poll::Ready(Ok(n))
+                }
+                other => other,
+            }
+        }
+
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    async fn serve_metered(listener: TcpListener, client: Client, kind: &'static str) -> Result<()> {
+        crate::socks::serve_connector(listener, kind, move |host, port| {
+            let client = client.clone();
+            async move {
+                client
+                    .connect((host.as_str(), port))
+                    .await
+                    .map(|stream| {
+                        use tokio_util::compat::FuturesAsyncReadCompatExt;
+                        Metered {
+                            inner: stream.compat(),
+                        }
+                    })
+                    .map_err(std::io::Error::other)
+            }
+        })
+        .await
+    }
+
     async fn serve(listener: TcpListener, client: Client, kind: &'static str) -> Result<()> {
         crate::socks::serve_connector(listener, kind, move |host, port| {
             let client = client.clone();
@@ -741,7 +814,7 @@ mod with_tor {
         let client = establish(&state, None, FOREVER).await?;
         log::info!("[+] tor is ready; {listen} leaves through tor");
 
-        serve(listener, client, "tor socks5").await
+        serve_metered(listener, client, "tor socks5").await
     }
 
     pub async fn start_reverse(state: PathBuf) -> Result<SocketAddr> {
