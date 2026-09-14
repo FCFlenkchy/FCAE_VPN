@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -50,8 +51,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private static final int NOTIF_ID = 3;
 
     private PsiphonTunnel tunnel;
-    private String configJson = "{}";
     private String region = "";
+    private volatile String lastRegions = "";
     private int wantSocks;
     private int wantHttp;
     private final AtomicInteger socksPort = new AtomicInteger(0);
@@ -62,6 +63,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public void onCreate() {
         super.onCreate();
         createChannel();
+        // startForegroundService() times out if this process (class load of
+        // libgojni.so, bind, etc.) takes too long. Promote before any of that.
+        promoteForeground("FCAE Psiphon — Starting…");
         bindToUnderlyingNetwork();
         tunnel = PsiphonTunnel.newPsiphonTunnel(this);
         tunnel.setVpnMode(false);
@@ -69,23 +73,26 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+        // Every startForegroundService() delivery must call startForeground,
+        // including ACTION_STOP (disconnect always used that API).
+        boolean stop = intent != null && ACTION_STOP.equals(intent.getAction());
+        promoteForeground(stop ? "FCAE Psiphon — Stopping…" : "FCAE Psiphon — Connecting…");
+        if (stop) {
             stopNow();
             return START_NOT_STICKY;
         }
         if (intent != null) {
-            String cfg = intent.getStringExtra("psiphonConfig");
-            if (cfg != null && !cfg.trim().isEmpty()) configJson = cfg.trim();
             String r = intent.getStringExtra("psiphonRegion");
             region = r == null ? "" : r.trim();
             wantSocks = intent.getIntExtra("psiphonSocksPort", 0);
             wantHttp = intent.getIntExtra("psiphonHttpPort", 0);
         }
-        startForeground(NOTIF_ID, buildNotification("FCAE Psiphon — Connecting…"));
         stopping = false;
+        final PsiphonTunnel t = tunnel;
         new Thread(() -> {
             try {
-                tunnel.startTunneling("");
+                if (t != null) t.startTunneling("");
+                else throw new Exception("Psiphon tunnel not created");
             } catch (Exception e) {
                 Log.e(TAG, "startTunneling failed", e);
                 broadcastFailed(e.getMessage() == null ? "Psiphon failed to start" : e.getMessage());
@@ -93,6 +100,15 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             }
         }, "FCAE-PsiStart").start();
         return START_STICKY;
+    }
+
+    private void promoteForeground(String text) {
+        Notification n = buildNotification(text);
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else {
+            startForeground(NOTIF_ID, n);
+        }
     }
 
     private void stopNow() {
@@ -154,7 +170,15 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public String getPsiphonConfig() {
         try {
-            JSONObject o = new JSONObject(configJson.isEmpty() ? "{}" : configJson);
+            JSONObject o = new JSONObject();
+            o.put("PropagationChannelId", "FFFFFFFFFFFFFFFF");
+            o.put("SponsorId", "FFFFFFFFFFFFFFFF");
+            o.put("ClientVersion", "1");
+            o.put("TunnelPoolSize", 1);
+            o.put("DisableLocalSocksAuth", true);
+            o.put("EmitDiagnosticNotices", true);
+            o.put("UseIndistinguishableTLS", true);
+            o.put("AllowDefaultDNSResolverWithBindToDevice", true);
             File root = new File(getFilesDir(), "psiphon");
             if (!root.exists() && !root.mkdirs()) {
                 Log.w(TAG, "could not create " + root);
@@ -163,11 +187,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             if (!region.isEmpty()) o.put("EgressRegion", region);
             if (wantSocks > 0) o.put("LocalSocksProxyPort", wantSocks);
             if (wantHttp > 0) o.put("LocalHttpProxyPort", wantHttp);
-            // Isolated process: no VpnService here. Device binder is unused.
             return o.toString();
         } catch (Exception e) {
             Log.e(TAG, "getPsiphonConfig: " + e.getMessage());
-            return configJson.isEmpty() ? "{}" : configJson;
+            return "{}";
         }
     }
 
@@ -200,10 +223,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onAvailableEgressRegions(List<String> regions) {
         if (regions == null || regions.isEmpty()) return;
+        lastRegions = String.join(",", regions);
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());
         i.putExtra("regionsOnly", true);
-        i.putExtra(EXTRA_REGIONS, String.join(",", regions));
+        i.putExtra(EXTRA_REGIONS, lastRegions);
         sendBroadcast(i);
     }
 
@@ -263,8 +287,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Intent stop = new Intent(this, PsiphonTunnelService.class);
         stop.setAction(ACTION_STOP);
-        PendingIntent piStop = PendingIntent.getService(this, 31, stop,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent piStop = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? PendingIntent.getForegroundService(this, 31, stop,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE)
+                : PendingIntent.getService(this, 31, stop,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder nb = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);

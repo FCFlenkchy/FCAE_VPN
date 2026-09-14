@@ -75,8 +75,7 @@ struct AppState {
     // Chain mode tor and the engine are both listening.
     int  tor_socks_port = 1821;
 
-    // Psiphon. config_json is the whole config object, not a path.
-    char psiphon_config[8192] = {0};
+    // Psiphon. Config JSON is built automatically (no paste field).
     char psiphon_region[8]    = {0};   // ISO code, "" = auto
     char psiphon_data_dir[512] = {0};
     int  psiphon_socks_port = 0;       // 0 = Psiphon chooses
@@ -176,18 +175,33 @@ struct AppState {
 
         c.engine_log       = (FcaeEngineLog)engine_log;
 
-        // Protocol Tor is its own transport. A leftover tor_mode of 3 (the
-        // old "Tor only" egress entry) or Chain/Reverse stacked on top of
-        // protocol Tor is not a valid combo — clamp to Off so the 3-item
-        // combo cannot OOB and the engine never sees Tor+Chain.
+        // Protocol Tor / Protocol Psiphon do not apply the egress combo
+        // (value is kept in the UI for when the user switches back).
+        // Egress index 3 is Psiphon, not a FcaeTorMode.
+        const bool proto_psiphon = (backend == 1);
+        const bool egress_psiphon = (!proto_psiphon && protocol != 4 && tor_mode == 3);
         int tm = tor_mode;
-        if (protocol == 4 || tm < 0 || tm > 2) tm = 0;
+        if (protocol == 4 || proto_psiphon || egress_psiphon || tm < 0 || tm > 2) tm = 0;
         c.tor.mode         = (FcaeTorMode)tm;
         c.tor.bridges      = (FcaeTorBridges)tor_bridges;
         c.tor.bridge_lines = tor_bridge_lines[0] ? tor_bridge_lines : nullptr;
         c.tor.socks_port   = (uint16_t)tor_socks_port;
 
-        c.psiphon.config_json   = psiphon_config[0] ? psiphon_config : nullptr;
+        if (egress_psiphon) {
+            c.backend  = FCAE_BACKEND_PSIPHON;
+            c.protocol = FCAE_PROTOCOL_AUTO;
+        }
+
+        // Built in-process. Process-lifetime pointer is safe for fcae_start.
+        static const char kDefaultPsiphonConfig[] =
+            "{\"PropagationChannelId\":\"FFFFFFFFFFFFFFFF\","
+            "\"SponsorId\":\"FFFFFFFFFFFFFFFF\","
+            "\"ClientVersion\":\"1\","
+            "\"TunnelPoolSize\":1,"
+            "\"DisableLocalSocksAuth\":true,"
+            "\"EmitDiagnosticNotices\":true,"
+            "\"UseIndistinguishableTLS\":true}";
+        c.psiphon.config_json   = kDefaultPsiphonConfig;
         c.psiphon.egress_region = psiphon_region[0] ? psiphon_region : nullptr;
         c.psiphon.data_root_dir = psiphon_data_dir[0] ? psiphon_data_dir : nullptr;
         c.psiphon.socks_port    = (uint16_t)psiphon_socks_port;

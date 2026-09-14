@@ -224,29 +224,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:text="Psiphon config (JSON)"
-                android:textColor="#FF9AA3B5"
-                android:textSize="13sp" />
-
-            <EditText
-                android:id="@+id/editPsiphonConfig"
-                android:layout_width="match_parent"
-                android:layout_height="80dp"
-                android:layout_marginTop="4dp"
-                android:background="#FF1E1E2C"
-                android:gravity="top|start"
-                android:hint="paste the Psiphon config object"
-                android:inputType="textMultiLine"
-                android:padding="10dp"
-                android:textColor="#FFE8ECF4"
-                android:textColorHint="#FF6B7280"
-                android:textSize="12sp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="Psiphon egress region"
+                android:text="Psiphon region"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />
 
@@ -320,7 +298,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:text="Tor egress"
+                android:text="Egress"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />
 

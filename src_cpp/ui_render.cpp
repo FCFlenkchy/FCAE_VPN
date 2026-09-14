@@ -1130,10 +1130,9 @@ void render_ui() {
                 g_app.protocol = 2; g_app.backend = 0;
             }
             if (ImGui::RadioButton("Tor only", &transport, 4)) {
-                // FcaeProtocol::Tor; the core normalises this to
-                // tor.mode = Only. This is the only place Tor-only can be
-                // picked -- the Tor egress combo below has no "Only" entry.
-                g_app.protocol = 4; g_app.backend = 0; g_app.tor_mode = 0;
+                // FcaeProtocol::Tor. Do not reset the egress combo — gray it
+                // and apply Off at start so switching protocol restores it.
+                g_app.protocol = 4; g_app.backend = 0;
             }
             if (ImGui::RadioButton("Psiphon", &transport, 5)) {
                 // Psiphon picks its own transport, hence FcaeProtocol::Auto.
@@ -1230,12 +1229,11 @@ void render_ui() {
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Psiphon");
-            ImGui::InputTextMultiline("##psiphon_config", g_app.psiphon_config,
-                                      sizeof(g_app.psiphon_config), ImVec2(0, 70));
-            ImGui::TextDisabled("Paste the Psiphon config object (JSON), not a path.");
+            ImGui::TextDisabled("Config is built automatically. Region starts on Auto;");
+            ImGui::TextDisabled("the list updates each time Psiphon reaches its servers.");
 
-            // Egress region. Psiphon only reports the available regions after
-            // a successful handshake, so before the first connect the only
+            // Region. Psiphon only reports available regions after a
+            // successful handshake, so before the first connect the only
             // choice is Auto; the list fills in once connected.
             {
                 static char region_buf[1024];
@@ -1266,11 +1264,11 @@ void render_ui() {
                 for (auto& c : codes)
                     labels.push_back(c.empty() ? "Auto (fastest)" : c.c_str());
 
-                if (ImGui::Combo("Egress region", &sel, labels.data(), (int)labels.size()))
+                if (ImGui::Combo("Psiphon region", &sel, labels.data(), (int)labels.size()))
                     snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region),
                              "%s", codes[(size_t)sel].c_str());
                 if (codes.size() == 1)
-                    ImGui::TextDisabled("Regions appear after the first successful connect.");
+                    ImGui::TextDisabled("Regions appear after Psiphon connects.");
             }
 
             // Psiphon's own listeners, kept off the engine's and Tor's ports.
@@ -1279,31 +1277,35 @@ void render_ui() {
             ImGui::TextDisabled("0 lets Psiphon pick a free port.");
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Text("Tor egress");
-            // Tor is an egress inside the Aether engine (AETHER_TOR), not a
-            // separate backend, so it needs no bridge of its own.
-            // "Tor only (no WARP)" is deliberately not a mode here: it is a
-            // Transport entry above (FcaeProtocol::Tor), so it appears once.
-            // (A saved tor_mode=3 from older builds still works; it is just
-            // no longer selectable.)
-            const char* tor_modes[] = {
+            ImGui::Text("Egress");
+            // Tor modes are an Aether-engine hop. Psiphon is a backend.
+            // Protocol Tor / Protocol Psiphon gray this combo without
+            // resetting it, so switching protocol restores the last pick.
+            // Index 3 = Psiphon (applied only when protocol is a WARP transport).
+            const char* egress_modes[] = {
                 "Off",
                 "Tor through the tunnel",
                 "Tunnel through Tor (MASQUE only)",
+                "Psiphon",
             };
-            if (g_app.protocol == 4) g_app.tor_mode = 0;
-            if (g_app.tor_mode < 0 || g_app.tor_mode > 2) g_app.tor_mode = 0;
-            if (g_app.protocol == 4) ImGui::BeginDisabled();
-            ImGui::Combo("Tor", &g_app.tor_mode, tor_modes, 3);
-            if (g_app.protocol == 4) ImGui::EndDisabled();
+            if (g_app.tor_mode < 0 || g_app.tor_mode > 3) g_app.tor_mode = 0;
+            const bool lock_egress = (g_app.protocol == 4 || g_app.backend == 1);
+            if (lock_egress) ImGui::BeginDisabled();
+            ImGui::Combo("Egress", &g_app.tor_mode, egress_modes, 4);
+            if (lock_egress) ImGui::EndDisabled();
             if (g_app.protocol == 4)
-                ImGui::TextDisabled("Tor only is selected above; the egress combo stays Off.");
+                ImGui::TextDisabled("Tor only is selected above; egress is unused until you change protocol.");
+            else if (g_app.backend == 1)
+                ImGui::TextDisabled("Psiphon is the transport; egress Psiphon is unused.");
             // In TUN mode the routing to the right port happens internally,
             // but in proxy mode the user dials the ports by hand -- tell
             // them which one actually carries tor traffic, or they will use
             // the tunnel's plain port and wonder why "tor" did nothing.
             if (g_app.mode == 0) {
-                if (g_app.tor_mode == 1)
+                if (g_app.backend == 1 || (g_app.protocol != 4 && g_app.tor_mode == 3))
+                    ImGui::TextDisabled(
+                        "Psiphon reaches its servers on its own; tun2socks uses Psiphon SOCKS.");
+                else if (g_app.tor_mode == 1)
                     ImGui::TextDisabled(
                         "Proxy mode: point SOCKS clients at the Tor SOCKS port below; "
                         "the tunnel's own SOCKS/HTTP ports stay plain (un-tor'ed).");
@@ -1311,13 +1313,14 @@ void render_ui() {
                     ImGui::TextDisabled(
                         "Proxy mode: use the tunnel's SOCKS/HTTP ports as usual; "
                         "tor is the carrier underneath them.");
-                else if (g_app.protocol == 4 || g_app.tor_mode == 3)
+                else if (g_app.protocol == 4)
                     ImGui::TextDisabled(
                         "Proxy mode: dial the Tor SOCKS port below; Tor-only has no WARP tunnel.");
             }
             // Protocol Tor (Tor only) still needs the SOCKS port and bridge
             // knobs even though the egress combo is locked to Off.
-            const bool tor_opts = g_app.tor_mode != 0 || g_app.protocol == 4;
+            const bool tor_opts = g_app.protocol == 4 ||
+                                  (g_app.backend != 1 && (g_app.tor_mode == 1 || g_app.tor_mode == 2));
             if (!tor_opts) ImGui::BeginDisabled();
             ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port);
             const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };

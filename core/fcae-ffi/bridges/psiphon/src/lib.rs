@@ -193,11 +193,13 @@ impl Backend for PsiphonBackend {
 
     #[cfg(not(all(feature = "enabled", psiphon_linked)))]
     async fn start(&self, cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
-        let _ = validate(&cx.config)?;
+        // AAR owns the tunnel core and the config JSON. Attach needs only the
+        // local SOCKS port — do not require a pasted sponsor config.
         let socks = cx.config.psiphon.socks_port;
         if socks == 0 {
             return Err(CoreError::StartFailed(
-                "Android Psiphon is the official AAR (process :psiphon).                  Start PsiphonTunnelService first and pass its SOCKS port."
+                "Android Psiphon is the official AAR (process :psiphon). \
+                 Start PsiphonTunnelService first and pass its SOCKS port."
                     .into(),
             ));
         }
