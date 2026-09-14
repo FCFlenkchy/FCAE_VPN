@@ -121,6 +121,9 @@ class MainActivity : AppCompatActivity() {
     // When set, the receiver ignores disconnect broadcasts — they belong
     // to the previous cycle and would override the optimistic connect UI.
     private var userInitiatedDisconnect = false
+    // Notification Stop/Start own the UI until the next command.
+    @Volatile private var commandPaused = false
+    @Volatile private var commandConnecting = false
 
     private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
