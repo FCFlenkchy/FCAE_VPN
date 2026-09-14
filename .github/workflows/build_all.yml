@@ -366,9 +366,11 @@ jobs:
       # The Psiphon AAR is always compiled from the core/psiphon submodule:
       # the Maven release lags the tunnel-core fixes this repo pins. Runs
       # before gradle so android/psiphon/libs/ca.psiphon.aar exists when the
-      # app modules assemble. Needs the SDK platform gomobile binds against,
-      # so the cmdline-tools/platform install that "build apk" would do
-      # anyway happens here first (idempotent there).
+      # app module assembles (it consumes that file directly via files();
+      # there is no :psiphon Gradle module for an AAR to be bundled into).
+      # Needs the SDK platform gomobile binds against, so the
+      # cmdline-tools/platform install that "build apk" would do anyway
+      # happens here first (idempotent there).
       - name: build psiphon AAR from submodule
         if: startsWith(matrix.name, 'android-')
         env:
