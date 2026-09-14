@@ -271,8 +271,12 @@ impl SessionConfig {
 /// Insert `UpstreamProxyURL` into a Psiphon config object.
 ///
 /// Used when Psiphon is the egress hop: it must dial through Aether's SOCKS
-/// rather than the underlay. The URL is a loopback socks5 URI and contains
-/// no characters that need JSON escaping.
+/// rather than the underlay. The URL is a loopback URI and contains no
+/// characters that need JSON escaping.
+///
+/// tunnel-core's `upstreamproxy` package accepts the `socks5://`,
+/// `socks4a://` and `http://` URI schemes (golang.org/x/net/proxy plus its
+/// own registrations); anything else fails config load inside psi.Start.
 pub fn inject_upstream_proxy_url(config_json: &str, url: &str) -> String {
     let trimmed = config_json.trim();
     let body = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(trimmed);
@@ -459,6 +463,12 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         data_root_dir: cstr_opt(raw.psiphon.data_root_dir),
         socks_port: raw.psiphon.socks_port,
         http_port: raw.psiphon.http_port,
+        // Egress "Psiphon through the tunnel": the UI signals it via
+        // _reserved[0] (see FcaeConfig in fcae.h) so the ABI does not shift.
+        // This used to be dropped here — the flag was set by the UI, parsed
+        // by nothing, and the supervisor chained nothing, so Psiphon always
+        // dialled the underlay directly instead of through Aether.
+        through_tunnel: raw._reserved[0] != 0,
     };
 
     // ── Tor ─────────────────────────────────────────────────────────────
@@ -1007,5 +1017,25 @@ mod tests {
         );
         assert!(out.contains(r#""UpstreamProxyURL":"socks5://127.0.0.1:1819""#), "{out}");
         assert!(out.contains(r#""PropagationChannelId":"X""#), "{out}");
+    }
+
+    /// The UI signals "Psiphon through the tunnel" via FcaeConfig._reserved[0];
+    /// parse() must read it, or the supervisor never chains Psiphon behind
+    /// Aether and the flag silently does nothing (regression test).
+    #[test]
+    fn reserved_slot_zero_sets_through_tunnel() {
+        // Zeroed like a host that called fcae_config_default() and changed
+        // nothing: every zero enum value here is a valid variant, and all
+        // pointer fields are NULL, which cstr_opt folds to None.
+        let mut raw: FcaeConfig = unsafe { std::mem::zeroed() };
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+
+        let cfg = unsafe { parse(&raw) }.expect("default config parses");
+        assert!(!cfg.psiphon.through_tunnel);
+
+        raw._reserved[0] = 1;
+        let cfg = unsafe { parse(&raw) }.expect("config parses");
+        assert!(cfg.psiphon.through_tunnel);
     }
 }

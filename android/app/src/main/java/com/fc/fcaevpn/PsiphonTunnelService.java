@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -58,6 +59,15 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private String region = "";
     private volatile String lastRegions = "";
     private String upstreamProxy = "";
+    // Server-entry sources. tunnel-core has exactly three ways to learn its
+    // first server entries, and without one of them the controller stalls on
+    // CandidateServers count 0 forever ("no capable servers", then the
+    // misleading "untunneled DSL fetch failed ... no broker specs" — the DSL
+    // fetcher needs in-proxy broker specs, which are derived from server
+    // entries). The embedded list wins when several are set.
+    private String remoteServerListUrl = "";
+    private String remoteServerListKey = "";
+    private String embeddedListPath = "";
     private int wantSocks;
     private int wantHttp;
     private final AtomicInteger socksPort = new AtomicInteger(0);
@@ -97,13 +107,37 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             String up = intent.getStringExtra("upstreamProxy");
             upstreamProxy = up == null ? "" : up.trim();
         }
+        // Server-entry sources: intent extras first (the host may rotate
+        // them), then filesDir/psiphon_settings.json (the provisioning file —
+        // the only path that works without shipping a new APK), then the
+        // persisted values from previous starts. Everything non-empty is
+        // stored so a restart (region switch, process death) keeps working
+        // without the host having to repeat it.
+        SharedPreferences p = getSharedPreferences("fcae_psiphon", MODE_PRIVATE);
+        String extraUrl = intent == null ? null : intent.getStringExtra("psiphonRemoteUrl");
+        String extraKey = intent == null ? null : intent.getStringExtra("psiphonRemoteKey");
+        String extraList = intent == null ? null : intent.getStringExtra("psiphonEmbeddedListFile");
+        String[] fromFile = readProvisioningFile();
+        remoteServerListUrl = firstNonEmpty(extraUrl, fromFile[0], p.getString("psiphonRemoteUrl", ""));
+        remoteServerListKey = firstNonEmpty(extraKey, fromFile[1], p.getString("psiphonRemoteKey", ""));
+        embeddedListPath = firstNonEmpty(extraList, fromFile[2], p.getString("psiphonEmbeddedListFile", ""));
+        p.edit()
+                .putString("psiphonRemoteUrl", remoteServerListUrl)
+                .putString("psiphonRemoteKey", remoteServerListKey)
+                .putString("psiphonEmbeddedListFile", embeddedListPath)
+                .apply();
         stopping = false;
         emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")")
-                + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy));
+                + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy)
+                + sourceSummary());
         final PsiphonTunnel t = tunnel;
         new Thread(() -> {
             try {
-                if (t != null) t.startTunneling("");
+                // The embedded list is the body of an encoded server entry
+                // list (same format as a remote server_list payload); ""
+                // falls back to whatever the datastore still holds plus any
+                // remote server list configured in getPsiphonConfig().
+                if (t != null) t.startTunneling(readEmbeddedServerList());
                 else throw new Exception("Psiphon tunnel not created");
             } catch (Exception e) {
                 Log.e(TAG, "startTunneling failed", e);
@@ -203,11 +237,152 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             if (!region.isEmpty()) o.put("EgressRegion", region);
             if (wantSocks > 0) o.put("LocalSocksProxyPort", wantSocks);
             if (wantHttp > 0) o.put("LocalHttpProxyPort", wantHttp);
+            // "Psiphon through the tunnel": all of Psiphon's own dials
+            // (servers, API calls, remote server list fetches) go through
+            // this proxy — Aether's local SOCKS. This field used to be
+            // logged and then dropped, so Psiphon always dialled the
+            // underlay directly and the chain silently degraded to plain
+            // Psiphon. tunnel-core accepts socks5://, socks4a:// and
+            // http:// here (see psiphon/upstreamproxy/README.md upstream).
+            if (!upstreamProxy.isEmpty()) {
+                o.put("UpstreamProxyURL", normalizeUpstreamProxyUrl(upstreamProxy));
+            }
+            // Out-of-band server entries: the classic remote server list.
+            // RemoteServerListUrl is the legacy field name, still promoted
+            // upstream, so a plain https:// URL + signature key is enough.
+            if (!remoteServerListUrl.isEmpty()) {
+                o.put("RemoteServerListUrl", remoteServerListUrl);
+                if (!remoteServerListKey.isEmpty()) {
+                    o.put("RemoteServerListSignaturePublicKey", remoteServerListKey);
+                }
+            }
             return o.toString();
         } catch (Exception e) {
             Log.e(TAG, "getPsiphonConfig: " + e.getMessage());
             return "{}";
         }
+    }
+
+    /** tunnel-core dropped the bare "socks" scheme; map it to socks5. */
+    static String normalizeUpstreamProxyUrl(String url) {
+        String u = url.trim();
+        if (u.regionMatches(true, 0, "socks://", 0, 8)) {
+            return "socks5://" + u.substring(8);
+        }
+        return u;
+    }
+
+    /**
+     * Optional provisioning file: filesDir/psiphon_settings.json.
+     *
+     * Recognised keys (all optional):
+     * { "RemoteServerListUrl": "https://…/server_list",
+     *   "RemoteServerListSignaturePublicKey": "base64 key",
+     *   "EmbeddedServerEntryListFile": "/path/to/server_entries" }
+     *
+     * This is the one provisioning path that needs neither a new APK (asset)
+     * nor host code (extras): push the file with run-as on a debug build and
+     * restart Psiphon. Returns {url, key, embeddedPath}, empty strings when
+     * absent.
+     */
+    private String[] readProvisioningFile() {
+        String[] out = {"", "", ""};
+        try {
+            File f = new File(getFilesDir(), "psiphon_settings.json");
+            if (!f.isFile()) return out;
+            JSONObject o = new JSONObject(new String(readAll(f), "UTF-8"));
+            out[0] = o.optString("RemoteServerListUrl", "").trim();
+            out[1] = o.optString("RemoteServerListSignaturePublicKey", "").trim();
+            out[2] = o.optString("EmbeddedServerEntryListFile", "").trim();
+            emitLog("provisioning file: " + f.getAbsolutePath()
+                    + (out[0].isEmpty() ? "" : " (remote list)")
+                    + (out[2].isEmpty() ? "" : " (embedded list file)"));
+        } catch (Exception e) {
+            emitLog("could not parse psiphon_settings.json: " + e.getMessage());
+        }
+        return out;
+    }
+
+    /** One-line summary of which server-entry sources are configured. */
+    private String sourceSummary() {
+        java.util.List<String> s = new java.util.ArrayList<>();
+        if (!embeddedListPath.isEmpty()) s.add("embedded:" + embeddedListPath);
+        if (!remoteServerListUrl.isEmpty()) s.add("remote-list:" + remoteServerListUrl);
+        return s.isEmpty()
+                ? " [no server-entry source — configure one or Psiphon cannot bootstrap]"
+                : " [server entries: " + String.join(", ", s) + "]";
+    }
+
+    /**
+     * Load the embedded server entry list for startTunneling().
+     *
+     * Order: the file given via psiphonEmbeddedListFile (extra or pref), then
+     * an asset named psiphon_server_list.txt shipped in the APK. Returns ""
+     * when neither exists — which is legitimate only when a remote server
+     * list is configured or the datastore still holds entries.
+     */
+    private String readEmbeddedServerList() {
+        if (!embeddedListPath.isEmpty()) {
+            try {
+                byte[] raw = readAll(new File(embeddedListPath));
+                if (raw.length > 0) {
+                    emitLog("importing embedded server entries from " + embeddedListPath
+                            + " (" + raw.length + " bytes)");
+                    return new String(raw, "UTF-8");
+                }
+                emitLog("embedded list file is empty: " + embeddedListPath);
+            } catch (Exception e) {
+                emitLog("could not read embedded list " + embeddedListPath + ": " + e.getMessage());
+            }
+        }
+        // filesDir/psiphon_server_list.txt: the push-without-rebuild path,
+        // same provisioning idea as psiphon_settings.json.
+        File sideLoaded = new File(getFilesDir(), "psiphon_server_list.txt");
+        if (sideLoaded.isFile() && sideLoaded.length() > 0) {
+            try {
+                byte[] raw = readAll(sideLoaded);
+                emitLog("importing embedded server entries from " + sideLoaded
+                        + " (" + raw.length + " bytes)");
+                return new String(raw, "UTF-8");
+            } catch (Exception e) {
+                emitLog("could not read " + sideLoaded + ": " + e.getMessage());
+            }
+        }
+        try (java.io.InputStream in = getAssets().open("psiphon_server_list.txt")) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            if (out.size() > 0) {
+                emitLog("importing embedded server entries from assets"
+                        + " (" + out.size() + " bytes)");
+                return out.toString("UTF-8");
+            }
+        } catch (Exception ignored) {
+            // No bundled asset — the normal case.
+        }
+        if (remoteServerListUrl.isEmpty()) {
+            emitLog("WARNING: no server-entry source (embedded list, asset or remote server"
+                    + " list URL): on a fresh datastore Psiphon can never connect");
+        }
+        return "";
+    }
+
+    private static byte[] readAll(File f) throws Exception {
+        try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return out.toByteArray();
+        }
+    }
+
+    private static String firstNonEmpty(String... values) {
+        for (String v : values) {
+            if (v != null && !v.trim().isEmpty()) return v.trim();
+        }
+        return "";
     }
 
     @Override

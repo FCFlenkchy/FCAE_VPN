@@ -418,10 +418,63 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     config_json = inject_psiphon_ports(&config_json, p.socks_port, p.http_port)?;
     config_json = inject_android_resolver_policy(&config_json)?;
 
+    warn_when_no_server_entry_source(&config_json, &p.embedded_server_list);
+
     Ok(StartInputs {
         config_json,
         embedded_server_list: p.embedded_server_list.clone().unwrap_or_default(),
     })
+}
+
+/// Explain — loudly but non-fatally — when the session has no way to learn
+/// about any Psiphon server.
+///
+/// tunnel-core bootstraps its first server entries from exactly three
+/// sources: the embedded server entry list (psi.Start's second parameter),
+/// RemoteServerListUrl(s) + RemoteServerListSignaturePublicKey, or
+/// ObfuscatedServerListRootURL(s). With none of them the server entry store
+/// is empty and the session fails exactly like this:
+///
+/// ```text
+/// Info: awaiting embedded server entry list import
+/// Warning: tactics request aborted: no capable servers
+/// Error: untunneled DSL fetch failed: ... no broker specs
+/// CandidateServers: {"count":0, ...}
+/// ```
+///
+/// ("no broker specs" is a downstream symptom, not the cause: the untunneled
+/// DSL fetcher rides in-proxy broker clients, and broker specs are derived
+/// from server entries — of which there are none.)
+///
+/// Entries may also survive in the datastore from a previous run, which is
+/// why this warns instead of erroring.
+fn warn_when_no_server_entry_source(config_json: &str, embedded: &Option<String>) {
+    if has_server_entry_source(config_json, embedded.as_deref()) {
+        return;
+    }
+    log::warn!(
+        "[psiphon] no server entry source: config_json sets neither RemoteServerListUrl \
+         (+RemoteServerListSignaturePublicKey) nor an embedded server entry list, so on a \
+         fresh datastore Psiphon can never establish a tunnel (CandidateServers count 0). \
+         Set psiphon.embedded_server_list, or add RemoteServerListUrl and \
+         RemoteServerListSignaturePublicKey to psiphon.config_json."
+    );
+}
+
+/// True when at least one tunnel-core server-entry source is configured.
+fn has_server_entry_source(config_json: &str, embedded: Option<&str>) -> bool {
+    if embedded.map(str::trim).unwrap_or("") != "" {
+        return true;
+    }
+    [
+        "\"RemoteServerListUrl\"",
+        "\"RemoteServerListURLs\"",
+        "\"ObfuscatedServerListRootURL\"",
+        "\"ObfuscatedServerListRootURLs\"",
+        "\"TargetServerEntry\"",
+    ]
+    .iter()
+    .any(|k| config_json.contains(k))
 }
 
 /// Set `EgressRegion` in a Psiphon config object.
@@ -850,6 +903,36 @@ mod tests {
         let inputs = validate(&cfg).expect("should validate");
         assert!(inputs.config_json.contains(r#""PropagationChannelId":"x""#));
         assert!(inputs.embedded_server_list.is_empty());
+    }
+
+    /// With neither an embedded list nor a remote/obfuscated server list in
+    /// config_json, tunnel-core has no way to learn its first server entry:
+    /// the predicate behind the startup warning must flag exactly this shape.
+    #[test]
+    fn the_default_ui_config_has_no_server_entry_source() {
+        // kDefaultPsiphonConfig from ui_render.h (plus the injected data dir).
+        let bare = concat!(
+            r#"{"PropagationChannelId":"FFFFFFFFFFFFFFFF","SponsorId":"FFFFFFFFFFFFFFFF","#,
+            r#""ClientVersion":"1","TunnelPoolSize":1,"DisableLocalSocksAuth":true,"#,
+            r#""EmitDiagnosticNotices":true,"UseIndistinguishableTLS":true,"#,
+            r#""DataRootDirectory":"/tmp/psi"}"#
+        );
+        assert!(!has_server_entry_source(bare, None));
+        assert!(!has_server_entry_source(bare, Some("")));
+        // Whitespace-only is still no source...
+        assert!(has_server_entry_source(bare, Some("  \n")));
+
+        // An embedded list satisfies it...
+        assert!(has_server_entry_source(bare, Some("oNNXuM6b5Wl3BwEX4xNw")));
+        // ...as does any recognised remote/obfuscated list field.
+        assert!(has_server_entry_source(
+            r#"{"RemoteServerListUrl":"https://example.invalid/server_list"}"#,
+            None
+        ));
+        assert!(has_server_entry_source(
+            r#"{"RemoteServerListSignaturePublicKey":"k","RemoteServerListURLs":[{"URL":"aGk="}]}"#,
+            None
+        ));
     }
 
     fn make_config(

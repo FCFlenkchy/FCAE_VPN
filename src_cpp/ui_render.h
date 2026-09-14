@@ -80,6 +80,18 @@ struct AppState {
     char psiphon_data_dir[512] = {0};
     int  psiphon_socks_port = 0;       // 0 = Psiphon chooses
     int  psiphon_http_port  = 0;
+    // Server-entry sources. tunnel-core has exactly three ways to learn its
+    // first server entries; with none of them the controller sits on
+    // "CandidateServers: count 0" forever and the tunnel never establishes.
+    // At least one must be configured.
+    char psiphon_remote_url[512]  = {0};  // RemoteServerListUrl (https://…)
+    char psiphon_remote_key[512]  = {0};  // RemoteServerListSignaturePublicKey
+    char psiphon_embedded_file[1024] = {0}; // encoded server entries file
+    // Built by to_config(): the default config JSON with the server-entry
+    // fields merged in. to_config() returns a FcaeConfig pointing INTO this
+    // string, and the connect worker immediately snapshots it — same
+    // process-lifetime pattern as the other char[] fields.
+    std::string psiphon_config_json_built;
 
     // Tor egress (inside the Aether engine, not a separate backend).
     int  tor_mode    = 0;        // FcaeTorMode
@@ -138,7 +150,7 @@ struct AppState {
     /// Always starts from fcae_config_default() so struct_size/abi_version are
     /// stamped correctly and any field the UI does not yet expose gets a sane
     /// default instead of a zero.
-    FcaeConfig to_config() const {
+    FcaeConfig to_config() {
         FcaeConfig c;
         fcae_config_default(&c);
 
@@ -203,13 +215,56 @@ struct AppState {
             "\"DisableLocalSocksAuth\":true,"
             "\"EmitDiagnosticNotices\":true,"
             "\"UseIndistinguishableTLS\":true}";
-        c.psiphon.config_json   = kDefaultPsiphonConfig;
+        // Splice the server-entry sources into the config object. tunnel-core
+        // bootstraps from the embedded list OR RemoteServerListUrl
+        // (+RemoteServerListSignaturePublicKey); the all-F sponsor IDs ship
+        // no entries by themselves, so without one of these fields Psiphon
+        // can never leave CandidateServers count 0.
+        std::string json = kDefaultPsiphonConfig;
+        json = merge_psiphon_string_field(json, "RemoteServerListUrl", psiphon_remote_url);
+        json = merge_psiphon_string_field(json, "RemoteServerListSignaturePublicKey", psiphon_remote_key);
+        psiphon_config_json_built = json;
+        c.psiphon.config_json   = psiphon_config_json_built.c_str();
         c.psiphon.egress_region = psiphon_region[0] ? psiphon_region : nullptr;
         c.psiphon.data_root_dir = psiphon_data_dir[0] ? psiphon_data_dir : nullptr;
         c.psiphon.socks_port    = (uint16_t)psiphon_socks_port;
         c.psiphon.http_port     = (uint16_t)psiphon_http_port;
 
         return c;
+    }
+
+    /// Splice "key": "value" into a flat Psiphon config JSON object.
+    ///
+    /// Textual like the Rust side's injectors (this TU deliberately has no
+    /// JSON dependency), so the value is JSON-string-escaped first. A field
+    /// the caller already set is left alone.
+    static std::string merge_psiphon_string_field(
+            const std::string& json, const char* key, const char* raw_value) {
+        if (!raw_value || !raw_value[0]) return json;
+        std::string value;
+        value.reserve(strlen(raw_value) + 2);
+        for (const char* p = raw_value; *p; ++p) {
+            switch (*p) {
+                case '"':  value += "\\\""; break;
+                case '\\': value += "\\\\"; break;
+                case '\n': value += "\\n";  break;
+                case '\r': value += "\\r";  break;
+                case '\t': value += "\\t";  break;
+                default:   value += *p;     break;
+            }
+        }
+        const std::string pair = std::string("\"") + key + "\":\"" + value + "\"";
+        if (json.find("\"" + std::string(key) + "\"") != std::string::npos) {
+            return json; // already present; do not duplicate
+        }
+        size_t close = json.find_last_of('}');
+        if (close == std::string::npos) return json;
+        std::string out = json.substr(0, close);
+        // Trim whitespace and a dangling comma before appending.
+        while (!out.empty() && (out.back() == ' ' || out.back() == '\n' ||
+                                out.back() == '\r' || out.back() == '\t')) out.pop_back();
+        if (!out.empty() && out.back() == ',') out.pop_back();
+        return out + "," + pair + "}";
     }
 };
 

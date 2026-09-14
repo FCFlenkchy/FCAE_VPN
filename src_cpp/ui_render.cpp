@@ -326,6 +326,9 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "psiphon_data_dir") snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir), "%s", val.c_str());
     else if (key == "psiphon_socks_port") g_app.psiphon_socks_port = atoi(val.c_str());
     else if (key == "psiphon_http_port") g_app.psiphon_http_port = atoi(val.c_str());
+    else if (key == "psiphon_remote_url") snprintf(g_app.psiphon_remote_url, sizeof(g_app.psiphon_remote_url), "%s", val.c_str());
+    else if (key == "psiphon_remote_key") snprintf(g_app.psiphon_remote_key, sizeof(g_app.psiphon_remote_key), "%s", val.c_str());
+    else if (key == "psiphon_embedded_file") snprintf(g_app.psiphon_embedded_file, sizeof(g_app.psiphon_embedded_file), "%s", val.c_str());
     else if (key == "mode") g_app.mode = atoi(val.c_str());
     else if (key == "lan_sharing") g_app.lan_sharing = atoi(val.c_str()) != 0;
     else if (key == "scan_mode") g_app.scan_mode = atoi(val.c_str());
@@ -392,6 +395,9 @@ static void save_config() {
     fprintf(f, "psiphon_data_dir=%s\n", g_app.psiphon_data_dir);
     fprintf(f, "psiphon_socks_port=%d\n", g_app.psiphon_socks_port);
     fprintf(f, "psiphon_http_port=%d\n", g_app.psiphon_http_port);
+    fprintf(f, "psiphon_remote_url=%s\n", g_app.psiphon_remote_url);
+    fprintf(f, "psiphon_remote_key=%s\n", g_app.psiphon_remote_key);
+    fprintf(f, "psiphon_embedded_file=%s\n", g_app.psiphon_embedded_file);
     fprintf(f, "mode=%d\n", g_app.mode);
     fprintf(f, "lan_sharing=%d\n", g_app.lan_sharing ? 1 : 0);
     fprintf(f, "scan_mode=%d\n", g_app.scan_mode);
@@ -798,6 +804,7 @@ void render_ui() {
                 // Snapshot config + own string storage for the worker thread.
                 struct Owned {
                     std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
+                    std::string psi_json, psi_embedded;
                     FcaeConfig c{};
                 };
                 // Use unique_ptr with a custom deleter that handles the
@@ -819,6 +826,29 @@ void render_ui() {
                 o->routes = g_app.routes_file;
                 o->routes_inline = g_app.routes_inline;
                 o->c = g_app.to_config();
+                // to_config() built the JSON (with the server-entry fields
+                // merged in) into a g_app buffer; snapshot it, and read the
+                // embedded server entry list, so fcae_start only ever sees
+                // pointers owned by this worker.
+                o->psi_json = g_app.psiphon_config_json_built;
+                if (g_app.psiphon_embedded_file[0]) {
+                    std::ifstream f(g_app.psiphon_embedded_file, std::ios::binary);
+                    if (f) {
+                        std::ostringstream ss;
+                        ss << f.rdbuf();
+                        o->psi_embedded = ss.str();
+                        g_app.add_log(3, ("[ui] psiphon embedded server list: " +
+                                          std::to_string(o->psi_embedded.size()) +
+                                          " bytes from " + g_app.psiphon_embedded_file).c_str());
+                    } else {
+                        g_app.add_log(3, ("[ui] psiphon embedded list not readable: " +
+                                          std::string(g_app.psiphon_embedded_file)).c_str());
+                    }
+                } else if (!g_app.psiphon_remote_url[0]) {
+                    g_app.add_log(3,
+                        "[ui] psiphon has no server-entry source (embedded file or remote "
+                        "server list URL): on a fresh datastore it can never connect");
+                }
                 o->c.obfuscation.noize_profile = o->noize.c_str();
                 o->c.force_peer                = o->peer.empty() ? nullptr : o->peer.c_str();
                 o->c.config_path               = o->path.c_str();
@@ -828,6 +858,9 @@ void render_ui() {
                 o->c.zero_trust.access_email   = o->email.empty() ? nullptr : o->email.c_str();
                 o->c.routing.rules_file        = o->routes.empty() ? nullptr : o->routes.c_str();
                 o->c.routing.rules_inline      = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
+                o->c.psiphon.config_json          = o->psi_json.c_str();
+                o->c.psiphon.embedded_server_list =
+                    o->psi_embedded.empty() ? nullptr : o->psi_embedded.c_str();
                 auto* raw = o.release(); // transfer ownership to the thread
                 std::thread([raw] {
                     // Wrap in a unique_ptr again so the custom deleter
@@ -1275,6 +1308,22 @@ void render_ui() {
             ImGui::InputInt("Psiphon SOCKS port", &g_app.psiphon_socks_port);
             ImGui::InputInt("Psiphon HTTP port", &g_app.psiphon_http_port);
             ImGui::TextDisabled("0 lets Psiphon pick a free port.");
+
+            // Server-entry sources: tunnel-core learns its first server
+            // entries from an embedded list OR the remote server list. With
+            // neither, every connect dies as "CandidateServers count 0"
+            // (plus the misleading "untunneled DSL fetch ... no broker
+            // specs" error, which is only a downstream symptom).
+            ImGui::Spacing();
+            ImGui::Text("Server entries");
+            ImGui::InputText("Remote server list URL", g_app.psiphon_remote_url,
+                             sizeof(g_app.psiphon_remote_url));
+            ImGui::InputText("Server list signature key", g_app.psiphon_remote_key,
+                             sizeof(g_app.psiphon_remote_key));
+            ImGui::InputText("Embedded entries file", g_app.psiphon_embedded_file,
+                             sizeof(g_app.psiphon_embedded_file));
+            ImGui::TextDisabled("Set a remote list (URL + key), or an embedded entries file.");
+            ImGui::TextDisabled("Without one, Psiphon can never establish its first tunnel.");
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Egress");

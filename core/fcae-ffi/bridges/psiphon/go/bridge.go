@@ -345,6 +345,9 @@ func psi_set_network_callbacks(
 //	-2 invalid argument
 //	-3 psi.Start failed
 //
+// Before launching the controller, psi_start emits a warning notice when no
+// server-entry source is configured; see psiWarnNoServerEntrySource below.
+//
 //export psi_start
 func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	psiMu.Lock()
@@ -388,6 +391,8 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	embeddedList := C.GoString(embedded)
 	psiMu.Unlock()
 
+	psiWarnNoServerEntrySource(cfg, embeddedList)
+
 	// psi.Start() is deliberately called WITHOUT psiMu held.
 	//
 	// It performs the whole datastore open and embedded-server-list import
@@ -409,6 +414,46 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 
 	psiEmit(psiLogInfo, "[psiphon] controller started")
 	return 0
+}
+
+// psiWarnNoServerEntrySource mirrors the Rust bridge's startup diagnostic for
+// hosts that drive this shim directly (the console binary).
+//
+// tunnel-core bootstraps its first server entries from exactly three sources:
+// the embedded server entry list, RemoteServerListUrl(s) +
+// RemoteServerListSignaturePublicKey, or ObfuscatedServerListRootURL(s). With
+// none of them the server entry store is empty and the session dies as:
+//
+//	Info: awaiting embedded server entry list import
+//	Warning: tactics request aborted: no capable servers
+//	Error: untunneled DSL fetch failed: ... no broker specs
+//	CandidateServers: {"count":0, ...}
+//
+// "no broker specs" is a downstream symptom, not the cause: the untunneled
+// DSL fetcher rides in-proxy broker clients, and broker specs are derived
+// from server entries — of which there are none. Entries may survive in the
+// datastore from a previous run, hence warn rather than fail.
+func psiWarnNoServerEntrySource(configJSON, embedded string) {
+	if embedded != "" {
+		return
+	}
+	var probe map[string]json.RawMessage
+	if json.Unmarshal([]byte(configJSON), &probe) != nil {
+		return
+	}
+	for _, key := range []string{
+		"RemoteServerListUrl", "RemoteServerListURLs",
+		"ObfuscatedServerListRootURL", "ObfuscatedServerListRootURLs",
+		"TargetServerEntry",
+	} {
+		if _, ok := probe[key]; ok {
+			return
+		}
+	}
+	psiEmit(psiLogWarn,
+		"[psiphon] no server entry source: set an embedded server entry list, or add "+
+			"RemoteServerListUrl and RemoteServerListSignaturePublicKey to the config; "+
+			"otherwise Psiphon can never establish its first tunnel")
 }
 
 //export psi_stop
