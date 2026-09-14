@@ -60,6 +60,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // fallback for builds without provisioning; may be retired upstream.
     private static final String DEFAULT_SERVER_LIST_URL =
             "https://s3.amazonaws.com//psiphon/web/mjr4-p23r-puwl/server_list_compressed";
+    // Standard ed25519 public key verifying individually signed server
+    // entries (DSL fetches, server-pushed updates). Without it every tunneled
+    // DSL fetch fails with "VerifySignature: missing public key". Same value
+    // the open-source Psiphon clients embed; a config that sets its own wins.
+    private static final String DEFAULT_SERVER_ENTRY_SIGNATURE_KEY =
+            "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA=";
     private static final String DEFAULT_SERVER_LIST_SIGNATURE_KEY =
             "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH"
           + "5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5"
@@ -264,6 +270,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             // http:// here (see psiphon/upstreamproxy/README.md upstream).
             if (!upstreamProxy.isEmpty()) {
                 o.put("UpstreamProxyURL", normalizeUpstreamProxyUrl(upstreamProxy));
+            }
+            // Entry-level signature verification (see the constant's comment).
+            if (!o.has("ServerEntrySignaturePublicKey")) {
+                o.put("ServerEntrySignaturePublicKey", DEFAULT_SERVER_ENTRY_SIGNATURE_KEY);
             }
             // Out-of-band server entries: the classic remote server list.
             // RemoteServerListUrl is the legacy field name, still promoted

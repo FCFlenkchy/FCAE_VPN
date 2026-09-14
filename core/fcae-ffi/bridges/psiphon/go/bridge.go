@@ -435,6 +435,12 @@ const (
 		"KxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM="
 )
 
+// Standard ed25519 public key verifying individually signed server entries
+// (DSL fetches, server-pushed updates); the same value the open-source
+// Psiphon clients embed. Without it every tunneled DSL fetch fails with
+// "VerifySignature: missing public key" even after the tunnel is up.
+const psiDefaultServerEntrySignatureKey = "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA="
+
 // psiEnsureServerEntrySource returns configJSON with a server-entry source
 // guaranteed: an embedded list counts (the caller passes it to Start), and
 // otherwise the config is probed for the remote/obfuscated list fields. When
@@ -442,31 +448,50 @@ const (
 // fresh datastore can bootstrap instead of dying on CandidateServers count 0
 // ("no capable servers", then "untunneled DSL fetch ... no broker specs" —
 // broker specs are derived from server entries). User config always wins.
+//
+// Independently of the source, the entry-signature key is defaulted when the
+// config does not set one, so out-of-band entries verify instead of failing
+// with "missing public key".
 func psiEnsureServerEntrySource(configJSON, embedded string) string {
-	if embedded != "" {
-		return configJSON
-	}
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(configJSON), &probe); err != nil {
 		return configJSON // psi.Start will report the malformed config
 	}
-	for _, key := range []string{
-		"RemoteServerListUrl", "RemoteServerListURLs",
-		"ObfuscatedServerListRootURL", "ObfuscatedServerListRootURLs",
-		"TargetServerEntry",
-	} {
-		if _, ok := probe[key]; ok {
-			return configJSON
+
+	changed := false
+	if _, ok := probe["ServerEntrySignaturePublicKey"]; !ok {
+		probe["ServerEntrySignaturePublicKey"] = json.RawMessage(`"` + psiDefaultServerEntrySignatureKey + `"`)
+		changed = true
+	}
+
+	if embedded == "" {
+		hasSource := false
+		for _, key := range []string{
+			"RemoteServerListUrl", "RemoteServerListURLs",
+			"ObfuscatedServerListRootURL", "ObfuscatedServerListRootURLs",
+			"TargetServerEntry",
+		} {
+			if _, ok := probe[key]; ok {
+				hasSource = true
+				break
+			}
+		}
+		if !hasSource {
+			probe["RemoteServerListUrl"] = json.RawMessage(`"` + psiDefaultServerListURL + `"`)
+			probe["RemoteServerListSignaturePublicKey"] = json.RawMessage(`"` + psiDefaultServerListKey + `"`)
+			changed = true
+			psiEmit(psiLogInfo,
+				"[psiphon] no server entry source configured; using the built-in legacy public remote server list")
 		}
 	}
-	probe["RemoteServerListUrl"] = json.RawMessage(`"` + psiDefaultServerListURL + `"`)
-	probe["RemoteServerListSignaturePublicKey"] = json.RawMessage(`"` + psiDefaultServerListKey + `"`)
+
+	if !changed {
+		return configJSON
+	}
 	out, err := json.Marshal(probe)
 	if err != nil {
 		return configJSON
 	}
-	psiEmit(psiLogInfo,
-		"[psiphon] no server entry source configured; using the built-in legacy public remote server list")
 	return string(out)
 }
 

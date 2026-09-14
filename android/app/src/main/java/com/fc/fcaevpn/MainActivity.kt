@@ -1147,8 +1147,14 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("torSocksPort", editTorSocksPort.text.toString().toIntOrNull() ?: 1821)
         i.putExtra("psiphonConfig", "")
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
-        i.putExtra("psiphonSocksPort", editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
-        i.putExtra("psiphonHttpPort", editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
+        // Prefer the LIVE AAR ports: when this start is the Protocol=Psiphon
+        // "raise TUN" step, the AAR already picked random ports and
+        // pendingPsiSocks/pendingPsiHttp hold them. Reading only the edit
+        // fields sent 0 here, the native Psiphon attach backend refused with
+        // "Start PsiphonTunnelService first and pass its SOCKS port", and the
+        // tunnel looked dead even though Psiphon was up.
+        i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
+        i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
         startForegroundService(i)
         // Poll is started by the VPN_STATE_CHANGED broadcast from the service
         // AFTER nativeStart() succeeds — NOT here, to avoid calling native
@@ -1755,7 +1761,11 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val POLL_INTERVAL_MS = 1000L
-        private const val MAX_LOG_CHARS = 8000
+        // ~70+ log messages on screen. Psiphon's JSON notices average
+        // 150-350 chars, so 8000 showed only ~20-30 lines and older lines
+        // (handshake, CandidateServers) scrolled away before the connect
+        // verdict was visible.
+        private const val MAX_LOG_CHARS = 24000
 
         // Set to true while the Activity is alive.  The service checks
         // this after fullShutdown() to decide whether to kill the process.

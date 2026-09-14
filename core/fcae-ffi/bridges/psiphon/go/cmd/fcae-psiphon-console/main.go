@@ -277,33 +277,54 @@ const (
 		"KxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM="
 )
 
+// Standard ed25519 public key verifying individually signed server entries
+// (DSL fetches, server-pushed updates); see the shim's constant of the same
+// name. Without it, tunneled DSL fetches fail with "missing public key".
+const defaultServerEntrySignatureKey = "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA="
+
 // ensureServerEntrySource mirrors the desktop shim: embedded list wins, then
 // any remote/obfuscated list already in the config, then the legacy public
-// remote server list so a fresh datastore can bootstrap.
+// remote server list so a fresh datastore can bootstrap. The entry-signature
+// key is also defaulted when the config does not set one.
 func ensureServerEntrySource(config []byte, embedded string) []byte {
-	if embedded != "" {
-		return config
-	}
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(config, &probe); err != nil {
 		return config
 	}
-	for _, key := range []string{
-		"RemoteServerListUrl", "RemoteServerListURLs",
-		"ObfuscatedServerListRootURL", "ObfuscatedServerListRootURLs",
-		"TargetServerEntry",
-	} {
-		if _, ok := probe[key]; ok {
-			return config
+
+	changed := false
+	if _, ok := probe["ServerEntrySignaturePublicKey"]; !ok {
+		probe["ServerEntrySignaturePublicKey"] = json.RawMessage(`"` + defaultServerEntrySignatureKey + `"`)
+		changed = true
+	}
+
+	if embedded == "" {
+		hasSource := false
+		for _, key := range []string{
+			"RemoteServerListUrl", "RemoteServerListURLs",
+			"ObfuscatedServerListRootURL", "ObfuscatedServerListRootURLs",
+			"TargetServerEntry",
+		} {
+			if _, ok := probe[key]; ok {
+				hasSource = true
+				break
+			}
+		}
+		if !hasSource {
+			probe["RemoteServerListUrl"] = json.RawMessage(`"` + defaultServerListURL + `"`)
+			probe["RemoteServerListSignaturePublicKey"] = json.RawMessage(`"` + defaultServerListKey + `"`)
+			changed = true
+			fmt.Fprintln(os.Stderr,
+				"fcae-psiphon-console: no server-entry source configured; using the built-in legacy public remote server list")
 		}
 	}
-	probe["RemoteServerListUrl"] = json.RawMessage(`"` + defaultServerListURL + `"`)
-	probe["RemoteServerListSignaturePublicKey"] = json.RawMessage(`"` + defaultServerListKey + `"`)
+
+	if !changed {
+		return config
+	}
 	out, err := json.Marshal(probe)
 	if err != nil {
 		return config
 	}
-	fmt.Fprintln(os.Stderr,
-		"fcae-psiphon-console: no server-entry source configured; using the built-in legacy public remote server list")
 	return out
 }

@@ -418,6 +418,21 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     config_json = inject_psiphon_ports(&config_json, p.socks_port, p.http_port)?;
     config_json = inject_android_resolver_policy(&config_json)?;
 
+    // Server entries fetched out-of-band (tunneled DSL fetches, entry
+    // updates pushed by the server) are individually signed and verified
+    // against ServerEntrySignaturePublicKey. Without it every tunneled DSL
+    // fetch dies with "protocol.ServerEntryFields.VerifySignature: missing
+    // public key" even though the tunnel itself is fine. The standard
+    // ed25519 key below is the value the open-source Psiphon clients embed;
+    // a config that deliberately sets its own key wins.
+    if !config_json.contains("\"ServerEntrySignaturePublicKey\"") {
+        config_json = inject_string_field(
+            &config_json,
+            "ServerEntrySignaturePublicKey",
+            DEFAULT_SERVER_ENTRY_SIGNATURE_KEY,
+        )?;
+    }
+
     // A fresh datastore with no server-entry source can never connect (the
     // bootstrap chicken-and-egg). Fall back to the LEGACY PUBLIC remote
     // server list — the same URL + signature key the open-source Psiphon 3
@@ -459,6 +474,12 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
 /// hosted and signed by Psiphon infrastructure; may be retired at any time.
 pub(crate) const DEFAULT_SERVER_LIST_URL: &str =
     "https://s3.amazonaws.com//psiphon/web/mjr4-p23r-puwl/server_list_compressed";
+
+/// Standard ed25519 public key used to verify individually signed server
+/// entries (DSL fetches, server-pushed updates) — the same value the
+/// open-source Psiphon clients embed. Public; not provisioning.
+pub(crate) const DEFAULT_SERVER_ENTRY_SIGNATURE_KEY: &str =
+    "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA=";
 
 /// Signature public key that authenticates the legacy public remote server
 /// list payload (the same value embedded in the open-source Psiphon 3
