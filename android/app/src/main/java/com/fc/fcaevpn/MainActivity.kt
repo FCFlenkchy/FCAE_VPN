@@ -1643,9 +1643,3 @@ class MainActivity : AppCompatActivity() {
         private val COLOR_UPDATE_IDLE = Color.parseColor("#60A5FA")        // blue theme
     }
 }
-      private val COLOR_UPDATE_IDLE = Color.parseColor("#60A5FA")        // blue theme
-    }
-}
-("#60A5FA")        // blue theme
-    }
-}
