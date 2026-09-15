@@ -142,6 +142,22 @@ pub async fn start_reverse(_state: PathBuf) -> Result<SocketAddr> {
     Err(unsupported())
 }
 
+// Retain serving tasks until cooperative shutdown finishes, before the
+// embedding runtime can be destroyed or the next session resets its flags.
+static SERVING_TASKS: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn retain_task(task: tokio::task::JoinHandle<()>) {
+    SERVING_TASKS.lock().unwrap_or_else(|e| e.into_inner()).push(task);
+}
+
+pub(crate) async fn drain_tasks() {
+    let tasks = std::mem::take(&mut *SERVING_TASKS.lock().unwrap_or_else(|e| e.into_inner()));
+    for task in tasks {
+        if let Err(e) = task.await { log::warn!("tor serving task exited: {e}"); }
+    }
+}
+
 #[cfg(feature = "tor")]
 pub use with_tor::{run_chain, run_only, start_reverse};
 
@@ -777,11 +793,14 @@ mod with_tor {
         .await
     }
 
-    async fn serve_with_http(listener: TcpListener, client: Client, metered: bool) -> Result<()> {
-        let http = match crate::http_proxy_listen() {
-            Some(address) => Some(crate::socks::bind_listener("tor http proxy", address).await?),
-            None => None,
-        };
+    async fn bind_http() -> Result<Option<TcpListener>> {
+        match crate::http_proxy_listen_env("AETHER_TOR_HTTP_PROXY") {
+            Some(address) => Ok(Some(crate::socks::bind_listener("tor http proxy", address).await?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn serve_with_http(listener: TcpListener, http: Option<TcpListener>, client: Client, metered: bool) -> Result<()> {
         let socks_client = client.clone();
         let socks = async move {
             if metered { serve_metered(listener, socks_client.clone(), "tor socks5").await }
@@ -830,7 +849,7 @@ mod with_tor {
         let client = establish(&state, Some(through), FOREVER).await?;
         log::info!("[+] tor is ready; {listen} leaves through tor, carried by the tunnel");
 
-        serve_with_http(listener, client, false).await
+        serve_with_http(listener, bind_http().await?, client, false).await
     }
 
     pub async fn run_only(listen: SocketAddr, state: PathBuf) -> Result<()> {
@@ -842,7 +861,7 @@ mod with_tor {
         let client = establish(&state, None, FOREVER).await?;
         log::info!("[+] tor is ready; {listen} leaves through tor");
 
-        serve_with_http(listener, client, true).await
+        serve_with_http(listener, bind_http().await?, client, true).await
     }
 
     pub async fn start_reverse(state: PathBuf) -> Result<SocketAddr> {
@@ -855,11 +874,18 @@ mod with_tor {
         let client = establish(&state, None, REVERSE_ATTEMPTS).await?;
         log::info!("[+] tor is ready; the tunnel goes out through {listen}");
 
-        tokio::spawn(async move {
-            if let Err(e) = serve(listener, client, "tor socks5").await {
-                log::error!("[-] the tor proxy stopped: {e}");
+        // Bind before returning success so a collision fails the connection,
+        // rather than silently losing a listener the UI advertises as active.
+        let http = bind_http().await?;
+        super::retain_task(tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = crate::shutdown::cancelled() => {},
+                result = serve_with_http(listener, http, client, false) => {
+                    if let Err(e) = result { log::error!("[-] the tor proxy stopped: {e}"); }
+                }
             }
-        });
+        }));
 
         Ok(listen)
     }

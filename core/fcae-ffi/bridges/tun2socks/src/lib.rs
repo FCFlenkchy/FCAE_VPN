@@ -34,8 +34,8 @@
 //! On Android the descriptor belongs to `ParcelFileDescriptor`. The old code
 //! called `libc::close()` on it from native code and triggered a Bionic
 //! double-close abort on disconnect. Here the bridge **dups** the fd, gives
-//! the dup to Go, and closes only the dup — the original stays owned by the
-//! JVM.
+//! the dup to Go, and relinquishes it once Go accepts ownership. Only Go
+//! closes an accepted dup; the original stays owned by the JVM.
 //!
 //! ## Exported C ABI
 //!
@@ -194,9 +194,8 @@ pub struct Tun2SocksBridge {
     up_logged: AtomicBool,
     /// Android VpnService descriptor set out-of-band via the FFI.
     external_fd: AtomicI32,
-    /// Dup created in `device_spec` before `Active` is published. Stop
-    /// closes this immediately so a notification Disconnect cannot leave
-    /// the kernel TUN up while `engine.Start()` still holds the Go mutex.
+    /// Rust-owned dup before handoff. Cleared when Go accepts ownership.
+    /// Guard the handoff and abort with `active` to prevent fd-number reuse.
     pending_fd: AtomicI32,
     /// Set by `stop`/`abort` so an in-flight `start` aborts instead of
     /// bringing the interface up after the user already disconnected.
@@ -450,6 +449,13 @@ impl TunBridge for Tun2SocksBridge {
             .unwrap_or_else(|| "silent".to_string());
         let c_level = CString::new(level).expect("level has no NUL");
 
+        // Serialize the fd handoff with abort. Never close a numeric fd while
+        // Go is opening it, nor after Go's device has taken ownership of it.
+        // This lock covers stack startup only, not platform routes/DNS or joins.
+        let handoff = self.active.lock();
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(CoreError::Internal("TUN start cancelled before fd handoff".into()));
+        }
         let rc = unsafe {
             t2s_start(
                 c_device.as_ptr(),
@@ -459,16 +465,18 @@ impl TunBridge for Tun2SocksBridge {
             )
         };
 
+        // Success and -4 mean Go accepted (and may already have closed) the
+        // fd. All other failure codes leave ownership with Rust.
+        let leftover = self.pending_fd.swap(-1, Ordering::SeqCst);
+        if rc != 0 && rc != -4 && leftover >= 0 {
+            unsafe { libc::close(leftover) };
+        }
+        drop(handoff);
         if rc != 0 {
-            let leftover = self.pending_fd.swap(-1, Ordering::SeqCst);
-            if leftover >= 0 {
-                unsafe { libc::close(leftover) };
-            }
-            let _ = owned_fd;
             return Err(CoreError::Internal(match rc {
                 -1 => "tun2socks is already running".to_string(),
                 -2 => format!("tun2socks rejected the configuration (device={device}, proxy={proxy})"),
-                -3 => "the tun2socks engine failed to start (see log for details)".to_string(),
+                -3 | -4 => "the tun2socks engine failed to start (see log for details)".to_string(),
                 -100 => "tun2socks bridge not compiled into this build".to_string(),
                 other => format!("tun2socks start failed with code {other}"),
             }));
@@ -479,20 +487,19 @@ impl TunBridge for Tun2SocksBridge {
         // the tunnel.
         let undo = platform::configure(cfg, endpoints.peer_ip.as_deref())?;
 
+        let mut active = self.active.lock();
         if self.closing.load(Ordering::SeqCst) {
+            drop(active);
             platform::restore(undo, Duration::from_millis(250));
             let _ = unsafe { t2s_stop() };
-            let leftover = self.pending_fd.swap(-1, Ordering::SeqCst);
-            if leftover >= 0 {
-                unsafe { libc::close(leftover) };
-            }
             return Err(CoreError::Internal(
                 "TUN start cancelled after engine.Start (session is stopping)".into(),
             ));
         }
 
         self.running.store(true, Ordering::SeqCst);
-        *self.active.lock() = Some(Active { owned_fd, undo });
+        let _ = owned_fd; // transferred to Go by t2s_start
+        *active = Some(Active { owned_fd: None, undo });
         self.up_logged.store(true, Ordering::SeqCst);
         log::info!("[tun] up: {device} <-> {proxy} (in-process)");
         Ok(())
@@ -501,16 +508,15 @@ impl TunBridge for Tun2SocksBridge {
     fn abort(&self) {
         self.closing.store(true, Ordering::SeqCst);
 
-        // Close every TUN fd we own. Do not call t2s_stop(): it waits on
-        // the same Go mutex as engine.Start(), which is how Disconnect
-        // used to stall for tens of milliseconds with the kernel interface
-        // still up.
+        // Only pre-handoff descriptors belong to Rust. Go closes accepted
+        // descriptors during stop(), preventing double-close/fd-reuse crashes.
+        let mut active_slot = self.active.lock();
         let pending = self.pending_fd.swap(-1, Ordering::SeqCst);
         if pending >= 0 {
             unsafe { libc::close(pending) };
         }
 
-        if let Some(active) = self.active.lock().take() {
+        if let Some(active) = active_slot.take() {
             if let Some(fd) = active.owned_fd {
                 if fd != pending {
                     unsafe { libc::close(fd) };
@@ -673,6 +679,28 @@ mod tests {
 
         assert_eq!(device, "tun://FCAE_VPN");
         assert!(owned_fd.is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn abort_does_not_close_a_descriptor_transferred_to_go() {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let bridge = Tun2SocksBridge::new();
+        let mut cfg = SessionConfig::default();
+        cfg.tun.fd = Some(file.as_raw_fd());
+        let (_, owned) = bridge.device_spec(&cfg).unwrap();
+        let fd = owned.unwrap();
+        // Model the successful t2s_start ownership transfer under active lock.
+        {
+            let _handoff = bridge.active.lock();
+            assert_eq!(bridge.pending_fd.swap(-1, Ordering::SeqCst), fd);
+        }
+        bridge.abort();
+        bridge.abort();
+        assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0,
+            "only Go may close a transferred descriptor");
+        unsafe { libc::close(fd); }
     }
 
     /// When a descriptor is supplied (Android VpnService) it wins over any

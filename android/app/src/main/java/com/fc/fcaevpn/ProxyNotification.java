@@ -26,6 +26,7 @@ public class ProxyNotification extends Service {
     private static ProxyNotification instance;
     private boolean externalPsiphon;
     private boolean handingOff;
+    private long ownerGeneration;
     private Intent lastPsiphonStats;
     /** Remove only the obsolete notification owned by older Psiphon builds. */
     public static void clearLegacyPsiphonNotification(android.content.Context context) {
@@ -109,6 +110,7 @@ public class ProxyNotification extends Service {
         clearLegacyPsiphonNotification(this);
         Log.i(TAG, "ProxyNotification created");
         instance = this;
+        ownerGeneration = FCAEVpnService.sGeneration.get();
         android.content.IntentFilter filter = new android.content.IntentFilter();
         filter.addAction(PsiphonTunnelService.BROADCAST_READY);
         filter.addAction(PsiphonTunnelService.BROADCAST_STATS);
@@ -147,6 +149,7 @@ public class ProxyNotification extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_PSIPHON.equals(intent.getAction())) {
+            ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
             externalPsiphon = true;
             showNotification("FCAE VPN — Connecting…", true);
             Intent psi = new Intent(this, PsiphonTunnelService.class).setAction(PsiphonTunnelService.ACTION_START);
@@ -174,7 +177,7 @@ public class ProxyNotification extends Service {
         // A fresh proxy session: bump the shared generation counter so this
         // session's later disconnect broadcast is never mistaken for a stale
         // one from a previous connect/disconnect cycle.
-        FCAEVpnService.sGeneration.incrementAndGet();
+        ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
         stopping = false;
         nativeFreed = false;
         showNotification("FCAE VPN — Proxy connecting...", false);
@@ -246,7 +249,7 @@ public class ProxyNotification extends Service {
     }
 
     private synchronized void stopProxy() {
-        if (stopping) return;
+        if (stopping || ownerGeneration != FCAEVpnService.sGeneration.get()) return;
         stopping = true;
         handler.removeCallbacks(statsRunnable);
         PsiphonTunnelService.stopBound(this);
@@ -268,9 +271,6 @@ public class ProxyNotification extends Service {
 
         freeNativeOnce();
 
-        if (!MainActivity.activityAlive) {
-            android.os.Process.killProcess(android.os.Process.myPid());
-        }
     }
 
     /** Mirrors FCAEVpnService's disconnect broadcast so MainActivity resets. */
@@ -290,19 +290,23 @@ public class ProxyNotification extends Service {
     public static void notifyCleanupComplete(android.content.Context context) {
         Intent done = new Intent(FCAEVpnService.BROADCAST_VPN_DISCONNECTED).setPackage(context.getPackageName());
         done.putExtra("cleanupComplete", true);
+        done.putExtra("generation", FCAEVpnService.sGeneration.get());
         context.sendBroadcast(done);
     }
 
     private synchronized void freeNativeOnce() {
         if (nativeFreed) return;
         nativeFreed = true;
+        final long generation = ownerGeneration;
+        if (generation != FCAEVpnService.sGeneration.get()) return;
         if (externalPsiphon) { notifyCleanupComplete(this); return; }
-        new Thread(() -> {
+        NativeEngine.lifecycleExecutor.execute(() -> {
+            if (generation != FCAEVpnService.sGeneration.get()) return;
             try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
             // Keep the process-global FFI and Android hooks alive for reconnect.
-            notifyCleanupComplete(this);
-        }, "FCAE-ProxyStop").start();
+            if (generation == FCAEVpnService.sGeneration.get()) notifyCleanupComplete(this);
+        });
     }
 
     @Override
@@ -310,7 +314,7 @@ public class ProxyNotification extends Service {
         handler.removeCallbacks(statsRunnable);
         unregisterReceiver(psiphonReceiver);
         if (instance == this) instance = null;
-        if (handingOff) { super.onDestroy(); return; }
+        if (handingOff || ownerGeneration != FCAEVpnService.sGeneration.get()) { super.onDestroy(); return; }
         PsiphonTunnelService.stopBound(this);
         Log.i(TAG, "ProxyNotification onDestroy");
 
@@ -325,9 +329,6 @@ public class ProxyNotification extends Service {
         // Only cleanup native here if stopProxy() didn't already do it.
         freeNativeOnce();
 
-        if (!MainActivity.activityAlive) {
-            android.os.Process.killProcess(android.os.Process.myPid());
-        }
 
         super.onDestroy();
     }

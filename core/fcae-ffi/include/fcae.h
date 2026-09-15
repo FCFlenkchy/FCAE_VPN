@@ -276,7 +276,8 @@ typedef struct {
     uint32_t        tun_mtu;       /* 576..9000, or 0 for 1500             */
     int32_t         tun_fd;        /* Android VpnService fd, else -1       */
 
-    uint64_t        _reserved[4];
+    uint64_t        _reserved[3];
+    uint64_t        tor_http_port; /* 0 disables; 1..65535; formerly reserved[3] */
 } FcaeConfig;
 
 /* ── Telemetry ─────────────────────────────────────────────────────── */

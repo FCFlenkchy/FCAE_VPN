@@ -408,6 +408,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jint engineLog,
     jint backend,
     jint torSocksPort,
+    jint torHttpPort,
     jstring psiphonConfig,
     jstring psiphonRegion,
     jint psiphonSocksPort,
@@ -482,6 +483,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
     // passed through verbatim — do NOT substitute a literal here.
     cfg.tor.socks_port = (uint16_t)torSocksPort;
+    cfg.tor_http_port = (uint64_t)torHttpPort;
 
     // Psiphon. Its datastore must be writable and app-private; the Kotlin
     // side passes filesDir, which is exactly that.

@@ -1,6 +1,12 @@
 package com.fc.fcaevpn
 
 object NativeEngine {
+    // Process-wide command ordering, shared by the activity and both owners.
+    // StopBegin remains immediate; starts and cleanup must not overtake one another.
+    @JvmField val lifecycleExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "FCAE-Lifecycle").apply { isDaemon = true }
+    }
+
     init {
         // tun2socks Go runtime. Must load before the Rust JNI library, which
         // references t2s_* symbols. Psiphon is not in this .so (official AAR
@@ -68,6 +74,7 @@ object NativeEngine {
         // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
         // do not substitute a literal here.
         torSocksPort: Int,
+        torHttpPort: Int,
         // Psiphon config JSON (the whole object, not a path), "" if unused.
         psiphonConfig: String,
         // ISO country code, or "" for automatic.

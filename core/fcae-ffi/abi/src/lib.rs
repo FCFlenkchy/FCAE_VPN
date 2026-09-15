@@ -426,8 +426,10 @@ pub struct FcaeConfig {
     /// and never closes the original — Android's ParcelFileDescriptor owns it.
     pub tun_fd: i32,
 
-    /// Reserved for future growth without another ABI bump.
-    pub _reserved: [u64; 4],
+    pub _reserved: [u64; 3],
+    /// Independent Tor HTTP listener: 0 disables, otherwise 1..=65535.
+    /// Former reserved[3]; preserves size and existing Psiphon reserved[0].
+    pub tor_http_port: u64,
 }
 
 // ── Telemetry ───────────────────────────────────────────────────────────

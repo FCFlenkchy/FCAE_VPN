@@ -133,6 +133,7 @@ impl Default for TunConfig {
 /// separate backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TorConfig {
+    pub http_port: u16,
     pub mode: FcaeTorMode,
     pub bridges: FcaeTorBridges,
     pub bind: Option<String>,
@@ -144,6 +145,7 @@ pub struct TorConfig {
 impl Default for TorConfig {
     fn default() -> Self {
         Self {
+            http_port: 0,
             mode: FcaeTorMode::Off,
             bridges: FcaeTorBridges::None,
             bind: None,
@@ -359,7 +361,8 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     if cfg.socks_port == 0 && cfg.mode == FcaeMode::Tun {
         cfg.socks_port = 1819;
     }
-    if cfg.http_port != 0 && cfg.http_port == cfg.socks_port {
+    if cfg.protocol != FcaeProtocol::Tor && raw.tor.mode != FcaeTorMode::Only
+        && cfg.http_port != 0 && cfg.http_port == cfg.socks_port {
         return Err(CoreError::InvalidConfig(format!(
             "socks_port and http_port are both {}; they must differ",
             cfg.socks_port
@@ -545,7 +548,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         } else {
             DEFAULT_TOR_SOCKS_PORT
         });
-    if t.mode != FcaeTorMode::Off {
+    if t.mode != FcaeTorMode::Off && t.mode != FcaeTorMode::Only {
         check_port_clash("tor", tor_port, cfg.http_port, "http_port")?;
     }
     if t.mode != FcaeTorMode::Off && t.mode != FcaeTorMode::Only {
@@ -578,13 +581,25 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             ));
         }
     }
+    let tor_http = u16::try_from(raw.tor_http_port)
+        .map_err(|_| CoreError::InvalidConfig("tor_http_port must be 0..65535".into()))?;
+    if t.mode != FcaeTorMode::Off && tor_http != 0 {
+        check_port_clash("tor_http_port", tor_http, tor_port, "tor SOCKS")?;
+        if t.mode != FcaeTorMode::Only {
+            check_port_clash("tor_http_port", tor_http, cfg.socks_port, "socks_port")?;
+            check_port_clash("tor_http_port", tor_http, cfg.http_port, "http_port")?;
+        }
+        check_port_clash("tor_http_port", tor_http, psi_socks, "psiphon SOCKS")?;
+        check_port_clash("tor_http_port", tor_http, psi_http, "psiphon HTTP")?;
+    }
     cfg.tor = TorConfig {
+        http_port: tor_http,
         mode: t.mode,
         bridges: t.bridges,
         // Resolved once here so every consumer (env projection, the bridge's
         // readiness probe) agrees on the port instead of each re-deriving it.
         bind: Some(
-            cstr_opt(t.bind).unwrap_or_else(|| format!("127.0.0.1:{tor_port}")),
+            cstr_opt(t.bind).unwrap_or_else(|| format!("{}:{tor_port}", if cfg.lan_sharing { "0.0.0.0" } else { "127.0.0.1" })),
         ),
         state_dir: cstr_opt(t.state_dir),
         bridge_lines,
@@ -754,11 +769,15 @@ pub mod env_compat {
         // came up, and in tor Only mode the "0.0.0.0:0" branch could bind a
         // stray listener instead of staying off. Write the name the engine
         // actually reads, and clear it to disable.
-        if cfg.http_port != 0 {
+        if cfg.http_port != 0 && cfg.tor.mode != FcaeTorMode::Only {
             set("AETHER_HTTP_PROXY", Some(format!("{host}:{}", cfg.http_port)));
         } else {
             set("AETHER_HTTP_PROXY", None::<&str>);
         }
+
+        set("AETHER_TOR_HTTP_PROXY", if cfg.tor.is_enabled() && cfg.tor.http_port != 0 {
+            Some(format!("{host}:{}", cfg.tor.http_port))
+        } else { None });
 
         // The engine must NOT raise TUN itself any more -- the supervisor owns
         // the in-process bridge -- so it always runs in proxy mode. That is
@@ -978,6 +997,11 @@ mod tests {
         // so the proxy never bound; and http_port = 0 was projected as
         // "0.0.0.0:0", which parses and binds rather than disabling.
         cfg.http_port = 8087;
+        cfg.tor.http_port = 1822;
+        env_compat::apply(&cfg);
+        assert!(std::env::var("AETHER_HTTP_PROXY").is_err());
+        assert_eq!(std::env::var("AETHER_TOR_HTTP_PROXY").unwrap(), "127.0.0.1:1822");
+        cfg.tor.mode = FcaeTorMode::Chain;
         env_compat::apply(&cfg);
         assert_eq!(
             std::env::var("AETHER_HTTP_PROXY").unwrap(),
@@ -995,6 +1019,7 @@ mod tests {
         cfg.tor = TorConfig::default();
         env_compat::apply(&cfg);
         assert_eq!(std::env::var("AETHER_TOR").unwrap(), "off");
+        assert!(std::env::var("AETHER_TOR_HTTP_PROXY").is_err());
         assert!(std::env::var("AETHER_TOR_BRIDGES").is_err());
         assert!(std::env::var("AETHER_TOR_BIND").is_err());
     }
@@ -1032,6 +1057,27 @@ mod tests {
     /// The UI signals "Psiphon through the tunnel" via FcaeConfig._reserved[0];
     /// parse() must read it, or the supervisor never chains Psiphon behind
     /// Aether and the flag silently does nothing (regression test).
+    #[test]
+    fn independent_tor_http_ports_are_validated() {
+        let mut raw: FcaeConfig = unsafe { std::mem::zeroed() };
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.tor.mode = FcaeTorMode::Chain;
+        raw.socks_port = 1819;
+        raw.http_port = 1820;
+        raw.tor.socks_port = 1821;
+        raw.tor_http_port = 1822;
+        let cfg = unsafe { parse(&raw) }.unwrap();
+        assert_eq!(cfg.tor.http_port, 1822);
+        assert!(!cfg.psiphon.through_tunnel);
+        for port in [1819, 1820, 1821, 65536] {
+            raw.tor_http_port = port;
+            assert!(unsafe { parse(&raw) }.is_err());
+        }
+        raw.tor_http_port = 0;
+        assert!(unsafe { parse(&raw) }.is_ok());
+    }
+
     #[test]
     fn reserved_slot_zero_sets_through_tunnel() {
         // Zeroed like a host that called fcae_config_default() and changed

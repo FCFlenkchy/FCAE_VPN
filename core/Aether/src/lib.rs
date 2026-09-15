@@ -88,13 +88,16 @@ const DEFAULT_CONFIG: &str = "aether.toml";
 /// The engine is configured entirely through environment variables, which the
 /// FFI writes via `env_compat::apply` before calling this.
 pub async fn run_from_env() -> Result<()> {
-    // A fresh run must not inherit the previous one's cancellation.
-    shutdown::reset();
+    // The embedding caller resets only after the previous run is drained.
+    // Resetting here loses a Stop arriving between spawn and the first poll.
+    let result = tokio::select! {
+        biased;
+        _ = shutdown::cancelled() => Ok(()),
+        result = run_inner() => result,
+    };
 
-    let result = run_inner().await;
-
-    // Whatever happened, make sure nothing from this run is left listening.
     shutdown::request();
+    tor::drain_tasks().await;
     result
 }
 
@@ -241,11 +244,15 @@ async fn run_inner() -> Result<()> {
         tor::Mode::Chain => {
             let through = listen;
             let state = tor::state_dir(&base_config);
-            tokio::spawn(async move {
-                if let Err(e) = tor::run_chain(through, state).await {
-                    log::error!("[-] tor: {e}");
+            tor::retain_task(tokio::spawn(async move {
+                tokio::select! {
+                    biased;
+                    _ = shutdown::cancelled() => {},
+                    result = tor::run_chain(through, state) => {
+                        if let Err(e) = result { log::error!("[-] tor: {e}"); }
+                    }
                 }
-            });
+            }));
         }
         tor::Mode::Reverse => {
             if matches!(protocol, Protocol::WireGuard | Protocol::WarpInWarp) {
@@ -647,18 +654,21 @@ async fn run_gool(
 }
 
 fn install_netstack_panic_guard() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let from_netstack = info
-            .location()
-            .map(|l| l.file().contains("smoltcp"))
-            .unwrap_or(false);
-        if from_netstack {
-            log::debug!("[netstack] recovered from a malformed segment: {info}");
-        } else {
-            default_hook(info);
-        }
-    }));
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let from_netstack = info
+                .location()
+                .map(|l| l.file().contains("smoltcp"))
+                .unwrap_or(false);
+            if from_netstack {
+                log::debug!("[netstack] recovered from a malformed segment: {info}");
+            } else {
+                default_hook(info);
+            }
+        }));
+    });
 }
 
 fn noize_config() -> noize::NoizeConfig {
@@ -2334,7 +2344,11 @@ async fn run_wireguard_tunnel(
 type TunnelExit = tokio::task::JoinHandle<Result<()>>;
 
 fn http_proxy_listen() -> Option<SocketAddr> {
-    let raw = std::env::var("AETHER_HTTP_PROXY").ok()?;
+    http_proxy_listen_env("AETHER_HTTP_PROXY")
+}
+
+fn http_proxy_listen_env(key: &str) -> Option<SocketAddr> {
+    let raw = std::env::var(key).ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -2349,9 +2363,6 @@ fn http_proxy_listen() -> Option<SocketAddr> {
 }
 
 async fn bind_http_proxy() -> Result<Option<tokio::net::TcpListener>> {
-    // In Chain mode the optional HTTP listener exits through Tor, not WARP.
-    // Tor owns the listener, so the carrier must not compete for its port.
-    if tor::mode() == tor::Mode::Chain { return Ok(None); }
     match http_proxy_listen() {
         Some(listen) => Ok(Some(socks::bind_listener("http proxy", listen).await?)),
         None => Ok(None),

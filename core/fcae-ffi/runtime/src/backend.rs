@@ -224,5 +224,9 @@ pub trait Backend: Send + Sync {
         Ok(())
     }
 
+    /// Drain tasks retained by a cancelled start before destroying their runtime.
+    /// Runs on the session worker, never the UI/control thread.
+    async fn drain(&self) {}
+
     fn recover_stale_state(&self) {}
 }

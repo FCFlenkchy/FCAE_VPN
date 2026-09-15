@@ -252,7 +252,7 @@ impl Supervisor {
                 // runtime drop and leave the session flagged as running.
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     rt.block_on(run_session(
-                        backend,
+                        backend.clone(),
                         config,
                         sink,
                         cancel_for_thread,
@@ -267,9 +267,13 @@ impl Supervisor {
                 // runtime is dropped, because its stop path may need to run
                 // blocking OS commands.
                 tun_bridge.stop(stop_timeout);
-                // Do not sit on leftover tasks (warp-in-warp used to eat the
-                // full stop_timeout here). Abort already cancelled them.
-                rt.shutdown_background();
+                // A cancelled start may not have returned a BackendHandle.
+                // Drain its retained task while its runtime is still alive.
+                // Dropping the runtime early force-cancelled Tor despite the
+                // no-abort policy in BackendHandle::stop, and let the reaper
+                // release the next-start barrier before task destructors ran.
+                rt.block_on(backend.drain());
+                drop(rt); // worker/reaper waits; stop() on the UI still returns promptly
 
                 match outcome {
                     Ok(Ok(())) => {

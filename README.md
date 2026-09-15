@@ -195,3 +195,57 @@ If this project helped you bypass censorship or just saved you some time, consid
 **Other languages:** [فارسی](READMEFA.md) | [中文](READMECH.md)
 
 </div>
+
+
+### Independent HTTP listeners and reconnect lifecycle
+
+Android and desktop now have **Aether HTTP proxy** and **Tor HTTP proxy**
+controls, with independently saved ports. Aether keeps port 1820; Tor HTTP is
+opt-in and defaults to 1822. Tor SOCKS remains 1821. Core validation rejects
+colliding active Tor HTTP, SOCKS, Aether and Psiphon ports. Changes apply on
+the next connection. The new ABI field uses former `FcaeConfig._reserved[3]`;
+the existing Psiphon chain flag in slot 0 and total struct size are preserved.
+Rebuild the native bridge and UI together (including the Android JNI signature).
+
+In Tor Chain mode, **Aether HTTP is the plain tunnel exit and bypasses Tor**;
+Tor HTTP uses Arti through that tunnel. In Reverse mode, Aether HTTP exits
+through the tunnel carried over Tor; Tor HTTP exits directly through Arti.
+Tor-only starts no Aether HTTP listener. Disabling Tor clears its HTTP setting
+from the engine environment. LAN sharing binds these listeners to IPv4 wildcard;
+they have no authentication, so enable LAN only on trusted networks.
+
+Source tracing found these reconnect hazards (not a reproduced device crash):
+- The pinned tun2socks FD device closes its fd, while Rust also retained and
+  closed that same numeric dup. Rapid reuse could close an unrelated/new fd.
+  The bridge now has an explicit fd handoff, including partial-start errors.
+  Go alone closes accepted fds; Rust only closes pre-handoff fds. The supplied-fd
+  path uses the pinned device/stack APIs directly so ownership is observable.
+  Desktop engine startup now checks the pinned API's returned error as well.
+- Tor's normal stop avoided abort, but cancelled startup and next-start reaping
+  still aborted it. Retained tasks now drain before runtime destruction and
+  before the reconnect barrier clears. The engine no longer resets away a
+  just-arrived Stop. Tor serving tasks are retained and shut down cooperatively.
+- Android start/cleanup commands now share an executor. Late completion/state
+  callbacks are generation-checked, and activity absence no longer triggers
+  process-wide free/kill during service teardown. The process panic hook is
+  installed once, rather than wrapping itself on every connection.
+
+Stop remains cancellation-first and cleanup stays off the UI thread, but the
+fd handoff is synchronized with native stack startup for safety. This is **not
+an exact 5 ms guarantee**. A reconnect may report the existing two-second
+cleanup timeout instead of starting over a still-draining session.
+
+Validation checklist (builds/device tests not run by the patch author):
+- Rapid Stop/Start during scan, Tor bootstrap, just-connected, and active traffic;
+  repeat using notification actions, TUN/proxy mode, background/foreground,
+  and activity recreation. Confirm no crash, fd growth, stale service teardown,
+  or permanently retained ports. Exercise WARP-in-WARP and MASQUE-in-MASQUE.
+- Enable both HTTP listeners in Tor Chain and Reverse; verify each exit using
+  a proxy-aware client, disable each independently, reconnect, and test saved
+  settings plus deliberate port collisions. Repeat on Android and desktop.
+- Retest UDP DNS via Psiphon, Tor TCP DNS, LAN opt-in, notifications, and the
+  upstream log-follow/RTT fixes. New Rust config/descriptor tests are included
+  but have not been executed.
+- If a crash persists, capture Android `adb logcat -b all -d` immediately,
+  including `FATAL EXCEPTION`, libc/fdsan aborts, Rust panic, or native tombstone;
+  note the protocol, mode and whether Stop came from the app or notification.

@@ -160,9 +160,9 @@ impl Backend for AetherBackend {
 
                 // Cancellation is checked before the engine starts: stop()
                 // can land between the supervisor deciding to (re)connect and
-                // this task being polled, and run_from_env() begins with
-                // shutdown::reset(), which would wipe that request and leave
-                // the engine running after a stop.
+                // this task being polled. run_from_env no longer resets the
+                // flag again, so the Stop cannot be lost between this check
+                // and the first engine poll.
                 let result = if aether_engine::shutdown::is_cancelled() {
                     Ok(())
                 } else {
@@ -187,17 +187,21 @@ impl Backend for AetherBackend {
         // start-timeout fires, this future is dropped while wait_for_* is
         // still looping — without the guard the engine task kept running,
         // held the SOCKS port, and the next connect aborted the *new*
-        // engine instead. Drop aborts *this* task only.
-        struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+        // engine instead. Drop retains this task for drain; only non-Tor
+        // starts may also be aborted.
+        struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>, bool);
         impl Drop for AbortOnDrop {
             fn drop(&mut self) {
                 if let Some(h) = self.0.take() {
                     aether_engine::shutdown::request();
-                    h.abort();
+                    if !self.1 { h.abort(); }
+                    // Retain even a cancelled task until its destructors finish.
+                    // Tor must exit cooperatively, including during bootstrap.
+                    *LAST_ENGINE.lock() = Some(h);
                 }
             }
         }
-        let mut engine_guard = AbortOnDrop(Some(engine_task));
+        let mut engine_guard = AbortOnDrop(Some(engine_task), cfg.tor.is_enabled());
 
         // Readiness = the SOCKS listener actually accepting connections.
         // Log-scraping for "socks5 ... listening" (the old approach) silently
@@ -358,6 +362,10 @@ impl Backend for AetherBackend {
         }))
     }
 
+    async fn drain(&self) {
+        reap_previous_engine().await;
+    }
+
     fn recover_stale_state(&self) {
         // A previous process may have died with a TUN adapter still up. With
         // the subprocess gone there is no orphan to kill any more — only
@@ -372,11 +380,18 @@ async fn reap_previous_engine() {
     let Some(prev) = LAST_ENGINE.lock().take() else {
         return;
     };
-    if prev.is_finished() {
-        return;
+    // Never force-abort an unknown previous task: it may own Arti.
+    // Preserve ownership if this await is itself cancelled by a rapid Stop.
+    struct Pending(Option<tokio::task::JoinHandle<()>>);
+    impl Drop for Pending {
+        fn drop(&mut self) {
+            if let Some(task) = self.0.take() { *LAST_ENGINE.lock() = Some(task); }
+        }
     }
+    let mut pending = Pending(Some(prev));
     aether_engine::shutdown::request();
-    prev.abort();
+    let _ = pending.0.as_mut().unwrap().await;
+    pending.0 = None;
 }
 
 /// One connect attempt against the tunnel's SOCKS listener.
@@ -562,6 +577,9 @@ impl AetherHandle {
                 push_wild(&mut addrs, self.cfg.http_port);
             }
         }
+        if self.cfg.tor.is_enabled() {
+            push_wild(&mut addrs, self.cfg.tor.http_port);
+        }
         addrs
     }
 }
@@ -569,11 +587,15 @@ impl AetherHandle {
 #[async_trait]
 impl BackendHandle for AetherHandle {
     fn endpoints(&self) -> Endpoints {
+        let http_port = match self.cfg.tor.mode {
+            FcaeTorMode::Only | FcaeTorMode::Chain => self.cfg.tor.http_port,
+            _ => self.cfg.http_port,
+        };
         Endpoints {
             socks: Some(self.socks_addr),
             // Tor-only/chain serve the optional HTTP endpoint via Arti.
-            http: (self.cfg.http_port != 0)
-                .then(|| format!("127.0.0.1:{}", self.cfg.http_port).parse().ok())
+            http: (http_port != 0)
+                .then(|| format!("127.0.0.1:{}", http_port).parse().ok())
                 .flatten(),
             peer_ip: self.cfg.force_peer.as_ref().and_then(|p| {
                 p.rsplit_once(':')
@@ -677,7 +699,9 @@ impl BackendHandle for AetherHandle {
                     "[aether] engine did not exit within {timeout:?}; aborting leftover task"
                 );
                 task.abort();
-                let _ = tokio::time::timeout(Duration::from_millis(400), &mut task).await;
+                if tokio::time::timeout(Duration::from_millis(400), &mut task).await.is_err() {
+                    *LAST_ENGINE.lock() = Some(task);
+                }
             }
         }
 

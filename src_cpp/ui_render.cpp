@@ -120,6 +120,8 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.quick_reconnect);
     h = fnv_value(h, g_app.socks_enabled);
     h = fnv_value(h, g_app.http_enabled);
+    h = fnv_value(h, g_app.tor_http_enabled);
+    h = fnv_value(h, g_app.tor_http_port);
     h = fnv_value(h, g_app.socks_port);
     h = fnv_value(h, g_app.http_port);
     h = fnv_value(h, g_app.h2_enabled);
@@ -349,6 +351,8 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "socks_port") g_app.socks_port = (uint16_t)atoi(val.c_str());
     else if (key == "http_port") g_app.http_port = (uint16_t)atoi(val.c_str());
     else if (key == "socks_enabled") g_app.socks_enabled = atoi(val.c_str()) != 0;
+    else if (key == "tor_http_port") g_app.tor_http_port = (uint16_t)atoi(val.c_str());
+    else if (key == "tor_http_enabled") g_app.tor_http_enabled = atoi(val.c_str()) != 0;
     else if (key == "http_enabled") g_app.http_enabled = atoi(val.c_str()) != 0;
     else if (key == "force_peer")
         snprintf(g_app.force_peer, sizeof(g_app.force_peer), "%s", val.c_str());
@@ -415,6 +419,8 @@ static void save_config() {
     fprintf(f, "frag_max_delay=%d\n", g_app.frag_max_delay);
     fprintf(f, "socks_port=%u\n", (unsigned)g_app.socks_port);
     fprintf(f, "http_port=%u\n", (unsigned)g_app.http_port);
+    fprintf(f, "tor_http_port=%u\n", (unsigned)g_app.tor_http_port);
+    fprintf(f, "tor_http_enabled=%d\n", g_app.tor_http_enabled ? 1 : 0);
     fprintf(f, "socks_enabled=%d\n", g_app.socks_enabled ? 1 : 0);
     fprintf(f, "http_enabled=%d\n", g_app.http_enabled ? 1 : 0);
     fprintf(f, "force_peer=%s\n", g_app.force_peer);
@@ -1128,7 +1134,9 @@ void render_ui() {
             };
             if (telem.backend != FCAE_BACKEND_PSIPHON) {
                 if (g_app.protocol != 4 && g_app.socks_enabled) endpoint("SOCKS5", g_app.socks_port);
-                if (g_app.http_enabled) endpoint("HTTP", g_app.http_port);
+                if (g_app.protocol != 4 && g_app.http_enabled) endpoint("Aether HTTP", g_app.http_port);
+                if (g_app.tor_http_enabled && (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2))
+                    endpoint("Tor HTTP", g_app.tor_http_port);
                 if (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)
                     endpoint("TOR SOCKS5", g_app.tor_socks_port ? g_app.tor_socks_port : 1821);
             }
@@ -1217,7 +1225,7 @@ void render_ui() {
             ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
             ImGui::SameLine(0, 20);
             ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
-            ImGui::Checkbox("HTTP proxy", &g_app.http_enabled);
+            ImGui::Checkbox("Aether HTTP proxy", &g_app.http_enabled);
             ImGui::SameLine(0, 20);
             ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
             ImGui::PopItemWidth();
@@ -1412,6 +1420,9 @@ void render_ui() {
             // All Tor knobs stay editable in every combo; the engine
             // ignores them when no Tor is in play (to_config normalises),
             // same ignore-not-gray policy as the egress combo above.
+            ImGui::Checkbox("Tor HTTP proxy", &g_app.tor_http_enabled);
+            ImGui::InputScalar("Tor HTTP port", ImGuiDataType_U16, &g_app.tor_http_port);
+            if (g_app.tor_http_enabled && g_app.tor_http_port == 0) g_app.tor_http_port = 1822;
             ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port);
             const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };
             ImGui::Combo("Bridges", &g_app.tor_bridges, tor_bridges, 4);

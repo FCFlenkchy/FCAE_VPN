@@ -46,6 +46,7 @@ import (
 	"io"
 	"net/url"
 	"strconv"
+	"runtime"
 	"strings"
 	"sync"
 	"unsafe"
@@ -54,7 +55,13 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/xjasonlyu/tun2socks/v2/engine"
+    "github.com/xjasonlyu/tun2socks/v2/engine"
+    "github.com/xjasonlyu/tun2socks/v2/core"
+    "github.com/xjasonlyu/tun2socks/v2/core/device"
+    "github.com/xjasonlyu/tun2socks/v2/core/device/fdbased"
+    "github.com/xjasonlyu/tun2socks/v2/dialer"
+    "github.com/xjasonlyu/tun2socks/v2/tunnel"
+    "gvisor.dev/gvisor/pkg/tcpip/stack"
 	t2slog "github.com/xjasonlyu/tun2socks/v2/log"
 	"github.com/xjasonlyu/tun2socks/v2/metadata"
 	"github.com/xjasonlyu/tun2socks/v2/proxy"
@@ -501,6 +508,41 @@ func validateKey(k *engine.Key) error {
 //	-2 invalid argument
 //	-3 engine failed to start
 //
+// For supplied descriptors, keep device ownership explicit instead of hiding
+// it inside engine's globals. The pinned FD.Close closes the numeric fd.
+// Rust relinquishes it on success or -4; on other errors Rust still owns it.
+var fdDevice device.Device
+var fdStack *stack.Stack
+
+func startFD(k *engine.Key) error {
+    u, err := url.Parse(k.Proxy)
+    if err != nil { return err }
+    p, err := proxy.Parse(u)
+    if err != nil { return err }
+    dialer.Reset()
+    tunnel.T().SetUDPTimeout(k.UDPTimeout)
+    tunnel.T().SetProxy(p)
+    installNonFatalLogger(k.LogLevel)
+    d, err := url.Parse(k.Device)
+    if err != nil { return err }
+    offset := 0
+    if runtime.GOOS == "darwin" || runtime.GOOS == "ios" { offset = 4 }
+    fdDevice, err = fdbased.Open(d.Host, uint32(k.MTU), offset)
+    if err != nil { return err } // FD.Open only takes ownership on success
+    fdStack, err = core.CreateStack(&core.Config{
+        LinkEndpoint: fdDevice,
+        TransportHandler: tunnel.T(),
+    })
+    return err
+}
+
+func stopFD() {
+    d, s := fdDevice, fdStack
+    fdDevice, fdStack = nil, nil
+    if d != nil { d.Close() }
+    if s != nil { s.Close(); s.Wait() }
+}
+
 //export t2s_start
 func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char) C.int {
 	mu.Lock()
@@ -542,19 +584,24 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char) C.int
 				startErr = fmt.Errorf("engine.Start failed: %v", r)
 			}
 		}()
-		engine.Insert(key)
-		engine.Start()
+        if strings.HasPrefix(key.Device, "fd://") {
+            startErr = startFD(key)
+        } else {
+            engine.Insert(key)
+            startErr = engine.Start() // pinned API returns errors; do not ignore them
+        }
 	}()
 
-	if startErr != nil {
-		emit(logError, "[bridge] %v", startErr)
-		// Leave nothing half-initialised behind.
-		func() {
-			defer func() { _ = recover() }()
-			engine.Stop()
-		}()
-		return -3
-	}
+    if startErr != nil {
+        emit(logError, "[bridge] %v", startErr)
+        consumedFD := fdDevice != nil
+        func() {
+            defer func() { _ = recover() }()
+            if strings.HasPrefix(key.Device, "fd://") { stopFD() } else { _ = engine.Stop() }
+        }()
+        if consumedFD { return -4 } // already closed by Go; MUST NOT close again in Rust
+        return -3
+    }
 
 	// Now that general() has installed its own logger, replace it with ours:
 	// runtime logs reach the host, and a Fatalf during Stop panics (which
@@ -582,7 +629,7 @@ func t2s_stop() C.int {
 				emit(logWarn, "[bridge] panic during stop (ignored): %v", r)
 			}
 		}()
-		engine.Stop()
+        if fdDevice != nil { stopFD() } else { _ = engine.Stop() }
 	}()
 	running = false
 	emit(logInfo, "[bridge] tun2socks stopped")

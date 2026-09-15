@@ -173,7 +173,8 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
         tun_name: std::ptr::null(),
         tun_mtu: 0,
         tun_fd: -1,
-        _reserved: [0; 4],
+        tor_http_port: 0,
+        _reserved: [0; 3],
     });
     FcaeStatus::Ok
 }

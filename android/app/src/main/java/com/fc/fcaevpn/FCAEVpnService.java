@@ -18,7 +18,6 @@ import android.os.ParcelFileDescriptor;
 import android.telephony.TelephonyManager;
 import android.util.Log;
 import java.net.InetAddress;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class FCAEVpnService extends VpnService {
@@ -77,12 +76,10 @@ public class FCAEVpnService extends VpnService {
     /** Serialises TUN fd ownership between establishTunNow and teardown. */
     private final Object tunLock = new Object();
     private volatile ParcelFileDescriptor vpnInterface;
-    private volatile Thread vpnThread;
+    private volatile Runnable vpnThread; // queued native startup, never a waiting thread
     private volatile boolean running = false;
     private volatile boolean vpnPaused = false;
     private volatile boolean shuttingDown = false;
-    private volatile boolean nativeFreed = false;
-    private CountDownLatch shutdownLatch;
 
     private Intent lastStartIntent;
     private VpnNotification notification;
@@ -556,7 +553,7 @@ public class FCAEVpnService extends VpnService {
      * engine, queue this until that cleanup returns — never start on top
      * of an aborting warp-in-warp task.
      */
-    private void requestStart(Intent intent) {
+    private synchronized void requestStart(Intent intent) {
         Intent src = intent;
         if (src == null || !src.hasExtra("protocol")) {
             if (lastStartIntent != null) {
@@ -597,7 +594,7 @@ public class FCAEVpnService extends VpnService {
         startFg(notification.build("FCAE VPN — Ready (tap Connect in app)", VpnNotification.BUTTONS_PAUSED));
     }
 
-    private void finishEngineOp() {
+    private synchronized void finishEngineOp() {
         Intent next;
         synchronized (cmdLock) {
             engineOpInFlight = false;
@@ -610,11 +607,11 @@ public class FCAEVpnService extends VpnService {
                 engineOpInFlight = true;
             }
             final Intent src = next;
-            handler.post(() -> startVpn(src));
+            startVpn(src);
         }
     }
 
-    private void startVpn(Intent intent) {
+    private synchronized void startVpn(Intent intent) {
         sGeneration.incrementAndGet();
         // The worker validates this after every slow step (establish,
         // nativeStart): a disconnect/pause/new connect that lands in the
@@ -622,17 +619,14 @@ public class FCAEVpnService extends VpnService {
         final long sessionGen = cleanupGeneration.incrementAndGet();
         vpnPaused = false;
         shuttingDown = false;
-        nativeFreed = false;
         uiConnecting = true;
 
         running = false;
 
         // The previous session is stopped on the worker thread below, NOT
         // here. startVpn() runs on the main thread (onStartCommand), and
-        // fcae_stop() blocks until the session thread joins -- up to its 10s
-        // stop_timeout. Doing it here froze the UI and, past 5s, tripped an
-        // ANR: changing a setting while connected looked like "stuck on
-        // establishing, nothing happens".
+        // nativeStop schedules reaping; nativeStart enforces the cleanup
+        // barrier and may wait. Keep the command queue off the main thread.
         final ParcelFileDescriptor oldPfd;
         synchronized (tunLock) {
             oldPfd = vpnInterface;
@@ -681,6 +675,7 @@ public class FCAEVpnService extends VpnService {
         // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
         // MainActivity sends 0 when the field still holds the default.
         final int torSocksPort = intent.getIntExtra("torSocksPort", 0);
+        final int torHttpPort = intent.getIntExtra("torHttpPort", 0);
         final String psiphonCfg    = intent.getStringExtra("psiphonConfig");
         final String psiphonRegion = intent.getStringExtra("psiphonRegion");
         final String psiphonCfgV    = (psiphonCfg == null) ? "" : psiphonCfg;
@@ -693,8 +688,12 @@ public class FCAEVpnService extends VpnService {
         final String routesVal = (routesF == null) ? "" : routesF;
         final String routesIVal = (routesI == null) ? "" : routesI;
 
-        vpnThread = new Thread(() -> {
+        final Runnable startup = () -> {
             try {
+                if (sessionGen != cleanupGeneration.get() || shuttingDown) {
+                    closeQuiet(oldPfd);
+                    return;
+                }
                 // Stop any previous session and release its descriptor before
                 // building a new interface. Blocking is fine here -- this is
                 // the worker thread, not the main thread -- but release the
@@ -736,12 +735,13 @@ public class FCAEVpnService extends VpnService {
                     sniVal, sysProfile,
                     teamVal, tokenVal, emailVal, routesVal, routesIVal,
                     torMode, torBridges, torLinesV, engineLog,
-                    backend, torSocksPort,
+                    backend, torSocksPort, torHttpPort,
                     psiphonCfgV, psiphonRegionV, psiphonSocks, psiphonHttp
                 );
                 if (!ok) {
-                    synchronized (cmdLock) { engineOpInFlight = false; }
-                    handler.post(this::fullShutdown);
+                    handler.post(() -> {
+                        if (sessionGen == cleanupGeneration.get()) fullShutdown();
+                    });
                     return;
                 }
 
@@ -754,52 +754,34 @@ public class FCAEVpnService extends VpnService {
                     try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
                     sweepTun();
                     try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-                    synchronized (cmdLock) { engineOpInFlight = false; }
                     return;
                 }
 
-                running = true;
-                uiConnecting = false;
-                synchronized (cmdLock) { engineOpInFlight = false; }
-                lastNotifText = null;
-                updateNotification();
-                handler.post(statsRunnable);
-                notifyUi();
+                handler.post(() -> {
+                    synchronized (FCAEVpnService.this) {
+                        if (sessionGen != cleanupGeneration.get() || shuttingDown) return;
+                        running = true;
+                        uiConnecting = false;
+                        synchronized (cmdLock) { engineOpInFlight = false; }
+                        lastNotifText = null;
+                        updateNotification();
+                        handler.post(statsRunnable);
+                        notifyUi();
+                    }
+                });
 
-                shutdownLatch = new CountDownLatch(1);
-                try { shutdownLatch.await(); } catch (InterruptedException ignored) {}
             } catch (Exception e) {
-                handler.post(this::fullShutdown);
+                Log.e(TAG, "Native startup failed", e);
+                handler.post(() -> {
+                    if (sessionGen == cleanupGeneration.get()) fullShutdown();
+                });
             }
-        }, "FCAE-VPN-Worker");
+        };
 
-        vpnThread.start();
+        vpnThread = startup;
+        NativeEngine.lifecycleExecutor.execute(startup);
     }
 
-    /**
-     * Release the whole native library.
-     *
-     * Deliberately NOT called on an ordinary disconnect. fcae_shutdown()
-     * tears the library down process-wide, and the JNI layer latches
-     * g_inited=false; every later call then has to re-init, and anything
-     * holding state across a session (the log sink, the Psiphon region list,
-     * the registered VpnService for protect()) is lost. Disconnect →
-     * reconnect appeared to leave "the FFI turned off" for exactly that
-     * reason. fcae_stop() alone ends a session; the library stays usable.
-     *
-     * This is now reserved for the process genuinely going away (onDestroy
-     * with no activity alive), where releasing is correct.
-     */
-    private void freeNativeOnce() {
-        if (nativeFreed) return;
-        nativeFreed = true;
-        Thread t = new Thread(() -> {
-            try { NativeEngine.nativeFree(); } catch (Exception ignored) {}
-        }, "FCAE-NativeFree");
-        t.setDaemon(true);
-        t.start();
-    }
-    
     private static void closeQuiet(ParcelFileDescriptor pfd) {
         if (pfd == null) return;
         try { pfd.close(); } catch (Exception ignored) {}
@@ -825,7 +807,7 @@ public class FCAEVpnService extends VpnService {
         // already cleared/poisoned by the first pass, so a repeat call has
         // nothing to do.
         if (shuttingDown && !running && vpnThread == null
-                && shutdownLatch == null && vpnInterface == null) {
+                && vpnInterface == null) {
             return;
         }
         PsiphonTunnelService.stopBound(this);
@@ -842,12 +824,6 @@ public class FCAEVpnService extends VpnService {
         }
         forgetStart();
 
-        if (shutdownLatch != null) {
-            shutdownLatch.countDown();
-            shutdownLatch = null;
-        }
-
-        final Thread t = vpnThread;
         vpnThread = null;
         final ParcelFileDescriptor pfd;
         synchronized (tunLock) {
@@ -862,7 +838,6 @@ public class FCAEVpnService extends VpnService {
         closeQuiet(pfd);
         try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
         sweepTun();
-        if (t != null) t.interrupt();
 
         // 1. INSTANT UI & NOTIFICATION CLEANUP
         Runnable uiCleanup = () -> {
@@ -880,28 +855,27 @@ public class FCAEVpnService extends VpnService {
 
         // 2. Reap only. TUN and UI are already down — do not join the
         // worker (join(0) waits forever in Java; join(50) was a 50ms stall).
-        Thread cleanupThread = new Thread(() -> {
+        NativeEngine.lifecycleExecutor.execute(() -> {
             if (myGen != cleanupGeneration.get()) return;
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
             sweepTun();
             handler.post(() -> {
-                stopSelf();
-                ProxyNotification.notifyCleanupComplete(this);
+                synchronized (FCAEVpnService.this) {
+                    if (myGen != cleanupGeneration.get()) return;
+                    synchronized (cmdLock) {
+                        engineOpInFlight = false;
+                        queuedStart = null;
+                    }
+                    stopSelf();
+                    ProxyNotification.notifyCleanupComplete(this);
+                }
             });
-            synchronized (cmdLock) {
-                engineOpInFlight = false;
-                queuedStart = null;
-            }
-            if (!MainActivity.activityAlive) {
-                freeNativeOnce();
-                android.os.Process.killProcess(android.os.Process.myPid());
-            }
-        }, "FCAE-Cleanup");
-        cleanupThread.setDaemon(true);
-        cleanupThread.start();
+            // Activity absence/recreation is not process shutdown. Never free
+            // the global FFI or kill a process that may already be reconnecting.
+        });
     }
 
-    private void pauseVpn() {
+    private synchronized void pauseVpn() {
         sGeneration.incrementAndGet();
         // Invalidate any in-flight startVpn() session: without this bump a
         // pause landing in the connect window would not stop the worker, and
@@ -915,12 +889,6 @@ public class FCAEVpnService extends VpnService {
             engineOpInFlight = true;
         }
 
-        if (shutdownLatch != null) {
-            shutdownLatch.countDown();
-            shutdownLatch = null;
-        }
-
-        final Thread t = vpnThread;
         vpnThread = null;
         final ParcelFileDescriptor pfd;
         synchronized (tunLock) {
@@ -929,7 +897,6 @@ public class FCAEVpnService extends VpnService {
         }
         closeQuiet(pfd);
         try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
-        if (t != null) t.interrupt();
 
         // 1. INSTANT UI & NOTIFICATION UPDATE
         Runnable uiCleanup = () -> {
@@ -949,16 +916,13 @@ public class FCAEVpnService extends VpnService {
         // freeNativeOnce() is deliberately absent: pause is resumable, and
         // releasing the library here meant resuming had to re-init a
         // shut-down FFI.
-        Thread cleanupThread = new Thread(() -> {
-            if (myGen != cleanupGeneration.get()) {
-                finishEngineOp();
-                return;
-            }
+        NativeEngine.lifecycleExecutor.execute(() -> {
+            if (myGen != cleanupGeneration.get()) return;
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-            finishEngineOp();
-        }, "FCAE-PauseCleanup");
-        cleanupThread.setDaemon(true);
-        cleanupThread.start();
+            handler.post(() -> {
+                if (myGen == cleanupGeneration.get()) finishEngineOp();
+            });
+        });
     }
 
     private void notifyUi() {
@@ -1049,6 +1013,7 @@ public class FCAEVpnService extends VpnService {
         putStr(e, i, "torBridgeLines");
         putInt(e, i, "engineLog", 3);
         putInt(e, i, "backend", 0);
+        putInt(e, i, "torHttpPort", 0);
         putInt(e, i, "torSocksPort", 0); // 0 = engine default (defer)
         putStr(e, i, "psiphonConfig");
         putStr(e, i, "psiphonRegion");
@@ -1087,6 +1052,7 @@ public class FCAEVpnService extends VpnService {
         copyStr(p, i, "torBridgeLines");
         copyInt(p, i, "engineLog", 3);
         copyInt(p, i, "backend", 0);
+        copyInt(p, i, "torHttpPort", 0);
         copyInt(p, i, "torSocksPort", 0); // 0 = engine default (defer)
         copyStr(p, i, "psiphonConfig");
         copyStr(p, i, "psiphonRegion");

@@ -81,6 +81,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             android.content.ServiceConnection next = new android.content.ServiceConnection() {
                 @Override public void onServiceConnected(android.content.ComponentName name, IBinder binder) {}
                 @Override public void onServiceDisconnected(android.content.ComponentName name) {
+                    if (connection != this) return;
                     stopBound(app);
                     Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
                     failed.putExtra("psiSession", activeSession);

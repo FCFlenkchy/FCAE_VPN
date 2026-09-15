@@ -221,6 +221,23 @@
                 android:textColorHint="#FF6B7280"
                 android:textSize="14sp" />
 
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchTorHttp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Tor HTTP proxy"
+                android:textColor="#FFE8ECF4" />
+            <EditText
+                android:id="@+id/editTorHttpPort"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="number"
+                android:hint="Tor HTTP port (1822)"
+                android:contentDescription="Tor HTTP port"
+                android:padding="10dp"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF6B7280" />
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

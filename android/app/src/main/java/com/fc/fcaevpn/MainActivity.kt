@@ -78,6 +78,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchLan: SwitchMaterial
     private lateinit var switchLogging: SwitchMaterial
     private lateinit var switchSocks: SwitchMaterial
+    private lateinit var switchTorHttp: SwitchMaterial
+    private lateinit var editTorHttpPort: android.widget.EditText
     private lateinit var switchHttp: SwitchMaterial
     private lateinit var switchAutoUpdate: SwitchMaterial
     private lateinit var switchPreReleases: SwitchMaterial
@@ -151,8 +153,11 @@ class MainActivity : AppCompatActivity() {
             if (intent.action?.startsWith("com.fc.fcaevpn.PSI_") == true &&
                 !PsiphonTunnelService.isCurrentBroadcast(intent)) return
             if (intent.getBooleanExtra("cleanupComplete", false)) {
-                bgExecutor.execute {
+                val generation = intent.getLongExtra("generation", -1)
+                val epoch = connectionEpoch
+                NativeEngine.lifecycleExecutor.execute {
                     handler.post {
+                        if (epoch != connectionEpoch || generation != FCAEVpnService.sGeneration.get()) return@post
                         disconnecting = false
                         updateButton()
                     }
@@ -422,7 +427,9 @@ class MainActivity : AppCompatActivity() {
         switchLogging = findViewById(R.id.switchLogging)
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
-        switchHttp.text = "HTTP proxy"
+        switchHttp.text = "Aether HTTP proxy"
+        switchTorHttp = findViewById(R.id.switchTorHttp)
+        editTorHttpPort = findViewById(R.id.editTorHttpPort)
         switchAutoUpdate = findViewById(R.id.switchAutoUpdate)
         switchPreReleases = findViewById(R.id.switchPreReleases)
         spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
@@ -457,7 +464,7 @@ class MainActivity : AppCompatActivity() {
         // cursor.  This covers every focus-loss path (taps outside, back
         // button, keyboard dismissal, spinner selection) regardless of how
         // the focus was moved.
-        val editTexts = listOf(editSni, editForcePeer, editSocksPort, editHttpPort,
+        val editTexts = listOf(editSni, editForcePeer, editSocksPort, editHttpPort, editTorHttpPort,
             editTeam, editAccessToken, editAccessEmail, editRoutesFile, editRoutesInline)
         for (et in editTexts) {
             et.setOnFocusChangeListener { view, hasFocus ->
@@ -995,6 +1002,8 @@ class MainActivity : AppCompatActivity() {
             putBoolean("lan", switchLan.isChecked)
             putBoolean("logging", switchLogging.isChecked)
             putBoolean("socks", switchSocks.isChecked)
+            putBoolean("torHttp", switchTorHttp.isChecked)
+            putString("torHttpPort", editTorHttpPort.text.toString())
             putBoolean("http", switchHttp.isChecked)
             putBoolean("autoUpdate", switchAutoUpdate.isChecked)
             putBoolean("checkPreReleases", switchPreReleases.isChecked)
@@ -1057,6 +1066,8 @@ class MainActivity : AppCompatActivity() {
         switchLan.isChecked = prefs.getBoolean("lan", false)
         switchLogging.isChecked = prefs.getBoolean("logging", true)
         switchSocks.isChecked = prefs.getBoolean("socks", true)
+        switchTorHttp.isChecked = prefs.getBoolean("torHttp", false)
+        editTorHttpPort.setText(prefs.getString("torHttpPort", "1822"))
         switchHttp.isChecked = prefs.getBoolean("http", true)
         switchAutoUpdate.isChecked = prefs.getBoolean("autoUpdate", true)
         switchPreReleases.isChecked = prefs.getBoolean("checkPreReleases", false)
@@ -1076,6 +1087,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectClicked() {
         if (disconnecting || connecting || engineRunning || vpnActive) return
+        if (switchTorHttp.isChecked && (editTorHttpPort.text.toString().toIntOrNull() ?: 0) !in 1..65535) {
+            editTorHttpPort.error = "Use a port from 1 to 65535"
+            return
+        }
         connectionEpoch++
         userInitiatedDisconnect = false
         commandPaused = false
@@ -1180,6 +1195,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("engineLog", spinnerEngineLog.selectedItemPosition)
         i.putExtra("backend", backendFromSelection())
         i.putExtra("torSocksPort", deferredTorSocksPort())
+        i.putExtra("torHttpPort", if (switchTorHttp.isChecked) editTorHttpPort.text.toString().toIntOrNull() ?: 1822 else 0)
         i.putExtra("psiphonConfig", "")
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
         // Prefer the LIVE AAR ports: when this start is the Protocol=Psiphon
@@ -1236,18 +1252,17 @@ class MainActivity : AppCompatActivity() {
         val engineLog = spinnerEngineLog.selectedItemPosition
         val backend = backendFromSelection()
         val torSocksPort = deferredTorSocksPort()
+        val torHttpPort = if (switchTorHttp.isChecked) editTorHttpPort.text.toString().toIntOrNull() ?: 1822 else 0
         val psiphonConfig = ""
         val psiphonRegion = selectedPsiphonRegion()
         val psiphonSocksPort = editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0
         val psiphonHttpPort = editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0
 
         val epoch = connectionEpoch
-        bgExecutor.execute {
+        NativeEngine.lifecycleExecutor.execute {
             if (epoch != connectionEpoch) return@execute
-            // Ensure previous engine is fully stopped before starting.
-            // nativeStop() -> fcae_stop() is synchronous, so once it returns
-            // the previous session has released the TUN fd and its threads
-            // are joined. No sleep or retry loop is needed here.
+            // Schedule previous cleanup. Native start enforces the reaper
+            // barrier; nativeStop itself returns before cleanup is finished.
             try { NativeEngine.nativeStop() } catch (_: Throwable) {}
 
             if (epoch != connectionEpoch) return@execute
@@ -1284,6 +1299,7 @@ class MainActivity : AppCompatActivity() {
                     engineLog = engineLog,
                     backend = backend,
                     torSocksPort = torSocksPort,
+                    torHttpPort = torHttpPort,
                     psiphonConfig = psiphonConfig,
                     psiphonRegion = psiphonRegion,
                     psiphonSocksPort = psiphonSocksPort,
@@ -1352,7 +1368,10 @@ class MainActivity : AppCompatActivity() {
             if (!hadVpnService && !psiphonBooting) ProxyNotification.notifyCleanupComplete(this)
             if (psiphonBooting) {
                 val stop = Intent(this, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_STOP)
-                startForegroundService(stop)
+                try { startForegroundService(stop) } catch (e: Exception) {
+                    android.util.Log.w("FCAE", "Cannot deliver proxy Stop", e)
+                    ProxyNotification.notifyCleanupComplete(this)
+                }
             }
         } else {
             // Proxy mode: stopProxy() handles nativeStop + nativeFree.
@@ -1651,9 +1670,11 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (!isTorOnly() && switchSocks.isChecked)
                     endpoint("SOCKS5", editSocksPort.text.toString().trim().ifEmpty { "1819" })
-                if (switchHttp.isChecked)
-                    endpoint("HTTP", editHttpPort.text.toString().trim().ifEmpty { "1820" })
-                if (isTorOnly() || effectiveTorMode() != 0)
+                if (!isTorOnly() && switchHttp.isChecked)
+                    endpoint("Aether HTTP", editHttpPort.text.toString().trim().ifEmpty { "1820" })
+                if (switchTorHttp.isChecked && (isTorOnly() || effectiveTorMode() in 1..2))
+                    endpoint("Tor HTTP", editTorHttpPort.text.toString())
+                if (isTorOnly() || effectiveTorMode() in 1..2)
                     endpoint("TOR SOCKS5", editTorSocksPort.text.toString().trim().ifEmpty { "1821" })
                 if (local.isNotEmpty()) peerLine.append("\nLocal: " + local.joinToString(" | "))
                 if (shared.isNotEmpty()) peerLine.append("\nLAN: " + shared.joinToString(" | "))
