@@ -1548,15 +1548,29 @@ class MainActivity : AppCompatActivity() {
             val peerLine = StringBuilder()
             peerLine.append("Peer: ${peer.ifEmpty { " \u2014 " }}")
             if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") {
-                val socksPort = if (switchSocks.isChecked) "1819" else null
-                val httpPort = if (switchHttp.isChecked) "1820" else null
+                // Mirror the actual EditText values (with the same fallbacks
+                // the connect intents use), not hardcoded constants.
+                val socksPort = if (switchSocks.isChecked)
+                    editSocksPort.text.toString().trim().ifEmpty { "1819" } else null
+                val httpPort = if (switchHttp.isChecked)
+                    editHttpPort.text.toString().trim().ifEmpty { "1820" } else null
+                val torSocks = if (effectiveTorMode() != 0)
+                    editTorSocksPort.text.toString().trim().ifEmpty { "1821" } else null
                 val ports = listOfNotNull(
                     socksPort?.let { "SOCKS5 $lan:$it" },
-                    httpPort?.let { "HTTP $lan:$it" }
+                    httpPort?.let { "HTTP $lan:$it" },
+                    torSocks?.let { "TOR SOCKS5 $lan:$it" }
                 ).joinToString("  |  ")
                 if (ports.isNotEmpty()) {
                     peerLine.append("\nLAN: $ports")
                 }
+            }
+            // Psiphon's own proxies are localhost-only (the AAR wrapper binds
+            // 127.0.0.1 regardless of LAN sharing), but worth surfacing:
+            // they're what to point local apps at — actual ports from READY.
+            if ((isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0) {
+                peerLine.append("\nPsiphon local: SOCKS5 127.0.0.1:$pendingPsiSocks")
+                if (pendingPsiHttp > 0) peerLine.append(" | HTTP 127.0.0.1:$pendingPsiHttp")
             }
             // Only append error here if not already shown in statusText (state 5 = ERROR)
             if (errMsg.isNotEmpty() && state != 5) peerLine.append("\nError: $errMsg")

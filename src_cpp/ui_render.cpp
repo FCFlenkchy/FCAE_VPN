@@ -1140,11 +1140,25 @@ void render_ui() {
                     else
                         ImGui::TextWrapped("All proxies disabled");
                 }
+                // Tor's own SOCKS listener is alive whenever the Tor protocol
+                // or a Tor egress mode (through-tunnel / tunnel-through-Tor)
+                // is selected — tell LAN users exactly where to point.
+                if (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2) {
+                    if (g_app.lan_sharing)
+                        ImGui::TextWrapped("TOR SOCKS5  Local 127.0.0.1:%u  |  LAN %s:%u",
+                            g_app.tor_socks_port, lip, g_app.tor_socks_port);
+                    else
+                        ImGui::TextWrapped("TOR SOCKS5  127.0.0.1:%u", g_app.tor_socks_port);
+                }
             } else {
-                if (g_app.lan_sharing)
+                if (g_app.lan_sharing) {
                     ImGui::TextWrapped("TUN | Local 127.0.0.1 | LAN %s", lip);
-                else
+                    if (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)
+                        ImGui::TextWrapped("TOR SOCKS5  Local 127.0.0.1:%u  |  LAN %s:%u",
+                            g_app.tor_socks_port, lip, g_app.tor_socks_port);
+                } else {
                     ImGui::TextWrapped("TUN Active | SOCKS5 127.0.0.1:%u", g_app.socks_port);
+                }
             }
         } else {
             ImGui::Text("  No active tunnel");
