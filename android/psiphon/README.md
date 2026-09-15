@@ -63,3 +63,37 @@ Device checks (not run as part of this patch):
   from a second Wi-Fi device, and confirm LAN access is closed when disabled.
 - Switch between Tor-only, Aether and Psiphon; check that the shown endpoints
   belong to the current backend and that old stats disappear on reconnect.
+
+## In-proxy diagnostics
+
+Auto permits tunnel-core's full protocol selection, including server-tactics
+choices of `INPROXY-WEBRTC-*`. `InproxyEnableProxy=false` only prevents
+volunteering this device as a proxy for other clients. The former
+`InproxyEnabled` field was not recognized; `InproxyAllowClient` is a
+server-side parameter, not a client-side opt-out. These were not effective
+controls for disabling client WebRTC/STUN dialing. This patch does not
+remove transports, disable tactics, or filter upstream diagnostics.
+
+“in-proxy protocol preferred”, selection rate limits and skipped candidates
+are connection-selection diagnostics, not by themselves a failed tunnel.
+WebRTC offer states and STUN/mux warnings concern Psiphon's transport, not
+proof of a browser WebRTC leak. Cancellation/exiting notices after an
+explicit stop normally describe teardown; an unexpected stop still needs
+its preceding service/network events investigated. Internal DNS metrics
+do not verify Android applications' DNS or browsing path.
+
+UI regression checks (require builds/devices; not run here):
+- Desktop: fill the 200-line ring, continue logging (including repeated
+  identical lines), click/double-click/copy a line, and verify following
+  reaches the true last row. Wheel/drag upward pauses following; returning
+  to the bottom or toggling Auto-scroll off/on resumes. Clear during logging.
+- Android: tap logs, long-press/select/copy, release selection, and continue
+  receiving both native and AAR logs. Following must use the padded viewport
+  after layout; dragging upward pauses it and reaching the bottom resumes.
+  Verify the inner log pane scrolls rather than the outer settings pane.
+- WARP/WARP-in-WARP: live validation RTT is published once, not replaced
+  seconds later with a different HTTP measurement. MASQUE/MASQUE-in-MASQUE
+  remains unknown until its first successful HTTP probe, then retains that
+  value; failed probes do not publish an RTT. A genuine reconnect is a new
+  measurement. This does not claim reproduction of two simultaneous RTT
+  labels; both UIs currently contain a single telemetry RTT field.

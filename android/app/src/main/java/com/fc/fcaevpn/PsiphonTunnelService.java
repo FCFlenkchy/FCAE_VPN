@@ -394,12 +394,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             // which drives the notification counters. Without this a working
             // tunnel shows 0 B.
             o.put("EmitBytesTransferred", true);
-            // In-proxy client participation dials WebRTC connections through
-            // STUN while the tunnel is still connecting; every STUN timeout
-            // then lands in the log ("Failed get server reflexive
-            // address"). Off — the tunnel works without it.
-            o.put("InproxyEnabled", false);
-            o.put("InproxyAllowClient", false);
+            // Do not volunteer this device as an in-proxy proxy. This does
+            // NOT disable client dialing: Auto follows tunnel-core/tactics,
+            // including INPROXY-WEBRTC transports. InproxyEnabled is not a
+            // core field; InproxyAllowClient is a server-side parameter.
+            o.put("InproxyEnableProxy", false);
             // Transport family restriction: Auto (0) leaves the field out so
             // tunnel-core tries its full default protocol set.
             String[] protocols = transportProtocols(transport);

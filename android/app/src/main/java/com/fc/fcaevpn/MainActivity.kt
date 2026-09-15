@@ -41,7 +41,8 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var connectionEpoch = 0L
     @Volatile private var vpnActive = false
     private var wasAtBottom = true
-    private var updatingLogs = false
+    private var logTouchActive = false
+    private var logTouchStartY = 0f
     private var inForeground = false
 
     private lateinit var statusText: TextView
@@ -650,6 +651,7 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<MaterialButton>(R.id.btnClearLogs).setOnClickListener {
             NativeEngine.nativeClearLogs()
+            wasAtBottom = true
             logText.text = ""
             lastLogHash = 0L
         }
@@ -674,12 +676,16 @@ class MainActivity : AppCompatActivity() {
 
         updateButton()
 
-        // Track whether user is at the bottom of the log scroll.
-        logScroll.setOnScrollChangeListener { _: android.view.View, _: Int, scrollY: Int, _: Int, _: Int ->
-            if (updatingLogs) return@setOnScrollChangeListener
-            val child = logScroll.getChildAt(0) ?: return@setOnScrollChangeListener
-            val maxScroll = (child.height - logScroll.height).coerceAtLeast(0)
-            wasAtBottom = scrollY >= maxScroll - 5
+        // Run after text layout/focus scrolling, not in a posted runnable that
+        // can observe the old child height. Only a drag pauses following; a
+        // tap/focus change must not silently turn it off.
+        logScroll.viewTreeObserver.addOnPreDrawListener {
+            if (!logTouchActive && !logText.hasSelection()) {
+                val bottom = logBottom()
+                if (logScroll.scrollY >= bottom - logBottomTolerance()) wasAtBottom = true
+                if (wasAtBottom) logScroll.scrollTo(0, bottom)
+            }
+            true
         }
 
         val filter = IntentFilter().apply {
@@ -774,6 +780,7 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         inForeground = false
+        logTouchActive = false
         // Clear any EditText focus so the blinking cursor doesn't stay
         // visible after the keyboard is dismissed.
         clearEditTextFocus()
@@ -1476,25 +1483,58 @@ class MainActivity : AppCompatActivity() {
         try { NativeEngine.nativeAppendLog(chunk) } catch (_: Throwable) {}
         if (!::switchLogging.isInitialized || !switchLogging.isChecked) return
         val logs = try { NativeEngine.nativeGetLogs().takeLast(MAX_LOG_CHARS) } catch (_: Throwable) { return }
-        val h = logs.hashCode().toLong()
+        renderLogs(logs)
+    }
+
+    private fun logBottomTolerance() = (4 * resources.displayMetrics.density).toInt()
+
+    private fun logBottom(): Int {
+        val child = logScroll.getChildAt(0) ?: return 0
+        val viewport = logScroll.height - logScroll.paddingTop - logScroll.paddingBottom
+        return (child.height - viewport).coerceAtLeast(0)
+    }
+
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        if (::logScroll.isInitialized) {
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    val location = IntArray(2)
+                    logScroll.getLocationOnScreen(location)
+                    logTouchActive = event.rawX >= location[0] &&
+                        event.rawX < location[0] + logScroll.width &&
+                        event.rawY >= location[1] && event.rawY < location[1] + logScroll.height
+                    logTouchStartY = event.rawY
+                    // The log ScrollView is nested inside the settings scroll.
+                    // Keep drags in this pane instead of letting its parent
+                    // intercept them after a tap has focused the selectable text.
+                    if (logTouchActive) logScroll.parent.requestDisallowInterceptTouchEvent(true)
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    if (logTouchActive && kotlin.math.abs(event.rawY - logTouchStartY) >
+                        android.view.ViewConfiguration.get(this).scaledTouchSlop) {
+                        wasAtBottom = false
+                    }
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    logTouchActive = false
+                    logScroll.parent.requestDisallowInterceptTouchEvent(false)
+                }
+            }
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
+    /** Both native polling and AAR notices use this one layout-safe path. */
+    private fun renderLogs(logs: String) {
+        // Keep selection stable while copying. The native ring still receives
+        // every notice; the next poll catches up when interaction ends.
+        if (logTouchActive || logText.hasSelection()) return
+        val shown = logs.takeLast(MAX_LOG_CHARS)
+        val h = shown.hashCode().toLong()
         if (h == lastLogHash) return
         lastLogHash = h
-        val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
-        val scrollWasAtBottom = wasAtBottom
-        updatingLogs = true
         logText.text = shown
-        if (scrollWasAtBottom) {
-            logScroll.post {
-                val child = logScroll.getChildAt(0)
-                if (child != null) {
-                    val target = (child.height - logScroll.height).coerceAtLeast(0)
-                    logScroll.scrollTo(0, target)
-                }
-                updatingLogs = false
-            }
-        } else {
-            updatingLogs = false
-        }
+        // The pre-draw listener follows using the newly laid-out child height.
     }
 
     private fun applyStatus(
@@ -1624,30 +1664,7 @@ class MainActivity : AppCompatActivity() {
             if (errMsg.isNotEmpty() && state != 5) peerLine.append("\nError: $errMsg")
             peerText.text = peerLine.toString()
 
-            // Equal-size ring buffers still change in the middle.
-            val h = logs.hashCode().toLong()
-            if (h != lastLogHash) {
-                lastLogHash = h
-                val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
-
-                val scrollWasAtBottom = wasAtBottom
-
-                updatingLogs = true
-                logText.text = shown
-
-                if (scrollWasAtBottom) {
-                    logScroll.post {
-                        val child = logScroll.getChildAt(0)
-                        if (child != null) {
-                            val target = (child.height - logScroll.height).coerceAtLeast(0)
-                            logScroll.scrollTo(0, target)
-                        }
-                        updatingLogs = false
-                    }
-                } else {
-                    updatingLogs = false
-                }
-            }
+            renderLogs(logs)
             updateButton()
         } catch (e: Throwable) {
             statusText.text = "UI error: ${e.message}"

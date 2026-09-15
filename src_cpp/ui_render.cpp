@@ -43,6 +43,7 @@ static bool s_update_in_progress = false;
 
 // What the last painted frame looked like / when it was painted.
 static uint64_t s_painted_sig = 0;
+static bool s_log_scroll_pending = false;
 static bool     s_painted_once = false;
 static double   s_last_paint_t = 0.0;
 
@@ -99,9 +100,10 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, t.status_message);
     h = fnv_cstr(h, t.last_error);
 
-    // Log panel: length + newest line is enough to notice new output.
+    // Log revision also detects identical new lines after the ring fills.
     {
         std::lock_guard<std::mutex> lock(g_app.logs_mutex);
+        h = fnv_value(h, g_app.logs_revision);
         const size_t n = g_app.logs.size();
         h = fnv_value(h, n);
         if (n) h = fnv_cstr(h, g_app.logs.back().second.c_str());
@@ -192,7 +194,7 @@ bool ui_should_render(bool interacting) {
 
     // A redraw request is only cleared once a frame is really painted, so it
     // cannot be lost while the window is minimized.
-    if (g_app.redraw_requested.load()) return true;
+    if (g_app.redraw_requested.load() || s_log_scroll_pending) return true;
 
     // The user is interacting: paint every frame the caller offers (hover,
     // drag, typing, scroll). The platform caps this at ~60 FPS.
@@ -1519,16 +1521,24 @@ void render_ui() {
             ImGui::EndTabItem();
         }
 
+        s_log_scroll_pending = false;
         if (ImGui::BeginTabItem("Logs")) {
+            static bool follow_tail = true;
+            static bool manual_scroll_last_frame = false;
+            static uint64_t rendered_revision = 0;
             ImGui::Checkbox("Logging", &g_app.logging_enabled);
             ImGui::SameLine(0, 12);
-            ImGui::Checkbox("Auto-scroll", &g_app.auto_scroll);
+            if (ImGui::Checkbox("Auto-scroll", &g_app.auto_scroll))
+                follow_tail = g_app.auto_scroll;
             ImGui::SameLine(0, 12);
             ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
             ImGui::SameLine(0, 20);
             ImGui::Checkbox("Also check for pre-releases", &g_app.check_prereleases);
             ImGui::SameLine(0, 12);
-            if (ImGui::Button("Clear")) g_app.logs.clear();
+            if (ImGui::Button("Clear")) {
+                g_app.clear_logs();
+                follow_tail = true;
+            }
             ImGui::SameLine(0, 8);
             if (ImGui::Button("Copy All")) {
                 std::string all = g_app.logs_as_text();
@@ -1547,21 +1557,38 @@ void render_ui() {
             // Take a thread-safe snapshot of the logs for rendering.
             // This avoids a data race with the FFI callback thread which
             // calls add_log() concurrently.
-            auto logs_snapshot = g_app.copy_logs();
+            uint64_t revision = 0;
+            auto logs_snapshot = g_app.copy_logs(revision);
 
-            // Check if we should auto-scroll BEFORE rendering (scroll height not yet known)
-            int cur_count = (int)logs_snapshot.size();
-            bool should_scroll = false;
-            if (g_app.auto_scroll && cur_count > g_app.prev_log_count) {
-                float scroll_y = ImGui::GetScrollY();
-                float scroll_max = ImGui::GetScrollMaxY();
-                // If scrollable area is small or we're near the bottom, auto-scroll
-                should_scroll = (scroll_max <= 0.0f) || (scroll_y >= scroll_max - 4.0f);
+            // Only deliberate scrolling changes follow state. Selectable-line
+            // focus/navigation can move the viewport after a click; that is
+            // not a request to stop following. Sample the next frame too,
+            // since ImGui applies wheel/scrollbar targets on the next frame.
+            const bool manual_scroll =
+                (ImGui::IsWindowHovered() &&
+                    (ImGui::GetIO().MouseWheel != 0.0f || ImGui::IsMouseDragging(0))) ||
+                (ImGui::IsWindowFocused() &&
+                    (ImGui::IsKeyPressed(ImGuiKey_PageUp) || ImGui::IsKeyPressed(ImGuiKey_PageDown) ||
+                     ImGui::IsKeyPressed(ImGuiKey_Home) || ImGui::IsKeyPressed(ImGuiKey_End) ||
+                     ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow)));
+            if (manual_scroll || manual_scroll_last_frame) {
+                follow_tail = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f;
             }
-            g_app.prev_log_count = cur_count;
+            manual_scroll_last_frame = manual_scroll;
+            const bool should_scroll = g_app.auto_scroll && follow_tail && !manual_scroll &&
+                !ImGui::IsMouseDown(0) && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
+            if (manual_scroll || (should_scroll &&
+                (revision != rendered_revision || ImGui::GetScrollY() < ImGui::GetScrollMaxY() - 1.0f))) {
+                s_log_scroll_pending = true;
+            }
+            rendered_revision = revision;
 
             ImGuiListClipper clipper;
             clipper.Begin((int)logs_snapshot.size());
+            // SetScrollHereY must refer to the actual final row, not whichever
+            // row the clipper last happened to render in the old viewport.
+            if (should_scroll && !logs_snapshot.empty())
+                clipper.IncludeItemByIndex((int)logs_snapshot.size() - 1);
             while (clipper.Step()) {
                 for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
                     auto& [lvl, msg] = logs_snapshot[(size_t)i];
@@ -1594,11 +1621,9 @@ void render_ui() {
                     }
                     ImGui::PopID();
                     ImGui::PopStyleColor();
+                    if (should_scroll && i == (int)logs_snapshot.size() - 1)
+                        ImGui::SetScrollHereY(1.0f);
                 }
-            }
-            // Scroll AFTER clipper rendered items so scroll height is correct
-            if (should_scroll) {
-                ImGui::SetScrollHereY(1.0f);
             }
             ImGui::EndChild();
             ImGui::EndTabItem();

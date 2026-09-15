@@ -2371,11 +2371,15 @@ fn spawn_session_rtt(
     tasks: &mut TaskGuard,
     validation_rtt: Option<Duration>,
 ) {
-    let stack = stack.clone();
-    // Publish before the first background delay: the UI can show the live
-    // validation result as soon as SOCKS/TUN becomes ready. Failed HTTP probes
-    // must not erase it. MASQUE, without this measurement, still starts unknown.
+    // One measurement per live connection: do not publish WG/WIW validation
+    // and then overwrite it with a different (HTTP) measurement seconds later.
+    // MASQUE/MIM has no validation RTT, so it publishes only its first successful
+    // HTTP probe. A reconnect calls this again for the new live connection.
     set_rtt_ms(session_rtt_millis(validation_rtt));
+    if validation_rtt.is_some() {
+        return;
+    }
+    let stack = stack.clone();
     let task = tokio::spawn(async move {
         for delay in [1, 2, 4, 8] {
             tokio::time::sleep(Duration::from_secs(delay)).await;

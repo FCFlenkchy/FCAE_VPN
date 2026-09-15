@@ -436,14 +436,12 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     config_json = inject_string_field(&config_json, "ListenInterface", if cfg.lan_sharing { "any" } else { "" })?;
     config_json = inject_android_resolver_policy(&config_json)?;
 
-    // In-proxy client participation dials WebRTC connections through STUN
-    // servers while the tunnel is still connecting; every STUN timeout then
-    // lands in the log ("Failed get server reflexive address …"). Off unless
-    // the caller explicitly opted in — the tunnel works without it.
-    for key in ["InproxyEnabled", "InproxyAllowClient"] {
-        if !config_json.contains(&format!("\"{key}\"")) {
-            config_json = inject_bool_field(&config_json, key, false)?;
-        }
+    // Do not volunteer as an in-proxy proxy unless explicitly configured.
+    // This is distinct from client dialing, which Auto/tactics may select.
+    // InproxyEnabled is not a core field; InproxyAllowClient is server-side
+    // and never disabled client WebRTC/STUN participation here.
+    if !config_json.contains("\"InproxyEnableProxy\"") {
+        config_json = inject_bool_field(&config_json, "InproxyEnableProxy", false)?;
     }
     // BytesTransferred notices feed the UI/notification counters; without
     // this a working tunnel displays 0 B everywhere.

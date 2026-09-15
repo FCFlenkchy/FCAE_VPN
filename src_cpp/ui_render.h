@@ -119,7 +119,7 @@ struct AppState {
     std::vector<std::pair<int, std::string>> logs;
     int  max_logs    = 200;
     bool auto_scroll = true;
-    int  prev_log_count = 0;
+    uint64_t logs_revision = 0; // guarded by logs_mutex, including ring eviction
     bool logging_enabled = true;
     bool auto_update_check  = true;
     // Update channel: off = stable slot only; on = pre-releases also compete
@@ -138,6 +138,7 @@ struct AppState {
         if (s.size() > 256) s.resize(256);
         std::lock_guard<std::mutex> lock(logs_mutex);
         logs.emplace_back(level, std::move(s));
+        ++logs_revision;
         if ((int)logs.size() > max_logs) {
             const int drop = (int)logs.size() - max_logs;
             logs.erase(logs.begin(), logs.begin() + drop);
@@ -155,9 +156,16 @@ struct AppState {
         return out;
     }
 
-    // Thread-safe copy for UI rendering: returns snapshot and size.
-    std::vector<std::pair<int, std::string>> copy_logs() const {
+    void clear_logs() {
         std::lock_guard<std::mutex> lock(logs_mutex);
+        logs.clear();
+        ++logs_revision;
+    }
+
+    // Capture content and revision together, including same-size replacements.
+    std::vector<std::pair<int, std::string>> copy_logs(uint64_t& revision) const {
+        std::lock_guard<std::mutex> lock(logs_mutex);
+        revision = logs_revision;
         return logs;
     }
 
