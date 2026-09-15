@@ -6,6 +6,13 @@ from the pinned `core/psiphon` submodule, using that revision's Dockerfile,
 vendored gomobile, Go and NDK. They verify all four ABI libraries have 16 KB
 ELF LOAD alignment and upload the AAR as a separate artifact.
 
+CI mounts both the submodule source and its resolved Git metadata directory
+(read-only) into Docker. Explicit `GIT_DIR` and `GIT_WORK_TREE` let upstream's
+`make.bash` read its build revision without following the submodule's `.git`
+pointer outside the source mount. The checkout and container HEAD must match
+FCAE's `HEAD:core/psiphon` gitlink; no separate upstream checkout or branch-tip
+update is used.
+
 For local APK builds, first download the matching CI AAR to the path above,
 or follow `core/psiphon/MobileLibrary/Android/README.md` to build that pinned
 source and copy its `ca.psiphon.aar` here. No Maven prebuilt fallback is used.

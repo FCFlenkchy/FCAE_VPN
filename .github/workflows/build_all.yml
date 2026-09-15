@@ -372,14 +372,30 @@ jobs:
           # Do not mix Oblivion's module-aware fork tooling with this upstream
           # checkout: this revision's make.bash explicitly uses GOPATH mode.
           ROOT="$PWD"
+          # Build the gitlink pinned by FCAE, not the tip of the upstream branch.
+          PSIPHON_REV=$(git rev-parse HEAD:core/psiphon)
+          test "$(git -C core/psiphon rev-parse HEAD)" = "$PSIPHON_REV"
+          PSIPHON_GIT_DIR=$(git -C core/psiphon rev-parse --absolute-git-dir)
+          echo "Building core/psiphon at $PSIPHON_REV"
           docker build --platform=linux/amd64 -t fcae-psiphon-android \
             -f core/psiphon/MobileLibrary/Android/Dockerfile core/psiphon/MobileLibrary
           docker run --platform=linux/amd64 --rm \
             --user "$(id -u):$(id -g)" \
             -e HOME=/tmp -e GOCACHE=/tmp/go-cache \
+            -e GIT_DIR=/psiphon-git \
+            -e GIT_WORK_TREE=/go/src/github.com/Psiphon-Labs/psiphon-tunnel-core \
+            -e PSIPHON_REV="$PSIPHON_REV" \
+            -v "$PSIPHON_GIT_DIR:/psiphon-git:ro" \
             -v "$ROOT/core/psiphon:/go/src/github.com/Psiphon-Labs/psiphon-tunnel-core" \
-            fcae-psiphon-android /bin/bash -c \
-            'cd /go/src/github.com/Psiphon-Labs/psiphon-tunnel-core/MobileLibrary/Android && ./make.bash'
+            fcae-psiphon-android /bin/bash -c '
+              set -euo pipefail
+              # The submodule .git file points outside its source mount.
+              # GIT_DIR/GIT_WORK_TREE use the explicit metadata mount instead.
+              cd "$GIT_WORK_TREE/MobileLibrary/Android"
+              test "$(git rev-parse HEAD)" = "$PSIPHON_REV"
+              git rev-parse --short=10 HEAD
+              ./make.bash
+            '
           mkdir -p android/psiphon/libs
           cp core/psiphon/MobileLibrary/Android/ca.psiphon.aar android/psiphon/libs/
           INSPECT=$(mktemp -d)
