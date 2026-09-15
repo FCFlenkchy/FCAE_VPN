@@ -87,6 +87,31 @@ fn addr_of(cidr: &str) -> &str {
     cidr.split('/').next().unwrap_or(cidr)
 }
 
+/// Split the configured TUN DNS override into individual addresses. The
+/// config carries one string so the UIs can express a comma separated list
+/// (the same format the engine's AETHER_DNS variable parses).
+#[allow(dead_code)]
+fn dns_server_list(server: Option<&str>) -> Vec<&str> {
+    server
+        .map(|s| s.split(',').map(str::trim).filter(|e| !e.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// Strip what the OS DNS knobs cannot take: an optional CIDR suffix, an
+/// optional :port, and IPv6 brackets. The engine keeps the full entry (it
+/// parses "ip:port" itself); netsh/networksetup want the bare address.
+#[allow(dead_code)]
+fn dns_host_of(entry: &str) -> &str {
+    let no_port = entry
+        .strip_prefix('[')
+        .and_then(|s| s.find(']').map(|i| &s[..i]))
+        .unwrap_or_else(|| match entry.matches(':').count() {
+            1 => entry.rsplit_once(':').map(|(h, _)| h).unwrap_or(entry),
+            _ => entry,
+        });
+    no_port.split('/').next().unwrap_or(no_port)
+}
+
 /// Poll `probe` until it reports ready or `budget` elapses; returns the last
 /// probe result.
 ///
@@ -285,12 +310,27 @@ fn configure_windows(cfg: &SessionConfig, peer_ip: Option<&str>, undo: &mut TunU
     }
 
     // DNS: back up the current servers before overriding.
-    if let Some(server) = cfg.dns.server.as_deref().map(addr_of) {
+    let servers = dns_server_list(cfg.dns.server.as_deref());
+    if !servers.is_empty() {
         if let Some(prev) = capture("netsh", &["interface", "ip", "show", "dnsservers"]) {
             undo.dns_backup.push((name.clone(), parse_windows_dns(&prev)));
         }
-        run("netsh", &["interface", "ip", "set", "dns",
-            &format!("name={name}"), "static", server, "primary"]);
+        let mut v4_primary = false;
+        for entry in &servers {
+            let addr = dns_host_of(entry);
+            if addr.contains(':') {
+                // IPv6 resolvers go through the ipv6 stack's dnsserver list.
+                run("netsh", &["interface", "ipv6", "add", "dnsservers",
+                    &format!("name={name}"), addr]);
+            } else if !v4_primary {
+                run("netsh", &["interface", "ip", "set", "dns",
+                    &format!("name={name}"), "static", addr, "primary"]);
+                v4_primary = true;
+            } else {
+                run("netsh", &["interface", "ip", "add", "dns",
+                    &format!("name={name}"), addr]);
+            }
+        }
     }
 
     Ok(())
@@ -420,8 +460,10 @@ fn configure_macos(cfg: &SessionConfig, peer_ip: Option<&str>, undo: &mut TunUnd
         undo.default_route = true;
     }
 
-    // Back up DNS per network service so it can be restored precisely.
-    if let Some(server) = cfg.dns.server.as_deref().map(addr_of) {
+    // Back up DNS per network service so it can be restored precisely. All
+    // configured servers (v4 and v6 mixed) are set in one call.
+    let servers = dns_server_list(cfg.dns.server.as_deref());
+    if !servers.is_empty() {
         for service in macos_network_services() {
             if let Some(prev) = capture("networksetup", &["-getdnsservers", &service]) {
                 let servers: Vec<String> = prev
@@ -431,7 +473,9 @@ fn configure_macos(cfg: &SessionConfig, peer_ip: Option<&str>, undo: &mut TunUnd
                     .collect();
                 undo.dns_backup.push((service.clone(), servers));
             }
-            run("networksetup", &["-setdnsservers", &service, server]);
+            let mut args = vec!["-setdnsservers", service.as_str()];
+            args.extend(servers.iter().map(|s| dns_host_of(s)));
+            run("networksetup", &args);
         }
     }
 

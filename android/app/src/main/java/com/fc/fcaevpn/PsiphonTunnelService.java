@@ -45,6 +45,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String ACTION_STOP  = "com.fc.fcaevpn.PSI_STOP";
     public static final String BROADCAST_READY = "com.fc.fcaevpn.PSI_READY";
     public static final String BROADCAST_FAILED = "com.fc.fcaevpn.PSI_FAILED";
+    // Staged connect progress (like the Tor bootstrap percentage): INTEGER
+    // stage + short label, rendered by the UI as "CONNECTING · PSIPHON · …".
+    public static final String BROADCAST_STAGE = "com.fc.fcaevpn.PSI_STAGE";
     public static final String BROADCAST_STOPPED = "com.fc.fcaevpn.PSI_STOPPED";
     public static final String BROADCAST_LOG = "com.fc.fcaevpn.PSI_LOG";
     public static final String EXTRA_SOCKS = "socksPort";
@@ -52,6 +55,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String EXTRA_ERROR = "error";
     public static final String EXTRA_REGIONS = "regions";
     public static final String EXTRA_LOG = "log";
+    public static final String EXTRA_STAGE = "psiphonStage";
+    public static final String EXTRA_STAGE_LABEL = "psiphonStageLabel";
 
     private static final String CHANNEL_ID = "fcaevpn_psiphon";
     private static final int NOTIF_ID = 3;
@@ -98,6 +103,15 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private final AtomicLong bytesDown = new AtomicLong(0);
     private volatile long lastCounterNotifAt = 0;
     private volatile boolean stopping;
+    // True while a start thread is inside startTunneling(); true alone
+    // (psiphonUp) once the library reported itself started. Together they
+    // serialize duplicate ACTION_PSIPHON_START deliveries: the library
+    // wrapper begins EVERY start by stopping the previous instance
+    // ("stopping Psiphon library" is logged unconditionally), so re-entering
+    // while a controller is mid-boot kills it — that was the tight
+    // "starting tunnel → stopping Psiphon library" crash loop.
+    private volatile boolean startInFlight;
+    private volatile boolean psiphonUp;
     private final Handler logHandler = new Handler(Looper.getMainLooper());
     private final StringBuilder logBuf = new StringBuilder();
     private final Runnable flushLogs = this::flushLogs;
@@ -124,7 +138,30 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             stopNow();
             return START_NOT_STICKY;
         }
-        if (intent != null) {
+        if (intent == null) {
+            // Sticky restart after this process was killed: the user's
+            // region/transport/ports/upstream extras died with it, so
+            // replaying a blank "Auto" config would start a tunnel nobody
+            // asked for and — paired with start failures below — loop
+            // forever at the system's ~1s restart cadence. MainActivity is
+            // the only legitimate source of psiphon starts; exit quietly.
+            if (!psiphonUp && !startInFlight) {
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                stopSelf();
+            }
+            return START_NOT_STICKY;
+        }
+        if (startInFlight || psiphonUp) {
+            // Duplicate start (double-tap, poll re-fire, redelivery). The
+            // wrapper stops the running instance before every new start, so
+            // a second start mid-boot aborts the first controller — repeat
+            // deliveries turned into the connect/stop crash loop. The UI
+            // always stops before reconfiguring, so ignore extras here.
+            emitLog("start ignored: tunnel already " + (startInFlight ? "starting" : "running"));
+            flushLogs();
+            return START_NOT_STICKY;
+        }
+        {
             String r = intent.getStringExtra("psiphonRegion");
             region = r == null ? "" : r.trim();
             transport = intent.getIntExtra("psiphonTransport", 0);
@@ -134,8 +171,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             upstreamProxy = up == null ? "" : up.trim();
         }
         stopping = false;
+        startInFlight = true;
+        psiphonUp = false;
         bytesUp.set(0);
         bytesDown.set(0);
+        broadcastStage(1, "STARTING");
         // Read the embedded server-entry list once per start: it feeds both
         // the log line and startTunneling() (two reads would double-log the
         // "importing embedded server entries" notice).
@@ -152,15 +192,18 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 // remote server list configured in getPsiphonConfig().
                 if (t != null) t.startTunneling(embeddedList);
                 else throw new Exception("Psiphon tunnel not created");
+                psiphonUp = true;
             } catch (Exception e) {
                 Log.e(TAG, "startTunneling failed", e);
                 emitLog("start failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
                 flushLogs();
                 broadcastFailed(e.getMessage() == null ? "Psiphon failed to start" : e.getMessage());
                 stopNow();
+            } finally {
+                startInFlight = false;
             }
         }, "FCAE-PsiStart").start();
-        return START_STICKY;
+        return START_NOT_STICKY;
     }
 
     // startForeground(int, Notification) (no type) is deprecated on API 34,
@@ -177,7 +220,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     }
 
     private void stopNow() {
+        // Idempotent: a start failure, onExiting() and an ACTION_STOP can
+        // all land within the same second; only the first may run the
+        // teardown (a second t.stop() would block on the already-stopping
+        // controller and double the "stopping" noise).
+        if (stopping) return;
         stopping = true;
+        psiphonUp = false;
         emitLog("stopping");
         flushLogs();
         try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Exception ignored) {}
@@ -403,12 +452,26 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     @Override
     public void onDiagnosticMessage(String message) {
+        // Staged-status hooks. Diagnostic notices arrive as raw JSON here;
+        // the wrapper's own lifecycle lines arrive as plain text. All of it
+        // is cheap substring work on a low-rate channel.
+        if (!stopping && message != null) {
+            if (message.contains("starting Psiphon library")) {
+                broadcastStage(2, "BOOTSTRAP");
+            } else if (message.contains("\"noticeType\":\"ConnectingServer\"")) {
+                broadcastStage(3, "CONTACTING SERVER");
+            } else if (message.contains("\"noticeType\":\"ConnectedServer\"")
+                    || message.contains("\"noticeType\":\"ActiveTunnel\"")) {
+                broadcastStage(4, "HANDSHAKE");
+            }
+        }
         emitLog(message);
     }
 
     @Override
     public void onListeningSocksProxyPort(int port) {
         socksPort.set(port);
+        if (!stopping) broadcastStage(5, "PORTS UP");
         emitLog("SOCKS 127.0.0.1:" + port);
     }
 
@@ -553,6 +616,15 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private void broadcastStopped() {
         Intent i = new Intent(BROADCAST_STOPPED);
         i.setPackage(getPackageName());
+        sendBroadcast(i);
+    }
+
+    /** Staged connect progress for the UI (see BROADCAST_STAGE). */
+    private void broadcastStage(int stage, String label) {
+        Intent i = new Intent(BROADCAST_STAGE);
+        i.setPackage(getPackageName());
+        i.putExtra(EXTRA_STAGE, stage);
+        i.putExtra(EXTRA_STAGE_LABEL, label);
         sendBroadcast(i);
     }
 

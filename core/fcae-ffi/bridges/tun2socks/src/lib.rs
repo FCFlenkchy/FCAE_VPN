@@ -187,6 +187,11 @@ pub struct Tun2SocksBridge {
     active: Mutex<Option<Active>>,
     running: AtomicBool,
     log_installed: AtomicBool,
+    /// Set when "[tun] up" was logged; "[tun] down" logs only on a matching
+    /// swap back to false. Teardown (abort/stop, session end, supervisor)
+    /// can run several times for one up — without this gate every extra
+    /// pass printed another "[tun] down".
+    up_logged: AtomicBool,
     /// Android VpnService descriptor set out-of-band via the FFI.
     external_fd: AtomicI32,
     /// Dup created in `device_spec` before `Active` is published. Stop
@@ -220,6 +225,7 @@ impl Tun2SocksBridge {
             active: Mutex::new(None),
             running: AtomicBool::new(false),
             log_installed: AtomicBool::new(false),
+            up_logged: AtomicBool::new(false),
             external_fd: AtomicI32::new(-1),
             pending_fd: AtomicI32::new(-1),
             closing: AtomicBool::new(false),
@@ -480,6 +486,7 @@ impl TunBridge for Tun2SocksBridge {
 
         self.running.store(true, Ordering::SeqCst);
         *self.active.lock() = Some(Active { owned_fd, undo });
+        self.up_logged.store(true, Ordering::SeqCst);
         log::info!("[tun] up: {device} <-> {proxy} (in-process)");
         Ok(())
     }
@@ -522,7 +529,9 @@ impl TunBridge for Tun2SocksBridge {
         }
 
         // Leave `closing` set. The next start() clears it.
-        log::info!("[tun] down");
+        if self.up_logged.swap(false, Ordering::SeqCst) {
+            log::info!("[tun] down");
+        }
     }
 
     fn preauthorised_fd(&self) -> Option<i32> {

@@ -65,10 +65,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerPsiphonTransport: Spinner
     private lateinit var editPsiphonSocksPort: android.widget.EditText
     private lateinit var editPsiphonHttpPort: android.widget.EditText
-    // Which egress entries are available for the current protocol; -1 = not
-    // built yet. The adapter is rebuilt only when this changes, because
-    // replacing a Spinner adapter resets its selection.
-    private var egressAvailSig = -1
     /// Regions currently offered, index 0 always "Auto" (empty code).
     private var psiphonRegionCodes: List<String> = listOf("")
     /// Region chosen before the list was known, restored once it arrives.
@@ -80,23 +76,20 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchSocks: SwitchMaterial
     private lateinit var switchHttp: SwitchMaterial
     private lateinit var switchAutoUpdate: SwitchMaterial
+    private lateinit var switchPreReleases: SwitchMaterial
     private lateinit var spinnerSysprofile: Spinner
     private lateinit var editSni: android.widget.EditText
     private lateinit var editForcePeer: android.widget.EditText
     private lateinit var editSocksPort: android.widget.EditText
     private lateinit var editHttpPort: android.widget.EditText
+    private lateinit var editTunDnsV4: android.widget.EditText
+    private lateinit var editTunDnsV6: android.widget.EditText
     private lateinit var editTeam: android.widget.EditText
     private lateinit var editAccessToken: android.widget.EditText
     private lateinit var editAccessEmail: android.widget.EditText
     private lateinit var editRoutesFile: android.widget.EditText
     private lateinit var editRoutesInline: android.widget.EditText
     private lateinit var outerScroll: ScrollView
-
-    // TUN mode always needs the engine's local SOCKS5 listener (tun2socks dials
-    // it), so while TUN is selected the SOCKS5 switch is forced ON and shown
-    // grayed out — the same "auto" behaviour the desktop UI has. The user's own
-    // Proxy-mode choice is remembered here and restored when they switch back.
-    private var socksChoiceForProxyMode = true
 
     /// True when this build came from a pre-release workflow run: its own
     /// version carries a suffix (v1.4.0-beta.2 vs v1.3.2). Drives the channel
@@ -135,6 +128,22 @@ class MainActivity : AppCompatActivity() {
     private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
+                // Staged psiphon progress (like the Tor bootstrap phases):
+                // only repaints the status line while a psiphon connect is
+                // still in flight — READY/FAILED own the terminal states.
+                PsiphonTunnelService.BROADCAST_STAGE -> {
+                    val label = intent.getStringExtra(PsiphonTunnelService.EXTRA_STAGE_LABEL) ?: return
+                    handler.post {
+                        // commandConnecting covers the egress chain, where
+                        // 'connecting' already flipped off when the Aether
+                        // state hit Connected before psiphon finished.
+                        if ((connecting || commandConnecting)
+                                && (isPsiphonSelected() || isEgressPsiphon())) {
+                            statusText.text = "CONNECTING · PSIPHON · $label"
+                            statusText.setTextColor(COLOR_PROGRESS)
+                        }
+                    }
+                }
                 PsiphonTunnelService.BROADCAST_READY -> {
                     val socks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, 0)
                     val http = intent.getIntExtra(PsiphonTunnelService.EXTRA_HTTP, 0)
@@ -349,11 +358,14 @@ class MainActivity : AppCompatActivity() {
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
         switchAutoUpdate = findViewById(R.id.switchAutoUpdate)
+        switchPreReleases = findViewById(R.id.switchPreReleases)
         spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
         editSni = findViewById(R.id.editSni)
         editForcePeer = findViewById(R.id.editForcePeer)
         editSocksPort = findViewById(R.id.editSocksPort)
         editHttpPort = findViewById(R.id.editHttpPort)
+        editTunDnsV4 = findViewById(R.id.editTunDnsV4)
+        editTunDnsV6 = findViewById(R.id.editTunDnsV6)
         editTeam = findViewById(R.id.editTeam)
         editAccessToken = findViewById(R.id.editAccessToken)
         editAccessEmail = findViewById(R.id.editAccessEmail)
@@ -524,9 +536,9 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.parseColor(if (buildIsPrerelease) "#FFF0B429" else "#FF8A93A6"))
         }
 
-        // TUN mode forces SOCKS5 on (tun2socks needs the local SOCKS5 listener),
-        // so keep the switch locked/grayed while TUN is selected. Applied after
-        // loadSettings() so the saved Proxy-mode preference is captured first.
+        // Mode changes re-evaluate the tor hint (and nothing else: no control
+        // is ever locked or re-pointed; TUN simply ignores the SOCKS switch,
+        // which the service forces on for tun2socks anyway).
         spinnerMode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: android.widget.AdapterView<*>?,
@@ -612,6 +624,7 @@ class MainActivity : AppCompatActivity() {
             addAction(PsiphonTunnelService.BROADCAST_FAILED)
             addAction(PsiphonTunnelService.BROADCAST_STOPPED)
             addAction(PsiphonTunnelService.BROADCAST_LOG)
+            addAction(PsiphonTunnelService.BROADCAST_STAGE)
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(vpnStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -815,111 +828,44 @@ class MainActivity : AppCompatActivity() {
      */
     private fun applyModeSocksLock() {
         if (!::spinnerMode.isInitialized || !::switchSocks.isInitialized) return
-        if (spinnerMode.selectedItemPosition == 1) {
-            // Capture the user's Proxy-mode choice before overriding it. While
-            // locked the switch is disabled, so this only happens once.
-            if (switchSocks.isEnabled) socksChoiceForProxyMode = switchSocks.isChecked
-            switchSocks.isChecked = true
-            switchSocks.isEnabled = false
-            editSocksPort.isEnabled = false
-            switchSocks.alpha = 0.5f
-            editSocksPort.alpha = 0.5f
-            switchSocks.text = "SOCKS5 proxy (auto — required for TUN)"
-        } else {
-            switchSocks.isEnabled = true
-            editSocksPort.isEnabled = true
-            switchSocks.alpha = 1.0f
-            editSocksPort.alpha = 1.0f
-            switchSocks.isChecked = socksChoiceForProxyMode
-            switchSocks.text = "SOCKS5 proxy"
-        }
+        // No lock, no forced value: in TUN mode FCAEVpnService forces the
+        // local SOCKS5 listener tun2socks dials ((mode==1 && port==0) ->
+        // 1819), so the switch is simply ignored there.
+        switchSocks.text = "SOCKS5 proxy"
         // The tor hint depends on which mode is active.
         updateTorHint()
     }
 
     /**
-     * Tor sub-options only mean something when Tor is on, and custom bridge
-     * lines only when "Custom lines" is picked. Grey out the rest so the UI
-     * cannot express a config the core would reject.
+     * The egress combo and every Tor knob (bridges, bridge lines) stay fully
+     * interactive in every combo: values the current mode/protocol cannot
+     * use are simply ignored downstream, never grayed and never re-pointed
+     * (round-12 policy, same as desktop).
      */
     private fun applyTorLock() {
         if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
-        // Only Protocol=Psiphon locks the whole combo (the engine is not the
-        // transport then, so no egress applies). Protocol=Tor keeps the
-        // spinner enabled: "Psiphon through the tunnel" chains the AAR behind
-        // the Tor-only engine; the two Tor entries are grayed per-item by
-        // applyEgressAvailability() because Tor-on-Tor is meaningless.
-        val lockEgress = isPsiphonProtocol()
-        spinnerTor.isEnabled = !lockEgress
-        spinnerTor.alpha = if (lockEgress) 0.5f else 1.0f
-        applyEgressAvailability()
-        // Tor-only still uses bridges; egress is unused (value kept for restore).
-        val torOn = isTorOnly() || (!isPsiphonProtocol() && spinnerTor.selectedItemPosition in 1..2)
-        spinnerTorBridges.isEnabled = torOn
-        spinnerTorBridges.alpha = if (torOn) 1.0f else 0.5f
-
-        // Bridge lines are writable for every bridge mode, not just "Custom
-        // lines": pasting obfs4/snowflake lines while that family is picked
-        // overrides the built-in set in the engine (config.rs maps a
-        // non-empty box to the literal lines; empty = built-in "auto").
-        val linesUsable = torOn && spinnerTorBridges.selectedItemPosition in 1..3
-        editTorBridgeLines.isEnabled = linesUsable
-        editTorBridgeLines.alpha = if (linesUsable) 1.0f else 0.5f
-
+        ensureEgressAdapter()
         updateTorHint()
     }
 
     /**
-     * Gray the egress entries the current protocol cannot combine with.
-     *
-     * A plain ArrayAdapter cannot disable individual rows, so this installs a
-     * BaseAdapter whose disabled rows render gray and cannot be picked from
-     * the dropdown. Rebuilt only when the availability set actually changes
-     * (egressAvailSig), because swapping an adapter resets the selection and
-     * re-fires the item listener.
-     *
-     *   Protocol WARP   -> all four entries selectable (unchanged behaviour).
-     *   Protocol Tor    -> Off + "Psiphon through the tunnel" selectable; the
-     *                      two Tor entries are gray (Tor on Tor is a no-op).
-     *   Protocol Psiphon-> whole spinner disabled by applyTorLock().
+     * One-time plain adapter for the egress combo. Nothing is disabled,
+     * nothing is gray: the four entries always render and select normally,
+     * and combos the current protocol cannot use are ignored downstream.
+     * Guarded on adapter==null so the selection is never disturbed.
      */
-    private fun applyEgressAvailability() {
-        if (!::spinnerTor.isInitialized) return
-        val sig = if (isTorOnly()) 1 else 0
-        if (sig == egressAvailSig) return
-        egressAvailSig = sig
-
+    private fun ensureEgressAdapter() {
+        if (!::spinnerTor.isInitialized || spinnerTor.adapter != null) return
         val labels = listOf(
             "Off",
             "Tor through the tunnel",
             "Tunnel through Tor (MASQUE only)",
             "Psiphon through the tunnel",
         )
-        val disabled = if (isTorOnly()) setOf(1, 2) else emptySet()
-        val inflater = android.view.LayoutInflater.from(this)
-        spinnerTor.adapter = object : android.widget.BaseAdapter() {
-            override fun getCount(): Int = labels.size
-            override fun getItem(position: Int): Any = labels[position]
-            override fun getItemId(position: Int): Long = position.toLong()
-            override fun isEnabled(position: Int): Boolean = position !in disabled
-            override fun areAllItemsEnabled(): Boolean = disabled.isEmpty()
-            private fun bind(v: android.view.View?, parent: android.view.ViewGroup, position: Int): android.view.View {
-                val tv = (v ?: inflater.inflate(
-                    android.R.layout.simple_spinner_dropdown_item, parent, false)) as android.widget.TextView
-                tv.text = labels[position]
-                tv.alpha = if (position in disabled) 0.4f else 1.0f
-                return tv
-            }
-            override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View =
-                bind(convertView, parent, position)
-            override fun getDropDownView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View =
-                bind(convertView, parent, position)
-        }
-        // Keep the current pick when it stays valid; otherwise fall back to
-        // Off. setSelection(…, false) suppresses the animation, and the
-        // listener re-running applyTorLock is harmless (sig unchanged).
-        val keep = spinnerTor.selectedItemPosition.coerceIn(0, 3)
-        spinnerTor.setSelection(if (keep in disabled) 0 else keep, false)
+        val a = android.widget.ArrayAdapter(
+            this, android.R.layout.simple_spinner_item, labels)
+        a.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        spinnerTor.adapter = a
     }
 
     /**
@@ -975,16 +921,17 @@ class MainActivity : AppCompatActivity() {
             putBoolean("quick", switchQuick.isChecked)
             putBoolean("lan", switchLan.isChecked)
             putBoolean("logging", switchLogging.isChecked)
-            // In TUN mode the switch is force-locked to ON, so persist the
-            // remembered Proxy-mode preference instead of the forced value.
-            putBoolean("socks", if (isTunModeSelected()) socksChoiceForProxyMode else switchSocks.isChecked)
+            putBoolean("socks", switchSocks.isChecked)
             putBoolean("http", switchHttp.isChecked)
             putBoolean("autoUpdate", switchAutoUpdate.isChecked)
+            putBoolean("checkPreReleases", switchPreReleases.isChecked)
             putString("sni", editSni.text.toString().trim())
             putString("forcePeer", editForcePeer.text.toString().trim())
             putInt("sysprofile", spinnerSysprofile.selectedItemPosition)
             putString("socksPort", editSocksPort.text.toString())
             putString("httpPort", editHttpPort.text.toString())
+            putString("tunDnsV4", editTunDnsV4.text.toString().trim())
+            putString("tunDnsV6", editTunDnsV6.text.toString().trim())
             putString("team", editTeam.text.toString().trim())
             putString("accessToken", editAccessToken.text.toString().trim())
             putString("accessEmail", editAccessEmail.text.toString().trim())
@@ -1012,7 +959,6 @@ class MainActivity : AppCompatActivity() {
         // fields entirely, so there is nothing to migrate for that backend
         // -- the egress entry just resets to Off.
         val savedTor = prefs.getInt("tor", 0)
-        val savedProto = prefs.getInt("protocol", 0)
         if (savedTor > 3) {
             // Pre-Psiphon-egress: 3+ was the old "Tor only" egress entry.
             if (prefs.getInt("backend", 0) != 1) {
@@ -1020,10 +966,9 @@ class MainActivity : AppCompatActivity() {
             }
             spinnerTor.setSelection(0)
         } else {
-            // Protocol=Tor grays egress 1/2 (Tor-on-Tor); restore Off instead
-            // of a grayed entry. 3 (Psiphon through the tunnel) stays valid.
-            val pos = savedTor.coerceIn(0, 3)
-            spinnerTor.setSelection(if (savedProto == 4 && pos in 1..2) 0 else pos)
+            // Restore the pick verbatim, whatever the protocol: entries the
+            // protocol cannot use are ignored downstream, never re-pointed.
+            spinnerTor.setSelection(savedTor.coerceIn(0, 3))
         }
         spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
         editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
@@ -1041,11 +986,14 @@ class MainActivity : AppCompatActivity() {
         switchSocks.isChecked = prefs.getBoolean("socks", true)
         switchHttp.isChecked = prefs.getBoolean("http", true)
         switchAutoUpdate.isChecked = prefs.getBoolean("autoUpdate", true)
+        switchPreReleases.isChecked = prefs.getBoolean("checkPreReleases", false)
         editSni.setText(prefs.getString("sni", ""))
         editForcePeer.setText(prefs.getString("forcePeer", ""))
         spinnerSysprofile.setSelection(prefs.getInt("sysprofile", 0))
         editSocksPort.setText(prefs.getString("socksPort", "1819"))
         editHttpPort.setText(prefs.getString("httpPort", "1820"))
+        editTunDnsV4.setText(prefs.getString("tunDnsV4", FCAEVpnService.DEFAULT_TUN_DNS_V4))
+        editTunDnsV6.setText(prefs.getString("tunDnsV6", FCAEVpnService.DEFAULT_TUN_DNS_V6))
         editTeam.setText(prefs.getString("team", ""))
         editAccessToken.setText(prefs.getString("accessToken", ""))
         editAccessEmail.setText(prefs.getString("accessEmail", ""))
@@ -1332,10 +1280,9 @@ class MainActivity : AppCompatActivity() {
         // Use the core's native async update checker (reqwest-based HTTP fetch).
         // The core spawns a background tokio runtime, fetches version.json from
         // GitHub, parses it, and stores the result. We poll with nativePollUpdate().
-        // Stable channel only: a pre-release on GitHub must never be offered
-        // as an update (was: switchPreRelease toggle, removed from the UI —
-        // includePrereleases=false always, here and on desktop).
-        NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION, false)
+        // Channel gate is the user's toggle: off = stable slot only; on = both
+        // slots compete and the higher version wins (engine: compare_versions).
+        NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION, switchPreReleases.isChecked)
 
         // Poll for result on a background thread
         Thread {

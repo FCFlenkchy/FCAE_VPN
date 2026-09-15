@@ -23,6 +23,13 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class FCAEVpnService extends VpnService {
 
+    /** TUN DNS defaults (also the reset-to values in the UI text fields).
+     *  User-configurable in Settings; comma separated per family. */
+    public static final String DEFAULT_TUN_DNS_V4 = "1.1.1.1,1.0.0.1";
+    public static final String DEFAULT_TUN_DNS_V6 = "2606:4700:4700::1111,2606:4700:4700::1001";
+    /** MainActivity's settings store. */
+    private static final String PREFS_MAIN = "aether_vpn";
+
     /**
      * MTU of the VpnService interface.
      *
@@ -340,6 +347,49 @@ public class FCAEVpnService extends VpnService {
      * The descriptor stays owned by this service: the native side dups it.
      * Resolved reflectively by name/signature in android_jni.cpp.
      */
+    /**
+     * TUN DNS servers from the user's settings (comma separated per family).
+     * Blank entries are skipped; invalid addresses are rejected by
+     * addDnsServer() and skipped; if nothing valid remains the hardcoded
+     * defaults go in so the interface never ends up resolver-less.
+     */
+    private void configureTunDns(Builder builder) {
+        SharedPreferences p = getSharedPreferences(PREFS_MAIN, MODE_PRIVATE);
+        String v4 = p.getString("tunDnsV4", DEFAULT_TUN_DNS_V4);
+        String v6 = p.getString("tunDnsV6", DEFAULT_TUN_DNS_V6);
+        int added = 0;
+        added += addDnsEach(builder, v4);
+        added += addDnsEach(builder, v6);
+        if (added == 0) {
+            addDnsEach(builder, DEFAULT_TUN_DNS_V4);
+        }
+    }
+
+    private static int addDnsEach(Builder builder, String csv) {
+        int added = 0;
+        if (csv == null) return 0;
+        for (String entry : csv.split(",")) {
+            String s = entry.trim();
+            if (s.isEmpty()) continue;
+            // VpnService only carries a bare resolver IP for plain DNS:
+            // "1.1.1.1:53" and "[2606:...::1111]:53" are accepted with their
+            // default port stripped; a non-53 port, a scheme (tls://…) or a
+            // hostname cannot be honoured here and is skipped, not guessed.
+            if (s.startsWith("[") && s.endsWith("]:53")) {
+                s = s.substring(1, s.length() - 4);
+            } else if (s.endsWith(":53") && s.indexOf(':') == s.lastIndexOf(':')) {
+                s = s.substring(0, s.length() - 3);
+            }
+            try {
+                builder.addDnsServer(s);
+                added++;
+            } catch (Exception e) {
+                Log.w(TAG, "addDnsServer rejected '" + s + "': " + e.getMessage());
+            }
+        }
+        return added;
+    }
+
     @SuppressWarnings("unused")
     public int establishTunNow() {
         // A disconnect may have arrived while the backend was still dialling.
@@ -364,10 +414,7 @@ public class FCAEVpnService extends VpnService {
             builder.addRoute("0.0.0.0", 0);
             builder.addRoute("::", 0);
             try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
-            builder.addDnsServer("1.1.1.1");
-            builder.addDnsServer("1.0.0.1");
-            builder.addDnsServer("2606:4700:4700::1111");
-            builder.addDnsServer("2606:4700:4700::1001");
+            configureTunDns(builder);
 
             ParcelFileDescriptor pfd = builder.establish();
             if (pfd == null) {
@@ -763,6 +810,18 @@ public class FCAEVpnService extends VpnService {
     }
 
     private void fullShutdown() {
+        // Idempotent teardown. Disconnect (UI or notification), onRevoke
+        // and onDestroy can ALL fire for the same session, and the first
+        // call's cleanup thread may already be past its generation check
+        // when the second call lands — the second run then repeated
+        // nativeStopBegin/nativeStop, i.e. the tun2socks teardown ran
+        // twice ("tun2socks 2 times torn down"). All fields below are
+        // already cleared/poisoned by the first pass, so a repeat call has
+        // nothing to do.
+        if (shuttingDown && !running && vpnThread == null
+                && shutdownLatch == null && vpnInterface == null) {
+            return;
+        }
         sGeneration.incrementAndGet();
         final long myGen = cleanupGeneration.incrementAndGet();
         running = false;

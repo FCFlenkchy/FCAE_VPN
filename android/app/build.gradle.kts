@@ -160,14 +160,12 @@ tasks.withType<JavaCompile>().configureEach {
 dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
-    // Official AAR, built in CI from core/psiphon into psiphon/libs/ —
-    // consumed DIRECTLY as a local file dependency. App modules may do this
-    // (AGP fully merges classes, jni libgojni.so, manifest and assets); a
-    // library module may not, which is why the old `:psiphon` wrapper module
-    // failed at :psiphon:bundleReleaseAar ("Direct local .aar file
-    // dependencies are not supported when building an AAR"). Process
+    // Official AAR, built in CI from core/psiphon into psiphon/libs/ and
+    // consumed through the pass-through ":psiphon" module (a plain Gradle
+    // module exposing the aar as its only artifact — AGP library modules may
+    // not embed a local .aar, app modules merge them fine). Process
     // isolation is unchanged: PsiphonTunnelService still runs in :psiphon
     // via android:process, so libgojni.so never shares an address space with
     // tun2socks. processR8 keeps are in proguard-rules.pro.
-    implementation(files("../psiphon/libs/ca.psiphon.aar"))
+    implementation(project(":psiphon"))
 }

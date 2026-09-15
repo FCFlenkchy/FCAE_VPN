@@ -55,6 +55,11 @@ struct AppState {
 
     // MASQUE SNI (empty = default consumer-masque.cloudflareclient.com)
     char sni[128] = {};
+    // TUN DNS servers (comma separated per family). The bridge applies them
+    // to the OS when the tunnel comes up and restores on down; defaults
+    // mirror the Android VpnService hardcode.
+    char tun_dns4[96]  = "1.1.1.1,1.0.0.1";
+    char tun_dns6[112] = "2606:4700:4700::1111,2606:4700:4700::1001";
     // Zero Trust (Cloudflare Teams)
     char team_name[128] = {};
     char access_token[256] = {};
@@ -99,6 +104,8 @@ struct AppState {
     // string, and the connect worker immediately snapshots it — same
     // process-lifetime pattern as the other char[] fields.
     std::string psiphon_config_json_built;
+    // Joined "v4,v6" built by to_config() for FcaeDnsConfig.server.
+    char dns_server_built[224] = {0};
 
     // Tor egress (inside the Aether engine, not a separate backend).
     int  tor_mode    = 0;        // FcaeTorMode
@@ -114,7 +121,10 @@ struct AppState {
     bool auto_scroll = true;
     int  prev_log_count = 0;
     bool logging_enabled = true;
-    bool auto_update_check = true;
+    bool auto_update_check  = true;
+    // Update channel: off = stable slot only; on = pre-releases also compete
+    // (engine picks the higher of the two). Default off.
+    bool check_prereleases  = false;
     // NOTE: there is no pre-release update channel. Update checks always pass
     // include_prereleases=false (ui_render.cpp), so only stable releases are
     // ever advertised. The old "Include pre-releases" toggle was removed.
@@ -168,7 +178,13 @@ struct AppState {
         c.sys_profile      = (FcaeSysProfile)sys_profile;
         c.lan_sharing      = lan_sharing;
         c.quick_reconnect  = quick_reconnect;
-        c.socks_port       = socks_enabled ? socks_port : 0;
+        // TUN tunnels through the local SOCKS5 listener tun2socks dials, so
+        // the checkbox is ignored in that mode: a port is always sent (same
+        // rule as Android's FCAEVpnService). Port 0 means "off" for proxy
+        // mode only.
+        c.socks_port       = (mode == 1)
+                                   ? (socks_port != 0 ? socks_port : (uint16_t)1819)
+                                   : (socks_enabled ? socks_port : (uint16_t)0);
         c.http_port        = http_enabled ? http_port : 0;
         c.force_peer       = force_peer[0] ? force_peer : nullptr;
         c.config_path      = config_path;
@@ -183,6 +199,11 @@ struct AppState {
         c.obfuscation.ech_enabled      = ech_enabled;
 
         c.dns.sni = sni[0] ? sni : nullptr;
+        // TUN DNS override: NULL keeps the bridge's default (no system DNS
+        // change); a value is applied on `up` and restored on `down`.
+        std::snprintf(dns_server_built, sizeof(dns_server_built), "%s%s%s",
+                      tun_dns4, (tun_dns4[0] && tun_dns6[0]) ? "," : "", tun_dns6);
+        c.dns.server = dns_server_built[0] ? dns_server_built : nullptr;
 
         c.routing.rules_file   = routes_file[0] ? routes_file : nullptr;
         c.routing.rules_inline = routes_inline[0] ? routes_inline : nullptr;

@@ -111,6 +111,15 @@
                 android:text="Auto-check for updates"
                 android:textColor="#FFE0E4EE" />
 
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchPreReleases"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:checked="false"
+                android:text="Also check for pre-releases"
+                android:textColor="#FFE0E4EE" />
+
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -485,6 +494,46 @@
                 android:inputType="number"
                 android:padding="12dp"
                 android:text="1820"
+                android:textColor="#FFE8ECF4"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="TUN DNS — IPv4 (comma separated)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editTunDnsV4"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:inputType="textUri"
+                android:padding="12dp"
+                android:text="1.1.1.1,1.0.0.1"
+                android:textColor="#FFE8ECF4"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="TUN DNS — IPv6 (comma separated)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editTunDnsV6"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:inputType="textUri"
+                android:padding="12dp"
+                android:text="2606:4700:4700::1111,2606:4700:4700::1001"
                 android:textColor="#FFE8ECF4"
                 android:textSize="14sp" />
 

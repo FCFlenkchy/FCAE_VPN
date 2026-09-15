@@ -19,9 +19,11 @@ dependencyResolutionManagement {
 
 rootProject.name = "FCAE_VPN"
 include(":app")
-// NOTE: no ":psiphon" library module. AGP refuses to build a library AAR
-// that has a direct local .aar file dependency (:psiphon:bundleReleaseAar
-// failed with "Direct local .aar file dependencies are not supported when
-// building an AAR" — the wrapped psiphon/libs/ca.psiphon.aar was never going
-// to be merged). :app consumes the CI-built AAR from psiphon/libs/ directly;
-// android/psiphon keeps only its README and the libs/ staging directory.
+include(":psiphon")
+// ":psiphon" is a plain pass-through Gradle module (no AGP applied) whose
+// only artifact is the CI-built AAR — see android/psiphon/build.gradle.kts.
+// A real Android *library* module cannot carry a local .aar (AGP's
+// bundleReleaseAar rejects them), so this facade is used: :app gets proper
+// project wiring while the AAR merges as a file artifact exactly like a
+// files(...) dependency would.
+// android/psiphon keeps its README and the libs/ staging directory.

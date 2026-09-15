@@ -127,6 +127,8 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.tor_mode);
     h = fnv_value(h, g_app.tor_bridges);
     h = fnv_cstr(h, g_app.tor_bridge_lines);
+    h = fnv_cstr(h, g_app.tun_dns4);
+    h = fnv_cstr(h, g_app.tun_dns6);
     h = fnv_cstr(h, g_app.noize_profile);
     h = fnv_cstr(h, g_app.force_peer);
     h = fnv_cstr(h, g_app.config_path);
@@ -322,6 +324,8 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "backend") g_app.backend = atoi(val.c_str());
     else if (key == "tor_socks_port") g_app.tor_socks_port = atoi(val.c_str());
     else if (key == "psiphon_region") snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region), "%s", val.c_str());
+    else if (key == "tun_dns4") snprintf(g_app.tun_dns4, sizeof(g_app.tun_dns4), "%s", val.c_str());
+    else if (key == "tun_dns6") snprintf(g_app.tun_dns6, sizeof(g_app.tun_dns6), "%s", val.c_str());
     else if (key == "psiphon_region_list")
         snprintf(g_app.psiphon_region_list, sizeof(g_app.psiphon_region_list), "%s", val.c_str());
     else if (key == "psiphon_transport") g_app.psiphon_transport = atoi(val.c_str());
@@ -355,6 +359,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
     else if (key == "auto_update_check") g_app.auto_update_check = atoi(val.c_str()) != 0;
+    else if (key == "check_prereleases") g_app.check_prereleases = atoi(val.c_str()) != 0;
     else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
     else if (key == "engine_log") g_app.engine_log = atoi(val.c_str());
     else if (key == "tor_mode") g_app.tor_mode = atoi(val.c_str());
@@ -415,9 +420,12 @@ static void save_config() {
     fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled ? 1 : 0);
     fprintf(f, "ech_enabled=%d\n", g_app.ech_enabled ? 1 : 0);
     fprintf(f, "sni=%s\n", g_app.sni);
+    fprintf(f, "tun_dns4=%s\n", g_app.tun_dns4);
+    fprintf(f, "tun_dns6=%s\n", g_app.tun_dns6);
     fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
     fprintf(f, "auto_scroll=%d\n", g_app.auto_scroll ? 1 : 0);
     fprintf(f, "auto_update_check=%d\n", g_app.auto_update_check ? 1 : 0);
+    fprintf(f, "check_prereleases=%d\n", g_app.check_prereleases ? 1 : 0);
     fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
     fprintf(f, "engine_log=%d\n", g_app.engine_log);
     fprintf(f, "tor_mode=%d\n", g_app.tor_mode);
@@ -617,7 +625,7 @@ void ui_init() {
 
     // Auto-trigger update check once on startup if enabled
     if (g_app.auto_update_check) {
-        fcae_check_update_async(FCAE_VERSION, /*include_prereleases=*/false); // stable releases only
+        fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
     }
 }
 
@@ -929,7 +937,7 @@ void render_ui() {
                 s_update_available = false;
                 snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    fcae_check_update_async(FCAE_VERSION, /*include_prereleases=*/false); // stable releases only
+                    fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
                     s_update_checked = false;
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
@@ -962,14 +970,14 @@ void render_ui() {
                 s_update_checked = true;
                 snprintf(s_update_status, sizeof(s_update_status), "%.127s", info.status_message);
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    fcae_check_update_async(FCAE_VERSION, /*include_prereleases=*/false); // stable releases only
+                    fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
                     s_update_checked = false;
                     s_update_available = false;
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
             } else {
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    fcae_check_update_async(FCAE_VERSION, /*include_prereleases=*/false); // stable releases only
+                    fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
                     s_update_checked = false;
                     s_update_available = false;
                     s_check_start_time = std::chrono::steady_clock::now();
@@ -1195,38 +1203,25 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Proxy Ports");
             ImGui::PushItemWidth(100);
-            // TUN mode tunnels through the local SOCKS5 proxy, so keep it
-            // forced on (grayed/auto) and lock the checkbox while TUN is
-            // selected. Leaving TUN restores the user's own Proxy-mode choice
-            // instead of leaving the forced value behind.
-            static int socks_mode_seen = -1;
-            static bool socks_choice_for_proxy = true;
-            if (socks_mode_seen != g_app.mode) {
-                if (g_app.mode == 0 && socks_mode_seen == 1) {
-                    g_app.socks_enabled = socks_choice_for_proxy;
-                }
-                socks_mode_seen = g_app.mode;
-            }
-            if (g_app.mode == 0) {
-                socks_choice_for_proxy = g_app.socks_enabled;
-            } else {
-                g_app.socks_enabled = true;
-                ImGui::BeginDisabled();
-            }
+            // No forcing, no locking: the checkbox governs proxy mode only.
+            // In TUN the local SOCKS5 listener is mandatory, so to_config()
+            // ignores the checkbox there and always raises it (same rule as
+            // Android's FCAEVpnService).
             ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
-            if (g_app.mode == 1) ImGui::EndDisabled();
             ImGui::SameLine(0, 20);
-            if (!g_app.socks_enabled) ImGui::BeginDisabled();
             ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
-            if (!g_app.socks_enabled) ImGui::EndDisabled();
             ImGui::Checkbox("HTTP", &g_app.http_enabled);
             ImGui::SameLine(0, 20);
-            if (!g_app.http_enabled) ImGui::BeginDisabled();
             ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
-            if (!g_app.http_enabled) ImGui::EndDisabled();
             ImGui::PopItemWidth();
             if (g_app.mode == 1)
-                ImGui::TextDisabled("SOCKS5 is required for TUN mode");
+                ImGui::TextDisabled("TUN always raises the local SOCKS5 listener; this checkbox only governs proxy mode.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("TUN DNS (comma separated; applied on up, restored on down; empty = platform default)");
+            ImGui::PushItemWidth(-1);
+            ImGui::InputTextWithHint("##tun_dns4", "IPv4 DNS — e.g. 1.1.1.1,1.0.0.1", g_app.tun_dns4, sizeof(g_app.tun_dns4));
+            ImGui::InputTextWithHint("##tun_dns6", "IPv6 DNS — e.g. 2606:4700:4700::1111,2606:4700:4700::1001", g_app.tun_dns6, sizeof(g_app.tun_dns6));
+            ImGui::PopItemWidth();
             ImGui::Spacing();
             ImGui::InputTextWithHint("##force_peer", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));
             ImGui::InputText("Identity file (aether.toml)", g_app.config_path, sizeof(g_app.config_path));
@@ -1370,35 +1365,20 @@ void render_ui() {
                 "Tunnel through Tor (MASQUE only)",
                 "Psiphon through the tunnel",
             };
-            // Protocol Tor: Off and "Psiphon through the tunnel" are valid
-            // (the chain runs Aether(Tor-only) -> Psiphon); the two Tor
-            // entries would be Tor on Tor, so they are relabeled and snap
-            // back if a stale config still points at them.
+            // No graying, no locking, no relabeling: all four entries are
+            // always selectable. An entry that does not apply to the current
+            // protocol is simply ignored — tor_mode is normalized at use
+            // time (ui_render.h) — and the pick is never touched, so
+            // switching protocols restores it verbatim. Same as Android.
             const bool proto_tor = (g_app.protocol == 4);
-            if (proto_tor && (g_app.tor_mode == 1 || g_app.tor_mode == 2))
-                g_app.tor_mode = 0;
-            const char* egress_labels[4] = {
-                kEgressModes[0],
-                proto_tor ? "Tor through the tunnel (n/a: already Tor)" : kEgressModes[1],
-                proto_tor ? "Tunnel through Tor (n/a: already Tor)"   : kEgressModes[2],
-                kEgressModes[3],
-            };
             if (g_app.tor_mode < 0 || g_app.tor_mode > 3) g_app.tor_mode = 0;
-            // Only Protocol Psiphon locks the combo: there is no engine to
-            // apply an egress to then. Do not reset the value, so switching
-            // protocol restores the last pick.
-            const bool lock_egress = (g_app.backend == 1);
-            if (lock_egress) ImGui::BeginDisabled();
-            ImGui::Combo("Egress", &g_app.tor_mode, egress_labels, 4);
-            if (lock_egress) ImGui::EndDisabled();
+            ImGui::Combo("Egress", &g_app.tor_mode, kEgressModes, 4);
             if (g_app.backend == 1)
                 ImGui::TextDisabled("Psiphon is the transport; egress applies to Aether sessions only.");
             else if (proto_tor && g_app.tor_mode == 3)
                 ImGui::TextDisabled("Psiphon chains through the Tor-only SOCKS (UpstreamProxyURL): Tor first, then Psiphon exits.");
             else if (proto_tor)
                 ImGui::TextDisabled("Tor-only engine. Egress can chain Psiphon through it.");
-            else if (g_app.backend == 1)
-                ImGui::TextDisabled("Psiphon is the transport; egress is unused.");
             // In TUN mode the routing to the right port happens internally,
             // but in proxy mode the user dials the ports by hand -- tell
             // them which one actually carries tor traffic, or they will use
@@ -1422,21 +1402,16 @@ void render_ui() {
                     ImGui::TextDisabled(
                         "Proxy mode: dial the Tor SOCKS port below; Tor-only has no WARP tunnel.");
             }
-            // Protocol Tor (Tor only) still needs the SOCKS port and bridge
-            // knobs even though the egress combo is locked to Off.
-            const bool tor_opts = g_app.protocol == 4 ||
-                                  (g_app.backend != 1 && (g_app.tor_mode == 1 || g_app.tor_mode == 2));
-            if (!tor_opts) ImGui::BeginDisabled();
+            // All Tor knobs stay editable in every combo; the engine
+            // ignores them when no Tor is in play (to_config normalises),
+            // same ignore-not-gray policy as the egress combo above.
             ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port);
             const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };
             ImGui::Combo("Bridges", &g_app.tor_bridges, tor_bridges, 4);
-            // Writable for obfs4/snowflake too: pasted lines override the
-            // built-in set in the engine; empty box = built-in "auto".
-            if (g_app.tor_bridges == 0) ImGui::BeginDisabled();
+            // Writable even with "No bridges": pasted lines override the
+            // built-in set once a bridge family is picked; empty = "auto".
             ImGui::InputTextMultiline("##tor_bridge_lines", g_app.tor_bridge_lines,
                                       sizeof(g_app.tor_bridge_lines), ImVec2(0, 60));
-            if (g_app.tor_bridges == 0) ImGui::EndDisabled();
-            if (!tor_opts) ImGui::EndDisabled();
             if (g_app.tor_mode == 2 && (g_app.protocol == 1 || g_app.protocol == 2))
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
                                    "Tor is TCP-only: pick MASQUE for this mode.");
@@ -1545,6 +1520,8 @@ void render_ui() {
             ImGui::Checkbox("Auto-scroll", &g_app.auto_scroll);
             ImGui::SameLine(0, 12);
             ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
+            ImGui::SameLine(0, 20);
+            ImGui::Checkbox("Also check for pre-releases", &g_app.check_prereleases);
             ImGui::SameLine(0, 12);
             if (ImGui::Button("Clear")) g_app.logs.clear();
             ImGui::SameLine(0, 8);
