@@ -369,8 +369,8 @@ jobs:
         run: |
           set -euo pipefail
           # Use this submodule's vendored gomobile and Docker-pinned Go/NDK.
-          # Do not mix Oblivion's module-aware fork tooling with this upstream
-          # checkout: this revision's make.bash explicitly uses GOPATH mode.
+          # Do not mix module-aware fork tooling with this upstream checkout:
+          # this revision's make.bash explicitly uses GOPATH mode.
           ROOT="$PWD"
           # Build the gitlink pinned by FCAE, not the tip of the upstream branch.
           PSIPHON_REV=$(git rev-parse HEAD:core/psiphon)

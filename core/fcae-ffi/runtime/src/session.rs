@@ -659,7 +659,7 @@ mod tests {
                 http: None,
                 peer_ip: Some("203.0.113.7".into()),
                 udp: true,
-                dns_over_https: false,
+                psiphon_dns: false,
             }
         }
         async fn wait(&self) -> Result<()> {
@@ -748,7 +748,7 @@ mod tests {
         impl BackendHandle for ExitHandle {
             fn endpoints(&self) -> Endpoints {
                 Endpoints { socks: Some("127.0.0.1:1080".parse().unwrap()), http: None,
-                    peer_ip: None, udp: false, dns_over_https: true }
+                    peer_ip: None, udp: false, psiphon_dns: true }
             }
             async fn wait(&self) -> Result<()> { std::future::pending().await }
             async fn stop(&self, _: Duration) -> Result<()> { Ok(()) }
@@ -768,7 +768,7 @@ mod tests {
         impl TunBridge for CheckTun {
             fn start(&self, _: &SessionConfig, ep: &Endpoints) -> Result<()> {
                 assert_eq!(ep.socks.unwrap().port(), 1080);
-                assert!(ep.dns_over_https);
+                assert!(ep.psiphon_dns);
                 assert!(!ep.udp);
                 assert_eq!(ep.peer_ip.as_deref(), Some("203.0.113.7"));
                 self.checked.store(true, Ordering::SeqCst);

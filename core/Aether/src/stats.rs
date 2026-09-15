@@ -6,6 +6,8 @@ static TOTAL_RX: AtomicU64 = AtomicU64::new(0);
 static TOTAL_TX: AtomicU64 = AtomicU64::new(0);
 static WINDOW_RX: AtomicU64 = AtomicU64::new(0);
 static WINDOW_TX: AtomicU64 = AtomicU64::new(0);
+static PEER: Mutex<Option<std::net::SocketAddr>> = Mutex::new(None);
+
 static RTT_MS: AtomicU64 = AtomicU64::new(0);
 
 struct RateState {
@@ -93,6 +95,7 @@ pub fn cached_rates() -> (u64, u64) {
 }
 
 pub fn reset() {
+    *PEER.lock().unwrap_or_else(|e| e.into_inner()) = None;
     TOTAL_RX.store(0, Ordering::Relaxed);
     TOTAL_TX.store(0, Ordering::Relaxed);
     WINDOW_RX.store(0, Ordering::Relaxed);
@@ -101,4 +104,22 @@ pub fn reset() {
     if let Ok(mut g) = RATE.lock() {
         *g = None;
     }
+}
+
+
+pub fn peer() -> Option<std::net::SocketAddr> {
+    *PEER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub struct PeerGuard;
+impl Drop for PeerGuard {
+    fn drop(&mut self) {
+        *PEER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Publish only established gateways; clear on failure, reconnect or abort.
+pub fn connected_peer(peer: std::net::SocketAddr) -> PeerGuard {
+    *PEER.lock().unwrap_or_else(|e| e.into_inner()) = Some(peer);
+    PeerGuard
 }

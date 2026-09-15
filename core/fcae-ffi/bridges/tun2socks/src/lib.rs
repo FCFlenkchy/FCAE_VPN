@@ -424,8 +424,8 @@ impl TunBridge for Tun2SocksBridge {
         // socks5t tun2socks drops those flows locally in silence.
         let scheme = if endpoints.udp {
             "socks5"
-        } else if endpoints.dns_over_https {
-            log::info!("[tun] Psiphon DNS: Cloudflare DoH over tunnel TCP/443 (no direct DNS fallback)");
+        } else if endpoints.psiphon_dns {
+            log::info!("[tun] Psiphon DNS: native UDP gateway through the selected exit (no fallback)");
             "socks5p"
         } else {
             "socks5t"

@@ -437,8 +437,7 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 }
 
 // Legacy PUBLIC remote server list + signature key, as shipped in the
-// open-source Psiphon 3 clients (community clients like Oblivion embed the
-// same values). Bootstrap fallback for configs without any server-entry
+// open-source Psiphon 3 clients. Bootstrap source for configs without any server-entry
 // source; legacy infrastructure that may be retired upstream.
 const (
 	psiDefaultServerListURL = "https://s3.amazonaws.com//psiphon/web/mjr4-p23r-puwl/server_list_compressed"

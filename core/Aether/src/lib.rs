@@ -1509,6 +1509,7 @@ async fn run_masque_tunnel(
     )
     .await?;
 
+    let _peer_guard = stats::connected_peer(dial);
     let socks_listener = socks::bind_listener("socks5", listen).await?;
     let http_listener = bind_http_proxy().await?;
 
@@ -1740,6 +1741,7 @@ async fn run_masque_in_masque(
         ));
     };
 
+    let _peer_guard = stats::connected_peer(peer);
     let socks_listener = socks::bind_listener("socks5", listen).await?;
     let http_listener = bind_http_proxy().await?;
 
@@ -2307,6 +2309,7 @@ async fn run_wireguard_tunnel(
 
     let mut tasks = TaskGuard::new();
 
+    let _peer_guard = stats::connected_peer(peer);
     let socks_listener = socks::bind_listener("socks5", listen).await?;
     let http_listener = bind_http_proxy().await?;
 
@@ -2582,6 +2585,7 @@ async fn run_warp_in_warp(
         establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
     tasks.push(inner_exit.abort_handle());
 
+    let _peer_guard = stats::connected_peer(peer);
     let socks_listener = socks::bind_listener("socks5", listen).await?;
     let http_listener = bind_http_proxy().await?;
 

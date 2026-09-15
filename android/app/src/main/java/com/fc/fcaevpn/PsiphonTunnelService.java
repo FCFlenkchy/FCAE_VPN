@@ -309,15 +309,15 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         bytesUp.set(0);
         bytesDown.set(0);
         broadcastStage(1, "CONNECTING");
-        // Read the embedded server-entry list once per start: it feeds both
-        // the log line and startTunneling() (two reads would double-log the
-        // "importing embedded server entries" notice).
-        final String embeddedList = readEmbeddedServerList();
-        emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")")
-                + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy)
-                + sourceSummary(embeddedList));
         libraryWorker.execute(() -> {
             try {
+                if (stopping) return;
+                // Asset I/O must not delay the main-thread start/stop buttons.
+                final String embeddedList = readEmbeddedServerList();
+                if (stopping) return;
+                emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")")
+                        + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy)
+                        + sourceSummary(embeddedList));
                 // The embedded list is the body of an encoded server entry
                 // list (same format as a remote server_list payload); ""
                 // falls back to whatever the datastore still holds plus any
@@ -507,8 +507,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             }
             // Out-of-band server entries: the LEGACY PUBLIC remote server
             // list (the URL + signature key the open-source Psiphon 3
-            // clients shipped — community clients like Oblivion still embed
-            // them). This is what makes an unprovisioned build connect on a
+            // clients shipped). This is what makes an unprovisioned build connect on a
             // fresh datastore instead of sitting on CandidateServers count 0.
             // There is no UI for overriding it any more; a bundled
             // assets/psiphon_servers.txt (read in readEmbeddedServerList())

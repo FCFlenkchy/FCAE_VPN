@@ -597,11 +597,7 @@ impl BackendHandle for AetherHandle {
             http: (http_port != 0)
                 .then(|| format!("127.0.0.1:{}", http_port).parse().ok())
                 .flatten(),
-            peer_ip: self.cfg.force_peer.as_ref().and_then(|p| {
-                p.rsplit_once(':')
-                    .map(|(host, _)| host.trim_matches(['[', ']']).to_string())
-                    .or_else(|| Some(p.clone()))
-            }),
+            peer_ip: aether_engine::stats::peer().map(|peer| peer.ip().to_string()),
             // The engine's SOCKS listener carries UDP (gVisor netstack) —
             // but only while the egress is WARP. Tor has no UDP: every UDP
             // flow sent there (rare stray DNS, QUIC probes) dies with a
@@ -609,7 +605,7 @@ impl BackendHandle for AetherHandle {
             // whenever a Tor mode is active and let tun2socks drop those
             // flows locally instead.
             udp: self.cfg.tor.mode == FcaeTorMode::Off,
-            dns_over_https: false,
+            psiphon_dns: false,
         }
     }
 
@@ -729,6 +725,7 @@ impl BackendHandle for AetherHandle {
 
 
     fn counters(&self) -> Counters {
+        self.sink.set_peer(aether_engine::stats::peer().map(|p| p.to_string()).unwrap_or_default());
         let (rx, tx) = aether_engine::rates();
         Counters {
             total_rx: aether_engine::total_rx(),

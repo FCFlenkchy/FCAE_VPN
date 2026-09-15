@@ -52,6 +52,13 @@ use fcae_runtime::error::{CoreError, Result};
 #[cfg(all(feature = "enabled", psiphon_linked))]
 static STARTING: AtomicBool = AtomicBool::new(false);
 
+// Keep async teardown owned until the next start. Dropping an awaited start
+// must not lose this handle or allow an old stop to kill a fresh controller.
+#[cfg(all(feature = "enabled", psiphon_linked))]
+static STOP_TASK: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>> =
+    tokio::sync::Mutex::const_new(None);
+
+
 /// Egress regions reported by the last successful handshake.
 ///
 /// Psiphon only learns these after connecting, so the UI shows "Auto" until
@@ -261,7 +268,7 @@ impl Backend for PsiphonBackend {
                     Some((false, None)) => {},
                     _ => return Err(CoreError::StartFailed("Android Psiphon exit failed".into())),
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
         if socks == 0 {
@@ -290,6 +297,13 @@ impl Backend for PsiphonBackend {
         }
         // From here on every exit path must clear STARTING.
         let _guard = StartGuard;
+        {
+            let mut previous = STOP_TASK.lock().await;
+            if let Some(task) = previous.as_mut() {
+                task.await.map_err(|e| CoreError::Internal(format!("Psiphon cleanup failed: {e}")))?;
+            }
+            *previous = None;
+        }
 
         ffi::install_log_hook();
         // Android hands the protect hook in through
@@ -358,10 +372,8 @@ impl Backend for PsiphonBackend {
                     cx.config.start_timeout()
                 )));
             }
-            // state()/socks_port() are cheap cgo getters: poll at 50 ms
-            // (was 250 ms) so a completed handshake is reported to the UI
-            // at once instead of up to a quarter second late.
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Cheap state/port getters: cap added readiness latency at 10 ms.
+            tokio::time::sleep(Duration::from_millis(10)).await;
         };
 
         let found = ffi::regions();
@@ -529,7 +541,7 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     // A fresh datastore with no server-entry source can never connect (the
     // bootstrap chicken-and-egg). Fall back to the LEGACY PUBLIC remote
     // server list — the same URL + signature key the open-source Psiphon 3
-    // clients shipped (and community clients like Oblivion still ship) — so
+    // clients shipped — so
     // an unprovisioned build works out of the box. Explicit user config
     // (embedded list / remote list / obfuscated lists / target entry) always
     // wins. NOTE: this is legacy infrastructure; partner provisioning from
@@ -1017,7 +1029,7 @@ impl BackendHandle for PsiphonHandle {
             peer_ip: None,
             // Psiphon's local SOCKS5 is CONNECT-only: no UDP ASSOCIATE.
             udp: false,
-            dns_over_https: true,
+            psiphon_dns: true,
         }
     }
 
@@ -1085,7 +1097,7 @@ impl BackendHandle for PsiphonHandle {
             // disconnect on. The cancel token is already set and `stopped`
             // makes wait() exit immediately, so the tunnel is down from the
             // caller's perspective; the blocking stop runs on its own task.
-            tokio::task::spawn_blocking(ffi::stop);
+            *STOP_TASK.lock().await = Some(tokio::task::spawn_blocking(ffi::stop));
         }
         Ok(())
     }
@@ -1149,11 +1161,11 @@ mod tests {
     }
 
     #[test]
-    fn psiphon_endpoint_requires_tunneled_https_dns() {
+    fn psiphon_endpoint_requires_native_dns() {
         let handle = PsiphonHandle { host_lease: None, socks_port: 1080, http_port: 8080, stopped: AtomicBool::new(false) };
         let endpoints = handle.endpoints();
         assert!(!endpoints.udp);
-        assert!(endpoints.dns_over_https);
+        assert!(endpoints.psiphon_dns);
     }
 
     #[test]

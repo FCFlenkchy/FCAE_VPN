@@ -37,8 +37,6 @@ import "C"
 
 import (
 	"bytes"
-	"crypto/tls"
-	"net/http"
     "os"
 	"context"
 	"encoding/binary"
@@ -92,7 +90,7 @@ const (
 const (
 	schemeSocks5  = "socks5"
 	schemeSocks5t = "socks5t"
-	schemePsiphon = "socks5p" // CONNECT-only, DNS via tunneled HTTPS/443
+	schemePsiphon = "socks5p" // CONNECT-only, native UDP-gateway DNS
 )
 
 // blackholeConn is a net.PacketConn that swallows every write and blocks
@@ -130,22 +128,22 @@ func (c *blackholeConn) SetWriteDeadline(time.Time) error { return nil }
 // the whole device unable to resolve anything.
 type udpDroppingProxy struct {
 	proxy.Proxy
-	doh bool
+	psiphonDNS bool
     ctx context.Context
 }
 
 func (p udpDroppingProxy) DialUDP(m *metadata.Metadata) (net.PacketConn, error) {
 	if m.DstPort == 53 && m.DstIP.IsValid() {
-		return newDNSRelay(p.ctx, p.Proxy, m.DstIP, p.doh, nil), nil
+		return newDNSRelay(p.ctx, p.Proxy, m.DstIP, p.psiphonDNS, nil), nil
 	}
 	return &blackholeConn{done: make(chan struct{})}, nil
 }
 
 // Psiphon's official SOCKS listener is CONNECT-only. Intercept TCP/53 too:
 // Android and desktop resolvers may retry a UDP lookup over TCP. Forwarding
-// that retry to an exit which denies TCP/53 defeats the UDP HTTPS relay.
+// that retry to an exit which denies TCP/53 defeats the native DNS relay.
 func (p udpDroppingProxy) DialContext(ctx context.Context, m *metadata.Metadata) (net.Conn, error) {
-    if !p.doh || m.DstPort != 53 || !m.DstIP.IsValid() {
+    if !p.psiphonDNS || m.DstPort != 53 || !m.DstIP.IsValid() {
         return p.Proxy.DialContext(ctx, m)
     }
     if err := ctx.Err(); err != nil { return nil, err }
@@ -165,7 +163,7 @@ func (p udpDroppingProxy) DialContext(ctx context.Context, m *metadata.Metadata)
             query := make([]byte, size)
             if _, err := io.ReadFull(server, query); err != nil { return }
             if query[2]&0x80 != 0 { return }
-            answer, err := relay.dnsOverHTTPS(query)
+            answer, err := relay.dnsOverGateway(query)
             if err != nil {
                 emit(logWarn, "[dns] Psiphon TCP DNS relay failed: %v", err)
                 answer = dnsServfail(query)
@@ -177,15 +175,15 @@ func (p udpDroppingProxy) DialContext(ctx context.Context, m *metadata.Metadata)
     return client, nil
 }
 
-func newDNSRelay(parent context.Context, inner proxy.Proxy, resolver netip.Addr, doh bool, stream net.Conn) *dnsRelayConn {
+func newDNSRelay(parent context.Context, inner proxy.Proxy, resolver netip.Addr, psiphonDNS bool, stream net.Conn) *dnsRelayConn {
     ctx, cancel := context.WithCancel(parent)
     c := &dnsRelayConn{
-        doh: doh, ctx: ctx, cancel: cancel, pending: make(chan struct{}, 4),
+        psiphonDNS: psiphonDNS, ctx: ctx, cancel: cancel, pending: make(chan struct{}, 4),
         inner: inner, resolver: resolver, replies: make(chan dnsReply, 8),
         done: make(chan struct{}), stream: stream,
         deadlineChanged: make(chan struct{}),
     }
-    if doh { c.https = newDNSHTTPSClient(inner, resolver) }
+
     context.AfterFunc(ctx, func() { c.Close() })
     return c
 }
@@ -200,7 +198,6 @@ func dnsServfail(query []byte) []byte {
 // dnsRelayTimeout bounds one tunneled DNS exchange. A warmed Tor circuit
 // answers in ~1s; bound each TCP exchange when the egress is gone.
 const dnsRelayTimeout = 8 * time.Second
-const dnsHTTPSRelayTimeout = 8 * time.Second
 
 // dnsReply is one completed DNS-over-TCP answer plus the address it must be
 // reported from (the queried resolver -- apps match src+ID).
@@ -212,11 +209,10 @@ type dnsReply struct {
 
 // dnsRelayConn is the PacketConn handed to one UDP flow whose destination is
 // a resolver. The wire format of a DNS message is identical over UDP and
-// TCP (length-prefixed) or HTTPS (application/dns-message). Replies retain
+// TCP (length-prefixed) or the Psiphon UDP gateway. Replies retain
 // the original query ID and appear to come from the intercepted resolver.
 type dnsRelayConn struct {
-	doh bool
-    https *dnsHTTPSClient
+	psiphonDNS bool
     stream net.Conn
     deadlineMu sync.Mutex
     readDeadline time.Time
@@ -253,7 +249,7 @@ func (c *dnsRelayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		defer func() { <-c.pending }()
 		var resp []byte
 		var err error
-		if c.doh { resp, err = c.dnsOverHTTPS(payload) } else { resp, err = c.dnsOverTCP(payload, udpAddr) }
+		if c.psiphonDNS { resp, err = c.dnsOverGateway(payload) } else { resp, err = c.dnsOverTCP(payload, udpAddr) }
 		if err != nil {
 			// A failed query is not a fatal UDP-association error. Return SERVFAIL
 			// so the OS can retry instead of destroying the entire DNS flow.
@@ -351,7 +347,6 @@ func (c *dnsRelayConn) Close() error {
         c.cancel()
         close(c.done)
         if c.stream != nil { c.stream.Close() }
-        if c.https != nil { c.https.client.CloseIdleConnections() }
     })
 	return nil
 }
@@ -368,87 +363,69 @@ func (c *dnsRelayConn) SetReadDeadline(t time.Time) error {
 }
 func (c *dnsRelayConn) SetWriteDeadline(time.Time) error { return nil }
 
-// Keep HTTPS connections per DNS flow instead of opening a fresh SSH
-// forward and TLS connection for every lookup. All bootstraps are literal
-// IPs dialled through the selected exit; never fall back to local DNS/direct.
-type dnsHTTPSClient struct {
-    url string
-    client *http.Client
-}
-
-// A resolver must have an explicit HTTPS mapping. Do not substitute another
-// provider, IPv4/IPv6 address, or the OS resolver when it is unavailable.
-func newDNSHTTPSClient(inner proxy.Proxy, resolver netip.Addr) *dnsHTTPSClient {
-    var host string
-    switch resolver.String() {
-    case "1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001":
-        host = "cloudflare-dns.com"
-    case "8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844":
-        host = "dns.google"
-    case "9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9":
-        host = "dns.quad9.net"
-    default:
-        return nil
-    }
-    transport := &http.Transport{
-        Proxy: nil,
-        MaxResponseHeaderBytes: 64 * 1024,
-        TLSClientConfig: &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12},
-        MaxConnsPerHost: 4, MaxIdleConnsPerHost: 2,
-        IdleConnTimeout: 20 * time.Second,
-        TLSHandshakeTimeout: 4 * time.Second,
-        DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-            if address != host+":443" { return nil, fmt.Errorf("unexpected DoH destination: %s", address) }
-            return inner.DialContext(ctx, &metadata.Metadata{
-                Network: metadata.TCP, DstIP: resolver, DstPort: 443,
-            })
-        },
-    }
-    return &dnsHTTPSClient{
-        url: "https://"+host+"/dns-query",
-        client: &http.Client{Transport: transport,
-            CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-    }
-}
-
-func (c *dnsRelayConn) dnsOverHTTPS(query []byte) ([]byte, error) {
-    if c.https == nil {
-        return nil, fmt.Errorf("no HTTPS mapping for selected DNS resolver %s; no substitution attempted", c.resolver)
-    }
-    ctx, cancel := context.WithTimeout(c.ctx, dnsHTTPSRelayTimeout)
+// Psiphon's server intercepts this special SOCKS CONNECT destination and
+// speaks BadVPN UDPGW inside the SSH channel. The DNS flag requests the
+// exit's native resolver; it is the primary path, not a provider fallback.
+// Wire layout follows the official server/udp.go: LE length excluding the
+// length field, flags, LE connection ID, raw IP, BE port, UDP payload.
+func (c *dnsRelayConn) dnsOverGateway(query []byte) ([]byte, error) {
+    if len(query) < 12 || len(query) > 32768 { return nil, errors.New("invalid UDPGW DNS size") }
+    ctx, cancel := context.WithTimeout(c.ctx, dnsRelayTimeout)
     defer cancel()
-    // RFC 8484 recommends zero DNS IDs inside HTTPS. Restore the app's ID
-    // on return instead of rejecting a valid cached DoH reply with ID zero.
-    wire := append([]byte(nil), query...)
-    wire[0], wire[1] = 0, 0
-    answer, err := c.https.exchange(ctx, wire)
-    if err != nil { return nil, fmt.Errorf("%s: %w", c.https.url, err) }
-    // Preserve all DNS response codes, including SERVFAIL and REFUSED.
-    answer[0], answer[1] = query[0], query[1]
-    return answer, nil
-}
-
-func (endpoint dnsHTTPSClient) exchange(ctx context.Context, query []byte) ([]byte, error) {
-    request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.url, bytes.NewReader(query))
-    if err != nil { return nil, err }
-    request.Header.Set("Content-Type", "application/dns-message")
-    request.Header.Set("Accept", "application/dns-message")
-    response, err := endpoint.client.Do(request)
-    if err != nil { return nil, err }
-    defer response.Body.Close()
-    if response.StatusCode != http.StatusOK || !strings.EqualFold(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]), "application/dns-message") {
-        return nil, fmt.Errorf("unexpected DoH response %s", response.Status)
+    conn, err := c.inner.DialContext(ctx, &metadata.Metadata{
+        Network: metadata.TCP, DstIP: netip.MustParseAddr("127.0.0.1"), DstPort: 7300,
+    })
+    if err != nil { return nil, fmt.Errorf("Psiphon UDPGW CONNECT failed: %w", err) }
+    defer conn.Close()
+    stopClose := context.AfterFunc(ctx, func() { conn.Close() })
+    defer stopClose()
+    deadline, _ := ctx.Deadline()
+    _ = conn.SetDeadline(deadline)
+    // With transparent DNS the address is only a flow label, not a resolver.
+    // Use an IPv4 label even for an intercepted IPv6 DNS flow: the pinned
+    // server emits zero reply flags, so IPv6 labels cannot round-trip safely.
+    // ReadFrom still reports the application's original resolver address.
+    ip := net.IPv4zero.To4()
+    flags := byte(0x02 | 0x04) // rebind + transparent DNS
+    headerSize := 7 + len(ip)
+    frame := make([]byte, headerSize+len(query))
+    binary.LittleEndian.PutUint16(frame[:2], uint16(len(frame)-2))
+    frame[2] = flags
+    // One DNS exchange per channel; connection ID zero cannot collide.
+    copy(frame[5:], ip)
+    binary.BigEndian.PutUint16(frame[5+len(ip):headerSize], 53)
+    copy(frame[headerSize:], query)
+    for remaining := frame; len(remaining) > 0; {
+        n, err := conn.Write(remaining)
+        if err != nil { return nil, err }
+        if n == 0 { return nil, io.ErrShortWrite }
+        remaining = remaining[n:]
     }
-    answer, err := io.ReadAll(io.LimitReader(response.Body, 65536))
-    if err != nil { return nil, err }
-    if len(answer) < 12 || len(answer) > 65535 || !bytes.Equal(answer[:2], query[:2]) || answer[2]&0x80 == 0 {
-        return nil, errors.New("invalid DoH reply")
+    for {
+        var length [2]byte
+        if _, err := io.ReadFull(conn, length[:]); err != nil { return nil, fmt.Errorf("UDPGW reply: %w", err) }
+        size := int(binary.LittleEndian.Uint16(length[:]))
+        if size < 3 || size > 32768+21 { return nil, errors.New("invalid UDPGW frame size") }
+        reply := make([]byte, size)
+        if _, err := io.ReadFull(conn, reply); err != nil { return nil, err }
+        if reply[0]&0x01 != 0 { continue } // keepalive, bounded by the connection deadline
+        addrLen := 4
+        if reply[0]&0x08 != 0 { addrLen = 16 }
+        offset := 5 + addrLen
+        if len(reply) < offset+12 || binary.LittleEndian.Uint16(reply[1:3]) != 0 ||
+            !bytes.Equal(reply[3:3+addrLen], ip) || binary.BigEndian.Uint16(reply[3+addrLen:offset]) != 53 {
+            return nil, errors.New("invalid UDPGW DNS envelope")
+        }
+        answer := reply[offset:]
+        if !bytes.Equal(answer[:2], query[:2]) || answer[2]&0x80 == 0 {
+            return nil, errors.New("invalid UDPGW DNS answer")
+        }
+        return answer, nil
     }
-    return answer, nil
 }
 
 // Capture a per-start parent in each proxy. Cancellation closes DNS pipes,
-// active HTTPS requests and idle connections, including on failed starts.
+// active gateway requests, including on failed starts.
 // A retired proxy can never borrow the next session's lifetime.
 var dnsContextMu sync.RWMutex
 var dnsContext = context.Background()
@@ -477,13 +454,13 @@ func stopDNSContext() {
 // parseSocks5t reuses the upstream socks5 parser (its init registers only the
 // "socks5" scheme) by rewriting the scheme on the incoming URL.
 func parseSocks5t(u *url.URL) (proxy.Proxy, error) {
-	doh := u.Scheme == schemePsiphon
+	psiphonDNS := u.Scheme == schemePsiphon
 	u.Scheme = schemeSocks5
 	inner, err := proxy.Parse(u)
 	if err != nil {
 		return nil, err
 	}
-	return udpDroppingProxy{Proxy: inner, doh: doh, ctx: currentDNSContext()}, nil
+	return udpDroppingProxy{Proxy: inner, psiphonDNS: psiphonDNS, ctx: currentDNSContext()}, nil
 }
 
 func init() {
