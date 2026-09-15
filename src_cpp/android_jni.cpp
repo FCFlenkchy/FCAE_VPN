@@ -372,6 +372,12 @@ Java_com_fc_fcaevpn_NativeEngine_nativePsiphonAttachComplete(JNIEnv*, jclass, jl
     fcae_psiphon_attach_complete((uint64_t)id, (uint16_t)socks, (uint16_t)http);
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeParseTcpBufferSize(JNIEnv* env, jclass, jstring text) {
+    const std::string value = jstr(env, text);
+    return (jint)fcae_parse_tcp_buffer_size(value.c_str());
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeInit(JNIEnv*, jclass) {
     ensure_init();
@@ -426,7 +432,11 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jstring psiphonConfig,
     jstring psiphonRegion,
     jint psiphonSocksPort,
-    jint psiphonHttpPort
+    jint psiphonHttpPort,
+    jint tunTcpSndbuf,
+    jint tunTcpRcvbuf,
+    jboolean tunTcpAutoTuning,
+    jint tunMtu
 ) {
     ensure_init();
 
@@ -506,6 +516,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg._reserved[0] = psiphonThroughTunnel == JNI_TRUE ? 1 : 0;
     cfg.psiphon.socks_port = (uint16_t)psiphonSocksPort;
     cfg.psiphon.http_port = (uint16_t)psiphonHttpPort;
+    cfg.tun_tcp_sndbuf = (uint32_t)tunTcpSndbuf;
+    cfg.tun_tcp_rcvbuf = (uint32_t)tunTcpRcvbuf;
+    cfg.tun_tcp_auto_tuning = tunTcpAutoTuning == JNI_TRUE ? 1 : 2;
 
     // The data directory is a real config field now, not a smuggled env var.
     std::string dataDir;
@@ -535,9 +548,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     // established the interface. Leaving it at 0 let the core default to 1500
     // independently of whatever the Builder picked: when the two disagreed,
     // gVisor built segments the interface silently dropped, so the tunnel came
-    // up and passed no traffic. Keep this in sync with kVpnServiceMtu in
+    // up and passed no traffic. The same session value is used by
     // FCAEVpnService.java.
-    cfg.tun_mtu = (cfg.mode == FCAE_MODE_TUN) ? 1500 : 0;
+    cfg.tun_mtu = static_cast<uint32_t>(tunMtu);
 
     FcaeStatus st = fcae_start(&cfg);
     if (st != FCAE_OK) {

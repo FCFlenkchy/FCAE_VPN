@@ -273,10 +273,13 @@ typedef struct {
     FcaeTor         tor;
 
     const char     *tun_name;      /* NULL = "FCAE_VPN"                    */
-    uint32_t        tun_mtu;       /* 576..9000, or 0 for 1500             */
+    uint32_t        tun_mtu;       /* 1280..9000, or 0 for 1500             */
     int32_t         tun_fd;        /* Android VpnService fd, else -1       */
 
-    uint64_t        _reserved[3];
+    uint64_t        _reserved[1]; /* slot 0 remains Psiphon chain flag */
+    uint32_t        tun_tcp_sndbuf; /* bytes; 0 = 128000; 4096..4194304 bytes */
+    uint32_t        tun_tcp_rcvbuf; /* bytes; 0 = 128000; 4096..4194304 bytes */
+    uint64_t        tun_tcp_auto_tuning; /* 0=default(on), 1=on, 2=off */
     uint64_t        tor_http_port; /* 0 disables; 1..65535; formerly reserved[3] */
 } FcaeConfig;
 
@@ -370,6 +373,9 @@ FcaeStatus fcae_get_telemetry(FcaeTelemetry *out);
 /* Android: hand over the VpnService descriptor. The library dups it and
  * closes only its own copy, so ParcelFileDescriptor stays the owner. */
 FcaeStatus fcae_set_tun_fd(int32_t fd);
+/* Pure size parser: decimal whole byte counts only.
+ * Returns 0 for invalid/out-of-range/non-integral sizes. NULL also returns 0. */
+uint32_t fcae_parse_tcp_buffer_size(const char *text);
 
 /* True if the process can create a TUN device (admin/root). */
 bool       fcae_is_privileged(void);

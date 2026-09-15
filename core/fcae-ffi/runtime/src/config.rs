@@ -104,10 +104,38 @@ pub struct PsiphonConfig {
     pub through_tunnel: bool,
 }
 
+pub const DEFAULT_TCP_BUFFER: u32 = 128000;
+// gVisor TCP MinBufferSize/MaxBufferSize in the pinned tun2socks dependency.
+pub const MIN_TCP_BUFFER: u32 = 4 * 1024;
+pub const MAX_TCP_BUFFER: u32 = 4 * 1024 * 1024;
+
+pub fn parse_tcp_buffer_size(text: &str) -> Result<u32> {
+    let text = text.trim();
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(CoreError::InvalidConfig("TCP buffer: enter a whole byte count (4096..4194304)".into()));
+    }
+    let bytes = text.parse::<u32>().map_err(|_| CoreError::InvalidConfig("TCP buffer byte count is too large".into()))?;
+    if !(MIN_TCP_BUFFER..=MAX_TCP_BUFFER).contains(&bytes) {
+        return Err(CoreError::InvalidConfig("TCP buffer must be 4096..4194304 bytes".into()));
+    }
+    Ok(bytes)
+}
+
+fn tcp_buffer_or_default(bytes: u32, field: &str) -> Result<u32> {
+    if bytes == 0 { return Ok(DEFAULT_TCP_BUFFER); }
+    if !(MIN_TCP_BUFFER..=MAX_TCP_BUFFER).contains(&bytes) {
+        return Err(CoreError::InvalidConfig(format!("{field} must be 4096..4194304 bytes (or 0 for 128000)")));
+    }
+    Ok(bytes)
+}
+
 /// TUN parameters. Owned by the supervisor, not the backend: whichever
 /// backend runs, TUN is raised the same way on top of its SOCKS endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TunConfig {
+    pub tcp_sndbuf: u32,
+    pub tcp_rcvbuf: u32,
+    pub tcp_auto_tuning: bool,
     pub name: String,
     pub mtu: u32,
     pub ipv4: String,
@@ -119,6 +147,9 @@ pub struct TunConfig {
 impl Default for TunConfig {
     fn default() -> Self {
         Self {
+            tcp_sndbuf: DEFAULT_TCP_BUFFER,
+            tcp_rcvbuf: DEFAULT_TCP_BUFFER,
+            tcp_auto_tuning: true,
             name: "FCAE_VPN".into(),
             mtu: 1500,
             ipv4: "198.18.0.1/24".into(),
@@ -610,14 +641,21 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // ── TUN ─────────────────────────────────────────────────────────────
     let mtu = match raw.tun_mtu {
         0 => 1500,
-        v if (576..=9000).contains(&v) => v,
+        v if (1280..=9000).contains(&v) => v,
         v => {
             return Err(CoreError::InvalidConfig(format!(
-                "tun_mtu={v} out of range (576..=9000, or 0 for 1500)"
+                "tun_mtu={v} out of range (1280..=9000, or 0 for 1500)"
             )))
         }
     };
     cfg.tun = TunConfig {
+        tcp_sndbuf: tcp_buffer_or_default(raw.tun_tcp_sndbuf, "tun_tcp_sndbuf")?,
+        tcp_rcvbuf: tcp_buffer_or_default(raw.tun_tcp_rcvbuf, "tun_tcp_rcvbuf")?,
+        tcp_auto_tuning: match raw.tun_tcp_auto_tuning {
+            0 | 1 => true,
+            2 => false,
+            _ => return Err(CoreError::InvalidConfig("tun_tcp_auto_tuning must be 0, 1 or 2".into())),
+        },
         name: cstr_opt(raw.tun_name).unwrap_or_else(|| "FCAE_VPN".into()),
         mtu,
         fd: if raw.tun_fd >= 0 { Some(raw.tun_fd) } else { None },
@@ -932,6 +970,72 @@ pub mod env_compat {
 mod tests {
     use super::*;
 
+    fn raw_test_config() -> FcaeConfig {
+        // Initialize nonzero-only enums before creating a typed value.
+        let mut raw = std::mem::MaybeUninit::<FcaeConfig>::zeroed();
+        unsafe {
+            let p = raw.as_mut_ptr();
+            std::ptr::addr_of_mut!((*p).ip_version).write(FcaeIpVersion::V4);
+            std::ptr::addr_of_mut!((*p).dns.ip_prefer).write(FcaeIpVersion::Dual);
+            raw.assume_init()
+        }
+    }
+
+    #[test]
+    fn tcp_buffer_sizes_are_plain_bytes_only() {
+        for (text, expected) in [("128000", 128000), (" 256000 ", 256000),
+                                 ("4096", MIN_TCP_BUFFER), ("4194304", MAX_TCP_BUFFER)] {
+            assert_eq!(parse_tcp_buffer_size(text).unwrap(), expected);
+        }
+        for text in ["", "0", "-128000", "+128000", "NaN", "1e6", "128K", "128kb",
+                     "1m", "1mb", "128 m", "128000.0", "4095", "4194305", "999999999999"] {
+            assert!(parse_tcp_buffer_size(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn tcp_defaults_and_explicit_off_survive_config_parsing() {
+        let mut raw: FcaeConfig = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        let cfg = unsafe { parse(&raw) }.unwrap();
+        assert_eq!(cfg.tun.tcp_sndbuf, 128000);
+        assert_eq!(cfg.tun.tcp_rcvbuf, 128000);
+        assert!(cfg.tun.tcp_auto_tuning);
+        raw.tun_tcp_sndbuf = 256 * 1024;
+        raw.tun_tcp_rcvbuf = 512 * 1024;
+        raw.tun_tcp_auto_tuning = 2;
+        let cfg = unsafe { parse(&raw) }.unwrap();
+        assert_eq!(cfg.tun.tcp_sndbuf, 256 * 1024);
+        assert_eq!(cfg.tun.tcp_rcvbuf, 512 * 1024);
+        assert!(!cfg.tun.tcp_auto_tuning);
+        raw.tun_tcp_auto_tuning = 1;
+        assert!(unsafe { parse(&raw) }.unwrap().tun.tcp_auto_tuning);
+        raw.tun_tcp_auto_tuning = 3;
+        assert!(unsafe { parse(&raw) }.is_err());
+        raw.tun_tcp_auto_tuning = 0;
+        raw.tun_mtu = 9000;
+        assert_eq!(unsafe { parse(&raw) }.unwrap().tun.mtu, 9000);
+        raw.tun_mtu = 1279;
+        assert!(unsafe { parse(&raw) }.is_err());
+        raw.tun_mtu = 9001;
+        assert!(unsafe { parse(&raw) }.is_err());
+        raw.tun_mtu = 1500;
+        raw.tun_tcp_sndbuf = MAX_TCP_BUFFER + 1;
+        assert!(unsafe { parse(&raw) }.is_err());
+    }
+
+    #[test]
+    fn tcp_fields_use_only_the_two_free_reserved_slots() {
+        use std::mem::{offset_of, size_of};
+        let base = offset_of!(FcaeConfig, _reserved);
+        assert_eq!(offset_of!(FcaeConfig, tun_tcp_sndbuf), base + 8);
+        assert_eq!(offset_of!(FcaeConfig, tun_tcp_rcvbuf), base + 12);
+        assert_eq!(offset_of!(FcaeConfig, tun_tcp_auto_tuning), base + 16);
+        assert_eq!(offset_of!(FcaeConfig, tor_http_port), base + 24);
+        assert_eq!(size_of::<FcaeConfig>(), base + 32);
+    }
+
     #[test]
     fn inline_routes_default_to_direct() {
         let (block, direct) = parse_inline_routes(Some("a.com,b.com"));
@@ -1060,7 +1164,7 @@ mod tests {
     /// Aether and the flag silently does nothing (regression test).
     #[test]
     fn independent_tor_http_ports_are_validated() {
-        let mut raw: FcaeConfig = unsafe { std::mem::zeroed() };
+        let mut raw: FcaeConfig = raw_test_config();
         raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
         raw.abi_version = FCAE_ABI_VERSION;
         raw.tor.mode = FcaeTorMode::Chain;
@@ -1081,10 +1185,8 @@ mod tests {
 
     #[test]
     fn reserved_slot_zero_sets_through_tunnel() {
-        // Zeroed like a host that called fcae_config_default() and changed
-        // nothing: every zero enum value here is a valid variant, and all
-        // pointer fields are NULL, which cstr_opt folds to None.
-        let mut raw: FcaeConfig = unsafe { std::mem::zeroed() };
+        // Reserved slots and pointers are zero; enum fields are valid.
+        let mut raw: FcaeConfig = raw_test_config();
         raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
         raw.abi_version = FCAE_ABI_VERSION;
 

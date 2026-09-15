@@ -60,6 +60,10 @@ struct AppState {
     // TUN DNS servers (comma separated per family). The bridge applies them
     // to the OS when the tunnel comes up and restores on down; defaults
     // mirror the Android VpnService hardcode.
+    char tun_mtu[8] = "1500";
+    char tun_tcp_sndbuf[32] = "128000";
+    char tun_tcp_rcvbuf[32] = "128000";
+    bool tun_tcp_auto_tuning = true;
     char tun_dns4[96]  = "1.1.1.1,1.0.0.1";
     char tun_dns6[112] = "2606:4700:4700::1111,2606:4700:4700::1001";
     // Zero Trust (Cloudflare Teams)
@@ -176,6 +180,16 @@ struct AppState {
     /// Always starts from fcae_config_default() so struct_size/abi_version are
     /// stamped correctly and any field the UI does not yet expose gets a sane
     /// default instead of a zero.
+    uint32_t parsed_tun_mtu() const {
+        unsigned mtu = 0;
+        bool mtu_valid = tun_mtu[0] != '\0';
+        for (const char* p = tun_mtu; *p; ++p) {
+            if (*p < '0' || *p > '9') { mtu_valid = false; break; }
+            mtu = mtu * 10 + static_cast<unsigned>(*p - '0');
+        }
+        return mtu_valid && mtu >= 1280 && mtu <= 9000 ? mtu : 0xffffffffu;
+    }
+
     FcaeConfig to_config() {
         FcaeConfig c;
         fcae_config_default(&c);
@@ -188,6 +202,13 @@ struct AppState {
         c.sys_profile      = (FcaeSysProfile)sys_profile;
         c.lan_sharing      = lan_sharing;
         c.quick_reconnect  = quick_reconnect;
+        c.tun_mtu = parsed_tun_mtu();
+        const uint32_t snd = fcae_parse_tcp_buffer_size(tun_tcp_sndbuf);
+        const uint32_t rcv = fcae_parse_tcp_buffer_size(tun_tcp_rcvbuf);
+        // Never turn malformed UI input into the ABI's zero/default sentinel.
+        c.tun_tcp_sndbuf = snd ? snd : 0xffffffffu;
+        c.tun_tcp_rcvbuf = rcv ? rcv : 0xffffffffu;
+        c.tun_tcp_auto_tuning = tun_tcp_auto_tuning ? 1 : 2;
         // TUN tunnels through the local SOCKS5 listener tun2socks dials, so
         // the checkbox is ignored in that mode: a port is always sent (same
         // rule as Android's FCAEVpnService). Port 0 means "off" for proxy

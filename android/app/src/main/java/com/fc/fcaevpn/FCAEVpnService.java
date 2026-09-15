@@ -46,7 +46,7 @@ public class FCAEVpnService extends VpnService {
      * Do NOT go below 1280: this interface carries an IPv6 address (fd00::2)
      * and Android/Linux reject IPv6 on links with MTU < 1280.
      */
-    static final int kVpnServiceMtu = 1500;
+    private volatile int sessionTunMtu = 1500;
     private static final String TAG = "FCAE_VPN";
 
     public static final String ACTION_STOP       = "com.fc.fcaevpn.STOP";
@@ -404,10 +404,10 @@ public class FCAEVpnService extends VpnService {
         try {
             Builder builder = new Builder();
             builder.setSession("FCAE VPN");
-            // See kVpnServiceMtu: this is the local tun device MTU, not the
+            // This session snapshot is shared with nativeStart: this is the local tun device MTU, not the
             // tunnel MTU. Must stay in sync with cfg.tun_mtu on the native
             // side.
-            builder.setMtu(kVpnServiceMtu);
+            builder.setMtu(sessionTunMtu);
             builder.addAddress("10.0.0.2", 32);
             builder.addAddress("fd00::2", 128);
             builder.addRoute("0.0.0.0", 0);
@@ -613,6 +613,12 @@ public class FCAEVpnService extends VpnService {
     }
 
     private synchronized void startVpn(Intent intent) {
+        final int tunMtu = intent.getIntExtra("tunMtu", 1500);
+        if (tunMtu < 1280 || tunMtu > 9000) {
+            Log.e(TAG, "Invalid TUN MTU: " + tunMtu);
+            return;
+        }
+
         sGeneration.incrementAndGet();
         // The worker validates this after every slow step (establish,
         // nativeStart): a disconnect/pause/new connect that lands in the
@@ -676,6 +682,10 @@ public class FCAEVpnService extends VpnService {
         // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
         // MainActivity sends 0 when the field still holds the default.
         final int torSocksPort = intent.getIntExtra("torSocksPort", 0);
+        sessionTunMtu = tunMtu;
+        final int tunTcpSndbuf = intent.getIntExtra("tunTcpSndbuf", 128000);
+        final int tunTcpRcvbuf = intent.getIntExtra("tunTcpRcvbuf", 128000);
+        final boolean tunTcpAutoTuning = intent.getBooleanExtra("tunTcpAutoTuning", true);
         final int torHttpPort = intent.getIntExtra("torHttpPort", 0);
         final boolean throughPsiphon = intent.getBooleanExtra("psiphonThroughTunnel", false);
         final String psiphonCfg    = intent.getStringExtra("psiphonConfig");
@@ -738,7 +748,8 @@ public class FCAEVpnService extends VpnService {
                     teamVal, tokenVal, emailVal, routesVal, routesIVal,
                     torMode, torBridges, torLinesV, engineLog,
                     backend, torSocksPort, torHttpPort, throughPsiphon,
-                    psiphonCfgV, psiphonRegionV, psiphonSocks, psiphonHttp
+                    psiphonCfgV, psiphonRegionV, psiphonSocks, psiphonHttp,
+                    tunTcpSndbuf, tunTcpRcvbuf, tunTcpAutoTuning, tunMtu
                 );
                 if (!ok) {
                     handler.post(() -> {
@@ -1019,6 +1030,10 @@ public class FCAEVpnService extends VpnService {
         putInt(e, i, "engineLog", 3);
         putInt(e, i, "backend", 0);
         putBool(e, i, "psiphonThroughTunnel", false);
+        putInt(e, i, "tunMtu", 1500);
+        putInt(e, i, "tunTcpSndbuf", 128000);
+        putInt(e, i, "tunTcpRcvbuf", 128000);
+        putBool(e, i, "tunTcpAutoTuning", true);
         putInt(e, i, "torHttpPort", 0);
         putInt(e, i, "torSocksPort", 0); // 0 = engine default (defer)
         putStr(e, i, "psiphonConfig");
@@ -1059,6 +1074,10 @@ public class FCAEVpnService extends VpnService {
         copyInt(p, i, "engineLog", 3);
         copyInt(p, i, "backend", 0);
         copyBool(p, i, "psiphonThroughTunnel", false);
+        copyInt(p, i, "tunMtu", 1500);
+        copyInt(p, i, "tunTcpSndbuf", 128000);
+        copyInt(p, i, "tunTcpRcvbuf", 128000);
+        copyBool(p, i, "tunTcpAutoTuning", true);
         copyInt(p, i, "torHttpPort", 0);
         copyInt(p, i, "torSocksPort", 0); // 0 = engine default (defer)
         copyStr(p, i, "psiphonConfig");

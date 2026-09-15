@@ -426,7 +426,13 @@ pub struct FcaeConfig {
     /// and never closes the original — Android's ParcelFileDescriptor owns it.
     pub tun_fd: i32,
 
-    pub _reserved: [u64; 3],
+    pub _reserved: [u64; 1], // slot 0 remains the Psiphon chain flag
+    /// TUN TCP defaults in bytes. 0 = 128000 bytes; valid range 4096..4194304 bytes.
+    /// These two fields occupy former reserved slot 1.
+    pub tun_tcp_sndbuf: u32,
+    pub tun_tcp_rcvbuf: u32,
+    /// Former reserved slot 2: 0 = app default (on), 1 = on, 2 = off.
+    pub tun_tcp_auto_tuning: u64,
     /// Independent Tor HTTP listener: 0 disables, otherwise 1..=65535.
     /// Former reserved[3]; preserves size and existing Psiphon reserved[0].
     pub tor_http_port: u64,

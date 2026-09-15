@@ -88,6 +88,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editForcePeer: android.widget.EditText
     private lateinit var editSocksPort: android.widget.EditText
     private lateinit var editHttpPort: android.widget.EditText
+    private lateinit var editTunMtu: android.widget.EditText
+    private lateinit var editTunTcpSndbuf: android.widget.EditText
+    private lateinit var editTunTcpRcvbuf: android.widget.EditText
+    private lateinit var switchTunTcpAutoTuning: SwitchMaterial
     private lateinit var editTunDnsV4: android.widget.EditText
     private lateinit var editTunDnsV6: android.widget.EditText
     private lateinit var editTeam: android.widget.EditText
@@ -441,6 +445,10 @@ class MainActivity : AppCompatActivity() {
         editForcePeer = findViewById(R.id.editForcePeer)
         editSocksPort = findViewById(R.id.editSocksPort)
         editHttpPort = findViewById(R.id.editHttpPort)
+        editTunMtu = findViewById(R.id.editTunMtu)
+        editTunTcpSndbuf = findViewById(R.id.editTunTcpSndbuf)
+        editTunTcpRcvbuf = findViewById(R.id.editTunTcpRcvbuf)
+        switchTunTcpAutoTuning = findViewById(R.id.switchTunTcpAutoTuning)
         editTunDnsV4 = findViewById(R.id.editTunDnsV4)
         editTunDnsV6 = findViewById(R.id.editTunDnsV6)
         editTeam = findViewById(R.id.editTeam)
@@ -468,7 +476,7 @@ class MainActivity : AppCompatActivity() {
         // cursor.  This covers every focus-loss path (taps outside, back
         // button, keyboard dismissal, spinner selection) regardless of how
         // the focus was moved.
-        val editTexts = listOf(editSni, editForcePeer, editSocksPort, editHttpPort, editTorHttpPort,
+        val editTexts = listOf(editTunMtu, editSni, editForcePeer, editSocksPort, editHttpPort, editTorHttpPort, editTunTcpSndbuf, editTunTcpRcvbuf,
             editTeam, editAccessToken, editAccessEmail, editRoutesFile, editRoutesInline)
         for (et in editTexts) {
             et.setOnFocusChangeListener { view, hasFocus ->
@@ -1028,6 +1036,10 @@ class MainActivity : AppCompatActivity() {
             putInt("sysprofile", spinnerSysprofile.selectedItemPosition)
             putString("socksPort", editSocksPort.text.toString())
             putString("httpPort", editHttpPort.text.toString())
+            putString("tunMtu", editTunMtu.text.toString())
+            putString("tunTcpSndbuf", editTunTcpSndbuf.text.toString().trim())
+            putString("tunTcpRcvbuf", editTunTcpRcvbuf.text.toString().trim())
+            putBoolean("tunTcpAutoTuning", switchTunTcpAutoTuning.isChecked)
             putString("tunDnsV4", editTunDnsV4.text.toString().trim())
             putString("tunDnsV6", editTunDnsV6.text.toString().trim())
             putString("team", editTeam.text.toString().trim())
@@ -1092,6 +1104,10 @@ class MainActivity : AppCompatActivity() {
         spinnerSysprofile.setSelection(prefs.getInt("sysprofile", 0))
         editSocksPort.setText(prefs.getString("socksPort", "1819"))
         editHttpPort.setText(prefs.getString("httpPort", "1820"))
+        editTunMtu.setText(prefs.getString("tunMtu", "1500"))
+        editTunTcpSndbuf.setText(prefs.getString("tunTcpSndbuf", "128000"))
+        editTunTcpRcvbuf.setText(prefs.getString("tunTcpRcvbuf", "128000"))
+        switchTunTcpAutoTuning.isChecked = prefs.getBoolean("tunTcpAutoTuning", true)
         editTunDnsV4.setText(prefs.getString("tunDnsV4", FCAEVpnService.DEFAULT_TUN_DNS_V4))
         editTunDnsV6.setText(prefs.getString("tunDnsV6", FCAEVpnService.DEFAULT_TUN_DNS_V6))
         editTeam.setText(prefs.getString("team", ""))
@@ -1101,8 +1117,25 @@ class MainActivity : AppCompatActivity() {
         editRoutesInline.setText(prefs.getString("routesInline", ""))
     }
 
+    private fun tunMtuBytes(): Int {
+        val text = editTunMtu.text.toString().trim()
+        return if (text.isNotEmpty() && text.all { it in '0'..'9' }) text.toIntOrNull() ?: -1 else -1
+    }
+
+    private fun tcpBufferBytes(field: android.widget.EditText): Int =
+        NativeEngine.nativeParseTcpBufferSize(field.text.toString()).let { if (it == 0) -1 else it }
+
     private fun connectClicked() {
         if (disconnecting || connecting || engineRunning || vpnActive) return
+        var buffersValid = true
+        for (field in listOf(editTunTcpSndbuf, editTunTcpRcvbuf)) {
+            field.error = if (tcpBufferBytes(field) < 0) {
+                buffersValid = false
+                "Enter 4096..4194304 bytes, without suffixes"
+            } else null
+        }
+        editTunMtu.error = if (tunMtuBytes() !in 1280..9000) "Enter 1280..9000 bytes" else null
+        if (!buffersValid || editTunMtu.error != null) return
         if (switchTorHttp.isChecked && (editTorHttpPort.text.toString().toIntOrNull() ?: 0) !in 1..65535) {
             editTorHttpPort.error = "Use a port from 1 to 65535"
             return
@@ -1186,6 +1219,10 @@ class MainActivity : AppCompatActivity() {
         i.action = FCAEVpnService.ACTION_START
         i.putExtra("protocol", coreProtocolFromSelection())
         i.putExtra("mode", spinnerMode.selectedItemPosition)
+        i.putExtra("tunMtu", tunMtuBytes())
+        i.putExtra("tunTcpSndbuf", tcpBufferBytes(editTunTcpSndbuf))
+        i.putExtra("tunTcpRcvbuf", tcpBufferBytes(editTunTcpRcvbuf))
+        i.putExtra("tunTcpAutoTuning", switchTunTcpAutoTuning.isChecked)
         i.putExtra("scanMode", spinnerScan.selectedItemPosition)
         i.putExtra("ipVersion", spinnerIpVersionToInt())
         i.putExtra("quickReconnect", switchQuick.isChecked)
@@ -1275,6 +1312,10 @@ class MainActivity : AppCompatActivity() {
         val psiphonSocksPort = editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0
         val psiphonHttpPort = editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0
 
+        val tunMtu = tunMtuBytes()
+        val tunTcpSndbuf = tcpBufferBytes(editTunTcpSndbuf)
+        val tunTcpRcvbuf = tcpBufferBytes(editTunTcpRcvbuf)
+        val tunTcpAutoTuning = switchTunTcpAutoTuning.isChecked
         val epoch = connectionEpoch
         NativeEngine.lifecycleExecutor.execute {
             if (epoch != connectionEpoch) return@execute
@@ -1322,6 +1363,10 @@ class MainActivity : AppCompatActivity() {
                     psiphonRegion = psiphonRegion,
                     psiphonSocksPort = psiphonSocksPort,
                     psiphonHttpPort = psiphonHttpPort,
+                    tunTcpSndbuf = tunTcpSndbuf,
+                    tunTcpRcvbuf = tunTcpRcvbuf,
+                    tunTcpAutoTuning = tunTcpAutoTuning,
+                    tunMtu = tunMtu,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }

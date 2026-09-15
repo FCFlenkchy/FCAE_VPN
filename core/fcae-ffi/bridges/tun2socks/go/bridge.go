@@ -58,6 +58,8 @@ import (
     "github.com/xjasonlyu/tun2socks/v2/engine"
     "github.com/xjasonlyu/tun2socks/v2/core"
     "github.com/xjasonlyu/tun2socks/v2/core/device"
+    "github.com/xjasonlyu/tun2socks/v2/core/option"
+    "gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
     "github.com/xjasonlyu/tun2socks/v2/core/device/fdbased"
     "github.com/xjasonlyu/tun2socks/v2/dialer"
     "github.com/xjasonlyu/tun2socks/v2/tunnel"
@@ -437,7 +439,26 @@ func (hostWriter) Write(p []byte) (int, error) {
 // binary, fatal for an in-process library that a VPN GUI links. So we
 // pre-validate here and refuse the call ourselves, leaving engine.Start only
 // the cases it can actually handle.
+// Values are canonical byte counts from the Rust config, not UI text.
+// Validate before any device/FD is opened, including the direct Android path.
+func tcpBufferOptions(k *engine.Key) ([]option.Option, error) {
+    snd, err := strconv.Atoi(k.TCPSendBufferSize)
+    if err != nil || snd < tcp.MinBufferSize || snd > tcp.MaxBufferSize {
+        return nil, fmt.Errorf("invalid TCP send buffer %q (4096..4194304 bytes)", k.TCPSendBufferSize)
+    }
+    rcv, err := strconv.Atoi(k.TCPReceiveBufferSize)
+    if err != nil || rcv < tcp.MinBufferSize || rcv > tcp.MaxBufferSize {
+        return nil, fmt.Errorf("invalid TCP receive buffer %q (4096..4194304 bytes)", k.TCPReceiveBufferSize)
+    }
+    return []option.Option{
+        option.WithTCPSendBufferSize(snd),
+        option.WithTCPReceiveBufferSize(rcv),
+        option.WithTCPModerateReceiveBuffer(k.TCPModerateReceiveBuffer),
+    }, nil
+}
+
 func validateKey(k *engine.Key) error {
+    if _, err := tcpBufferOptions(k); err != nil { return err }
 	if strings.TrimSpace(k.Device) == "" {
 		return errors.New("empty device")
 	}
@@ -449,7 +470,7 @@ func validateKey(k *engine.Key) error {
 		return fmt.Errorf("invalid proxy url %q: %w", k.Proxy, err)
 	}
 	switch strings.ToLower(u.Scheme) {
-	case schemeSocks5, schemeSocks5t, "socks4", "socks4a", "http", "https", "ss", "relay", "direct", "reject":
+	case schemeSocks5, schemeSocks5t, schemePsiphon, "socks4", "socks4a", "http", "https", "ss", "relay", "direct", "reject":
 	default:
 		return fmt.Errorf("unsupported proxy scheme %q", u.Scheme)
 	}
@@ -501,6 +522,8 @@ func validateKey(k *engine.Key) error {
 //	proxy    - e.g. "socks5://127.0.0.1:1819"
 //	mtu      - 0 for the tun2socks default
 //	loglevel - "debug" | "info" | "warn" | "error" | "silent"
+//	tcpSndbuf/tcpRcvbuf - TCP defaults in bytes (4096..4194304 bytes)
+//	tcpAutoTuning - 0 disables, nonzero enables receive-buffer auto-tuning
 //
 // Returns 0 on success, or a negative error code:
 //
@@ -515,6 +538,8 @@ var fdDevice device.Device
 var fdStack *stack.Stack
 
 func startFD(k *engine.Key) error {
+    options, err := tcpBufferOptions(k)
+    if err != nil { return err }
     u, err := url.Parse(k.Proxy)
     if err != nil { return err }
     p, err := proxy.Parse(u)
@@ -532,6 +557,7 @@ func startFD(k *engine.Key) error {
     fdStack, err = core.CreateStack(&core.Config{
         LinkEndpoint: fdDevice,
         TransportHandler: tunnel.T(),
+        Options: options,
     })
     return err
 }
@@ -544,7 +570,8 @@ func stopFD() {
 }
 
 //export t2s_start
-func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char) C.int {
+func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char,
+    tcpSndbuf C.uint32_t, tcpRcvbuf C.uint32_t, tcpAutoTuning C.int) C.int {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -558,6 +585,9 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char) C.int
 		Proxy:    C.GoString(proxy),
 		MTU:      int(mtu),
 		LogLevel: C.GoString(loglevel),
+        TCPSendBufferSize: strconv.FormatUint(uint64(tcpSndbuf), 10),
+        TCPReceiveBufferSize: strconv.FormatUint(uint64(tcpRcvbuf), 10),
+        TCPModerateReceiveBuffer: tcpAutoTuning != 0,
 		// Expire idle UDP flows quicker than the 60s default so the NAT
 		// table (and any parked goroutines) drains promptly.
 		UDPTimeout: 30 * time.Second,

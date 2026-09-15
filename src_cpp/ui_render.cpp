@@ -131,6 +131,10 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.tor_mode);
     h = fnv_value(h, g_app.tor_bridges);
     h = fnv_cstr(h, g_app.tor_bridge_lines);
+    h = fnv_cstr(h, g_app.tun_mtu);
+    h = fnv_cstr(h, g_app.tun_tcp_sndbuf);
+    h = fnv_cstr(h, g_app.tun_tcp_rcvbuf);
+    h = fnv_value(h, g_app.tun_tcp_auto_tuning);
     h = fnv_cstr(h, g_app.tun_dns4);
     h = fnv_cstr(h, g_app.tun_dns6);
     h = fnv_cstr(h, g_app.noize_profile);
@@ -328,6 +332,10 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "backend") g_app.backend = atoi(val.c_str());
     else if (key == "tor_socks_port") g_app.tor_socks_port = atoi(val.c_str());
     else if (key == "psiphon_region") snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region), "%s", val.c_str());
+    else if (key == "tun_mtu") snprintf(g_app.tun_mtu, sizeof(g_app.tun_mtu), "%s", val.c_str());
+    else if (key == "tun_tcp_sndbuf") snprintf(g_app.tun_tcp_sndbuf, sizeof(g_app.tun_tcp_sndbuf), "%s", val.c_str());
+    else if (key == "tun_tcp_rcvbuf") snprintf(g_app.tun_tcp_rcvbuf, sizeof(g_app.tun_tcp_rcvbuf), "%s", val.c_str());
+    else if (key == "tun_tcp_auto_tuning") g_app.tun_tcp_auto_tuning = atoi(val.c_str()) != 0;
     else if (key == "tun_dns4") snprintf(g_app.tun_dns4, sizeof(g_app.tun_dns4), "%s", val.c_str());
     else if (key == "tun_dns6") snprintf(g_app.tun_dns6, sizeof(g_app.tun_dns6), "%s", val.c_str());
     else if (key == "psiphon_region_list")
@@ -428,6 +436,10 @@ static void save_config() {
     fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled ? 1 : 0);
     fprintf(f, "ech_enabled=%d\n", g_app.ech_enabled ? 1 : 0);
     fprintf(f, "sni=%s\n", g_app.sni);
+    fprintf(f, "tun_mtu=%s\n", g_app.tun_mtu);
+    fprintf(f, "tun_tcp_sndbuf=%s\n", g_app.tun_tcp_sndbuf);
+    fprintf(f, "tun_tcp_rcvbuf=%s\n", g_app.tun_tcp_rcvbuf);
+    fprintf(f, "tun_tcp_auto_tuning=%d\n", g_app.tun_tcp_auto_tuning ? 1 : 0);
     fprintf(f, "tun_dns4=%s\n", g_app.tun_dns4);
     fprintf(f, "tun_dns6=%s\n", g_app.tun_dns6);
     fprintf(f, "logging_enabled=%d\n", g_app.logging_enabled ? 1 : 0);
@@ -1232,6 +1244,19 @@ void render_ui() {
             ImGui::PopItemWidth();
             if (g_app.mode == 1)
                 ImGui::TextDisabled("TUN always raises the local SOCKS5 listener; this checkbox only governs proxy mode.");
+            ImGui::Spacing();
+            ImGui::Text("tun2socks TCP (TUN mode)");
+            ImGui::PushItemWidth(160);
+            ImGui::InputText("TCP send buffer (bytes)", g_app.tun_tcp_sndbuf, sizeof(g_app.tun_tcp_sndbuf));
+            ImGui::InputText("TCP receive buffer (bytes)", g_app.tun_tcp_rcvbuf, sizeof(g_app.tun_tcp_rcvbuf));
+            ImGui::InputText("TUN MTU (bytes)", g_app.tun_mtu, sizeof(g_app.tun_mtu));
+            ImGui::PopItemWidth();
+            if (g_app.parsed_tun_mtu() == 0xffffffffu)
+                ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "MTU: enter 1280..9000 bytes (default 1500).");
+            ImGui::Checkbox("TCP auto-tuning", &g_app.tun_tcp_auto_tuning);
+            if (!fcae_parse_tcp_buffer_size(g_app.tun_tcp_sndbuf) || !fcae_parse_tcp_buffer_size(g_app.tun_tcp_rcvbuf))
+                ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "Buffers: enter 4096..4194304 bytes (default 128000); no suffixes.");
+            ImGui::TextWrapped("Applies on next TUN connection. Auto-tuning may grow the receive buffer beyond its default.");
             ImGui::Spacing();
             ImGui::TextDisabled("TUN DNS (comma separated; applied on up, restored on down; empty = platform default)");
             ImGui::PushItemWidth(-1);

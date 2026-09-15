@@ -174,7 +174,10 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
         tun_mtu: 0,
         tun_fd: -1,
         tor_http_port: 0,
-        _reserved: [0; 3],
+        _reserved: [0; 1],
+        tun_tcp_sndbuf: config::DEFAULT_TCP_BUFFER,
+        tun_tcp_rcvbuf: config::DEFAULT_TCP_BUFFER,
+        tun_tcp_auto_tuning: 1,
     });
     FcaeStatus::Ok
 }
@@ -541,6 +544,14 @@ pub unsafe extern "C" fn fcae_psiphon_regions(out: *mut c_char, cap: u32) -> u32
         fill(buf, &list);
     }
     list.len() as u32
+}
+
+/// Shared text parser for desktop and Android buffer fields; no runtime needed.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_parse_tcp_buffer_size(text: *const c_char) -> u32 {
+    if text.is_null() { return 0; }
+    CStr::from_ptr(text).to_str().ok()
+        .and_then(|s| config::parse_tcp_buffer_size(s).ok()).unwrap_or(0)
 }
 
 /// Psiphon's currently bound SOCKS port, or zero when unavailable.

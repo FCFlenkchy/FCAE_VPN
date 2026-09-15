@@ -48,7 +48,7 @@
 //! | symbol | meaning |
 //! |---|---|
 //! | `t2s_set_log_callback(fn)` | route tun2socks logs into the host logger |
-//! | `t2s_start(device, proxy, mtu, loglevel)` | `0` ok, `-1` already running, `-2` bad config, `-3` engine failed |
+//! | `t2s_start(device, proxy, mtu, loglevel, sndbuf, rcvbuf, auto_tuning)` | `0` ok, `-1` already running, `-2` bad config, `-3` engine failed |
 //! | `t2s_stop()` | idempotent teardown |
 //! | `t2s_is_running()` | `1` / `0` |
 //! | `t2s_version()` | static string, do not free |
@@ -105,7 +105,8 @@ static WINTUN_DLL: &[u8] = include_bytes!(env!("FCAE_WINTUN_DLL"));
 #[cfg(tun2socks_linked)]
 extern "C" {
     fn t2s_set_log_callback(cb: Option<unsafe extern "C" fn(c_int, *const c_char)>);
-    fn t2s_start(device: *const c_char, proxy: *const c_char, mtu: c_int, loglevel: *const c_char)
+    fn t2s_start(device: *const c_char, proxy: *const c_char, mtu: c_int, loglevel: *const c_char,
+        tcp_sndbuf: u32, tcp_rcvbuf: u32, tcp_auto_tuning: c_int)
         -> c_int;
     fn t2s_stop() -> c_int;
     fn t2s_is_running() -> c_int;
@@ -124,6 +125,9 @@ mod stub {
         _p: *const c_char,
         _m: c_int,
         _l: *const c_char,
+        _snd: u32,
+        _rcv: u32,
+        _auto: c_int,
     ) -> c_int {
         -100
     }
@@ -448,6 +452,8 @@ impl TunBridge for Tun2SocksBridge {
             .filter(|v| matches!(v.as_str(), "debug" | "info" | "warn" | "error" | "silent"))
             .unwrap_or_else(|| "silent".to_string());
         let c_level = CString::new(level).expect("level has no NUL");
+        log::info!("[tun] TCP sndbuf={} bytes, rcvbuf={} bytes, auto-tuning={}",
+            cfg.tun.tcp_sndbuf, cfg.tun.tcp_rcvbuf, cfg.tun.tcp_auto_tuning);
 
         // Serialize the fd handoff with abort. Never close a numeric fd while
         // Go is opening it, nor after Go's device has taken ownership of it.
@@ -462,6 +468,9 @@ impl TunBridge for Tun2SocksBridge {
                 c_proxy.as_ptr(),
                 cfg.tun.mtu as c_int,
                 c_level.as_ptr(),
+                cfg.tun.tcp_sndbuf,
+                cfg.tun.tcp_rcvbuf,
+                if cfg.tun.tcp_auto_tuning { 1 } else { 0 },
             )
         };
 

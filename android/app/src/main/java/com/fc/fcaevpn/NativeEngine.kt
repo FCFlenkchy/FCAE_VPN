@@ -83,9 +83,14 @@ object NativeEngine {
         // Psiphon's own proxy ports; 0 lets Psiphon choose.
         psiphonSocksPort: Int,
         psiphonHttpPort: Int,
+        tunTcpSndbuf: Int,
+        tunTcpRcvbuf: Int,
+        tunTcpAutoTuning: Boolean,
+        tunMtu: Int,
     ): Boolean
     @JvmStatic external fun nativePsiphonAttachRequest(): String
     @JvmStatic external fun nativePsiphonAttachComplete(id: Long, socks: Int, http: Int)
+    @JvmStatic external fun nativeParseTcpBufferSize(text: String): Int
     @JvmStatic external fun nativeStop()
 
     /**

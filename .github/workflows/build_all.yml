@@ -929,7 +929,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: release
+    name: release/pre-release
     needs: build
     runs-on: ubuntu-latest
     if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch'
@@ -988,53 +988,12 @@ jobs:
           ls -lah release-zips/
           test $(ls -1 release-zips/* 2>/dev/null | wc -l) -ge 1
 
-      - name: skip version.json bump (pre-release)
-        if: ${{ inputs.prerelease }}
-        run: echo "pre-release run, leaving version.json (stable channel) untouched"
-
-      - name: update version.json (stable only)
-        if: ${{ inputs.prerelease != true }}
-        run: |
-          set -euo pipefail
-          export TAG="${{ github.event.inputs.release_tag }}"
-          export DATE=$(date +%Y-%m-%d)
-          export NOTES="${{ github.event.inputs.extra_notes }}"
-          export DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases"
-
-          python3 << 'PYEOF'
-          import json, os
-          tag = os.environ['TAG']
-          date = os.environ['DATE']
-          notes = os.environ.get('NOTES', '')
-          download_url = os.environ['DOWNLOAD_URL']
-          data = {
-              'version': tag,
-              'release_date': date,
-              'release_notes': notes,
-              'download_url': download_url
-          }
-          with open('version.json', 'w') as f:
-              json.dump(data, f, indent=2)
-              f.write('\n')
-          print('Updated version.json:')
-          print(open('version.json').read())
-          PYEOF
-
-      - name: commit and push version.json (stable only)
-        if: ${{ inputs.prerelease != true }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add version.json
-          git commit -m "chore: bump version.json to ${{ github.event.inputs.release_tag }}" || echo "No changes to commit"
-          git push origin main
-
       - name: delete existing release + tag
         uses: actions/github-script@v7
         continue-on-error: true
         with:
           script: |
-            const tag = '${{ github.event.inputs.release_tag }}';
+            const tag = ${{ toJSON(inputs.release_tag) }};
             try {
               const rel = await github.rest.repos.getReleaseByTag({
                 owner: context.repo.owner, repo: context.repo.repo, tag
@@ -1050,7 +1009,7 @@ jobs:
               });
             } catch (e) { console.log(`No existing tag: ${e.message}`); }
 
-      - name: create release
+      - name: release/pre-release
         uses: actions/github-script@v7
         with:
           script: |
@@ -1112,3 +1071,40 @@ jobs:
               });
             }
             console.log('All assets uploaded.');
+
+            // Publish update metadata only after every asset uploaded successfully.
+            // Both stable and pre-release runs update main; preserve the same
+            // version suffix embedded by the build job. Use the Contents API
+            // to commit just this file without pushing a stale checkout.
+            const version = `${tag}${isPrerelease ? '-prerelease' : ''}`;
+            const metadata = {
+              version,
+              release_date: (release.data.published_at || new Date().toISOString()).slice(0, 10),
+              release_notes: body,
+              download_url: release.data.html_url,
+            };
+            const content = `${JSON.stringify(metadata, null, 2)}\n`;
+            const current = await github.rest.repos.getContent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              path: 'version.json',
+              ref: 'main',
+            });
+            if (Array.isArray(current.data) || current.data.type !== 'file') {
+              throw new Error('Expected version.json to be a file on main');
+            }
+            const previous = Buffer.from(current.data.content, 'base64').toString('utf8');
+            if (previous !== content) {
+              await github.rest.repos.createOrUpdateFileContents({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                path: 'version.json',
+                branch: 'main',
+                sha: current.data.sha,
+                message: `chore: bump version.json to ${version}`,
+                content: Buffer.from(content, 'utf8').toString('base64'),
+              });
+              console.log(`Committed version.json for ${version} after release uploads`);
+            } else {
+              console.log('version.json already matches this release');
+            }

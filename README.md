@@ -301,3 +301,38 @@ Regression checks still requiring builds/devices:
 
 Added Rust regression tests cover rejected/stale AAR attachments, final-exit
 labels, and refusing TUN after chained-exit failure. They were not run locally.
+
+
+### tun2socks TCP buffers and MTU
+
+Android and desktop TUN settings now expose:
+
+| Setting | Default | Accepted values |
+| --- | --- | --- |
+| TCP send buffer (bytes) | 128000 | 4096–4194304 |
+| TCP receive buffer (bytes) | 128000 | 4096–4194304 |
+| TCP auto-tuning | On | On / Off |
+| TUN MTU (bytes) | 1500 | 1280–9000 |
+
+Enter plain integer byte counts only. Unit suffixes and decimal fractions are
+not supported: use `128000`, not `128K` or `128KB`. The buffer range follows the
+pinned gVisor TCP limits. Receive auto-tuning may grow the receive buffer beyond
+its configured default. MTU has a 1280-byte floor because the TUN supports IPv6.
+This is the local TUN MTU, not the backend's encrypted tunnel MTU.
+
+Settings persist on both platforms, including Android notification reconnects,
+and apply on the next TUN connection. Android uses the same session MTU for
+`VpnService.Builder.setMtu()` and tun2socks. Both the desktop engine Key path and
+Android supplied-FD stack receive the TCP options. These controls do not tune
+standalone proxy servers or mutate an already-running stack.
+
+Two unused native config slots store buffer sizes and auto-tuning, preserving
+config size, Psiphon flags and the Tor HTTP port. Zeroed legacy slots mean
+128000-byte buffers with auto-tuning on. Rebuild native/UI/JNI/Go together since
+internal start signatures changed. The bridge also accepts its already
+registered Psiphon DNS proxy scheme during pre-validation.
+
+Parser/config/ABI regression tests are included. No local builds
+or unit/device tests were run. After rebuilding, check edited values, invalid
+input, auto-tuning off/on persistence, Android notification reconnect, and
+matching Android interface/tun2socks MTU on direct and chained TUN connections.

@@ -567,6 +567,92 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="20dp"
+                android:text="tun2socks TCP (TUN mode)"
+                android:textColor="#FF60A5FA"
+                android:textSize="15sp" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:labelFor="@id/editTunTcpSndbuf"
+                android:text="TCP send buffer (bytes)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+            <EditText
+                android:id="@+id/editTunTcpSndbuf"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:inputType="number"
+                android:singleLine="true"
+                android:maxLength="31"
+                android:padding="12dp"
+                android:text="128000"
+                android:hint="128000"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF6B7280"
+                android:textSize="14sp" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:labelFor="@id/editTunTcpRcvbuf"
+                android:text="TCP receive buffer (bytes)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+            <EditText
+                android:id="@+id/editTunTcpRcvbuf"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:inputType="number"
+                android:singleLine="true"
+                android:maxLength="31"
+                android:padding="12dp"
+                android:text="128000"
+                android:hint="128000"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF6B7280"
+                android:textSize="14sp" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="12dp" android:text="TUN MTU (bytes, 1280–9000)"
+                android:labelFor="@id/editTunMtu" android:textColor="#FF9AA3B5" android:textSize="13sp" />
+            <EditText
+                android:id="@+id/editTunMtu"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:inputType="number"
+                android:singleLine="true"
+                android:maxLength="31"
+                android:padding="12dp"
+                android:text="1500"
+                android:hint="1500"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF6B7280"
+                android:textSize="14sp" />
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchTunTcpAutoTuning"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="TCP auto-tuning"
+                android:checked="true"
+                android:textColor="#FFE8ECF4" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Enter 4096–4194304 bytes; default 128000. No suffixes. MTU defaults to 1500; also applies to Android VPN interface. Applies on next TUN connection. Auto-tuning may grow the receive buffer beyond its default."
+                android:textColor="#FF9AA3B5"
+                android:textSize="12sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
                 android:text="Zero Trust (Teams)"
                 android:textColor="#FF60A5FA"
                 android:textSize="15sp"
