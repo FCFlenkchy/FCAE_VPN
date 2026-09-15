@@ -352,20 +352,13 @@ FcaeStatus fcae_init(const FcaeInitOptions *options);
  * (or use state_cb) for progress. */
 FcaeStatus fcae_start(const FcaeConfig *config);
 
-/* Stop the session. Blocks until the TUN device is down and routes/DNS
- * have been restored. */
+/* Cancel and abort owned TUN descriptors without waiting for full native/OS
+ * cleanup. A background reaper gates reconnect until the worker exits. */
 FcaeStatus fcae_stop(void);
 
-/* Release the tunnel's OS resources immediately, without waiting for the
- * session thread to finish.
- *
- * fcae_stop() joins the worker thread and can take seconds if a backend is
- * mid-handshake; until it returns, the TUN device (and on Android our dup of
- * the VpnService fd) is still open, so the system keeps the VPN up. This
- * cancels and drops the device only, so a UI can tear down at once. Follow
- * with fcae_stop() on a background thread to reap the session.
- *
- * Idempotent. */
+/* Cancel and abort owned TUN descriptors without joining. The host must close
+ * its own VPN descriptor too. Follow with fcae_stop() to arrange reaping.
+ * Native joins and routes/DNS restoration run off the caller. Idempotent. */
 FcaeStatus fcae_stop_begin(void);
 
 bool       fcae_is_running(void);

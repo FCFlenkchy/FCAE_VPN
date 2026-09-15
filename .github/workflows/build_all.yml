@@ -407,13 +407,8 @@ jobs:
             readelf -lW "$LIB" | awk '$1 == "LOAD" { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
           done
 
-      - name: Upload source-built Psiphon AAR
-        if: startsWith(matrix.name, 'android-')
-        uses: actions/upload-artifact@v4
-        with:
-          name: psiphon-aar-${{ matrix.name }}
-          path: android/psiphon/libs/ca.psiphon.aar
-          if-no-files-found: error
+      # ca.psiphon.aar is an intermediate consumed by :app below, not an
+      # artifact or a standalone release asset.
 
       - name: fetch imgui
         run: |
@@ -946,9 +941,10 @@ jobs:
         with:
           ref: main
 
-      - name: download all artifacts
+      - name: download app package artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: FCAE_VPN-*
           path: artifacts/
           merge-multiple: false
 

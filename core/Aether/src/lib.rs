@@ -43,7 +43,7 @@ pub use stats::{
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use error::{AetherError, Result};
 

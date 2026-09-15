@@ -151,8 +151,8 @@ impl Supervisor {
         // A stop that is still draining must finish first, otherwise the new
         // session's TUN setup races the old session's DNS restore — the
         // classic "reconnect leaves DNS pointing at a dead adapter" bug.
-        // Drain wait is independent of the 2ms join in stop(): reconnect
-        // must wait for the background reaper, not fail in 2ms.
+        // stop() returns before native cleanup finishes. Reconnect must wait
+        // for the background reaper rather than racing that cleanup.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let mut slot = loop {
             let slot = self.running.lock();
@@ -285,119 +285,65 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Cancel the session and release the TUN device, WITHOUT waiting for the
-    /// worker thread to finish.
-    ///
-    /// [`stop`] is synchronous and can legitimately take seconds: it joins the
-    /// session thread, which may be mid-handshake inside a backend. On Android
-    /// that delay is very visible, because the VpnService fd stays open until
-    /// the bridge is down, so the system keeps showing the VPN as connected
-    /// and the key icon stays in the status bar.
-    ///
-    /// This performs only the two steps that actually free OS resources —
-    /// cancel, then tear down the TUN bridge (which closes our dup of the
-    /// VpnService fd and restores routes/DNS). The caller can then close its
-    /// own descriptor and dismiss the UI immediately, and call [`stop`]
-    /// afterwards to reap the thread.
-    ///
-    /// Safe to call more than once, and safe to follow with [`stop`].
+    /// Cancel and abort the TUN descriptors without native joins or OS restore.
+    /// The caller must close any platform-owned descriptor separately. Follow
+    /// with `stop()` to schedule reaping; the session worker owns full cleanup.
+    /// Idempotent, including repeated notification/UI disconnect requests.
     pub fn begin_stop(&self) {
         let slot = self.running.lock();
         if let Some(running) = slot.as_ref() {
-            self.stopping.store(true, Ordering::SeqCst);
-            running.cancel.cancel();
-            // Hold the slot through abort: a new start cannot install a TUN
-            // between cancelling this session and closing its descriptor.
-            self.cfg.tun_bridge.abort();
+            if !self.stopping.swap(true, Ordering::SeqCst) {
+                running.cancel.cancel();
+                // Keep ownership while aborting so a new start cannot install
+                // a TUN between cancellation and descriptor closure.
+                self.cfg.tun_bridge.abort();
+            }
         }
-
     }
 
-    /// Request shutdown and wait (bounded) for the session thread to finish.
-    ///
-    /// Unlike the old `aether_stop`, this is synchronous and ordered: when it
-    /// returns, the TUN device is down and DNS has been restored, so a UI can
-    /// immediately offer "Connect" again without a hidden race.
+    /// Request shutdown without waiting on Go, backend joins, or OS restore.
+    /// Abort descriptors on the caller and let the session worker perform full
+    /// cleanup. A background reaper retains the reconnect barrier until that
+    /// worker exits. This is a fast control path, not a hard realtime deadline.
     pub fn stop(&self) -> Result<()> {
-        let running = {
+        let (running, already_stopping) = {
             let mut slot = self.running.lock();
             let Some(running) = slot.take() else {
                 // Another stop may already own the worker. Only its reaper
                 // may clear `stopping`, never a duplicate Disconnect.
                 return Ok(());
             };
-            self.stopping.store(true, Ordering::SeqCst);
-            running
+            let already_stopping = self.stopping.swap(true, Ordering::SeqCst);
+            (running, already_stopping)
         };
 
         running.cancel.cancel();
 
-        // The bridge is stopped by the session thread, but do it here too:
-        // if the thread is wedged inside a backend call, this releases the
-        // TUN device (and on Android the VpnService fd) immediately.
-        self.cfg.tun_bridge.stop(self.cfg.stop_timeout);
-
-        // 2ms then background reaper — do not sit on a 250ms poll after
-        // the TUN is already gone.
-        match join_bounded(running.thread, Duration::from_millis(2)) {
-            Ok(()) => self.stopping.store(false, Ordering::SeqCst),
-            Err(handle) => {
-                // Do not drop the JoinHandle: that detaches the session
-                // thread while it still owns a tokio runtime, and the next
-                // start races it (ports, LAST_ENGINE, tun2socks). Reap it
-                // in the background and keep `stopping` set until then so
-                // start() waits.
-                log::warn!(
-                    "[session] session thread did not finish within 2ms; waiting in background",
-                );
-                let flag = self.stopping.clone();
-                let _ = std::thread::Builder::new()
-                    .name("fcae-session-reaper".into())
-                    .spawn(move || {
-                        let _ = handle.join();
-                        flag.store(false, Ordering::SeqCst);
-                    });
-            }
+        if !already_stopping {
+            // Only close descriptors here. stop() may block in platform::restore
+            // or Go engine.Stop(); the session worker already owns those calls.
+            self.cfg.tun_bridge.abort();
         }
         self.telemetry
             .set_state(FcaeState::Disconnected, "Disconnected".into());
+
+        if running.thread.is_finished() {
+            let _ = running.thread.join();
+            self.stopping.store(false, Ordering::SeqCst);
+        } else {
+            // No polling/sleep budget on the UI thread. Keep the barrier set
+            // until cleanup completes, including when Disconnect is repeated.
+            let flag = self.stopping.clone();
+            std::thread::Builder::new()
+                .name("fcae-session-reaper".into())
+                .spawn(move || {
+                    let _ = running.thread.join();
+                    flag.store(false, Ordering::SeqCst);
+                })
+                .map_err(|e| CoreError::Internal(format!("failed to spawn session reaper: {e}")))?;
+        }
         Ok(())
     }
-}
-
-/// Join with a timeout — `JoinHandle` has no such API, so poll `is_finished`.
-///
-/// On timeout the handle is returned so the caller can reap it instead of
-/// detaching (Drop of JoinHandle detaches, which leaked the old engine).
-fn join_bounded(
-    handle: std::thread::JoinHandle<()>,
-    timeout: Duration,
-) -> std::result::Result<(), std::thread::JoinHandle<()>> {
-    if handle.is_finished() {
-        let _ = handle.join();
-        return Ok(());
-    }
-    if timeout.is_zero() {
-        return Err(handle);
-    }
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        if handle.is_finished() {
-            let _ = handle.join();
-            return Ok(());
-        }
-        let remain = deadline.saturating_duration_since(std::time::Instant::now());
-        let slice = Duration::from_millis(1).min(remain);
-        if slice.is_zero() {
-            break;
-        }
-        std::thread::sleep(slice);
-    }
-    if handle.is_finished() {
-        let _ = handle.join();
-        return Ok(());
-    }
-    Err(handle)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -756,6 +702,56 @@ mod tests {
         sup.stop().expect("stop");
         assert!(!sup.is_running());
         assert_eq!(cell.snapshot().state, FcaeState::Disconnected);
+    }
+
+    #[test]
+    fn stop_aborts_once_without_running_full_bridge_cleanup_on_caller() {
+        use std::sync::atomic::AtomicUsize;
+
+        #[derive(Default)]
+        struct RecordingBridge {
+            aborts: AtomicUsize,
+            stops: AtomicUsize,
+        }
+        impl TunBridge for RecordingBridge {
+            fn start(&self, _: &SessionConfig, _: &Endpoints) -> Result<()> { Ok(()) }
+            fn abort(&self) { self.aborts.fetch_add(1, Ordering::SeqCst); }
+            fn stop(&self, _: Duration) { self.stops.fetch_add(1, Ordering::SeqCst); }
+            fn is_running(&self) -> bool { false }
+        }
+
+        for begin_first in [false, true] {
+            let bridge = Arc::new(RecordingBridge::default());
+            let sup = Supervisor::new(Arc::new(TelemetryCell::new()), SupervisorConfig {
+                tun_bridge: bridge.clone(),
+                ..Default::default()
+            });
+            // Hold the worker open independently of scheduler timing. stop()
+            // must return without joining it or invoking the slow bridge path.
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let cancel = CancelToken::new();
+            *sup.running.lock() = Some(Running {
+                cancel: cancel.clone(),
+                thread: std::thread::spawn(move || { let _ = wait.recv(); }),
+            });
+            if begin_first {
+                sup.begin_stop();
+                sup.begin_stop();
+            }
+            sup.stop().unwrap();
+            sup.stop().unwrap();
+            sup.begin_stop();
+            assert!(cancel.is_cancelled());
+            assert_eq!(bridge.aborts.load(Ordering::SeqCst), 1);
+            assert_eq!(bridge.stops.load(Ordering::SeqCst), 0);
+            assert!(sup.stopping.load(Ordering::SeqCst), "worker still owns cleanup");
+            release.send(()).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while sup.stopping.load(Ordering::SeqCst) {
+                assert!(std::time::Instant::now() < deadline, "reaper did not finish");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
     }
 
     #[test]

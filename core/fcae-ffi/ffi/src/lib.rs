@@ -299,27 +299,18 @@ pub unsafe extern "C" fn fcae_start(cfg: *const FcaeConfig) -> FcaeStatus {
     })
 }
 
-/// Stop the session. Blocks until the TUN device is down and routes/DNS are
-/// restored, so it is safe to immediately offer "connect" again.
+/// Cancel the session and abort TUN descriptors without waiting for native
+/// shutdown or routes/DNS restoration. Full cleanup runs on the session worker;
+/// reconnect remains gated until the background reaper joins that worker.
 #[no_mangle]
 pub extern "C" fn fcae_stop() -> FcaeStatus {
     guard("fcae_stop", || runtime()?.supervisor.stop())
 }
 
-/// Release the tunnel's OS resources immediately, without waiting for the
-/// session thread to finish.
-///
-/// [`fcae_stop`] joins the worker thread, which can take seconds if a backend
-/// is mid-handshake. On Android that delay is very visible: our dup of the
-/// VpnService fd stays open, so the system still considers the VPN up and the
-/// key icon lingers long after the user tapped disconnect.
-///
-/// This cancels the session and tears down the TUN bridge only — closing our
-/// descriptor and restoring routes/DNS — so the caller can close its own fd
-/// and update the UI at once. Follow it with [`fcae_stop`] on a background
-/// thread to reap the session.
-///
-/// Idempotent, and safe to call before [`fcae_stop`].
+/// Cancel and abort owned TUN descriptors without joining the session.
+/// The host must also close its own VPN descriptor. Full native and OS cleanup
+/// runs on the session worker, not this caller. Follow with `fcae_stop()` to
+/// arrange reaping. Idempotent; repeated calls do not repeat descriptor abort.
 #[no_mangle]
 pub extern "C" fn fcae_stop_begin() -> FcaeStatus {
     guard("fcae_stop_begin", || {
