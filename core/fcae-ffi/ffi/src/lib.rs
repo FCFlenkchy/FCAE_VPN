@@ -561,6 +561,23 @@ pub extern "C" fn fcae_psiphon_http_port() -> u16 {
     { 0 }
 }
 
+/// Android AAR attach request JSON. Returns required bytes excluding NUL.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_psiphon_attach_request(out: *mut std::ffi::c_char, cap: u32) -> u32 {
+    #[cfg(feature = "psiphon")]
+    let request = fcae_bridge_psiphon::host_request();
+    #[cfg(not(feature = "psiphon"))]
+    let request = String::new();
+    if !out.is_null() && cap > 0 { fill(std::slice::from_raw_parts_mut(out, cap as usize), &request); }
+    request.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn fcae_psiphon_attach_complete(id: u64, socks: u16, http: u16) {
+    #[cfg(feature = "psiphon")]
+    fcae_bridge_psiphon::host_complete(id, socks, http);
+}
+
 /// Install Android's `VpnService.protect(fd)` for Psiphon's own sockets.
 ///
 /// Psiphon dials out while our TUN is up, so without this its connections are

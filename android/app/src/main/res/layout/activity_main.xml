@@ -227,16 +227,25 @@
                 android:layout_height="wrap_content"
                 android:text="Tor HTTP proxy"
                 android:textColor="#FFE8ECF4" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Tor HTTP port"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
             <EditText
                 android:id="@+id/editTorHttpPort"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:hint="1822"
                 android:inputType="number"
-                android:hint="Tor HTTP port (1822)"
-                android:contentDescription="Tor HTTP port"
                 android:padding="10dp"
                 android:textColor="#FFE8ECF4"
-                android:textColorHint="#FF6B7280" />
+                android:textColorHint="#FF6B7280"
+                android:textSize="14sp" />
 
             <TextView
                 android:layout_width="wrap_content"
@@ -700,12 +709,22 @@
         android:textColor="#FF9AA3B5"
         android:textSize="13sp" />
 
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="220dp">
     <ScrollView
         android:id="@+id/logScroll"
         android:layout_width="match_parent"
-        android:layout_height="220dp"
+        android:layout_height="match_parent"
         android:background="#FF0C0C14"
-        android:padding="10dp">
+        android:scrollbars="vertical"
+        android:fadeScrollbars="false"
+        android:scrollbarAlwaysDrawVerticalTrack="true"
+        android:scrollbarStyle="insideInset"
+        android:scrollbarTrackVertical="@android:color/darker_gray"
+        android:scrollbarThumbVertical="@android:color/holo_blue_light"
+        android:padding="10dp"
+        android:paddingBottom="52dp">
 
         <TextView
             android:id="@+id/logText"
@@ -716,6 +735,16 @@
             android:textSize="11sp"
             android:textIsSelectable="true" />
     </ScrollView>
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnLatestLogs"
+        android:layout_width="wrap_content"
+        android:layout_height="48dp"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="10dp"
+        android:text="Latest"
+        android:textAllCaps="false"
+        android:contentDescription="Jump to latest log and resume following" />
+    </FrameLayout>
 
     <LinearLayout
         android:layout_width="match_parent"

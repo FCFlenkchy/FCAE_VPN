@@ -99,6 +99,7 @@ public class ProxyNotification extends Service {
                     return;
                 }
             }
+            if (!stopping && !externalPsiphon) PsiphonTunnelService.pollChainedRequest(ProxyNotification.this);
             updateNotification();
             handler.postDelayed(this, 1000);
         }

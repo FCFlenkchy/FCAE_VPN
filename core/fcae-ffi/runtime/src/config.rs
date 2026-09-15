@@ -358,7 +358,8 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // ── Ports ───────────────────────────────────────────────────────────
     // TUN mode needs an internal SOCKS endpoint even if the user zeroed the
     // port, so fall back rather than failing.
-    if cfg.socks_port == 0 && cfg.mode == FcaeMode::Tun {
+    if cfg.socks_port == 0 && (cfg.mode == FcaeMode::Tun || raw._reserved[0] != 0
+        || matches!(raw.tor.mode, FcaeTorMode::Chain | FcaeTorMode::Reverse)) {
         cfg.socks_port = 1819;
     }
     if cfg.protocol != FcaeProtocol::Tor && raw.tor.mode != FcaeTorMode::Only

@@ -401,6 +401,9 @@ uint32_t   fcae_psiphon_regions(char *out, uint32_t cap);
 /* Bound desktop proxy ports; zero if unavailable. Android uses service broadcasts. */
 uint16_t   fcae_psiphon_socks_port(void);
 uint16_t   fcae_psiphon_http_port(void);
+uint32_t   fcae_psiphon_attach_request(char *out, uint32_t cap);
+/* socks=0 reports failure/disconnection for this request ID. */
+void       fcae_psiphon_attach_complete(uint64_t id, uint16_t socks, uint16_t http);
 
 /* Install Android's VpnService.protect(fd) for Psiphon's own sockets; the
  * callback returns 1 on success, 0 on failure. Without it Psiphon's

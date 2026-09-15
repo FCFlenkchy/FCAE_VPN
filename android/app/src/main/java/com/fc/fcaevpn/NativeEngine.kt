@@ -75,6 +75,7 @@ object NativeEngine {
         // do not substitute a literal here.
         torSocksPort: Int,
         torHttpPort: Int,
+        psiphonThroughTunnel: Boolean,
         // Psiphon config JSON (the whole object, not a path), "" if unused.
         psiphonConfig: String,
         // ISO country code, or "" for automatic.
@@ -83,6 +84,8 @@ object NativeEngine {
         psiphonSocksPort: Int,
         psiphonHttpPort: Int,
     ): Boolean
+    @JvmStatic external fun nativePsiphonAttachRequest(): String
+    @JvmStatic external fun nativePsiphonAttachComplete(id: Long, socks: Int, http: Int)
     @JvmStatic external fun nativeStop()
 
     /**

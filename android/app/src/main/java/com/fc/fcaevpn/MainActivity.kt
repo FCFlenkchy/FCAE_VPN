@@ -34,8 +34,6 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var pendingPsiSocks = 0
     @Volatile private var pendingPsiHttp = 0
     @Volatile private var pendingPsiLan = ""
-    /// Egress "Psiphon through the tunnel": AAR is started after Aether is up.
-    @Volatile private var psiEgressStarted = false
     private var lastLogHash = 0L
     private var disconnecting = false
     @Volatile private var connectionEpoch = 0L
@@ -73,6 +71,8 @@ class MainActivity : AppCompatActivity() {
     private var psiphonRegionCodes: List<String> = listOf("")
     /// Region chosen before the list was known, restored once it arrives.
     private var savedPsiphonRegion: String = ""
+    private var applyingRegionList = false
+    private var pendingRegionCodes: List<String>? = null
     private lateinit var switchEch: SwitchMaterial
     private lateinit var switchQuick: SwitchMaterial
     private lateinit var switchLan: SwitchMaterial
@@ -215,11 +215,15 @@ class MainActivity : AppCompatActivity() {
                         pendingPsiSocks = socks
                         pendingPsiHttp = http
                         pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: ""
+                        if (isEgressPsiphon()) {
+                            handler.post(poll)
+                            return@post
+                        }
                         connecting = false
                         engineRunning = true
                         vpnActive = true
                         updateButton()
-                        statusText.text = if (isTunModeSelected()) "ESTABLISHING TUNNEL" else "CONNECTED"
+                        statusText.text = if (isTunModeSelected()) "ESTABLISHING PSIPHON TUN" else "CONNECTED (PSIPHON PROXY)"
                         statusText.setTextColor(COLOR_CONNECTED)
                         // Surface psiphon's actual proxy endpoints here too —
                         // pure-psiphon mode never polls the engine, so this
@@ -227,7 +231,7 @@ class MainActivity : AppCompatActivity() {
                         if (!isTunModeSelected() && socks > 0) {
                             peerText.text = psiphonEndpointText()
                         }
-                        if (isTunModeSelected() && socks > 0) {
+                        if (isPsiphonSelected() && isTunModeSelected() && socks > 0) {
                             startTunServiceWithConfig()
                         }
                     }
@@ -566,7 +570,9 @@ class MainActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
+                if (applyingRegionList || position != spinnerPsiphonRegion.selectedItemPosition) return
                 savedPsiphonRegion = psiphonRegionCodes.getOrElse(position) { savedPsiphonRegion }
+                prefs.edit().putString("psiphonRegion", savedPsiphonRegion).apply()
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
@@ -656,6 +662,16 @@ class MainActivity : AppCompatActivity() {
             if (vpnActive || engineRunning || connecting) disconnectAll() else connectClicked()
         }
 
+        findViewById<MaterialButton>(R.id.btnLatestLogs).setOnClickListener {
+            logText.clearFocus()
+            if (logText.text is android.text.Spannable)
+                android.text.Selection.removeSelection(logText.text as android.text.Spannable)
+            logTouchActive = false
+            wasAtBottom = true
+            if (switchLogging.isChecked) renderLogs(try { NativeEngine.nativeGetLogs() } catch (_: Throwable) { logText.text.toString() })
+            logScroll.requestLayout()
+            logScroll.invalidate()
+        }
         findViewById<MaterialButton>(R.id.btnClearLogs).setOnClickListener {
             NativeEngine.nativeClearLogs()
             wasAtBottom = true
@@ -1095,7 +1111,6 @@ class MainActivity : AppCompatActivity() {
         userInitiatedDisconnect = false
         commandPaused = false
         commandConnecting = true
-        psiEgressStarted = false
         pendingPsiSocks = 0
         pendingPsiHttp = 0
         pendingPsiLan = ""
@@ -1179,7 +1194,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("lanSharing", switchLan.isChecked)
         i.putExtra("configPath", filesDir.resolve("aether.toml").absolutePath)
         i.putExtra("sni", editSni.text.toString().trim())
-        i.putExtra("socksPort", if (switchSocks.isChecked) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0)
+        i.putExtra("socksPort", if (switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0)
         i.putExtra("httpPort", if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0)
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
         i.putExtra("forcePeer", editForcePeer.text.toString().trim())
@@ -1196,7 +1211,8 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("backend", backendFromSelection())
         i.putExtra("torSocksPort", deferredTorSocksPort())
         i.putExtra("torHttpPort", if (switchTorHttp.isChecked) editTorHttpPort.text.toString().toIntOrNull() ?: 1822 else 0)
-        i.putExtra("psiphonConfig", "")
+        i.putExtra("psiphonThroughTunnel", isEgressPsiphon())
+        i.putExtra("psiphonConfig", org.json.JSONObject().put("FCAETransport", selectedPsiphonTransportIndex()).toString())
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
         // Prefer the LIVE AAR ports: when this start is the Protocol=Psiphon
         // "raise TUN" step, the AAR already picked random ports and
@@ -1237,7 +1253,7 @@ class MainActivity : AppCompatActivity() {
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
         // Extract ALL UI values on the main thread — never read Views from bg.
         val noizeProfile = spinnerNoize.selectedItem.toString()
-        val socksPort = if (switchSocks.isChecked) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0
+        val socksPort = if (switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0
         val httpPort = if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0
         val forcePeer = editForcePeer.text.toString().trim()
         val sysProfile = spinnerSysprofile.selectedItemPosition
@@ -1253,7 +1269,8 @@ class MainActivity : AppCompatActivity() {
         val backend = backendFromSelection()
         val torSocksPort = deferredTorSocksPort()
         val torHttpPort = if (switchTorHttp.isChecked) editTorHttpPort.text.toString().toIntOrNull() ?: 1822 else 0
-        val psiphonConfig = ""
+        val throughPsiphon = isEgressPsiphon()
+        val psiphonConfig = org.json.JSONObject().put("FCAETransport", selectedPsiphonTransportIndex()).toString()
         val psiphonRegion = selectedPsiphonRegion()
         val psiphonSocksPort = editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0
         val psiphonHttpPort = editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0
@@ -1300,6 +1317,7 @@ class MainActivity : AppCompatActivity() {
                     backend = backend,
                     torSocksPort = torSocksPort,
                     torHttpPort = torHttpPort,
+                    psiphonThroughTunnel = throughPsiphon,
                     psiphonConfig = psiphonConfig,
                     psiphonRegion = psiphonRegion,
                     psiphonSocksPort = psiphonSocksPort,
@@ -1596,13 +1614,6 @@ class MainActivity : AppCompatActivity() {
                 // handshake, so this is the first moment the real list can be
                 // read. Cheap and idempotent: it no-ops unless the set changed.
                 if (state == 4 && (isPsiphonSelected() || isEgressPsiphon())) refreshPsiphonRegions()
-                if (state == 4 && isEgressPsiphon() && !psiEgressStarted) {
-                    psiEgressStarted = true
-                    val port = if (switchSocks.isChecked)
-                        editSocksPort.text.toString().toIntOrNull() ?: 1819
-                    else 1819
-                    startPsiphonWithUpstream("socks5://127.0.0.1:$port")
-                }
                 // Detect engine stopped while we thought it was active.
                 // 0 = idle/stopped, 5 = terminal error. The FFI keeps state
                 // 5 sticky after the session thread ends, so without the 5
@@ -1625,7 +1636,8 @@ class MainActivity : AppCompatActivity() {
                 3 -> "CONNECTING"
                 4 -> {
                     val isTun = spinnerMode.selectedItemPosition == 1
-                    if (isTun) "CONNECTED (TUN)" else "CONNECTED (PROXY)"
+                    if (statusMsg.isNotBlank()) statusMsg.uppercase()
+                    else if (isTun) "CONNECTED (TUN)" else "CONNECTED (PROXY)"
                 }
                 5 -> "ERROR"
                 6 -> "RECONNECTING"
@@ -1661,23 +1673,25 @@ class MainActivity : AppCompatActivity() {
             // Show only listeners belonging to the active backend. Tor-only
             // has its own SOCKS port; Psiphon has ports assigned by its service.
             if (state == 4 && !isPsiphonSelected()) {
-                val local = mutableListOf<String>()
-                val shared = mutableListOf<String>()
-                fun endpoint(kind: String, port: String) {
-                    local.add("$kind 127.0.0.1:$port")
-                    if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1")
-                        shared.add("$kind $lan:$port")
+                fun endpoints(backend: String, socks: String?, http: String?) {
+                    val local = mutableListOf<String>()
+                    val shared = mutableListOf<String>()
+                    fun add(kind: String, port: String) {
+                        local.add("$kind 127.0.0.1:$port")
+                        if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") shared.add("$kind $lan:$port")
+                    }
+                    socks?.let { add("SOCKS5", it) }
+                    http?.let { add("HTTP", it) }
+                    if (local.isNotEmpty()) peerLine.append("\n$backend local: " + local.joinToString(" | "))
+                    if (shared.isNotEmpty()) peerLine.append("\n$backend LAN: " + shared.joinToString(" | "))
                 }
-                if (!isTorOnly() && switchSocks.isChecked)
-                    endpoint("SOCKS5", editSocksPort.text.toString().trim().ifEmpty { "1819" })
-                if (!isTorOnly() && switchHttp.isChecked)
-                    endpoint("Aether HTTP", editHttpPort.text.toString().trim().ifEmpty { "1820" })
-                if (switchTorHttp.isChecked && (isTorOnly() || effectiveTorMode() in 1..2))
-                    endpoint("Tor HTTP", editTorHttpPort.text.toString())
-                if (isTorOnly() || effectiveTorMode() in 1..2)
-                    endpoint("TOR SOCKS5", editTorSocksPort.text.toString().trim().ifEmpty { "1821" })
-                if (local.isNotEmpty()) peerLine.append("\nLocal: " + local.joinToString(" | "))
-                if (shared.isNotEmpty()) peerLine.append("\nLAN: " + shared.joinToString(" | "))
+                if (!isTorOnly()) endpoints("Aether",
+                    if (switchSocks.isChecked || isTunModeSelected() || isEgressPsiphon() || effectiveTorMode() in 1..2)
+                        editSocksPort.text.toString().trim().ifEmpty { "1819" } else null,
+                    if (switchHttp.isChecked) editHttpPort.text.toString().trim().ifEmpty { "1820" } else null)
+                if (isTorOnly() || effectiveTorMode() in 1..2) endpoints("Tor",
+                    editTorSocksPort.text.toString().trim().ifEmpty { "1821" },
+                    if (switchTorHttp.isChecked) editTorHttpPort.text.toString() else null)
             }
             if (state == 4 && (isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0)
                 peerLine.append("\n" + psiphonEndpointText())
@@ -1764,8 +1778,8 @@ class MainActivity : AppCompatActivity() {
     /**
      * Only Protocol=Psiphon runs the Psiphon attach backend. Egress "Psiphon
      * through the tunnel" keeps backend Aether: the engine session stays up
-     * and this activity chains the AAR in front of it afterwards (mirrors
-     * the desktop supervisor's _reserved[0] through-tunnel flag).
+     * and the supervisor requests the AAR exit through the foreground owner.
+     * Its _reserved[0] flag now follows the same routing as desktop.
      */
     private fun backendFromSelection(): Int =
         if (isPsiphonProtocol()) 1 else 0
@@ -1796,6 +1810,7 @@ class MainActivity : AppCompatActivity() {
 
     /** The ISO code currently chosen, or "" for automatic. */
     private fun selectedPsiphonRegion(): String {
+        if (applyingRegionList) return savedPsiphonRegion
         if (!::spinnerPsiphonRegion.isInitialized) return savedPsiphonRegion
         val i = spinnerPsiphonRegion.selectedItemPosition
         return psiphonRegionCodes.getOrElse(i) { "" }
@@ -1865,23 +1880,35 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyPsiphonRegionCodes(newCodes: List<String>) {
         if (!::spinnerPsiphonRegion.isInitialized) return
-        // Keep the user's current pick over the stale persisted value: when
-        // both exist the current selection is the newer intent (a listener
-        // writes savedPsiphonRegion on every pick, so this only differs
-        // while a fresh pick hasn't been saved yet).
-        val want = run {
-            val cur = selectedPsiphonRegion()
-            if (cur.isNotEmpty() && newCodes.contains(cur)) cur
-            else if (savedPsiphonRegion.isNotEmpty()) savedPsiphonRegion
-            else cur
+        val want = savedPsiphonRegion.trim().uppercase()
+        // Canonical order makes repeated/reordered network notices a no-op.
+        // Keep an explicit saved choice even if temporarily absent upstream.
+        val normalized = listOf("") + (newCodes + listOf(want))
+            .map { it.trim().uppercase() }.filter { it.isNotEmpty() }.distinct().sorted()
+        if (spinnerPsiphonRegion.adapter != null && normalized == psiphonRegionCodes) return
+        if (spinnerPsiphonRegion.adapter != null && !hasWindowFocus()) {
+            pendingRegionCodes = normalized
+            return // a popup is open; don't rebuild underneath the user's finger
         }
-        psiphonRegionCodes = newCodes
-        val labels = newCodes.map { if (it.isEmpty()) "Auto" else it }
-        spinnerPsiphonRegion.adapter =
-            ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
-        val at = newCodes.indexOf(want)
-        spinnerPsiphonRegion.setSelection(if (at >= 0) at else 0)
-        savedPsiphonRegion = selectedPsiphonRegion()
+        pendingRegionCodes = null
+        applyingRegionList = true
+        psiphonRegionCodes = normalized
+        spinnerPsiphonRegion.adapter = ArrayAdapter(this,
+            android.R.layout.simple_spinner_dropdown_item,
+            normalized.map { if (it.isEmpty()) "Auto" else it })
+        spinnerPsiphonRegion.setSelection(normalized.indexOf(want).coerceAtLeast(0), false)
+        savedPsiphonRegion = want
+        spinnerPsiphonRegion.post { applyingRegionList = false }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && ::spinnerPsiphonRegion.isInitialized) pendingRegionCodes?.let {
+            // A popup can return window focus before onItemSelected is dispatched.
+            // Read its new selection before applying the deferred network list.
+            savedPsiphonRegion = selectedPsiphonRegion()
+            applyPsiphonRegionCodes(it)
+        }
     }
 
     private fun h2FromSelection(): Boolean = spinnerProtocol.selectedItemPosition in listOf(1, 7)

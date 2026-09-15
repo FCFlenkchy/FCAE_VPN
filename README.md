@@ -249,3 +249,55 @@ Validation checklist (builds/device tests not run by the patch author):
 - If a crash persists, capture Android `adb logcat -b all -d` immediately,
   including `FATAL EXCEPTION`, libc/fdsan aborts, Rust panic, or native tombstone;
   note the protocol, mode and whether Stop came from the app or notification.
+
+
+### Final-exit routing and UI follow-up
+
+TUN now waits for the requested final exit. A failed Psiphon chain is an error,
+not permission to fall back to the Aether/Tor carrier. The supervisor monitors
+both hops and tears down TUN when either hop terminates. Existing explicit
+DIRECT routing rules and platform VPN limitations are unchanged; this is not
+a new system-wide kill switch.
+
+Android's foreground notification owner services an ID-tagged native AAR attach
+request, including the supervisor-selected upstream SOCKS endpoint. This fixes
+both Aether → Psiphon and Tor-only → Psiphon without restarting the carrier or
+raising a carrier-only TUN first. Startup continues with the activity backgrounded.
+Late READY/FAILED notices from old requests are rejected. Native and Android
+components must be rebuilt together because the JNI start signature changed.
+
+Connected status identifies the actual final endpoint: Aether TUN, Tor TUN, or
+Psiphon TUN. Tor Chain exits through Tor; Reverse exits through the tunnel carried
+by Tor. Backend-prefixed local/LAN rows distinguish carrier listeners from final
+exit listeners. In proxy-only mode clients still need to select the **final
+exit's** SOCKS/HTTP port; using the carrier's port does not magically chain it.
+
+Tor HTTP uses the same input styling as the other ports on Android and the same
+integer-entry widget as Tor SOCKS on desktop. Both log panes have a persistent
+vertical scrollbar and a fixed Latest button to resume following after reading
+older lines. The button is fixed within the log pane, not inside the log text.
+Psiphon region notices are normalized/deduplicated; unchanged lists do not replace
+the spinner adapter. Real changes are deferred while it loses focus to a popup,
+and a saved region is retained even when temporarily absent from a notice.
+
+Psiphon already supports `ListenInterface=any`. Android now applies network-binding
+policy **after** reading LAN settings. LAN mode avoids forcing all reply sockets
+onto a cellular network, and discovers Wi-Fi/hotspot IPv4 separately. The app UID
+(including :psiphon) remains excluded from its own VPN. LAN is unauthenticated and
+opt-in; change the option before connecting. AP/client isolation, Android hotspot
+restrictions, and host firewalls may still prevent access. A LAN address cannot
+be advertised if the OS does not expose one.
+
+Regression checks still requiring builds/devices:
+- Test Aether → Tor, Tor → Aether (supported MASQUE Reverse), Aether → Psiphon,
+  and Tor-only → Psiphon in TUN and proxy modes. Verify the public IP using the
+  final exit; kill that exit and confirm no carrier-only Connected/TUN fallback.
+- Background Android during chained startup, cancel during AAR attach, and rapidly
+  reconnect; old bindings/READY messages must not attach to the replacement.
+- Compare Psiphon loopback and LAN HTTP/SOCKS access from another device, with
+  Wi-Fi and mobile data both enabled; then reconnect with LAN disabled.
+- Scroll the open region dropdown during repeated notices; select a non-Auto
+  region and reopen it. Copy/select old logs, use Latest, and fill the log ring.
+
+Added Rust regression tests cover rejected/stale AAR attachments, final-exit
+labels, and refusing TUN after chained-exit failure. They were not run locally.

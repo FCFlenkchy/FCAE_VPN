@@ -41,7 +41,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-#[cfg(all(feature = "enabled", psiphon_linked))]
 use fcae_abi::FcaeState;
 use fcae_runtime::backend::{
     Backend, BackendContext, BackendHandle, BackendId, Capabilities, Endpoints,
@@ -171,6 +170,39 @@ pub fn register() {
 
 pub struct PsiphonBackend;
 
+// App-process handshake with the Android AAR owner. IDs prevent a late READY
+// from an old binding attaching its ports to a new session. No native restart
+// is needed: the carrier stays alive while the supervisor waits for this exit.
+struct HostAttach {
+    id: u64,
+    request: String,
+    ports: Option<(u16, u16)>,
+    failed: bool,
+}
+static HOST_ATTACH: parking_lot::Mutex<Option<HostAttach>> = parking_lot::Mutex::new(None);
+static NEXT_HOST_ATTACH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub fn host_request() -> String {
+    HOST_ATTACH.lock().as_ref().map(|s| s.request.clone()).unwrap_or_default()
+}
+
+pub fn host_complete(id: u64, socks: u16, http: u16) {
+    let mut state = HOST_ATTACH.lock();
+    if let Some(s) = state.as_mut().filter(|s| s.id == id) {
+        if socks == 0 { s.failed = true; s.ports = None; }
+        else if !s.failed { s.ports = Some((socks, http)); }
+    }
+}
+
+struct HostLease(u64);
+impl Drop for HostLease {
+    fn drop(&mut self) {
+        let mut state = HOST_ATTACH.lock();
+        if state.as_ref().is_some_and(|s| s.id == self.0) { *state = None; }
+    }
+}
+
+
 #[async_trait]
 impl Backend for PsiphonBackend {
     fn id(&self) -> BackendId {
@@ -203,7 +235,35 @@ impl Backend for PsiphonBackend {
     async fn start(&self, cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
         // AAR owns the tunnel core and the config JSON. Attach needs only the
         // local SOCKS port — do not require a pasted sponsor config.
-        let socks = cx.config.psiphon.socks_port;
+        let json: serde_json::Value = serde_json::from_str(
+            cx.config.psiphon.config_json.as_deref().unwrap_or("{}")).unwrap_or_default();
+        let mut lease = None;
+        let mut socks = cx.config.psiphon.socks_port;
+        let mut http = cx.config.psiphon.http_port;
+        if let Some(upstream) = json.get("UpstreamProxyURL").or_else(|| json.get("UpstreamProxyUrl")).and_then(|v| v.as_str()) {
+            let id = NEXT_HOST_ATTACH.fetch_add(1, Ordering::SeqCst);
+            let request = serde_json::json!({
+                "requestId": id, "upstreamProxy": upstream,
+                "psiphonRegion": cx.config.psiphon.egress_region.as_deref().unwrap_or(""),
+                "psiphonSocksPort": socks, "psiphonHttpPort": http,
+                "psiphonTransport": json.get("FCAETransport").and_then(|v| v.as_i64()).unwrap_or(0),
+                "lanSharing": cx.config.lan_sharing,
+            }).to_string();
+            *HOST_ATTACH.lock() = Some(HostAttach { id, request, ports: None, failed: false });
+            lease = Some(HostLease(id));
+            cx.report(FcaeState::Connecting, "Waiting for Android Psiphon exit…");
+            loop {
+                if cx.cancel.is_cancelled() { return Err(CoreError::StartFailed("chain cancelled".into())); }
+                let result = HOST_ATTACH.lock().as_ref().filter(|s| s.id == id)
+                    .map(|s| (s.failed, s.ports));
+                match result {
+                    Some((false, Some(ports))) => { (socks, http) = ports; break; }
+                    Some((false, None)) => {},
+                    _ => return Err(CoreError::StartFailed("Android Psiphon exit failed".into())),
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
         if socks == 0 {
             return Err(CoreError::StartFailed(
                 "Android Psiphon is the official AAR (process :psiphon). \
@@ -213,7 +273,8 @@ impl Backend for PsiphonBackend {
         }
         Ok(Box::new(PsiphonHandle {
             socks_port: socks,
-            http_port: cx.config.psiphon.http_port,
+            http_port: http,
+            host_lease: lease,
             stopped: AtomicBool::new(false),
         }))
     }
@@ -314,6 +375,7 @@ impl Backend for PsiphonBackend {
         Ok(Box::new(PsiphonHandle {
             socks_port,
             http_port: ffi::http_port(),
+            host_lease: None,
             stopped: AtomicBool::new(false),
         }))
     }
@@ -934,6 +996,7 @@ mod counters_state {
 /// Handle over a running Psiphon tunnel.
 #[cfg_attr(not(all(feature = "enabled", psiphon_linked)), allow(dead_code))]
 struct PsiphonHandle {
+    host_lease: Option<HostLease>,
     socks_port: u16,
     http_port: u16,
     stopped: AtomicBool,
@@ -995,6 +1058,11 @@ impl BackendHandle for PsiphonHandle {
         {
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
+                if let Some(lease) = self.host_lease.as_ref() {
+                    let alive = HOST_ATTACH.lock().as_ref()
+                        .is_some_and(|s| s.id == lease.0 && !s.failed && s.ports.is_some());
+                    if !alive { return Err(CoreError::Internal("Android Psiphon exit dropped".into())); }
+                }
                 if self.stopped.load(Ordering::SeqCst) {
                     return Ok(());
                 }
@@ -1005,6 +1073,10 @@ impl BackendHandle for PsiphonHandle {
     async fn stop(&self, _timeout: Duration) -> Result<()> {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return Ok(());
+        }
+        if let Some(lease) = self.host_lease.as_ref() {
+            let mut state = HOST_ATTACH.lock();
+            if state.as_ref().is_some_and(|s| s.id == lease.0) { *state = None; }
         }
         #[cfg(all(feature = "enabled", psiphon_linked))]
         {
@@ -1058,8 +1130,27 @@ mod tests {
     }
 
     #[test]
+    fn host_attachment_ignores_old_bindings_and_cannot_revive_failed_exit() {
+        *HOST_ATTACH.lock() = Some(HostAttach {
+            id: 42, request: "request".into(), ports: None, failed: false,
+        });
+        host_complete(41, 1080, 8080);
+        assert!(HOST_ATTACH.lock().as_ref().unwrap().ports.is_none());
+        host_complete(42, 1080, 8080);
+        assert_eq!(HOST_ATTACH.lock().as_ref().unwrap().ports, Some((1080, 8080)));
+        host_complete(42, 0, 0);
+        host_complete(42, 1080, 8080);
+        assert!(HOST_ATTACH.lock().as_ref().unwrap().failed);
+        assert!(HOST_ATTACH.lock().as_ref().unwrap().ports.is_none());
+        drop(HostLease(41));
+        assert!(!host_request().is_empty());
+        drop(HostLease(42));
+        assert!(host_request().is_empty());
+    }
+
+    #[test]
     fn psiphon_endpoint_requires_tunneled_https_dns() {
-        let handle = PsiphonHandle { socks_port: 1080, http_port: 8080, stopped: AtomicBool::new(false) };
+        let handle = PsiphonHandle { host_lease: None, socks_port: 1080, http_port: 8080, stopped: AtomicBool::new(false) };
         let endpoints = handle.endpoints();
         assert!(!endpoints.udp);
         assert!(endpoints.dns_over_https);

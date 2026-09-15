@@ -65,17 +65,72 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     // Accessed on the application main thread. The app notification owner keeps
     // this binding alive; the isolated Go service never becomes a foreground service.
-    private static android.content.ServiceConnection connection;
+    private static volatile android.content.ServiceConnection connection;
+    private static final java.util.concurrent.atomic.AtomicLong bindingEpoch = new java.util.concurrent.atomic.AtomicLong();
     private static volatile long activeSession;
     private long session;
+    private long attachRequestId;
+    private static volatile long clientAttachId;
+    private static boolean attachReceiverRegistered;
+
+    // Called on main by the foreground owner, not by the activity. Chained
+    // startup therefore continues while the UI is backgrounded.
+    public static void pollChainedRequest(Context context) {
+        Context app = context.getApplicationContext();
+        try {
+            if (!attachReceiverRegistered) {
+                android.content.IntentFilter filter = new android.content.IntentFilter();
+                filter.addAction(BROADCAST_READY);
+                filter.addAction(BROADCAST_FAILED);
+                filter.addAction(BROADCAST_STOPPED);
+                androidx.core.content.ContextCompat.registerReceiver(app, new android.content.BroadcastReceiver() {
+                    @Override public void onReceive(Context c, Intent i) {
+                        long id = i.getLongExtra("requestId", 0);
+                        if (id == 0 || id != clientAttachId || !isCurrentBroadcast(i)) return;
+                        if (BROADCAST_READY.equals(i.getAction())) {
+                            if (i.getBooleanExtra("regionsOnly", false)) return;
+                            NativeEngine.nativePsiphonAttachComplete(id,
+                                i.getIntExtra(EXTRA_SOCKS, 0), i.getIntExtra(EXTRA_HTTP, 0));
+                        } else { NativeEngine.nativePsiphonAttachComplete(id, 0, 0); }
+                    }
+                }, filter, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED);
+                attachReceiverRegistered = true;
+            }
+            String raw = NativeEngine.nativePsiphonAttachRequest();
+            if (raw.isEmpty()) {
+                if (clientAttachId != 0) { stopBound(app); clientAttachId = 0; }
+                return;
+            }
+            org.json.JSONObject request = new org.json.JSONObject(raw);
+            long id = request.getLong("requestId");
+            if (id == clientAttachId) return;
+            // stopBound and startBound enqueue in order on the main looper.
+            if (connection != null) stopBound(app);
+            clientAttachId = id;
+            Intent start = new Intent(app, PsiphonTunnelService.class).setAction(ACTION_START);
+            start.putExtra("requestId", id);
+            start.putExtra("upstreamProxy", request.getString("upstreamProxy"));
+            start.putExtra("psiphonRegion", request.optString("psiphonRegion", ""));
+            start.putExtra("psiphonTransport", request.optInt("psiphonTransport", 0));
+            start.putExtra("psiphonSocksPort", request.optInt("psiphonSocksPort", 0));
+            start.putExtra("psiphonHttpPort", request.optInt("psiphonHttpPort", 0));
+            start.putExtra("lanSharing", request.optBoolean("lanSharing", false));
+            startBound(app, start);
+        } catch (Exception e) {
+            Log.e(TAG, "Cannot start chained Psiphon exit", e);
+            if (clientAttachId != 0) NativeEngine.nativePsiphonAttachComplete(clientAttachId, 0, 0);
+        }
+    }
+
     public static boolean hasActiveBinding() { return connection != null; }
     public static boolean isCurrentBroadcast(Intent intent) {
         return intent.getLongExtra("psiSession", -1) == activeSession;
     }
     public static void startBound(Context context, Intent intent) {
         Context app = context.getApplicationContext();
+        final long epoch = bindingEpoch.incrementAndGet();
         new Handler(Looper.getMainLooper()).post(() -> {
-            if (connection != null) return;
+            if (epoch != bindingEpoch.get() || connection != null) return;
             activeSession = android.os.SystemClock.elapsedRealtimeNanos();
             intent.putExtra("psiSession", activeSession);
             android.content.ServiceConnection next = new android.content.ServiceConnection() {
@@ -85,6 +140,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                     stopBound(app);
                     Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
                     failed.putExtra("psiSession", activeSession);
+                    failed.putExtra("requestId", intent.getLongExtra("requestId", 0));
                     failed.putExtra(EXTRA_ERROR, "Psiphon process exited");
                     app.sendBroadcast(failed);
                 }
@@ -94,6 +150,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 connection = null;
                 Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
                 failed.putExtra("psiSession", activeSession);
+                    failed.putExtra("requestId", intent.getLongExtra("requestId", 0));
                 failed.putExtra(EXTRA_ERROR, "Unable to bind Psiphon service");
                 app.sendBroadcast(failed);
             }
@@ -102,9 +159,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     public static void stopBound(Context context) {
         Context app = context.getApplicationContext();
+        bindingEpoch.incrementAndGet(); // invalidate starts not yet delivered
+        final android.content.ServiceConnection old = connection;
+        final long request = clientAttachId;
+        clientAttachId = 0;
+        if (request != 0) NativeEngine.nativePsiphonAttachComplete(request, 0, 0);
         new Handler(Looper.getMainLooper()).post(() -> {
-            android.content.ServiceConnection old = connection;
-            connection = null;
+            if (connection == old) connection = null;
             if (old != null) {
                 try { app.unbindService(old); } catch (IllegalArgumentException ignored) {}
             }
@@ -197,7 +258,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onCreate() {
         super.onCreate();
-        bindToUnderlyingNetwork();
+        // Binding policy depends on the per-start LAN option, not onCreate.
         // Construct the singleton on libraryWorker, never on Android main.
     }
 
@@ -239,7 +300,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             String up = intent.getStringExtra("upstreamProxy");
             upstreamProxy = up == null ? "" : up.trim();
             lanSharing = intent.getBooleanExtra("lanSharing", false);
+            attachRequestId = intent.getLongExtra("requestId", 0);
         }
+        bindToUnderlyingNetwork();
         stopping = false;
         startInFlight = true;
         psiphonUp = false;
@@ -336,40 +399,52 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     /** Keep this process off the VPN so Psiphon can reach the internet. */
     private void bindToUnderlyingNetwork() {
+        lanAddress = "";
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
             if (cm == null) return;
             Network chosen = null;
+            int score = -1;
             for (Network n : cm.getAllNetworks()) {
                 NetworkCapabilities cap = cm.getNetworkCapabilities(n);
-                if (cap == null) continue;
-                if (!cap.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue;
-                if (cap.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
-                chosen = n;
-                if (cap.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                        || cap.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
-                    break;
-                }
-            }
-            if (chosen != null) {
-                cm.bindProcessToNetwork(chosen);
-                Log.i(TAG, "bound :psiphon to underlying network " + chosen);
-                android.net.LinkProperties links = cm.getLinkProperties(chosen);
-                NetworkCapabilities capabilities = cm.getNetworkCapabilities(chosen);
-                if (links != null && capabilities != null
-                        && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                    for (android.net.LinkAddress address : links.getLinkAddresses()) {
+                if (cap == null || cap.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
+                if (cap.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    android.net.LinkProperties links = cm.getLinkProperties(n);
+                    if (links != null) for (android.net.LinkAddress address : links.getLinkAddresses()) {
                         java.net.InetAddress ip = address.getAddress();
-                        if (ip instanceof java.net.Inet4Address && !ip.isLoopbackAddress()) {
+                        if (ip instanceof java.net.Inet4Address && !ip.isLoopbackAddress() && !ip.isLinkLocalAddress()) {
                             lanAddress = ip.getHostAddress();
                             break;
                         }
                     }
                 }
+                if (!cap.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue;
+                int rank = cap.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ? 10 : 0;
+                if (cap.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) rank += 2;
+                else if (cap.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) rank += 1;
+                if (rank > score) { score = rank; chosen = n; }
             }
-        } catch (Exception e) {
-            Log.w(TAG, "bindProcessToNetwork: " + e.getMessage());
-        }
+            // VpnService excludes our whole UID, including :psiphon. A forced
+            // cellular network mark can prevent replies to WiFi/hotspot LAN
+            // clients. In LAN mode use normal routing for accepted sockets.
+            cm.bindProcessToNetwork(lanSharing ? null : chosen);
+            if (lanSharing && lanAddress.isEmpty()) {
+                java.util.Enumeration<java.net.NetworkInterface> interfaces = java.net.NetworkInterface.getNetworkInterfaces();
+                while (interfaces != null && interfaces.hasMoreElements() && lanAddress.isEmpty()) {
+                    java.net.NetworkInterface nic = interfaces.nextElement();
+                    String name = nic.getName();
+                    if (!nic.isUp() || !(name.startsWith("wlan") || name.startsWith("swlan") || name.startsWith("ap"))) continue;
+                    java.util.Enumeration<java.net.InetAddress> addresses = nic.getInetAddresses();
+                    while (addresses.hasMoreElements()) {
+                        java.net.InetAddress ip = addresses.nextElement();
+                        if (ip instanceof java.net.Inet4Address && !ip.isLoopbackAddress() && !ip.isLinkLocalAddress()) {
+                            lanAddress = ip.getHostAddress(); break;
+                        }
+                    }
+                }
+            }
+            Log.i(TAG, "Psiphon LAN=" + lanSharing + ", address=" + lanAddress + ", underlying=" + chosen);
+        } catch (Exception e) { Log.w(TAG, "bindToUnderlyingNetwork", e); }
     }
 
     // ── HostService ──────────────────────────────────────────────────────
@@ -592,6 +667,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());
         i.putExtra("psiSession", session);
+        i.putExtra("requestId", attachRequestId);
         i.putExtra("regionsOnly", true);
         i.putExtra(EXTRA_REGIONS, lastRegions);
         sendBroadcast(i);
@@ -609,6 +685,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());
         i.putExtra("psiSession", session);
+        i.putExtra("requestId", attachRequestId);
         i.putExtra(EXTRA_SOCKS, s);
         i.putExtra(EXTRA_LAN, lanSharing ? lanAddress : "");
         i.putExtra(EXTRA_HTTP, httpPort.get());
@@ -671,6 +748,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             Intent i = new Intent(BROADCAST_LOG);
             i.setPackage(getPackageName());
             i.putExtra("psiSession", session);
+        i.putExtra("requestId", attachRequestId);
             i.putExtra(EXTRA_LOG, chunk.substring(offset, end));
             sendBroadcast(i);
             offset = end;
@@ -721,6 +799,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 Intent i = new Intent(BROADCAST_STATS);
                 i.setPackage(getPackageName());
         i.putExtra("psiSession", session);
+        i.putExtra("requestId", attachRequestId);
                 i.putExtra(EXTRA_LAN, lanSharing ? lanAddress : "");
                 i.putExtra(EXTRA_SOCKS, socksPort.get());
                 i.putExtra(EXTRA_HTTP, httpPort.get());
@@ -764,6 +843,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         Intent i = new Intent(BROADCAST_FAILED);
         i.setPackage(getPackageName());
         i.putExtra("psiSession", session);
+        i.putExtra("requestId", attachRequestId);
         i.putExtra(EXTRA_ERROR, msg == null ? "failed" : msg);
         sendBroadcast(i);
     }
@@ -772,6 +852,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         Intent i = new Intent(BROADCAST_STOPPED);
         i.setPackage(getPackageName());
         i.putExtra("psiSession", session);
+        i.putExtra("requestId", attachRequestId);
         sendBroadcast(i);
     }
 
@@ -780,6 +861,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         Intent i = new Intent(BROADCAST_STAGE);
         i.setPackage(getPackageName());
         i.putExtra("psiSession", session);
+        i.putExtra("requestId", attachRequestId);
         i.putExtra(EXTRA_STAGE, stage);
         i.putExtra(EXTRA_STAGE_LABEL, label);
         sendBroadcast(i);

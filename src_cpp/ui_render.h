@@ -48,7 +48,7 @@ struct AppState {
     bool socks_enabled   = true;
     bool http_enabled    = true;
     bool tor_http_enabled = false;
-    uint16_t tor_http_port = 1822;
+    int tor_http_port = 1822;
     char force_peer[128] = {};
     // Engine identity file (Cloudflare device certs). Not the UI settings file.
     char config_path[256] = "aether.toml";
@@ -192,7 +192,7 @@ struct AppState {
         // the checkbox is ignored in that mode: a port is always sent (same
         // rule as Android's FCAEVpnService). Port 0 means "off" for proxy
         // mode only.
-        c.socks_port       = (mode == 1)
+        c.socks_port       = (mode == 1 || (backend != 1 && tor_mode != 0))
                                    ? (socks_port != 0 ? socks_port : (uint16_t)1819)
                                    : (socks_enabled ? socks_port : (uint16_t)0);
         c.http_port        = http_enabled ? http_port : 0;

@@ -351,7 +351,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "socks_port") g_app.socks_port = (uint16_t)atoi(val.c_str());
     else if (key == "http_port") g_app.http_port = (uint16_t)atoi(val.c_str());
     else if (key == "socks_enabled") g_app.socks_enabled = atoi(val.c_str()) != 0;
-    else if (key == "tor_http_port") g_app.tor_http_port = (uint16_t)atoi(val.c_str());
+    else if (key == "tor_http_port") g_app.tor_http_port = atoi(val.c_str());
     else if (key == "tor_http_enabled") g_app.tor_http_enabled = atoi(val.c_str()) != 0;
     else if (key == "http_enabled") g_app.http_enabled = atoi(val.c_str()) != 0;
     else if (key == "force_peer")
@@ -1125,24 +1125,25 @@ void render_ui() {
         if (connected) {
             const char* lip = telem.lan_ip;
             const bool share = telem.lan_enabled && lip[0] && strcmp(lip, "127.0.0.1") != 0;
-            auto endpoint = [&](const char* kind, unsigned port) {
+            auto endpoint = [&](const char* backend, const char* kind, unsigned port) {
                 if (!port) return;
                 if (share)
-                    ImGui::TextWrapped("%s 127.0.0.1:%u | LAN %s:%u", kind, port, lip, port);
+                    ImGui::TextWrapped("%s local: %s 127.0.0.1:%u | %s LAN: %s %s:%u", backend, kind, port, backend, kind, lip, port);
                 else
-                    ImGui::TextWrapped("%s 127.0.0.1:%u", kind, port);
+                    ImGui::TextWrapped("%s local: %s 127.0.0.1:%u", backend, kind, port);
             };
+            ImGui::TextWrapped("Routing: %s", telem.status_message);
             if (telem.backend != FCAE_BACKEND_PSIPHON) {
-                if (g_app.protocol != 4 && g_app.socks_enabled) endpoint("SOCKS5", g_app.socks_port);
-                if (g_app.protocol != 4 && g_app.http_enabled) endpoint("Aether HTTP", g_app.http_port);
+                if (g_app.protocol != 4 && (g_app.socks_enabled || g_app.mode == 1 || g_app.tor_mode != 0)) endpoint("Aether", "SOCKS5", g_app.socks_port ? g_app.socks_port : 1819);
+                if (g_app.protocol != 4 && g_app.http_enabled) endpoint("Aether", "HTTP", g_app.http_port);
                 if (g_app.tor_http_enabled && (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2))
-                    endpoint("Tor HTTP", g_app.tor_http_port);
+                    endpoint("Tor", "HTTP", g_app.tor_http_port);
                 if (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)
-                    endpoint("TOR SOCKS5", g_app.tor_socks_port ? g_app.tor_socks_port : 1821);
+                    endpoint("Tor", "SOCKS5", g_app.tor_socks_port ? g_app.tor_socks_port : 1821);
             }
             if (telem.backend == FCAE_BACKEND_PSIPHON || g_app.tor_mode == 3) {
-                endpoint("Psiphon SOCKS5", fcae_psiphon_socks_port());
-                endpoint("Psiphon HTTP", fcae_psiphon_http_port());
+                endpoint("Psiphon", "SOCKS5", fcae_psiphon_socks_port());
+                endpoint("Psiphon", "HTTP", fcae_psiphon_http_port());
             }
         } else {
             ImGui::Text("  No active tunnel");
@@ -1421,7 +1422,7 @@ void render_ui() {
             // ignores them when no Tor is in play (to_config normalises),
             // same ignore-not-gray policy as the egress combo above.
             ImGui::Checkbox("Tor HTTP proxy", &g_app.tor_http_enabled);
-            ImGui::InputScalar("Tor HTTP port", ImGuiDataType_U16, &g_app.tor_http_port);
+            ImGui::InputInt("Tor HTTP port", &g_app.tor_http_port);
             if (g_app.tor_http_enabled && g_app.tor_http_port == 0) g_app.tor_http_port = 1822;
             ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port);
             const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };
@@ -1563,7 +1564,7 @@ void render_ui() {
             ImGui::Spacing();
 
             // Selectable multi-line log view (click lines to select; Ctrl+C via ImGui input)
-            ImGui::BeginChild("##log", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 4), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGui::BeginChild("##log", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 4), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
             // Take a thread-safe snapshot of the logs for rendering.
             // This avoids a data race with the FFI callback thread which
@@ -1637,6 +1638,15 @@ void render_ui() {
                 }
             }
             ImGui::EndChild();
+            // Fixed footer, outside the scrolled/clipped log rows.
+            if (ImGui::Button("Latest##logs")) {
+                g_app.auto_scroll = true;
+                follow_tail = true;
+                manual_scroll_last_frame = false;
+                s_log_scroll_pending = true;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("Scroll up to pause; Latest resumes following");
             ImGui::EndTabItem();
         }
 

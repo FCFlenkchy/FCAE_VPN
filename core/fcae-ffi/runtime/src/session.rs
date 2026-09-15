@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use fcae_abi::{FcaeBackend, FcaeMode, FcaeState};
+use fcae_abi::{FcaeBackend, FcaeMode, FcaeState, FcaeTorMode};
 use parking_lot::Mutex;
 
 use crate::backend::{BackendContext, BackendHandle, CancelToken, Endpoints};
@@ -439,20 +439,20 @@ async fn run_session(
             match start_psiphon_through_tunnel(&config, &endpoints, &sink, &cancel).await {
                 Ok(h) => {
                     let psi_ep = h.endpoints();
-                    if psi_ep.socks.is_some() {
-                        endpoints = psi_ep;
+                    if psi_ep.socks.is_none() {
+                        let _ = h.stop(stop_timeout).await;
+                        let _ = handle.stop(stop_timeout).await;
+                        return Err(CoreError::StartFailed("Psiphon exit has no SOCKS endpoint".into()));
                     }
+                    endpoints = Endpoints { peer_ip: endpoints.peer_ip.clone(), ..psi_ep };
                     psi_handle = Some(h);
                 }
                 Err(e) => {
-                    // Android: the official AAR owns the second hop; the
-                    // attach backend cannot start without a SOCKS port yet.
-                    // Keep Aether and let the host start :psiphon with the
-                    // same UpstreamProxyURL.
-                    log::warn!(
-                        "[session] psiphon through-tunnel not started in-process ({e}); \
-                         Aether stays up for the host to attach Psiphon"
-                    );
+                    // Never silently send requested Psiphon traffic through
+                    // the carrier. No TUN is raised before the final exit.
+                    stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
+                    if cancel.is_cancelled() { return Ok(()); }
+                    return Err(e);
                 }
             }
         }
@@ -485,10 +485,8 @@ async fn run_session(
 
         sink.set_state(
             FcaeState::Connected,
-            match config.mode {
-                FcaeMode::Tun => "Connected (TUN)".into(),
-                FcaeMode::Proxy => "Connected (Proxy)".into(),
-            },
+            format!("Connected ({} {})", exit_name(&config),
+                if config.mode == FcaeMode::Tun { "TUN" } else { "Proxy" }),
         );
 
         // Pump counters into telemetry while we wait for the tunnel to end.
@@ -499,7 +497,11 @@ async fn run_session(
                 stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
                 return Ok(());
             }
-            r = handle.wait() => r,
+            r = async {
+                if let Some(psi) = psi_handle.as_ref() {
+                    tokio::select! { r = handle.wait() => r, r = psi.wait() => r }
+                } else { handle.wait().await }
+            } => r,
             _ = pump_counters(&*handle, &sink) => Ok(()),
         };
 
@@ -570,9 +572,20 @@ async fn start_psiphon_through_tunnel(
         format!("Starting Psiphon through {url}…"),
     );
     let cx = BackendContext::new(psi_cfg, sink.clone(), cancel.clone());
-    let handle = backend.start(cx).await?;
+    let handle = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(CoreError::StartFailed("chain cancelled".into())),
+        r = tokio::time::timeout(config.start_timeout().max(Duration::from_secs(120)), backend.start(cx)) =>
+            r.map_err(|_| CoreError::StartFailed("Psiphon exit startup timed out".into()))??,
+    };
     log::info!("[session] Psiphon through-tunnel via {url}");
     Ok(handle)
+}
+
+fn exit_name(config: &SessionConfig) -> &'static str {
+    if config.backend == FcaeBackend::Psiphon || config.psiphon.through_tunnel { "Psiphon" }
+    else if matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain) { "Tor" }
+    else { "Aether" }
 }
 
 fn should_retry(auto: bool, max: u32, attempt: u32, cancel: &CancelToken) -> bool {
@@ -681,6 +694,100 @@ mod tests {
         async fn start(&self, _cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
             Ok(Box::new(FakeHandle))
         }
+    }
+
+    #[test]
+    fn routing_label_names_the_exit_not_the_carrier() {
+        let mut cfg = SessionConfig::default();
+        assert_eq!(exit_name(&cfg), "Aether");
+        cfg.tor.mode = FcaeTorMode::Chain;
+        assert_eq!(exit_name(&cfg), "Tor");
+        cfg.tor.mode = FcaeTorMode::Reverse;
+        assert_eq!(exit_name(&cfg), "Aether");
+        cfg.tor.mode = FcaeTorMode::Only;
+        assert_eq!(exit_name(&cfg), "Tor");
+        cfg.psiphon.through_tunnel = true;
+        assert_eq!(exit_name(&cfg), "Psiphon");
+    }
+
+    #[test]
+    fn failed_psiphon_chain_never_raises_tun() {
+        struct FailedExit;
+        #[async_trait]
+        impl Backend for FailedExit {
+            fn id(&self) -> BackendId { BackendId::Psiphon }
+            fn capabilities(&self) -> Capabilities { FakeBackend.capabilities() }
+            async fn start(&self, _: BackendContext) -> Result<Box<dyn BackendHandle>> {
+                Err(CoreError::StartFailed("exit unavailable".into()))
+            }
+        }
+        struct NoTun;
+        impl TunBridge for NoTun {
+            fn start(&self, _: &SessionConfig, _: &Endpoints) -> Result<()> {
+                panic!("must not route TUN through the carrier after exit failure");
+            }
+            fn stop(&self, _: Duration) {}
+            fn is_running(&self) -> bool { false }
+        }
+        registry::register(FcaeBackend::Psiphon, || Arc::new(FailedExit));
+        let mut cfg = SessionConfig::default();
+        cfg.mode = FcaeMode::Tun;
+        cfg.psiphon.through_tunnel = true;
+        let cell = Arc::new(TelemetryCell::new());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let result = runtime.block_on(run_session(Arc::new(FakeBackend), cfg,
+            TelemetrySink::new(cell.clone()), CancelToken::new(), Arc::new(NoTun),
+            Duration::from_millis(10), false, 0));
+        assert!(result.is_err());
+        assert_ne!(cell.snapshot().state, FcaeState::Connected);
+
+        // Positive half: the TUN gets the exit SOCKS/DNS policy, never the
+        // primary's plain SOCKS, while retaining the carrier route exclusion.
+        struct ExitHandle;
+        #[async_trait]
+        impl BackendHandle for ExitHandle {
+            fn endpoints(&self) -> Endpoints {
+                Endpoints { socks: Some("127.0.0.1:1080".parse().unwrap()), http: None,
+                    peer_ip: None, udp: false, dns_over_https: true }
+            }
+            async fn wait(&self) -> Result<()> { std::future::pending().await }
+            async fn stop(&self, _: Duration) -> Result<()> { Ok(()) }
+            fn counters(&self) -> Counters { Counters::default() }
+        }
+        struct ReadyExit;
+        #[async_trait]
+        impl Backend for ReadyExit {
+            fn id(&self) -> BackendId { BackendId::Psiphon }
+            fn capabilities(&self) -> Capabilities { FakeBackend.capabilities() }
+            async fn start(&self, cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
+                assert!(cx.config.psiphon.config_json.unwrap().contains("socks5://127.0.0.1:1819"));
+                Ok(Box::new(ExitHandle))
+            }
+        }
+        struct CheckTun { cancel: CancelToken, checked: Arc<AtomicBool> }
+        impl TunBridge for CheckTun {
+            fn start(&self, _: &SessionConfig, ep: &Endpoints) -> Result<()> {
+                assert_eq!(ep.socks.unwrap().port(), 1080);
+                assert!(ep.dns_over_https);
+                assert!(!ep.udp);
+                assert_eq!(ep.peer_ip.as_deref(), Some("203.0.113.7"));
+                self.checked.store(true, Ordering::SeqCst);
+                self.cancel.cancel();
+                Ok(())
+            }
+            fn stop(&self, _: Duration) {}
+            fn is_running(&self) -> bool { false }
+        }
+        registry::register(FcaeBackend::Psiphon, || Arc::new(ReadyExit));
+        let mut cfg = SessionConfig::default();
+        cfg.mode = FcaeMode::Tun;
+        cfg.psiphon.through_tunnel = true;
+        let cancel = CancelToken::new();
+        let checked = Arc::new(AtomicBool::new(false));
+        runtime.block_on(run_session(Arc::new(FakeBackend), cfg, TelemetrySink::new(cell),
+            cancel.clone(), Arc::new(CheckTun { cancel, checked: checked.clone() }),
+            Duration::from_millis(10), false, 0)).unwrap();
+        assert!(checked.load(Ordering::SeqCst));
     }
 
     fn install_fake() {

@@ -359,6 +359,19 @@ static std::string jstr(JNIEnv* env, jstring s) {
     return out;
 }
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativePsiphonAttachRequest(JNIEnv* env, jclass) {
+    char buf[4096] = {};
+    auto size = fcae_psiphon_attach_request(buf, sizeof(buf));
+    if (size >= sizeof(buf)) return env->NewStringUTF("");
+    return env->NewStringUTF(buf);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativePsiphonAttachComplete(JNIEnv*, jclass, jlong id, jint socks, jint http) {
+    if (socks < 0 || socks > 65535 || http < 0 || http > 65535) return;
+    fcae_psiphon_attach_complete((uint64_t)id, (uint16_t)socks, (uint16_t)http);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeInit(JNIEnv*, jclass) {
     ensure_init();
@@ -409,6 +422,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jint backend,
     jint torSocksPort,
     jint torHttpPort,
+    jboolean psiphonThroughTunnel,
     jstring psiphonConfig,
     jstring psiphonRegion,
     jint psiphonSocksPort,
@@ -489,6 +503,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     // side passes filesDir, which is exactly that.
     if (!psiCfgOwned.empty()) cfg.psiphon.config_json = psiCfgOwned.c_str();
     if (!psiRegionOwned.empty()) cfg.psiphon.egress_region = psiRegionOwned.c_str();
+    cfg._reserved[0] = psiphonThroughTunnel == JNI_TRUE ? 1 : 0;
     cfg.psiphon.socks_port = (uint16_t)psiphonSocksPort;
     cfg.psiphon.http_port = (uint16_t)psiphonHttpPort;
 

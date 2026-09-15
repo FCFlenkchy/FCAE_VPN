@@ -645,8 +645,11 @@ impl BackendHandle for AetherHandle {
             if up != was_up {
                 was_up = up;
                 if up {
-                    self.sink
-                        .set_state(FcaeState::Connected, "Reconnected".into());
+                    let exit = if self.cfg.psiphon.through_tunnel { "Psiphon" }
+                        else if matches!(self.cfg.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain) { "Tor" }
+                        else { "Aether" };
+                    self.sink.set_state(FcaeState::Connected, format!("Reconnected ({} {})", exit,
+                        if self.cfg.is_tun() { "TUN" } else { "Proxy" }));
                 } else {
                     self.sink.set_state(
                         FcaeState::Reconnecting,

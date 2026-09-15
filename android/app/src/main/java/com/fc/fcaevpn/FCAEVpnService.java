@@ -119,6 +119,7 @@ public class FCAEVpnService extends VpnService {
                     return;
                 }
             }
+            if (running && !shuttingDown && !vpnPaused) PsiphonTunnelService.pollChainedRequest(FCAEVpnService.this);
             updateNotification();
             if (running) handler.postDelayed(this, 1000);
         }
@@ -676,6 +677,7 @@ public class FCAEVpnService extends VpnService {
         // MainActivity sends 0 when the field still holds the default.
         final int torSocksPort = intent.getIntExtra("torSocksPort", 0);
         final int torHttpPort = intent.getIntExtra("torHttpPort", 0);
+        final boolean throughPsiphon = intent.getBooleanExtra("psiphonThroughTunnel", false);
         final String psiphonCfg    = intent.getStringExtra("psiphonConfig");
         final String psiphonRegion = intent.getStringExtra("psiphonRegion");
         final String psiphonCfgV    = (psiphonCfg == null) ? "" : psiphonCfg;
@@ -735,7 +737,7 @@ public class FCAEVpnService extends VpnService {
                     sniVal, sysProfile,
                     teamVal, tokenVal, emailVal, routesVal, routesIVal,
                     torMode, torBridges, torLinesV, engineLog,
-                    backend, torSocksPort, torHttpPort,
+                    backend, torSocksPort, torHttpPort, throughPsiphon,
                     psiphonCfgV, psiphonRegionV, psiphonSocks, psiphonHttp
                 );
                 if (!ok) {
@@ -881,6 +883,9 @@ public class FCAEVpnService extends VpnService {
         // pause landing in the connect window would not stop the worker, and
         // it would resurrect "running" (live TUN) after the pause.
         final long myGen = cleanupGeneration.incrementAndGet();
+        if (lastStartIntent != null && lastStartIntent.getBooleanExtra("psiphonThroughTunnel", false)) {
+            PsiphonTunnelService.stopBound(this);
+        }
         running = false;
         vpnPaused = true;
         uiConnecting = false;
@@ -1013,6 +1018,7 @@ public class FCAEVpnService extends VpnService {
         putStr(e, i, "torBridgeLines");
         putInt(e, i, "engineLog", 3);
         putInt(e, i, "backend", 0);
+        putBool(e, i, "psiphonThroughTunnel", false);
         putInt(e, i, "torHttpPort", 0);
         putInt(e, i, "torSocksPort", 0); // 0 = engine default (defer)
         putStr(e, i, "psiphonConfig");
@@ -1052,6 +1058,7 @@ public class FCAEVpnService extends VpnService {
         copyStr(p, i, "torBridgeLines");
         copyInt(p, i, "engineLog", 3);
         copyInt(p, i, "backend", 0);
+        copyBool(p, i, "psiphonThroughTunnel", false);
         copyInt(p, i, "torHttpPort", 0);
         copyInt(p, i, "torSocksPort", 0); // 0 = engine default (defer)
         copyStr(p, i, "psiphonConfig");
