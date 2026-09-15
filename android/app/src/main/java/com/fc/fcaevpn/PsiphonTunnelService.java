@@ -190,14 +190,23 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 // list (same format as a remote server_list payload); ""
                 // falls back to whatever the datastore still holds plus any
                 // remote server list configured in getPsiphonConfig().
+                emitLog("startTunneling: calling");
                 if (t != null) t.startTunneling(embeddedList);
                 else throw new Exception("Psiphon tunnel not created");
+                emitLog("startTunneling: returned");
                 psiphonUp = true;
-            } catch (Exception e) {
-                Log.e(TAG, "startTunneling failed", e);
-                emitLog("start failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
-                flushLogs();
-                broadcastFailed(e.getMessage() == null ? "Psiphon failed to start" : e.getMessage());
+            } catch (Throwable err) {
+                // Throwable, not Exception: gomobile native load failures
+                // (UnsatisfiedLinkError, ExceptionInInitializerError) are
+                // Errors — catching Exception only lets the thread die
+                // silently with nothing in the log, which is exactly the
+                // "connecting / starting tunnel / stopping, then nothing"
+                // symptom. The class name identifies the failure.
+                Log.e(TAG, "startTunneling failed", err);
+                String what = err.getClass().getSimpleName() + ": "
+                        + (err.getMessage() == null ? "(no message)" : err.getMessage());
+                emitLog("start failed: " + what);
+                broadcastFailed(what);
                 stopNow();
             } finally {
                 startInFlight = false;
@@ -226,6 +235,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         // controller and double the "stopping" noise).
         if (stopping) return;
         stopping = true;
+        // Only touch the native library when a tunnel is actually up or a
+        // start is in flight (whose blocked startTunneling() needs stop()
+        // to unblock it). After a FAILED start the controller never ran;
+        // calling the wrapper's stop() then — its stopPsiphon() emits the
+        // "stopping Psiphon library" line even for a null controller and
+        // would needlessly re-enter libgojni on an already-dying service.
+        final boolean needsLibraryStop = psiphonUp || startInFlight;
         psiphonUp = false;
         emitLog("stopping");
         flushLogs();
@@ -233,7 +249,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         broadcastStopped();
         final PsiphonTunnel t = tunnel;
         new Thread(() -> {
-            try { if (t != null) t.stop(); } catch (Exception ignored) {}
+            try { if (t != null && needsLibraryStop) t.stop(); } catch (Throwable ignored) {}
         }, "FCAE-PsiStop").start();
         stopSelf();
     }
@@ -241,7 +257,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onDestroy() {
         stopping = true;
-        try { if (tunnel != null) tunnel.stop(); } catch (Exception ignored) {}
+        try { if (tunnel != null && (psiphonUp || startInFlight)) tunnel.stop(); } catch (Throwable ignored) {}
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
             if (cm != null) cm.bindProcessToNetwork(null);
@@ -587,7 +603,16 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             }
         }
         logHandler.removeCallbacks(flushLogs);
-        logHandler.postDelayed(flushLogs, 150);
+        if (message.startsWith("{")) {
+            // Raw upstream JSON notices can arrive in bursts — batch them.
+            logHandler.postDelayed(flushLogs, 150);
+        } else {
+            // Plain-text lifecycle lines (ours and the wrapper's) are rare
+            // and are exactly what survives as the last line before a
+            // native crash, so they must never sit in a 150 ms debounce
+            // window — flush them to the UI immediately.
+            flushLogs();
+        }
     }
 
     private void flushLogs() {

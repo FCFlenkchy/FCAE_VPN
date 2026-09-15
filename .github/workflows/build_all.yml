@@ -389,49 +389,37 @@ jobs:
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platforms;android-34" "build-tools;34.0.0" > /dev/null
 
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          export PATH="$(go env GOPATH)/bin:$PATH"
-          gomobile init
-
-          # make.bash is a GOPATH-era script: the tunnel-core checkout must
-          # sit at its canonical import path (a symlink to the submodule
-          # keeps a single source of truth).
+          # gomobile/gobind are built from the VENDORED x/mobile copy that
+          # ships inside the submodule at MobileLibrary/go-mobile — the same
+          # source upstream's official Docker image uses (see
+          # MobileLibrary/Android/Dockerfile). Installing @latest from the
+          # network floats the binding generator away from the pinned
+          # tunnel-core: the gobind codegen and its seq.go.support /
+          # Seq.java / seq_android.* files must match what the pinned
+          # Psiphon code is tested against, or the resulting libgojni.so
+          # can misbehave at runtime (silent native crashes / bind
+          # protocol mismatches). The old module-cache-XMOBILE staging is
+          # gone: the GOPATH symlink below IS the generator's own source,
+          # so binary and support files can never diverge.
           GOPATH_DIR="$(go env GOPATH)"
-          mkdir -p "$GOPATH_DIR/src/github.com/Psiphon-Labs"
+          export GO111MODULE=off
+          mkdir -p "$GOPATH_DIR/src/golang.org/x" "$GOPATH_DIR/src/github.com/Psiphon-Labs"
+          ln -sfn "$GITHUB_WORKSPACE/core/psiphon/MobileLibrary/go-mobile" \
+            "$GOPATH_DIR/src/golang.org/x/mobile"
           ln -sfn "$GITHUB_WORKSPACE/core/psiphon" \
             "$GOPATH_DIR/src/github.com/Psiphon-Labs/psiphon-tunnel-core"
 
-          # gobind -lang=go,java copies support sources (bind/seq.go.support,
-          # bind/java/Seq.java, seq_android.*) out of package
-          # golang.org/x/mobile/bind, and the generated gobind package later
-          # imports golang.org/x/mobile/bind/... — all resolved through plain
-          # GOPATH because make.bash forces GO111MODULE=off. But
-          # `go install .../cmd/gobind@latest` only populates the module
-          # cache, which GOPATH mode cannot see:
-          #   '"golang.org/x/mobile/bind" is not found; run go get ...'
-          # Point GOPATH at the exact module-cache extraction the gobind
-          # binary was built from — same commit as the codegen, so the copied
-          # support files can never mismatch the binary, and no network round
-          # trip. The cache copy is read-only; gobind only reads it.
-          GOMODCACHE_DIR="$(go env GOMODCACHE)"
-          XMOBILE_VER=$(go version -m "$(command -v gobind)" \
-            | awk '$1 == "mod" && $2 == "golang.org/x/mobile" {print $3; exit}')
-          XMOBILE_DIR="${GOMODCACHE_DIR}/golang.org/x/mobile@${XMOBILE_VER}"
-          if [ ! -d "$XMOBILE_DIR" ]; then
-            # Fallback: whatever extraction the cache holds (there is one).
-            XMOBILE_DIR=$(ls -d "${GOMODCACHE_DIR}"/golang.org/x/mobile@* 2>/dev/null \
-              | sort -V | tail -1 || true)
+          # Same patch as upstream's Dockerfile: init.go references
+          # gobind@latest (module path — invisible in GOPATH mode), rewrite
+          # it to the local GOPATH import so nothing touches the network.
+          if [ -f core/psiphon/MobileLibrary/go-mobile/cmd/gomobile/init.go ]; then
+            sed -i 's|golang.org/x/mobile/cmd/gobind@latest|golang.org/x/mobile/cmd/gobind|' \
+              core/psiphon/MobileLibrary/go-mobile/cmd/gomobile/init.go
           fi
-          if [ -z "${XMOBILE_DIR:-}" ] || [ ! -d "$XMOBILE_DIR" ]; then
-            echo "::error::golang.org/x/mobile source missing from module cache; gobind cannot generate bindings"
-            exit 1
-          fi
-          mkdir -p "$GOPATH_DIR/src/golang.org/x"
-          ln -sfn "$XMOBILE_DIR" "$GOPATH_DIR/src/golang.org/x/mobile"
-          echo "staged in GOPATH: $GOPATH_DIR/src/golang.org/x/mobile -> $(readlink -f "$GOPATH_DIR/src/golang.org/x/mobile")"
+          go install golang.org/x/mobile/cmd/gomobile golang.org/x/mobile/cmd/gobind
+          export PATH="$GOPATH_DIR/bin:$PATH"
+          gomobile init
 
-          export GO111MODULE=off
           export ANDROID_PLATFORM_VERSION=34
 
           # gomobile's -androidapi defaults to 16 (x/mobile `minAndroidAPI`),
@@ -449,8 +437,30 @@ jobs:
           grep -n -- '-androidapi' core/psiphon/MobileLibrary/Android/make.bash \
             || echo '::warning::-androidapi not present in make.bash; upstream moved the gomobile invocation. If gomobile rejects the NDK API range again, update the sed above.'
 
-          cd core/psiphon/MobileLibrary/Android
-          ./make.bash
+          # Quiet build: upstream make.bash runs `set -e -u -x`, so every
+          # command echoes on top of gomobile's already-verbose output and
+          # the CI log fills with thousands of noise lines. Drop the -x
+          # trace, capture the remaining output to a log file, and surface
+          # only warnings/errors. On failure the FULL log is dumped so the
+          # error is never hidden.
+          sed -i 's/^set -e -u -x$/set -e -u/' core/psiphon/MobileLibrary/Android/make.bash
+          grep -q '^set -e -u$' core/psiphon/MobileLibrary/Android/make.bash \
+            || echo '::notice::make.bash "set" line not as expected; -x trace not removed (build continues, log may be verbose)'
+
+          echo "building psiphon AAR (log: psiphon-build.log, warnings/errors only below)"
+          if ! ( cd core/psiphon/MobileLibrary/Android && ./make.bash ) >psiphon-build.log 2>&1; then
+            echo "::error::psiphon AAR build failed — full log follows"
+            cat psiphon-build.log
+            exit 1
+          fi
+          # Surface only warnings/errors from a successful build. Compilers
+          # and gomobile print these to stdout/stderr with a "warning:" or
+          # "error:" prefix; \b keeps substrings (e.g. errorcode) out.
+          if grep -inE '\b(warning|error)\b' psiphon-build.log; then
+            echo "::warning::psiphon AAR build succeeded with warnings (see lines above)"
+          else
+            echo "psiphon AAR build clean — no warnings or errors"
+          fi
 
           cd "$GITHUB_WORKSPACE"
           mkdir -p android/psiphon/libs
