@@ -1087,9 +1087,19 @@ void render_ui() {
         }
 
         ImGui::Spacing();
-        ImGui::TextWrapped("Peer: %s  |  RTT: %u ms  |  Mode: %s",
+        // Only show a live measurement: outside CONNECTED the last value is
+        // stale (the engine keeps rtt_ms from the previous session), and on
+        // backends without a prober it is 0 regardless.
+        char rtt_buf[24];
+        if (telem.state == FCAE_STATE_CONNECTED && telem.rtt_ms > 0) {
+            snprintf(rtt_buf, sizeof(rtt_buf), "%u ms", telem.rtt_ms);
+        } else {
+            rtt_buf[0] = '-';
+            rtt_buf[1] = '\0';
+        }
+        ImGui::TextWrapped("Peer: %s  |  RTT: %s  |  Mode: %s",
             telem.connected_peer[0] ? telem.connected_peer : "-",
-            telem.rtt_ms,
+            rtt_buf,
             g_app.mode == 0 ? "Proxy" : "TUN");
         if (telem.status_message[0]) {
             ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.60f, 1.0f), "%s", telem.status_message);

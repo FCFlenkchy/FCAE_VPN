@@ -125,6 +125,23 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var commandPaused = false
     @Volatile private var commandConnecting = false
 
+    // Latest psiphon tunnel telemetry from PsiphonTunnelService
+    // (BROADCAST_STATS). The Aether engine getters return nothing on the
+    // psiphon-only path, so the stats line and RTT are fed from here.
+    @Volatile private var psiRttMs = 0
+    @Volatile private var psiUpBps = 0L
+    @Volatile private var psiDownBps = 0L
+    @Volatile private var psiTotalUp = 0L
+    @Volatile private var psiTotalDown = 0L
+
+    private fun resetPsiStats() {
+        psiRttMs = 0
+        psiUpBps = 0L
+        psiDownBps = 0L
+        psiTotalUp = 0L
+        psiTotalDown = 0L
+    }
+
     private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -139,8 +156,25 @@ class MainActivity : AppCompatActivity() {
                         // state hit Connected before psiphon finished.
                         if ((connecting || commandConnecting)
                                 && (isPsiphonSelected() || isEgressPsiphon())) {
-                            statusText.text = "CONNECTING · PSIPHON · $label"
+                            // Same status vocabulary as the other protocols —
+                            // the label is already the full staged phrase.
+                            statusText.text = label
                             statusText.setTextColor(COLOR_PROGRESS)
+                        }
+                    }
+                }
+                PsiphonTunnelService.BROADCAST_STATS -> {
+                    // Tunnel telemetry from :psiphon — owns the stats line on
+                    // every psiphon path (the engine getters are empty there).
+                    psiRttMs = intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, 0)
+                    psiUpBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, 0L)
+                    psiDownBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, 0L)
+                    psiTotalUp = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, 0L)
+                    psiTotalDown = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, 0L)
+                    if (vpnActive && (isPsiphonSelected() || isEgressPsiphon())) {
+                        handler.post {
+                            statsText.text =
+                                "↓ ${fmt(psiDownBps)}/s (${fmt(psiTotalDown)})  |  ↑ ${fmt(psiUpBps)}/s (${fmt(psiTotalUp)})  |  RTT ${if (psiRttMs > 0) "${psiRttMs}ms" else "—"}"
                         }
                     }
                 }
@@ -160,7 +194,7 @@ class MainActivity : AppCompatActivity() {
                         engineRunning = true
                         vpnActive = true
                         updateButton()
-                        statusText.text = if (isTunModeSelected()) "PSIPHON UP — raising TUN" else "CONNECTED (PSIPHON)"
+                        statusText.text = if (isTunModeSelected()) "ESTABLISHING TUNNEL" else "CONNECTED"
                         statusText.setTextColor(COLOR_CONNECTED)
                         if (isTunModeSelected() && socks > 0) {
                             startTunServiceWithConfig()
@@ -180,6 +214,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 PsiphonTunnelService.BROADCAST_STOPPED -> {
+                    resetPsiStats()
                     handler.post {
                         if (userInitiatedDisconnect) return@post
                         connecting = false
@@ -282,7 +317,11 @@ class MainActivity : AppCompatActivity() {
                     // Use structured getters instead of JSON round-trip.
                     // Saves ~1 KB alloc per poll tick.
                     val state = NativeEngine.nativeGetState()
-                    val rtt = NativeEngine.nativeGetRttMs()
+                    // On psiphon paths the engine's prober owns no RTT; fall
+                    // back to the tunnel probe broadcast from :psiphon.
+                    val rttNative = NativeEngine.nativeGetRttMs()
+                    val rtt = if (rttNative == 0 && psiRttMs > 0
+                            && (isPsiphonSelected() || isEgressPsiphon())) psiRttMs else rttNative
                     val rx = NativeEngine.nativeGetRxBps()
                     val tx = NativeEngine.nativeGetTxBps()
                     val totalRx = NativeEngine.nativeGetTotalRx()
@@ -625,6 +664,7 @@ class MainActivity : AppCompatActivity() {
             addAction(PsiphonTunnelService.BROADCAST_STOPPED)
             addAction(PsiphonTunnelService.BROADCAST_LOG)
             addAction(PsiphonTunnelService.BROADCAST_STAGE)
+            addAction(PsiphonTunnelService.BROADCAST_STATS)
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(vpnStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -1043,7 +1083,8 @@ class MainActivity : AppCompatActivity() {
             vpnActive = true
             updateButton()
             saveSettings()
-            statusText.text = "CONNECTING (PSIPHON)"
+            resetPsiStats()
+            statusText.text = "CONNECTING"
             statusText.setTextColor(COLOR_PROGRESS)
         }
         ingestPsiphonLog(
@@ -1495,8 +1536,13 @@ class MainActivity : AppCompatActivity() {
                     else -> COLOR_PROGRESS
                 },
             )
-            statsText.text =
-                "\u2193 ${fmt(rx)}/s (${fmt(totalRx)})  |  \u2191 ${fmt(tx)}/s (${fmt(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "\u2014"}"
+            if (isPsiphonSelected() || isEgressPsiphon()) {
+                // Owned by BROADCAST_STATS from :psiphon — writing native
+                // zeros here would step on the live tunnel telemetry.
+            } else {
+                statsText.text =
+                    "\u2193 ${fmt(rx)}/s (${fmt(totalRx)})  |  \u2191 ${fmt(tx)}/s (${fmt(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "\u2014"}"
+            }
 
             // Build peer line — include LAN proxy addresses when sharing is on
             val peerLine = StringBuilder()

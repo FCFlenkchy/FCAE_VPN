@@ -46,10 +46,15 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String BROADCAST_READY = "com.fc.fcaevpn.PSI_READY";
     public static final String BROADCAST_FAILED = "com.fc.fcaevpn.PSI_FAILED";
     // Staged connect progress (like the Tor bootstrap percentage): INTEGER
-    // stage + short label, rendered by the UI as "CONNECTING · PSIPHON · …".
+    // stage + short label. The label is a full status phrase in the same
+    // vocabulary as the Aether engine statuses (CONNECTING / ESTABLISHING
+    // TUNNEL / CONNECTED) — no protocol tag baked into the text.
     public static final String BROADCAST_STAGE = "com.fc.fcaevpn.PSI_STAGE";
     public static final String BROADCAST_STOPPED = "com.fc.fcaevpn.PSI_STOPPED";
     public static final String BROADCAST_LOG = "com.fc.fcaevpn.PSI_LOG";
+    // Live telemetry while the tunnel is up: byte rates, cumulative totals
+    // and tunnel RTT measured through Psiphon's own local HTTP proxy.
+    public static final String BROADCAST_STATS = "com.fc.fcaevpn.PSI_STATS";
     public static final String EXTRA_SOCKS = "socksPort";
     public static final String EXTRA_HTTP = "httpPort";
     public static final String EXTRA_ERROR = "error";
@@ -57,6 +62,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String EXTRA_LOG = "log";
     public static final String EXTRA_STAGE = "psiphonStage";
     public static final String EXTRA_STAGE_LABEL = "psiphonStageLabel";
+    public static final String EXTRA_RTT = "rttMs";
+    public static final String EXTRA_UP_BPS = "upBps";
+    public static final String EXTRA_DOWN_BPS = "downBps";
+    public static final String EXTRA_TOTAL_UP = "totalUp";
+    public static final String EXTRA_TOTAL_DOWN = "totalDown";
 
     private static final String CHANNEL_ID = "fcaevpn_psiphon";
     private static final int NOTIF_ID = 3;
@@ -115,6 +125,28 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private final Handler logHandler = new Handler(Looper.getMainLooper());
     private final StringBuilder logBuf = new StringBuilder();
     private final Runnable flushLogs = this::flushLogs;
+
+    /**
+     * Slow-connect heartbeat: while startTunneling() is still dialing this
+     * emits an "establishing tunnel" line every 10 s so the UI/log never
+     * looks dead on a slow or filtered egress. Self-terminates once the
+     * tunnel is up, stopping, or the start thread has exited.
+     */
+    private volatile long dialStartedAtMs = 0L;
+    private final Runnable dialHeartbeat = new Runnable() {
+        @Override public void run() {
+            if (startInFlight && !psiphonUp && !stopping) {
+                long secs = (System.currentTimeMillis() - dialStartedAtMs) / 1000L;
+                emitLog("establishing tunnel, elapsed " + secs + "s");
+                logHandler.postDelayed(this, 10000L);
+            }
+        }
+    };
+
+    // Last measured tunnel RTT in ms (0 = no measurement yet) and the
+    // background stats publisher started from onConnected().
+    private volatile int lastRttMs = 0;
+    private Thread statsThread;
 
     @Override
     public void onCreate() {
@@ -175,7 +207,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         psiphonUp = false;
         bytesUp.set(0);
         bytesDown.set(0);
-        broadcastStage(1, "STARTING");
+        broadcastStage(1, "CONNECTING");
         // Read the embedded server-entry list once per start: it feeds both
         // the log line and startTunneling() (two reads would double-log the
         // "importing embedded server entries" notice).
@@ -212,6 +244,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 startInFlight = false;
             }
         }, "FCAE-PsiStart").start();
+        dialStartedAtMs = System.currentTimeMillis();
+        logHandler.removeCallbacks(dialHeartbeat);
+        logHandler.postDelayed(dialHeartbeat, 10000L);
         return START_NOT_STICKY;
     }
 
@@ -235,6 +270,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         // controller and double the "stopping" noise).
         if (stopping) return;
         stopping = true;
+        logHandler.removeCallbacks(dialHeartbeat);
+        Thread st = statsThread;
+        if (st != null) st.interrupt();
         // Only touch the native library when a tunnel is actually up or a
         // start is in flight (whose blocked startTunneling() needs stop()
         // to unblock it). After a FAILED start the controller never ran;
@@ -257,6 +295,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onDestroy() {
         stopping = true;
+        logHandler.removeCallbacks(dialHeartbeat);
+        Thread st = statsThread;
+        if (st != null) st.interrupt();
         try { if (tunnel != null && (psiphonUp || startInFlight)) tunnel.stop(); } catch (Throwable ignored) {}
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
@@ -473,12 +514,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         // is cheap substring work on a low-rate channel.
         if (!stopping && message != null) {
             if (message.contains("starting Psiphon library")) {
-                broadcastStage(2, "BOOTSTRAP");
+                broadcastStage(2, "CONNECTING");
             } else if (message.contains("\"noticeType\":\"ConnectingServer\"")) {
-                broadcastStage(3, "CONTACTING SERVER");
+                broadcastStage(3, "ESTABLISHING TUNNEL");
             } else if (message.contains("\"noticeType\":\"ConnectedServer\"")
                     || message.contains("\"noticeType\":\"ActiveTunnel\"")) {
-                broadcastStage(4, "HANDSHAKE");
+                broadcastStage(4, "ESTABLISHING TUNNEL");
             }
         }
         emitLog(message);
@@ -487,7 +528,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onListeningSocksProxyPort(int port) {
         socksPort.set(port);
-        if (!stopping) broadcastStage(5, "PORTS UP");
+        if (!stopping) broadcastStage(5, "ESTABLISHING TUNNEL");
         emitLog("SOCKS 127.0.0.1:" + port);
     }
 
@@ -562,6 +603,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         i.putExtra(EXTRA_SOCKS, s);
         i.putExtra(EXTRA_HTTP, httpPort.get());
         sendBroadcast(i);
+        startStatsLoop();
     }
 
     @Override
@@ -602,17 +644,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 logBuf.delete(0, logBuf.length() - 8000);
             }
         }
+        // Every line is broadcast immediately. A 150 ms debounce previously
+        // batched upstream JSON notices — and silently swallowed the last
+        // diagnostics when the process died inside that window. Notice volume
+        // here is low (BytesTransferred is excluded upstream), so immediate
+        // flush costs nothing and the log survives a native crash intact.
         logHandler.removeCallbacks(flushLogs);
-        if (message.startsWith("{")) {
-            // Raw upstream JSON notices can arrive in bursts — batch them.
-            logHandler.postDelayed(flushLogs, 150);
-        } else {
-            // Plain-text lifecycle lines (ours and the wrapper's) are rare
-            // and are exactly what survives as the last line before a
-            // native crash, so they must never sit in a 150 ms debounce
-            // window — flush them to the UI immediately.
-            flushLogs();
-        }
+        flushLogs();
     }
 
     private void flushLogs() {
@@ -627,6 +665,72 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         i.setPackage(getPackageName());
         i.putExtra(EXTRA_LOG, chunk);
         sendBroadcast(i);
+    }
+
+    /**
+     * While the tunnel is up, publishes byte rates, cumulative totals and
+     * tunnel RTT every 2 s as BROADCAST_STATS. RTT is one HTTP round trip
+     * through Psiphon's own local proxy (absolute-URI HEAD against Google's
+     * generate_204 edge), so it measures the actual tunnel latency to the
+     * internet — the engine's RTT field is not available on this path.
+     */
+    private void startStatsLoop() {
+        Thread prev = statsThread;
+        if (prev != null && prev.isAlive()) return;
+        lastRttMs = 0;
+        Thread t = new Thread(() -> {
+            long prevUp = bytesUp.get(), prevDown = bytesDown.get();
+            long prevAt = System.currentTimeMillis();
+            while (psiphonUp && !stopping) {
+                try {
+                    Thread.sleep(2000L);
+                } catch (InterruptedException ie) {
+                    return;
+                }
+                long now = System.currentTimeMillis();
+                long up = bytesUp.get(), down = bytesDown.get();
+                long dt = Math.max(1L, now - prevAt);
+                long upBps = (up - prevUp) * 1000L / dt;
+                long downBps = (down - prevDown) * 1000L / dt;
+                prevUp = up;
+                prevDown = down;
+                prevAt = now;
+                int port = httpPort.get();
+                if (port > 0) {
+                    Integer r = probeTunnelRtt(port);
+                    if (r != null) lastRttMs = r;
+                }
+                Intent i = new Intent(BROADCAST_STATS);
+                i.setPackage(getPackageName());
+                i.putExtra(EXTRA_RTT, lastRttMs);
+                i.putExtra(EXTRA_UP_BPS, upBps);
+                i.putExtra(EXTRA_DOWN_BPS, downBps);
+                i.putExtra(EXTRA_TOTAL_UP, up);
+                i.putExtra(EXTRA_TOTAL_DOWN, down);
+                sendBroadcast(i);
+            }
+        }, "FCAE-PsiStats");
+        statsThread = t;
+        t.start();
+    }
+
+    /** One tunnel round trip through the local HTTP proxy, or null. */
+    private Integer probeTunnelRtt(int port) {
+        java.net.Socket s = new java.net.Socket();
+        try {
+            s.connect(new java.net.InetSocketAddress("127.0.0.1", port), 1500);
+            s.setSoTimeout(1500);
+            long t0 = System.currentTimeMillis();
+            s.getOutputStream().write(("HEAD http://www.gstatic.com/generate_204"
+                    + " HTTP/1.1\r\nHost: www.gstatic.com\r\n"
+                    + "Connection: close\r\n\r\n").getBytes());
+            if (s.getInputStream().read() < 0) return null;
+            return (int) Math.max(1L, System.currentTimeMillis() - t0);
+        } catch (Exception e) {
+            return null;
+        } finally {
+            try { s.close(); } catch (Exception ignored) {}
+        }
     }
 
     private void broadcastFailed(String msg) {
