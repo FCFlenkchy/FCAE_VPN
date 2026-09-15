@@ -566,13 +566,6 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:text="tun2socks TCP (TUN mode)"
-                android:textColor="#FF60A5FA"
-                android:textSize="15sp" />
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:labelFor="@id/editTunTcpSndbuf"
                 android:text="TCP send buffer (bytes)"
@@ -617,7 +610,7 @@
                 android:textColorHint="#FF6B7280"
                 android:textSize="14sp" />
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="12dp" android:text="TUN MTU (bytes, 1280–9000)"
+                android:layout_marginTop="12dp" android:text="TUN MTU (bytes)"
                 android:labelFor="@id/editTunMtu" android:textColor="#FF9AA3B5" android:textSize="13sp" />
             <EditText
                 android:id="@+id/editTunMtu"
@@ -642,12 +635,6 @@
                 android:text="TCP auto-tuning"
                 android:checked="true"
                 android:textColor="#FFE8ECF4" />
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Enter 4096–4194304 bytes; default 128000. No suffixes. MTU defaults to 1500; also applies to Android VPN interface. Applies on next TUN connection. Auto-tuning may grow the receive buffer beyond its default."
-                android:textColor="#FF9AA3B5"
-                android:textSize="12sp" />
 
             <TextView
                 android:layout_width="match_parent"

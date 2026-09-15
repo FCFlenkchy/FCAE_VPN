@@ -336,3 +336,42 @@ Parser/config/ABI regression tests are included. No local builds
 or unit/device tests were run. After rebuilding, check edited values, invalid
 input, auto-tuning off/on persistence, Android notification reconnect, and
 matching Android interface/tun2socks MTU on direct and chained TUN connections.
+
+
+### Psiphon TUN DNS reliability
+
+The official pinned Psiphon core exposes a CONNECT-only SOCKS proxy. Oblivion's
+reference workflows use a separate Psiphon fork with UDP-gateway support;
+copying its UDP setting does not add that feature to the official core. This
+patch keeps FCAE's existing official core pin and Android AAR build pipeline.
+
+FCAE now relays both UDP/53 and framed TCP/53 through HTTPS/443 over the selected
+Psiphon SOCKS exit. Previously only UDP/53 was intercepted; TCP retries still
+attempted direct port-53 forwards. Tor's existing DNS-over-TCP path is unchanged.
+The shared bridge covers Android's supplied-FD path and desktop's engine path,
+including chains whose final exit is Psiphon.
+
+Recognized Cloudflare, Google and Quad9 DNS addresses (including their IPv6
+addresses) select that provider's HTTPS endpoint. The connection goes to the
+exact queried resolver IP through the same SOCKS exit, with TLS certificate
+verification. There is no alternate-provider, alternate-address, direct, or
+local-DNS fallback. Unrecognized resolver addresses return SERVFAIL with an
+explicit unsupported-mapping log instead of silently using Cloudflare. Private/
+split-horizon resolvers are not supported by this HTTPS mapping. Private DNS/DoT
+on port 853 and arbitrary UDP traffic are not converted by this change.
+
+HTTPS connections are reused within each DNS flow. Each lookup has a single
+selected endpoint and an eight-second query budget; valid DNS response codes
+are preserved, including SERVFAIL and REFUSED. PacketConn read deadlines follow
+updates from tun2socks rather than racing a hard-coded query timeout. Session
+cancellation closes TCP DNS pipes and cancels HTTPS requests/idle connections.
+DNS IDs are normalized for HTTPS and restored for the application. Failed
+lookups return SERVFAIL and report relay errors without logging queried names.
+
+Psiphon's own `port forward failures` counter is unchanged: upstream increments
+it on failed SSH channel opens and forwarded-connection read/write errors. It
+is not a DNS-specific diagnosis. Remaining failures may be exit policy,
+unreachable destinations, or an unhealthy transport; this patch cannot promise
+to remove them. No builds or device/network tests were run. After rebuilding,
+check UDP DNS, TCP DNS retries, IPv4/IPv6 resolver settings, selected-resolver failure handling, repeated disconnect/reconnect, and direct/chained Psiphon browsing on
+both platforms. The TCP/MTU settings remain; explanatory UI text was removed.

@@ -984,7 +984,7 @@ class MainActivity : AppCompatActivity() {
         val hint = if (spinnerMode.selectedItemPosition != 0) {
             "" // TUN mode: routing is automatic
         } else if (isPsiphonProtocol()) {
-            "Psiphon reaches its servers on its own; tun2socks uses Psiphon SOCKS. Egress is unused."
+            "Psiphon connects independently. Egress is unused."
         } else if (isTorOnly() && isEgressPsiphon()) {
             // user -> Psiphon -> Tor -> internet: the AAR dials its servers
             // through the Tor-only engine SOCKS (UpstreamProxyURL).
@@ -1131,7 +1131,7 @@ class MainActivity : AppCompatActivity() {
         for (field in listOf(editTunTcpSndbuf, editTunTcpRcvbuf)) {
             field.error = if (tcpBufferBytes(field) < 0) {
                 buffersValid = false
-                "Enter 4096..4194304 bytes, without suffixes"
+                "Buffers: 4096..4194304 bytes."
             } else null
         }
         editTunMtu.error = if (tunMtuBytes() !in 1280..9000) "Enter 1280..9000 bytes" else null

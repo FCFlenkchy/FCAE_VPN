@@ -1245,18 +1245,16 @@ void render_ui() {
             if (g_app.mode == 1)
                 ImGui::TextDisabled("TUN always raises the local SOCKS5 listener; this checkbox only governs proxy mode.");
             ImGui::Spacing();
-            ImGui::Text("tun2socks TCP (TUN mode)");
             ImGui::PushItemWidth(160);
             ImGui::InputText("TCP send buffer (bytes)", g_app.tun_tcp_sndbuf, sizeof(g_app.tun_tcp_sndbuf));
             ImGui::InputText("TCP receive buffer (bytes)", g_app.tun_tcp_rcvbuf, sizeof(g_app.tun_tcp_rcvbuf));
             ImGui::InputText("TUN MTU (bytes)", g_app.tun_mtu, sizeof(g_app.tun_mtu));
             ImGui::PopItemWidth();
             if (g_app.parsed_tun_mtu() == 0xffffffffu)
-                ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "MTU: enter 1280..9000 bytes (default 1500).");
+                ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "MTU: 1280..9000 bytes.");
             ImGui::Checkbox("TCP auto-tuning", &g_app.tun_tcp_auto_tuning);
             if (!fcae_parse_tcp_buffer_size(g_app.tun_tcp_sndbuf) || !fcae_parse_tcp_buffer_size(g_app.tun_tcp_rcvbuf))
-                ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "Buffers: enter 4096..4194304 bytes (default 128000); no suffixes.");
-            ImGui::TextWrapped("Applies on next TUN connection. Auto-tuning may grow the receive buffer beyond its default.");
+                ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "Buffers: 4096..4194304 bytes.");
             ImGui::Spacing();
             ImGui::TextDisabled("TUN DNS (comma separated; applied on up, restored on down; empty = platform default)");
             ImGui::PushItemWidth(-1);
@@ -1427,7 +1425,7 @@ void render_ui() {
             if (g_app.mode == 0) {
                 if (g_app.backend == 1)
                     ImGui::TextDisabled(
-                        "Psiphon reaches its servers on its own; tun2socks uses Psiphon SOCKS.");
+                        "Psiphon connects independently.");
                 else if (g_app.protocol != 4 && g_app.tor_mode == 3)
                     ImGui::TextDisabled(
                         "Aether connects first; Psiphon dials through Aether SOCKS.");
