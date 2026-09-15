@@ -466,6 +466,7 @@ public class FCAEVpnService extends VpnService {
     @Override
     public void onCreate() {
         super.onCreate();
+        ProxyNotification.clearLegacyPsiphonNotification(this);
         instance = this;
 
         // Force the native libraries to load before calling ANY native method

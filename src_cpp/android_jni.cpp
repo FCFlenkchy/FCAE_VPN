@@ -284,14 +284,14 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeUnregisterVpnService(JNIEnv* env, jclas
     g_network_id_mid = nullptr;
 }
 
-static void push_log_line(char prefix, const char* message) {
+static void push_log_line(char prefix, const char* message, bool truncate = true) {
     if (!message || !message[0]) return;
     std::string line;
     line.push_back(prefix);
     line += " ";
     line += message;
     // One diagnostic notice can be a long JSON blob; keep the pane readable.
-    if (line.size() > 512) line.resize(512);
+    if (truncate && line.size() > 512) line.resize(512);
     g_logs.push_back(std::move(line));
     while (g_logs.size() > kMaxLogs) {
         g_logs.pop_front();
@@ -674,7 +674,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeAppendLog(JNIEnv* env, jclass, jstring s)
         const char* nl = strchr(p, '\n');
         std::string one = nl ? std::string(p, (size_t)(nl - p)) : std::string(p);
         if (!one.empty() && one.back() == '\r') one.pop_back();
-        if (!one.empty()) push_log_line('I', one.c_str());
+        // Host-side Psiphon notices retain their full text, including JSON.
+        // kMaxLogs still bounds history; the UI renders only its visible tail.
+        if (!one.empty()) push_log_line('I', one.c_str(), false);
         if (!nl) break;
         p = nl + 1;
     }

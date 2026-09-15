@@ -1508,7 +1508,7 @@ async fn run_masque_tunnel(
     let socks_task = tokio::spawn(async move { socks::serve(socks_listener, socks_stack).await });
     tasks.push(socks_task.abort_handle());
 
-    spawn_session_rtt(&hop.stack, &mut tasks);
+    spawn_session_rtt(&hop.stack, &mut tasks, None);
     let http_task = spawn_http_proxy(http_listener, &hop.stack);
     if let Some(task) = &http_task {
         tasks.push(task.abort_handle());
@@ -1734,7 +1734,7 @@ async fn run_masque_in_masque(
     let http_listener = bind_http_proxy().await?;
 
     let mut tasks = TaskGuard::new();
-    spawn_session_rtt(&inner.stack, &mut tasks);
+    spawn_session_rtt(&inner.stack, &mut tasks, None);
     let http_task = spawn_http_proxy(http_listener, &inner.stack);
     if let Some(task) = &http_task {
         tasks.push(task.abort_handle());
@@ -2263,7 +2263,7 @@ async fn run_wireguard_tunnel(
         .map_err(|_| AetherError::Other("invalid ipv4".into()))?;
 
     log::info!("[*] validating WireGuard tunnel with {peer} (handshake + data-plane) before exposing socks5...");
-    let (_, session) = wireguard::verify_endpoint_keep_session(
+    let (validation_rtt, session) = wireguard::verify_endpoint_keep_session(
         peer,
         private_key,
         peer_public,
@@ -2304,7 +2304,7 @@ async fn run_wireguard_tunnel(
     let socks_task = tokio::spawn(async move { socks::serve(socks_listener, socks_stack).await });
     tasks.push(socks_task.abort_handle());
 
-    spawn_session_rtt(&stack, &mut tasks);
+    spawn_session_rtt(&stack, &mut tasks, Some(validation_rtt));
     let http_task = spawn_http_proxy(http_listener, &stack);
     if let Some(task) = &http_task {
         tasks.push(task.abort_handle());
@@ -2358,16 +2358,31 @@ async fn bind_http_proxy() -> Result<Option<tokio::net::TcpListener>> {
     }
 }
 
-fn spawn_session_rtt(stack: &netstack::StackHandle, tasks: &mut TaskGuard) {
+// Keep the same validation measurement used by the WG probe logs as an
+// initial value. It includes handshake/data-plane verification, not just a
+// single packet. For WARP-in-WARP this MUST come from the live inner session
+// via the outer tunnel, not from adding two independently scanned edge RTTs.
+fn session_rtt_millis(measured: Option<Duration>) -> u64 {
+    measured.map(|rtt| rtt.as_millis().clamp(1, u32::MAX as u128) as u64).unwrap_or(0)
+}
+
+fn spawn_session_rtt(
+    stack: &netstack::StackHandle,
+    tasks: &mut TaskGuard,
+    validation_rtt: Option<Duration>,
+) {
     let stack = stack.clone();
-    set_rtt_ms(0);
+    // Publish before the first background delay: the UI can show the live
+    // validation result as soon as SOCKS/TUN becomes ready. Failed HTTP probes
+    // must not erase it. MASQUE, without this measurement, still starts unknown.
+    set_rtt_ms(session_rtt_millis(validation_rtt));
     let task = tokio::spawn(async move {
         for delay in [1, 2, 4, 8] {
             tokio::time::sleep(Duration::from_secs(delay)).await;
             let started = std::time::Instant::now();
             if matches!(tokio::time::timeout(Duration::from_secs(10),
                 tunnelping::http_probe(&stack)).await, Ok(Ok(()))) {
-                set_rtt_ms(started.elapsed().as_millis().max(1) as u64);
+                set_rtt_ms(session_rtt_millis(Some(started.elapsed())));
                 break;
             }
         }
@@ -2393,7 +2408,7 @@ async fn establish_wg(
     obfuscate: bool,
     keepalive: u16,
     label: &'static str,
-) -> Result<(netstack::StackHandle, TunnelExit)> {
+) -> Result<(netstack::StackHandle, TunnelExit, Duration)> {
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
 
@@ -2409,7 +2424,7 @@ async fn establish_wg(
     };
 
     log::info!("[*] [{label}] validating WireGuard tunnel with {peer} (handshake + data-plane)...");
-    let (_, session) = wireguard::verify_endpoint_keep_session(
+    let (validation_rtt, session) = wireguard::verify_endpoint_keep_session(
         peer,
         private_key,
         peer_public,
@@ -2447,7 +2462,7 @@ async fn establish_wg(
         }
     });
 
-    Ok((stack, exit))
+    Ok((stack, exit, validation_rtt))
 }
 
 struct TaskGuard(Vec<tokio::task::AbortHandle>);
@@ -2540,7 +2555,7 @@ async fn run_warp_in_warp(
     let mut tasks = TaskGuard::new();
 
     log::info!("[*] establishing outer WARP tunnel to {peer}...");
-    let (outer_stack, mut outer_exit) =
+    let (outer_stack, mut outer_exit, _outer_rtt) =
         establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
     tasks.push(outer_exit.abort_handle());
 
@@ -2548,14 +2563,14 @@ async fn run_warp_in_warp(
     log::info!("[+] inner endpoint {inner_peer} tunneled through outer warp via {forwarder}");
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
-    let (inner_stack, mut inner_exit) =
+    let (inner_stack, mut inner_exit, inner_rtt) =
         establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
     tasks.push(inner_exit.abort_handle());
 
     let socks_listener = socks::bind_listener("socks5", listen).await?;
     let http_listener = bind_http_proxy().await?;
 
-    spawn_session_rtt(&inner_stack, &mut tasks);
+    spawn_session_rtt(&inner_stack, &mut tasks, Some(inner_rtt));
     let http_task = spawn_http_proxy(http_listener, &inner_stack);
     if let Some(task) = &http_task {
         tasks.push(task.abort_handle());
@@ -2844,6 +2859,19 @@ async fn select_ip_version() -> prober::IpScan {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_rtt_retains_a_live_validation_measurement() {
+        assert_eq!(super::session_rtt_millis(Some(std::time::Duration::from_micros(456_802))), 456);
+        assert_eq!(super::session_rtt_millis(Some(std::time::Duration::from_micros(706_338))), 706);
+        assert_eq!(super::session_rtt_millis(None), 0);
+    }
+
+    #[test]
+    fn session_rtt_is_positive_and_fits_the_ffi_field() {
+        assert_eq!(super::session_rtt_millis(Some(std::time::Duration::from_nanos(1))), 1);
+        assert_eq!(super::session_rtt_millis(Some(std::time::Duration::from_secs(u64::MAX))), u32::MAX as u64);
+    }
+
     use super::*;
     use std::collections::BTreeMap;
 

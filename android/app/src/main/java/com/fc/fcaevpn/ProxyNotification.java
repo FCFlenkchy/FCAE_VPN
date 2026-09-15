@@ -26,6 +26,16 @@ public class ProxyNotification extends Service {
     private static ProxyNotification instance;
     private boolean externalPsiphon;
     private boolean handingOff;
+    /** Remove only the obsolete notification owned by older Psiphon builds. */
+    public static void clearLegacyPsiphonNotification(android.content.Context context) {
+        android.app.NotificationManager manager = context.getSystemService(android.app.NotificationManager.class);
+        if (manager == null) return;
+        manager.cancel(3); // Old PsiphonTunnelService.NOTIF_ID; app owners use 1/2.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            manager.deleteNotificationChannel("fcaevpn_psiphon");
+        }
+    }
+
     public static void handoffToVpn() {
         ProxyNotification current = instance;
         if (current == null || !current.externalPsiphon) return;
@@ -39,7 +49,7 @@ public class ProxyNotification extends Service {
             if (!externalPsiphon || stopping || handingOff || !PsiphonTunnelService.isCurrentBroadcast(intent)) return;
             if (PsiphonTunnelService.BROADCAST_READY.equals(intent.getAction())) {
                 if (!intent.getBooleanExtra("regionsOnly", false))
-                    showNotification("FCAE VPN — Psiphon connected", true);
+                    showNotification("FCAE VPN — Proxy connected", true);
             } else { stopProxy(); }
         }
     };
@@ -81,6 +91,7 @@ public class ProxyNotification extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        clearLegacyPsiphonNotification(this);
         Log.i(TAG, "ProxyNotification created");
         instance = this;
         android.content.IntentFilter filter = new android.content.IntentFilter();
@@ -121,7 +132,7 @@ public class ProxyNotification extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_PSIPHON.equals(intent.getAction())) {
             externalPsiphon = true;
-            showNotification("FCAE VPN — Psiphon connecting…", true);
+            showNotification("FCAE VPN — Connecting…", true);
             Intent psi = new Intent(this, PsiphonTunnelService.class).setAction(PsiphonTunnelService.ACTION_START);
             if (intent.getExtras() != null) psi.putExtras(intent.getExtras());
             PsiphonTunnelService.startBound(this, psi);

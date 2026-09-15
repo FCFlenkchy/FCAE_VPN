@@ -368,7 +368,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             o.put("ClientVersion", "1");
             o.put("TunnelPoolSize", 1);
             o.put("DisableLocalSocksAuth", true);
-            o.put("EmitDiagnosticNotices", false);
+            o.put("EmitDiagnosticNotices", true);
             o.put("UseIndistinguishableTLS", true);
             o.put("AllowDefaultDNSResolverWithBindToDevice", true);
             // Frequent byte-count notices: they feed onBytesTransferred,
@@ -606,43 +606,36 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         }
     }
 
-    /** Format a notice for the UI pane. Raw JSON is collapsed to noticeType. */
-    private static String formatNotice(String message) {
-        if (message == null) return "";
-        String m = message.trim();
-        if (m.isEmpty()) return "";
-        if (m.startsWith("{") && m.contains("\"noticeType\"")) {
-            try {
-                JSONObject o = new JSONObject(m);
-                String type = o.optString("noticeType", "");
-                Object data = o.opt("data");
-                if (!type.isEmpty() && data != null) return type + " " + data;
-                if (!type.isEmpty()) return type;
-            } catch (Exception ignored) {}
-        }
-        return m;
-    }
-
+    // Keep notice JSON and diagnostic text intact. Batching is only transport,
+    // not a severity/content filter. Small logcat chunks avoid its entry limit.
     private void emitLog(String message) {
-        String line = formatNotice(message);
-        if (line.isEmpty()) return;
-        Log.d(TAG, line);
+        if (message == null || message.isEmpty()) return;
+        for (int offset = 0; offset < message.length();) {
+            int end = chunkEnd(message, offset, 1000);
+            Log.i(TAG, message.substring(offset, end));
+            offset = end;
+        }
+        boolean flushNow;
         synchronized (logBuf) {
             if (logBuf.length() > 0) logBuf.append('\n');
-            logBuf.append("[psiphon] ").append(line);
-            if (logBuf.length() > 12000) {
-                logBuf.delete(0, logBuf.length() - 8000);
-            }
-        }
-        synchronized (logBuf) {
+            logBuf.append("[psiphon] ").append(message);
+            // Flush bursts instead of silently deleting the oldest notices.
+            flushNow = logBuf.length() >= 12000;
             if (!logFlushPending) {
                 logFlushPending = true;
                 logHandler.postDelayed(flushLogs, 250L);
             }
         }
+        if (flushNow) flushLogs();
     }
 
-    private void flushLogs() {
+    private static int chunkEnd(String text, int offset, int limit) {
+        int end = Math.min(text.length(), offset + limit);
+        if (end < text.length() && Character.isHighSurrogate(text.charAt(end - 1))) end--;
+        return end;
+    }
+
+    private synchronized void flushLogs() {
         logHandler.removeCallbacks(flushLogs);
         String chunk;
         synchronized (logBuf) {
@@ -651,11 +644,17 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             chunk = logBuf.toString();
             logBuf.setLength(0);
         }
-        Intent i = new Intent(BROADCAST_LOG);
-        i.setPackage(getPackageName());
-        i.putExtra("psiSession", session);
-        i.putExtra(EXTRA_LOG, chunk);
-        sendBroadcast(i);
+        // Stay well below Binder's transaction limit, even for a large JSON
+        // notice. Every character is delivered; the UI retains a bounded tail.
+        for (int offset = 0; offset < chunk.length();) {
+            int end = chunkEnd(chunk, offset, 12000);
+            Intent i = new Intent(BROADCAST_LOG);
+            i.setPackage(getPackageName());
+            i.putExtra("psiSession", session);
+            i.putExtra(EXTRA_LOG, chunk.substring(offset, end));
+            sendBroadcast(i);
+            offset = end;
+        }
     }
 
     /**
