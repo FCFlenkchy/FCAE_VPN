@@ -571,9 +571,8 @@ impl BackendHandle for AetherHandle {
     fn endpoints(&self) -> Endpoints {
         Endpoints {
             socks: Some(self.socks_addr),
-            // In Only mode there is no WARP tunnel, so the engine's HTTP
-            // listener never exists -- do not advertise it.
-            http: (self.cfg.http_port != 0 && self.cfg.tor.mode != FcaeTorMode::Only)
+            // Tor-only/chain serve the optional HTTP endpoint via Arti.
+            http: (self.cfg.http_port != 0)
                 .then(|| format!("127.0.0.1:{}", self.cfg.http_port).parse().ok())
                 .flatten(),
             peer_ip: self.cfg.force_peer.as_ref().and_then(|p| {

@@ -545,12 +545,14 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         } else {
             DEFAULT_TOR_SOCKS_PORT
         });
+    if t.mode != FcaeTorMode::Off {
+        check_port_clash("tor", tor_port, cfg.http_port, "http_port")?;
+    }
     if t.mode != FcaeTorMode::Off && t.mode != FcaeTorMode::Only {
         // In Only mode the tor port IS the session endpoint (the engine
         // serves tor on AETHER_SOCKS) and no WARP listener exists, so a
-        // "clash" with socks_port or http_port is the intended layout.
+        // sharing socks_port is harmless; the HTTP port must still differ.
         check_port_clash("tor", tor_port, cfg.socks_port, "socks_port")?;
-        check_port_clash("tor", tor_port, cfg.http_port, "http_port")?;
     }
 
     // Psiphon's own proxies. 0 means "let Psiphon choose", which never
@@ -696,6 +698,7 @@ pub mod env_compat {
             FcaeProtocol::Masque | FcaeProtocol::Auto | FcaeProtocol::Tor => "masque",
             FcaeProtocol::WireGuard => "wg",
             FcaeProtocol::Gool => "gool",
+            FcaeProtocol::MasqueInMasque => "mim",
         };
         let scan = match cfg.scan_mode {
             FcaeScanMode::Turbo => "turbo",

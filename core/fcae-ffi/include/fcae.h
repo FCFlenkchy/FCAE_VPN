@@ -97,7 +97,8 @@ typedef enum {
     /* Tor alone, no WARP underneath. Sugar for tor.mode = FCAE_TOR_ONLY:
      * from the user's point of view it is a peer of MASQUE/WireGuard, while
      * Chain and Reverse remain modifiers on FcaeTor.mode.               */
-    FCAE_PROTOCOL_TOR       = 4
+    FCAE_PROTOCOL_TOR       = 4,
+    FCAE_PROTOCOL_MASQUE_IN_MASQUE = 5
 } FcaeProtocol;
 
 typedef enum {

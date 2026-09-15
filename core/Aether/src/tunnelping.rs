@@ -31,7 +31,7 @@ fn http_probe_port() -> u16 {
         .unwrap_or(80)
 }
 
-async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
+pub(crate) async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
     let ip = socks::dns_resolve(stack, HTTP_PROBE_HOST).await?;
     let dst = SocketAddr::new(ip, http_probe_port());
 

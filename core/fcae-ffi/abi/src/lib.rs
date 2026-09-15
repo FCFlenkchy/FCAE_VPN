@@ -111,6 +111,8 @@ pub enum FcaeProtocol {
     /// Chain and Reverse modes stay on [`FcaeTor::mode`], where they really
     /// are modifiers.
     Tor = 4,
+    /// MASQUE nested inside MASQUE; h2_enabled selects both carriers.
+    MasqueInMasque = 5,
 }
 
 #[repr(C)]

@@ -363,11 +363,41 @@ jobs:
           ndk-version: r27
           link-to-sdk: true
 
-      # The Psiphon AAR is no longer built here: :app depends on the
-      # official prebuilt ca.psiphon:psiphontunnel AAR published by Psiphon
-      # Labs from their own pinned Docker pipeline (see
-      # android/app/build.gradle.kts). Gradle resolves it from the Maven repo
-      # in android/settings.gradle.kts during the normal APK build.
+      - name: Build Psiphon Android AAR from pinned source
+        if: startsWith(matrix.name, 'android-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Use this submodule's vendored gomobile and Docker-pinned Go/NDK.
+          # Do not mix Oblivion's module-aware fork tooling with this upstream
+          # checkout: this revision's make.bash explicitly uses GOPATH mode.
+          ROOT="$PWD"
+          docker build --platform=linux/amd64 -t fcae-psiphon-android \
+            -f core/psiphon/MobileLibrary/Android/Dockerfile core/psiphon/MobileLibrary
+          docker run --platform=linux/amd64 --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e GOCACHE=/tmp/go-cache \
+            -v "$ROOT/core/psiphon:/go/src/github.com/Psiphon-Labs/psiphon-tunnel-core" \
+            fcae-psiphon-android /bin/bash -c \
+            'cd /go/src/github.com/Psiphon-Labs/psiphon-tunnel-core/MobileLibrary/Android && ./make.bash'
+          mkdir -p android/psiphon/libs
+          cp core/psiphon/MobileLibrary/Android/ca.psiphon.aar android/psiphon/libs/
+          INSPECT=$(mktemp -d)
+          trap 'rm -rf "$INSPECT"' EXIT
+          unzip -q android/psiphon/libs/ca.psiphon.aar 'jni/*' -d "$INSPECT"
+          for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
+            LIB="$INSPECT/jni/$ABI/libgojni.so"
+            test -s "$LIB"
+            readelf -lW "$LIB" | awk '$1 == "LOAD" { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
+          done
+
+      - name: Upload source-built Psiphon AAR
+        if: startsWith(matrix.name, 'android-')
+        uses: actions/upload-artifact@v4
+        with:
+          name: psiphon-aar-${{ matrix.name }}
+          path: android/psiphon/libs/ca.psiphon.aar
+          if-no-files-found: error
 
       - name: fetch imgui
         run: |

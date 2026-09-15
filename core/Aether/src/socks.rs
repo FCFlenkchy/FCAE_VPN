@@ -1950,6 +1950,52 @@ mod tests {
 
 const HTTP_HEAD_LIMIT: usize = 16 * 1024;
 
+/// HTTP CONNECT/absolute-form requests carried by a supplied connector.
+/// Pass hostnames intact: Tor must resolve them remotely (including .onion).
+pub(crate) async fn serve_http_connector<F, Fut, S>(listener: TcpListener, connect: F) -> Result<()>
+where
+    F: Fn(String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = std::io::Result<S>> + Send,
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let listen = listener.local_addr()?;
+    log::info!("[+] tor http proxy listening on {listen}");
+    warn_if_world_reachable("tor http proxy", listen);
+    accept_clients(listener, "tor http proxy", client_limit(), move |mut sock, peer| {
+        let connect = connect.clone();
+        async move {
+            let result: Result<()> = async {
+                let (head, early) = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_head(&mut sock))
+                    .await.map_err(|_| AetherError::Other("http handshake timeout".into()))??;
+                let text = String::from_utf8_lossy(&head);
+                let Some(request) = parse_request_line(text.lines().next().unwrap_or_default()) else {
+                    sock.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n").await?;
+                    return Ok(());
+                };
+                let remote = tokio::time::timeout(Duration::from_secs(60),
+                    connect(request.authority, request.port)).await;
+                let mut remote = match remote {
+                    Ok(Ok(remote)) => remote,
+                    _ => {
+                        sock.write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n").await?;
+                        return Ok(());
+                    }
+                };
+                if let Some(line) = request.rewritten {
+                    let rest = text.split_once("\r\n").map(|(_, tail)| tail).unwrap_or("");
+                    remote.write_all(format!("{line}{rest}").as_bytes()).await?;
+                } else {
+                    sock.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await?;
+                }
+                remote.write_all(&early).await?;
+                relay_generic(sock, remote, half_close_linger()).await;
+                Ok(())
+            }.await;
+            if let Err(e) = result { log::debug!("tor http client {peer} ended: {e}"); }
+        }
+    }).await
+}
+
 pub async fn serve_http(listener: TcpListener, stack: StackHandle) -> Result<()> {
     let listen = listener.local_addr()?;
     log::info!("[+] http proxy listening on {listen}");
@@ -2221,6 +2267,33 @@ async fn relay_http_direct(
 #[cfg(test)]
 mod http_proxy_tests {
     use super::{parse_authority, parse_request_line, read_head};
+
+    #[tokio::test]
+    async fn tor_http_connect_preserves_hostname_and_early_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(super::serve_http_connector(listener, |host, port| async move {
+            assert_eq!(host, "example.onion");
+            assert_eq!(port, 443);
+            let (client, mut remote) = tokio::io::duplex(1024);
+            tokio::spawn(async move {
+                let mut bytes = [0; 4];
+                remote.read_exact(&mut bytes).await.unwrap();
+                remote.write_all(&bytes).await.unwrap();
+            });
+            Ok(client)
+        }));
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client.write_all(b"CONNECT example.onion:443 HTTP/1.1\r\nHost: example.onion\r\n\r\nping").await.unwrap();
+        let expected = b"HTTP/1.1 200 Connection established\r\n\r\nping";
+        let mut response = vec![0; expected.len()];
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), client.read_exact(&mut response)).await;
+        server.abort();
+        result.unwrap().unwrap();
+        assert_eq!(response, expected);
+    }
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 

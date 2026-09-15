@@ -1189,6 +1189,7 @@ void render_ui() {
             // transports to the user even though internally Tor is an engine
             // egress (tor.mode = Only) and Psiphon is a separate backend.
             int transport = (g_app.backend == 1)  ? 5
+                          : (g_app.protocol == 5) ? (g_app.h2_enabled ? 7 : 6)
                           : (g_app.protocol == 4) ? 4
                           : (g_app.protocol == 0) ? (g_app.h2_enabled ? 1 : 0)
                           : (g_app.protocol == 1) ? 2 : 3;
@@ -1197,6 +1198,12 @@ void render_ui() {
             }
             if (ImGui::RadioButton("MASQUE (HTTP/2 TLS)", &transport, 1)) {
                 g_app.protocol = 0; g_app.h2_enabled = true; g_app.backend = 0;
+            }
+            if (ImGui::RadioButton("MASQUE-in-MASQUE (HTTP/3)", &transport, 6)) {
+                g_app.protocol = 5; g_app.h2_enabled = false; g_app.backend = 0;
+            }
+            if (ImGui::RadioButton("MASQUE-in-MASQUE (HTTP/2)", &transport, 7)) {
+                g_app.protocol = 5; g_app.h2_enabled = true; g_app.backend = 0;
             }
             if (ImGui::RadioButton("WireGuard", &transport, 2)) {
                 g_app.protocol = 1; g_app.backend = 0;
@@ -1234,7 +1241,7 @@ void render_ui() {
             ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
             ImGui::SameLine(0, 20);
             ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
-            ImGui::Checkbox("HTTP", &g_app.http_enabled);
+            ImGui::Checkbox("HTTP (Tor exit in Tor-only/chain mode)", &g_app.http_enabled);
             ImGui::SameLine(0, 20);
             ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
             ImGui::PopItemWidth();

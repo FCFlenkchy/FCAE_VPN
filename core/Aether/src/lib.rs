@@ -1508,6 +1508,7 @@ async fn run_masque_tunnel(
     let socks_task = tokio::spawn(async move { socks::serve(socks_listener, socks_stack).await });
     tasks.push(socks_task.abort_handle());
 
+    spawn_session_rtt(&hop.stack, &mut tasks);
     let http_task = spawn_http_proxy(http_listener, &hop.stack);
     if let Some(task) = &http_task {
         tasks.push(task.abort_handle());
@@ -1733,6 +1734,7 @@ async fn run_masque_in_masque(
     let http_listener = bind_http_proxy().await?;
 
     let mut tasks = TaskGuard::new();
+    spawn_session_rtt(&inner.stack, &mut tasks);
     let http_task = spawn_http_proxy(http_listener, &inner.stack);
     if let Some(task) = &http_task {
         tasks.push(task.abort_handle());
@@ -2302,6 +2304,7 @@ async fn run_wireguard_tunnel(
     let socks_task = tokio::spawn(async move { socks::serve(socks_listener, socks_stack).await });
     tasks.push(socks_task.abort_handle());
 
+    spawn_session_rtt(&stack, &mut tasks);
     let http_task = spawn_http_proxy(http_listener, &stack);
     if let Some(task) = &http_task {
         tasks.push(task.abort_handle());
@@ -2346,10 +2349,30 @@ fn http_proxy_listen() -> Option<SocketAddr> {
 }
 
 async fn bind_http_proxy() -> Result<Option<tokio::net::TcpListener>> {
+    // In Chain mode the optional HTTP listener exits through Tor, not WARP.
+    // Tor owns the listener, so the carrier must not compete for its port.
+    if tor::mode() == tor::Mode::Chain { return Ok(None); }
     match http_proxy_listen() {
         Some(listen) => Ok(Some(socks::bind_listener("http proxy", listen).await?)),
         None => Ok(None),
     }
+}
+
+fn spawn_session_rtt(stack: &netstack::StackHandle, tasks: &mut TaskGuard) {
+    let stack = stack.clone();
+    set_rtt_ms(0);
+    let task = tokio::spawn(async move {
+        for delay in [1, 2, 4, 8] {
+            tokio::time::sleep(Duration::from_secs(delay)).await;
+            let started = std::time::Instant::now();
+            if matches!(tokio::time::timeout(Duration::from_secs(10),
+                tunnelping::http_probe(&stack)).await, Ok(Ok(()))) {
+                set_rtt_ms(started.elapsed().as_millis().max(1) as u64);
+                break;
+            }
+        }
+    });
+    tasks.push(task.abort_handle());
 }
 
 fn spawn_http_proxy(
@@ -2532,6 +2555,7 @@ async fn run_warp_in_warp(
     let socks_listener = socks::bind_listener("socks5", listen).await?;
     let http_listener = bind_http_proxy().await?;
 
+    spawn_session_rtt(&inner_stack, &mut tasks);
     let http_task = spawn_http_proxy(http_listener, &inner_stack);
     if let Some(task) = &http_task {
         tasks.push(task.abort_handle());

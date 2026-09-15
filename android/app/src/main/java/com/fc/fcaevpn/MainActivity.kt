@@ -36,6 +36,8 @@ class MainActivity : AppCompatActivity() {
     /// Egress "Psiphon through the tunnel": AAR is started after Aether is up.
     @Volatile private var psiEgressStarted = false
     private var lastLogHash = 0L
+    private var disconnecting = false
+    @Volatile private var connectionEpoch = 0L
     @Volatile private var vpnActive = false
     private var wasAtBottom = true
     private var updatingLogs = false
@@ -144,6 +146,17 @@ class MainActivity : AppCompatActivity() {
 
     private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action?.startsWith("com.fc.fcaevpn.PSI_") == true &&
+                !PsiphonTunnelService.isCurrentBroadcast(intent)) return
+            if (intent.getBooleanExtra("cleanupComplete", false)) {
+                bgExecutor.execute {
+                    handler.post {
+                        disconnecting = false
+                        updateButton()
+                    }
+                }
+                return
+            }
             when (intent.action) {
                 // Staged psiphon progress (like the Tor bootstrap phases):
                 // only repaints the status line while a psiphon connect is
@@ -187,7 +200,7 @@ class MainActivity : AppCompatActivity() {
                         if (!regions.isNullOrBlank()) {
                             applyPsiphonRegionList(regions)
                         }
-                        if (regionsOnly) return@post
+                        if (regionsOnly || userInitiatedDisconnect) return@post
                         pendingPsiSocks = socks
                         pendingPsiHttp = http
                         connecting = false
@@ -403,6 +416,7 @@ class MainActivity : AppCompatActivity() {
         switchLogging = findViewById(R.id.switchLogging)
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
+        switchHttp.text = "HTTP proxy (Tor exit in Tor-only/chain mode)"
         switchAutoUpdate = findViewById(R.id.switchAutoUpdate)
         switchPreReleases = findViewById(R.id.switchPreReleases)
         spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
@@ -457,7 +471,7 @@ class MainActivity : AppCompatActivity() {
             // (backend, protocol, torMode) triple the FFI wants.
             listOf(
                 "MASQUE (HTTP/3)", "MASQUE (HTTP/2)", "WireGuard", "WARP-in-WARP",
-                "Tor", "Psiphon",
+                "Tor", "Psiphon", "MASQUE-in-MASQUE (HTTP/3)", "MASQUE-in-MASQUE (HTTP/2)",
             ),
         )
         spinnerMode.adapter = ArrayAdapter(
@@ -1049,10 +1063,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun connectClicked() {
+        if (disconnecting || connecting || engineRunning || vpnActive) return
+        connectionEpoch++
         userInitiatedDisconnect = false
         commandPaused = false
         commandConnecting = true
         psiEgressStarted = false
+        pendingPsiSocks = 0
+        pendingPsiHttp = 0
         if (isPsiphonSelected()) {
             if (isTunModeSelected()) {
                 val prep = VpnService.prepare(this)
@@ -1104,11 +1122,14 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("psiphonTransport", selectedPsiphonTransportIndex())
         i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
-        // Lets :psiphon detach from the tray after READY (the VPN service
-        // owns the notification in TUN mode) — one notification per session.
-        i.putExtra("psiTunMode", isTunModeSelected())
         if (!upstream.isNullOrBlank()) i.putExtra("upstreamProxy", upstream)
-        startForegroundService(i)
+        if (upstream.isNullOrBlank()) {
+            val owner = Intent(this, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_PSIPHON)
+            i.extras?.let { owner.putExtras(it) }
+            startForegroundService(owner)
+        } else {
+            PsiphonTunnelService.startBound(this, i)
+        }
     }
 
     private fun startTunServiceWithConfig() {
@@ -1206,13 +1227,16 @@ class MainActivity : AppCompatActivity() {
         val psiphonSocksPort = editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0
         val psiphonHttpPort = editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0
 
+        val epoch = connectionEpoch
         bgExecutor.execute {
+            if (epoch != connectionEpoch) return@execute
             // Ensure previous engine is fully stopped before starting.
             // nativeStop() -> fcae_stop() is synchronous, so once it returns
             // the previous session has released the TUN fd and its threads
             // are joined. No sleep or retry loop is needed here.
             try { NativeEngine.nativeStop() } catch (_: Throwable) {}
 
+            if (epoch != connectionEpoch) return@execute
             val ok = try {
                 NativeEngine.nativeStart(
                     protocol = protocol,
@@ -1255,7 +1279,12 @@ class MainActivity : AppCompatActivity() {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }
                 false
             }
+            if (epoch != connectionEpoch) {
+                try { NativeEngine.nativeStop() } catch (_: Throwable) {}
+                return@execute
+            }
             handler.post {
+                if (epoch != connectionEpoch) return@post
                 if (!ok) {
                     connecting = false
                     vpnActive = false
@@ -1276,6 +1305,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnectAll() {
+    if (disconnecting) return
+    disconnecting = true
+    connectionEpoch++
     userInitiatedDisconnect = true
     commandPaused = false
     commandConnecting = false
@@ -1293,15 +1325,21 @@ class MainActivity : AppCompatActivity() {
     peerText.text = ""
 
     try {
-        stopService(Intent(this, PsiphonTunnelService::class.java))
+        PsiphonTunnelService.stopBound(this)
     } catch (_: Throwable) {}
 
     // 2. Trigger disconnect on a background thread
     val currentMode = spinnerMode.selectedItemPosition
+    val psiphonBooting = pendingPsiSocks == 0 && isPsiphonSelected()
     Thread({
         if (currentMode == 1) {
             // TUN mode: fullShutdown() handles nativeStop + nativeFree
-            FCAEVpnService.disconnectNow()
+            val hadVpnService = FCAEVpnService.disconnectNow()
+            if (!hadVpnService && !psiphonBooting) ProxyNotification.notifyCleanupComplete(this)
+            if (psiphonBooting) {
+                val stop = Intent(this, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_STOP)
+                startForegroundService(stop)
+            }
         } else {
             // Proxy mode: stopProxy() handles nativeStop + nativeFree.
             //
@@ -1430,11 +1468,8 @@ class MainActivity : AppCompatActivity() {
         if (chunk.isBlank()) return
         try { NativeEngine.nativeAppendLog(chunk) } catch (_: Throwable) {}
         if (!::switchLogging.isInitialized || !switchLogging.isChecked) return
-        val logs = try { NativeEngine.nativeGetLogs() } catch (_: Throwable) { return }
-        val h = if (logs.isEmpty()) 0L else
-            logs.length.toLong() * 31 +
-            logs[0].code.toLong() * 31 +
-            logs[logs.length - 1].code.toLong()
+        val logs = try { NativeEngine.nativeGetLogs().takeLast(MAX_LOG_CHARS) } catch (_: Throwable) { return }
+        val h = logs.hashCode().toLong()
         if (h == lastLogHash) return
         lastLogHash = h
         val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
@@ -1600,12 +1635,8 @@ class MainActivity : AppCompatActivity() {
             if (errMsg.isNotEmpty() && state != 5) peerLine.append("\nError: $errMsg")
             peerText.text = peerLine.toString()
 
-            // Fast change detection: length + first/last chars is cheaper
-            // than scanning the entire string for hashCode().
-            val h = if (logs.isEmpty()) 0L else
-                logs.length.toLong() * 31 +
-                logs[0].code.toLong() * 31 +
-                logs[logs.length - 1].code.toLong()
+            // Equal-size ring buffers still change in the middle.
+            val h = logs.hashCode().toLong()
             if (h != lastLogHash) {
                 lastLogHash = h
                 val shown = if (logs.length > MAX_LOG_CHARS) logs.takeLast(MAX_LOG_CHARS) else logs
@@ -1635,6 +1666,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateButton() {
+        btnConnect.isEnabled = !disconnecting
+        if (disconnecting) {
+            btnConnect.text = "DISCONNECTING"
+            return
+        }
         if (vpnActive || engineRunning || connecting) {
             btnConnect.text = "DISCONNECT"
             btnConnect.setBackgroundColor(COLOR_DISCONNECT_BTN)
@@ -1660,6 +1696,7 @@ class MainActivity : AppCompatActivity() {
     private fun coreProtocolFromSelection(): Int = when (spinnerProtocol.selectedItemPosition) {
         2 -> 1    // WireGuard
         3 -> 2    // WARP-in-WARP
+        6, 7 -> 5 // MASQUE-in-MASQUE
         4 -> 4    // Tor (FcaeProtocol::Tor; implies tor.mode = Only)
         5 -> 3    // Psiphon picks its own transport (FcaeProtocol::Auto)
         else -> 0 // MASQUE (either HTTP version)
@@ -1805,7 +1842,7 @@ class MainActivity : AppCompatActivity() {
         savedPsiphonRegion = selectedPsiphonRegion()
     }
 
-    private fun h2FromSelection(): Boolean = spinnerProtocol.selectedItemPosition == 1
+    private fun h2FromSelection(): Boolean = spinnerProtocol.selectedItemPosition in listOf(1, 7)
 
     /** Old saved prefs keep protocol (0-2) + h2 (bool); map back to the
      *  spinner position so existing configs load unchanged.
@@ -1815,6 +1852,7 @@ class MainActivity : AppCompatActivity() {
     private fun selectionPositionFromPrefs(protocol: Int, h2: Boolean, backend: Int = 0): Int =
         when {
             backend == 1 -> 5          // Psiphon
+            protocol == 5 -> if (h2) 7 else 6
             protocol == 4 -> 4         // Tor only
             protocol == 0 -> if (h2) 1 else 0
             else -> protocol + 1       // 1=wg -> 2, 2=gool -> 3

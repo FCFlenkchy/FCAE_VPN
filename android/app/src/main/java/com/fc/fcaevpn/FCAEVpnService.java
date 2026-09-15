@@ -334,6 +334,7 @@ public class FCAEVpnService extends VpnService {
         } else {
             startForeground(VpnNotification.NOTIFICATION_ID, n);
         }
+        ProxyNotification.handoffToVpn();
     }
 
     /**
@@ -455,10 +456,11 @@ public class FCAEVpnService extends VpnService {
     public static native long[] nativeGetTrafficStats();
 
     // ADDED: Called directly from MainActivity for 0ms UI disconnect
-    public static void disconnectNow() {
-        if (instance != null) {
-            instance.fullShutdown();
-        }
+    public static boolean disconnectNow() {
+        FCAEVpnService current = instance;
+        if (current == null) return false;
+        current.fullShutdown();
+        return true;
     }
 
     @Override
@@ -809,7 +811,7 @@ public class FCAEVpnService extends VpnService {
         closeQuiet(pfd);
     }
 
-    private void fullShutdown() {
+    private synchronized void fullShutdown() {
         // Idempotent teardown. Disconnect (UI or notification), onRevoke
         // and onDestroy can ALL fire for the same session, and the first
         // call's cleanup thread may already be past its generation check
@@ -822,6 +824,7 @@ public class FCAEVpnService extends VpnService {
                 && shutdownLatch == null && vpnInterface == null) {
             return;
         }
+        PsiphonTunnelService.stopBound(this);
         sGeneration.incrementAndGet();
         final long myGen = cleanupGeneration.incrementAndGet();
         running = false;
@@ -877,7 +880,10 @@ public class FCAEVpnService extends VpnService {
             if (myGen != cleanupGeneration.get()) return;
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
             sweepTun();
-            handler.post(this::stopSelf);
+            handler.post(() -> {
+                stopSelf();
+                ProxyNotification.notifyCleanupComplete(this);
+            });
             synchronized (cmdLock) {
                 engineOpInFlight = false;
                 queuedStart = null;

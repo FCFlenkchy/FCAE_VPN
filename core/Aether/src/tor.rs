@@ -777,6 +777,34 @@ mod with_tor {
         .await
     }
 
+    async fn serve_with_http(listener: TcpListener, client: Client, metered: bool) -> Result<()> {
+        let http = match crate::http_proxy_listen() {
+            Some(address) => Some(crate::socks::bind_listener("tor http proxy", address).await?),
+            None => None,
+        };
+        let socks_client = client.clone();
+        let socks = async move {
+            if metered { serve_metered(listener, socks_client.clone(), "tor socks5").await }
+            else { serve(listener, socks_client, "tor socks5").await }
+        };
+        let http = async {
+            let Some(http) = http else { return std::future::pending::<Result<()>>().await; };
+            crate::socks::serve_http_connector(http, move |host, port| {
+                let client = client.clone();
+                async move {
+                    use tokio_util::compat::FuturesAsyncReadCompatExt;
+                    client.connect((host.as_str(), port)).await
+                        .map(|stream| Metered { inner: stream.compat() })
+                        .map_err(std::io::Error::other)
+                }
+            }).await
+        };
+        tokio::select! {
+            result = socks => result,
+            result = http => result,
+        }
+    }
+
     async fn wait_for_proxy(through: SocketAddr) {
         let mut announced = false;
         loop {
@@ -802,7 +830,7 @@ mod with_tor {
         let client = establish(&state, Some(through), FOREVER).await?;
         log::info!("[+] tor is ready; {listen} leaves through tor, carried by the tunnel");
 
-        serve(listener, client, "tor socks5").await
+        serve_with_http(listener, client, false).await
     }
 
     pub async fn run_only(listen: SocketAddr, state: PathBuf) -> Result<()> {
@@ -814,7 +842,7 @@ mod with_tor {
         let client = establish(&state, None, FOREVER).await?;
         log::info!("[+] tor is ready; {listen} leaves through tor");
 
-        serve_metered(listener, client, "tor socks5").await
+        serve_with_http(listener, client, true).await
     }
 
     pub async fn start_reverse(state: PathBuf) -> Result<SocketAddr> {

@@ -160,15 +160,7 @@ tasks.withType<JavaCompile>().configureEach {
 dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
-    // Official prebuilt AAR published by Psiphon Labs from their own Docker
-    // pipeline (MobileLibrary/Android/Dockerfile: exact Go toolchain +
-    // vendored gomobile pairing, 16 KB page-aligned). Building our own from
-    // the submodule drifted the gomobile/Go/NDK combination away from what
-    // upstream tests and produced a libgojni.so that died silently at
-    // runtime, so the CI step that built it is gone. The wrapper API
-    // (ca.psiphon.PsiphonTunnel) ships inside this AAR. Process isolation is
-    // unchanged: PsiphonTunnelService still runs in :psiphon via
-    // android:process, so libgojni.so never shares an address space with
-    // tun2socks. processR8 keeps are in proguard-rules.pro.
-    implementation("ca.psiphon:psiphontunnel:2.0.41")
+    // Built in CI from the pinned core/psiphon source and its vendored tools.
+    // The Go runtime remains isolated in :psiphon.
+    implementation(project(":psiphon"))
 }

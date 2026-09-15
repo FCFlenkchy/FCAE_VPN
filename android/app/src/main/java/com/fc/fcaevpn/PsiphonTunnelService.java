@@ -1,13 +1,8 @@
 package com.fc.fcaevpn;
 
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -68,8 +63,51 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String EXTRA_TOTAL_UP = "totalUp";
     public static final String EXTRA_TOTAL_DOWN = "totalDown";
 
-    private static final String CHANNEL_ID = "fcaevpn_psiphon";
-    private static final int NOTIF_ID = 3;
+    // Accessed on the application main thread. The app notification owner keeps
+    // this binding alive; the isolated Go service never becomes a foreground service.
+    private static android.content.ServiceConnection connection;
+    private static volatile long activeSession;
+    private long session;
+    public static boolean isCurrentBroadcast(Intent intent) {
+        return intent.getLongExtra("psiSession", -1) == activeSession;
+    }
+    public static void startBound(Context context, Intent intent) {
+        Context app = context.getApplicationContext();
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (connection != null) return;
+            activeSession = android.os.SystemClock.elapsedRealtimeNanos();
+            intent.putExtra("psiSession", activeSession);
+            android.content.ServiceConnection next = new android.content.ServiceConnection() {
+                @Override public void onServiceConnected(android.content.ComponentName name, IBinder binder) {}
+                @Override public void onServiceDisconnected(android.content.ComponentName name) {
+                    stopBound(app);
+                    Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
+                    failed.putExtra("psiSession", activeSession);
+                    failed.putExtra(EXTRA_ERROR, "Psiphon process exited");
+                    app.sendBroadcast(failed);
+                }
+            };
+            connection = next;
+            if (!app.bindService(intent, next, Context.BIND_AUTO_CREATE)) {
+                connection = null;
+                Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
+                failed.putExtra("psiSession", activeSession);
+                failed.putExtra(EXTRA_ERROR, "Unable to bind Psiphon service");
+                app.sendBroadcast(failed);
+            }
+        });
+    }
+
+    public static void stopBound(Context context) {
+        Context app = context.getApplicationContext();
+        new Handler(Looper.getMainLooper()).post(() -> {
+            android.content.ServiceConnection old = connection;
+            connection = null;
+            if (old != null) {
+                try { app.unbindService(old); } catch (IllegalArgumentException ignored) {}
+            }
+        });
+    }
 
     // Legacy PUBLIC remote server list + signature key from the open-source
     // Psiphon 3 clients (same values community clients embed). Bootstrap
@@ -98,6 +136,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // 0 = Auto: no LimitTunnelProtocols, tunnel-core uses its full set.
     private int transport = 0;
 
+    private static final Object LIBRARY_LOCK = new Object();
+    private static final java.util.concurrent.ExecutorService libraryWorker =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> new Thread(r, "FCAE-PsiLibrary"));
     private PsiphonTunnel tunnel;
     private String region = "";
     private volatile String lastRegions = "";
@@ -108,17 +149,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private final AtomicInteger httpPort = new AtomicInteger(0);
     // Cumulative tunneled bytes, from onBytesTransferred (EmitBytesTransferred
     // notices — the callback reports DELTAS since the previous notice, so
-    // accumulate). Surfaced in the foreground notification.
+    // accumulate). Published to the app-owned UI/notification.
     private final AtomicLong bytesUp = new AtomicLong(0);
     private final AtomicLong bytesDown = new AtomicLong(0);
-    private volatile long lastCounterNotifAt = 0;
-    // UI set "psiTunMode" on the start intent (TUN selected), and chain mode
-    // is detected from upstreamProxy. In both cases another foreground
-    // service already owns the tray entry (VpnNotification/ProxyNotification)
-    // — this service detaches from the foreground after READY so the user
-    // sees ONE notification per session, not two.
-    private volatile boolean psiTunMode = false;
-    private volatile boolean notifDetached = false;
     private volatile boolean stopping;
     // True while a start thread is inside startTunneling(); true alone
     // (psiphonUp) once the library reported itself started. Together they
@@ -130,6 +163,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private volatile boolean startInFlight;
     private volatile boolean psiphonUp;
     private final Handler logHandler = new Handler(Looper.getMainLooper());
+    private boolean logFlushPending;
     private final StringBuilder logBuf = new StringBuilder();
     private final Runnable flushLogs = this::flushLogs;
 
@@ -154,29 +188,17 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // background stats publisher started from onConnected().
     private volatile int lastRttMs = 0;
     private Thread statsThread;
-    // Auto-recovery state for dead servers (see maybeAutoReconnect).
-    private volatile int autoReconnectsDone = 0;
-    private volatile long lastAutoReconnectAt = 0L;
-    private volatile String lastEmbeddedList = "";
 
     @Override
     public void onCreate() {
         super.onCreate();
-        createChannel();
-        // startForegroundService() times out if this process (class load of
-        // libgojni.so, bind, etc.) takes too long. Promote before any of that.
-        promoteForeground("FCAE Psiphon — Starting…");
         bindToUnderlyingNetwork();
-        tunnel = PsiphonTunnel.newPsiphonTunnel(this);
-        tunnel.setVpnMode(false);
+        // Construct the singleton on libraryWorker, never on Android main.
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // Every startForegroundService() delivery must call startForeground,
-        // including ACTION_STOP (disconnect always used that API).
         boolean stop = intent != null && ACTION_STOP.equals(intent.getAction());
-        promoteForeground(stop ? "FCAE Psiphon — Stopping…" : "FCAE Psiphon — Connecting…");
         if (stop) {
             stopNow();
             return START_NOT_STICKY;
@@ -189,12 +211,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             // forever at the system's ~1s restart cadence. MainActivity is
             // the only legitimate source of psiphon starts; exit quietly.
             if (!psiphonUp && !startInFlight) {
-                stopForeground(STOP_FOREGROUND_REMOVE);
                 stopSelf();
             }
             return START_NOT_STICKY;
         }
-        if (startInFlight || psiphonUp) {
+        if (stopping || startInFlight || psiphonUp) {
             // Duplicate start (double-tap, poll re-fire, redelivery). The
             // wrapper stops the running instance before every new start, so
             // a second start mid-boot aborts the first controller — repeat
@@ -212,9 +233,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             wantHttp = intent.getIntExtra("psiphonHttpPort", 0);
             String up = intent.getStringExtra("upstreamProxy");
             upstreamProxy = up == null ? "" : up.trim();
-            psiTunMode = intent.getBooleanExtra("psiTunMode", false);
         }
-        notifDetached = false;
         stopping = false;
         startInFlight = true;
         psiphonUp = false;
@@ -225,25 +244,24 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         // the log line and startTunneling() (two reads would double-log the
         // "importing embedded server entries" notice).
         final String embeddedList = readEmbeddedServerList();
-        // Fresh user-initiated start: reset the auto-recovery budget.
-        lastEmbeddedList = embeddedList;
-        autoReconnectsDone = 0;
-        lastAutoReconnectAt = 0L;
         emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")")
                 + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy)
                 + sourceSummary(embeddedList));
-        final PsiphonTunnel t = tunnel;
-        new Thread(() -> {
+        libraryWorker.execute(() -> {
             try {
                 // The embedded list is the body of an encoded server entry
                 // list (same format as a remote server_list payload); ""
                 // falls back to whatever the datastore still holds plus any
                 // remote server list configured in getPsiphonConfig().
                 emitLog("startTunneling: calling");
-                if (t != null) t.startTunneling(embeddedList);
-                else throw new Exception("Psiphon tunnel not created");
+                synchronized (LIBRARY_LOCK) {
+                    if (stopping) return;
+                    tunnel = PsiphonTunnel.newPsiphonTunnel(this);
+                    tunnel.setVpnMode(false);
+                    tunnel.startTunneling(embeddedList);
+                }
                 emitLog("startTunneling: returned");
-                psiphonUp = true;
+                if (!stopping) psiphonUp = true;
             } catch (Throwable err) {
                 // Throwable, not Exception: gomobile native load failures
                 // (UnsatisfiedLinkError, ExceptionInInitializerError) are
@@ -260,27 +278,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             } finally {
                 startInFlight = false;
             }
-        }, "FCAE-PsiStart").start();
+        });
         dialStartedAtMs = System.currentTimeMillis();
         logHandler.removeCallbacks(dialHeartbeat);
         logHandler.postDelayed(dialHeartbeat, 10000L);
         return START_NOT_STICKY;
     }
 
-    // startForeground(int, Notification) (no type) is deprecated on API 34,
-    // but is the correct call on < 34 — same deliberate fallback as
-    // FCAEVpnService. Suppressed here rather than gated to keep one call site.
-    @SuppressWarnings("deprecation")
-    private void promoteForeground(String text) {
-        Notification n = buildNotification(text);
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        } else {
-            startForeground(NOTIF_ID, n);
-        }
-    }
-
-    private void stopNow() {
+    private synchronized void stopNow() {
         // Idempotent: a start failure, onExiting() and an ACTION_STOP can
         // all land within the same second; only the first may run the
         // teardown (a second t.stop() would block on the already-stopping
@@ -300,31 +305,28 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         psiphonUp = false;
         emitLog("stopping");
         flushLogs();
-        try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Exception ignored) {}
-        broadcastStopped();
-        final PsiphonTunnel t = tunnel;
-        new Thread(() -> {
-            try { if (t != null && needsLibraryStop) t.stop(); } catch (Throwable ignored) {}
-        }, "FCAE-PsiStop").start();
+        libraryWorker.execute(() -> {
+            synchronized (LIBRARY_LOCK) {
+                try { if (tunnel != null && needsLibraryStop) tunnel.stop(); } catch (Throwable ignored) {}
+            }
+            broadcastStopped();
+        });
         stopSelf();
     }
 
     @Override
     public void onDestroy() {
-        stopping = true;
-        logHandler.removeCallbacks(dialHeartbeat);
-        Thread st = statsThread;
-        if (st != null) st.interrupt();
-        try { if (tunnel != null && (psiphonUp || startInFlight)) tunnel.stop(); } catch (Throwable ignored) {}
-        try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-            if (cm != null) cm.bindProcessToNetwork(null);
-        } catch (Exception ignored) {}
+        stopNow();
+        flushLogs();
         super.onDestroy();
     }
 
     @Override
-    public IBinder onBind(Intent intent) { return null; }
+    public IBinder onBind(Intent intent) {
+        session = intent.getLongExtra("psiSession", -1);
+        onStartCommand(intent, 0, 0);
+        return new android.os.Binder();
+    }
 
     /** Keep this process off the VPN so Psiphon can reach the internet. */
     private void bindToUnderlyingNetwork() {
@@ -366,7 +368,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             o.put("ClientVersion", "1");
             o.put("TunnelPoolSize", 1);
             o.put("DisableLocalSocksAuth", true);
-            o.put("EmitDiagnosticNotices", true);
+            o.put("EmitDiagnosticNotices", false);
             o.put("UseIndistinguishableTLS", true);
             o.put("AllowDefaultDNSResolverWithBindToDevice", true);
             // Frequent byte-count notices: they feed onBytesTransferred,
@@ -539,24 +541,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 broadcastStage(4, "ESTABLISHING TUNNEL");
             }
         }
-        // Dead-server detection: tunnel-core counts failed port-forwards per
-        // server ("port forward failures for <server-id>: N") but never
-        // rotates off the broken server on its own. Parse N as the digits
-        // after the FIRST ':' following the phrase — lastIndexOf(':') would
-        // land inside the trailing timestamp and false-trigger.
-        int ff = message.indexOf("port forward failures for");
-        if (ff >= 0) {
-            int idx = message.indexOf(':', ff + 25);
-            if (idx >= 0) {
-                int end = idx + 1;
-                while (end < message.length() && Character.isDigit(message.charAt(end))) end++;
-                if (end > idx + 1) {
-                    try {
-                        maybeAutoReconnect(Integer.parseInt(message.substring(idx + 1, end)));
-                    } catch (NumberFormatException ignored) {}
-                }
-            }
-        }
         emitLog(message);
     }
 
@@ -579,33 +563,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (sent <= 0 && received <= 0) return;
         bytesUp.addAndGet(Math.max(0, sent));
         bytesDown.addAndGet(Math.max(0, received));
-        if (!notifDetached) maybeUpdateCounterNotification();
-    }
-
-    /** Refresh the notification's byte counters at most every 2 seconds. */
-    private void maybeUpdateCounterNotification() {
-        long now = android.os.SystemClock.elapsedRealtime();
-        if (stopping || now - lastCounterNotifAt < 2000) return;
-        lastCounterNotifAt = now;
-        try {
-            NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm == null) return;
-            int s = socksPort.get();
-            String base = s > 0
-                    ? "FCAE Psiphon — SOCKS 127.0.0.1:" + s
-                    : "FCAE Psiphon — Connecting…";
-            nm.notify(NOTIF_ID, buildNotification(
-                    base + "  ·  \u2191" + fmtBytes(bytesUp.get())
-                            + " \u2193" + fmtBytes(bytesDown.get())));
-        } catch (Exception ignored) {}
-    }
-
-    private static String fmtBytes(long b) {
-        if (b < 1024) return b + " B";
-        double v = b;
-        if ((v /= 1024) < 1024) return String.format(java.util.Locale.US, "%.1f kB", v);
-        if ((v /= 1024) < 1024) return String.format(java.util.Locale.US, "%.1f MB", v);
-        return String.format(java.util.Locale.US, "%.2f GB", v / 1024);
     }
 
     @Override
@@ -615,6 +572,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         emitLog("regions: " + lastRegions);
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());
+        i.putExtra("psiSession", session);
         i.putExtra("regionsOnly", true);
         i.putExtra(EXTRA_REGIONS, lastRegions);
         sendBroadcast(i);
@@ -623,29 +581,15 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onConnected() {
         if (stopping) return;
+        psiphonUp = true;
         int s = socksPort.get();
         if (s <= 0) s = tunnel.getLocalSocksProxyPort();
         socksPort.set(s);
         emitLog("connected, SOCKS 127.0.0.1:" + s);
         flushLogs();
-        // One tray entry per session: TUN mode has VpnNotification and the
-        // egress-chain has the engine's foreground service — this service
-        // detaches instead of stacking a second notification on top. The
-        // service itself stays alive-started; the session owns a foreground
-        // notification through that other service the whole time.
-        boolean ownerElsewhere = psiTunMode || !upstreamProxy.isEmpty();
-        if (ownerElsewhere) {
-            notifDetached = true;
-            try { stopForeground(STOP_FOREGROUND_DETACH); } catch (Exception ignored) {}
-        } else {
-            try {
-                NotificationManager nm = getSystemService(NotificationManager.class);
-                if (nm != null) nm.notify(NOTIF_ID, buildNotification(
-                        "FCAE Psiphon — SOCKS 127.0.0.1:" + s));
-            } catch (Exception ignored) {}
-        }
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());
+        i.putExtra("psiSession", session);
         i.putExtra(EXTRA_SOCKS, s);
         i.putExtra(EXTRA_HTTP, httpPort.get());
         sendBroadcast(i);
@@ -682,7 +626,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private void emitLog(String message) {
         String line = formatNotice(message);
         if (line.isEmpty()) return;
-        Log.i(TAG, line);
+        Log.d(TAG, line);
         synchronized (logBuf) {
             if (logBuf.length() > 0) logBuf.append('\n');
             logBuf.append("[psiphon] ").append(line);
@@ -690,25 +634,26 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 logBuf.delete(0, logBuf.length() - 8000);
             }
         }
-        // Every line is broadcast immediately. A 150 ms debounce previously
-        // batched upstream JSON notices — and silently swallowed the last
-        // diagnostics when the process died inside that window. Notice volume
-        // here is low (BytesTransferred is excluded upstream), so immediate
-        // flush costs nothing and the log survives a native crash intact.
-        logHandler.removeCallbacks(flushLogs);
-        flushLogs();
+        synchronized (logBuf) {
+            if (!logFlushPending) {
+                logFlushPending = true;
+                logHandler.postDelayed(flushLogs, 250L);
+            }
+        }
     }
 
     private void flushLogs() {
         logHandler.removeCallbacks(flushLogs);
         String chunk;
         synchronized (logBuf) {
+            logFlushPending = false;
             if (logBuf.length() == 0) return;
             chunk = logBuf.toString();
             logBuf.setLength(0);
         }
         Intent i = new Intent(BROADCAST_LOG);
         i.setPackage(getPackageName());
+        i.putExtra("psiSession", session);
         i.putExtra(EXTRA_LOG, chunk);
         sendBroadcast(i);
     }
@@ -756,6 +701,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 }
                 Intent i = new Intent(BROADCAST_STATS);
                 i.setPackage(getPackageName());
+        i.putExtra("psiSession", session);
                 i.putExtra(EXTRA_RTT, lastRttMs);
                 i.putExtra(EXTRA_UP_BPS, upBps);
                 i.putExtra(EXTRA_DOWN_BPS, downBps);
@@ -778,7 +724,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             s.getOutputStream().write(("HEAD http://www.gstatic.com/generate_204"
                     + " HTTP/1.1\r\nHost: www.gstatic.com\r\n"
                     + "Connection: close\r\n\r\n").getBytes());
-            if (s.getInputStream().read() < 0) return null;
+            java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(s.getInputStream(), java.nio.charset.StandardCharsets.US_ASCII));
+            String status = reader.readLine();
+            if (status == null || !status.matches("HTTP/1\\.[01] 204(?: .*|)")) return null;
             return (int) Math.max(1L, System.currentTimeMillis() - t0);
         } catch (Exception e) {
             return null;
@@ -787,60 +736,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         }
     }
 
-    /**
-     * A tunnel whose server cannot reach ANY destination is worse than a
-     * reconnect: tunnel-core only COUNTS failed port-forwards but never
-     * rotates off the broken server, so the session sits CONNECTED and
-     * blackholes every connection forever. Treat many failures with
-     * essentially no downloaded bytes as a dead server and restart the
-     * tunnel (fresh candidate selection), capped to two attempts with a
-     * 30 s cooldown to avoid churn on a globally bad network. Shown as
-     * CONNECTING/ESTABLISHING — recovery, not a user-visible disconnect.
-     */
-    private void maybeAutoReconnect(int failures) {
-        if (stopping || !psiphonUp) return;
-        if (failures < 20) return;
-        if (autoReconnectsDone >= 2) return;
-        if (bytesDown.get() > 15000L) return;  // real traffic flows: alive
-        long now = System.currentTimeMillis();
-        if (now - lastAutoReconnectAt < 30000L) return;
-        autoReconnectsDone++;
-        lastAutoReconnectAt = now;
-        emitLog("egress unreachable (" + failures + " failed port-forwards)"
-                + " — switching psiphon server (attempt " + autoReconnectsDone + "/2)");
-        psiphonUp = false;
-        broadcastStage(1, "CONNECTING");
-        final PsiphonTunnel t = tunnel;
-        new Thread(() -> {
-            try {
-                if (stopping) return;
-                startInFlight = true;
-                try { if (t != null) t.stop(); } catch (Throwable ignored) {}
-                if (stopping) return;
-                dialStartedAtMs = System.currentTimeMillis();
-                logHandler.removeCallbacks(dialHeartbeat);
-                logHandler.postDelayed(dialHeartbeat, 10000L);
-                if (t != null) t.startTunneling(lastEmbeddedList);
-                psiphonUp = true;
-                autoReconnectsDone = 0;   // new server, fresh budget
-            } catch (Throwable err) {
-                Log.e(TAG, "auto-reconnect failed", err);
-                String what = err.getClass().getSimpleName() + ": "
-                        + (err.getMessage() == null ? "(no message)" : err.getMessage());
-                emitLog("start failed: " + what);
-                broadcastFailed(what);
-                stopNow();
-            } finally {
-                startInFlight = false;
-            }
-        }, "FCAE-PsiReconn").start();
-    }
-
     private void broadcastFailed(String msg) {
         emitLog("failed: " + (msg == null ? "failed" : msg));
         flushLogs();
         Intent i = new Intent(BROADCAST_FAILED);
         i.setPackage(getPackageName());
+        i.putExtra("psiSession", session);
         i.putExtra(EXTRA_ERROR, msg == null ? "failed" : msg);
         sendBroadcast(i);
     }
@@ -848,6 +749,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private void broadcastStopped() {
         Intent i = new Intent(BROADCAST_STOPPED);
         i.setPackage(getPackageName());
+        i.putExtra("psiSession", session);
         sendBroadcast(i);
     }
 
@@ -855,47 +757,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private void broadcastStage(int stage, String label) {
         Intent i = new Intent(BROADCAST_STAGE);
         i.setPackage(getPackageName());
+        i.putExtra("psiSession", session);
         i.putExtra(EXTRA_STAGE, stage);
         i.putExtra(EXTRA_STAGE_LABEL, label);
         sendBroadcast(i);
     }
 
-    private void createChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel ch = new NotificationChannel(
-                    CHANNEL_ID, "FCAE Psiphon", NotificationManager.IMPORTANCE_HIGH);
-            ch.setSound(null, null);
-            ch.enableVibration(false);
-            NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm != null) nm.createNotificationChannel(ch);
-        }
-    }
-
-    // The no-channel Notification.Builder is deprecated since API 26 and only
-    // reached on 24/25 (minSdk 24), where channels do not exist. Deliberate
-    // fallback, same as FCAEVpnService.
-    @SuppressWarnings("deprecation")
-    private Notification buildNotification(String text) {
-        Intent main = new Intent(this, MainActivity.class);
-        PendingIntent piMain = PendingIntent.getActivity(this, 30, main,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Intent stop = new Intent(this, PsiphonTunnelService.class);
-        stop.setAction(ACTION_STOP);
-        PendingIntent piStop = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? PendingIntent.getForegroundService(this, 31, stop,
-                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE)
-                : PendingIntent.getService(this, 31, stop,
-                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Notification.Builder nb = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(this, CHANNEL_ID)
-                : new Notification.Builder(this);
-        nb.setContentTitle("FCAE VPN")
-          .setContentText(text)
-          .setSmallIcon(android.R.drawable.ic_lock_lock)
-          .setContentIntent(piMain)
-          .setOngoing(true)
-          .setOnlyAlertOnce(true)
-          .addAction(new Notification.Action.Builder(null, "Disconnect", piStop).build());
-        return nb.build();
-    }
 }

@@ -154,14 +154,15 @@ impl Supervisor {
         // Drain wait is independent of the 2ms join in stop(): reconnect
         // must wait for the background reaper, not fail in 2ms.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while self.stopping.load(Ordering::SeqCst) {
+        let mut slot = loop {
+            let slot = self.running.lock();
+            if !self.stopping.load(Ordering::SeqCst) { break slot; }
+            drop(slot);
             if std::time::Instant::now() >= deadline {
                 return Err(CoreError::Timeout(Duration::from_secs(2)));
             }
             std::thread::sleep(Duration::from_millis(1));
-        }
-
-        let mut slot = self.running.lock();
+        };
         // Reap a session that already ended by itself.
         //
         // `running` is only cleared by stop(). When the engine terminated on
@@ -301,12 +302,15 @@ impl Supervisor {
     ///
     /// Safe to call more than once, and safe to follow with [`stop`].
     pub fn begin_stop(&self) {
-        self.stopping.store(true, Ordering::SeqCst);
-        if let Some(running) = self.running.lock().as_ref().map(|r| r.cancel.clone()) {
-            running.cancel();
+        let slot = self.running.lock();
+        if let Some(running) = slot.as_ref() {
+            self.stopping.store(true, Ordering::SeqCst);
+            running.cancel.cancel();
+            // Hold the slot through abort: a new start cannot install a TUN
+            // between cancelling this session and closing its descriptor.
+            self.cfg.tun_bridge.abort();
         }
-        // Abort only: close TUN fds, do not wait on Go. `stop()` reaps.
-        self.cfg.tun_bridge.abort();
+
     }
 
     /// Request shutdown and wait (bounded) for the session thread to finish.
@@ -315,13 +319,16 @@ impl Supervisor {
     /// returns, the TUN device is down and DNS has been restored, so a UI can
     /// immediately offer "Connect" again without a hidden race.
     pub fn stop(&self) -> Result<()> {
-        let Some(running) = self.running.lock().take() else {
-            // Nothing running, but a previous begin_stop() may have left the
-            // flag set; clear it so a later start() is not blocked.
-            self.stopping.store(false, Ordering::SeqCst);
-            return Ok(());
+        let running = {
+            let mut slot = self.running.lock();
+            let Some(running) = slot.take() else {
+                // Another stop may already own the worker. Only its reaper
+                // may clear `stopping`, never a duplicate Disconnect.
+                return Ok(());
+            };
+            self.stopping.store(true, Ordering::SeqCst);
+            running
         };
-        self.stopping.store(true, Ordering::SeqCst);
 
         running.cancel.cancel();
 
@@ -749,6 +756,24 @@ mod tests {
         sup.stop().expect("stop");
         assert!(!sup.is_running());
         assert_eq!(cell.snapshot().state, FcaeState::Disconnected);
+    }
+
+    #[test]
+    fn duplicate_stop_preserves_reaper_barrier() {
+        let sup = Supervisor::new(Arc::new(TelemetryCell::new()), SupervisorConfig::default());
+        // Model the interval after stop took the worker but before it joined.
+        sup.stopping.store(true, Ordering::SeqCst);
+        sup.stop().unwrap();
+        sup.begin_stop();
+        assert!(sup.stopping.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn idle_stop_does_not_block_next_start() {
+        let sup = Supervisor::new(Arc::new(TelemetryCell::new()), SupervisorConfig::default());
+        sup.begin_stop();
+        sup.stop().unwrap();
+        assert!(!sup.stopping.load(Ordering::SeqCst));
     }
 
     #[test]

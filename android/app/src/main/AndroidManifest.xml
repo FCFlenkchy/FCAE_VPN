@@ -54,12 +54,7 @@
         <service
             android:name=".PsiphonTunnelService"
             android:exported="false"
-            android:process=":psiphon"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="psiphon" />
-        </service>
+            android:process=":psiphon" />
 
     </application>
 </manifest>

@@ -799,7 +799,7 @@ mod ffi {
         std::sync::atomic::AtomicBool::new(false);
 
     fn probe_rtt_once(port: u16) -> Option<u64> {
-        use std::io::{Read, Write};
+        use std::io::{BufRead, Write};
         let mut stream = std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
             std::time::Duration::from_millis(1500),
@@ -811,8 +811,13 @@ mod ffi {
         stream
             .write_all(b"HEAD http://www.gstatic.com/generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n")
             .ok()?;
-        let mut one = [0u8; 1];
-        stream.read(&mut one).ok()?;
+        let mut status = String::new();
+        use std::io::Read;
+        std::io::BufReader::new(stream).take(256).read_line(&mut status).ok()?;
+        let mut parts = status.split_whitespace();
+        if !parts.next()?.starts_with("HTTP/") || parts.next()? != "204" {
+            return None;
+        }
         Some(started.elapsed().as_millis().max(1) as u64)
     }
 
