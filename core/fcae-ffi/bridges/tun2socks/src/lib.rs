@@ -419,7 +419,14 @@ impl TunBridge for Tun2SocksBridge {
         // Tor egress has no UDP at all -- would otherwise be hammered with a
         // UDP ASSOCIATE (command 0x03) per app flow (DNS, QUIC); with
         // socks5t tun2socks drops those flows locally in silence.
-        let scheme = if endpoints.udp { "socks5" } else { "socks5t" };
+        let scheme = if endpoints.udp {
+            "socks5"
+        } else if endpoints.dns_over_https {
+            log::info!("[tun] Psiphon DNS: Cloudflare DoH over tunnel TCP/443 (no direct DNS fallback)");
+            "socks5p"
+        } else {
+            "socks5t"
+        };
         let proxy = format!("{scheme}://{socks}");
 
         let c_device = CString::new(device.clone())

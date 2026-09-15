@@ -542,6 +542,24 @@ pub unsafe extern "C" fn fcae_psiphon_regions(out: *mut c_char, cap: u32) -> u32
     list.len() as u32
 }
 
+/// Psiphon's currently bound SOCKS port, or zero when unavailable.
+#[no_mangle]
+pub extern "C" fn fcae_psiphon_socks_port() -> u16 {
+    #[cfg(feature = "psiphon")]
+    { fcae_bridge_psiphon::proxy_ports().0 }
+    #[cfg(not(feature = "psiphon"))]
+    { 0 }
+}
+
+/// Psiphon's currently bound HTTP port, or zero when unavailable.
+#[no_mangle]
+pub extern "C" fn fcae_psiphon_http_port() -> u16 {
+    #[cfg(feature = "psiphon")]
+    { fcae_bridge_psiphon::proxy_ports().1 }
+    #[cfg(not(feature = "psiphon"))]
+    { 0 }
+}
+
 /// Install Android's `VpnService.protect(fd)` for Psiphon's own sockets.
 ///
 /// Psiphon dials out while our TUN is up, so without this its connections are

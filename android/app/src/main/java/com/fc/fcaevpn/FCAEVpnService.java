@@ -492,6 +492,9 @@ public class FCAEVpnService extends VpnService {
 
         handler = new Handler(Looper.getMainLooper());
         notification = new VpnNotification(this);
+        androidx.core.content.ContextCompat.registerReceiver(this, psiphonStatsReceiver,
+                new android.content.IntentFilter(PsiphonTunnelService.BROADCAST_STATS),
+                androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED);
     }
 
     @Override
@@ -968,6 +971,15 @@ public class FCAEVpnService extends VpnService {
         sendBroadcast(intent);
     }
 
+    private Intent lastPsiphonStats;
+    private final android.content.BroadcastReceiver psiphonStatsReceiver = new android.content.BroadcastReceiver() {
+        @Override public void onReceive(android.content.Context context, Intent intent) {
+            if (shuttingDown || !running || !PsiphonTunnelService.isCurrentBroadcast(intent)) return;
+            lastPsiphonStats = new Intent(intent);
+            updateNotification();
+        }
+    };
+
     private void updateNotification() {
         if (uiConnecting) {
             lastNotifText = null;
@@ -976,6 +988,15 @@ public class FCAEVpnService extends VpnService {
             lastNotifText = null;
             notification.show("FCAE VPN — Stopped (tap Start to resume)", VpnNotification.BUTTONS_PAUSED);
         } else if (running) {
+            if (PsiphonTunnelService.hasActiveBinding() && lastPsiphonStats != null
+                    && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
+                String text = ProxyNotification.psiphonTrafficText(lastPsiphonStats);
+                if (!text.equals(lastNotifText)) {
+                    lastNotifText = text;
+                    notification.show(text, VpnNotification.BUTTONS_RUNNING);
+                }
+                return;
+            }
             long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
             try {
                 long[] stats = nativeGetTrafficStats();
@@ -1101,6 +1122,7 @@ public class FCAEVpnService extends VpnService {
 
     @Override
     public void onDestroy() {
+        unregisterReceiver(psiphonStatsReceiver);
         instance = null;
         fullShutdown();
         // Drop the global ref before the service object dies, or the native

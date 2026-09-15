@@ -587,6 +587,7 @@ impl BackendHandle for AetherHandle {
             // whenever a Tor mode is active and let tun2socks drop those
             // flows locally instead.
             udp: self.cfg.tor.mode == FcaeTorMode::Off,
+            dns_over_https: false,
         }
     }
 

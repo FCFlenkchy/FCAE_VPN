@@ -642,6 +642,7 @@ mod tests {
                 http: None,
                 peer_ip: Some("203.0.113.7".into()),
                 udp: true,
+                dns_over_https: false,
             }
         }
         async fn wait(&self) -> Result<()> {

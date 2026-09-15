@@ -33,6 +33,7 @@ class MainActivity : AppCompatActivity() {
     private var pendingAfterVpnPermission = false
     @Volatile private var pendingPsiSocks = 0
     @Volatile private var pendingPsiHttp = 0
+    @Volatile private var pendingPsiLan = ""
     /// Egress "Psiphon through the tunnel": AAR is started after Aether is up.
     @Volatile private var psiEgressStarted = false
     private var lastLogHash = 0L
@@ -179,6 +180,9 @@ class MainActivity : AppCompatActivity() {
                 PsiphonTunnelService.BROADCAST_STATS -> {
                     // Tunnel telemetry from :psiphon — owns the stats line on
                     // every psiphon path (the engine getters are empty there).
+                    pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: ""
+                    pendingPsiSocks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, pendingPsiSocks)
+                    pendingPsiHttp = intent.getIntExtra(PsiphonTunnelService.EXTRA_HTTP, pendingPsiHttp)
                     psiRttMs = intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, 0)
                     psiUpBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, 0L)
                     psiDownBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, 0L)
@@ -186,6 +190,7 @@ class MainActivity : AppCompatActivity() {
                     psiTotalDown = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, 0L)
                     if (vpnActive && (isPsiphonSelected() || isEgressPsiphon())) {
                         handler.post {
+                            if (isPsiphonSelected()) peerText.text = psiphonEndpointText()
                             statsText.text =
                                 "↓ ${fmt(psiDownBps)}/s (${fmt(psiTotalDown)})  |  ↑ ${fmt(psiUpBps)}/s (${fmt(psiTotalUp)})  |  RTT ${if (psiRttMs > 0) "${psiRttMs}ms" else "—"}"
                         }
@@ -203,6 +208,7 @@ class MainActivity : AppCompatActivity() {
                         if (regionsOnly || userInitiatedDisconnect) return@post
                         pendingPsiSocks = socks
                         pendingPsiHttp = http
+                        pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: ""
                         connecting = false
                         engineRunning = true
                         vpnActive = true
@@ -213,8 +219,7 @@ class MainActivity : AppCompatActivity() {
                         // pure-psiphon mode never polls the engine, so this
                         // and BROADCAST_STATS are the only UI updates.
                         if (!isTunModeSelected() && socks > 0) {
-                            peerText.text = "Psiphon local: SOCKS5 127.0.0.1:$socks" +
-                                (if (http > 0) " | HTTP 127.0.0.1:$http" else "")
+                            peerText.text = psiphonEndpointText()
                         }
                         if (isTunModeSelected() && socks > 0) {
                             startTunServiceWithConfig()
@@ -416,7 +421,7 @@ class MainActivity : AppCompatActivity() {
         switchLogging = findViewById(R.id.switchLogging)
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
-        switchHttp.text = "HTTP proxy (Tor exit in Tor-only/chain mode)"
+        switchHttp.text = "HTTP proxy"
         switchAutoUpdate = findViewById(R.id.switchAutoUpdate)
         switchPreReleases = findViewById(R.id.switchPreReleases)
         spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
@@ -1071,6 +1076,7 @@ class MainActivity : AppCompatActivity() {
         psiEgressStarted = false
         pendingPsiSocks = 0
         pendingPsiHttp = 0
+        pendingPsiLan = ""
         if (isPsiphonSelected()) {
             if (isTunModeSelected()) {
                 val prep = VpnService.prepare(this)
@@ -1120,6 +1126,7 @@ class MainActivity : AppCompatActivity() {
         i.action = PsiphonTunnelService.ACTION_START
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
         i.putExtra("psiphonTransport", selectedPsiphonTransportIndex())
+        i.putExtra("lanSharing", switchLan.isChecked)
         i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
         if (!upstream.isNullOrBlank()) i.putExtra("upstreamProxy", upstream)
@@ -1592,45 +1599,27 @@ class MainActivity : AppCompatActivity() {
             // Build peer line — include LAN proxy addresses when sharing is on
             val peerLine = StringBuilder()
             peerLine.append("Peer: ${peer.ifEmpty { " \u2014 " }}")
-            // Local proxy endpoints on every engine path (Aether, Tor,
-            // warp-in-warp chains alike) — independent of LAN sharing, which
-            // previously could hide ALL port info (e.g. warp-in-warp, where
-            // the engine reports no LAN IP and the LAN line vanished).
-            if (state == 4) {
-                val localParts = ArrayList<String>(3)
-                if (switchSocks.isChecked)
-                    localParts.add("SOCKS5 127.0.0.1:" + editSocksPort.text.toString().trim().ifEmpty { "1819" })
-                if (switchHttp.isChecked)
-                    localParts.add("HTTP 127.0.0.1:" + editHttpPort.text.toString().trim().ifEmpty { "1820" })
-                if (effectiveTorMode() != 0)
-                    localParts.add("TOR SOCKS5 127.0.0.1:" + editTorSocksPort.text.toString().trim().ifEmpty { "1821" })
-                if (localParts.isNotEmpty()) peerLine.append("\nLocal: ${localParts.joinToString("  |  ")}")
-            }
-            if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") {
-                // Mirror the actual EditText values (with the same fallbacks
-                // the connect intents use), not hardcoded constants.
-                val socksPort = if (switchSocks.isChecked)
-                    editSocksPort.text.toString().trim().ifEmpty { "1819" } else null
-                val httpPort = if (switchHttp.isChecked)
-                    editHttpPort.text.toString().trim().ifEmpty { "1820" } else null
-                val torSocks = if (effectiveTorMode() != 0)
-                    editTorSocksPort.text.toString().trim().ifEmpty { "1821" } else null
-                val ports = listOfNotNull(
-                    socksPort?.let { "SOCKS5 $lan:$it" },
-                    httpPort?.let { "HTTP $lan:$it" },
-                    torSocks?.let { "TOR SOCKS5 $lan:$it" }
-                ).joinToString("  |  ")
-                if (ports.isNotEmpty()) {
-                    peerLine.append("\nLAN: $ports")
+            // Show only listeners belonging to the active backend. Tor-only
+            // has its own SOCKS port; Psiphon has ports assigned by its service.
+            if (state == 4 && !isPsiphonSelected()) {
+                val local = mutableListOf<String>()
+                val shared = mutableListOf<String>()
+                fun endpoint(kind: String, port: String) {
+                    local.add("$kind 127.0.0.1:$port")
+                    if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1")
+                        shared.add("$kind $lan:$port")
                 }
+                if (!isTorOnly() && switchSocks.isChecked)
+                    endpoint("SOCKS5", editSocksPort.text.toString().trim().ifEmpty { "1819" })
+                if (switchHttp.isChecked)
+                    endpoint("HTTP", editHttpPort.text.toString().trim().ifEmpty { "1820" })
+                if (isTorOnly() || effectiveTorMode() != 0)
+                    endpoint("TOR SOCKS5", editTorSocksPort.text.toString().trim().ifEmpty { "1821" })
+                if (local.isNotEmpty()) peerLine.append("\nLocal: " + local.joinToString(" | "))
+                if (shared.isNotEmpty()) peerLine.append("\nLAN: " + shared.joinToString(" | "))
             }
-            // Psiphon's own proxies are localhost-only (the AAR wrapper binds
-            // 127.0.0.1 regardless of LAN sharing), but worth surfacing:
-            // they're what to point local apps at — actual ports from READY.
-            if ((isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0) {
-                peerLine.append("\nPsiphon local: SOCKS5 127.0.0.1:$pendingPsiSocks")
-                if (pendingPsiHttp > 0) peerLine.append(" | HTTP 127.0.0.1:$pendingPsiHttp")
-            }
+            if (state == 4 && (isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0)
+                peerLine.append("\n" + psiphonEndpointText())
             // Only append error here if not already shown in statusText (state 5 = ERROR)
             if (errMsg.isNotEmpty() && state != 5) peerLine.append("\nError: $errMsg")
             peerText.text = peerLine.toString()
@@ -1663,6 +1652,21 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Throwable) {
             statusText.text = "UI error: ${e.message}"
         }
+    }
+
+    private fun psiphonEndpointText(): String {
+        val local = mutableListOf<String>()
+        val shared = mutableListOf<String>()
+        if (pendingPsiSocks > 0) {
+            local.add("SOCKS5 127.0.0.1:$pendingPsiSocks")
+            if (pendingPsiLan.isNotEmpty()) shared.add("SOCKS5 $pendingPsiLan:$pendingPsiSocks")
+        }
+        if (pendingPsiHttp > 0) {
+            local.add("HTTP 127.0.0.1:$pendingPsiHttp")
+            if (pendingPsiLan.isNotEmpty()) shared.add("HTTP $pendingPsiLan:$pendingPsiHttp")
+        }
+        return "Psiphon local: " + local.joinToString(" | ") +
+            if (shared.isEmpty()) "" else "\nPsiphon LAN: " + shared.joinToString(" | ")
     }
 
     private fun updateButton() {

@@ -397,6 +397,9 @@ uint32_t   fcae_backend_count(void);
  * successful Psiphon connect. Returns the length that would be written,
  * excluding the NUL, so truncation is detectable. */
 uint32_t   fcae_psiphon_regions(char *out, uint32_t cap);
+/* Bound desktop proxy ports; zero if unavailable. Android uses service broadcasts. */
+uint16_t   fcae_psiphon_socks_port(void);
+uint16_t   fcae_psiphon_http_port(void);
 
 /* Install Android's VpnService.protect(fd) for Psiphon's own sockets; the
  * callback returns 1 on success, 0 on failure. Without it Psiphon's

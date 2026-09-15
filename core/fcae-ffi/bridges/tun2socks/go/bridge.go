@@ -36,6 +36,9 @@ static void t2s_invoke_log(t2s_log_fn fn, int level, const char *msg) {
 import "C"
 
 import (
+	"bytes"
+	"crypto/tls"
+	"net/http"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -79,6 +82,7 @@ const (
 const (
 	schemeSocks5  = "socks5"
 	schemeSocks5t = "socks5t"
+	schemePsiphon = "socks5p" // CONNECT-only, DNS via tunneled HTTPS/443
 )
 
 // blackholeConn is a net.PacketConn that swallows every write and blocks
@@ -116,11 +120,14 @@ func (c *blackholeConn) SetWriteDeadline(time.Time) error { return nil }
 // the whole device unable to resolve anything.
 type udpDroppingProxy struct {
 	proxy.Proxy
+	doh bool
 }
 
 func (p udpDroppingProxy) DialUDP(m *metadata.Metadata) (net.PacketConn, error) {
 	if m.DstPort == 53 && m.DstIP.IsValid() {
+		ctx, cancel := context.WithCancel(context.Background())
 		return &dnsRelayConn{
+			doh: p.doh, ctx: ctx, cancel: cancel, pending: make(chan struct{}, 4),
 			inner:   p.Proxy,
 			resolver: m.DstIP,
 			replies: make(chan dnsReply, 8),
@@ -130,7 +137,7 @@ func (p udpDroppingProxy) DialUDP(m *metadata.Metadata) (net.PacketConn, error) 
 	return &blackholeConn{done: make(chan struct{})}, nil
 }
 
-// dnsRelayTimeout bounds one DNS-over-TCP exchange. A warmed Tor circuit
+// dnsRelayTimeout bounds one tunneled DNS exchange. A warmed Tor circuit
 // answers in ~1s; 8s leaves margin for a fresh one without parking a
 // goroutine forever when the egress is truly gone.
 const dnsRelayTimeout = 8 * time.Second
@@ -145,9 +152,13 @@ type dnsReply struct {
 
 // dnsRelayConn is the PacketConn handed to one UDP flow whose destination is
 // a resolver. The wire format of a DNS message is identical over UDP and
-// TCP -- only a 2-byte length prefix differs -- so no DNS parsing is needed
-// here; frames are relayed byte for byte.
+// TCP (length-prefixed) or HTTPS (application/dns-message). Replies retain
+// the original query ID and appear to come from the intercepted resolver.
 type dnsRelayConn struct {
+	doh bool
+	ctx context.Context
+	cancel context.CancelFunc
+	pending chan struct{}
 	inner   proxy.Proxy
 	resolver netip.Addr // flow destination; every WriteTo is expected to match
 	replies chan dnsReply
@@ -157,7 +168,7 @@ type dnsRelayConn struct {
 
 func (c *dnsRelayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	udpAddr, ok := addr.(*net.UDPAddr)
-	if !ok || len(p) == 0 || len(p) > 0xffff {
+	if !ok || len(p) < 12 || len(p) > 0xffff || p[2]&0x80 != 0 {
 		// Swallow silently like the blackhole: never inject errors into the
 		// NAT loop for traffic we deliberately refuse to carry.
 		return len(p), nil
@@ -165,9 +176,28 @@ func (c *dnsRelayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	// Each query gets its own exchange goroutine; apps de-multiplex by the
 	// DNS header ID, so reply order is irrelevant and bursts cannot block
 	// the stack's NAT goroutine.
+	select {
+	case <-c.done:
+		return 0, net.ErrClosed
+	case c.pending <- struct{}{}:
+	default:
+		return len(p), nil // bound work; resolver retries if overloaded
+	}
 	payload := append([]byte(nil), p...)
 	go func() {
-		resp, err := c.dnsOverTCP(payload, udpAddr)
+		defer func() { <-c.pending }()
+		var resp []byte
+		var err error
+		if c.doh { resp, err = c.dnsOverHTTPS(payload) } else { resp, err = c.dnsOverTCP(payload, udpAddr) }
+		if err != nil {
+			// A failed query is not a fatal UDP-association error. Return SERVFAIL
+			// so the OS can retry instead of destroying the entire DNS flow.
+			resp = append([]byte(nil), payload...)
+			resp[2] = (resp[2] & 0x79) | 0x80
+			resp[3] = 0x82
+			// Preserve the question and any EDNS OPT record from the query.
+			err = nil
+		}
 		select {
 		case c.replies <- dnsReply{payload: resp, src: udpAddr, err: err}:
 		case <-c.done:
@@ -189,19 +219,21 @@ func (c *dnsRelayConn) dnsOverTCP(query []byte, dst *net.UDPAddr) ([]byte, error
 		DstIP:   resolver,
 		DstPort: 53,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dnsRelayTimeout)
+	ctx, cancel := context.WithTimeout(c.ctx, dnsRelayTimeout)
 	defer cancel()
 	conn, err := c.inner.DialContext(ctx, md)
 	if err != nil {
 		return nil, fmt.Errorf("dns: connect %s: %w", resolver, err)
 	}
 	defer conn.Close()
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
 	_ = conn.SetDeadline(time.Now().Add(dnsRelayTimeout))
 
 	frame := make([]byte, 2, 2+len(query))
 	binary.BigEndian.PutUint16(frame, uint16(len(query)))
 	frame = append(frame, query...)
-	if _, err := conn.Write(frame); err != nil {
+	if _, err := io.Copy(conn, bytes.NewReader(frame)); err != nil {
 		return nil, fmt.Errorf("dns: write: %w", err)
 	}
 	var hdr [2]byte
@@ -209,7 +241,7 @@ func (c *dnsRelayConn) dnsOverTCP(query []byte, dst *net.UDPAddr) ([]byte, error
 		return nil, fmt.Errorf("dns: read header: %w", err)
 	}
 	n := int(binary.BigEndian.Uint16(hdr[:]))
-	if n == 0 || n > 4096 {
+	if n < 12 {
 		return nil, fmt.Errorf("dns: unexpected reply length %d", n)
 	}
 	resp := make([]byte, n)
@@ -237,7 +269,7 @@ func (c *dnsRelayConn) ReadFrom(p []byte) (int, net.Addr, error) {
 }
 
 func (c *dnsRelayConn) Close() error {
-	c.once.Do(func() { close(c.done) })
+	c.once.Do(func() { c.cancel(); close(c.done) })
 	return nil
 }
 
@@ -246,19 +278,60 @@ func (c *dnsRelayConn) SetDeadline(time.Time) error      { return nil }
 func (c *dnsRelayConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *dnsRelayConn) SetWriteDeadline(time.Time) error { return nil }
 
+// Psiphon exits need not permit TCP/53. Send wire-format DNS inside HTTPS
+// through the SAME SOCKS exit, preserving the original DNS ID and response.
+// The fixed bootstrap IP avoids both local DNS and a DNS bootstrap loop.
+// TLS verifies cloudflare-dns.com; redirects and environment proxies are off.
+func (c *dnsRelayConn) dnsOverHTTPS(query []byte) ([]byte, error) {
+    ctx, cancel := context.WithTimeout(c.ctx, dnsRelayTimeout)
+    defer cancel()
+    transport := &http.Transport{
+        Proxy: nil,
+        MaxResponseHeaderBytes: 64 * 1024,
+        TLSClientConfig: &tls.Config{ServerName: "cloudflare-dns.com", MinVersion: tls.VersionTLS12},
+        DisableKeepAlives: true,
+        DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+            if address != "cloudflare-dns.com:443" { return nil, fmt.Errorf("unexpected DoH destination: %s", address) }
+            return c.inner.DialContext(ctx, &metadata.Metadata{
+                Network: metadata.TCP, DstIP: netip.MustParseAddr("1.1.1.1"), DstPort: 443,
+            })
+        },
+    }
+    defer transport.CloseIdleConnections()
+    client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+    request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://cloudflare-dns.com/dns-query", bytes.NewReader(query))
+    if err != nil { return nil, err }
+    request.Header.Set("Content-Type", "application/dns-message")
+    request.Header.Set("Accept", "application/dns-message")
+    response, err := client.Do(request)
+    if err != nil { return nil, err }
+    defer response.Body.Close()
+    if response.StatusCode != http.StatusOK || !strings.EqualFold(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]), "application/dns-message") {
+        return nil, fmt.Errorf("dns: unexpected DoH response %s", response.Status)
+    }
+    answer, err := io.ReadAll(io.LimitReader(response.Body, 65536))
+    if err != nil { return nil, err }
+    if len(answer) < 12 || len(answer) > 65535 || !bytes.Equal(answer[:2], query[:2]) || answer[2]&0x80 == 0 {
+        return nil, errors.New("dns: invalid DoH reply")
+    }
+    return answer, nil
+}
+
 // parseSocks5t reuses the upstream socks5 parser (its init registers only the
 // "socks5" scheme) by rewriting the scheme on the incoming URL.
 func parseSocks5t(u *url.URL) (proxy.Proxy, error) {
+	doh := u.Scheme == schemePsiphon
 	u.Scheme = schemeSocks5
 	inner, err := proxy.Parse(u)
 	if err != nil {
 		return nil, err
 	}
-	return udpDroppingProxy{Proxy: inner}, nil
+	return udpDroppingProxy{Proxy: inner, doh: doh}, nil
 }
 
 func init() {
 	proxy.RegisterProtocol(schemeSocks5t, parseSocks5t)
+	proxy.RegisterProtocol(schemePsiphon, parseSocks5t)
 }
 
 var (

@@ -68,6 +68,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private static android.content.ServiceConnection connection;
     private static volatile long activeSession;
     private long session;
+    public static boolean hasActiveBinding() { return connection != null; }
     public static boolean isCurrentBroadcast(Intent intent) {
         return intent.getLongExtra("psiSession", -1) == activeSession;
     }
@@ -143,6 +144,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private String region = "";
     private volatile String lastRegions = "";
     private String upstreamProxy = "";
+    private boolean lanSharing;
+    private String lanAddress = "";
+    public static final String EXTRA_LAN = "psiphonLanIp";
     private int wantSocks;
     private int wantHttp;
     private final AtomicInteger socksPort = new AtomicInteger(0);
@@ -233,6 +237,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             wantHttp = intent.getIntExtra("psiphonHttpPort", 0);
             String up = intent.getStringExtra("upstreamProxy");
             upstreamProxy = up == null ? "" : up.trim();
+            lanSharing = intent.getBooleanExtra("lanSharing", false);
         }
         stopping = false;
         startInFlight = true;
@@ -348,6 +353,18 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             if (chosen != null) {
                 cm.bindProcessToNetwork(chosen);
                 Log.i(TAG, "bound :psiphon to underlying network " + chosen);
+                android.net.LinkProperties links = cm.getLinkProperties(chosen);
+                NetworkCapabilities capabilities = cm.getNetworkCapabilities(chosen);
+                if (links != null && capabilities != null
+                        && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    for (android.net.LinkAddress address : links.getLinkAddresses()) {
+                        java.net.InetAddress ip = address.getAddress();
+                        if (ip instanceof java.net.Inet4Address && !ip.isLoopbackAddress()) {
+                            lanAddress = ip.getHostAddress();
+                            break;
+                        }
+                    }
+                }
             }
         } catch (Exception e) {
             Log.w(TAG, "bindProcessToNetwork: " + e.getMessage());
@@ -368,6 +385,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             o.put("ClientVersion", "1");
             o.put("TunnelPoolSize", 1);
             o.put("DisableLocalSocksAuth", true);
+            // Upstream resolves "any" to 0.0.0.0; empty means loopback-only.
+            o.put("ListenInterface", lanSharing ? "any" : "");
             o.put("EmitDiagnosticNotices", true);
             o.put("UseIndistinguishableTLS", true);
             o.put("AllowDefaultDNSResolverWithBindToDevice", true);
@@ -591,6 +610,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         i.setPackage(getPackageName());
         i.putExtra("psiSession", session);
         i.putExtra(EXTRA_SOCKS, s);
+        i.putExtra(EXTRA_LAN, lanSharing ? lanAddress : "");
         i.putExtra(EXTRA_HTTP, httpPort.get());
         sendBroadcast(i);
         startStatsLoop();
@@ -701,6 +721,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 Intent i = new Intent(BROADCAST_STATS);
                 i.setPackage(getPackageName());
         i.putExtra("psiSession", session);
+                i.putExtra(EXTRA_LAN, lanSharing ? lanAddress : "");
+                i.putExtra(EXTRA_SOCKS, socksPort.get());
+                i.putExtra(EXTRA_HTTP, httpPort.get());
                 i.putExtra(EXTRA_RTT, lastRttMs);
                 i.putExtra(EXTRA_UP_BPS, upBps);
                 i.putExtra(EXTRA_DOWN_BPS, downBps);

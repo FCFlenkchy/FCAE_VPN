@@ -61,6 +61,14 @@ static STARTING: AtomicBool = AtomicBool::new(false);
 /// region for the *next* session.
 static REGIONS: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
 
+/// Actual bound desktop listener ports. Android reports them by broadcast.
+pub fn proxy_ports() -> (u16, u16) {
+    #[cfg(all(feature = "enabled", psiphon_linked))]
+    { (ffi::socks_port(), ffi::http_port()) }
+    #[cfg(not(all(feature = "enabled", psiphon_linked)))]
+    { (0, 0) } // Android learns these from the isolated service broadcasts.
+}
+
 /// Egress regions discovered so far, as ISO country codes.
 ///
 /// Empty until the first successful connect. "" (auto) is always valid and is
@@ -425,6 +433,7 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     // process working directory -- not writable on Android.
     let mut config_json = inject_string_field(&config_json, "DataRootDirectory", &data_root_dir)?;
     config_json = inject_psiphon_ports(&config_json, p.socks_port, p.http_port)?;
+    config_json = inject_string_field(&config_json, "ListenInterface", if cfg.lan_sharing { "any" } else { "" })?;
     config_json = inject_android_resolver_policy(&config_json)?;
 
     // In-proxy client participation dials WebRTC connections through STUN
@@ -947,6 +956,7 @@ impl BackendHandle for PsiphonHandle {
             peer_ip: None,
             // Psiphon's local SOCKS5 is CONNECT-only: no UDP ASSOCIATE.
             udp: false,
+            dns_over_https: true,
         }
     }
 
@@ -1036,6 +1046,25 @@ mod tests {
     #[test]
     fn egress_region_rejects_injection_attempts() {
         assert!(inject_egress_region(r#"{}"#, r#"a","X":"b"#).is_err());
+    }
+
+    #[test]
+    fn lan_toggle_controls_the_actual_psiphon_listen_interface() {
+        let mut cfg = make_config(Some(r#"{"ListenInterface":"any"}"#), Some("/tmp/psi"));
+        cfg.lan_sharing = false;
+        let local: serde_json::Value = serde_json::from_str(&validate(&cfg).unwrap().config_json).unwrap();
+        assert_eq!(local["ListenInterface"], "");
+        cfg.lan_sharing = true;
+        let shared: serde_json::Value = serde_json::from_str(&validate(&cfg).unwrap().config_json).unwrap();
+        assert_eq!(shared["ListenInterface"], "any");
+    }
+
+    #[test]
+    fn psiphon_endpoint_requires_tunneled_https_dns() {
+        let handle = PsiphonHandle { socks_port: 1080, http_port: 8080, stopped: AtomicBool::new(false) };
+        let endpoints = handle.endpoints();
+        assert!(!endpoints.udp);
+        assert!(endpoints.dns_over_https);
     }
 
     #[test]

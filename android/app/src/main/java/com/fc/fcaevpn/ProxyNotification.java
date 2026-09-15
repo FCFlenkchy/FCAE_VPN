@@ -26,6 +26,7 @@ public class ProxyNotification extends Service {
     private static ProxyNotification instance;
     private boolean externalPsiphon;
     private boolean handingOff;
+    private Intent lastPsiphonStats;
     /** Remove only the obsolete notification owned by older Psiphon builds. */
     public static void clearLegacyPsiphonNotification(android.content.Context context) {
         android.app.NotificationManager manager = context.getSystemService(android.app.NotificationManager.class);
@@ -44,9 +45,23 @@ public class ProxyNotification extends Service {
         current.stopForeground(STOP_FOREGROUND_REMOVE);
         current.stopSelf();
     }
+    public static String psiphonTrafficText(Intent stats) {
+        return String.format("↓ %s  %s  |  ↑ %s  %s",
+                VpnNotification.fmtBytes(stats.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, 0)),
+                VpnNotification.fmtRate(stats.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, 0)),
+                VpnNotification.fmtBytes(stats.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, 0)),
+                VpnNotification.fmtRate(stats.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, 0)));
+    }
+
     private final android.content.BroadcastReceiver psiphonReceiver = new android.content.BroadcastReceiver() {
         @Override public void onReceive(android.content.Context context, Intent intent) {
-            if (!externalPsiphon || stopping || handingOff || !PsiphonTunnelService.isCurrentBroadcast(intent)) return;
+            if (stopping || handingOff || !PsiphonTunnelService.isCurrentBroadcast(intent)) return;
+            if (PsiphonTunnelService.BROADCAST_STATS.equals(intent.getAction())) {
+                lastPsiphonStats = new Intent(intent);
+                updateNotification();
+                return;
+            }
+            if (!externalPsiphon) return;
             if (PsiphonTunnelService.BROADCAST_READY.equals(intent.getAction())) {
                 if (!intent.getBooleanExtra("regionsOnly", false))
                     showNotification("FCAE VPN — Proxy connected", true);
@@ -96,6 +111,7 @@ public class ProxyNotification extends Service {
         instance = this;
         android.content.IntentFilter filter = new android.content.IntentFilter();
         filter.addAction(PsiphonTunnelService.BROADCAST_READY);
+        filter.addAction(PsiphonTunnelService.BROADCAST_STATS);
         filter.addAction(PsiphonTunnelService.BROADCAST_FAILED);
         filter.addAction(PsiphonTunnelService.BROADCAST_STOPPED);
         androidx.core.content.ContextCompat.registerReceiver(this, psiphonReceiver, filter,
@@ -198,6 +214,15 @@ public class ProxyNotification extends Service {
     }
 
     private void updateNotification() {
+        if (PsiphonTunnelService.hasActiveBinding() && lastPsiphonStats != null
+                && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
+            String text = psiphonTrafficText(lastPsiphonStats);
+            if (!text.equals(lastNotifText)) {
+                lastNotifText = text;
+                showNotification(text, true);
+            }
+            return;
+        }
         long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
         try {
             long[] stats = FCAEVpnService.nativeGetTrafficStats();

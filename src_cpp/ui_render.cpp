@@ -1111,54 +1111,28 @@ void render_ui() {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.16f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.85f, 0.45f, 1.0f));
-        float addr_h = narrow ? 64.0f : 44.0f;
+        float addr_h = narrow ? 130.0f : 94.0f;
         ImGui::BeginChild("##addr", ImVec2(0, addr_h), ImGuiChildFlags_Borders);
 
         if (connected) {
-            const char* lip = telem.lan_ip[0] ? telem.lan_ip : "127.0.0.1";
-            if (g_app.mode == 0) {
-                if (g_app.lan_sharing) {
-                    if (g_app.socks_enabled && g_app.http_enabled)
-                        ImGui::TextWrapped("SOCKS5 Local 127.0.0.1:%u | LAN %s:%u\nHTTP Local 127.0.0.1:%u | LAN %s:%u",
-                            g_app.socks_port, lip, g_app.socks_port,
-                            g_app.http_port, lip, g_app.http_port);
-                    else if (g_app.socks_enabled)
-                        ImGui::TextWrapped("SOCKS5 Local 127.0.0.1:%u | LAN %s:%u\nHTTP proxy disabled",
-                            g_app.socks_port, lip, g_app.socks_port);
-                    else if (g_app.http_enabled)
-                        ImGui::TextWrapped("HTTP Local 127.0.0.1:%u | LAN %s:%u\nSOCKS5 proxy disabled",
-                            g_app.http_port, lip, g_app.http_port);
-                    else
-                        ImGui::TextWrapped("All proxies disabled");
-                } else {
-                    if (g_app.socks_enabled && g_app.http_enabled)
-                        ImGui::TextWrapped("SOCKS5 127.0.0.1:%u | HTTP 127.0.0.1:%u", g_app.socks_port, g_app.http_port);
-                    else if (g_app.socks_enabled)
-                        ImGui::TextWrapped("SOCKS5 127.0.0.1:%u | HTTP disabled", g_app.socks_port);
-                    else if (g_app.http_enabled)
-                        ImGui::TextWrapped("HTTP 127.0.0.1:%u | SOCKS5 disabled", g_app.http_port);
-                    else
-                        ImGui::TextWrapped("All proxies disabled");
-                }
-                // Tor's own SOCKS listener is alive whenever the Tor protocol
-                // or a Tor egress mode (through-tunnel / tunnel-through-Tor)
-                // is selected — tell LAN users exactly where to point.
-                if (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2) {
-                    if (g_app.lan_sharing)
-                        ImGui::TextWrapped("TOR SOCKS5  Local 127.0.0.1:%u  |  LAN %s:%u",
-                            g_app.tor_socks_port, lip, g_app.tor_socks_port);
-                    else
-                        ImGui::TextWrapped("TOR SOCKS5  127.0.0.1:%u", g_app.tor_socks_port);
-                }
-            } else {
-                if (g_app.lan_sharing) {
-                    ImGui::TextWrapped("TUN | Local 127.0.0.1 | LAN %s", lip);
-                    if (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)
-                        ImGui::TextWrapped("TOR SOCKS5  Local 127.0.0.1:%u  |  LAN %s:%u",
-                            g_app.tor_socks_port, lip, g_app.tor_socks_port);
-                } else {
-                    ImGui::TextWrapped("TUN Active | SOCKS5 127.0.0.1:%u", g_app.socks_port);
-                }
+            const char* lip = telem.lan_ip;
+            const bool share = telem.lan_enabled && lip[0] && strcmp(lip, "127.0.0.1") != 0;
+            auto endpoint = [&](const char* kind, unsigned port) {
+                if (!port) return;
+                if (share)
+                    ImGui::TextWrapped("%s 127.0.0.1:%u | LAN %s:%u", kind, port, lip, port);
+                else
+                    ImGui::TextWrapped("%s 127.0.0.1:%u", kind, port);
+            };
+            if (telem.backend != FCAE_BACKEND_PSIPHON) {
+                if (g_app.protocol != 4 && g_app.socks_enabled) endpoint("SOCKS5", g_app.socks_port);
+                if (g_app.http_enabled) endpoint("HTTP", g_app.http_port);
+                if (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)
+                    endpoint("TOR SOCKS5", g_app.tor_socks_port ? g_app.tor_socks_port : 1821);
+            }
+            if (telem.backend == FCAE_BACKEND_PSIPHON || g_app.tor_mode == 3) {
+                endpoint("Psiphon SOCKS5", fcae_psiphon_socks_port());
+                endpoint("Psiphon HTTP", fcae_psiphon_http_port());
             }
         } else {
             ImGui::Text("  No active tunnel");
@@ -1241,7 +1215,7 @@ void render_ui() {
             ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
             ImGui::SameLine(0, 20);
             ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
-            ImGui::Checkbox("HTTP (Tor exit in Tor-only/chain mode)", &g_app.http_enabled);
+            ImGui::Checkbox("HTTP proxy", &g_app.http_enabled);
             ImGui::SameLine(0, 20);
             ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
             ImGui::PopItemWidth();

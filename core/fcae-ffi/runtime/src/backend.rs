@@ -156,6 +156,9 @@ pub struct Endpoints {
     /// tun2socks must not hand either one 0x03 requests: they would refuse
     /// each one and spam the log for every app UDP flow (DNS, QUIC, ...).
     pub udp: bool,
+    /// Resolve intercepted DNS via HTTPS through this SOCKS exit instead of
+    /// TCP/53. Psiphon servers may permit web ports but reject resolver ports.
+    pub dns_over_https: bool,
 }
 
 impl Endpoints {
@@ -164,6 +167,7 @@ impl Endpoints {
         http: None,
         peer_ip: None,
         udp: true,
+        dns_over_https: false,
     };
 }
 
