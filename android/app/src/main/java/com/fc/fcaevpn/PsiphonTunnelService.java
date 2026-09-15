@@ -112,6 +112,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private final AtomicLong bytesUp = new AtomicLong(0);
     private final AtomicLong bytesDown = new AtomicLong(0);
     private volatile long lastCounterNotifAt = 0;
+    // UI set "psiTunMode" on the start intent (TUN selected), and chain mode
+    // is detected from upstreamProxy. In both cases another foreground
+    // service already owns the tray entry (VpnNotification/ProxyNotification)
+    // — this service detaches from the foreground after READY so the user
+    // sees ONE notification per session, not two.
+    private volatile boolean psiTunMode = false;
+    private volatile boolean notifDetached = false;
     private volatile boolean stopping;
     // True while a start thread is inside startTunneling(); true alone
     // (psiphonUp) once the library reported itself started. Together they
@@ -147,6 +154,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // background stats publisher started from onConnected().
     private volatile int lastRttMs = 0;
     private Thread statsThread;
+    // Auto-recovery state for dead servers (see maybeAutoReconnect).
+    private volatile int autoReconnectsDone = 0;
+    private volatile long lastAutoReconnectAt = 0L;
+    private volatile String lastEmbeddedList = "";
 
     @Override
     public void onCreate() {
@@ -201,7 +212,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             wantHttp = intent.getIntExtra("psiphonHttpPort", 0);
             String up = intent.getStringExtra("upstreamProxy");
             upstreamProxy = up == null ? "" : up.trim();
+            psiTunMode = intent.getBooleanExtra("psiTunMode", false);
         }
+        notifDetached = false;
         stopping = false;
         startInFlight = true;
         psiphonUp = false;
@@ -212,6 +225,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         // the log line and startTunneling() (two reads would double-log the
         // "importing embedded server entries" notice).
         final String embeddedList = readEmbeddedServerList();
+        // Fresh user-initiated start: reset the auto-recovery budget.
+        lastEmbeddedList = embeddedList;
+        autoReconnectsDone = 0;
+        lastAutoReconnectAt = 0L;
         emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")")
                 + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy)
                 + sourceSummary(embeddedList));
@@ -522,6 +539,24 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 broadcastStage(4, "ESTABLISHING TUNNEL");
             }
         }
+        // Dead-server detection: tunnel-core counts failed port-forwards per
+        // server ("port forward failures for <server-id>: N") but never
+        // rotates off the broken server on its own. Parse N as the digits
+        // after the FIRST ':' following the phrase — lastIndexOf(':') would
+        // land inside the trailing timestamp and false-trigger.
+        int ff = message.indexOf("port forward failures for");
+        if (ff >= 0) {
+            int idx = message.indexOf(':', ff + 25);
+            if (idx >= 0) {
+                int end = idx + 1;
+                while (end < message.length() && Character.isDigit(message.charAt(end))) end++;
+                if (end > idx + 1) {
+                    try {
+                        maybeAutoReconnect(Integer.parseInt(message.substring(idx + 1, end)));
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+        }
         emitLog(message);
     }
 
@@ -544,7 +579,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (sent <= 0 && received <= 0) return;
         bytesUp.addAndGet(Math.max(0, sent));
         bytesDown.addAndGet(Math.max(0, received));
-        maybeUpdateCounterNotification();
+        if (!notifDetached) maybeUpdateCounterNotification();
     }
 
     /** Refresh the notification's byte counters at most every 2 seconds. */
@@ -593,11 +628,22 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         socksPort.set(s);
         emitLog("connected, SOCKS 127.0.0.1:" + s);
         flushLogs();
-        try {
-            NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm != null) nm.notify(NOTIF_ID, buildNotification(
-                    "FCAE Psiphon — SOCKS 127.0.0.1:" + s));
-        } catch (Exception ignored) {}
+        // One tray entry per session: TUN mode has VpnNotification and the
+        // egress-chain has the engine's foreground service — this service
+        // detaches instead of stacking a second notification on top. The
+        // service itself stays alive-started; the session owns a foreground
+        // notification through that other service the whole time.
+        boolean ownerElsewhere = psiTunMode || !upstreamProxy.isEmpty();
+        if (ownerElsewhere) {
+            notifDetached = true;
+            try { stopForeground(STOP_FOREGROUND_DETACH); } catch (Exception ignored) {}
+        } else {
+            try {
+                NotificationManager nm = getSystemService(NotificationManager.class);
+                if (nm != null) nm.notify(NOTIF_ID, buildNotification(
+                        "FCAE Psiphon — SOCKS 127.0.0.1:" + s));
+            } catch (Exception ignored) {}
+        }
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());
         i.putExtra(EXTRA_SOCKS, s);
@@ -681,6 +727,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         Thread t = new Thread(() -> {
             long prevUp = bytesUp.get(), prevDown = bytesDown.get();
             long prevAt = System.currentTimeMillis();
+            int rttAttempts = 0;
+            long nextRttProbeAt = 0L;
             while (psiphonUp && !stopping) {
                 try {
                     Thread.sleep(2000L);
@@ -695,8 +743,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 prevUp = up;
                 prevDown = down;
                 prevAt = now;
+                // RTT is measured ONCE per connect (probe now, then a small
+                // retry budget with backoff) instead of every 2 s: periodic
+                // probing spams per-second notices and, on a broken server,
+                // inflates the 'port forward failures' counter.
                 int port = httpPort.get();
-                if (port > 0) {
+                if (lastRttMs == 0 && rttAttempts < 4 && port > 0 && now >= nextRttProbeAt) {
+                    rttAttempts++;
+                    nextRttProbeAt = now + (1L << Math.min(rttAttempts, 3)) * 1000L;
                     Integer r = probeTunnelRtt(port);
                     if (r != null) lastRttMs = r;
                 }
@@ -731,6 +785,55 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         } finally {
             try { s.close(); } catch (Exception ignored) {}
         }
+    }
+
+    /**
+     * A tunnel whose server cannot reach ANY destination is worse than a
+     * reconnect: tunnel-core only COUNTS failed port-forwards but never
+     * rotates off the broken server, so the session sits CONNECTED and
+     * blackholes every connection forever. Treat many failures with
+     * essentially no downloaded bytes as a dead server and restart the
+     * tunnel (fresh candidate selection), capped to two attempts with a
+     * 30 s cooldown to avoid churn on a globally bad network. Shown as
+     * CONNECTING/ESTABLISHING — recovery, not a user-visible disconnect.
+     */
+    private void maybeAutoReconnect(int failures) {
+        if (stopping || !psiphonUp) return;
+        if (failures < 20) return;
+        if (autoReconnectsDone >= 2) return;
+        if (bytesDown.get() > 15000L) return;  // real traffic flows: alive
+        long now = System.currentTimeMillis();
+        if (now - lastAutoReconnectAt < 30000L) return;
+        autoReconnectsDone++;
+        lastAutoReconnectAt = now;
+        emitLog("egress unreachable (" + failures + " failed port-forwards)"
+                + " — switching psiphon server (attempt " + autoReconnectsDone + "/2)");
+        psiphonUp = false;
+        broadcastStage(1, "CONNECTING");
+        final PsiphonTunnel t = tunnel;
+        new Thread(() -> {
+            try {
+                if (stopping) return;
+                startInFlight = true;
+                try { if (t != null) t.stop(); } catch (Throwable ignored) {}
+                if (stopping) return;
+                dialStartedAtMs = System.currentTimeMillis();
+                logHandler.removeCallbacks(dialHeartbeat);
+                logHandler.postDelayed(dialHeartbeat, 10000L);
+                if (t != null) t.startTunneling(lastEmbeddedList);
+                psiphonUp = true;
+                autoReconnectsDone = 0;   // new server, fresh budget
+            } catch (Throwable err) {
+                Log.e(TAG, "auto-reconnect failed", err);
+                String what = err.getClass().getSimpleName() + ": "
+                        + (err.getMessage() == null ? "(no message)" : err.getMessage());
+                emitLog("start failed: " + what);
+                broadcastFailed(what);
+                stopNow();
+            } finally {
+                startInFlight = false;
+            }
+        }, "FCAE-PsiReconn").start();
     }
 
     private void broadcastFailed(String msg) {

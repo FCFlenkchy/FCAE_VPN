@@ -196,6 +196,13 @@ class MainActivity : AppCompatActivity() {
                         updateButton()
                         statusText.text = if (isTunModeSelected()) "ESTABLISHING TUNNEL" else "CONNECTED"
                         statusText.setTextColor(COLOR_CONNECTED)
+                        // Surface psiphon's actual proxy endpoints here too —
+                        // pure-psiphon mode never polls the engine, so this
+                        // and BROADCAST_STATS are the only UI updates.
+                        if (!isTunModeSelected() && socks > 0) {
+                            peerText.text = "Psiphon local: SOCKS5 127.0.0.1:$socks" +
+                                (if (http > 0) " | HTTP 127.0.0.1:$http" else "")
+                        }
                         if (isTunModeSelected() && socks > 0) {
                             startTunServiceWithConfig()
                         }
@@ -1088,8 +1095,8 @@ class MainActivity : AppCompatActivity() {
             statusText.setTextColor(COLOR_PROGRESS)
         }
         ingestPsiphonLog(
-            if (upstream.isNullOrBlank()) "[psiphon] connecting"
-            else "[psiphon] connecting through $upstream"
+            if (upstream.isNullOrBlank()) "connecting"
+            else "connecting through $upstream"
         )
         val i = Intent(this, PsiphonTunnelService::class.java)
         i.action = PsiphonTunnelService.ACTION_START
@@ -1097,6 +1104,9 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("psiphonTransport", selectedPsiphonTransportIndex())
         i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
+        // Lets :psiphon detach from the tray after READY (the VPN service
+        // owns the notification in TUN mode) — one notification per session.
+        i.putExtra("psiTunMode", isTunModeSelected())
         if (!upstream.isNullOrBlank()) i.putExtra("upstreamProxy", upstream)
         startForegroundService(i)
     }
@@ -1547,6 +1557,20 @@ class MainActivity : AppCompatActivity() {
             // Build peer line — include LAN proxy addresses when sharing is on
             val peerLine = StringBuilder()
             peerLine.append("Peer: ${peer.ifEmpty { " \u2014 " }}")
+            // Local proxy endpoints on every engine path (Aether, Tor,
+            // warp-in-warp chains alike) — independent of LAN sharing, which
+            // previously could hide ALL port info (e.g. warp-in-warp, where
+            // the engine reports no LAN IP and the LAN line vanished).
+            if (state == 4) {
+                val localParts = ArrayList<String>(3)
+                if (switchSocks.isChecked)
+                    localParts.add("SOCKS5 127.0.0.1:" + editSocksPort.text.toString().trim().ifEmpty { "1819" })
+                if (switchHttp.isChecked)
+                    localParts.add("HTTP 127.0.0.1:" + editHttpPort.text.toString().trim().ifEmpty { "1820" })
+                if (effectiveTorMode() != 0)
+                    localParts.add("TOR SOCKS5 127.0.0.1:" + editTorSocksPort.text.toString().trim().ifEmpty { "1821" })
+                if (localParts.isNotEmpty()) peerLine.append("\nLocal: ${localParts.joinToString("  |  ")}")
+            }
             if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") {
                 // Mirror the actual EditText values (with the same fallbacks
                 // the connect intents use), not hardcoded constants.

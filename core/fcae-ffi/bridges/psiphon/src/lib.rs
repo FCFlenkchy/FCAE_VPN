@@ -714,6 +714,8 @@ mod ffi {
         // Fresh session: drop the previous tunnel's RTT measurement.
         PSI_RTT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
         PSI_RTT_NEXT_PROBE_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
+        PSI_RTT_ATTEMPTS.store(0, std::sync::atomic::Ordering::Relaxed);
+        PSI_RTT_DONE.store(false, std::sync::atomic::Ordering::Relaxed);
         let config = CString::new(inputs.config_json.as_str())
             .map_err(|_| CoreError::InvalidConfig("psiphon.config_json contains a NUL".into()))?;
         let servers = CString::new(inputs.embedded_server_list.as_str()).map_err(|_| {
@@ -783,14 +785,18 @@ mod ffi {
     // The psiphon shim exports no latency telemetry, so the bridge measures
     // it: one HTTP round trip through the shim's local HTTP proxy
     // (absolute-URI HEAD against Google's generate_204 edge) — a full tunnel
-    // round trip to the internet. Runs on a short-lived thread at most every
-    // 2 s so the ~500 ms telemetry pump in counters() never blocks on a dead
-    // or filtered tunnel. 0 means "no measurement yet".
+    // round trip to the internet. Runs ONCE per connect (immediate probe
+    // plus a small backoff retry budget) — continuous pings would spam the
+    // tunnel and the 'port forward failures' counter on a dead server. Runs
+    // off-thread so the ~500 ms telemetry pump never blocks. 0 = none yet.
     static PSI_RTT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     static PSI_RTT_PROBE_ACTIVE: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
     static PSI_RTT_NEXT_PROBE_SECS: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
+    static PSI_RTT_ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static PSI_RTT_DONE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 
     fn probe_rtt_once(port: u16) -> Option<u64> {
         use std::io::{Read, Write};
@@ -812,6 +818,9 @@ mod ffi {
 
     fn refresh_rtt() {
         use std::sync::atomic::Ordering::Relaxed;
+        if PSI_RTT_DONE.load(Relaxed) || PSI_RTT_ATTEMPTS.load(Relaxed) >= 4 {
+            return;
+        }
         let port = http_port();
         if port == 0 {
             PSI_RTT_MS.store(0, Relaxed);
@@ -827,10 +836,14 @@ mod ffi {
         if PSI_RTT_PROBE_ACTIVE.swap(true, Relaxed) {
             return;
         }
-        PSI_RTT_NEXT_PROBE_SECS.store(now + 2, Relaxed);
+        let attempts = PSI_RTT_ATTEMPTS.fetch_add(1, Relaxed);
+        // Backoff per failed attempt (0s, +2s, +4s, +8s), then give up —
+        // per-second probes on a dead server only log spam.
+        PSI_RTT_NEXT_PROBE_SECS.store(now + (1u64 << (attempts + 1).min(3)), Relaxed);
         std::thread::spawn(move || {
             if let Some(ms) = probe_rtt_once(port) {
                 PSI_RTT_MS.store(ms, Relaxed);
+                PSI_RTT_DONE.store(true, Relaxed);
             }
             PSI_RTT_PROBE_ACTIVE.store(false, Relaxed);
         });
