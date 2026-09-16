@@ -277,14 +277,40 @@ func (c *dnsRelayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return len(p), nil
 }
 
-// resolvePsiphon routes one query through the exit's UDP gateway. No
-// third-party fallback: if the gateway cannot answer, the caller SERVFAILs
-// and the OS retries -- resolution stays inside the Psiphon tunnel.
+// tcpDnsResolvers are the resolvers for the TCP fallback. Port 53 is in the
+// port whitelist Psiphon exits enforce (53, 80, 443, 465, 587, 993, 995,
+// 8000, 8001, 8080 -- official FAQ), so plain DNS-over-TCP through the
+// CONNECT works; proper DoT (tcp/853) is NOT whitelisted.
+var tcpDnsResolvers = [...]string{"1.1.1.1", "8.8.8.8"}
+
+// resolvePsiphon answers one query through the exit's UDP gateway -- the
+// primary path, identical to the official client (exit's own resolver,
+// bypasses port rules). When the gateway cannot answer (exit without UDP
+// intercept, channel down), the query falls back to the same DNS-over-TCP
+// relay the tor and aether paths use: a CONNECT to a public resolver on the
+// whitelisted port 53. Only when both fail does the caller SERVFAIL, so the
+// OS retries -- a broken gateway can no longer take DNS down with it.
 func (c *dnsRelayConn) resolvePsiphon(query []byte) ([]byte, error) {
-    if c.gw == nil {
-        return nil, errors.New("psiphon DNS gateway unavailable")
-    }
-    return c.gw.exchange(c.ctx, query)
+	if c.gw != nil {
+		resp, err := c.gw.exchange(c.ctx, query)
+		if err == nil {
+			return resp, nil
+		}
+		if c.ctx.Err() != nil {
+			return nil, err
+		}
+		emit(logWarn, "[dns] UDPGW gateway unavailable (%v); relaying DNS over TCP/53", err)
+	}
+	var lastErr error
+	for _, server := range tcpDnsResolvers {
+		dst := &net.UDPAddr{IP: net.ParseIP(server), Port: 53}
+		resp, err := c.dnsOverTCP(query, dst)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 // dnsOverTCP dials the resolver through the upstream proxy (plain SOCKS5
