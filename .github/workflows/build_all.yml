@@ -13,7 +13,7 @@ on:
         default: 'true'
         type: boolean
       extra_notes:
-        description: 'extra release notes (optional, appended below the changelog)'
+        description: 'release notes (used as the release body and the update-dialog notes)'
         required: false
         default: ''
 
@@ -1017,7 +1017,24 @@ jobs:
             const isPrerelease = ${{ inputs.prerelease }};
             const extraNotes = ${{ toJSON(inputs.extra_notes) }};
 
-            // Auto-generate a changelog for this tag (commits/PRs since the last release)
+            // Compare the numeric base of two version strings (ignoring the
+            // leading v and any -prerelease/+build suffix); returns true when
+            // the first base is strictly newer.
+            const baseKey = (v) => String(v).replace(/^[vV]/, '').split(/[-+]/)[0].split('.')
+              .map((n) => parseInt(n, 10) || 0);
+            const baseNewer = (a, b) => {
+              const ka = baseKey(a), kb = baseKey(b);
+              for (let i = 0; i < 4; i++) {
+                const d = (ka[i] || 0) - (kb[i] || 0);
+                if (d !== 0) return d > 0;
+              }
+              return false;
+            };
+
+            // Release notes = what was typed into the workflow input. The
+            // auto-generated changelog ("Full Changelog" compare link + raw
+            // commit titles) is only a fallback for when the input is empty,
+            // it never mixes in with typed notes.
             let changelog = '';
             try {
               const notes = await github.rest.repos.generateReleaseNotes({
@@ -1031,7 +1048,7 @@ jobs:
               console.log(`Could not generate release notes: ${e.message}`);
             }
 
-            const body = extraNotes ? `${changelog}\n\n${extraNotes}` : changelog;
+            const body = (extraNotes || '').trim() ? extraNotes.trim() : changelog;
 
             const release = await github.rest.repos.createRelease({
             owner: context.repo.owner,
@@ -1070,17 +1087,25 @@ jobs:
             console.log('All assets uploaded.');
 
             // Publish update metadata only after every asset uploaded successfully.
-            // Both stable and pre-release runs update main; preserve the same
-            // version suffix embedded by the build job. Use the Contents API
-            // to commit just this file without pushing a stale checkout.
-            const version = `${tag}${isPrerelease ? '-prerelease' : ''}`;
-            const metadata = {
-              version,
+            // Use the Contents API to commit just this file without pushing a
+            // stale checkout.
+            //
+            // version.json is a TWO-SLOT manifest (see
+            // core/Aether/src/version_checker.rs): the top level is always the
+            // latest STABLE release, the optional `prerelease` block is the
+            // latest pre-release, and `type` tells the client which is which.
+            // A pre-release run must never overwrite the stable slot — that
+            // is what used to hide the last stable release from stable users.
+            // The top-level keys must stay BEFORE the prerelease block: CMake
+            // and Gradle read the first "version" match of this file.
+            const entry = {
+              type: isPrerelease ? 'pre-release' : 'release',
+              version: isPrerelease ? `${tag}-prerelease` : tag,
               release_date: (release.data.published_at || new Date().toISOString()).slice(0, 10),
               release_notes: body,
               download_url: release.data.html_url,
             };
-            const content = `${JSON.stringify(metadata, null, 2)}\n`;
+
             const current = await github.rest.repos.getContent({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -1090,18 +1115,47 @@ jobs:
             if (Array.isArray(current.data) || current.data.type !== 'file') {
               throw new Error('Expected version.json to be a file on main');
             }
-            const previous = Buffer.from(current.data.content, 'base64').toString('utf8');
-            if (previous !== content) {
+            let previous = {};
+            try {
+              previous = JSON.parse(Buffer.from(current.data.content, 'base64').toString('utf8'));
+            } catch (e) {
+              console.log(`Existing version.json is not valid JSON, rewriting it: ${e.message}`);
+            }
+
+            const next = {};
+            if (isPrerelease) {
+              // Only the pre-release slot moves; the stable slot is kept
+              // verbatim so stable clients keep seeing the last stable.
+              for (const key of ['type', 'version', 'release_date', 'release_notes', 'download_url']) {
+                if (previous[key] !== undefined) next[key] = previous[key];
+              }
+              next.prerelease = entry;
+            } else {
+              next.type = 'release';
+              next.version = entry.version;
+              next.release_date = entry.release_date;
+              next.release_notes = entry.release_notes;
+              next.download_url = entry.download_url;
+              // Keep an in-flight pre-release only if its base version is still
+              // ahead of this stable (v1.5.0-beta.1 survives a v1.4.0 release);
+              // otherwise the stable supersedes it.
+              const oldPre = previous.prerelease;
+              if (oldPre && typeof oldPre.version === 'string' && baseNewer(oldPre.version, tag)) {
+                next.prerelease = oldPre;
+              }
+            }
+            const content = `${JSON.stringify(next, null, 2)}\n`;
+            if (content !== Buffer.from(current.data.content, 'base64').toString('utf8')) {
               await github.rest.repos.createOrUpdateFileContents({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 path: 'version.json',
                 branch: 'main',
                 sha: current.data.sha,
-                message: `chore: bump version.json to ${version}`,
+                message: `chore: bump version.json ${isPrerelease ? 'pre-release to' : 'to'} ${entry.version}`,
                 content: Buffer.from(content, 'utf8').toString('base64'),
               });
-              console.log(`Committed version.json for ${version} after release uploads`);
+              console.log(`Committed version.json for ${entry.version} after release uploads`);
             } else {
               console.log('version.json already matches this release');
             }

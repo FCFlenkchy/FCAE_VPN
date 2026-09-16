@@ -1,6 +1,14 @@
 {
-  "version": "v1.3.2-prerelease",
-  "release_date": "2026-09-16",
-  "release_notes": "**Full Changelog**: https://github.com/FCFlenkchy/FCAE_VPN/compare/v1.3.1...v1.3.2\n\nBump aether engine to 2.0.0 which now possible to connect tor and added psiphon u can chain psiphon too havent tested destkops version but android is mostly stable",
-  "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/v1.3.2"
+  "type": "release",
+  "version": "v1.3.1",
+  "release_date": "2026-09-12",
+  "release_notes": "use tun2socks for android too and fixed warp in warp counting bytes and warp in warp or wireguard in android now also perform well in tun mode due to this switchand",
+  "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases",
+  "prerelease": {
+    "type": "pre-release",
+    "version": "v1.3.2-prerelease",
+    "release_date": "2026-09-16",
+    "release_notes": "Bump aether engine to 2.0.0 which now possible to connect tor and added psiphon u can chain psiphon too havent tested destkops version but android is mostly stable",
+    "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/v1.3.2"
+  }
 }
