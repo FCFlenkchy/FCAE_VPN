@@ -85,10 +85,10 @@ struct AppState {
     // The FFI's own log callback level is fixed at info and not exposed.
     int  engine_log  = 3;
 
-    // Verbosity of the tun2socks data plane (FcaeT2sLog). 0 = default =
-    // silent: the netstack logs a line per connection when verbose, which
-    // is noise for daily use. Silent still lets rare error lines through.
-    int  t2s_log     = 0;
+    // Verbosity of the tun2socks data plane (FcaeT2sLog): 1 = silent ..
+    // 5 = debug. The netstack logs a line per connection when verbose,
+    // which is noise for daily use; silent still lets error lines through.
+    int  t2s_log     = 1;
 
     // The aether engine's default Tor SOCKS port (config.rs
     // DEFAULT_TOR_SOCKS_PORT). Shown in the field, but an untouched field
@@ -239,11 +239,26 @@ struct AppState {
         c.obfuscation.h2_enabled       = h2_enabled;
         c.obfuscation.ech_enabled      = ech_enabled;
 
+        // Where does this session's traffic end: protocol Psiphon (backend
+        // 1) or egress "Psiphon through the tunnel" (tor_mode 3 on a
+        // non-Psiphon protocol). Both end at a Psiphon exit, and Psiphon
+        // exits are IPv4-only.
+        const bool proto_psiphon  = (backend == 1);
+        const bool proto_tor      = (protocol == 4);
+        const bool egress_psiphon = (!proto_psiphon && tor_mode == 3);
+        const bool psiphon_exit   = (proto_psiphon || egress_psiphon);
+
         c.dns.sni = sni[0] ? sni : nullptr;
         // TUN DNS override: NULL keeps the bridge's default (no system DNS
         // change); a value is applied on `up` and restored on `down`.
+        // In a psiphon_exit session the override carries the v4 servers
+        // ONLY: a v6 entry would point the host resolver at an address the
+        // v4-only exit cannot reach -- and on a host with native IPv6 the
+        // query would LEAVE the tunnel entirely.
         std::snprintf(dns_server_built, sizeof(dns_server_built), "%s%s%s",
-                      tun_dns4, (tun_dns4[0] && tun_dns6[0]) ? "," : "", tun_dns6);
+                      tun_dns4,
+                      (tun_dns4[0] && tun_dns6[0] && !psiphon_exit) ? "," : "",
+                      psiphon_exit ? "" : tun_dns6);
         c.dns.server = dns_server_built[0] ? dns_server_built : nullptr;
 
         c.routing.rules_file   = routes_file[0] ? routes_file : nullptr;
@@ -259,9 +274,7 @@ struct AppState {
         // the UI for when the user switches back). Protocol Tor DOES combine
         // with egress 3: the chain runs Aether(Tor-only) -> Psiphon via
         // UpstreamProxyURL. Egress index 3 is Psiphon, not a FcaeTorMode.
-        const bool proto_psiphon = (backend == 1);
-        const bool proto_tor     = (protocol == 4);
-        const bool egress_psiphon = (!proto_psiphon && tor_mode == 3);
+        // (The flags were computed above; the DNS override needs them too.)
         int tm = tor_mode;
         if (proto_psiphon || egress_psiphon || tm < 0 || tm > 2) tm = 0;
         // Protocol Tor normalises tor.mode to Only inside the runtime no

@@ -1265,10 +1265,13 @@ void render_ui() {
             // Verbosity of the tun2socks data plane (bridge + gVisor
             // netstack), separate from the engine log above. Default is
             // silent: it would otherwise log a line per connection.
-            const char* t2s_logs[] = {
-                "Silent (default)", "Silent", "Error", "Warn", "Info", "Debug",
-            };
-            ImGui::Combo("tun2socks log", &g_app.t2s_log, t2s_logs, 6);
+            // Combo position p is FcaeT2sLog value p+1; the ABI's 0 sentinel
+            // ("app default") means silent too, so silent is listed once.
+            const char* t2s_logs[] = { "Silent", "Error", "Warn", "Info", "Debug" };
+            int t2s_pos = g_app.t2s_log > 0 ? g_app.t2s_log - 1 : 0;
+            if (t2s_pos > 4) t2s_pos = 4;
+            if (ImGui::Combo("tun2socks log", &t2s_pos, t2s_logs, 5))
+                g_app.t2s_log = t2s_pos + 1;
             ImGui::Spacing();
             // These only pick the resolver for Aether/Tor sessions. With
             // Psiphon as the exit (protocol Psiphon or egress "Psiphon through
@@ -1329,7 +1332,7 @@ void render_ui() {
             // Verbosity of the aether engine itself, not of this UI's log
             // pane -- the FFI always reports to the host at info.
             const char* engine_logs[] = {
-                "Off", "Error", "Warn", "Info (default)", "Debug", "Trace",
+                "Off", "Error", "Warn", "Info", "Debug", "Trace",
             };
             ImGui::Combo("Engine log", &g_app.engine_log, engine_logs, 6);
 

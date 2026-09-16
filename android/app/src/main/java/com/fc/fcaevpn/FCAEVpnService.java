@@ -47,6 +47,10 @@ public class FCAEVpnService extends VpnService {
      * and Android/Linux reject IPv6 on links with MTU < 1280.
      */
     private volatile int sessionTunMtu = 1500;
+    /** True when Psiphon is this session's exit (protocol Psiphon, or
+     *  Psiphon-through-tunnel egress). Set from the start intent before the
+     *  core asks for the interface. */
+    private volatile boolean sessionPsiphonExit = false;
     private static final String TAG = "FCAE_VPN";
 
     public static final String ACTION_STOP       = "com.fc.fcaevpn.STOP";
@@ -330,7 +334,19 @@ public class FCAEVpnService extends VpnService {
     private void configureTunDns(Builder builder) {
         SharedPreferences p = getSharedPreferences(PREFS_MAIN, MODE_PRIVATE);
         String v4 = p.getString("tunDnsV4", DEFAULT_TUN_DNS_V4);
-        String v6 = p.getString("tunDnsV6", DEFAULT_TUN_DNS_V6);
+        // Psiphon exits are IPv4-only, and this session's TUN is v4-only
+        // with them (see establishTunNow: no fd00::2, no ::/0 route).
+        // Advertising a v6 DNS server here is not just dead weight: on
+        // Android versions that route the query over the physical network
+        // it LEAKS plain DNS outside the tunnel, and on the rest the
+        // platform resolver stalls on the unreachable entry before falling
+        // back to v4 (slow/broken DNS, version dependent). So in
+        // Psiphon-exit sessions the v4 list is the whole DNS config; the
+        // v6 field is ignored downstream (same policy as the other
+        // Psiphon-incompatible fields).
+        String v6 = sessionPsiphonExit
+            ? null
+            : p.getString("tunDnsV6", DEFAULT_TUN_DNS_V6);
         int added = 0;
         added += addDnsEach(builder, v4);
         added += addDnsEach(builder, v6);
@@ -384,9 +400,23 @@ public class FCAEVpnService extends VpnService {
             // side.
             builder.setMtu(sessionTunMtu);
             builder.addAddress("10.0.0.2", 32);
-            builder.addAddress("fd00::2", 128);
             builder.addRoute("0.0.0.0", 0);
-            builder.addRoute("::", 0);
+            // IPv6 on the interface ONLY when the exit can carry it. Psiphon
+            // exits are IPv4-only (the official client's VPN is v4-only for
+            // the same reason). Declaring fd00::2 + ::/0 here told Android
+            // the VPN had IPv6, so every app lookup asked for AAAA, the exit
+            // resolver answered it, and the app connected to the IPv6
+            // literal FIRST: a CONNECT to [2a00:...]:443 which the exit
+            // cannot dial and rejects as "administratively prohibited".
+            // Result: apps using hostnames stalled/failed, apps with IPv4
+            // literals worked, and every such attempt was one more "port
+            // forward failure". With no v6 address/route Android marks the
+            // VPN v4-only, AI_ADDRCONFIG suppresses AAAA, and every
+            // connection goes straight to the v4 answer.
+            if (!sessionPsiphonExit) {
+                builder.addAddress("fd00::2", 128);
+                builder.addRoute("::", 0);
+            }
             try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
             configureTunDns(builder);
 
@@ -661,7 +691,7 @@ public class FCAEVpnService extends VpnService {
         final int tunTcpSndbuf = intent.getIntExtra("tunTcpSndbuf", 256000);
         final int tunTcpRcvbuf = intent.getIntExtra("tunTcpRcvbuf", 256000);
         final boolean tunTcpAutoTuning = intent.getBooleanExtra("tunTcpAutoTuning", false);
-        // tun2socks data-plane log level (FcaeT2sLog); 0 = default = silent.
+        // tun2socks data-plane log level (FcaeT2sLog); 0 = silent.
         final int t2sLog = intent.getIntExtra("t2sLog", 0);
         final int torHttpPort = intent.getIntExtra("torHttpPort", 0);
         final boolean throughPsiphon = intent.getBooleanExtra("psiphonThroughTunnel", false);
@@ -671,6 +701,7 @@ public class FCAEVpnService extends VpnService {
         final String psiphonRegionV = (psiphonRegion == null) ? "" : psiphonRegion;
         final int psiphonSocks = intent.getIntExtra("psiphonSocksPort", 0);
         final int psiphonHttp  = intent.getIntExtra("psiphonHttpPort", 0);
+        sessionPsiphonExit = (backend == 1) || throughPsiphon;
         final String teamVal   = (teamName == null) ? "" : teamName;
         final String tokenVal  = (accessTok == null) ? "" : accessTok;
         final String emailVal  = (accessEm == null) ? "" : accessEm;
@@ -723,7 +754,12 @@ public class FCAEVpnService extends VpnService {
                 final android.content.SharedPreferences dnsPrefs =
                     getSharedPreferences(PREFS_MAIN, MODE_PRIVATE);
                 String dnsV4 = dnsPrefs.getString("tunDnsV4", DEFAULT_TUN_DNS_V4);
-                String dnsV6 = dnsPrefs.getString("tunDnsV6", DEFAULT_TUN_DNS_V6);
+                // Same v4-only rule as configureTunDns(): the resolver list
+                // fed to the core must not name a v6 resolver that a v4-only
+                // exit cannot carry.
+                String dnsV6 = sessionPsiphonExit
+                    ? null
+                    : dnsPrefs.getString("tunDnsV6", DEFAULT_TUN_DNS_V6);
                 StringBuilder dnsSb = new StringBuilder();
                 if (dnsV4 != null && !dnsV4.trim().isEmpty()) dnsSb.append(dnsV4.trim());
                 if (dnsV6 != null && !dnsV6.trim().isEmpty()) {

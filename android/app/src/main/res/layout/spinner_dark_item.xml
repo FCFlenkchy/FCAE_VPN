@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spinner item (closed state AND dropdown row) with a HARDCODED light
+     text color. The platform simple_spinner_item/simple_spinner_dropdown_item
+     layouts take their color from the ambient theme (?android:attr/
+     textColorPrimary), which on DayNight themes follows the device system
+     setting: on recent Android versions running in light mode that means
+     near-black text on this app's dark #1E1E2C spinner background, and
+     some OEM ROMs override the layout's attributes with ROM defaults.
+     Hardcoding the color here makes spinner text immune to both.
+     Mirrors simple_spinner_dropdown_item (CheckedTextView, single line,
+     ellipsize) so the look is unchanged apart from the color. -->
+<CheckedTextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@android:id/text1"
+    style="?android:attr/spinnerDropDownItemStyle"
+    android:layout_width="match_parent"
+    android:layout_height="48dp"
+    android:singleLine="true"
+    android:ellipsize="end"
+    android:textAlignment="inherit"
+    android:background="?android:attr/selectableItemBackground"
+    android:textColor="#FFE8ECF4" />

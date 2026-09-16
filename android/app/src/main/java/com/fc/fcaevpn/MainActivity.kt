@@ -21,6 +21,7 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.switchmaterial.SwitchMaterial
 import java.util.concurrent.Executors
@@ -402,6 +403,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // The UI is a fixed dark design, but the app theme is DayNight and
+        // therefore followed the device system setting. Recent Android
+        // versions (14/15) commonly ship with light mode active, which made
+        // every widget that inherits the theme text color (Spinner items,
+        // dialog titles, ...) render near-black on the dark background.
+        // Force night mode BEFORE super.onCreate so even the very first
+        // creation resolves dark values (no recreate, no flicker). The
+        // explicit textColorPrimary override in styles.xml is the safety
+        // net for OEM ROMs that substitute their own theme values.
+        AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
         super.onCreate(savedInstanceState)
         activityAlive = true
         setContentView(R.layout.activity_main)
@@ -486,7 +497,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         spinnerProtocol.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
+            this, R.layout.spinner_dark_item,
             // H2 is folded into the MASQUE entries (used to be the separate
             // "HTTP/2 fallback" switch). Positions map to core protocol +
             // h2Enabled via the helpers below — the FFI/start intents keep
@@ -502,15 +513,15 @@ class MainActivity : AppCompatActivity() {
             ),
         )
         spinnerMode.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
+            this, R.layout.spinner_dark_item,
             listOf("Proxy (SOCKS/HTTP)", "TUN (system VPN)"),
         )
         spinnerScan.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
+            this, R.layout.spinner_dark_item,
             listOf("Turbo", "Balanced", "Thorough", "Stealth", "Ironclad"),
         )
         spinnerIpVersion.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
+            this, R.layout.spinner_dark_item,
             listOf("IPv4", "IPv6", "Dual Stack (IPv4+IPv6)"),
         )
         // Obfuscation/noize types must match the Aether engine/core profiles
@@ -520,11 +531,11 @@ class MainActivity : AppCompatActivity() {
         // keeps the saved default (prefs.getInt("noize", 2)) aligned with the
         // core's default of "balanced".
         spinnerNoize.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
+            this, R.layout.spinner_dark_item,
             listOf("off", "light", "balanced", "aggressive"),
         )
         spinnerSysprofile.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
+            this, R.layout.spinner_dark_item,
             listOf("Auto", "Low", "Medium", "High"),
         )
         // Tor is an egress inside the Aether engine (AETHER_TOR), not a
@@ -532,7 +543,7 @@ class MainActivity : AppCompatActivity() {
         // "Tor only" is deliberately NOT here: it is the Tor entry of the
         // protocol list above, so it appears once.
         spinnerTor.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
+            this, R.layout.spinner_dark_item,
             listOf(
                 "Off",
                 "Tor through the tunnel",
@@ -542,28 +553,29 @@ class MainActivity : AppCompatActivity() {
         )
         // Positions map 1:1 onto FcaeTorBridges.
         spinnerTorBridges.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
+            this, R.layout.spinner_dark_item,
             listOf("No bridges", "obfs4", "snowflake", "Custom lines"),
         )
         // Psiphon transport families. Index maps 1:1 onto
         // PsiphonTunnelService.transportProtocols(); 0 = Auto leaves
         // LimitTunnelProtocols unset (tunnel-core tries its full set).
         spinnerPsiphonTransport.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
+            this, R.layout.spinner_dark_item,
             listOf("Auto", "SSH (OSSH)", "QUIC", "Unfronted meek", "Fronted meek"),
         )
         // Verbosity of the aether ENGINE. Positions map 1:1 onto
         // FcaeEngineLog; index 3 = info is the default.
         spinnerEngineLog.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
-            listOf("Off", "Error", "Warn", "Info (default)", "Debug", "Trace"),
+            this, R.layout.spinner_dark_item,
+            listOf("Off", "Error", "Warn", "Info", "Debug", "Trace"),
         )
-        // Verbosity of the tun2socks data plane. Positions map 1:1 onto
-        // FcaeT2sLog; index 0 = default = silent. The data plane is not
-        // something users act on, so it stays quiet unless asked for.
+        // Verbosity of the tun2socks data plane. Position p maps onto
+        // FcaeT2sLog value p+1 (see t2sLogValue/t2sLogPosition): the ABI's
+        // 0 = "app default" sentinel is the same thing as silent, so the UI
+        // offers silent once instead of twice.
         spinnerT2sLog.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
-            listOf("Silent (default)", "Silent", "Error", "Warn", "Info", "Debug"),
+            this, R.layout.spinner_dark_item,
+            listOf("Silent", "Error", "Warn", "Info", "Debug"),
         )
         spinnerTorBridges.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -955,6 +967,13 @@ class MainActivity : AppCompatActivity() {
      * use are simply ignored downstream, never grayed and never re-pointed
      * (round-12 policy, same as desktop).
      */
+    /** FcaeT2sLog value for the current tun2socks-log spinner position
+     *  (0 = Silent .. 4 = Debug -> ABI 1 = SILENT .. 5 = DEBUG). */
+    private fun t2sLogValue(): Int = spinnerT2sLog.selectedItemPosition + 1
+
+    /** Inverse of t2sLogValue; a stored 0 (old "default" entry) is Silent. */
+    private fun t2sLogPosition(value: Int): Int = (value - 1).coerceIn(0, 4)
+
     private fun applyTorLock() {
         if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
         ensureEgressAdapter()
@@ -995,8 +1014,8 @@ class MainActivity : AppCompatActivity() {
             "Psiphon through the tunnel",
         )
         val a = android.widget.ArrayAdapter(
-            this, android.R.layout.simple_spinner_item, labels)
-        a.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            this, R.layout.spinner_dark_item, labels)
+        a.setDropDownViewResource(R.layout.spinner_dark_item)
         spinnerTor.adapter = a
     }
 
@@ -1042,7 +1061,7 @@ class MainActivity : AppCompatActivity() {
             putInt("torBridges", spinnerTorBridges.selectedItemPosition)
             putString("torBridgeLines", editTorBridgeLines.text.toString().trim())
             putInt("engineLog", spinnerEngineLog.selectedItemPosition)
-            putInt("t2sLog", spinnerT2sLog.selectedItemPosition)
+            putInt("t2sLog", t2sLogValue())
             putInt("backend", if (isPsiphonProtocol()) 1 else 0)
             putString("torSocksPort", editTorSocksPort.text.toString().trim())
             putString("psiphonRegion", selectedPsiphonRegion())
@@ -1112,7 +1131,7 @@ class MainActivity : AppCompatActivity() {
         spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
         editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
         spinnerEngineLog.setSelection(prefs.getInt("engineLog", 3))
-        spinnerT2sLog.setSelection(prefs.getInt("t2sLog", 0))
+        spinnerT2sLog.setSelection(t2sLogPosition(prefs.getInt("t2sLog", 0)))
         editTorSocksPort.setText(prefs.getString("torSocksPort", "1821"))
         editPsiphonSocksPort.setText(prefs.getString("psiphonSocksPort", PsiphonTunnelService.DEFAULT_SOCKS_PORT.toString()))
         editPsiphonHttpPort.setText(prefs.getString("psiphonHttpPort", PsiphonTunnelService.DEFAULT_HTTP_PORT.toString()))
@@ -1275,7 +1294,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("torBridges", spinnerTorBridges.selectedItemPosition)
         i.putExtra("torBridgeLines", editTorBridgeLines.text.toString().trim())
         i.putExtra("engineLog", spinnerEngineLog.selectedItemPosition)
-        i.putExtra("t2sLog", spinnerT2sLog.selectedItemPosition)
+        i.putExtra("t2sLog", t2sLogValue())
         i.putExtra("backend", backendFromSelection())
         i.putExtra("torSocksPort", deferredTorSocksPort())
         i.putExtra("torHttpPort", if (switchTorHttp.isChecked) editTorHttpPort.text.toString().toIntOrNull() ?: 1822 else 0)
@@ -1334,7 +1353,7 @@ class MainActivity : AppCompatActivity() {
         val torBridges = spinnerTorBridges.selectedItemPosition
         val torBridgeLines = editTorBridgeLines.text.toString().trim()
         val engineLog = spinnerEngineLog.selectedItemPosition
-        val t2sLog = spinnerT2sLog.selectedItemPosition
+        val t2sLog = t2sLogValue()
         val backend = backendFromSelection()
         val torSocksPort = deferredTorSocksPort()
         val torHttpPort = if (switchTorHttp.isChecked) editTorHttpPort.text.toString().toIntOrNull() ?: 1822 else 0
@@ -1978,7 +1997,7 @@ class MainActivity : AppCompatActivity() {
         applyingRegionList = true
         psiphonRegionCodes = normalized
         spinnerPsiphonRegion.adapter = ArrayAdapter(this,
-            android.R.layout.simple_spinner_dropdown_item,
+            R.layout.spinner_dark_item,
             normalized.map { if (it.isEmpty()) "Auto" else it })
         spinnerPsiphonRegion.setSelection(normalized.indexOf(want).coerceAtLeast(0), false)
         savedPsiphonRegion = want

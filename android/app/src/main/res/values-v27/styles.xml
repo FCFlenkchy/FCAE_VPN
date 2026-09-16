@@ -1,0 +1,8 @@
+<resources>
+    <!-- API 27+: keep the gesture/3-button navigation bar icons light to
+         match the always-dark UI. (windowLightStatusBar is already set in
+         the base theme; it needs API 23 and minSdk is 24.) -->
+    <style name="Theme.FCAEVPN" parent="@style/Theme.FCAEVPN">
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

@@ -113,8 +113,8 @@ pub const MIN_TCP_BUFFER: u32 = 4 * 1024;
 pub const MAX_TCP_BUFFER: u32 = 4 * 1024 * 1024;
 
 /// Verbosity of the tun2socks data plane (bridge + gVisor netstack logs).
-/// Values mirror the `FcaeT2sLog` ABI enum: 0 = default (silent), then
-/// silent/error/warn/info/debug. Silent still lets through rare error-level
+/// Values mirror the `FcaeT2sLog` ABI enum: 0 = unset (treated as silent),
+/// then silent/error/warn/info/debug. Silent still lets through rare error-level
 /// bridge lines but suppresses the per-flow and per-query chatter.
 pub const T2S_LOG_DEFAULT: u8 = 0;
 pub const T2S_LOG_SILENT: u8 = 1;
@@ -704,6 +704,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             )))
         }
     };
+    let psiphon_exit = cfg.backend == FcaeBackend::Psiphon || cfg.psiphon.through_tunnel;
     cfg.tun = TunConfig {
         tcp_sndbuf: tcp_buffer_or_default(raw.tun_tcp_sndbuf, "tun_tcp_sndbuf")?,
         tcp_rcvbuf: tcp_buffer_or_default(raw.tun_tcp_rcvbuf, "tun_tcp_rcvbuf")?,
@@ -724,6 +725,13 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         name: cstr_opt(raw.tun_name).unwrap_or_else(|| "FCAE_VPN".into()),
         mtu,
         fd: if raw.tun_fd >= 0 { Some(raw.tun_fd) } else { None },
+        // Psiphon exits are IPv4-only. An IPv6 address on the TUN makes the
+        // OS resolver ask AAAA and prefer the v6 answer, so every hostname
+        // connection became a CONNECT to an IPv6 literal the exit rejects
+        // ("administratively prohibited"); hosts reached by IPv4 literal
+        // kept working, which is what made this look like a DNS fault.
+        // Android does the same in FCAEVpnService.establishTunNow().
+        ipv6: if psiphon_exit { None } else { TunConfig::default().ipv6 },
         ..TunConfig::default()
     };
 
