@@ -465,7 +465,27 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             o.put("ListenInterface", lanSharing ? "any" : "");
             o.put("EmitDiagnosticNotices", true);
             o.put("UseIndistinguishableTLS", true);
-            o.put("AllowDefaultDNSResolverWithBindToDevice", true);
+            // tunnel-core's own resolver binds its socket to the underlying
+            // network, so its bootstrap lookups (fronting domains, server
+            // list hosts, tactics) leave on the carrier link -- never through
+            // the TUN. Carriers that hijack UDP/53 answer with a private
+            // address, tunnel-core rejects it ("IP is bogon"), and the tunnel
+            // sits at CandidateServers 0. Pin it to public resolvers on ports
+            // the interception does not cover: Alternate (used when no
+            // system list is visible) and Preferred at probability 1.0
+            // (tried first, unconditionally, when one is -- the default 0.0
+            // leaves the list configured but never chosen). The
+            // default-resolver escape hatch is off so a failed bound lookup
+            // cannot drop back to the carrier resolver.
+            org.json.JSONArray bootstrapDns = new org.json.JSONArray();
+            bootstrapDns.put("208.67.222.222:5353");
+            bootstrapDns.put("9.9.9.9:9953");
+            bootstrapDns.put("208.67.220.220:5353");
+            o.put("DNSResolverAlternateServers", bootstrapDns);
+            o.put("DNSResolverPreferredAlternateServers", bootstrapDns);
+            o.put("DNSResolverPreferAlternateServerProbability", 1.0);
+            o.put("DNSResolverAttemptsPerPreferredServer", 2);
+            o.put("AllowDefaultDNSResolverWithBindToDevice", false);
             // Frequent byte-count notices: they feed onBytesTransferred,
             // which drives the notification counters. Without this a working
             // tunnel shows 0 B.

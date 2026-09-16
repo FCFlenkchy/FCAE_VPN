@@ -277,64 +277,18 @@ func (c *dnsRelayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return len(p), nil
 }
 
-// Host-configured resolvers (the UI's TUN DNS servers field, fed through
-// t2s_set_dns_servers). When set, gateway queries are sent to THESE
-// resolvers as normal UDP port forwards to port 53 -- port 53 is in the
-// whitelist Psiphon exits enforce (53, 80, 443, 465, 587, 993, 995, 8000,
-// 8001, 8080 -- official FAQ) -- instead of the transparent DNS-flag mode.
-// Nothing here is a fallback: it only decides WHICH in-tunnel resolver
-// answers. Empty/invalid lists keep the official transparent behaviour.
-var dnsServersMu sync.RWMutex
-var dnsServerAddrs []netip.Addr
-
-//export t2s_set_dns_servers
-//
-// Set the host's resolver list (comma/semicolon/space separated IPs). An
-// empty list restores the transparent-DNS default (the exit's resolver).
-func t2s_set_dns_servers(list *C.char) {
-	var parsed []netip.Addr
-	for _, field := range strings.FieldsFunc(C.GoString(list), func(r rune) bool {
-		return r == ',' || r == ';' || r == ' ' || r == '\t'
-	}) {
-		if ip, err := netip.ParseAddr(strings.TrimSpace(field)); err == nil {
-			parsed = append(parsed, ip.Unmap())
-		}
-	}
-	dnsServersMu.Lock()
-	dnsServerAddrs = parsed
-	dnsServersMu.Unlock()
-}
-
-// preferredResolver picks the host-configured resolver for one query,
-// matching the queried flow's family when possible.
-func preferredResolver(flow netip.Addr) (netip.Addr, bool) {
-	dnsServersMu.RLock()
-	defer dnsServersMu.RUnlock()
-	if len(dnsServerAddrs) == 0 {
-		return netip.Addr{}, false
-	}
-	flow4 := flow.Unmap().Is4()
-	for _, a := range dnsServerAddrs {
-		if a.Is4() == flow4 {
-			return a, true
-		}
-	}
-	return dnsServerAddrs[0], true
-}
-
-// resolvePsiphon routes one query through the exit's UDP gateway -- the
-// only path, identical to the official client. Default destination is the
-// transparent DNS exchange (the exit's own resolver, bypasses port rules);
-// when the host configured resolvers, the query goes to those instead, as
-// a normal gateway UDP forward to port 53. No fallback: if the gateway
-// cannot answer, the caller SERVFAILs and the OS retries -- resolution
-// stays inside the Psiphon tunnel. The tor/aether paths keep their own
-// DNS-over-TCP relay; Psiphon does not share it.
+// resolvePsiphon routes one query through the exit's UDP gateway as a
+// transparent DNS exchange -- the only path, identical to the official
+// client. The queried resolver address is irrelevant: the exit answers with
+// its own resolver. If the gateway cannot answer, the caller SERVFAILs and
+// the OS retries -- resolution stays inside the Psiphon tunnel. The
+// tor/aether paths keep their own DNS-over-TCP relay; Psiphon does not
+// share it.
 func (c *dnsRelayConn) resolvePsiphon(query []byte) ([]byte, error) {
 	if c.gw == nil {
 		return nil, errors.New("psiphon DNS gateway unavailable")
 	}
-	return c.gw.exchange(c.ctx, query, c.resolver)
+	return c.gw.exchange(c.ctx, query)
 }
 
 // dnsOverTCP dials the resolver through the upstream proxy (plain SOCKS5
@@ -512,18 +466,14 @@ func newUdpgwGateway(parent context.Context, inner proxy.Proxy) *udpgwGateway {
 	return g
 }
 
-// exchange runs one DNS query over the gateway. `prefer` is the queried
-// flow's resolver address, used to pick a family-matching host-configured
-// resolver when one is set. It retries once on a broken/replaced channel;
-// if the gateway still cannot answer (exit without UDP intercept, tunnel
-// flapping) the error propagates and the caller answers SERVFAIL so the OS
-// retries -- there is deliberately no third-party fallback: resolution
-// stays inside the Psiphon tunnel.
-func (g *udpgwGateway) exchange(parent context.Context, query []byte, prefer netip.Addr) ([]byte, error) {
+// exchange runs one DNS query over the gateway. It retries once on a
+// broken/replaced channel; if the gateway still cannot answer (exit without
+// UDP intercept, tunnel flapping) the error propagates and the caller
+// answers SERVFAIL so the OS retries. There is no other resolver.
+func (g *udpgwGateway) exchange(parent context.Context, query []byte) ([]byte, error) {
 	if len(query) < 12 || len(query) > udpgwMaxPayload {
 		return nil, errors.New("invalid UDPGW DNS size")
 	}
-	resolver, _ := preferredResolver(prefer)
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := parent.Err(); err != nil {
@@ -547,7 +497,7 @@ func (g *udpgwGateway) exchange(parent context.Context, query []byte, prefer net
 			lastErr = errors.New("udpgw: query table full")
 			continue
 		}
-		if err := g.send(conn, id, query, resolver); err != nil {
+		if err := g.send(conn, id, query); err != nil {
 			g.retire(id)
 			g.invalidate(conn)
 			lastErr = err
@@ -643,46 +593,22 @@ func (g *udpgwGateway) retire(id uint16) {
 	g.mu.Unlock()
 }
 
-// send writes one UDPGW frame. Two destination modes:
+// send writes one UDPGW frame as a transparent DNS exchange, flagged DNS
+// exactly like the official client. The exit resolves the query with its
+// own resolver; the zero address is only a flow label.
 //
-//   - resolver set: a NORMAL UDP port forward to that host-configured
-//     resolver, port 53 (IPv4 or IPv6 address form per its family). The
-//     exit dials the user's own choice of resolver; the whitelist allows
-//     destination port 53.
-//   - resolver invalid (the default): the transparent DNS exchange, flags
-//     DNS like the official client -- the exit answers with its own
-//     resolver and the address is just a flow label.
+// The DNS flag is what makes this work on every exit. A plain UDP port
+// forward to a resolver of our choosing goes through the exit's traffic
+// rules (AllowUDPPorts, subnet/ASN filters) and, when refused, is dropped
+// with no error -- udpgw has no NAK -- which surfaced as an 8 s stall and
+// SERVFAIL for every lookup on restrictive servers. The flagged exchange
+// bypasses those rules server-side because DNS is treated as essential.
 //
 // Wire layout mirrors the official server/udp.go: LE length excluding the
 // length field, flags, LE connection ID, raw IP, BE port, UDP payload.
-func (g *udpgwGateway) send(conn net.Conn, id uint16, query []byte, resolver netip.Addr) error {
+func (g *udpgwGateway) send(conn net.Conn, id uint16, query []byte) error {
 	g.writeMu.Lock()
 	defer g.writeMu.Unlock()
-
-	if resolver.IsValid() {
-		v6 := !resolver.Is4()
-		addr := resolver.As16()
-		headerSize := 11
-		flags := byte(0)
-		if v6 {
-			headerSize = 23
-			flags = udpgwFlagIPv6
-		}
-		frame := make([]byte, headerSize+len(query))
-		binary.LittleEndian.PutUint16(frame[0:2], uint16(len(frame)-2))
-		frame[2] = flags
-		binary.LittleEndian.PutUint16(frame[3:5], id)
-		if v6 {
-			copy(frame[5:21], addr[:])
-			binary.BigEndian.PutUint16(frame[21:23], 53)
-		} else {
-			copy(frame[5:9], addr[12:])
-			binary.BigEndian.PutUint16(frame[9:11], 53)
-		}
-		copy(frame[headerSize:], query)
-		_, err := conn.Write(frame)
-		return err
-	}
 
 	ip := net.IPv4zero.To4()
 	frame := make([]byte, 11+len(query))

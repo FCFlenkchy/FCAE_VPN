@@ -105,7 +105,6 @@ static WINTUN_DLL: &[u8] = include_bytes!(env!("FCAE_WINTUN_DLL"));
 #[cfg(tun2socks_linked)]
 extern "C" {
     fn t2s_set_log_callback(cb: Option<unsafe extern "C" fn(c_int, *const c_char)>);
-    fn t2s_set_dns_servers(list: *const c_char);
     fn t2s_start(device: *const c_char, proxy: *const c_char, mtu: c_int, loglevel: *const c_char,
         tcp_sndbuf: u32, tcp_rcvbuf: u32, tcp_auto_tuning: c_int)
         -> c_int;
@@ -121,7 +120,6 @@ extern "C" {
 mod stub {
     use super::*;
     pub unsafe fn t2s_set_log_callback(_cb: Option<unsafe extern "C" fn(c_int, *const c_char)>) {}
-    pub unsafe fn t2s_set_dns_servers(_list: *const c_char) {}
     pub unsafe fn t2s_start(
         _d: *const c_char,
         _p: *const c_char,
@@ -453,16 +451,6 @@ impl TunBridge for Tun2SocksBridge {
         let c_level = CString::new(level.clone()).expect("level has no NUL");
         log::info!("[tun] TCP sndbuf={} bytes, rcvbuf={} bytes, auto-tuning={}, t2s log={}",
             cfg.tun.tcp_sndbuf, cfg.tun.tcp_rcvbuf, cfg.tun.tcp_auto_tuning, level);
-
-        // Hand the host-configured TUN DNS servers (the same field both UIs
-        // expose) to the bridge: when set, Psiphon gateway queries go to
-        // THESE resolvers through the tunnel; empty keeps the official
-        // transparent behaviour (the exit's own resolver). On desktop the
-        // same field also drives platform::configure's OS DNS override, so
-        // both layers agree.
-        let dns_servers = cfg.dns.server.clone().unwrap_or_default();
-        let c_dns_servers = CString::new(dns_servers).unwrap_or_default();
-        unsafe { t2s_set_dns_servers(c_dns_servers.as_ptr()) };
 
         // Serialize the fd handoff with abort. Never close a numeric fd while
         // Go is opening it, nor after Go's device has taken ownership of it.

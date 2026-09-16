@@ -508,7 +508,7 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     let mut config_json = inject_string_field(&config_json, "DataRootDirectory", &data_root_dir)?;
     config_json = inject_psiphon_ports(&config_json, p.socks_port, p.http_port)?;
     config_json = inject_string_field(&config_json, "ListenInterface", if cfg.lan_sharing { "any" } else { "" })?;
-    config_json = inject_android_resolver_policy(&config_json)?;
+    config_json = inject_bootstrap_resolvers(&config_json)?;
 
     // Do not volunteer as an in-proxy proxy unless explicitly configured.
     // This is distinct from client dialing, which Auto/tactics may select.
@@ -633,6 +633,62 @@ fn inject_egress_region(config_json: &str, region: &str) -> Result<String> {
     inject_string_field(config_json, "EgressRegion", region)
 }
 
+/// Resolvers for tunnel-core's OWN lookups (fronting domains, remote server
+/// list hosts, tactics). Those never enter the tunnel: the resolver opens its
+/// own UDP socket bound to the underlying network, so they leave on the
+/// carrier link. Networks that hijack UDP/53 answer with a private address,
+/// tunnel-core rejects it ("IP is bogon"), and nothing resolves -- the
+/// tunnel sits at CandidateServers 0 with a healthy transport. The TUN's
+/// resolvers do not help: the interception is by port, not destination.
+///
+/// Public resolvers on ports the interception does not sit on. This is the
+/// resolver set tunnel-core is pinned to; the default-resolver escape hatch
+/// is closed so a failed bound lookup cannot drop to the carrier resolver.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
+const BOOTSTRAP_RESOLVERS: &[&str] = &[
+    "208.67.222.222:5353",
+    "9.9.9.9:9953",
+    "208.67.220.220:5353",
+];
+
+/// Pin tunnel-core's resolver to [`BOOTSTRAP_RESOLVERS`].
+///
+/// * `DNSResolverAlternateServers`: the list used when tunnel-core sees no
+///   system resolvers at all (desktop without a resolv.conf, sandboxed).
+/// * `DNSResolverPreferredAlternateServers` at probability 1.0: the same
+///   list, tried first and unconditionally, on hosts where tunnel-core does
+///   discover system resolvers. Probability defaults to 0.0 -- configured
+///   but effectively never chosen -- so 1.0 is load-bearing.
+/// * Two attempts per preferred server: one lost UDP packet on a mobile
+///   link must not exhaust the list.
+/// * `AllowDefaultDNSResolverWithBindToDevice` off: that flag lets Android
+///   builds drop to Go's default resolver -- the carrier one -- when bound
+///   lookups fail. Off, a failure is a failure.
+///
+/// Keys the caller already set are kept.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
+fn inject_bootstrap_resolvers(config_json: &str) -> Result<String> {
+    let mut object: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
+        CoreError::InvalidConfig(format!("psiphon.config_json is invalid JSON: {e}"))
+    })?;
+    let map = object.as_object_mut().ok_or_else(|| {
+        CoreError::InvalidConfig("psiphon.config_json must be a JSON object".into())
+    })?;
+    let list = || {
+        serde_json::Value::Array(
+            BOOTSTRAP_RESOLVERS.iter().map(|s| serde_json::Value::String((*s).into())).collect(),
+        )
+    };
+    map.entry("DNSResolverAlternateServers").or_insert_with(list);
+    map.entry("DNSResolverPreferredAlternateServers").or_insert_with(list);
+    map.entry("DNSResolverPreferAlternateServerProbability").or_insert(serde_json::json!(1.0));
+    map.entry("DNSResolverAttemptsPerPreferredServer").or_insert(serde_json::json!(2));
+    map.entry("AllowDefaultDNSResolverWithBindToDevice").or_insert(serde_json::Value::Bool(false));
+    serde_json::to_string(&object).map_err(|e| {
+        CoreError::InvalidConfig(format!("could not render psiphon.config_json: {e}"))
+    })
+}
+
 /// Set a bool field in a flat Psiphon config object.
 #[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 fn inject_bool_field(config_json: &str, key: &str, value: bool) -> Result<String> {
@@ -689,40 +745,6 @@ fn inject_psiphon_ports(config_json: &str, socks: u16, http: u16) -> Result<Stri
 }
 
 
-/// Permit the platform resolver even though BindToDevice is configured.
-///
-/// Upstream disables the standard library resolver whenever a DeviceBinder is
-/// set, because the system resolver may route inside the VPN:
-///
-/// ```text
-/// return c.BindToDevice == nil || c.AllowDefaultResolverWithBindToDevice
-/// ```
-///
-/// On Android that is too strict for us: the host OS keeps DNS out of the VPN
-/// already, and `VpnService.Builder.addDisallowedApplication(ourselves)` means
-/// our own lookups are never captured. Without this flag the resolver is left
-/// with whatever `GetDNSServersAsString` returned and nothing else, so a
-/// momentary gap in that list turned into "no DNS servers" and killed the
-/// connect. The flag is a no-op off Android, where BindToDevice is never set.
-#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
-fn inject_android_resolver_policy(config_json: &str) -> Result<String> {
-    if !cfg!(target_os = "android") {
-        return Ok(config_json.to_string());
-    }
-    let mut object: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
-        CoreError::InvalidConfig(format!("psiphon.config_json is invalid JSON: {e}"))
-    })?;
-    let map = object.as_object_mut().ok_or_else(|| {
-        CoreError::InvalidConfig("psiphon.config_json must be a JSON object".into())
-    })?;
-    // Only set it when the caller has not expressed an opinion, so a config
-    // that deliberately turns it off keeps working.
-    map.entry("AllowDefaultDNSResolverWithBindToDevice")
-        .or_insert(serde_json::Value::Bool(true));
-    serde_json::to_string(&object).map_err(|e| {
-        CoreError::InvalidConfig(format!("could not render psiphon.config_json: {e}"))
-    })
-}
 
 /// The cgo boundary. Only compiled when the archive is actually linked.
 #[cfg(all(feature = "enabled", psiphon_linked))]
@@ -1230,52 +1252,36 @@ mod tests {
         );
     }
 
+
+
+
+    /// tunnel-core's own lookups are pinned to one resolver set, with the
+    /// escape hatch back to the carrier resolver closed.
     #[test]
-    #[cfg(target_os = "android")]
-    fn android_allows_the_default_resolver_alongside_bind_to_device() {
+    fn bootstrap_resolvers_are_pinned() {
         let cfg = make_config(Some(r#"{"PropagationChannelId":"x"}"#), Some("/tmp/psi"));
         let inputs = validate(&cfg).expect("should validate");
-        assert!(
-            inputs
-                .config_json
-                .contains(r#""AllowDefaultDNSResolverWithBindToDevice":true"#),
-            "got: {}",
-            inputs.config_json
-        );
+        let v: serde_json::Value = serde_json::from_str(&inputs.config_json).unwrap();
+        let list = serde_json::json!(["208.67.222.222:5353", "9.9.9.9:9953", "208.67.220.220:5353"]);
+        assert_eq!(v["DNSResolverAlternateServers"], list);
+        assert_eq!(v["DNSResolverPreferredAlternateServers"], list);
+        assert_eq!(v["DNSResolverPreferAlternateServerProbability"], 1.0);
+        assert_eq!(v["DNSResolverAttemptsPerPreferredServer"], 2);
+        assert_eq!(v["AllowDefaultDNSResolverWithBindToDevice"], false);
     }
 
-    /// An explicit `false` is a deliberate choice and must survive.
+    /// A caller's explicit choice survives; only missing keys are filled.
     #[test]
-    #[cfg(target_os = "android")]
-    fn an_explicit_resolver_policy_is_not_overwritten() {
+    fn an_explicit_bootstrap_resolver_policy_is_kept() {
         let cfg = make_config(
-            Some(r#"{"AllowDefaultDNSResolverWithBindToDevice":false}"#),
+            Some(r#"{"DNSResolverPreferredAlternateServers":["1.2.3.4:5353"],"AllowDefaultDNSResolverWithBindToDevice":true}"#),
             Some("/tmp/psi"),
         );
         let inputs = validate(&cfg).expect("should validate");
-        assert!(
-            inputs
-                .config_json
-                .contains(r#""AllowDefaultDNSResolverWithBindToDevice":false"#),
-            "got: {}",
-            inputs.config_json
-        );
-    }
-
-    /// Desktop never sets BindToDevice, so the flag must stay absent rather
-    /// than being written unconditionally.
-    #[test]
-    #[cfg(not(target_os = "android"))]
-    fn desktop_does_not_touch_the_resolver_policy() {
-        let cfg = make_config(Some(r#"{"PropagationChannelId":"x"}"#), Some("/tmp/psi"));
-        let inputs = validate(&cfg).expect("should validate");
-        assert!(
-            !inputs
-                .config_json
-                .contains("AllowDefaultDNSResolverWithBindToDevice"),
-            "got: {}",
-            inputs.config_json
-        );
+        let v: serde_json::Value = serde_json::from_str(&inputs.config_json).unwrap();
+        assert_eq!(v["DNSResolverPreferredAlternateServers"], serde_json::json!(["1.2.3.4:5353"]));
+        assert_eq!(v["AllowDefaultDNSResolverWithBindToDevice"], true);
+        assert_eq!(v["DNSResolverAttemptsPerPreferredServer"], 2);
     }
 
     #[test]
