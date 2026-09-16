@@ -151,14 +151,11 @@ pub struct Endpoints {
     /// Public IP of the selected server, excluded from TUN routes to avoid a
     /// routing loop.
     pub peer_ip: Option<String>,
-    /// Whether the SOCKS endpoint carries UDP (UDP ASSOCIATE). Psiphon's
-    /// local SOCKS is CONNECT-only, and a Tor egress has no UDP at all, so
-    /// tun2socks must not hand either one 0x03 requests: they would refuse
-    /// each one and spam the log for every app UDP flow (DNS, QUIC, ...).
+    /// Whether the SOCKS endpoint speaks the full SOCKS5 protocol, including
+    /// UDP ASSOCIATE. tun2socks dials every endpoint as plain `socks5`;
+    /// backends that cannot carry UDP answer ASSOCIATE themselves (Aether's
+    /// tor listeners relay DNS over TCP and drop the rest).
     pub udp: bool,
-    /// Use the native Psiphon UDP gateway with its transparent DNS flag.
-    /// No public DoH provider or direct DNS fallback is attempted.
-    pub psiphon_dns: bool,
 }
 
 impl Endpoints {
@@ -167,7 +164,6 @@ impl Endpoints {
         http: None,
         peer_ip: None,
         udp: true,
-        psiphon_dns: false,
     };
 }
 

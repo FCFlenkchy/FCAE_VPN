@@ -1,8 +1,12 @@
 package com.fc.fcaevpn;
 
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -64,10 +68,39 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String EXTRA_TOTAL_DOWN = "totalDown";
 
     // Accessed on the application main thread. The app notification owner keeps
-    // this binding alive; the isolated Go service never becomes a foreground service.
+    // this binding alive.
     private static volatile android.content.ServiceConnection connection;
     private static final java.util.concurrent.atomic.AtomicLong bindingEpoch = new java.util.concurrent.atomic.AtomicLong();
     private static volatile long activeSession;
+    // EVERY live binder, not just the latest: a rebind that was already
+    // accepted can outlive a session switch, and a leaked binder reference
+    // would pin the :psiphon process (and its tunnel) after a disconnect.
+    // stopBound unbinds all of them.
+    private static final java.util.Set<android.content.ServiceConnection> liveConnections =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
+
+    /**
+     * FGS keep-alive. A bound-only service in a SEPARATE background process is
+     * exactly what the system reclaims first under memory pressure (and what
+     * OEM "cleaners" kill): the binder drops, the chain fails, and the tunnel
+     * "disconnects" on its own. A foreground service (low-importance, silent
+     * notification) pins the process for the lifetime of the user's session.
+     */
+    private static final String FGS_CHANNEL_ID = "fcaevpn_psiphon";
+    private static final int FGS_NOTIFICATION_ID = 3;
+
+    /**
+     * Rebind safety net for the kills the FGS still cannot prevent (OOM, OEM
+     * killers). The binder dropping must NOT fail the session: the Rust lease
+     * stays pending (no 0-port completion is sent), so the TUN keeps running
+     * while we rebind with the SAME intent (same requestId + psiSession). The
+     * restarted service replays the tunnel config and its READY refreshes the
+     * lease ports in place. Only after MAX_REBIND_ATTEMPTS do we give up and
+     * fail the chain, which the supervisor then handles with a fresh request.
+     */
+    private static final int MAX_REBIND_ATTEMPTS = 5;
+    private static final long REBIND_DELAY_MS = 1500L;
+    private static volatile int rebindAttempts;
     private long session;
     private long attachRequestId;
     private static volatile long clientAttachId;
@@ -89,6 +122,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                         if (id == 0 || id != clientAttachId || !isCurrentBroadcast(i)) return;
                         if (BROADCAST_READY.equals(i.getAction())) {
                             if (i.getBooleanExtra("regionsOnly", false)) return;
+                            rebindAttempts = 0; // the tunnel is alive again
                             NativeEngine.nativePsiphonAttachComplete(id,
                                 i.getIntExtra(EXTRA_SOCKS, 0), i.getIntExtra(EXTRA_HTTP, 0));
                         } else { NativeEngine.nativePsiphonAttachComplete(id, 0, 0); }
@@ -133,43 +167,108 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             if (epoch != bindingEpoch.get() || connection != null) return;
             activeSession = android.os.SystemClock.elapsedRealtimeNanos();
             intent.putExtra("psiSession", activeSession);
-            android.content.ServiceConnection next = new android.content.ServiceConnection() {
-                @Override public void onServiceConnected(android.content.ComponentName name, IBinder binder) {}
-                @Override public void onServiceDisconnected(android.content.ComponentName name) {
-                    if (connection != this) return;
-                    stopBound(app);
-                    Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
-                    failed.putExtra("psiSession", activeSession);
-                    failed.putExtra("requestId", intent.getLongExtra("requestId", 0));
-                    failed.putExtra(EXTRA_ERROR, "Psiphon process exited");
-                    app.sendBroadcast(failed);
-                }
-            };
+            android.content.ServiceConnection next = makeConnection(app, intent);
             connection = next;
+            liveConnections.add(next);
+            // Started AND bound: START_STICKY only applies to started services,
+            // so the system restarts a killed :psiphon process (its null-intent
+            // handler exits it quietly; the rebind below recreates it with the
+            // real extras). The FGS notification is raised inside the service.
+            try { app.startService(intent); } catch (Throwable ignored) {}
             if (!app.bindService(intent, next, Context.BIND_AUTO_CREATE)) {
                 connection = null;
+                liveConnections.remove(next);
                 Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
                 failed.putExtra("psiSession", activeSession);
-                    failed.putExtra("requestId", intent.getLongExtra("requestId", 0));
+                failed.putExtra("requestId", intent.getLongExtra("requestId", 0));
                 failed.putExtra(EXTRA_ERROR, "Unable to bind Psiphon service");
                 app.sendBroadcast(failed);
             }
         });
     }
 
+    static android.content.ServiceConnection makeConnection(final Context app, final Intent intent) {
+        return new android.content.ServiceConnection() {
+            @Override public void onServiceConnected(android.content.ComponentName name, IBinder binder) {}
+            @Override public void onServiceDisconnected(android.content.ComponentName name) {
+                // Process death: drop this binder from the live set no matter
+                // what; only the CURRENT connection triggers a rebind (a
+                // stale duplicate binder must not rebind twice).
+                liveConnections.remove(this);
+                if (connection != this) return;
+                connection = null;
+                // The :psiphon process died. NOT a user action: keep the
+                // session alive (no 0-port completion, no BROADCAST_FAILED)
+                // and rebind with the same intent instead.
+                Log.w(TAG, "Psiphon process lost the binder; rebind scheduled");
+                scheduleRebind(app, intent);
+            }
+        };
+    }
+
+    static void scheduleRebind(final Context app, final Intent original) {
+        // A stopBound/startBound that lands before we fire invalidates us via
+        // the epoch bump; a new binding already present means the session
+        // moved on. clientAttachId == 0 means the request was dropped.
+        final long epoch = bindingEpoch.get();
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (connection != null || clientAttachId == 0 || epoch != bindingEpoch.get()) return;
+            if (rebindAttempts >= MAX_REBIND_ATTEMPTS) {
+                rebindAttempts = 0;
+                long req = clientAttachId;
+                Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
+                failed.putExtra("psiSession", activeSession);
+                failed.putExtra("requestId", req);
+                failed.putExtra(EXTRA_ERROR, "Psiphon process exited (rebind exhausted)");
+                app.sendBroadcast(failed);
+                NativeEngine.nativePsiphonAttachComplete(req, 0, 0);
+                return;
+            }
+            rebindAttempts++;
+            Log.w(TAG, "Psiphon rebind attempt " + rebindAttempts + "/" + MAX_REBIND_ATTEMPTS);
+            try { app.startService(original); } catch (Throwable ignored) {}
+            android.content.ServiceConnection rebinding = makeConnection(app, original);
+            if (!app.bindService(original, rebinding, Context.BIND_AUTO_CREATE)) {
+                Log.w(TAG, "Psiphon rebind " + rebindAttempts + " refused; retrying");
+                scheduleRebind(app, original);
+            } else {
+                liveConnections.add(rebinding);
+                // Watchdog: if the bind was accepted but the process never
+                // connects (creation failed), no ServiceConnection callback
+                // ever fires, so 20 s of silence counts as a failed attempt.
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    if (connection == null && clientAttachId != 0) scheduleRebind(app, original);
+                }, 20000L);
+            }
+        }, REBIND_DELAY_MS);
+    }
+
     public static void stopBound(Context context) {
         Context app = context.getApplicationContext();
         bindingEpoch.incrementAndGet(); // invalidate starts not yet delivered
-        final android.content.ServiceConnection old = connection;
+        final java.util.List<android.content.ServiceConnection> old =
+                new java.util.ArrayList<>(liveConnections);
+        liveConnections.clear();
+        connection = null;
         final long request = clientAttachId;
         clientAttachId = 0;
         if (request != 0) NativeEngine.nativePsiphonAttachComplete(request, 0, 0);
-        new Handler(Looper.getMainLooper()).post(() -> {
-            if (connection == old) connection = null;
-            if (old != null) {
-                try { app.unbindService(old); } catch (IllegalArgumentException ignored) {}
-            }
-        });
+        // The service is ALSO started (for START_STICKY), so unbinding alone
+        // would leave it — and its tunnel — running. stopService is safe when
+        // nothing is running and covers the orphan case (binder already
+        // dropped, live set empty). A queued startBound for the NEXT session
+        // posts its startService after the unbinds below, so a fresh session
+        // is not hurt.
+        try { app.stopService(new Intent(app, PsiphonTunnelService.class)); }
+        catch (Throwable ignored) {}
+        if (!old.isEmpty()) {
+            new Handler(Looper.getMainLooper()).post(() -> {
+                // unbindService must run on the thread that bound (main).
+                for (android.content.ServiceConnection c : old) {
+                    try { app.unbindService(c); } catch (IllegalArgumentException ignored) {}
+                }
+            });
+        }
     }
 
     // Legacy PUBLIC remote server list + signature key from the open-source
@@ -262,8 +361,69 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onCreate() {
         super.onCreate();
+        createFgsChannel();
         // Binding policy depends on the per-start LAN option, not onCreate.
         // Construct the singleton on libraryWorker, never on Android main.
+    }
+
+    private void createFgsChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm == null) return;
+            // LOW importance on purpose: this notification exists to pin the
+            // process, not to inform. No sound, no badge.
+            NotificationChannel ch = new NotificationChannel(FGS_CHANNEL_ID, "FCAE tunnel process",
+                    NotificationManager.IMPORTANCE_LOW);
+            ch.setDescription("Keeps the Psiphon tunnel process alive");
+            ch.setShowBadge(false);
+            ch.setSound(null, null);
+            ch.enableVibration(false);
+            nm.createNotificationChannel(ch);
+        }
+    }
+
+    /**
+     * Raise (or update) the keep-alive foreground notification. Runs on the
+     * main looper: callers include AAR callbacks. A launch-restriction
+     * exception degrades to bind-only operation (the pre-change behaviour)
+     * rather than breaking the tunnel.
+     */
+    @SuppressWarnings("deprecation")
+    private void startFgs(String text) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (stopping) return;
+            try {
+                Notification.Builder nb = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                    ? new Notification.Builder(this, FGS_CHANNEL_ID)
+                    : new Notification.Builder(this);
+                Notification n = nb.setContentTitle("FCAE VPN")
+                    .setContentText(text)
+                    .setSmallIcon(android.R.drawable.ic_lock_lock)
+                    .setOngoing(true)
+                    .setOnlyAlertOnce(true)
+                    .setCategory(Notification.CATEGORY_SERVICE)
+                    .setVisibility(Notification.VISIBILITY_PUBLIC)
+                    .setPriority(Notification.PRIORITY_LOW)
+                    .build();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    startForeground(FGS_NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                } else {
+                    startForeground(FGS_NOTIFICATION_ID, n);
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "startForeground (psiphon) failed: " + t.getMessage());
+            }
+        });
+    }
+
+    private void stopFgs() {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Throwable ignored) {}
+            try {
+                NotificationManager nm = getSystemService(NotificationManager.class);
+                if (nm != null) nm.cancel(FGS_NOTIFICATION_ID);
+            } catch (Throwable ignored) {}
+        });
     }
 
     @Override
@@ -319,6 +479,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         bytesUp.set(0);
         bytesDown.set(0);
         broadcastStage(1, "CONNECTING");
+        // Pin the process for the whole requested session: startTunneling()
+        // can take 10-60 s on a slow egress, and that is exactly the window
+        // the system reclaims unkept background processes in.
+        startFgs("Establishing tunnel\u2026");
         libraryWorker.execute(() -> {
             try {
                 if (stopping) return;
@@ -374,7 +538,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         dialStartedAtMs = System.currentTimeMillis();
         logHandler.removeCallbacks(dialHeartbeat);
         logHandler.postDelayed(dialHeartbeat, 10000L);
-        return START_NOT_STICKY;
+        // Sticky: if the system kills this process while the user's session
+        // is live, restart it (null intent -> quiet exit below; the rebind /
+        // supervisor recreates it with the real extras).
+        return START_STICKY;
     }
 
     private synchronized void stopNow() {
@@ -385,6 +552,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (stopping) return;
         stopping = true;
         logHandler.removeCallbacks(dialHeartbeat);
+        stopFgs();
         Thread st = statsThread;
         if (st != null) st.interrupt();
         // Only touch the native library when a tunnel is actually up or a
@@ -727,6 +895,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (s <= 0) s = tunnel.getLocalSocksProxyPort();
         socksPort.set(s);
         emitLog("connected, SOCKS 127.0.0.1:" + s);
+        startFgs("Tunnel running");
         flushLogs();
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());

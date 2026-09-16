@@ -415,20 +415,12 @@ impl TunBridge for Tun2SocksBridge {
         platform::ensure_wintun(wintun_bytes())?;
 
         let (device, owned_fd) = self.device_spec(cfg)?;
-        // socks5t = TCP-only SOCKS5 (registered by the Go bridge). Upstreams
-        // that cannot take UDP -- Psiphon's local proxy is CONNECT-only, a
-        // Tor egress has no UDP at all -- would otherwise be hammered with a
-        // UDP ASSOCIATE (command 0x03) per app flow (DNS, QUIC); with
-        // socks5t tun2socks drops those flows locally in silence.
-        let scheme = if endpoints.udp {
-            "socks5"
-        } else if endpoints.psiphon_dns {
-            log::info!("[tun] Psiphon DNS: native UDP gateway through the selected exit (no fallback)");
-            "socks5p"
-        } else {
-            "socks5t"
-        };
-        let proxy = format!("{scheme}://{socks}");
+        // Always plain socks5 (full protocol, UDP ASSOCIATE). Every backend
+        // speaks it end to end: Aether's WARP listener carries real UDP,
+        // Aether's tor listeners answer ASSOCIATE by relaying DNS as
+        // DNS-over-TCP through the exit (and dropping other datagrams), and
+        // Psiphon is dialed as a plain SOCKS5 client.
+        let proxy = format!("socks5://{socks}");
 
         let c_device = CString::new(device.clone())
             .map_err(|_| CoreError::Internal("device string contains a NUL".into()))?;

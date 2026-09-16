@@ -968,7 +968,13 @@ public class FCAEVpnService extends VpnService {
         // pause landing in the connect window would not stop the worker, and
         // it would resurrect "running" (live TUN) after the pause.
         final long myGen = cleanupGeneration.incrementAndGet();
-        if (lastStartIntent != null && lastStartIntent.getBooleanExtra("psiphonThroughTunnel", false)) {
+        // ANY Psiphon exit keeps the tunnel process bound for the whole
+        // session. Stopping only the chained variant leaked the plain
+        // Psiphon (backend == 1) :psiphon process — and its live tunnel —
+        // after a Stop.
+        final Intent lsi = lastStartIntent;
+        if (lsi != null && (lsi.getIntExtra("backend", 0) == 1
+                || lsi.getBooleanExtra("psiphonThroughTunnel", false))) {
             PsiphonTunnelService.stopBound(this);
         }
         running = false;

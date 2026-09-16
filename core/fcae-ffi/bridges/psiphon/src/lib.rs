@@ -1049,9 +1049,9 @@ impl BackendHandle for PsiphonHandle {
             // before TUN is raised, and the supervisor excludes the SOCKS
             // loopback rather than a peer IP.
             peer_ip: None,
-            // Psiphon's local SOCKS5 is CONNECT-only: no UDP ASSOCIATE.
-            udp: false,
-            psiphon_dns: true,
+            // Plain SOCKS5: tun2socks hands the local proxy full-protocol
+            // flows (TCP CONNECT + UDP ASSOCIATE for DNS/QUIC).
+            udp: true,
         }
     }
 
@@ -1183,11 +1183,10 @@ mod tests {
     }
 
     #[test]
-    fn psiphon_endpoint_requires_native_dns() {
+    fn psiphon_endpoint_uses_plain_socks5() {
         let handle = PsiphonHandle { host_lease: None, socks_port: 1080, http_port: 8080, stopped: AtomicBool::new(false) };
         let endpoints = handle.endpoints();
-        assert!(!endpoints.udp);
-        assert!(endpoints.psiphon_dns);
+        assert!(endpoints.udp);
     }
 
     #[test]
