@@ -79,6 +79,9 @@ public class FCAEVpnService extends VpnService {
     private volatile long pendingSessionGen = -1;
     /** Serialises TUN fd ownership between establishTunNow and teardown. */
     private final Object tunLock = new Object();
+    /** Serialises interface CREATION between the early establish (startup
+     *  worker thread) and the core's on-demand fd request (JNI thread). */
+    private final Object tunEstablishLock = new Object();
     private volatile ParcelFileDescriptor vpnInterface;
     private volatile Runnable vpnThread; // queued native startup, never a waiting thread
     private volatile boolean running = false;
@@ -380,8 +383,29 @@ public class FCAEVpnService extends VpnService {
         return added;
     }
 
+    /**
+     * Create the session's TUN interface and hand its fd to the caller.
+     *
+     * Reached from two threads by design: the startup worker (early
+     * establish, Psiphon sessions) and the core's on-demand fd provider
+     * (JNI). tunEstablishLock serialises the two creations; the
+     * double-check under tunLock makes the second call a no-op that
+     * reuses the interface the first one created.
+     */
     @SuppressWarnings("unused")
     public int establishTunNow() {
+        synchronized (tunEstablishLock) {
+            synchronized (tunLock) {
+                if (vpnInterface != null) {
+                    // Already up (early establish won the race): reuse it.
+                    return vpnInterface.getFd();
+                }
+            }
+            return establishTunLocked();
+        }
+    }
+
+    private int establishTunLocked() {
         // A disconnect may have arrived while the backend was still dialling.
         // Building an interface for a session nobody wants any more is what
         // used to strand a live TUN behind a disconnected UI.
@@ -727,16 +751,36 @@ public class FCAEVpnService extends VpnService {
                 }
                 try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
 
-                // The interface is NOT established here.
-                //
-                // Doing so put the system routes in place before the backend
-                // had connected, so every packet of the handshake depended on
-                // the protect hook catching every socket; anything it missed
-                // looped straight back into our own half-built tunnel. The
-                // core now calls establishTunNow() through the fd provider,
-                // once a backend has reported a live SOCKS endpoint. Proxy
-                // mode never calls it at all, so no interface is created.
                 pendingSessionGen = sessionGen;
+
+                // Psiphon sessions raise OUR TUN first, before the backend
+                // starts. FCAEVpnService + tun2socks is the only VPN
+                // interface on the device; the Psiphon library stays a
+                // plain SOCKS/HTTP backend (setVpnMode(false)). Its
+                // NetworkMonitor watches the default network, so in the
+                // old order (backend first, TUN later) the monitor saw our
+                // TUN appear only after the tunnel was live and the
+                // controller terminated it on the network-change event --
+                // a dead DNS/connection window on every session. With the
+                // TUN up first, that event lands while no tunnel is active
+                // yet and is harmless (a late one, if the validation lands
+                // just after tunnel-up, is absorbed by the controller's
+                // automatic reconnect).
+                //
+                // This cannot loop the way the old establish-up-front
+                // design could: every process in this package (the
+                // in-process core and the :psiphon process) is excluded
+                // from the TUN by addDisallowedApplication() in the
+                // Builder, and :psiphon is additionally pinned to the
+                // physical network, so no handshake packet re-enters the
+                // TUN. Non-Psiphon TUN sessions keep the on-demand order:
+                // the core's fd provider still calls establishTunNow()
+                // once the backend reports a live SOCKS endpoint. Proxy
+                // mode never establishes an interface at all.
+                if (mode == 1 && sessionPsiphonExit) {
+                    establishTunNow();
+                }
+
                 NativeEngine.nativeInit();
                 try {
                     // tun2socks runs IN-PROCESS: its Go code is linked into

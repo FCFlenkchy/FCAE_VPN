@@ -27,8 +27,7 @@
         <!-- Active controls (switch thumb/track, checkboxes): app accent
              blue instead of the theme default. -->
         <item name="android:colorControlActivated">#FF60A5FA</item>
-        <!-- System bars stay dark with light icons (API 23+, minSdk 24).
-             The navigation-bar variant needs API 27 -> values-v27. -->
+        <!-- System bars stay dark with light icons (API 23+, minSdk 24). -->
         <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

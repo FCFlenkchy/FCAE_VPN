@@ -336,22 +336,20 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 synchronized (LIBRARY_LOCK) {
                     if (stopping) return;
                     tunnel = PsiphonTunnel.newPsiphonTunnel(this);
-                    // VPN mode is REQUIRED even though this service is not the
-                    // VpnService itself. In non-VPN mode the library's
-                    // NetworkMonitor requests the default network WITHOUT
-                    // NET_CAPABILITY_NOT_VPN, so the moment FCAEVpnService
-                    // raises the TUN the monitor sees "active network changed
-                    // MOBILE -> VPN", calls Psi.networkChanged() and the
-                    // controller terminates the tunnel we just handed to
-                    // tun2socks ("tunnel failed" 0 bytes in, then 5-10 s of
-                    // "no active tunnels" for every app connection and DNS
-                    // query). In VPN mode the monitor watches only the
-                    // underlying physical networks, the network ID is the
-                    // physical one (tactics/replay keyed correctly) and the
-                    // DNSServerGetter never reports the TUN's own resolvers.
-                    // bindToDevice() below stays a no-op: the process is
-                    // already pinned to the physical network.
-                    tunnel.setVpnMode(true);
+                    // Plain proxy mode, by design: FCAEVpnService +
+                    // tun2socks is the ONLY VPN/TUN interface on the
+                    // device (Android and desktop alike); this library
+                    // instance is just the SOCKS/HTTP backend that
+                    // tun2socks dials. It must never run in the
+                    // library's VPN mode, which re-keys its network
+                    // monitoring, network ID and DNS getters as if the
+                    // library itself were the device VPN. Plain mode's
+                    // one network-change event (fired when our TUN is
+                    // validated) is harmless here: FCAEVpnService raises
+                    // the TUN BEFORE this tunnel starts, so the event
+                    // lands with no active tunnel; a late one is
+                    // absorbed by the controller's automatic reconnect.
+                    tunnel.setVpnMode(false);
                     tunnel.startTunneling(embeddedList);
                 }
                 emitLog("startTunneling: returned");
@@ -657,11 +655,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     @Override
     public void bindToDevice(long fileDescriptor) throws PsiphonTunnel.Exception {
-        // Called for every tunnel-core dial because setVpnMode(true) installs
-        // this service as the DeviceBinder. Not a VpnService: sockets are
-        // already excluded from the TUN via bindProcessToNetwork, so there is
-        // nothing to protect(). Closing would recycle the fd out from under
-        // Go — leave it.
+        // HostService hook for the library's VPN-mode device binding. We
+        // run in plain proxy mode (setVpnMode(false)), so the library
+        // never installs this service as its DeviceBinder and this is
+        // never called; kept because the interface requires it. Had a
+        // binding ever arrived, closing would recycle the fd out from
+        // under Go -- leave it.
         if (fileDescriptor <= 0) {
             throw new PsiphonTunnel.Exception("bindToDevice: invalid fd");
         }

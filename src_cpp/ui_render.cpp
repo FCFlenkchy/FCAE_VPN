@@ -1283,7 +1283,7 @@ void render_ui() {
                 if (psiphon_exit) {
                     ImGui::TextDisabled("TUN DNS: Psiphon resolves at the exit; these fields apply to Aether/Tor only");
                 } else {
-                    ImGui::TextDisabled("TUN DNS (comma separated; applied on up, restored on down; empty = platform default)");
+                    ImGui::TextDisabled("TUN DNS (comma separated; applied on up, restored on down)");
                 }
                 ImGui::BeginDisabled(psiphon_exit);
                 ImGui::PushItemWidth(-1);
@@ -1423,7 +1423,7 @@ void render_ui() {
             // Psiphon's own listeners, kept off the engine's and Tor's ports.
             ImGui::InputInt("Psiphon SOCKS port", &g_app.psiphon_socks_port);
             ImGui::InputInt("Psiphon HTTP port", &g_app.psiphon_http_port);
-            ImGui::TextDisabled("Defaults 1823 / 1824; 0 restores the default (fixed, never auto-picked).");
+            ImGui::TextDisabled("0 restores the built-in value (fixed, never auto-picked).");
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Egress");
