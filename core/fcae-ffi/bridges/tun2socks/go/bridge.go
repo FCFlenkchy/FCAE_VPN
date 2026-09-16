@@ -404,9 +404,18 @@ const (
 	// UDPInterceptUdpgwServerAddress).
 	udpgwServerPort = 7300
 
-	// One DNS exchange per allocated connection ID. Retries reuse the
-	// channel; the cooldown keeps a dead exit from being hammered with
-	// fresh CONNECTs by every pending query at once.
+	// DNS queries are multiplexed over a SMALL FIXED POOL of udpgw
+	// connection IDs. Each distinct connection ID is one UDP port forward
+	// on the exit, and the exit keeps at most MaxUDPPortForwardCount (32
+	// by default, server/trafficRules.go) per client, closing the least
+	// recently used one when a new ID arrives. Minting a fresh ID per
+	// query -- what this gateway used to do -- therefore evicted in-flight
+	// exchanges as soon as a resolver burst exceeded 32 lookups, which
+	// surfaced as reply timeouts / SERVFAIL and as a steady stream of
+	// server-side forward closes (the climbing "port forward failures"
+	// counter). Eight slots stay well under the cap and under the 30 s
+	// idle timer thanks to the keepalive, so the forwards never churn.
+	udpgwDNSSlots       = 8
 	udpgwMaxPending     = 512
 	udpgwDialCooldown   = 250 * time.Millisecond
 	udpgwKeepaliveEvery = 20 * time.Second
@@ -420,15 +429,15 @@ const (
 // existing one (psiphon/server/udp.go, handleUdpgwChannel: "This channel
 // will replace any previously existing udpgw channel for this client").
 //
-// The previous implementation opened a fresh CONNECT to the gateway per
-// query, so any two overlapping lookups killed the first channel mid
-// exchange; on a busy resolver (Android fires 5+ queries at startup) that
-// meant a constant stream of "UDPGW reply: EOF" failures, SERVFAIL answers
-// and -- because each broken channel counts as a failed tunneled conn --
-// the climbing "port forward failures" counter in the Psiphon notices.
-// This gateway is the official BadVPN client design instead: one channel,
-// queries demultiplexed by the udpgw connection ID, writes serialised,
-// automatic reconnect with in-flight retry, and keepalives.
+// Within that channel the server is a plain UDP NAT table keyed by
+// connection ID with LRU eviction (see udpgwDNSSlots). The official BadVPN
+// client reuses one ID per flow for exactly that reason; this gateway does
+// the same for DNS: queries are spread round-robin over udpgwDNSSlots IDs
+// and demultiplexed by the DNS transaction ID, which the gateway rewrites
+// to a value unique among in-flight exchanges (and restores in the reply)
+// exactly like any forwarding resolver. Writes are serialised, the channel
+// reconnects automatically with in-flight retry, and keepalives keep the
+// slots warm on the exit.
 type udpgwGateway struct {
 	ctx   context.Context
 	inner proxy.Proxy
@@ -436,8 +445,9 @@ type udpgwGateway struct {
 	dialMu sync.Mutex // single-flight channel (re)connects
 	mu     sync.Mutex
 	conn   net.Conn
-	pending map[uint16]chan gwReply
-	nextID  uint16
+	pending  map[uint16]chan gwReply // keyed by rewritten DNS transaction ID
+	nextTxID uint16
+	nextSlot uint16
 	lastDial time.Time
 
 	writeMu sync.Mutex // SSH channels must not be written concurrently
@@ -474,6 +484,7 @@ func (g *udpgwGateway) exchange(parent context.Context, query []byte) ([]byte, e
 	if len(query) < 12 || len(query) > udpgwMaxPayload {
 		return nil, errors.New("invalid UDPGW DNS size")
 	}
+	origTxID := binary.BigEndian.Uint16(query[0:2])
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := parent.Err(); err != nil {
@@ -492,29 +503,30 @@ func (g *udpgwGateway) exchange(parent context.Context, query []byte) ([]byte, e
 			lastErr = err
 			continue
 		}
-		id, ch, ok := g.register()
+		txID, slot, ch, ok := g.register()
 		if !ok {
 			lastErr = errors.New("udpgw: query table full")
 			continue
 		}
-		if err := g.send(conn, id, query); err != nil {
-			g.retire(id)
+		if err := g.send(conn, slot, txID, query); err != nil {
+			g.retire(txID)
 			g.invalidate(conn)
 			lastErr = err
 			continue
 		}
 		select {
 		case rep := <-ch:
-			g.retire(id)
+			g.retire(txID)
 			if rep.err == nil {
+				binary.BigEndian.PutUint16(rep.payload[0:2], origTxID)
 				return rep.payload, nil
 			}
 			lastErr = rep.err
 		case <-time.After(dnsRelayTimeout):
-			g.retire(id)
+			g.retire(txID)
 			lastErr = errors.New("udpgw: reply timeout")
 		case <-parent.Done():
-			g.retire(id)
+			g.retire(txID)
 			return nil, parent.Err()
 		}
 	}
@@ -564,38 +576,40 @@ func (g *udpgwGateway) channel() (net.Conn, error) {
 	return conn, nil
 }
 
-// register claims a connection ID that is not currently in flight.
-// IDs are handed out monotonically and wrap; a wrapped ID can only collide
-// with an equally long-lived in-flight query, which the scan skips.
-func (g *udpgwGateway) register() (uint16, chan gwReply, bool) {
+// register claims a DNS transaction ID that is not currently in flight and
+// picks the next pool slot (udpgw connection ID 1..udpgwDNSSlots) round
+// robin. Transaction IDs are handed out monotonically and wrap; a wrapped
+// ID can only collide with an equally long-lived exchange, which the scan
+// skips. Slots are never "owned": the reply is matched by transaction ID,
+// so sharing a slot between concurrent queries is safe.
+func (g *udpgwGateway) register() (txID, slot uint16, ch chan gwReply, ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if len(g.pending) >= udpgwMaxPending {
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
 	for {
-		g.nextID++
-		if g.nextID == 0 {
-			g.nextID = 1
-		}
-		if _, taken := g.pending[g.nextID]; taken {
+		g.nextTxID++
+		if _, taken := g.pending[g.nextTxID]; taken {
 			continue
 		}
-		ch := make(chan gwReply, 1) // buffered: a timed-out query never blocks the reader
-		g.pending[g.nextID] = ch
-		return g.nextID, ch, true
+		ch = make(chan gwReply, 1) // buffered: a timed-out query never blocks the reader
+		g.pending[g.nextTxID] = ch
+		g.nextSlot = g.nextSlot%udpgwDNSSlots + 1
+		return g.nextTxID, g.nextSlot, ch, true
 	}
 }
 
-func (g *udpgwGateway) retire(id uint16) {
+func (g *udpgwGateway) retire(txID uint16) {
 	g.mu.Lock()
-	delete(g.pending, id)
+	delete(g.pending, txID)
 	g.mu.Unlock()
 }
 
 // send writes one UDPGW frame as a transparent DNS exchange, flagged DNS
 // exactly like the official client. The exit resolves the query with its
-// own resolver; the zero address is only a flow label.
+// own resolver; the zero address is only a flow label. The DNS transaction
+// ID is replaced by the gateway-unique txID; exchange restores it.
 //
 // The DNS flag is what makes this work on every exit. A plain UDP port
 // forward to a resolver of our choosing goes through the exit's traffic
@@ -606,25 +620,29 @@ func (g *udpgwGateway) retire(id uint16) {
 //
 // Wire layout mirrors the official server/udp.go: LE length excluding the
 // length field, flags, LE connection ID, raw IP, BE port, UDP payload.
-func (g *udpgwGateway) send(conn net.Conn, id uint16, query []byte) error {
-	g.writeMu.Lock()
-	defer g.writeMu.Unlock()
-
+func (g *udpgwGateway) send(conn net.Conn, slot, txID uint16, query []byte) error {
 	ip := net.IPv4zero.To4()
 	frame := make([]byte, 11+len(query))
 	binary.LittleEndian.PutUint16(frame[0:2], uint16(len(frame)-2))
 	frame[2] = udpgwFlagDNS
-	binary.LittleEndian.PutUint16(frame[3:5], id)
+	binary.LittleEndian.PutUint16(frame[3:5], slot)
 	copy(frame[5:9], ip)
 	binary.BigEndian.PutUint16(frame[9:11], 53)
 	copy(frame[11:], query)
+	binary.BigEndian.PutUint16(frame[11:13], txID)
+
+	g.writeMu.Lock()
+	defer g.writeMu.Unlock()
 	_, err := conn.Write(frame)
 	return err
 }
 
-// readLoop demultiplexes gateway replies by connection ID. One goroutine
-// per channel; it exits on any I/O or framing error, failing every pending
-// exchange so they retry on a fresh channel.
+// readLoop demultiplexes gateway replies by DNS transaction ID. One
+// goroutine per channel; it exits on an I/O error or a corrupt length
+// prefix (the stream is unrecoverable then), failing every pending
+// exchange so they retry on a fresh channel. A well-framed message with
+// an unusable body -- empty resolver answer, unknown flag layout -- is
+// skipped: one odd datagram must not tear down every lookup in flight.
 func (g *udpgwGateway) readLoop(conn net.Conn) {
 	defer g.drop(conn)
 	buf := make([]byte, 2+udpgwMaxMessageSize)
@@ -652,14 +670,13 @@ func (g *udpgwGateway) readLoop(conn net.Conn) {
 		}
 		// Envelope: flags(1) connID(2) ip(addrLen) port(2) payload...
 		if size < 5+addrLen+12 {
-			g.failAll(conn, errors.New("invalid UDPGW DNS envelope"))
-			return
+			continue // not a DNS message; nothing to match, nothing to fail
 		}
-		id := binary.LittleEndian.Uint16(buf[3:5])
 		payload := append([]byte(nil), buf[7+addrLen:2+size]...)
+		txID := binary.BigEndian.Uint16(payload[0:2])
 
 		g.mu.Lock()
-		ch, ok := g.pending[id]
+		ch, ok := g.pending[txID]
 		g.mu.Unlock()
 		if !ok {
 			continue // reply for an already-retired exchange (e.g. timed out)
