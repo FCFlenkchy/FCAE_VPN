@@ -144,10 +144,27 @@ func (p udpDroppingProxy) DialUDP(m *metadata.Metadata) (net.PacketConn, error) 
 	return &blackholeConn{done: make(chan struct{})}, nil
 }
 
+// errDoTRefused is returned for TCP/853 in Psiphon mode; see DialContext.
+var errDoTRefused = errors.New("dns: DNS-over-TLS is not carried in Psiphon mode; plain DNS goes through the exit's gateway")
+
 // Psiphon's official SOCKS listener is CONNECT-only. Intercept TCP/53 too:
 // Android and desktop resolvers may retry a UDP lookup over TCP. Forwarding
 // that retry to an exit which denies TCP/53 defeats the native DNS relay.
+//
+// TCP/853 (DNS-over-TLS) is refused locally in Psiphon mode. Android's
+// "Private DNS: automatic" probes the TUN resolver on 853 before every
+// cleartext lookup; Psiphon exits whitelist ports and 853 is not on it, so
+// each probe was a tunneled CONNECT answered with "administratively
+// prohibited" -- one "port forward failure" per probe and, until the probe
+// timed out, no cleartext fallback and therefore no DNS at all. A local
+// refusal makes the OS fall back to plain DNS immediately, which the
+// gateway below then resolves through the exit. Nothing is resolved outside
+// the tunnel. (Strict mode with a named DoT host cannot work through
+// Psiphon; the OS reports "Private DNS server cannot be accessed".)
 func (p udpDroppingProxy) DialContext(ctx context.Context, m *metadata.Metadata) (net.Conn, error) {
+    if p.psiphonDNS && m.DstPort == 853 {
+        return nil, errDoTRefused
+    }
     if !p.psiphonDNS || m.DstPort != 53 || !m.DstIP.IsValid() {
         return p.Proxy.DialContext(ctx, m)
     }
@@ -453,6 +470,13 @@ type udpgwGateway struct {
 	writeMu sync.Mutex // SSH channels must not be written concurrently
 
 	keepaliveOnce sync.Once
+
+	// lastDialErr is the last CONNECT failure reported to the host log.
+	// The gateway is the ONLY DNS path in Psiphon mode, so a refused or
+	// failing CONNECT means "no DNS at all" and must be visible at the
+	// default (errors only) log level -- but once per distinct cause, not
+	// once per query.
+	lastDialErr string
 }
 
 // gwReply is one completed UDPGW exchange delivered to the waiting query.
@@ -563,13 +587,28 @@ func (g *udpgwGateway) channel() (net.Conn, error) {
 	if err != nil {
 		g.mu.Lock()
 		g.lastDial = time.Now()
+		first := g.lastDialErr != err.Error()
+		g.lastDialErr = err.Error()
 		g.mu.Unlock()
+		if first {
+			// "general SOCKS server failure" = the local SOCKS listener had
+			// no active tunnel (reconnecting); "connection refused" = the
+			// exit rejected the udpgw CONNECT itself (no UDP intercept on
+			// this server) -- the latter means DNS stays dead until the
+			// controller moves to another exit.
+			emit(logError, "[dns] Psiphon UDPGW CONNECT failed: %v", err)
+		}
 		return nil, fmt.Errorf("Psiphon UDPGW CONNECT failed: %w", err)
 	}
 	g.mu.Lock()
 	g.lastDial = time.Now()
 	g.conn = conn
+	recovered := g.lastDialErr != ""
+	g.lastDialErr = ""
 	g.mu.Unlock()
+	if recovered {
+		emit(logError, "[dns] Psiphon UDPGW channel re-established")
+	}
 
 	g.keepaliveOnce.Do(func() { go g.keepaliveLoop() })
 	go g.readLoop(conn)
