@@ -209,6 +209,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private boolean lanSharing;
     private String lanAddress = "";
     public static final String EXTRA_LAN = "psiphonLanIp";
+    /** Default local listeners; kept clear of the engine (1819/1820) and Tor (1821/1822). */
+    public static final int DEFAULT_SOCKS_PORT = 1823;
+    public static final int DEFAULT_HTTP_PORT = 1824;
+
     private int wantSocks;
     private int wantHttp;
     private final AtomicInteger socksPort = new AtomicInteger(0);
@@ -295,8 +299,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             String r = intent.getStringExtra("psiphonRegion");
             region = r == null ? "" : r.trim();
             transport = intent.getIntExtra("psiphonTransport", 0);
+            // 0 used to mean "let Psiphon pick", which moved the listener on
+            // every connect. Pin the defaults (mirrors config.rs
+            // DEFAULT_PSIPHON_*_PORT) so anything pointed at the proxy keeps
+            // working across reconnects.
             wantSocks = intent.getIntExtra("psiphonSocksPort", 0);
             wantHttp = intent.getIntExtra("psiphonHttpPort", 0);
+            if (wantSocks <= 0) wantSocks = DEFAULT_SOCKS_PORT;
+            if (wantHttp <= 0) wantHttp = DEFAULT_HTTP_PORT;
             String up = intent.getStringExtra("upstreamProxy");
             upstreamProxy = up == null ? "" : up.trim();
             lanSharing = intent.getBooleanExtra("lanSharing", false);

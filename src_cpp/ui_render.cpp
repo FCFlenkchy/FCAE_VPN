@@ -1270,11 +1270,25 @@ void render_ui() {
             };
             ImGui::Combo("tun2socks log", &g_app.t2s_log, t2s_logs, 6);
             ImGui::Spacing();
-            ImGui::TextDisabled("TUN DNS (comma separated; applied on up, restored on down; empty = platform default)");
-            ImGui::PushItemWidth(-1);
-            ImGui::InputTextWithHint("##tun_dns4", "IPv4 DNS — e.g. 1.1.1.1,1.0.0.1", g_app.tun_dns4, sizeof(g_app.tun_dns4));
-            ImGui::InputTextWithHint("##tun_dns6", "IPv6 DNS — e.g. 2606:4700:4700::1111,2606:4700:4700::1001", g_app.tun_dns6, sizeof(g_app.tun_dns6));
-            ImGui::PopItemWidth();
+            // These only pick the resolver for Aether/Tor sessions. With
+            // Psiphon as the exit (protocol Psiphon or egress "Psiphon through
+            // the tunnel") every app query is carried to the exit and answered
+            // by the exit's own resolver; the IPs here are ignored, so say so
+            // instead of letting the user believe they are in effect.
+            {
+                const bool psiphon_exit = (g_app.backend == 1) || (g_app.backend != 1 && g_app.tor_mode == 3);
+                if (psiphon_exit) {
+                    ImGui::TextDisabled("TUN DNS: Psiphon resolves at the exit; these fields apply to Aether/Tor only");
+                } else {
+                    ImGui::TextDisabled("TUN DNS (comma separated; applied on up, restored on down; empty = platform default)");
+                }
+                ImGui::BeginDisabled(psiphon_exit);
+                ImGui::PushItemWidth(-1);
+                ImGui::InputTextWithHint("##tun_dns4", "IPv4 DNS — e.g. 1.1.1.1,1.0.0.1", g_app.tun_dns4, sizeof(g_app.tun_dns4));
+                ImGui::InputTextWithHint("##tun_dns6", "IPv6 DNS — e.g. 2606:4700:4700::1111,2606:4700:4700::1001", g_app.tun_dns6, sizeof(g_app.tun_dns6));
+                ImGui::PopItemWidth();
+                ImGui::EndDisabled();
+            }
             ImGui::Spacing();
             ImGui::InputTextWithHint("##force_peer", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));
             ImGui::InputText("Identity file (aether.toml)", g_app.config_path, sizeof(g_app.config_path));
@@ -1406,7 +1420,7 @@ void render_ui() {
             // Psiphon's own listeners, kept off the engine's and Tor's ports.
             ImGui::InputInt("Psiphon SOCKS port", &g_app.psiphon_socks_port);
             ImGui::InputInt("Psiphon HTTP port", &g_app.psiphon_http_port);
-            ImGui::TextDisabled("0 lets Psiphon pick a free port.");
+            ImGui::TextDisabled("Defaults 1823 / 1824; 0 restores the default (fixed, never auto-picked).");
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Egress");

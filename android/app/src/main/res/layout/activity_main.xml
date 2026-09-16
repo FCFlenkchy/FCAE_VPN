@@ -283,7 +283,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:text="Psiphon SOCKS port (0 = auto)"
+                android:text="Psiphon SOCKS port (default 1823)"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />
 
@@ -304,7 +304,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:text="Psiphon HTTP port (0 = auto)"
+                android:text="Psiphon HTTP port (default 1824)"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />
 
@@ -543,7 +543,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:text="TUN DNS — IPv4 (comma separated)"
+                android:text="TUN DNS — IPv4 (comma separated; Aether/Tor only)"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />
 
@@ -563,7 +563,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:text="TUN DNS — IPv6 (comma separated)"
+                android:text="TUN DNS — IPv6 (comma separated; Aether/Tor only)"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />
 

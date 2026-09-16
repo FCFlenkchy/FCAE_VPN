@@ -136,54 +136,29 @@ public class FCAEVpnService extends VpnService {
     // them out of ProGuard's reach (proguard-rules.pro keeps this package).
 
     /**
-     * Resolvers of the underlying (non-VPN) network, comma delimited.
+     * Resolvers tunnel-core may use for its OWN lookups (fronting domains,
+     * server-list hosts, tactics), comma delimited, IP:port.
      *
      * Mandatory: once the protect hook is installed, Psiphon stops using the
-     * platform resolver, so this list is its only source of DNS servers. An
-     * empty answer means no name resolution at all, which surfaces as a
-     * tunnel that never establishes rather than as a DNS error.
+     * platform resolver, so this list is its only source of DNS servers.
+     *
+     * This deliberately does NOT report the carrier's resolvers. tunnel-core
+     * appends whatever this returns behind its preferred alternate list, so
+     * reporting the underlying network's servers left a path back to a
+     * resolver the operator controls -- the one that answers UDP/53 with a
+     * bogon on hijacking networks. Returning the same alternate-port public
+     * resolvers here means every entry in tunnel-core's list is one we chose.
+     * These are reached over protected sockets on the underlying network,
+     * exactly like every other Psiphon dial.
      */
     @SuppressWarnings("unused")
     public String psiphonDnsServers() {
-        StringBuilder out = new StringBuilder();
-        try {
-            ConnectivityManager cm =
-                (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-            if (cm == null) return fallbackDnsServers();
-
-            Network active = underlyingNetwork(cm);
-            if (active == null) return fallbackDnsServers();
-
-            LinkProperties lp = cm.getLinkProperties(active);
-            if (lp == null) return fallbackDnsServers();
-
-            for (InetAddress addr : lp.getDnsServers()) {
-                String host = addr.getHostAddress();
-                if (host == null || host.isEmpty()) continue;
-                // Strip any IPv6 scope id ("fe80::1%wlan0"); Psiphon parses
-                // these as plain addresses.
-                int pct = host.indexOf('%');
-                if (pct >= 0) host = host.substring(0, pct);
-                if (out.length() > 0) out.append(',');
-                out.append(host);
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "psiphonDnsServers failed: " + t);
-        }
-        if (out.length() == 0) return fallbackDnsServers();
-        return out.toString();
+        return PSIPHON_BOOTSTRAP_DNS;
     }
 
-    /**
-     * Last resort when the platform will not name its resolvers.
-     *
-     * Returning "" here would leave Psiphon with no servers at all, so prefer
-     * public resolvers: they are reached over protected sockets on the
-     * underlying network, exactly like every other Psiphon dial.
-     */
-    private String fallbackDnsServers() {
-        return "1.1.1.1,8.8.8.8";
-    }
+    /** Same list as PsiphonTunnelService's DNSResolver*AlternateServers. */
+    public static final String PSIPHON_BOOTSTRAP_DNS =
+        "208.67.222.222:5353,9.9.9.9:9953,208.67.220.220:5353";
 
     /** True when a usable underlying network exists. */
     @SuppressWarnings("unused")

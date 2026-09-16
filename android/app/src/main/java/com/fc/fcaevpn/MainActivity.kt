@@ -959,6 +959,25 @@ class MainActivity : AppCompatActivity() {
         if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
         ensureEgressAdapter()
         updateTorHint()
+        applyDnsFieldsLock()
+    }
+
+    /**
+     * The TUN DNS fields only decide the resolver for Aether/Tor sessions.
+     * When Psiphon is the exit (protocol Psiphon, or "Psiphon through the
+     * tunnel"), every app DNS query is carried to the Psiphon exit and
+     * answered by the exit's own resolver -- these IPs are ignored. Gray
+     * them so the UI says what the data plane does.
+     */
+    private fun applyDnsFieldsLock() {
+        if (!::editTunDnsV4.isInitialized || !::editTunDnsV6.isInitialized) return
+        val psiphonExit = isPsiphonSelected() || isEgressPsiphon()
+        for (e in listOf(editTunDnsV4, editTunDnsV6)) {
+            e.isEnabled = !psiphonExit
+            e.alpha = if (psiphonExit) 0.45f else 1f
+        }
+        editTunDnsV4.hint = if (psiphonExit) "Psiphon: resolved at the exit" else null
+        editTunDnsV6.hint = if (psiphonExit) "Psiphon: resolved at the exit" else null
     }
 
     /**
@@ -1095,8 +1114,8 @@ class MainActivity : AppCompatActivity() {
         spinnerEngineLog.setSelection(prefs.getInt("engineLog", 3))
         spinnerT2sLog.setSelection(prefs.getInt("t2sLog", 0))
         editTorSocksPort.setText(prefs.getString("torSocksPort", "1821"))
-        editPsiphonSocksPort.setText(prefs.getString("psiphonSocksPort", "0"))
-        editPsiphonHttpPort.setText(prefs.getString("psiphonHttpPort", "0"))
+        editPsiphonSocksPort.setText(prefs.getString("psiphonSocksPort", PsiphonTunnelService.DEFAULT_SOCKS_PORT.toString()))
+        editPsiphonHttpPort.setText(prefs.getString("psiphonHttpPort", PsiphonTunnelService.DEFAULT_HTTP_PORT.toString()))
         savedPsiphonRegion = prefs.getString("psiphonRegion", "") ?: ""
         refreshPsiphonRegions()
         spinnerPsiphonTransport.setSelection(prefs.getInt("psiphonTransport", 0).coerceIn(0, 4))

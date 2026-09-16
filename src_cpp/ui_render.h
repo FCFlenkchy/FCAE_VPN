@@ -107,8 +107,8 @@ struct AppState {
     char psiphon_region_list[512] = {0};
     int  psiphon_transport = 0;        // index into kPsiphonTransports, 0 = auto
     char psiphon_data_dir[512] = {0};
-    int  psiphon_socks_port = 0;       // 0 = Psiphon chooses
-    int  psiphon_http_port  = 0;
+    int  psiphon_socks_port = 1823;    // config.rs DEFAULT_PSIPHON_SOCKS_PORT; 0 also maps to it
+    int  psiphon_http_port  = 1824;    // config.rs DEFAULT_PSIPHON_HTTP_PORT
     // Server-entry sources. tunnel-core has exactly three ways to learn its
     // first server entries; with none of them the controller sits on
     // "CandidateServers: count 0" forever and the tunnel never establishes.

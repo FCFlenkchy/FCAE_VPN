@@ -213,20 +213,38 @@ func (p *psiProvider) GetNetworkID() string {
 	return "UNKNOWN"
 }
 
-// GetDNSServersAsString returns the underlying network's resolvers, comma
-// delimited.
+// psiBootstrapDNS is the resolver set tunnel-core may use for its OWN
+// lookups (fronting domains, server-list hosts, tactics). Same list the
+// config's DNSResolver*AlternateServers carry; keep them in sync.
+const psiBootstrapDNS = "208.67.222.222:5353,9.9.9.9:9953,208.67.220.220:5353"
+
+// GetDNSServersAsString returns the resolvers tunnel-core treats as the
+// "system" list, comma delimited.
 //
 // This is not optional on Android. Once DeviceBinder is configured, upstream
 // disables the standard library resolver (it would route inside the VPN), so
 // this list is the ONLY source of DNS servers. Returning "" left the resolver
-// with an empty server set and every lookup failed with "no DNS servers" --
-// no remote server list fetch, no fronted dials, no tunnel, and no error that
-// pointed at DNS.
+// with an empty server set and every lookup failed with "no DNS servers".
+//
+// It deliberately never reports the OS or carrier resolvers. tunnel-core
+// appends this list behind its preferred alternate server, so the underlying
+// network's resolvers were a live path back to an operator-controlled server
+// -- the one answering UDP/53 with a bogon on hijacking networks. With the
+// same public alternate-port resolvers here, every entry tunnel-core can
+// try is one we chose. The host callback (Android) is consulted first and
+// is expected to return the same list; desktop has no callback and gets the
+// constant, so tunnel-core never falls through to /etc/resolv.conf or the
+// adapter DNS.
 func (p *psiProvider) GetDNSServersAsString() string {
 	psiLogMu.Lock()
 	cb := psiDnsCb
 	psiLogMu.Unlock()
-	return psiTakeCString(C.psi_call_dns(cb))
+	if cb != nil {
+		if list := psiTakeCString(C.psi_call_dns(cb)); list != "" {
+			return list
+		}
+	}
+	return psiBootstrapDNS
 }
 
 func (p *psiProvider) IPv6Synthesize(ipv4 string) string { return "" }
@@ -335,7 +353,7 @@ func psi_set_protect_callback(cb C.psi_protect_cb) {
 
 // psi_set_network_callbacks installs the host's view of the underlying
 // network. Passing NULL for any of them restores the safe default
-// (connectivity assumed, no resolvers, unknown network id).
+// (connectivity assumed, the pinned bootstrap resolvers, unknown network id).
 //
 //export psi_set_network_callbacks
 func psi_set_network_callbacks(

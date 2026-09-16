@@ -92,9 +92,12 @@ pub struct PsiphonConfig {
     pub embedded_server_list: Option<String>,
     pub egress_region: Option<String>,
     pub data_root_dir: Option<String>,
-    /// Local SOCKS5 port for Psiphon's own proxy; 0 = Psiphon chooses.
+    /// Local SOCKS5 port for Psiphon's own proxy. 0 is normalised to
+    /// [`DEFAULT_PSIPHON_SOCKS_PORT`] so the listener never moves between
+    /// sessions; clients (TUN, system proxy, other apps) can rely on it.
     pub socks_port: u16,
-    /// Local HTTP CONNECT port for Psiphon; 0 = Psiphon chooses.
+    /// Local HTTP CONNECT port for Psiphon. 0 is normalised to
+    /// [`DEFAULT_PSIPHON_HTTP_PORT`].
     pub http_port: u16,
     /// Egress "Psiphon through the tunnel": start Aether first, then Psiphon
     /// with UpstreamProxyURL = Aether's SOCKS. User traffic then enters
@@ -369,6 +372,14 @@ pub fn inject_upstream_proxy_url(config_json: &str, url: &str) -> String {
 /// whichever listener bound second died with "address already in use".
 pub const DEFAULT_TOR_SOCKS_PORT: u16 = 1821;
 
+/// Psiphon's own local listeners. Fixed rather than "let Psiphon pick":
+/// an ephemeral port changed on every connect, so anything pointed at
+/// it (a browser's proxy setting, LAN clients, the TUN bridge between
+/// reconnects) silently broke. 1823/1824 sit after the engine (1819/1820)
+/// and Tor (1821/1822) so the four backends never collide by default.
+pub const DEFAULT_PSIPHON_SOCKS_PORT: u16 = 1823;
+pub const DEFAULT_PSIPHON_HTTP_PORT: u16 = 1824;
+
 /// Reject two listeners sharing a port, with a message naming both.
 fn check_port_clash(what: &str, port: u16, other: u16, other_name: &str) -> Result<()> {
     if other != 0 && port == other {
@@ -632,10 +643,13 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         check_port_clash("tor", tor_port, cfg.socks_port, "socks_port")?;
     }
 
-    // Psiphon's own proxies. 0 means "let Psiphon choose", which never
-    // collides, so only a pinned port is checked.
-    let psi_socks = raw.psiphon.socks_port;
-    let psi_http = raw.psiphon.http_port;
+    // Psiphon's own proxies. 0 used to mean "Psiphon chooses a free port",
+    // which moved on every connect. Pin the defaults instead; the clash
+    // checks below then cover them like any explicit value.
+    if cfg.psiphon.socks_port == 0 { cfg.psiphon.socks_port = DEFAULT_PSIPHON_SOCKS_PORT; }
+    if cfg.psiphon.http_port == 0 { cfg.psiphon.http_port = DEFAULT_PSIPHON_HTTP_PORT; }
+    let psi_socks = cfg.psiphon.socks_port;
+    let psi_http = cfg.psiphon.http_port;
     if psi_socks != 0 {
         check_port_clash("psiphon.socks_port", psi_socks, cfg.socks_port, "socks_port")?;
         check_port_clash("psiphon.socks_port", psi_socks, cfg.http_port, "http_port")?;
