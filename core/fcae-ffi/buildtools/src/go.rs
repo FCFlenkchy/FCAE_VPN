@@ -178,7 +178,6 @@ impl<'a> CArchive<'a> {
         }
     }
 
-    /// Build the archive into `OUT_DIR`.
     /// Run an auxiliary `go` subcommand (module resolution, etc.) in
     /// `module_dir`, surfacing its stderr verbatim when it fails.
     fn run_go_step(
@@ -438,8 +437,6 @@ impl Built {
         Ok(())
     }
 
-    /// Emit the `cargo:rustc-link-*` directives needed to link this archive,
-    /// including the platform libraries the Go runtime itself requires.
     /// Copy a desktop c-shared library next to the final artifacts and make
     /// the loader able to find it.
     ///

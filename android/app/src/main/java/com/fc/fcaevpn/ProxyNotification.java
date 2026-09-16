@@ -193,8 +193,8 @@ public class ProxyNotification extends Service {
     }
 
     // startForeground(int, Notification) is deprecated on API 34; this service
-    // never declares a foregroundServiceType, so the two-arg form is the
-    // deliberate choice on every API level (same as FCAEVpnService).
+    // declares no foregroundServiceType, so the two-arg form is the correct
+    // one on every API level here.
     @SuppressWarnings("deprecation")
     private void showNotification(String text, boolean connected) {
         Notification.Builder nb = new Notification.Builder(this, CHANNEL_ID)

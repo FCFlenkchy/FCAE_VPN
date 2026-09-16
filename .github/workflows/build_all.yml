@@ -155,7 +155,6 @@ jobs:
                 const caches = res.data.actions_caches || [];
                 if (caches.length === 0) break;
 
-                // Delete anything older than 1 day
                 const old = caches.filter(c => new Date(c.created_at).getTime() < oneDayAgo);
                 // Also cap at 3 most recent per prefix
                 const recent = caches.filter(c => new Date(c.created_at).getTime() >= oneDayAgo);
@@ -440,7 +439,6 @@ jobs:
             export ANDROID_NDK_ROOT="$NDK"
 
             if [ "${{ matrix.name }}" = "android-universal" ]; then
-              # Build all three Android targets for universal APK
               echo "Building Rust for all Android ABIs (universal)..."
               
               for TARGET_TRIPLE in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
@@ -490,7 +488,6 @@ jobs:
               done
               echo "All Android Rust targets built successfully"
             else
-              # Single-ABI build (original logic)
               if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
                 NDK_CLANG_PREFIX=aarch64-linux-android
                 RUST_ENV_LOWER=aarch64_linux_android

@@ -348,6 +348,30 @@ impl Supervisor {
         }
         Ok(())
     }
+
+    /// Wait for the [`stop`] reaper to finish: the session worker has then
+    /// completed its full teardown (TUN down, routes/DNS restored, backend
+    /// drained). Returns false when the budget lapses first.
+    ///
+    /// Disconnects must stay instant, so stop() itself never joins; but a
+    /// process that is about to die must not exit before the worker's OS
+    /// restore ran — macOS in particular rewrites the physical service's
+    /// DNS, and a restore lost to process exit leaves the machine pointing
+    /// at a dead resolver until fixed by hand. The restore is the FIRST step
+    /// of the worker's teardown, so this budget does not need to cover the
+    /// slow tail (a Psiphon controller join); whatever still runs past the
+    /// deadline dies with the process, which the kernel cleans up (the
+    /// datastores are crash-safe).
+    pub fn wait_stopped(&self, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while self.stopping.load(Ordering::SeqCst) {
+            if start.elapsed() >= timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

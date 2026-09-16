@@ -664,6 +664,12 @@ pub extern "C" fn fcae_shutdown() -> FcaeStatus {
     guard("fcae_shutdown", || {
         if let Some(rt) = RUNTIME.get() {
             let _ = rt.supervisor.stop();
+            // stop() is instant for the UI; this call additionally means
+            // "the process is about to die", so give the background worker
+            // a bounded budget to finish its OS restore (routes/DNS) before
+            // the exit. See Supervisor::wait_stopped for why the budget does
+            // not need to cover the slow backend-join tail.
+            rt.supervisor.wait_stopped(std::time::Duration::from_secs(5));
             rt.telemetry.set_state_hook(None);
             // Drop any Android descriptor from the finished session. It is a
             // small integer that the JVM will recycle onto an unrelated file,

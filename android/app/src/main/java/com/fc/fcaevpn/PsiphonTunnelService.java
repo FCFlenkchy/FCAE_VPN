@@ -315,7 +315,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
           + "31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xal"
           + "KxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=";
 
-    // Transport families (indices into TRANSPORT_GROUPS in getPsiphonConfig).
+    // Transport family pick (index into transportProtocols()).
     // 0 = Auto: no LimitTunnelProtocols, tunnel-core uses its full set.
     private int transport = 0;
 

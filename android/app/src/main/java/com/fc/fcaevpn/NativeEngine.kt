@@ -31,7 +31,6 @@ object NativeEngine {
         // Referencing the object is enough; `init` has already run by here.
     }
 
-    // Pairs with the commented loader in android_jni.cpp (see DISABLED note).
     @JvmStatic external fun nativeInit()
     @JvmStatic external fun nativeSetNativeLibDir(path: String)
     @JvmStatic external fun nativeStart(

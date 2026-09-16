@@ -373,8 +373,6 @@ class MainActivity : AppCompatActivity() {
                     val errMsg = NativeEngine.nativeGetLastError()
                     val logs = if (switchLogging.isChecked) NativeEngine.nativeGetLogs() else ""
 
-                    // Adaptive polling: if idle (no traffic) for 5+ consecutive
-                    // ticks, slow down from 1s to 2s to save JNI crossings.
                     if (rx == 0L && tx == 0L) {
                         idleTicks++
                     } else {
@@ -634,10 +632,9 @@ class MainActivity : AppCompatActivity() {
         }
         applyTorLock()
 
-        // Running build, spelled out: version + which channel it is. A build
-        // Compact "ver · type": a pre-release build stamps "-prerelease" into
-        // the version itself, so show the base version and let the single
-        // type word carry the channel — no duplication, no "(BETA)" shout.
+        // Running build as "ver · type": a pre-release build stamps a suffix
+        // into the version itself, so show the base version and let the
+        // single type word carry the channel — no duplication.
         findViewById<TextView>(R.id.versionText).apply {
             val baseVersion = BuildConfig.APP_VERSION.substringBefore('-')
             text = "$baseVersion  \u00b7  ${if (buildIsPrerelease) "pre-release" else "release"}"

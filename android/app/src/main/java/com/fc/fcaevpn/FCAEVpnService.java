@@ -482,7 +482,7 @@ public class FCAEVpnService extends VpnService {
     private static native void nativeUnregisterVpnService();
     public static native long[] nativeGetTrafficStats();
 
-    // ADDED: Called directly from MainActivity for 0ms UI disconnect
+    // Called directly from MainActivity for the instant (0 ms) UI disconnect.
     public static boolean disconnectNow() {
         FCAEVpnService current = instance;
         if (current == null) return false;

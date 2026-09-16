@@ -574,9 +574,10 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeStop(JNIEnv*, jclass) {
     if (!g_inited) return;
-    // fcae_stop() is synchronous: the TUN device is released and the engine
-    // threads are joined before it returns. On Android that means the
-    // VpnService fd is free by the time Java tears the service down.
+    // Fast control path: cancels the session and aborts the TUN descriptors,
+    // then returns; the full teardown (routes/DNS restore, engine stop) runs
+    // on the session worker, and any next start blocks on the reaper barrier
+    // until it finishes.
     if (fcae_stop() != FCAE_OK) {
         LOGE("fcae_stop: %s", fcae_last_error());
     }
@@ -596,8 +597,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativePsiphonRegions(JNIEnv* env, jclass) {
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeStopBegin(JNIEnv*, jclass) {
     if (!g_inited) return;
-    // Frees the TUN device and our dup of the VpnService fd right away; the
-    // blocking join happens later in nativeStop().
+    // Cancels the session and aborts the TUN descriptors right away; the
+    // full teardown runs on the session worker (nativeStop schedules its
+    // reaping). Both are fast; neither joins anything.
     if (fcae_stop_begin() != FCAE_OK) {
         LOGE("fcae_stop_begin: %s", fcae_last_error());
     }
@@ -767,11 +769,9 @@ extern "C" JNIEXPORT jobject JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
     ensure_init();
 
-    // Find the FcaeUpdateInfo class
     jclass cls = env->FindClass("com/fc/fcaevpn/FcaeUpdateInfo");
     if (!cls) return nullptr;
 
-    // Get field IDs
     jfieldID fid_available = env->GetFieldID(cls, "updateAvailable", "Z");
     jfieldID fid_inProgress = env->GetFieldID(cls, "checkInProgress", "Z");
     jfieldID fid_done = env->GetFieldID(cls, "checkDone", "Z");
@@ -782,7 +782,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
     jfieldID fid_isPre = env->GetFieldID(cls, "isPrerelease", "Z");
     jfieldID fid_date = env->GetFieldID(cls, "releaseDate", "Ljava/lang/String;");
 
-    // Create object
     jobject obj = env->AllocObject(cls);
 
     FcaeUpdateInfo info = {};

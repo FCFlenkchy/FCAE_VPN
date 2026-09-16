@@ -677,9 +677,11 @@ void ui_frame() {
 }
 
 void ui_shutdown() {
-    // fcae_shutdown() stops any running session first: TUN device down,
-    // routes and DNS restored, engine threads joined. It is synchronous, so
-    // everything is undone before we exit the process.
+    // fcae_shutdown() stops any running session and then waits (bounded) for
+    // the background worker to finish its OS restore — routes and DNS back —
+    // so the process may exit with nothing left dangling. The wait is capped
+    // because the slow tail (a Psiphon controller join) dies with the process
+    // anyway, and the kernel cleans that up.
     fcae_shutdown();
 #if defined(_WIN32)
     ExitProcess(0);
@@ -778,12 +780,13 @@ void render_ui() {
         if (ImGui::Button(connected || busy ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 34))) {
             if (connected || busy || errored) {
                 g_app.start_busy.store(false);
-                // fcae_stop() is synchronous and ordered: it brings the TUN
-                // device down and restores routes/DNS before returning. It is
-                // run on a worker thread purely so the window keeps painting
-                // during the teardown; the UI may offer CONNECT again the
-                // moment it completes, with no hidden background cleanup
-                // still racing the next session.
+                // fcae_stop() is a fast control path: it cancels the session
+                // and aborts the TUN descriptors, then returns while the full
+                // teardown (routes/DNS restore, engine stop) runs on the
+                // session worker. It is run on a detached thread purely so the
+                // window keeps painting; the UI may offer CONNECT again at
+                // once — the next start blocks on the reaper barrier until the
+                // teardown finishes, so nothing races the previous session.
                 std::thread([] {
                     if (fcae_stop() != FCAE_OK) {
                         g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
@@ -970,7 +973,6 @@ void render_ui() {
                 ImGui::BeginDisabled();
                 ImGui::Button("Checking...", ImVec2(btn_width, 34));
                 ImGui::EndDisabled();
-                // Show elapsed time
                 ImGui::SameLine(0, 6);
                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(%llds)", (long long)elapsed);
             }
@@ -1012,7 +1014,6 @@ void render_ui() {
             // Status text
         if ((done || (info.check_in_progress && s_update_checked)) && !s_update_available && s_update_checked) {
             ImGui::SetCursorPosX((avail - btn_width) * 0.5f);
-            // Detect error messages
             bool is_error = strstr(s_update_status, "Failed") != nullptr ||
                             strstr(s_update_status, "HTTP") != nullptr ||
                             strstr(s_update_status, "error") != nullptr ||
