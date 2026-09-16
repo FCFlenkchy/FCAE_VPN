@@ -181,8 +181,6 @@ pub const fn is_supported() -> bool {
 
 /// State owned by a live TUN session.
 struct Active {
-    /// Descriptor we created (desktop) or dup'd (Android) and must close.
-    owned_fd: Option<i32>,
     /// Platform state needed to undo routes/DNS.
     undo: platform::TunUndo,
 }
@@ -519,7 +517,7 @@ impl TunBridge for Tun2SocksBridge {
 
         self.running.store(true, Ordering::SeqCst);
         let _ = owned_fd; // transferred to Go by t2s_start
-        *active = Some(Active { owned_fd: None, undo });
+        *active = Some(Active { undo });
         self.up_logged.store(true, Ordering::SeqCst);
         log::info!("[tun] up: {device} <-> {proxy} (in-process)");
         Ok(())
@@ -537,11 +535,6 @@ impl TunBridge for Tun2SocksBridge {
         }
 
         if let Some(active) = active_slot.take() {
-            if let Some(fd) = active.owned_fd {
-                if fd != pending {
-                    unsafe { libc::close(fd) };
-                }
-            }
             *self.stashed_undo.lock() = Some(active.undo);
         }
 

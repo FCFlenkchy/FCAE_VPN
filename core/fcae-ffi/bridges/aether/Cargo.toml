@@ -22,7 +22,6 @@ tor = ["aether-engine/tor"]
 fcae-abi.workspace = true
 fcae-runtime.workspace = true
 aether-engine.workspace = true
-anyhow.workspace = true
 async-trait.workspace = true
 log.workspace = true
 parking_lot.workspace = true
