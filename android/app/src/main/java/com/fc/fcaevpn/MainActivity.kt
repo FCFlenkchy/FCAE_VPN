@@ -62,6 +62,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textTorHint: android.widget.TextView
     private lateinit var editTorBridgeLines: android.widget.EditText
     private lateinit var spinnerEngineLog: Spinner
+    private lateinit var spinnerT2sLog: Spinner
     private lateinit var editTorSocksPort: android.widget.EditText
     private lateinit var spinnerPsiphonRegion: Spinner
     private lateinit var spinnerPsiphonTransport: Spinner
@@ -227,7 +228,7 @@ class MainActivity : AppCompatActivity() {
                         engineRunning = true
                         vpnActive = true
                         updateButton()
-                        statusText.text = if (isTunModeSelected()) "ESTABLISHING PSIPHON TUN" else "CONNECTED (PSIPHON PROXY)"
+                        statusText.text = if (isTunModeSelected()) "ESTABLISHING PSIPHON TUN" else "CONNECTED (PSIPHON - PROXY)"
                         statusText.setTextColor(COLOR_CONNECTED)
                         // Surface psiphon's actual proxy endpoints here too —
                         // pure-psiphon mode never polls the engine, so this
@@ -424,6 +425,7 @@ class MainActivity : AppCompatActivity() {
         textTorHint = findViewById(R.id.textTorHint)
         editTorBridgeLines = findViewById(R.id.editTorBridgeLines)
         spinnerEngineLog = findViewById(R.id.spinnerEngineLog)
+        spinnerT2sLog = findViewById(R.id.spinnerT2sLog)
         editTorSocksPort = findViewById(R.id.editTorSocksPort)
         spinnerPsiphonRegion = findViewById(R.id.spinnerPsiphonRegion)
         spinnerPsiphonTransport = findViewById(R.id.spinnerPsiphonTransport)
@@ -555,6 +557,13 @@ class MainActivity : AppCompatActivity() {
         spinnerEngineLog.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item,
             listOf("Off", "Error", "Warn", "Info (default)", "Debug", "Trace"),
+        )
+        // Verbosity of the tun2socks data plane. Positions map 1:1 onto
+        // FcaeT2sLog; index 0 = default = silent. The data plane is not
+        // something users act on, so it stays quiet unless asked for.
+        spinnerT2sLog.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            listOf("Silent (default)", "Silent", "Error", "Warn", "Info", "Debug"),
         )
         spinnerTorBridges.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -1014,6 +1023,7 @@ class MainActivity : AppCompatActivity() {
             putInt("torBridges", spinnerTorBridges.selectedItemPosition)
             putString("torBridgeLines", editTorBridgeLines.text.toString().trim())
             putInt("engineLog", spinnerEngineLog.selectedItemPosition)
+            putInt("t2sLog", spinnerT2sLog.selectedItemPosition)
             putInt("backend", if (isPsiphonProtocol()) 1 else 0)
             putString("torSocksPort", editTorSocksPort.text.toString().trim())
             putString("psiphonRegion", selectedPsiphonRegion())
@@ -1083,6 +1093,7 @@ class MainActivity : AppCompatActivity() {
         spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
         editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
         spinnerEngineLog.setSelection(prefs.getInt("engineLog", 3))
+        spinnerT2sLog.setSelection(prefs.getInt("t2sLog", 0))
         editTorSocksPort.setText(prefs.getString("torSocksPort", "1821"))
         editPsiphonSocksPort.setText(prefs.getString("psiphonSocksPort", "0"))
         editPsiphonHttpPort.setText(prefs.getString("psiphonHttpPort", "0"))
@@ -1105,9 +1116,9 @@ class MainActivity : AppCompatActivity() {
         editSocksPort.setText(prefs.getString("socksPort", "1819"))
         editHttpPort.setText(prefs.getString("httpPort", "1820"))
         editTunMtu.setText(prefs.getString("tunMtu", "1500"))
-        editTunTcpSndbuf.setText(prefs.getString("tunTcpSndbuf", "128000"))
-        editTunTcpRcvbuf.setText(prefs.getString("tunTcpRcvbuf", "128000"))
-        switchTunTcpAutoTuning.isChecked = prefs.getBoolean("tunTcpAutoTuning", true)
+        editTunTcpSndbuf.setText(prefs.getString("tunTcpSndbuf", "256000"))
+        editTunTcpRcvbuf.setText(prefs.getString("tunTcpRcvbuf", "256000"))
+        switchTunTcpAutoTuning.isChecked = prefs.getBoolean("tunTcpAutoTuning", false)
         editTunDnsV4.setText(prefs.getString("tunDnsV4", FCAEVpnService.DEFAULT_TUN_DNS_V4))
         editTunDnsV6.setText(prefs.getString("tunDnsV6", FCAEVpnService.DEFAULT_TUN_DNS_V6))
         editTeam.setText(prefs.getString("team", ""))
@@ -1245,6 +1256,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("torBridges", spinnerTorBridges.selectedItemPosition)
         i.putExtra("torBridgeLines", editTorBridgeLines.text.toString().trim())
         i.putExtra("engineLog", spinnerEngineLog.selectedItemPosition)
+        i.putExtra("t2sLog", spinnerT2sLog.selectedItemPosition)
         i.putExtra("backend", backendFromSelection())
         i.putExtra("torSocksPort", deferredTorSocksPort())
         i.putExtra("torHttpPort", if (switchTorHttp.isChecked) editTorHttpPort.text.toString().toIntOrNull() ?: 1822 else 0)
@@ -1303,6 +1315,7 @@ class MainActivity : AppCompatActivity() {
         val torBridges = spinnerTorBridges.selectedItemPosition
         val torBridgeLines = editTorBridgeLines.text.toString().trim()
         val engineLog = spinnerEngineLog.selectedItemPosition
+        val t2sLog = spinnerT2sLog.selectedItemPosition
         val backend = backendFromSelection()
         val torSocksPort = deferredTorSocksPort()
         val torHttpPort = if (switchTorHttp.isChecked) editTorHttpPort.text.toString().toIntOrNull() ?: 1822 else 0
@@ -1366,6 +1379,7 @@ class MainActivity : AppCompatActivity() {
                     tunTcpSndbuf = tunTcpSndbuf,
                     tunTcpRcvbuf = tunTcpRcvbuf,
                     tunTcpAutoTuning = tunTcpAutoTuning,
+                    t2sLog = t2sLog,
                     tunMtu = tunMtu,
                 )
             } catch (e: Throwable) {
@@ -1682,7 +1696,7 @@ class MainActivity : AppCompatActivity() {
                 4 -> {
                     val isTun = spinnerMode.selectedItemPosition == 1
                     if (statusMsg.isNotBlank()) statusMsg.uppercase()
-                    else if (isTun) "CONNECTED (TUN)" else "CONNECTED (PROXY)"
+                    else "CONNECTED (${engineLabelForStatus()} - ${if (isTun) "TUN" else "PROXY"})"
                 }
                 5 -> "ERROR"
                 6 -> "RECONNECTING"
@@ -1831,6 +1845,20 @@ class MainActivity : AppCompatActivity() {
 
     /** Protocol Psiphon only. Egress Psiphon starts Aether first, then the AAR. */
     private fun isPsiphonSelected(): Boolean = isPsiphonProtocol()
+
+    /**
+     * Engine/egress name for the status pill, e.g. "CONNECTED (AETHER - TUN)".
+     * Protocol=Psiphon runs the Psiphon backend; Protocol=Tor runs the Tor-only
+     * engine; the "Psiphon through the tunnel" egress chains both engines
+     * (Aether first, then Psiphon); every WARP transport reports AETHER.
+     */
+    private fun engineLabelForStatus(): String = when {
+        isPsiphonSelected() -> "PSIPHON"
+        isTorOnly() && isEgressPsiphon() -> "TOR+PSIPHON"
+        isTorOnly() -> "TOR"
+        isEgressPsiphon() -> "AETHER+PSIPHON"
+        else -> "AETHER"
+    }
 
     /** Tor modes 1/2 only. Protocol Tor/Psiphon and egress Psiphon send Off. */
     private fun effectiveTorMode(): Int {

@@ -129,12 +129,17 @@ func (c *blackholeConn) SetWriteDeadline(time.Time) error { return nil }
 type udpDroppingProxy struct {
 	proxy.Proxy
 	psiphonDNS bool
-    ctx context.Context
+	ctx        context.Context
+	// gw is the session-wide Psiphon UDP-gateway client (nil unless
+	// psiphonDNS). tun2socks stores this proxy by value, so the pointer is
+	// what keeps every copy sharing ONE gateway channel -- see
+	// udpgwGateway for why sharing is not optional.
+	gw *udpgwGateway
 }
 
 func (p udpDroppingProxy) DialUDP(m *metadata.Metadata) (net.PacketConn, error) {
 	if m.DstPort == 53 && m.DstIP.IsValid() {
-		return newDNSRelay(p.ctx, p.Proxy, m.DstIP, p.psiphonDNS, nil), nil
+		return newDNSRelay(p.ctx, p.Proxy, m.DstIP, p.psiphonDNS, nil, p.gw), nil
 	}
 	return &blackholeConn{done: make(chan struct{})}, nil
 }
@@ -148,7 +153,7 @@ func (p udpDroppingProxy) DialContext(ctx context.Context, m *metadata.Metadata)
     }
     if err := ctx.Err(); err != nil { return nil, err }
     client, server := net.Pipe()
-    relay := newDNSRelay(p.ctx, p.Proxy, m.DstIP, true, server)
+    relay := newDNSRelay(p.ctx, p.Proxy, m.DstIP, true, server, p.gw)
     go func() {
         defer server.Close()
         defer relay.Close()
@@ -163,7 +168,7 @@ func (p udpDroppingProxy) DialContext(ctx context.Context, m *metadata.Metadata)
             query := make([]byte, size)
             if _, err := io.ReadFull(server, query); err != nil { return }
             if query[2]&0x80 != 0 { return }
-            answer, err := relay.dnsOverGateway(query)
+            answer, err := relay.resolvePsiphon(query)
             if err != nil {
                 emit(logWarn, "[dns] Psiphon TCP DNS relay failed: %v", err)
                 answer = dnsServfail(query)
@@ -175,13 +180,13 @@ func (p udpDroppingProxy) DialContext(ctx context.Context, m *metadata.Metadata)
     return client, nil
 }
 
-func newDNSRelay(parent context.Context, inner proxy.Proxy, resolver netip.Addr, psiphonDNS bool, stream net.Conn) *dnsRelayConn {
+func newDNSRelay(parent context.Context, inner proxy.Proxy, resolver netip.Addr, psiphonDNS bool, stream net.Conn, gw *udpgwGateway) *dnsRelayConn {
     ctx, cancel := context.WithCancel(parent)
     c := &dnsRelayConn{
         psiphonDNS: psiphonDNS, ctx: ctx, cancel: cancel, pending: make(chan struct{}, 4),
         inner: inner, resolver: resolver, replies: make(chan dnsReply, 8),
         done: make(chan struct{}), stream: stream,
-        deadlineChanged: make(chan struct{}),
+        deadlineChanged: make(chan struct{}), gw: gw,
     }
 
     context.AfterFunc(ctx, func() { c.Close() })
@@ -195,12 +200,13 @@ func dnsServfail(query []byte) []byte {
     return response
 }
 
-// dnsRelayTimeout bounds one tunneled DNS exchange. A warmed Tor circuit
-// answers in ~1s; bound each TCP exchange when the egress is gone.
+// dnsRelayTimeout bounds one tunneled DNS exchange. A warmed tunnel answers
+// in well under a second; bound each exchange so a dead egress cannot park
+// the stack's NAT goroutines forever.
 const dnsRelayTimeout = 8 * time.Second
 
-// dnsReply is one completed DNS-over-TCP answer plus the address it must be
-// reported from (the queried resolver -- apps match src+ID).
+// dnsReply is one completed DNS answer plus the address it must be reported
+// from (the queried resolver -- apps match src+ID).
 type dnsReply struct {
 	payload []byte
 	src     net.Addr
@@ -213,6 +219,7 @@ type dnsReply struct {
 // the original query ID and appear to come from the intercepted resolver.
 type dnsRelayConn struct {
 	psiphonDNS bool
+	gw         *udpgwGateway
     stream net.Conn
     deadlineMu sync.Mutex
     readDeadline time.Time
@@ -249,7 +256,11 @@ func (c *dnsRelayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		defer func() { <-c.pending }()
 		var resp []byte
 		var err error
-		if c.psiphonDNS { resp, err = c.dnsOverGateway(payload) } else { resp, err = c.dnsOverTCP(payload, udpAddr) }
+		if c.psiphonDNS {
+			resp, err = c.resolvePsiphon(payload)
+		} else {
+			resp, err = c.dnsOverTCP(payload, udpAddr)
+		}
 		if err != nil {
 			// A failed query is not a fatal UDP-association error. Return SERVFAIL
 			// so the OS can retry instead of destroying the entire DNS flow.
@@ -264,6 +275,16 @@ func (c *dnsRelayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		}
 	}()
 	return len(p), nil
+}
+
+// resolvePsiphon routes one query through the exit's UDP gateway. No
+// third-party fallback: if the gateway cannot answer, the caller SERVFAILs
+// and the OS retries -- resolution stays inside the Psiphon tunnel.
+func (c *dnsRelayConn) resolvePsiphon(query []byte) ([]byte, error) {
+    if c.gw == nil {
+        return nil, errors.New("psiphon DNS gateway unavailable")
+    }
+    return c.gw.exchange(c.ctx, query)
 }
 
 // dnsOverTCP dials the resolver through the upstream proxy (plain SOCKS5
@@ -363,65 +384,360 @@ func (c *dnsRelayConn) SetReadDeadline(t time.Time) error {
 }
 func (c *dnsRelayConn) SetWriteDeadline(time.Time) error { return nil }
 
-// Psiphon's server intercepts this special SOCKS CONNECT destination and
-// speaks BadVPN UDPGW inside the SSH channel. The DNS flag requests the
-// exit's native resolver; it is the primary path, not a provider fallback.
-// Wire layout follows the official server/udp.go: LE length excluding the
-// length field, flags, LE connection ID, raw IP, BE port, UDP payload.
-func (c *dnsRelayConn) dnsOverGateway(query []byte) ([]byte, error) {
-    if len(query) < 12 || len(query) > 32768 { return nil, errors.New("invalid UDPGW DNS size") }
-    ctx, cancel := context.WithTimeout(c.ctx, dnsRelayTimeout)
-    defer cancel()
-    conn, err := c.inner.DialContext(ctx, &metadata.Metadata{
-        Network: metadata.TCP, DstIP: netip.MustParseAddr("127.0.0.1"), DstPort: 7300,
-    })
-    if err != nil { return nil, fmt.Errorf("Psiphon UDPGW CONNECT failed: %w", err) }
-    defer conn.Close()
-    stopClose := context.AfterFunc(ctx, func() { conn.Close() })
-    defer stopClose()
-    deadline, _ := ctx.Deadline()
-    _ = conn.SetDeadline(deadline)
-    // With transparent DNS the address is only a flow label, not a resolver.
-    // Use an IPv4 label even for an intercepted IPv6 DNS flow: the pinned
-    // server emits zero reply flags, so IPv6 labels cannot round-trip safely.
-    // ReadFrom still reports the application's original resolver address.
-    ip := net.IPv4zero.To4()
-    flags := byte(0x02 | 0x04) // rebind + transparent DNS
-    headerSize := 7 + len(ip)
-    frame := make([]byte, headerSize+len(query))
-    binary.LittleEndian.PutUint16(frame[:2], uint16(len(frame)-2))
-    frame[2] = flags
-    // One DNS exchange per channel; connection ID zero cannot collide.
-    copy(frame[5:], ip)
-    binary.BigEndian.PutUint16(frame[5+len(ip):headerSize], 53)
-    copy(frame[headerSize:], query)
-    for remaining := frame; len(remaining) > 0; {
-        n, err := conn.Write(remaining)
-        if err != nil { return nil, err }
-        if n == 0 { return nil, io.ErrShortWrite }
-        remaining = remaining[n:]
-    }
-    for {
-        var length [2]byte
-        if _, err := io.ReadFull(conn, length[:]); err != nil { return nil, fmt.Errorf("UDPGW reply: %w", err) }
-        size := int(binary.LittleEndian.Uint16(length[:]))
-        if size < 3 || size > 32768+21 { return nil, errors.New("invalid UDPGW frame size") }
-        reply := make([]byte, size)
-        if _, err := io.ReadFull(conn, reply); err != nil { return nil, err }
-        if reply[0]&0x01 != 0 { continue } // keepalive, bounded by the connection deadline
-        addrLen := 4
-        if reply[0]&0x08 != 0 { addrLen = 16 }
-        offset := 5 + addrLen
-        if len(reply) < offset+12 || binary.LittleEndian.Uint16(reply[1:3]) != 0 ||
-            !bytes.Equal(reply[3:3+addrLen], ip) || binary.BigEndian.Uint16(reply[3+addrLen:offset]) != 53 {
-            return nil, errors.New("invalid UDPGW DNS envelope")
-        }
-        answer := reply[offset:]
-        if !bytes.Equal(answer[:2], query[:2]) || answer[2]&0x80 == 0 {
-            return nil, errors.New("invalid UDPGW DNS answer")
-        }
-        return answer, nil
-    }
+// udpgw wire constants, mirroring the BadVPN protocol the Psiphon server
+// implements in psiphon/server/udp.go.
+const (
+	udpgwFlagKeepalive = 1 << 0
+	udpgwFlagRebind    = 1 << 1
+	udpgwFlagDNS       = 1 << 2
+	udpgwFlagIPv6      = 1 << 3
+
+	udpgwMaxPayload     = 32768
+	udpgwMaxMessageSize = 23 + udpgwMaxPayload // max preamble + max payload
+
+	// Psiphon's server intercepts CONNECTs to this address and speaks
+	// BadVPN UDPGW inside the SSH channel instead (see tunnelServer.go:
+	// UDPInterceptUdpgwServerAddress).
+	udpgwServerPort = 7300
+
+	// One DNS exchange per allocated connection ID. Retries reuse the
+	// channel; the cooldown keeps a dead exit from being hammered with
+	// fresh CONNECTs by every pending query at once.
+	udpgwMaxPending     = 512
+	udpgwDialCooldown   = 250 * time.Millisecond
+	udpgwKeepaliveEvery = 20 * time.Second
+)
+
+// udpgwGateway multiplexes every DNS exchange over ONE long-lived BadVPN
+// UDPGW channel to the Psiphon exit.
+//
+// The server allows exactly one udpgw channel per SSH client: when a new
+// channel arrives it REPLACES -- and therefore closes -- any previously
+// existing one (psiphon/server/udp.go, handleUdpgwChannel: "This channel
+// will replace any previously existing udpgw channel for this client").
+//
+// The previous implementation opened a fresh CONNECT to the gateway per
+// query, so any two overlapping lookups killed the first channel mid
+// exchange; on a busy resolver (Android fires 5+ queries at startup) that
+// meant a constant stream of "UDPGW reply: EOF" failures, SERVFAIL answers
+// and -- because each broken channel counts as a failed tunneled conn --
+// the climbing "port forward failures" counter in the Psiphon notices.
+// This gateway is the official BadVPN client design instead: one channel,
+// queries demultiplexed by the udpgw connection ID, writes serialised,
+// automatic reconnect with in-flight retry, and keepalives.
+type udpgwGateway struct {
+	ctx   context.Context
+	inner proxy.Proxy
+
+	dialMu sync.Mutex // single-flight channel (re)connects
+	mu     sync.Mutex
+	conn   net.Conn
+	pending map[uint16]chan gwReply
+	nextID  uint16
+	lastDial time.Time
+
+	writeMu sync.Mutex // SSH channels must not be written concurrently
+
+	keepaliveOnce sync.Once
+}
+
+// gwReply is one completed UDPGW exchange delivered to the waiting query.
+type gwReply struct {
+	payload []byte
+	err     error
+}
+
+func newUdpgwGateway(parent context.Context, inner proxy.Proxy) *udpgwGateway {
+	ctx, cancel := context.WithCancel(parent)
+	g := &udpgwGateway{
+		ctx: ctx, inner: inner,
+		pending: make(map[uint16]chan gwReply),
+	}
+	// Session teardown (or a new t2s_start retiring this context) must not
+	// leak the channel or leave exchanges parked on a dead connection.
+	context.AfterFunc(ctx, func() {
+		cancel()
+		g.close()
+	})
+	return g
+}
+
+// exchange runs one DNS query over the gateway. It retries once on a
+// broken/replaced channel; if the gateway still cannot answer (exit without
+// UDP intercept, tunnel flapping) the error propagates and the caller
+// answers SERVFAIL so the OS retries -- there is deliberately no third-party
+// fallback: resolution stays inside the Psiphon tunnel.
+func (g *udpgwGateway) exchange(parent context.Context, query []byte) ([]byte, error) {
+	if len(query) < 12 || len(query) > udpgwMaxPayload {
+		return nil, errors.New("invalid UDPGW DNS size")
+	}
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := parent.Err(); err != nil {
+			return nil, err
+		}
+		if attempt > 0 {
+			// Give the reconnect cooldown room to elapse before retrying.
+			select {
+			case <-time.After(udpgwDialCooldown):
+			case <-parent.Done():
+				return nil, parent.Err()
+			}
+		}
+		conn, err := g.channel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		id, ch, ok := g.register()
+		if !ok {
+			lastErr = errors.New("udpgw: query table full")
+			continue
+		}
+		if err := g.send(conn, id, query); err != nil {
+			g.retire(id)
+			g.invalidate(conn)
+			lastErr = err
+			continue
+		}
+		select {
+		case rep := <-ch:
+			g.retire(id)
+			if rep.err == nil {
+				return rep.payload, nil
+			}
+			lastErr = rep.err
+		case <-time.After(dnsRelayTimeout):
+			g.retire(id)
+			lastErr = errors.New("udpgw: reply timeout")
+		case <-parent.Done():
+			g.retire(id)
+			return nil, parent.Err()
+		}
+	}
+	return nil, lastErr
+}
+
+// channel returns the shared gateway connection, dialing it through the
+// Psiphon SOCKS listener if necessary. Dialing is single-flight: two
+// concurrent channels would replace each other server-side, recreating the
+// very EOF storm this gateway exists to fix.
+func (g *udpgwGateway) channel() (net.Conn, error) {
+	g.dialMu.Lock()
+	defer g.dialMu.Unlock()
+
+	g.mu.Lock()
+	if g.conn != nil {
+		c := g.conn
+		g.mu.Unlock()
+		return c, nil
+	}
+	if !g.lastDial.IsZero() && time.Since(g.lastDial) < udpgwDialCooldown {
+		g.mu.Unlock()
+		return nil, errors.New("udpgw: reconnect cooldown")
+	}
+	g.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(g.ctx, dnsRelayTimeout)
+	defer cancel()
+	conn, err := g.inner.DialContext(ctx, &metadata.Metadata{
+		Network: metadata.TCP,
+		DstIP:   netip.MustParseAddr("127.0.0.1"),
+		DstPort: udpgwServerPort,
+	})
+	if err != nil {
+		g.mu.Lock()
+		g.lastDial = time.Now()
+		g.mu.Unlock()
+		return nil, fmt.Errorf("Psiphon UDPGW CONNECT failed: %w", err)
+	}
+	g.mu.Lock()
+	g.lastDial = time.Now()
+	g.conn = conn
+	g.mu.Unlock()
+
+	g.keepaliveOnce.Do(func() { go g.keepaliveLoop() })
+	go g.readLoop(conn)
+	return conn, nil
+}
+
+// register claims a connection ID that is not currently in flight.
+// IDs are handed out monotonically and wrap; a wrapped ID can only collide
+// with an equally long-lived in-flight query, which the scan skips.
+func (g *udpgwGateway) register() (uint16, chan gwReply, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.pending) >= udpgwMaxPending {
+		return 0, nil, false
+	}
+	for {
+		g.nextID++
+		if g.nextID == 0 {
+			g.nextID = 1
+		}
+		if _, taken := g.pending[g.nextID]; taken {
+			continue
+		}
+		ch := make(chan gwReply, 1) // buffered: a timed-out query never blocks the reader
+		g.pending[g.nextID] = ch
+		return g.nextID, ch, true
+	}
+}
+
+func (g *udpgwGateway) retire(id uint16) {
+	g.mu.Lock()
+	delete(g.pending, id)
+	g.mu.Unlock()
+}
+
+// send writes one UDPGW frame: | LE size | flags | LE connID | IPv4 | BE port | DNS query |.
+// The DNS flag makes the exit answer with its own resolver and bypasses its
+// per-port traffic rules; the address is just a flow label echoed back.
+func (g *udpgwGateway) send(conn net.Conn, id uint16, query []byte) error {
+	ip := net.IPv4zero.To4()
+	frame := make([]byte, 11+len(query))
+	binary.LittleEndian.PutUint16(frame[0:2], uint16(len(frame)-2))
+	frame[2] = udpgwFlagDNS
+	binary.LittleEndian.PutUint16(frame[3:5], id)
+	copy(frame[5:9], ip)
+	binary.BigEndian.PutUint16(frame[9:11], 53)
+	copy(frame[11:], query)
+
+	g.writeMu.Lock()
+	_, err := conn.Write(frame)
+	g.writeMu.Unlock()
+	return err
+}
+
+// readLoop demultiplexes gateway replies by connection ID. One goroutine
+// per channel; it exits on any I/O or framing error, failing every pending
+// exchange so they retry on a fresh channel.
+func (g *udpgwGateway) readLoop(conn net.Conn) {
+	defer g.drop(conn)
+	buf := make([]byte, 2+udpgwMaxMessageSize)
+	for {
+		if _, err := io.ReadFull(conn, buf[0:2]); err != nil {
+			g.failAll(conn, err)
+			return
+		}
+		size := int(binary.LittleEndian.Uint16(buf[0:2]))
+		if size < 3 || size > udpgwMaxMessageSize {
+			g.failAll(conn, errors.New("invalid UDPGW frame size"))
+			return
+		}
+		if _, err := io.ReadFull(conn, buf[2:2+size]); err != nil {
+			g.failAll(conn, err)
+			return
+		}
+		flags := buf[2]
+		if flags&udpgwFlagKeepalive != 0 {
+			continue // the server never sends these today; tolerate anyway
+		}
+		addrLen := 4
+		if flags&udpgwFlagIPv6 != 0 {
+			addrLen = 16
+		}
+		// Envelope: flags(1) connID(2) ip(addrLen) port(2) payload...
+		if size < 5+addrLen+12 {
+			g.failAll(conn, errors.New("invalid UDPGW DNS envelope"))
+			return
+		}
+		id := binary.LittleEndian.Uint16(buf[3:5])
+		payload := append([]byte(nil), buf[7+addrLen:2+size]...)
+
+		g.mu.Lock()
+		ch, ok := g.pending[id]
+		g.mu.Unlock()
+		if !ok {
+			continue // reply for an already-retired exchange (e.g. timed out)
+		}
+		select {
+		case ch <- gwReply{payload: payload}:
+		default:
+		}
+	}
+}
+
+// keepaliveLoop keeps the shared channel warm and detects silent deaths.
+// Server-side keepalive frames are simply consumed, and an unwritable
+// channel is torn down so the next exchange reconnects immediately.
+func (g *udpgwGateway) keepaliveLoop() {
+	ticker := time.NewTicker(udpgwKeepaliveEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-g.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		g.mu.Lock()
+		conn := g.conn
+		g.mu.Unlock()
+		if conn == nil {
+			continue
+		}
+		frame := []byte{0x03, 0x00, udpgwFlagKeepalive, 0x00, 0x00} // size 3, flags keepalive, connID 0
+		g.writeMu.Lock()
+		_, err := conn.Write(frame)
+		g.writeMu.Unlock()
+		if err != nil {
+			g.invalidate(conn)
+		}
+	}
+}
+
+func (g *udpgwGateway) invalidate(conn net.Conn) {
+	g.mu.Lock()
+	if g.conn == conn {
+		g.conn = nil
+	}
+	g.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+}
+
+func (g *udpgwGateway) drop(conn net.Conn) {
+	g.invalidate(conn)
+}
+
+// failAll tears down a broken channel and fails every in-flight exchange so
+// their callers retry on a fresh channel instead of waiting out the timeout.
+func (g *udpgwGateway) failAll(conn net.Conn, cause error) {
+	g.mu.Lock()
+	if g.conn == conn {
+		g.conn = nil
+	}
+	pending := g.pending
+	g.pending = make(map[uint16]chan gwReply)
+	g.mu.Unlock()
+	_ = conn.Close()
+	wrapped := fmt.Errorf("UDPGW reply: %w", cause)
+	for _, ch := range pending {
+		select {
+		case ch <- gwReply{err: wrapped}:
+		default:
+		}
+	}
+}
+
+func (g *udpgwGateway) close() {
+	g.mu.Lock()
+	conn := g.conn
+	g.conn = nil
+	pending := g.pending
+	g.pending = make(map[uint16]chan gwReply)
+	g.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	wrapped := errors.New("udpgw: gateway closed")
+	for _, ch := range pending {
+		select {
+		case ch <- gwReply{err: wrapped}:
+		default:
+		}
+	}
 }
 
 // Capture a per-start parent in each proxy. Cancellation closes DNS pipes,
@@ -460,7 +776,13 @@ func parseSocks5t(u *url.URL) (proxy.Proxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	return udpDroppingProxy{Proxy: inner, psiphonDNS: psiphonDNS, ctx: currentDNSContext()}, nil
+	p := udpDroppingProxy{Proxy: inner, psiphonDNS: psiphonDNS, ctx: currentDNSContext()}
+	if psiphonDNS {
+		// One gateway per tun2socks session: every copy of the proxy value
+		// tun2socks dials through shares this single UDPGW channel.
+		p.gw = newUdpgwGateway(p.ctx, inner)
+	}
+	return p, nil
 }
 
 func init() {
@@ -472,7 +794,17 @@ var (
 	mu      sync.Mutex
 	running bool
 
-	// logMu guards logFn and is DELIBERATELY separate from mu.
+	// hostLogLevel caps which of the bridge's OWN diagnostics (the [bridge]/
+	// [dns] lines emitted through emit()) reach the host logger, independent
+	// of the zap level that filters tun2socks-core records. The default --
+	// matching the configurable "tun2socks log" setting in both UIs -- is
+	// errors only: a healthy session logs nothing from this bridge, and the
+	// per-query DNS warnings only appear when the user opts into verbose
+	// tun2socks logs.
+	hostLogLevel = logError
+
+	// logMu guards logFn and hostLogLevel and is DELIBERATELY separate from
+	// mu.
 	//
 	// emit() is called from inside t2s_start/t2s_stop, which already hold mu.
 	// Go's sync.Mutex is not reentrant, so guarding logFn with mu too meant
@@ -485,18 +817,39 @@ var (
 )
 
 // emit forwards a message to the host logger. Never panics if no callback is
-// registered yet, and never touches mu -- see the comment above.
+// registered yet, never touches mu -- see the comment above -- and drops
+// records above the configured host log level (default: errors only).
 func emit(level int, format string, args ...any) {
 	logMu.Lock()
-	fn := logFn
+	fn, gate := logFn, hostLogLevel
 	logMu.Unlock()
-	if fn == nil {
+	if fn == nil || level > gate {
 		return
 	}
 	msg := fmt.Sprintf(format, args...)
 	c := C.CString(msg)
 	defer C.free(unsafe.Pointer(c))
 	C.t2s_invoke_log(fn, C.int(level), c)
+}
+
+// setHostLogLevel maps a tun2socks log-level string onto the emit() gate.
+// "silent" keeps error-level lines only; the zap logger installed by
+// installNonFatalLogger separately silences tun2socks-core records.
+func setHostLogLevel(level string) {
+	gate := logError // "silent" and anything unrecognised
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug":
+		gate = logDebug
+	case "info":
+		gate = logInfo
+	case "warn":
+		gate = logWarn
+	case "error":
+		gate = logError
+	}
+	logMu.Lock()
+	hostLogLevel = gate
+	logMu.Unlock()
 }
 
 //export t2s_set_log_callback
@@ -646,7 +999,7 @@ func validateKey(k *engine.Key) error {
 //	device   - "tun://<name>", "tun://<name>?guid=..." on Windows, or "fd://<n>"
 //	proxy    - e.g. "socks5://127.0.0.1:1819"
 //	mtu      - 0 for the tun2socks default
-//	loglevel - "debug" | "info" | "warn" | "error" | "silent"
+//	loglevel - "debug" | "info" | "warn" | "error" | "silent" (default: silent)
 //	tcpSndbuf/tcpRcvbuf - TCP defaults in bytes (4096..4194304 bytes)
 //	tcpAutoTuning - 0 disables, nonzero enables receive-buffer auto-tuning
 //
@@ -717,9 +1070,15 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char,
 		// table (and any parked goroutines) drains promptly.
 		UDPTimeout: 30 * time.Second,
 	}
+	// The bridge's own diagnostics default to silent: the configurable
+	// "tun2socks log" UI setting feeds this value; an empty string keeps
+	// the quiet default instead of the old "info" chatter.
 	if key.LogLevel == "" {
-		key.LogLevel = "info"
+		key.LogLevel = "silent"
 	}
+	// Gate emit() before anything can log, including the validation errors
+	// below, so the chosen level covers every bridge message.
+	setHostLogLevel(key.LogLevel)
 
 	if err := validateKey(key); err != nil {
 		emit(logError, "[bridge] invalid configuration: %v", err)

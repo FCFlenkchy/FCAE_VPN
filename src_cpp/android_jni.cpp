@@ -436,6 +436,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jint tunTcpSndbuf,
     jint tunTcpRcvbuf,
     jboolean tunTcpAutoTuning,
+    jint t2sLog,
     jint tunMtu
 ) {
     ensure_init();
@@ -519,6 +520,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.tun_tcp_sndbuf = (uint32_t)tunTcpSndbuf;
     cfg.tun_tcp_rcvbuf = (uint32_t)tunTcpRcvbuf;
     cfg.tun_tcp_auto_tuning = tunTcpAutoTuning == JNI_TRUE ? 1 : 2;
+    // tun2socks data-plane log level (FcaeT2sLog); 0 = default = silent.
+    cfg.tun2socks_log_level = (uint64_t)t2sLog;
 
     // The data directory is a real config field now, not a smuggled env var.
     std::string dataDir;

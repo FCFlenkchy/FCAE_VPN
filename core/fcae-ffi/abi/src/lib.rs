@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 6;
+pub const FCAE_ABI_VERSION: u32 = 7;
 
 // ── Enumerations ────────────────────────────────────────────────────────
 
@@ -427,15 +427,19 @@ pub struct FcaeConfig {
     pub tun_fd: i32,
 
     pub _reserved: [u64; 1], // slot 0 remains the Psiphon chain flag
-    /// TUN TCP defaults in bytes. 0 = 128000 bytes; valid range 4096..4194304 bytes.
+    /// TUN TCP defaults in bytes. 0 = 256000 bytes; valid range 4096..4194304 bytes.
     /// These two fields occupy former reserved slot 1.
     pub tun_tcp_sndbuf: u32,
     pub tun_tcp_rcvbuf: u32,
-    /// Former reserved slot 2: 0 = app default (on), 1 = on, 2 = off.
+    /// Former reserved slot 2: 0 = app default (off), 1 = on, 2 = off.
     pub tun_tcp_auto_tuning: u64,
     /// Independent Tor HTTP listener: 0 disables, otherwise 1..=65535.
     /// Former reserved[3]; preserves size and existing Psiphon reserved[0].
     pub tor_http_port: u64,
+    /// tun2socks data-plane log verbosity (`FcaeT2sLog`): 0 = default
+    /// (silent), 1 = silent, 2 = error, 3 = warn, 4 = info, 5 = debug.
+    /// ABI v7: appended after `tor_http_port` so all earlier offsets hold.
+    pub tun2socks_log_level: u64,
 }
 
 // ── Telemetry ───────────────────────────────────────────────────────────

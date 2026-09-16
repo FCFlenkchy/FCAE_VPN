@@ -683,9 +683,11 @@ public class FCAEVpnService extends VpnService {
         // MainActivity sends 0 when the field still holds the default.
         final int torSocksPort = intent.getIntExtra("torSocksPort", 0);
         sessionTunMtu = tunMtu;
-        final int tunTcpSndbuf = intent.getIntExtra("tunTcpSndbuf", 128000);
-        final int tunTcpRcvbuf = intent.getIntExtra("tunTcpRcvbuf", 128000);
-        final boolean tunTcpAutoTuning = intent.getBooleanExtra("tunTcpAutoTuning", true);
+        final int tunTcpSndbuf = intent.getIntExtra("tunTcpSndbuf", 256000);
+        final int tunTcpRcvbuf = intent.getIntExtra("tunTcpRcvbuf", 256000);
+        final boolean tunTcpAutoTuning = intent.getBooleanExtra("tunTcpAutoTuning", false);
+        // tun2socks data-plane log level (FcaeT2sLog); 0 = default = silent.
+        final int t2sLog = intent.getIntExtra("t2sLog", 0);
         final int torHttpPort = intent.getIntExtra("torHttpPort", 0);
         final boolean throughPsiphon = intent.getBooleanExtra("psiphonThroughTunnel", false);
         final String psiphonCfg    = intent.getStringExtra("psiphonConfig");
@@ -749,7 +751,7 @@ public class FCAEVpnService extends VpnService {
                     torMode, torBridges, torLinesV, engineLog,
                     backend, torSocksPort, torHttpPort, throughPsiphon,
                     psiphonCfgV, psiphonRegionV, psiphonSocks, psiphonHttp,
-                    tunTcpSndbuf, tunTcpRcvbuf, tunTcpAutoTuning, tunMtu
+                    tunTcpSndbuf, tunTcpRcvbuf, tunTcpAutoTuning, t2sLog, tunMtu
                 );
                 if (!ok) {
                     handler.post(() -> {
@@ -1031,9 +1033,10 @@ public class FCAEVpnService extends VpnService {
         putInt(e, i, "backend", 0);
         putBool(e, i, "psiphonThroughTunnel", false);
         putInt(e, i, "tunMtu", 1500);
-        putInt(e, i, "tunTcpSndbuf", 128000);
-        putInt(e, i, "tunTcpRcvbuf", 128000);
-        putBool(e, i, "tunTcpAutoTuning", true);
+        putInt(e, i, "tunTcpSndbuf", 256000);
+        putInt(e, i, "tunTcpRcvbuf", 256000);
+        putBool(e, i, "tunTcpAutoTuning", false);
+        putInt(e, i, "t2sLog", 0);
         putInt(e, i, "torHttpPort", 0);
         putInt(e, i, "torSocksPort", 0); // 0 = engine default (defer)
         putStr(e, i, "psiphonConfig");
@@ -1075,9 +1078,10 @@ public class FCAEVpnService extends VpnService {
         copyInt(p, i, "backend", 0);
         copyBool(p, i, "psiphonThroughTunnel", false);
         copyInt(p, i, "tunMtu", 1500);
-        copyInt(p, i, "tunTcpSndbuf", 128000);
-        copyInt(p, i, "tunTcpRcvbuf", 128000);
-        copyBool(p, i, "tunTcpAutoTuning", true);
+        copyInt(p, i, "tunTcpSndbuf", 256000);
+        copyInt(p, i, "tunTcpRcvbuf", 256000);
+        copyBool(p, i, "tunTcpAutoTuning", false);
+        copyInt(p, i, "t2sLog", 0);
         copyInt(p, i, "torHttpPort", 0);
         copyInt(p, i, "torSocksPort", 0); // 0 = engine default (defer)
         copyStr(p, i, "psiphonConfig");

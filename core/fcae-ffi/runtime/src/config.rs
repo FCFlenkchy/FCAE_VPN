@@ -104,10 +104,45 @@ pub struct PsiphonConfig {
     pub through_tunnel: bool,
 }
 
-pub const DEFAULT_TCP_BUFFER: u32 = 128000;
+pub const DEFAULT_TCP_BUFFER: u32 = 256000;
 // gVisor TCP MinBufferSize/MaxBufferSize in the pinned tun2socks dependency.
 pub const MIN_TCP_BUFFER: u32 = 4 * 1024;
 pub const MAX_TCP_BUFFER: u32 = 4 * 1024 * 1024;
+
+/// Verbosity of the tun2socks data plane (bridge + gVisor netstack logs).
+/// Values mirror the `FcaeT2sLog` ABI enum: 0 = default (silent), then
+/// silent/error/warn/info/debug. Silent still lets through rare error-level
+/// bridge lines but suppresses the per-flow and per-query chatter.
+pub const T2S_LOG_DEFAULT: u8 = 0;
+pub const T2S_LOG_SILENT: u8 = 1;
+pub const T2S_LOG_ERROR: u8 = 2;
+pub const T2S_LOG_WARN: u8 = 3;
+pub const T2S_LOG_INFO: u8 = 4;
+pub const T2S_LOG_DEBUG: u8 = 5;
+
+impl TunConfig {
+    /// The tun2socks log-level string for `t2s_start`. `0` (the default)
+    /// resolves to silent; the `FCAE_TUN2SOCKS_LOG` env var remains as an
+    /// out-of-band debugging override on top of the default only.
+    pub fn t2s_log_str(&self) -> String {
+        match self.t2s_log_level {
+            T2S_LOG_SILENT => "silent".to_string(),
+            T2S_LOG_ERROR => "error".to_string(),
+            T2S_LOG_WARN => "warn".to_string(),
+            T2S_LOG_INFO => "info".to_string(),
+            T2S_LOG_DEBUG => "debug".to_string(),
+            _ => {
+                if let Ok(v) = std::env::var("FCAE_TUN2SOCKS_LOG") {
+                    let v = v.trim().to_ascii_lowercase();
+                    if matches!(v.as_str(), "debug" | "info" | "warn" | "error" | "silent") {
+                        return v;
+                    }
+                }
+                "silent".to_string()
+            }
+        }
+    }
+}
 
 pub fn parse_tcp_buffer_size(text: &str) -> Result<u32> {
     let text = text.trim();
@@ -124,7 +159,7 @@ pub fn parse_tcp_buffer_size(text: &str) -> Result<u32> {
 fn tcp_buffer_or_default(bytes: u32, field: &str) -> Result<u32> {
     if bytes == 0 { return Ok(DEFAULT_TCP_BUFFER); }
     if !(MIN_TCP_BUFFER..=MAX_TCP_BUFFER).contains(&bytes) {
-        return Err(CoreError::InvalidConfig(format!("{field} must be 4096..4194304 bytes (or 0 for 128000)")));
+        return Err(CoreError::InvalidConfig(format!("{field} must be 4096..4194304 bytes (or 0 for 256000)")));
     }
     Ok(bytes)
 }
@@ -136,6 +171,8 @@ pub struct TunConfig {
     pub tcp_sndbuf: u32,
     pub tcp_rcvbuf: u32,
     pub tcp_auto_tuning: bool,
+    /// tun2socks log verbosity: one of the T2S_LOG_* values (0 = default/silent).
+    pub t2s_log_level: u8,
     pub name: String,
     pub mtu: u32,
     pub ipv4: String,
@@ -149,7 +186,12 @@ impl Default for TunConfig {
         Self {
             tcp_sndbuf: DEFAULT_TCP_BUFFER,
             tcp_rcvbuf: DEFAULT_TCP_BUFFER,
-            tcp_auto_tuning: true,
+            // Auto-tuning grows the receive buffer up to the kernel cap; on
+            // high-latency, lossy links (the common case for this VPN) it
+            // tends to overshoot and add queueing delay, so it is OFF by
+            // default on every platform and opt-in from both UIs.
+            tcp_auto_tuning: false,
+            t2s_log_level: T2S_LOG_DEFAULT,
             name: "FCAE_VPN".into(),
             mtu: 1500,
             ipv4: "198.18.0.1/24".into(),
@@ -651,10 +693,19 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     cfg.tun = TunConfig {
         tcp_sndbuf: tcp_buffer_or_default(raw.tun_tcp_sndbuf, "tun_tcp_sndbuf")?,
         tcp_rcvbuf: tcp_buffer_or_default(raw.tun_tcp_rcvbuf, "tun_tcp_rcvbuf")?,
+        // 0 = default (now OFF), 1 = explicitly on, 2 = explicitly off.
         tcp_auto_tuning: match raw.tun_tcp_auto_tuning {
-            0 | 1 => true,
-            2 => false,
+            1 => true,
+            0 | 2 => false,
             _ => return Err(CoreError::InvalidConfig("tun_tcp_auto_tuning must be 0, 1 or 2".into())),
+        },
+        t2s_log_level: match raw.tun2socks_log_level {
+            v @ 0..=5 => v as u8,
+            _ => {
+                return Err(CoreError::InvalidConfig(
+                    "tun2socks_log_level must be 0..=5 (0=default/silent, 5=debug)".into(),
+                ))
+            }
         },
         name: cstr_opt(raw.tun_name).unwrap_or_else(|| "FCAE_VPN".into()),
         mtu,
@@ -999,9 +1050,11 @@ mod tests {
         raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
         raw.abi_version = FCAE_ABI_VERSION;
         let cfg = unsafe { parse(&raw) }.unwrap();
-        assert_eq!(cfg.tun.tcp_sndbuf, 128000);
-        assert_eq!(cfg.tun.tcp_rcvbuf, 128000);
-        assert!(cfg.tun.tcp_auto_tuning);
+        assert_eq!(cfg.tun.tcp_sndbuf, 256000);
+        assert_eq!(cfg.tun.tcp_rcvbuf, 256000);
+        // 0 = default: auto-tuning is now OFF unless explicitly enabled.
+        assert!(!cfg.tun.tcp_auto_tuning);
+        assert_eq!(cfg.tun.t2s_log_level, T2S_LOG_DEFAULT);
         raw.tun_tcp_sndbuf = 256 * 1024;
         raw.tun_tcp_rcvbuf = 512 * 1024;
         raw.tun_tcp_auto_tuning = 2;
@@ -1014,6 +1067,11 @@ mod tests {
         raw.tun_tcp_auto_tuning = 3;
         assert!(unsafe { parse(&raw) }.is_err());
         raw.tun_tcp_auto_tuning = 0;
+        raw.tun2socks_log_level = T2S_LOG_DEBUG as u64;
+        assert_eq!(unsafe { parse(&raw) }.unwrap().tun.t2s_log_level, T2S_LOG_DEBUG);
+        raw.tun2socks_log_level = 6;
+        assert!(unsafe { parse(&raw) }.is_err());
+        raw.tun2socks_log_level = 0;
         raw.tun_mtu = 9000;
         assert_eq!(unsafe { parse(&raw) }.unwrap().tun.mtu, 9000);
         raw.tun_mtu = 1279;
@@ -1033,7 +1091,9 @@ mod tests {
         assert_eq!(offset_of!(FcaeConfig, tun_tcp_rcvbuf), base + 12);
         assert_eq!(offset_of!(FcaeConfig, tun_tcp_auto_tuning), base + 16);
         assert_eq!(offset_of!(FcaeConfig, tor_http_port), base + 24);
-        assert_eq!(size_of::<FcaeConfig>(), base + 32);
+        // Appended after the former reserved slots; ABI v7.
+        assert_eq!(offset_of!(FcaeConfig, tun2socks_log_level), base + 32);
+        assert_eq!(size_of::<FcaeConfig>(), base + 40);
     }
 
     #[test]

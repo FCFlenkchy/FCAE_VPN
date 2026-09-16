@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 6
+#define FCAE_ABI_VERSION 7
 
 /* ── Enumerations ──────────────────────────────────────────────────── */
 
@@ -119,6 +119,19 @@ typedef enum {
     FCAE_ENGINE_LOG_DEBUG = 4,
     FCAE_ENGINE_LOG_TRACE = 5
 } FcaeEngineLog;
+
+/* Verbosity of the tun2socks data plane (bridge + gVisor netstack), separate
+ * from the engine log. Default is SILENT: the data plane is not something
+ * users act on, and it can otherwise log a line per connection. Silent still
+ * passes rare error-level bridge lines to the host logger. */
+typedef enum {
+    FCAE_T2S_LOG_DEFAULT = 0,  /* follow the app default (silent)         */
+    FCAE_T2S_LOG_SILENT  = 1,
+    FCAE_T2S_LOG_ERROR   = 2,
+    FCAE_T2S_LOG_WARN    = 3,
+    FCAE_T2S_LOG_INFO    = 4,
+    FCAE_T2S_LOG_DEBUG   = 5
+} FcaeT2sLog;
 
 /* Tor egress, mirroring the engine's own AETHER_TOR modes. Tor lives INSIDE
  * the Aether engine -- it is not a separate backend. */
@@ -277,10 +290,11 @@ typedef struct {
     int32_t         tun_fd;        /* Android VpnService fd, else -1       */
 
     uint64_t        _reserved[1]; /* slot 0 remains Psiphon chain flag */
-    uint32_t        tun_tcp_sndbuf; /* bytes; 0 = 128000; 4096..4194304 bytes */
-    uint32_t        tun_tcp_rcvbuf; /* bytes; 0 = 128000; 4096..4194304 bytes */
-    uint64_t        tun_tcp_auto_tuning; /* 0=default(on), 1=on, 2=off */
+    uint32_t        tun_tcp_sndbuf; /* bytes; 0 = 256000; 4096..4194304 bytes */
+    uint32_t        tun_tcp_rcvbuf; /* bytes; 0 = 256000; 4096..4194304 bytes */
+    uint64_t        tun_tcp_auto_tuning; /* 0=default(off), 1=on, 2=off */
     uint64_t        tor_http_port; /* 0 disables; 1..65535; formerly reserved[3] */
+    uint64_t        tun2socks_log_level; /* FcaeT2sLog; 0 = default (silent) */
 } FcaeConfig;
 
 /* ── Telemetry ─────────────────────────────────────────────────────── */

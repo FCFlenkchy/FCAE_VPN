@@ -177,7 +177,10 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
         _reserved: [0; 1],
         tun_tcp_sndbuf: config::DEFAULT_TCP_BUFFER,
         tun_tcp_rcvbuf: config::DEFAULT_TCP_BUFFER,
-        tun_tcp_auto_tuning: 1,
+        // 0 = follow the app default, which is auto-tuning OFF now.
+        tun_tcp_auto_tuning: 0,
+        // 0 = follow the app default: tun2socks logs stay silent.
+        tun2socks_log_level: 0,
     });
     FcaeStatus::Ok
 }

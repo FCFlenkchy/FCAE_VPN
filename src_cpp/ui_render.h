@@ -61,9 +61,12 @@ struct AppState {
     // to the OS when the tunnel comes up and restores on down; defaults
     // mirror the Android VpnService hardcode.
     char tun_mtu[8] = "1500";
-    char tun_tcp_sndbuf[32] = "128000";
-    char tun_tcp_rcvbuf[32] = "128000";
-    bool tun_tcp_auto_tuning = true;
+    char tun_tcp_sndbuf[32] = "256000";
+    char tun_tcp_rcvbuf[32] = "256000";
+    // Auto-tuning grows the receive buffer up to the kernel cap; on
+    // high-latency, lossy links it tends to overshoot and add queueing
+    // delay. OFF by default on every platform, opt-in here and on Android.
+    bool tun_tcp_auto_tuning = false;
     char tun_dns4[96]  = "1.1.1.1,1.0.0.1";
     char tun_dns6[112] = "2606:4700:4700::1111,2606:4700:4700::1001";
     // Zero Trust (Cloudflare Teams)
@@ -81,6 +84,11 @@ struct AppState {
     // Verbosity of the aether ENGINE (FcaeEngineLog). 3 = info = default.
     // The FFI's own log callback level is fixed at info and not exposed.
     int  engine_log  = 3;
+
+    // Verbosity of the tun2socks data plane (FcaeT2sLog). 0 = default =
+    // silent: the netstack logs a line per connection when verbose, which
+    // is noise for daily use. Silent still lets rare error lines through.
+    int  t2s_log     = 0;
 
     // The aether engine's default Tor SOCKS port (config.rs
     // DEFAULT_TOR_SOCKS_PORT). Shown in the field, but an untouched field
@@ -209,6 +217,7 @@ struct AppState {
         c.tun_tcp_sndbuf = snd ? snd : 0xffffffffu;
         c.tun_tcp_rcvbuf = rcv ? rcv : 0xffffffffu;
         c.tun_tcp_auto_tuning = tun_tcp_auto_tuning ? 1 : 2;
+        c.tun2socks_log_level = (uint64_t)t2s_log;
         // TUN tunnels through the local SOCKS5 listener tun2socks dials, so
         // the checkbox is ignored in that mode: a port is always sent (same
         // rule as Android's FCAEVpnService). Port 0 means "off" for proxy

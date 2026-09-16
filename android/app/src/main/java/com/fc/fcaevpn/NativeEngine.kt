@@ -86,6 +86,9 @@ object NativeEngine {
         tunTcpSndbuf: Int,
         tunTcpRcvbuf: Int,
         tunTcpAutoTuning: Boolean,
+        // tun2socks data-plane log level (FcaeT2sLog): 0=default(silent)
+        // 1=silent 2=error 3=warn 4=info 5=debug.
+        t2sLog: Int,
         tunMtu: Int,
     ): Boolean
     @JvmStatic external fun nativePsiphonAttachRequest(): String

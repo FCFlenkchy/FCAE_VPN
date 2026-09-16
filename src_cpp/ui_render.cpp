@@ -128,6 +128,7 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.ech_enabled);
     h = fnv_value(h, g_app.sys_profile);
     h = fnv_value(h, g_app.engine_log);
+    h = fnv_value(h, g_app.t2s_log);
     h = fnv_value(h, g_app.tor_mode);
     h = fnv_value(h, g_app.tor_bridges);
     h = fnv_cstr(h, g_app.tor_bridge_lines);
@@ -376,6 +377,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "check_prereleases") g_app.check_prereleases = atoi(val.c_str()) != 0;
     else if (key == "sys_profile") g_app.sys_profile = atoi(val.c_str());
     else if (key == "engine_log") g_app.engine_log = atoi(val.c_str());
+    else if (key == "tun2socks_log") g_app.t2s_log = atoi(val.c_str());
     else if (key == "tor_mode") g_app.tor_mode = atoi(val.c_str());
     else if (key == "tor_bridges") g_app.tor_bridges = atoi(val.c_str());
     else if (key == "tor_bridge_lines")
@@ -448,6 +450,7 @@ static void save_config() {
     fprintf(f, "check_prereleases=%d\n", g_app.check_prereleases ? 1 : 0);
     fprintf(f, "sys_profile=%d\n", g_app.sys_profile);
     fprintf(f, "engine_log=%d\n", g_app.engine_log);
+    fprintf(f, "tun2socks_log=%d\n", g_app.t2s_log);
     fprintf(f, "tor_mode=%d\n", g_app.tor_mode);
     fprintf(f, "tor_bridges=%d\n", g_app.tor_bridges);
     // The cfg file is line-based, so newlines in a value would corrupt it on
@@ -561,6 +564,22 @@ static ImVec4 state_color(FcaeState s) {
 }
 
 static const char* state_label(FcaeState s) {
+    // CONNECTED is composed from the active selection so the user can see
+    // WHICH engine carries WHICH mode at a glance, e.g.
+    // "CONNECTED (AETHER - TUN)". Psiphon backend / Protocol=Tor / the
+    // chained "Psiphon through the tunnel" egress get their own names.
+    static char connected[64];
+    if (s == FCAE_STATE_CONNECTED) {
+        const char* engine =
+            g_app.backend == 1                                    ? "PSIPHON"       :
+            (g_app.protocol == 4 && g_app.tor_mode == 3)          ? "TOR+PSIPHON"   :
+            g_app.protocol == 4                                   ? "TOR"           :
+            g_app.tor_mode == 3                                   ? "AETHER+PSIPHON":
+                                                                    "AETHER";
+        snprintf(connected, sizeof(connected), "CONNECTED (%s - %s)",
+                 engine, g_app.mode == 1 ? "TUN" : "PROXY");
+        return connected;
+    }
     switch (s) {
         case FCAE_STATE_DISCONNECTED: return "DISCONNECTED";
         case FCAE_STATE_PROVISIONING: return "PROVISIONING";
@@ -1255,6 +1274,15 @@ void render_ui() {
             ImGui::Checkbox("TCP auto-tuning", &g_app.tun_tcp_auto_tuning);
             if (!fcae_parse_tcp_buffer_size(g_app.tun_tcp_sndbuf) || !fcae_parse_tcp_buffer_size(g_app.tun_tcp_rcvbuf))
                 ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "Buffers: 4096..4194304 bytes.");
+            ImGui::Spacing();
+            ImGui::Text("tun2socks log (data plane)");
+            // Verbosity of the tun2socks data plane (bridge + gVisor
+            // netstack), separate from the engine log above. Default is
+            // silent: it would otherwise log a line per connection.
+            const char* t2s_logs[] = {
+                "Silent (default)", "Silent", "Error", "Warn", "Info", "Debug",
+            };
+            ImGui::Combo("tun2socks log", &g_app.t2s_log, t2s_logs, 6);
             ImGui::Spacing();
             ImGui::TextDisabled("TUN DNS (comma separated; applied on up, restored on down; empty = platform default)");
             ImGui::PushItemWidth(-1);

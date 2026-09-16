@@ -436,24 +436,23 @@ impl TunBridge for Tun2SocksBridge {
             .map_err(|_| CoreError::Internal("device string contains a NUL".into()))?;
         let c_proxy = CString::new(proxy.clone())
             .map_err(|_| CoreError::Internal("proxy string contains a NUL".into()))?;
-        // tun2socks is silent by default. It logged a line per connection,
-        // which on a busy device is thousands of useless entries an hour that
-        // bury the engine's own messages -- and the data plane is not
-        // something the user can act on anyway. "silent" still leaves the
-        // fatal path intact: installNonFatalLogger() clamps the level to
-        // Fatal so zap's OnFatal hook keeps converting a would-be os.Exit
-        // into a recoverable panic.
+        // tun2socks logs stay silent unless the user opts in from the UI
+        // ("tun2socks log" setting on Android and desktop). It used to log a
+        // line per connection, which on a busy device is thousands of useless
+        // entries an hour that bury the engine's own messages -- and the data
+        // plane is not something the user can act on anyway. "silent" still
+        // leaves the fatal path intact: installNonFatalLogger() clamps the
+        // level to Fatal so zap's OnFatal hook keeps converting a would-be
+        // os.Exit into a recoverable panic, and the bridge's own emit() gate
+        // keeps error-level lines while dropping the per-query chatter.
         //
-        // Opt back in with FCAE_TUN2SOCKS_LOG=debug|info|warn|error when
-        // debugging the data plane.
-        let level = std::env::var("FCAE_TUN2SOCKS_LOG")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .filter(|v| matches!(v.as_str(), "debug" | "info" | "warn" | "error" | "silent"))
-            .unwrap_or_else(|| "silent".to_string());
-        let c_level = CString::new(level).expect("level has no NUL");
-        log::info!("[tun] TCP sndbuf={} bytes, rcvbuf={} bytes, auto-tuning={}",
-            cfg.tun.tcp_sndbuf, cfg.tun.tcp_rcvbuf, cfg.tun.tcp_auto_tuning);
+        // FCAE_TUN2SOCKS_LOG=debug|info|warn|error remains as an out-of-band
+        // debugging override on top of the default only; an explicit UI pick
+        // always wins.
+        let level = cfg.tun.t2s_log_str();
+        let c_level = CString::new(level.clone()).expect("level has no NUL");
+        log::info!("[tun] TCP sndbuf={} bytes, rcvbuf={} bytes, auto-tuning={}, t2s log={}",
+            cfg.tun.tcp_sndbuf, cfg.tun.tcp_rcvbuf, cfg.tun.tcp_auto_tuning, level);
 
         // Serialize the fd handoff with abort. Never close a numeric fd while
         // Go is opening it, nor after Go's device has taken ownership of it.
