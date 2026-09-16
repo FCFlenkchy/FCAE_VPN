@@ -101,6 +101,27 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private static final int MAX_REBIND_ATTEMPTS = 5;
     private static final long REBIND_DELAY_MS = 1500L;
     private static volatile int rebindAttempts;
+
+    /**
+     * Hard deadline for the AAR's tunnel.stop().
+     *
+     * Upstream's Stop() joins the ENTIRE controller (controllerWaitGroup
+     * -> runWaitGroup.Wait()): every in-flight dial, handshake and fetch has
+     * to notice the context cancellation and finish first. On a healthy
+     * egress that is tens of milliseconds; mid-handshake on a slow or
+     * filtered one it runs to seconds — long after the user was told the
+     * session is over, with the tunnel still connected and this process
+     * still alive the whole time. That is the visible "Psiphon teardown is
+     * slow".
+     *
+     * Anything slower is killed instead of joined: the kernel closes every
+     * socket on process death, so the tunnel is gone the instant we kill.
+     * The on-disk datastore is left in exactly the state an OOM kill would
+     * leave — bolt's on-disk structure is crash-safe, tunnel-core has a
+     * recovery path for it, and the system already OOM-kills this process
+     * in production, so a hard kill is not a new failure mode.
+     */
+    private static final long HARD_STOP_TIMEOUT_MS = 500L;
     private long session;
     private long attachRequestId;
     private static volatile long clientAttachId;
@@ -565,12 +586,38 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         psiphonUp = false;
         emitLog("stopping");
         flushLogs();
-        libraryWorker.execute(() -> {
-            synchronized (LIBRARY_LOCK) {
-                try { if (tunnel != null && needsLibraryStop) tunnel.stop(); } catch (Throwable ignored) {}
-            }
-            broadcastStopped();
-        });
+        if (tunnel != null && needsLibraryStop) {
+            // The AAR's stop() joins the whole controller and can take
+            // seconds (see HARD_STOP_TIMEOUT_MS). Run it, and race it
+            // against a deadline: a stop still running when the deadline
+            // fires gets the process killed, which drops the tunnel
+            // instantly instead of letting it outlive the user's
+            // disconnect by however long the in-flight dials take.
+            final PsiphonTunnel t = tunnel;
+            final java.util.concurrent.CountDownLatch stopDone =
+                    new java.util.concurrent.CountDownLatch(1);
+            libraryWorker.execute(() -> {
+                try {
+                    synchronized (LIBRARY_LOCK) {
+                        try { t.stop(); } catch (Throwable ignored) {}
+                    }
+                } finally {
+                    stopDone.countDown();
+                }
+                broadcastStopped();
+            });
+            new Thread(() -> {
+                try {
+                    if (stopDone.await(HARD_STOP_TIMEOUT_MS,
+                            java.util.concurrent.TimeUnit.MILLISECONDS)) return;
+                } catch (InterruptedException ignored) { return; }
+                Log.w(TAG, "Psiphon stop exceeded " + HARD_STOP_TIMEOUT_MS
+                        + " ms; killing the process to drop the tunnel");
+                try { android.os.Process.killProcess(android.os.Process.myPid()); }
+                catch (Throwable ignored) {}
+                Runtime.getRuntime().halt(2); // backstop: guaranteed exit
+            }, "FCAE-PsiHardStop").start();
+        }
         stopSelf();
     }
 
