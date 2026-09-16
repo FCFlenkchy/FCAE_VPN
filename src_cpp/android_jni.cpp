@@ -437,7 +437,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jint tunTcpRcvbuf,
     jboolean tunTcpAutoTuning,
     jint t2sLog,
-    jint tunMtu
+    jint tunMtu,
+    jstring tunDnsServers
 ) {
     ensure_init();
 
@@ -522,6 +523,12 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.tun_tcp_auto_tuning = tunTcpAutoTuning == JNI_TRUE ? 1 : 2;
     // tun2socks data-plane log level (FcaeT2sLog); 0 = default = silent.
     cfg.tun2socks_log_level = (uint64_t)t2sLog;
+
+    // The UI's TUN DNS servers: the core also gets them so the in-tunnel
+    // Psiphon gateway queries THESE resolvers. Empty keeps the core
+    // defaults; the string must outlive fcae_start, hence the owned copy.
+    std::string tunDnsOwned = jstr(env, tunDnsServers);
+    if (!tunDnsOwned.empty()) cfg.dns.server = tunDnsOwned.c_str();
 
     // The data directory is a real config field now, not a smuggled env var.
     std::string dataDir;

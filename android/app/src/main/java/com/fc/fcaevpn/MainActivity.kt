@@ -1329,6 +1329,11 @@ class MainActivity : AppCompatActivity() {
         val tunTcpSndbuf = tcpBufferBytes(editTunTcpSndbuf)
         val tunTcpRcvbuf = tcpBufferBytes(editTunTcpRcvbuf)
         val tunTcpAutoTuning = switchTunTcpAutoTuning.isChecked
+        // TUN DNS servers for the core (in-tunnel resolver choice); same
+        // fields the VpnService builder uses. Blanks collapse to "".
+        val tunDnsServers = listOf(editTunDnsV4.text.toString().trim(), editTunDnsV6.text.toString().trim())
+            .filter { it.isNotEmpty() }
+            .joinToString(",")
         val epoch = connectionEpoch
         NativeEngine.lifecycleExecutor.execute {
             if (epoch != connectionEpoch) return@execute
@@ -1381,6 +1386,7 @@ class MainActivity : AppCompatActivity() {
                     tunTcpAutoTuning = tunTcpAutoTuning,
                     t2sLog = t2sLog,
                     tunMtu = tunMtu,
+                    tunDnsServers = tunDnsServers,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }

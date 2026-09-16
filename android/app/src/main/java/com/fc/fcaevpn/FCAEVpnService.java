@@ -741,6 +741,22 @@ public class FCAEVpnService extends VpnService {
                     NativeEngine.nativeSetNativeLibDir(getApplicationInfo().nativeLibraryDir);
                 } catch (Exception ignored) {}
 
+                // The UI's TUN DNS servers (the same prefs configureTunDns
+                // reads for the builder) also feed the core: the in-tunnel
+                // Psiphon gateway then queries THESE resolvers. Blanks
+                // collapse to "" so the core keeps its defaults.
+                final android.content.SharedPreferences dnsPrefs =
+                    getSharedPreferences(PREFS_MAIN, MODE_PRIVATE);
+                String dnsV4 = dnsPrefs.getString("tunDnsV4", DEFAULT_TUN_DNS_V4);
+                String dnsV6 = dnsPrefs.getString("tunDnsV6", DEFAULT_TUN_DNS_V6);
+                StringBuilder dnsSb = new StringBuilder();
+                if (dnsV4 != null && !dnsV4.trim().isEmpty()) dnsSb.append(dnsV4.trim());
+                if (dnsV6 != null && !dnsV6.trim().isEmpty()) {
+                    if (dnsSb.length() > 0) dnsSb.append(',');
+                    dnsSb.append(dnsV6.trim());
+                }
+                final String tunDnsCfgV = dnsSb.toString();
+
                 boolean ok = NativeEngine.nativeStart(
                     protocol, mode, lan, scanMode,
                     ipVersion, quick, noizeVal,
@@ -751,7 +767,8 @@ public class FCAEVpnService extends VpnService {
                     torMode, torBridges, torLinesV, engineLog,
                     backend, torSocksPort, torHttpPort, throughPsiphon,
                     psiphonCfgV, psiphonRegionV, psiphonSocks, psiphonHttp,
-                    tunTcpSndbuf, tunTcpRcvbuf, tunTcpAutoTuning, t2sLog, tunMtu
+                    tunTcpSndbuf, tunTcpRcvbuf, tunTcpAutoTuning, t2sLog, tunMtu,
+                    tunDnsCfgV
                 );
                 if (!ok) {
                     handler.post(() -> {

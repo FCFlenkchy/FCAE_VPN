@@ -90,6 +90,10 @@ object NativeEngine {
         // 1=silent 2=error 3=warn 4=info 5=debug.
         t2sLog: Int,
         tunMtu: Int,
+        // TUN DNS servers from the UI (comma separated) or "" for defaults.
+        // Fed to the core so the in-tunnel Psiphon gateway queries THESE
+        // resolvers; the same list also populates the TUN builder.
+        tunDnsServers: String,
     ): Boolean
     @JvmStatic external fun nativePsiphonAttachRequest(): String
     @JvmStatic external fun nativePsiphonAttachComplete(id: Long, socks: Int, http: Int)
