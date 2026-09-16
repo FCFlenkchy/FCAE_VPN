@@ -564,22 +564,8 @@ static ImVec4 state_color(FcaeState s) {
 }
 
 static const char* state_label(FcaeState s) {
-    // CONNECTED is composed from the active selection so the user can see
-    // WHICH engine carries WHICH mode at a glance, e.g.
-    // "CONNECTED (AETHER - TUN)". Psiphon backend / Protocol=Tor / the
-    // chained "Psiphon through the tunnel" egress get their own names.
-    static char connected[64];
-    if (s == FCAE_STATE_CONNECTED) {
-        const char* engine =
-            g_app.backend == 1                                    ? "PSIPHON"       :
-            (g_app.protocol == 4 && g_app.tor_mode == 3)          ? "TOR+PSIPHON"   :
-            g_app.protocol == 4                                   ? "TOR"           :
-            g_app.tor_mode == 3                                   ? "AETHER+PSIPHON":
-                                                                    "AETHER";
-        snprintf(connected, sizeof(connected), "CONNECTED (%s - %s)",
-                 engine, g_app.mode == 1 ? "TUN" : "PROXY");
-        return connected;
-    }
+    if (s == FCAE_STATE_CONNECTED)
+        return g_app.mode == 1 ? "CONNECTED - TUN" : "CONNECTED - PROXY";
     switch (s) {
         case FCAE_STATE_DISCONNECTED: return "DISCONNECTED";
         case FCAE_STATE_PROVISIONING: return "PROVISIONING";

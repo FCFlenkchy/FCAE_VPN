@@ -228,7 +228,7 @@ class MainActivity : AppCompatActivity() {
                         engineRunning = true
                         vpnActive = true
                         updateButton()
-                        statusText.text = if (isTunModeSelected()) "ESTABLISHING PSIPHON TUN" else "CONNECTED (PSIPHON - PROXY)"
+                        statusText.text = if (isTunModeSelected()) "ESTABLISHING PSIPHON TUN" else "CONNECTED - PROXY"
                         statusText.setTextColor(COLOR_CONNECTED)
                         // Surface psiphon's actual proxy endpoints here too —
                         // pure-psiphon mode never polls the engine, so this
@@ -1696,7 +1696,7 @@ class MainActivity : AppCompatActivity() {
                 4 -> {
                     val isTun = spinnerMode.selectedItemPosition == 1
                     if (statusMsg.isNotBlank()) statusMsg.uppercase()
-                    else "CONNECTED (${engineLabelForStatus()} - ${if (isTun) "TUN" else "PROXY"})"
+                    else "CONNECTED - ${if (isTun) "TUN" else "PROXY"}"
                 }
                 5 -> "ERROR"
                 6 -> "RECONNECTING"
@@ -1845,20 +1845,6 @@ class MainActivity : AppCompatActivity() {
 
     /** Protocol Psiphon only. Egress Psiphon starts Aether first, then the AAR. */
     private fun isPsiphonSelected(): Boolean = isPsiphonProtocol()
-
-    /**
-     * Engine/egress name for the status pill, e.g. "CONNECTED (AETHER - TUN)".
-     * Protocol=Psiphon runs the Psiphon backend; Protocol=Tor runs the Tor-only
-     * engine; the "Psiphon through the tunnel" egress chains both engines
-     * (Aether first, then Psiphon); every WARP transport reports AETHER.
-     */
-    private fun engineLabelForStatus(): String = when {
-        isPsiphonSelected() -> "PSIPHON"
-        isTorOnly() && isEgressPsiphon() -> "TOR+PSIPHON"
-        isTorOnly() -> "TOR"
-        isEgressPsiphon() -> "AETHER+PSIPHON"
-        else -> "AETHER"
-    }
 
     /** Tor modes 1/2 only. Protocol Tor/Psiphon and egress Psiphon send Off. */
     private fun effectiveTorMode(): Int {
