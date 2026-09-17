@@ -643,7 +643,7 @@ class MainActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
-                if (applyingRegionList || position != spinnerPsiphonRegion.selectedItemPosition) return
+                if (applyingRegionList) return
                 savedPsiphonRegion = psiphonRegionCodes.getOrElse(position) { savedPsiphonRegion }
                 prefs.edit().putString("psiphonRegion", savedPsiphonRegion).apply()
             }
