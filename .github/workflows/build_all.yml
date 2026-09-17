@@ -96,13 +96,13 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
       - name: setup Java 17 for Android Gradle Plugin
         if: startsWith(matrix.name, 'android-')
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -123,7 +123,7 @@ jobs:
       # "module ... requires go >= 1.26.3". Keep this >= that value; `stable`
       # tracks the current release so submodule bumps do not break the build.
       - name: setup go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: 'stable'
           cache: false
@@ -140,7 +140,7 @@ jobs:
           go version
 
       - name: cleanup old caches
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         continue-on-error: true
         with:
           script: |
@@ -281,7 +281,7 @@ jobs:
       - name: cache macos glfw build
         if: matrix.name == 'macos-x64'
         id: cache-glfw
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /usr/local/glfw_x64
           key: glfw-x64-3.4
@@ -345,7 +345,7 @@ jobs:
 
       - name: cache cmake
         if: "!startsWith(matrix.name, 'android-')"
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build
           key: cmake-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt', 'core/**', 'src_cpp/**', 'include/**') }}
@@ -353,7 +353,7 @@ jobs:
 
       - name: cache gradle
         if: startsWith(matrix.name, 'android-')
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.gradle/caches
@@ -926,7 +926,7 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
 
       - name: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: FCAE_VPN-${{ matrix.name }}
           path: ${{ startsWith(matrix.name, 'macos-') && 'package/*.dmg' || 'package/*' }}
@@ -941,12 +941,12 @@ jobs:
       contents: write
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
 
       - name: download app package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: FCAE_VPN-*
           path: artifacts/
@@ -993,7 +993,7 @@ jobs:
           test $(ls -1 release-zips/* 2>/dev/null | wc -l) -ge 1
 
       - name: delete existing release + tag
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         continue-on-error: true
         with:
           script: |
@@ -1014,7 +1014,7 @@ jobs:
             } catch (e) { console.log(`No existing tag: ${e.message}`); }
 
       - name: release/pre-release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
