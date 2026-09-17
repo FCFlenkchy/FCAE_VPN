@@ -415,14 +415,13 @@ impl TunBridge for Tun2SocksBridge {
         platform::ensure_wintun(wintun_bytes())?;
 
         let (device, owned_fd) = self.device_spec(cfg)?;
-        // Keep the standard SOCKS5 schema for every backend. The Go bridge
-        // patches that schema directly: Psiphon gets a private query flag so
-        // its CONNECT-only listener never receives UDP ASSOCIATE (0x03), while
-        // Aether keeps its normal SOCKS5 UDP behavior. No alternate protocol
-        // scheme is needed.
+        // Aether keeps the upstream full SOCKS5 schema, including its own
+        // Tor/WARP DNS handling. Psiphon uses the bridge's explicit
+        // socks5p adapter so its CONNECT-only listener never receives UDP
+        // ASSOCIATE (0x03); DNS is sent through the native UDP gateway.
         let proxy = if endpoints.psiphon_dns {
             log::info!("[tun] Psiphon DNS: native UDP gateway through the selected exit (no fallback)");
-            format!("socks5://{socks}?fcae_psiphon_dns=1")
+            format!("socks5p://{socks}")
         } else {
             format!("socks5://{socks}")
         };
