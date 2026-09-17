@@ -1,17 +1,12 @@
 package com.fc.fcaevpn;
 
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.content.SharedPreferences;
-import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -80,23 +75,21 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 
     /**
-     * FGS keep-alive. A bound-only service in a SEPARATE background process is
-     * exactly what the system reclaims first under memory pressure (and what
-     * OEM "cleaners" kill): the binder drops, the chain fails, and the tunnel
-     * "disconnects" on its own. A foreground service (low-importance, silent
-     * notification) pins the process for the lifetime of the user's session.
-     */
-    private static final String FGS_CHANNEL_ID = "fcaevpn_psiphon";
-    private static final int FGS_NOTIFICATION_ID = 3;
-
-    /**
-     * Rebind safety net for the kills the FGS still cannot prevent (OOM, OEM
-     * killers). The binder dropping must NOT fail the session: the Rust lease
-     * stays pending (no 0-port completion is sent), so the TUN keeps running
-     * while we rebind with the SAME intent (same requestId + psiSession). The
-     * restarted service replays the tunnel config and its READY refreshes the
-     * lease ports in place. Only after MAX_REBIND_ATTEMPTS do we give up and
-     * fail the chain, which the supervisor then handles with a fresh request.
+     * Rebind safety net for an isolated-process service that is bound to the
+     * app-owned foreground service. The binder dropping must NOT fail the
+     * session: the Rust lease stays pending (no 0-port completion is sent),
+     * so the TUN keeps running while we rebind with the SAME intent (same
+     * requestId + psiSession). The restarted service replays the tunnel
+     * config and its READY refreshes the lease ports in place. Only after
+     * MAX_REBIND_ATTEMPTS do we give up and fail the chain, which the
+     * supervisor then handles with a fresh request.
+     *
+     * PsiphonTunnelService deliberately does not call startForeground(). A
+     * Psiphon session always has exactly one notification owner: the existing
+     * ProxyNotification service in proxy mode, or FCAEVpnService in TUN mode.
+     * Both owners are foreground services and initiate the binding, so Android
+     * keeps this isolated process alive for the active session without posting
+     * a second notification.
      */
     private static final int MAX_REBIND_ATTEMPTS = 5;
     private static final long REBIND_DELAY_MS = 1500L;
@@ -191,10 +184,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             android.content.ServiceConnection next = makeConnection(app, intent);
             connection = next;
             liveConnections.add(next);
-            // Started AND bound: START_STICKY only applies to started services,
-            // so the system restarts a killed :psiphon process (its null-intent
-            // handler exits it quietly; the rebind below recreates it with the
-            // real extras). The FGS notification is raised inside the service.
+            // Keep the service both started and bound so an orphaned service
+            // can be stopped explicitly. Its lifetime/priority is owned by
+            // the app's single foreground notification owner; this isolated
+            // service must not create a second foreground notification.
             try { app.startService(intent); } catch (Throwable ignored) {}
             if (!app.bindService(intent, next, Context.BIND_AUTO_CREATE)) {
                 connection = null;
@@ -274,12 +267,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         final long request = clientAttachId;
         clientAttachId = 0;
         if (request != 0) NativeEngine.nativePsiphonAttachComplete(request, 0, 0);
-        // The service is ALSO started (for START_STICKY), so unbinding alone
-        // would leave it — and its tunnel — running. stopService is safe when
-        // nothing is running and covers the orphan case (binder already
-        // dropped, live set empty). A queued startBound for the NEXT session
-        // posts its startService after the unbinds below, so a fresh session
-        // is not hurt.
+        // The service is also started so unbinding alone cannot leave an
+        // orphaned tunnel running. stopService is safe when nothing is
+        // running and covers the binder-already-dropped case. A queued
+        // startBound for the NEXT session posts its startService after the
+        // unbinds below, so a fresh session is not hurt.
         try { app.stopService(new Intent(app, PsiphonTunnelService.class)); }
         catch (Throwable ignored) {}
         if (!old.isEmpty()) {
@@ -382,69 +374,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onCreate() {
         super.onCreate();
-        createFgsChannel();
-        // Binding policy depends on the per-start LAN option, not onCreate.
-        // Construct the singleton on libraryWorker, never on Android main.
-    }
-
-    private void createFgsChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm == null) return;
-            // LOW importance on purpose: this notification exists to pin the
-            // process, not to inform. No sound, no badge.
-            NotificationChannel ch = new NotificationChannel(FGS_CHANNEL_ID, "FCAE tunnel process",
-                    NotificationManager.IMPORTANCE_LOW);
-            ch.setDescription("Keeps the Psiphon tunnel process alive");
-            ch.setShowBadge(false);
-            ch.setSound(null, null);
-            ch.enableVibration(false);
-            nm.createNotificationChannel(ch);
-        }
-    }
-
-    /**
-     * Raise (or update) the keep-alive foreground notification. Runs on the
-     * main looper: callers include AAR callbacks. A launch-restriction
-     * exception degrades to bind-only operation (the pre-change behaviour)
-     * rather than breaking the tunnel.
-     */
-    @SuppressWarnings("deprecation")
-    private void startFgs(String text) {
-        new Handler(Looper.getMainLooper()).post(() -> {
-            if (stopping) return;
-            try {
-                Notification.Builder nb = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                    ? new Notification.Builder(this, FGS_CHANNEL_ID)
-                    : new Notification.Builder(this);
-                Notification n = nb.setContentTitle("FCAE VPN")
-                    .setContentText(text)
-                    .setSmallIcon(android.R.drawable.ic_lock_lock)
-                    .setOngoing(true)
-                    .setOnlyAlertOnce(true)
-                    .setCategory(Notification.CATEGORY_SERVICE)
-                    .setVisibility(Notification.VISIBILITY_PUBLIC)
-                    .setPriority(Notification.PRIORITY_LOW)
-                    .build();
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    startForeground(FGS_NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-                } else {
-                    startForeground(FGS_NOTIFICATION_ID, n);
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "startForeground (psiphon) failed: " + t.getMessage());
-            }
-        });
-    }
-
-    private void stopFgs() {
-        new Handler(Looper.getMainLooper()).post(() -> {
-            try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Throwable ignored) {}
-            try {
-                NotificationManager nm = getSystemService(NotificationManager.class);
-                if (nm != null) nm.cancel(FGS_NOTIFICATION_ID);
-            } catch (Throwable ignored) {}
-        });
+        // The app-owned ProxyNotification/FCAEVpnService foreground service
+        // owns the single visible notification for this session. Do not call
+        // startForeground() here: doing so creates a second notification for
+        // the isolated Psiphon process.
     }
 
     @Override
@@ -500,10 +433,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         bytesUp.set(0);
         bytesDown.set(0);
         broadcastStage(1, "CONNECTING");
-        // Pin the process for the whole requested session: startTunneling()
-        // can take 10-60 s on a slow egress, and that is exactly the window
-        // the system reclaims unkept background processes in.
-        startFgs("Establishing tunnel\u2026");
         libraryWorker.execute(() -> {
             try {
                 if (stopping) return;
@@ -573,7 +502,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (stopping) return;
         stopping = true;
         logHandler.removeCallbacks(dialHeartbeat);
-        stopFgs();
         Thread st = statsThread;
         if (st != null) st.interrupt();
         // Only touch the native library when a tunnel is actually up or a
@@ -942,7 +870,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (s <= 0) s = tunnel.getLocalSocksProxyPort();
         socksPort.set(s);
         emitLog("connected, SOCKS 127.0.0.1:" + s);
-        startFgs("Tunnel running");
         flushLogs();
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());

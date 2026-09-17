@@ -50,18 +50,13 @@
         </service>
 
         <!-- Isolated process: AAR Go runtime must not share an address space
-             with tun2socks. specialUse FGS: a bound-only service in a
-             background process is what the system reclaims first under
-             memory pressure, which killed the tunnel on its own. -->
+             with tun2socks. The service is bound to the app-owned foreground
+             service; it deliberately has no foreground-service declaration so
+             it cannot create a second status notification. -->
         <service
             android:name=".PsiphonTunnelService"
             android:exported="false"
-            android:process=":psiphon"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="psiphon-tunnel" />
-        </service>
+            android:process=":psiphon" />
 
     </application>
 </manifest>

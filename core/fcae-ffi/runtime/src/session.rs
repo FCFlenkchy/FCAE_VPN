@@ -683,6 +683,7 @@ mod tests {
                 http: None,
                 peer_ip: Some("203.0.113.7".into()),
                 udp: true,
+                psiphon_dns: false,
             }
         }
         async fn wait(&self) -> Result<()> {
@@ -764,14 +765,14 @@ mod tests {
         assert!(result.is_err());
         assert_ne!(cell.snapshot().state, FcaeState::Connected);
 
-        // Positive half: the TUN gets the exit SOCKS endpoint, never the
+        // Positive half: the TUN gets the exit SOCKS/DNS policy, never the
         // primary's plain SOCKS, while retaining the carrier route exclusion.
         struct ExitHandle;
         #[async_trait]
         impl BackendHandle for ExitHandle {
             fn endpoints(&self) -> Endpoints {
                 Endpoints { socks: Some("127.0.0.1:1080".parse().unwrap()), http: None,
-                    peer_ip: None, udp: true }
+                    peer_ip: None, udp: false, psiphon_dns: true }
             }
             async fn wait(&self) -> Result<()> { std::future::pending().await }
             async fn stop(&self, _: Duration) -> Result<()> { Ok(()) }
@@ -791,7 +792,8 @@ mod tests {
         impl TunBridge for CheckTun {
             fn start(&self, _: &SessionConfig, ep: &Endpoints) -> Result<()> {
                 assert_eq!(ep.socks.unwrap().port(), 1080);
-                assert!(ep.udp);
+                assert!(ep.psiphon_dns);
+                assert!(!ep.udp);
                 assert_eq!(ep.peer_ip.as_deref(), Some("203.0.113.7"));
                 self.checked.store(true, Ordering::SeqCst);
                 self.cancel.cancel();

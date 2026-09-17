@@ -598,13 +598,14 @@ impl BackendHandle for AetherHandle {
                 .then(|| format!("127.0.0.1:{}", http_port).parse().ok())
                 .flatten(),
             peer_ip: aether_engine::stats::peer().map(|peer| peer.ip().to_string()),
-            // Every Aether endpoint speaks the full SOCKS protocol: the
-            // WARP listener (tor off, and Reverse where tor is the carrier)
-            // carries real UDP through the netstack, and the tor listeners
-            // (Only/Chain) answer UDP ASSOCIATE by relaying DNS as
-            // DNS-over-TCP through the exit and dropping other datagrams --
-            // so no TCP-only scheme or local relay is needed upstream.
-            udp: true,
+            // The engine's SOCKS listener carries UDP (gVisor netstack) —
+            // but only while the egress is WARP. Tor has no UDP: every UDP
+            // flow sent there (rare stray DNS, QUIC probes) dies with a
+            // Tor-protocol error and spams the log, so advertise UDP-less
+            // whenever a Tor mode is active and let tun2socks drop those
+            // flows locally instead.
+            udp: self.cfg.tor.mode == FcaeTorMode::Off,
+            psiphon_dns: false,
         }
     }
 
