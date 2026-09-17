@@ -62,7 +62,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -104,10 +106,14 @@ var (
 	psiBytesUp   uint64
 	psiBytesDown uint64
 
-	// psiRegions is the set of egress psiRegions the server reported. Psiphon only
-	// sends this after a successful handshake, which is why the UI can offer
-	// "Auto" until the first connect completes.
-	psiRegions []string
+	defaultPsiRegions = []string{
+		"AT", "AU", "BE", "BG", "CA", "CH", "CZ", "DE", "DK", "ES",
+		"FI", "FR", "GB", "HU", "IE", "IN", "IT", "JP", "NL", "NO",
+		"PL", "RO", "SE", "SG", "US",
+	}
+
+	// psiRegions is the set of egress psiRegions the server reported.
+	psiRegions = append([]string{}, defaultPsiRegions...)
 
 	// psiLogMu is deliberately separate from psiMu: psiEmit() is called from Psiphon's
 	// notice goroutine while psiMu may be held by start/stop, and sharing one
@@ -337,11 +343,68 @@ func psiHandleNotice(noticeJSON string) {
 			Regions []string `json:"regions"`
 		}
 		if json.Unmarshal(n.Data, &d) == nil && len(d.Regions) > 0 {
-			sort.Strings(d.Regions)
 			psiMu.Lock()
-			psiRegions = d.Regions
+			merged := make(map[string]bool)
+			for _, r := range psiRegions {
+				if r != "" {
+					merged[r] = true
+				}
+			}
+			for _, r := range d.Regions {
+				if r != "" {
+					merged[strings.ToUpper(r)] = true
+				}
+			}
+			list := make([]string, 0, len(merged))
+			for r := range merged {
+				list = append(list, r)
+			}
+			sort.Strings(list)
+			psiRegions = list
 			psiMu.Unlock()
-			psiEmit(psiLogInfo, "[psiphon] %d egress regions available", len(d.Regions))
+			psiEmit(psiLogInfo, "[psiphon] %d egress regions available", len(list))
+		}
+
+	case "ConnectedServerRegion":
+		var d struct {
+			ServerRegion string `json:"serverRegion"`
+		}
+		if json.Unmarshal(n.Data, &d) == nil && d.ServerRegion != "" {
+			reg := strings.ToUpper(d.ServerRegion)
+			psiMu.Lock()
+			found := false
+			for _, r := range psiRegions {
+				if r == reg {
+					found = true
+					break
+				}
+			}
+			if !found {
+				psiRegions = append(psiRegions, reg)
+				sort.Strings(psiRegions)
+			}
+			psiMu.Unlock()
+		}
+
+	case "CandidateServers":
+		var d struct {
+			Region string `json:"region"`
+		}
+		if json.Unmarshal(n.Data, &d) == nil && d.Region != "" {
+			reg := strings.ToUpper(d.Region)
+			psiMu.Lock()
+			found := false
+			for _, r := range psiRegions {
+				if r == reg {
+					found = true
+					break
+				}
+			}
+			if !found {
+				psiRegions = append(psiRegions, reg)
+				sort.Strings(psiRegions)
+			}
+			psiMu.Unlock()
 		}
 
 	case "BytesTransferred":
@@ -442,20 +505,40 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 		}
 	}
 
-	// Reset per-session cached psiState. Ports and psiRegions belong to the
-	// session that reported them; carrying them over would make a failed
-	// start look like it had succeeded.
+	// Reset per-session cached psiState.
 	psiSocksPort = 0
 	psiHttpPort = 0
 	psiListenIP = psiListenIPFromConfig(cfg)
 	atomic.StoreUint64(&psiBytesUp, 0)
 	atomic.StoreUint64(&psiBytesDown, 0)
-	psiRegions = nil
 	psiState = psiStateStarting
 	// Claim the slot before releasing the lock, so a concurrent psi_start
 	// still loses the race even though psi.Start() below runs unlocked.
 	psiRunning = true
 	embeddedList := C.GoString(embedded)
+	if embeddedList != "" {
+		re := regexp.MustCompile(`"(?:region|Region)"\s*:\s*"([A-Za-z]{2})"`)
+		matches := re.FindAllStringSubmatch(embeddedList, -1)
+		if len(matches) > 0 {
+			merged := make(map[string]bool)
+			for _, r := range psiRegions {
+				if r != "" {
+					merged[r] = true
+				}
+			}
+			for _, m := range matches {
+				if len(m) > 1 && m[1] != "" {
+					merged[strings.ToUpper(m[1])] = true
+				}
+			}
+			list := make([]string, 0, len(merged))
+			for r := range merged {
+				list = append(list, r)
+			}
+			sort.Strings(list)
+			psiRegions = list
+		}
+	}
 	psiMu.Unlock()
 
 	cfg = psiEnsureServerEntrySource(cfg, embeddedList)

@@ -526,17 +526,6 @@ pub unsafe extern "C" fn fcae_backend_info(index: u32, out: *mut FcaeBackendInfo
 /// `out` must point to storage for at least `cap` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn fcae_psiphon_regions(out: *mut c_char, cap: u32) -> u32 {
-    // Guard: if the library was never initialised the backend was never
-    // registered, so regions() would return an empty Vec anyway — but
-    // returning early avoids touching any static that might not be
-    // zero-safe on every platform.
-    if RUNTIME.get().is_none() {
-        if !out.is_null() && cap > 0 {
-            *out = 0;
-        }
-        return 0;
-    }
-
     #[cfg(feature = "psiphon")]
     let list = fcae_bridge_psiphon::regions().join(",");
     #[cfg(not(feature = "psiphon"))]

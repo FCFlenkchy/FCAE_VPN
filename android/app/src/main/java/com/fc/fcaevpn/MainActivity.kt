@@ -2141,12 +2141,29 @@ class MainActivity : AppCompatActivity() {
             prefs.getInt("psiphonTransport", 0)
         else spinnerPsiphonTransport.selectedItemPosition
 
+    private val DEFAULT_PSIPHON_REGIONS = listOf(
+        "AT", "AU", "BE", "BG", "CA", "CH", "CZ", "DE", "DK", "ES",
+        "FI", "FR", "GB", "HU", "IE", "IN", "IT", "JP", "NL", "NO",
+        "PL", "RO", "SE", "SG", "US"
+    )
+
+    private fun psiphonRegionDisplayName(code: String): String {
+        if (code.isEmpty()) return "Auto"
+        val upper = code.trim().uppercase()
+        val loc = java.util.Locale("", upper)
+        val name = try { loc.getDisplayCountry(java.util.Locale.ENGLISH) } catch (_: Throwable) { "" }
+        return if (name.isNotBlank() && !name.equals(upper, ignoreCase = true)) {
+            "$name ($upper)"
+        } else {
+            upper
+        }
+    }
+
     /**
      * Rebuild the region list from the core.
      *
-     * Psiphon only learns which egress regions exist after a successful
-     * handshake, so before the first connect this is just "Auto". Called on
-     * load and again once connected, which is when the real list appears.
+     * Psiphon learns which egress regions exist after connecting, and we also
+     * offer default regions so the user can pick a region before first connect.
      */
     private fun refreshPsiphonRegions() {
         if (!::spinnerPsiphonRegion.isInitialized) return
@@ -2159,7 +2176,7 @@ class MainActivity : AppCompatActivity() {
         val codes = try {
             NativeEngine.nativePsiphonRegions()
                 .split(',')
-                .map { it.trim() }
+                .map { it.trim().uppercase() }
                 .filter { it.isNotEmpty() }
         } catch (t: Throwable) {
             android.util.Log.w("FCAE_VPN", "psiphon regions unavailable: $t")
@@ -2173,35 +2190,39 @@ class MainActivity : AppCompatActivity() {
         // otherwise the spinner collapses to "Auto" and the chosen region
         // appears to be forgotten after every connect.
         if (codes.isNotEmpty()) persistRegionCodes(codes)
-        applyPsiphonRegionCodes(listOf("") + if (codes.isNotEmpty()) codes else persistedRegionCodes())
+        val combined = (DEFAULT_PSIPHON_REGIONS + persistedRegionCodes() + codes).distinct()
+        applyPsiphonRegionCodes(combined)
     }
 
     /** Egress regions learned so far, persisted across restarts. Written only
      *  from authoritative sources (service broadcast / non-empty core list). */
     private fun persistedRegionCodes(): List<String> =
         (prefs.getString("psiphonRegionList", "") ?: "")
-            .split(',').map { it.trim() }.filter { it.isNotEmpty() }
+            .split(',').map { it.trim().uppercase() }.filter { it.isNotEmpty() }
 
-    private fun persistRegionCodes(codes: List<String>) =
-        prefs.edit().putString("psiphonRegionList", codes.joinToString(",")).apply()
+    private fun persistRegionCodes(codes: List<String>) {
+        val merged = (persistedRegionCodes() + codes.map { it.trim().uppercase() })
+            .filter { it.isNotEmpty() }.distinct().sorted()
+        prefs.edit().putString("psiphonRegionList", merged.joinToString(",")).apply()
+    }
 
     /** Rebuild the region spinner. Always runs so each connect can refresh. */
     private fun applyPsiphonRegionList(csv: String) {
         savedPsiphonRegion = selectedPsiphonRegion()
-        val codes = csv.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        val codes = csv.split(',').map { it.trim().uppercase() }.filter { it.isNotEmpty() }
         // Authoritative service list: persist (regions survive restarts) and
         // fall back to what is already stored on the odd empty broadcast.
         if (codes.isNotEmpty()) persistRegionCodes(codes)
-        applyPsiphonRegionCodes(listOf("") + if (codes.isNotEmpty()) codes else persistedRegionCodes())
+        val combined = (DEFAULT_PSIPHON_REGIONS + persistedRegionCodes() + codes).distinct()
+        applyPsiphonRegionCodes(combined)
     }
 
     private fun applyPsiphonRegionCodes(newCodes: List<String>) {
         if (!::spinnerPsiphonRegion.isInitialized) return
         val want = savedPsiphonRegion.trim().uppercase()
-        // Canonical order makes repeated/reordered network notices a no-op.
-        // Keep an explicit saved choice even if temporarily absent upstream.
-        val normalized = listOf("") + (newCodes + listOf(want))
+        val allCodes = (DEFAULT_PSIPHON_REGIONS + newCodes + (if (want.isNotEmpty()) listOf(want) else emptyList()))
             .map { it.trim().uppercase() }.filter { it.isNotEmpty() }.distinct().sorted()
+        val normalized = listOf("") + allCodes
         if (spinnerPsiphonRegion.adapter != null && normalized == psiphonRegionCodes) return
         if (spinnerPsiphonRegion.adapter != null && !hasWindowFocus()) {
             pendingRegionCodes = normalized
@@ -2210,11 +2231,13 @@ class MainActivity : AppCompatActivity() {
         pendingRegionCodes = null
         applyingRegionList = true
         psiphonRegionCodes = normalized
+        val displayItems = normalized.map { psiphonRegionDisplayName(it) }
         spinnerPsiphonRegion.adapter = ArrayAdapter(this,
             R.layout.spinner_dark_item,
-            normalized.map { if (it.isEmpty()) "Auto" else it })
-        spinnerPsiphonRegion.setSelection(normalized.indexOf(want).coerceAtLeast(0), false)
-        savedPsiphonRegion = want
+            displayItems)
+        val selIndex = if (want.isEmpty()) 0 else normalized.indexOf(want).coerceAtLeast(0)
+        spinnerPsiphonRegion.setSelection(selIndex, false)
+        savedPsiphonRegion = normalized.getOrElse(selIndex) { "" }
         spinnerPsiphonRegion.post { applyingRegionList = false }
     }
 

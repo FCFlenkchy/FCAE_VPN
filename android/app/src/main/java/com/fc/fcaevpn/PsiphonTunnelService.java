@@ -863,12 +863,34 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             if (out.size() > 0) {
                 emitLog("importing embedded server entries from assets/psiphon_servers.txt"
                         + " (" + out.size() + " bytes)");
-                return out.toString("UTF-8");
+                String raw = out.toString("UTF-8");
+                extractAndBroadcastEmbeddedRegions(raw);
+                return raw;
             }
         } catch (Exception ignored) {
             // No bundled asset — the normal case.
         }
         return "";
+    }
+
+    private void extractAndBroadcastEmbeddedRegions(String raw) {
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile("\"[Rr]egion\"\\s*:\\s*\"([A-Za-z]{2})\"");
+        java.util.regex.Matcher m = p.matcher(raw);
+        java.util.Set<String> set = new java.util.TreeSet<>();
+        while (m.find()) {
+            set.add(m.group(1).toUpperCase(java.util.Locale.US));
+        }
+        if (!set.isEmpty()) {
+            lastRegions = String.join(",", set);
+            emitLog("embedded regions: " + lastRegions);
+            Intent i = new Intent(BROADCAST_READY);
+            i.setPackage(getPackageName());
+            i.putExtra("psiSession", session);
+            i.putExtra("requestId", attachRequestId);
+            i.putExtra("regionsOnly", true);
+            i.putExtra(EXTRA_REGIONS, lastRegions);
+            sendBroadcast(i);
+        }
     }
 
     private static byte[] readAll(File f) throws Exception {
@@ -943,7 +965,18 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onAvailableEgressRegions(List<String> regions) {
         if (regions == null || regions.isEmpty()) return;
-        lastRegions = String.join(",", regions);
+        java.util.Set<String> set = new java.util.TreeSet<>();
+        if (!lastRegions.isEmpty()) {
+            for (String r : lastRegions.split(",")) {
+                String t = r.trim().toUpperCase(java.util.Locale.US);
+                if (!t.isEmpty()) set.add(t);
+            }
+        }
+        for (String r : regions) {
+            String t = r.trim().toUpperCase(java.util.Locale.US);
+            if (!t.isEmpty()) set.add(t);
+        }
+        lastRegions = String.join(",", set);
         emitLog("regions: " + lastRegions);
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());
@@ -973,6 +1006,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         i.putExtra(EXTRA_SOCKS, s);
         i.putExtra(EXTRA_LAN, lanSharing ? lanAddress : "");
         i.putExtra(EXTRA_HTTP, httpPort.get());
+        if (!lastRegions.isEmpty()) i.putExtra(EXTRA_REGIONS, lastRegions);
         sendBroadcast(i);
         startStatsLoop();
     }

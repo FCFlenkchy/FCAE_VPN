@@ -3,6 +3,9 @@
 #include <sstream>
 #include <vector>
 #include <memory>
+#include <unordered_map>
+#include <algorithm>
+#include <cctype>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -691,6 +694,310 @@ void ui_shutdown() {
 #endif
 }
 
+static const char* psiphon_country_name(const std::string& code) {
+    static const std::unordered_map<std::string, const char*> kCountryNames = {
+        {"AD", "Andorra"},
+        {"AE", "United Arab Emirates"},
+        {"AF", "Afghanistan"},
+        {"AG", "Antigua and Barbuda"},
+        {"AI", "Anguilla"},
+        {"AL", "Albania"},
+        {"AM", "Armenia"},
+        {"AO", "Angola"},
+        {"AQ", "Antarctica"},
+        {"AR", "Argentina"},
+        {"AS", "American Samoa"},
+        {"AT", "Austria"},
+        {"AU", "Australia"},
+        {"AW", "Aruba"},
+        {"AX", "Åland Islands"},
+        {"AZ", "Azerbaijan"},
+        {"BA", "Bosnia and Herzegovina"},
+        {"BB", "Barbados"},
+        {"BD", "Bangladesh"},
+        {"BE", "Belgium"},
+        {"BF", "Burkina Faso"},
+        {"BG", "Bulgaria"},
+        {"BH", "Bahrain"},
+        {"BI", "Burundi"},
+        {"BJ", "Benin"},
+        {"BL", "Saint Barthélemy"},
+        {"BM", "Bermuda"},
+        {"BN", "Brunei"},
+        {"BO", "Bolivia"},
+        {"BQ", "Caribbean Netherlands"},
+        {"BR", "Brazil"},
+        {"BS", "Bahamas"},
+        {"BT", "Bhutan"},
+        {"BV", "Bouvet Island"},
+        {"BW", "Botswana"},
+        {"BY", "Belarus"},
+        {"BZ", "Belize"},
+        {"CA", "Canada"},
+        {"CC", "Cocos (Keeling) Islands"},
+        {"CD", "Congo (DRC)"},
+        {"CF", "Central African Republic"},
+        {"CG", "Congo (Republic)"},
+        {"CH", "Switzerland"},
+        {"CI", "Côte d'Ivoire"},
+        {"CK", "Cook Islands"},
+        {"CL", "Chile"},
+        {"CM", "Cameroon"},
+        {"CN", "China"},
+        {"CO", "Colombia"},
+        {"CR", "Costa Rica"},
+        {"CU", "Cuba"},
+        {"CV", "Cape Verde"},
+        {"CW", "Curaçao"},
+        {"CX", "Christmas Island"},
+        {"CY", "Cyprus"},
+        {"CZ", "Czechia"},
+        {"DE", "Germany"},
+        {"DJ", "Djibouti"},
+        {"DK", "Denmark"},
+        {"DM", "Dominica"},
+        {"DO", "Dominican Republic"},
+        {"DZ", "Algeria"},
+        {"EC", "Ecuador"},
+        {"EE", "Estonia"},
+        {"EG", "Egypt"},
+        {"EH", "Western Sahara"},
+        {"ER", "Eritrea"},
+        {"ES", "Spain"},
+        {"ET", "Ethiopia"},
+        {"FI", "Finland"},
+        {"FJ", "Fiji"},
+        {"FK", "Falkland Islands"},
+        {"FM", "Micronesia"},
+        {"FO", "Faroe Islands"},
+        {"FR", "France"},
+        {"GA", "Gabon"},
+        {"GB", "United Kingdom"},
+        {"GD", "Grenada"},
+        {"GE", "Georgia"},
+        {"GF", "French Guiana"},
+        {"GG", "Guernsey"},
+        {"GH", "Ghana"},
+        {"GI", "Gibraltar"},
+        {"GL", "Greenland"},
+        {"GM", "Gambia"},
+        {"GN", "Guinea"},
+        {"GP", "Guadeloupe"},
+        {"GQ", "Equatorial Guinea"},
+        {"GR", "Greece"},
+        {"GS", "South Georgia"},
+        {"GT", "Guatemala"},
+        {"GU", "Guam"},
+        {"GW", "Guinea-Bissau"},
+        {"GY", "Guyana"},
+        {"HK", "Hong Kong"},
+        {"HM", "Heard and McDonald Islands"},
+        {"HN", "Honduras"},
+        {"HR", "Croatia"},
+        {"HT", "Haiti"},
+        {"HU", "Hungary"},
+        {"ID", "Indonesia"},
+        {"IE", "Ireland"},
+        {"IL", "Israel"},
+        {"IM", "Isle of Man"},
+        {"IN", "India"},
+        {"IO", "British Indian Ocean Territory"},
+        {"IQ", "Iraq"},
+        {"IR", "Iran"},
+        {"IS", "Iceland"},
+        {"IT", "Italy"},
+        {"JE", "Jersey"},
+        {"JM", "Jamaica"},
+        {"JO", "Jordan"},
+        {"JP", "Japan"},
+        {"KE", "Kenya"},
+        {"KG", "Kyrgyzstan"},
+        {"KH", "Cambodia"},
+        {"KI", "Kiribati"},
+        {"KM", "Comoros"},
+        {"KN", "Saint Kitts and Nevis"},
+        {"KP", "North Korea"},
+        {"KR", "South Korea"},
+        {"KW", "Kuwait"},
+        {"KY", "Cayman Islands"},
+        {"KZ", "Kazakhstan"},
+        {"LA", "Laos"},
+        {"LB", "Lebanon"},
+        {"LC", "Saint Lucia"},
+        {"LI", "Liechtenstein"},
+        {"LK", "Sri Lanka"},
+        {"LR", "Liberia"},
+        {"LS", "Lesotho"},
+        {"LT", "Lithuania"},
+        {"LU", "Luxembourg"},
+        {"LV", "Latvia"},
+        {"LY", "Libya"},
+        {"MA", "Morocco"},
+        {"MC", "Monaco"},
+        {"MD", "Moldova"},
+        {"ME", "Montenegro"},
+        {"MF", "Saint Martin"},
+        {"MG", "Madagascar"},
+        {"MH", "Marshall Islands"},
+        {"MK", "North Macedonia"},
+        {"ML", "Mali"},
+        {"MM", "Myanmar"},
+        {"MN", "Mongolia"},
+        {"MO", "Macao"},
+        {"MP", "Northern Mariana Islands"},
+        {"MQ", "Martinique"},
+        {"MR", "Mauritania"},
+        {"MS", "Montserrat"},
+        {"MT", "Malta"},
+        {"MU", "Mauritius"},
+        {"MV", "Maldives"},
+        {"MW", "Malawi"},
+        {"MX", "Mexico"},
+        {"MY", "Malaysia"},
+        {"MZ", "Mozambique"},
+        {"NA", "Namibia"},
+        {"NC", "New Caledonia"},
+        {"NE", "Niger"},
+        {"NF", "Norfolk Island"},
+        {"NG", "Nigeria"},
+        {"NI", "Nicaragua"},
+        {"NL", "Netherlands"},
+        {"NO", "Norway"},
+        {"NP", "Nepal"},
+        {"NR", "Nauru"},
+        {"NU", "Niue"},
+        {"NZ", "New Zealand"},
+        {"OM", "Oman"},
+        {"PA", "Panama"},
+        {"PE", "Peru"},
+        {"PF", "French Polynesia"},
+        {"PG", "Papua New Guinea"},
+        {"PH", "Philippines"},
+        {"PK", "Pakistan"},
+        {"PL", "Poland"},
+        {"PM", "Saint Pierre and Miquelon"},
+        {"PN", "Pitcairn"},
+        {"PR", "Puerto Rico"},
+        {"PS", "Palestine"},
+        {"PT", "Portugal"},
+        {"PW", "Palau"},
+        {"PY", "Paraguay"},
+        {"QA", "Qatar"},
+        {"RE", "Réunion"},
+        {"RO", "Romania"},
+        {"RS", "Serbia"},
+        {"RU", "Russia"},
+        {"RW", "Rwanda"},
+        {"SA", "Saudi Arabia"},
+        {"SB", "Solomon Islands"},
+        {"SC", "Seychelles"},
+        {"SD", "Sudan"},
+        {"SE", "Sweden"},
+        {"SG", "Singapore"},
+        {"SH", "Saint Helena"},
+        {"SI", "Slovenia"},
+        {"SJ", "Svalbard and Jan Mayen"},
+        {"SK", "Slovakia"},
+        {"SL", "Sierra Leone"},
+        {"SM", "San Marino"},
+        {"SN", "Senegal"},
+        {"SO", "Somalia"},
+        {"SR", "Suriname"},
+        {"SS", "South Sudan"},
+        {"ST", "São Tomé and Príncipe"},
+        {"SV", "El Salvador"},
+        {"SX", "Sint Maarten"},
+        {"SY", "Syria"},
+        {"SZ", "Eswatini"},
+        {"TC", "Turks and Caicos Islands"},
+        {"TD", "Chad"},
+        {"TF", "French Southern Territories"},
+        {"TG", "Togo"},
+        {"TH", "Thailand"},
+        {"TJ", "Tajikistan"},
+        {"TK", "Tokelau"},
+        {"TL", "Timor-Leste"},
+        {"TM", "Turkmenistan"},
+        {"TN", "Tunisia"},
+        {"TO", "Tonga"},
+        {"TR", "Turkey"},
+        {"TT", "Trinidad and Tobago"},
+        {"TV", "Tuvalu"},
+        {"TW", "Taiwan"},
+        {"TZ", "Tanzania"},
+        {"UA", "Ukraine"},
+        {"UG", "Uganda"},
+        {"UM", "U.S. Minor Outlying Islands"},
+        {"US", "United States"},
+        {"UY", "Uruguay"},
+        {"UZ", "Uzbekistan"},
+        {"VA", "Vatican City"},
+        {"VC", "Saint Vincent and the Grenadines"},
+        {"VE", "Venezuela"},
+        {"VG", "British Virgin Islands"},
+        {"VI", "U.S. Virgin Islands"},
+        {"VN", "Vietnam"},
+        {"VU", "Vanuatu"},
+        {"WF", "Wallis and Futuna"},
+        {"WS", "Samoa"},
+        {"YE", "Yemen"},
+        {"YT", "Mayotte"},
+        {"ZA", "South Africa"},
+        {"ZM", "Zambia"},
+        {"ZW", "Zimbabwe"}
+    };
+    auto it = kCountryNames.find(code);
+    return (it != kCountryNames.end()) ? it->second : nullptr;
+}
+
+static std::string psiphon_region_label(const std::string& code) {
+    if (code.empty()) return "Auto";
+    const char* name = psiphon_country_name(code);
+    if (name) {
+        return std::string(name) + " (" + code + ")";
+    }
+    return code;
+}
+
+static void extract_regions_from_server_list(const std::string& text, std::vector<std::string>& out_codes) {
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t key_pos = text.find("\"region\"", pos);
+        if (key_pos == std::string::npos) {
+            key_pos = text.find("\"Region\"", pos);
+        }
+        if (key_pos == std::string::npos) break;
+        size_t colon_pos = text.find(':', key_pos);
+        if (colon_pos == std::string::npos || colon_pos - key_pos > 20) {
+            pos = key_pos + 8;
+            continue;
+        }
+        size_t quote1 = text.find('"', colon_pos);
+        if (quote1 == std::string::npos || quote1 - colon_pos > 10) {
+            pos = colon_pos + 1;
+            continue;
+        }
+        size_t quote2 = text.find('"', quote1 + 1);
+        if (quote2 == std::string::npos) break;
+        std::string code = text.substr(quote1 + 1, quote2 - quote1 - 1);
+        for (auto& ch : code) ch = (char)toupper((unsigned char)ch);
+        if (code.size() == 2 && isalpha((unsigned char)code[0]) && isalpha((unsigned char)code[1])) {
+            bool exists = false;
+            for (const auto& c : out_codes) {
+                if (c == code) { exists = true; break; }
+            }
+            if (!exists) out_codes.push_back(code);
+        }
+        pos = quote2 + 1;
+    }
+}
+
+static const char* kDefaultPsiphonRegions[] = {
+    "AT", "AU", "BE", "BG", "CA", "CH", "CZ", "DE", "DK", "ES",
+    "FI", "FR", "GB", "HU", "IE", "IN", "IT", "JP", "NL", "NO",
+    "PL", "RO", "SE", "SG", "US",
+};
+
 void render_ui() {
     const ImGuiIO& io = ImGui::GetIO();
     const bool narrow = io.DisplaySize.x < 720.0f;
@@ -1342,74 +1649,116 @@ void render_ui() {
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Psiphon");
-            ImGui::TextDisabled("Config is built automatically. Region starts on Auto;");
-            ImGui::TextDisabled("the list updates each time Psiphon reaches its servers.");
+            ImGui::TextDisabled("Config is built automatically. Select a target egress region;");
+            ImGui::TextDisabled("the list includes default regions and updates dynamically from servers.");
 
-            // Region. Psiphon only reports available regions after a
-            // successful handshake, so before the first connect the only
-            // choice is Auto; the list fills in once connected.
+            // Region selection with human-readable country names and dynamic discovery
             {
-                static char region_buf[1024];
+                static char region_buf[2048];
                 static std::vector<std::string> codes;
                 static double last_poll = 0.0;
                 static bool seeded = false;
                 if (!seeded) {
-                    // Seed from the persisted list (cfg psiphon_region_list) so
-                    // the combo starts populated from previous sessions — the
-                    // engine only reports regions after a fresh handshake.
                     seeded = true;
-                    codes.push_back("");           // Auto
+                    codes.push_back(""); // Auto
+                    for (const char* def : kDefaultPsiphonRegions) {
+                        codes.push_back(def);
+                    }
                     const char* q = g_app.psiphon_region_list;
                     while (*q) {
                         const char* comma = strchr(q, ',');
                         size_t len = comma ? (size_t)(comma - q) : strlen(q);
-                        if (len > 0) codes.push_back(std::string(q, len));
+                        if (len > 0) {
+                            std::string code(q, len);
+                            for (auto& ch : code) ch = (char)toupper((unsigned char)ch);
+                            bool found = false;
+                            for (const auto& existing : codes) {
+                                if (existing == code) { found = true; break; }
+                            }
+                            if (!found) codes.push_back(code);
+                        }
                         if (!comma) break;
                         q = comma + 1;
                     }
+                    if (g_app.psiphon_region[0]) {
+                        std::string want = g_app.psiphon_region;
+                        for (auto& ch : want) ch = (char)toupper((unsigned char)ch);
+                        bool found = false;
+                        for (const auto& existing : codes) {
+                            if (existing == want) { found = true; break; }
+                        }
+                        if (!found) codes.push_back(want);
+                    }
+                    std::string bundled = exe_dir() + "/psiphon_servers.txt";
+                    std::ifstream f(bundled, std::ios::binary);
+                    if (f) {
+                        std::ostringstream ss;
+                        ss << f.rdbuf();
+                        extract_regions_from_server_list(ss.str(), codes);
+                    }
+                    std::sort(codes.begin() + 1, codes.end());
                 }
                 double now = ImGui::GetTime();
                 if (now - last_poll > 2.0) {
                     last_poll = now;
                     region_buf[0] = '\0';
                     fcae_psiphon_regions(region_buf, (uint32_t)sizeof(region_buf));
-                    // Authoritative only when non-empty: an empty reply means
-                    // "nothing learned yet this session" and must not wipe the
-                    // persisted list (that is what collapsed the combo to Auto
-                    // and made region selection look broken).
                     if (region_buf[0]) {
-                        codes.clear();
-                        codes.push_back("");       // Auto
+                        bool changed = false;
                         const char* p = region_buf;
                         while (*p) {
                             const char* comma = strchr(p, ',');
                             size_t len = comma ? (size_t)(comma - p) : strlen(p);
-                            if (len > 0) codes.push_back(std::string(p, len));
+                            if (len > 0) {
+                                std::string code(p, len);
+                                for (auto& ch : code) ch = (char)toupper((unsigned char)ch);
+                                bool found = false;
+                                for (const auto& existing : codes) {
+                                    if (existing == code) { found = true; break; }
+                                }
+                                if (!found) {
+                                    codes.push_back(code);
+                                    changed = true;
+                                }
+                            }
                             if (!comma) break;
                             p = comma + 1;
                         }
-                        // Persist newly learned regions for the next launch.
-                        if (strcmp(g_app.psiphon_region_list, region_buf) != 0) {
+                        if (changed) {
+                            std::sort(codes.begin() + 1, codes.end());
+                            std::string joined;
+                            for (size_t i = 1; i < codes.size(); ++i) {
+                                if (i > 1) joined += ",";
+                                joined += codes[i];
+                            }
                             snprintf(g_app.psiphon_region_list,
-                                     sizeof(g_app.psiphon_region_list), "%s", region_buf);
+                                     sizeof(g_app.psiphon_region_list), "%s", joined.c_str());
                             save_config();
                         }
                     }
                 }
 
                 int sel = 0;
-                for (size_t i = 0; i < codes.size(); ++i)
+                for (size_t i = 0; i < codes.size(); ++i) {
                     if (codes[i] == g_app.psiphon_region) { sel = (int)i; break; }
+                }
 
+                std::vector<std::string> label_strs;
+                label_strs.reserve(codes.size());
+                for (const auto& c : codes) {
+                    label_strs.push_back(psiphon_region_label(c));
+                }
                 std::vector<const char*> labels;
-                for (auto& c : codes)
-                    labels.push_back(c.empty() ? "Auto" : c.c_str());
+                labels.reserve(label_strs.size());
+                for (const auto& s : label_strs) {
+                    labels.push_back(s.c_str());
+                }
 
-                if (ImGui::Combo("Psiphon region", &sel, labels.data(), (int)labels.size()))
+                if (ImGui::Combo("Psiphon region", &sel, labels.data(), (int)labels.size())) {
                     snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region),
                              "%s", codes[(size_t)sel].c_str());
-                if (codes.size() == 1)
-                    ImGui::TextDisabled("Regions appear after Psiphon connects.");
+                    save_config();
+                }
             }
 
             // Transport family. Auto lets tunnel-core try its full default

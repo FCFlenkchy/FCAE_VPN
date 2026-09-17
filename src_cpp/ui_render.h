@@ -108,7 +108,7 @@ struct AppState {
     // Learned egress regions (CSV). Persists in the cfg so the region combo
     // starts populated even before this session's first Psiphon handshake;
     // refreshed by the engine poll whenever a non-empty list arrives.
-    char psiphon_region_list[512] = {0};
+    char psiphon_region_list[1024] = {0};
     int  psiphon_transport = 0;        // index into kPsiphonTransports, 0 = auto
     char psiphon_data_dir[512] = {0};
     int  psiphon_socks_port = 1823;    // config.rs DEFAULT_PSIPHON_SOCKS_PORT; 0 also maps to it

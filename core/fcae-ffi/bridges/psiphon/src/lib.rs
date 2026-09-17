@@ -67,6 +67,12 @@ static STOP_TASK: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>> =
 /// region for the *next* session.
 static REGIONS: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
 
+const DEFAULT_PSIPHON_REGIONS: &[&str] = &[
+    "AT", "AU", "BE", "BG", "CA", "CH", "CZ", "DE", "DK", "ES",
+    "FI", "FR", "GB", "HU", "IE", "IN", "IT", "JP", "NL", "NO",
+    "PL", "RO", "SE", "SG", "US",
+];
+
 /// Actual bound desktop listener ports. Android reports them by broadcast.
 pub fn proxy_ports() -> (u16, u16) {
     #[cfg(all(feature = "enabled", psiphon_linked))]
@@ -77,10 +83,27 @@ pub fn proxy_ports() -> (u16, u16) {
 
 /// Egress regions discovered so far, as ISO country codes.
 ///
-/// Empty until the first successful connect. "" (auto) is always valid and is
-/// not included here.
+/// Returns discovered regions, merging newly received notices from Go.
 pub fn regions() -> Vec<String> {
-    REGIONS.lock().clone()
+    #[cfg(all(feature = "enabled", psiphon_linked))]
+    {
+        let found = ffi::regions();
+        if !found.is_empty() {
+            let mut lock = REGIONS.lock();
+            for r in found {
+                let trimmed = r.trim().to_uppercase();
+                if !trimmed.is_empty() && !lock.contains(&trimmed) {
+                    lock.push(trimmed);
+                }
+            }
+            lock.sort();
+        }
+    }
+    let mut lock = REGIONS.lock();
+    if lock.is_empty() {
+        *lock = DEFAULT_PSIPHON_REGIONS.iter().map(|s| (*s).to_string()).collect();
+    }
+    lock.clone()
 }
 
 /// Android's `VpnService.protect(fd)`, installed by the FFI layer.
@@ -378,8 +401,15 @@ impl Backend for PsiphonBackend {
 
         let found = ffi::regions();
         if !found.is_empty() {
-            log::info!("[psiphon] egress regions: {}", found.join(","));
-            *REGIONS.lock() = found;
+            let mut lock = REGIONS.lock();
+            for r in found {
+                let trimmed = r.trim().to_uppercase();
+                if !trimmed.is_empty() && !lock.contains(&trimmed) {
+                    lock.push(trimmed);
+                }
+            }
+            lock.sort();
+            log::info!("[psiphon] egress regions: {}", lock.join(","));
         }
 
         log::info!("[psiphon] tunnel established, socks 127.0.0.1:{socks_port}");
