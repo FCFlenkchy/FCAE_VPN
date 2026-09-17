@@ -472,6 +472,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")")
                         + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy)
                         + sourceSummary(embeddedList));
+                // Populate the region selector from authoritative sources in
+                // parallel with the handshake: the same remote server list
+                // the core will download, plus whatever was persisted.
+                fetchRemoteServerRegions();
                 // The embedded list is the body of an encoded server entry
                 // list (same format as a remote server_list payload); ""
                 // falls back to whatever the datastore still holds plus any
@@ -791,6 +795,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 emitLog("importing embedded server entries from assets/psiphon_servers.txt"
                         + " (" + out.size() + " bytes)");
                 String raw = out.toString("UTF-8");
+                java.util.TreeSet<String> embeddedRegions = scanRegionLines(raw);
+                if (!embeddedRegions.isEmpty()) mergeReportedRegions(embeddedRegions, "embedded");
                 return raw;
             }
         } catch (Exception ignored) {
@@ -821,6 +827,139 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         i.putExtra("requestId", attachRequestId);
         i.putExtra(EXTRA_REGIONS, lastRegions);
         sendBroadcast(i);
+    }
+
+    private final Object regionsLock = new Object();
+    private final java.util.concurrent.atomic.AtomicBoolean remoteRegionsFetching =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** Union a newly reported region set into the learned list, persist it for
+     *  the UI process and notify listeners. Sources differ in authority — core
+     *  notices reflect dial candidates in the datastore, the remote list
+     *  reflects the advertised network — the union answers "pick a region that
+     *  can plausibly work", which is what the selector is for. */
+    private void mergeReportedRegions(java.util.Collection<String> reported, String source) {
+        if (reported == null || stopping) return;
+        java.util.TreeSet<String> set = new java.util.TreeSet<>();
+        for (String r : reported) {
+            if (r == null) continue;
+            String t = r.trim().toUpperCase(java.util.Locale.US);
+            if (!t.isEmpty()) set.add(t);
+        }
+        if (set.isEmpty()) return;
+        synchronized (regionsLock) {
+            for (String r : lastRegions.split(",")) {
+                String t = r.trim().toUpperCase(java.util.Locale.US);
+                if (!t.isEmpty()) set.add(t);
+            }
+            String merged = android.text.TextUtils.join(",", set);
+            if (merged.equals(lastRegions)) return;
+            lastRegions = merged;
+            persistReportedRegions(lastRegions);
+        }
+        emitLog("regions (" + source + "): " + lastRegions);
+        broadcastRegions();
+    }
+
+    /** Actively derive the egress-region list from the same remote server
+     *  list the tunnel core downloads (plain HTTPS, zlib package of hex
+     *  entries — verified by the core on its own import; consumed here for
+     *  discovery only). Hydrates from the persisted replay when it is fresh;
+     *  otherwise fetches on a worker thread, deduplicated across connects. */
+    private void fetchRemoteServerRegions() {
+        File replay = new File(getFilesDir(), REGIONS_FILE);
+        if (replay.isFile() && System.currentTimeMillis() - replay.lastModified() < 12L * 3600 * 1000) {
+            try {
+                String[] cached = new String(readAll(replay), java.nio.charset.StandardCharsets.UTF_8)
+                        .split(",");
+                if (cached.length > 0) {
+                    mergeReportedRegions(java.util.Arrays.asList(cached), "replay");
+                    return;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        if (!remoteRegionsFetching.compareAndSet(false, true)) return;
+        new Thread(() -> {
+            java.util.TreeSet<String> regions = new java.util.TreeSet<>();
+            try {
+                java.net.HttpURLConnection conn =
+                        (java.net.HttpURLConnection) new java.net.URL(DEFAULT_SERVER_LIST_URL).openConnection();
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(30000);
+                try {
+                    if (conn.getResponseCode() != java.net.HttpURLConnection.HTTP_OK) return;
+                    java.util.zip.InflaterInputStream in = new java.util.zip.InflaterInputStream(conn.getInputStream());
+                    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[16384];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                        if (out.size() > 16 * 1024 * 1024) return;
+                    }
+                    regions = scanRegionLines(new String(out.toByteArray(),
+                            java.nio.charset.StandardCharsets.UTF_8));
+                } finally {
+                    conn.disconnect();
+                }
+            } catch (Exception ignored) {
+            } finally {
+                remoteRegionsFetching.set(false);
+            }
+            if (!regions.isEmpty()) mergeReportedRegions(regions, "remote-list");
+        }, "psi-remote-regions").start();
+    }
+
+    /** Extract region codes from either representation of the psiphon server
+     *  list: the signed download package {"data":"<hex lines>",...} or a bare
+     *  body of one entry per line (hex-encoded or plaintext JSON). */
+    private static java.util.TreeSet<String> scanRegionLines(String text) {
+        java.util.TreeSet<String> regions = new java.util.TreeSet<>();
+        if (text == null) return regions;
+        String body = text.trim();
+        if (body.isEmpty()) return regions;
+        if (body.startsWith("{")) {
+            try {
+                body = new JSONObject(body).optString("data", "");
+            } catch (Exception ignored) {
+                return regions;
+            }
+        }
+        for (String line : body.split("\n")) {
+            line = line.trim();
+            if (line.isEmpty()) continue;
+            try {
+                String entry = line;
+                if (!line.startsWith("{")) {
+                    byte[] raw = hexToBytes(line);
+                    if (raw != null)
+                        entry = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+                    int brace = entry.indexOf('{');
+                    // Legacy entries carry a numeric padding prefix ahead of
+                    // the JSON object; drop it.
+                    if (brace < 0) continue;
+                    entry = entry.substring(brace);
+                }
+                String region = new JSONObject(entry).optString("region", "")
+                        .trim().toUpperCase(java.util.Locale.US);
+                if (region.length() == 2) regions.add(region);
+            } catch (Exception ignored) {
+            }
+        }
+        return regions;
+    }
+
+    private static byte[] hexToBytes(String hex) {
+        int n = hex.length();
+        if ((n & 1) != 0) return null;
+        byte[] out = new byte[n / 2];
+        for (int i = 0; i < n; i += 2) {
+            int hi = Character.digit(hex.charAt(i), 16);
+            int lo = Character.digit(hex.charAt(i + 1), 16);
+            if (hi < 0 || lo < 0) return null;
+            out[i / 2] = (byte) ((hi << 4) | lo);
+        }
+        return out;
     }
 
     private static byte[] readAll(File f) throws Exception {
@@ -868,7 +1007,26 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 broadcastStage(4, "ESTABLISHING TUNNEL");
             }
         }
+        tryMineRegionsFromNotice(message);
         emitLog(message);
+    }
+
+    // The AvailableEgressRegions payload traverses this channel as raw JSON
+    // regardless of the typed AAR callback, so the selector list is derived
+    // here too — region discovery must not hinge on a single notice-to-
+    // callback chain.
+    private void tryMineRegionsFromNotice(String message) {
+        if (stopping || message == null || !message.contains("\"AvailableEgressRegions\"")) return;
+        try {
+            JSONObject data = new JSONObject(message).optJSONObject("data");
+            if (data == null) return;
+            org.json.JSONArray reported = data.optJSONArray("regions");
+            if (reported == null || reported.length() == 0) return;
+            java.util.ArrayList<String> regions = new java.util.ArrayList<>(reported.length());
+            for (int i = 0; i < reported.length(); i++) regions.add(reported.optString(i, ""));
+            mergeReportedRegions(regions, "core-notice");
+        } catch (Exception ignored) {
+        }
     }
 
     @Override
@@ -894,18 +1052,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     @Override
     public void onAvailableEgressRegions(List<String> regions) {
-        if (regions == null || regions.isEmpty()) return;
-        java.util.Set<String> set = new java.util.TreeSet<>();
-        for (String r : regions) {
-            if (r == null) continue;
-            String t = r.trim().toUpperCase(java.util.Locale.US);
-            if (!t.isEmpty()) set.add(t);
-        }
-        if (set.isEmpty()) return;
-        lastRegions = String.join(",", set);
-        persistReportedRegions(lastRegions);
-        emitLog("regions: " + lastRegions);
-        broadcastRegions();
+        mergeReportedRegions(regions, "core");
     }
 
     @Override
@@ -917,6 +1064,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         socksPort.set(s);
         emitLog("connected, SOCKS " + proxyBindHost() + ":" + s + lanSuffix(s));
         flushLogs();
+        // Last-chance discovery when nothing reported regions during
+        // establishing (e.g. a stale replay older than the freshness window).
+        if (lastRegions.isEmpty()) fetchRemoteServerRegions();
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());
         i.putExtra("psiSession", session);
