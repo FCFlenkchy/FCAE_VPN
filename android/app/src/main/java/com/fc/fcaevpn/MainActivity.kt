@@ -14,7 +14,6 @@ import android.os.Handler
 import android.os.Looper
 import android.content.SharedPreferences
 import android.widget.ArrayAdapter
-import android.widget.AutoCompleteTextView
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
@@ -70,7 +69,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerEngineLog: Spinner
     private lateinit var spinnerT2sLog: Spinner
     private lateinit var editTorSocksPort: android.widget.EditText
-    private lateinit var spinnerPsiphonRegion: AutoCompleteTextView
+    private lateinit var spinnerPsiphonRegion: Spinner
     private lateinit var spinnerPsiphonTransport: Spinner
     private lateinit var editPsiphonSocksPort: android.widget.EditText
     private lateinit var editPsiphonHttpPort: android.widget.EditText
@@ -224,6 +223,10 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             when (intent.action) {
+                PsiphonTunnelService.BROADCAST_REGIONS -> {
+                    val regions = intent.getStringExtra(PsiphonTunnelService.EXTRA_REGIONS)
+                    if (!regions.isNullOrBlank()) handler.post { applyPsiphonRegionList(regions) }
+                }
                 // Staged psiphon progress (like the Tor bootstrap phases):
                 // only repaints the status line while a psiphon connect is
                 // still in flight — READY/FAILED own the terminal states.
@@ -634,30 +637,22 @@ class MainActivity : AppCompatActivity() {
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
-        // AutoCompleteTextView owns the popup and reports the clicked row
-        // directly; unlike Spinner, it does not race selectedItemPosition
-        // updates with the adapter callback.
-        spinnerPsiphonRegion.setOnClickListener {
-            // Clear the display text only while opening so AutoCompleteTextView
-            // filters against an empty query and shows every reported region.
-            spinnerPsiphonRegion.setText("", false)
-            spinnerPsiphonRegion.showDropDown()
-        }
-        spinnerPsiphonRegion.setOnItemClickListener { _, _, position, _ ->
-            if (applyingRegionList) return@setOnItemClickListener
-            savedPsiphonRegion = psiphonRegionCodes.getOrElse(position) { "" }
-            prefs.edit().putString("psiphonRegion", savedPsiphonRegion).apply()
-        }
-        spinnerPsiphonRegion.setOnDismissListener {
-            val pending = pendingRegionCodes
-            if (pending == null) {
-                if (spinnerPsiphonRegion.text.isNullOrEmpty()) {
-                    spinnerPsiphonRegion.setText(psiphonRegionDisplayName(savedPsiphonRegion), false)
-                }
-                return@setOnDismissListener
+        // Persist the selected code before a later region refresh can rebuild
+        // the adapter. The widget remains a normal Spinner; the data source is
+        // fixed below rather than inferred from its lifecycle.
+        spinnerPsiphonRegion.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: android.widget.AdapterView<*>?,
+                view: android.view.View?,
+                position: Int,
+                id: Long
+            ) {
+                if (applyingRegionList) return
+                savedPsiphonRegion = psiphonRegionCodes.getOrElse(position) { "" }
+                prefs.edit().putString("psiphonRegion", savedPsiphonRegion).apply()
             }
-            savedPsiphonRegion = selectedPsiphonRegion()
-            applyPsiphonRegionCodes(pending)
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
         spinnerTor.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -796,6 +791,7 @@ class MainActivity : AppCompatActivity() {
             addAction(FCAEVpnService.BROADCAST_VPN_DISCONNECTED)
             addAction(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
             addAction(PsiphonTunnelService.BROADCAST_READY)
+            addAction(PsiphonTunnelService.BROADCAST_REGIONS)
             addAction(PsiphonTunnelService.BROADCAST_FAILED)
             addAction(PsiphonTunnelService.BROADCAST_STOPPED)
             addAction(PsiphonTunnelService.BROADCAST_LOG)
@@ -2049,7 +2045,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** The ISO code currently chosen, or "" for automatic. */
-    private fun selectedPsiphonRegion(): String = savedPsiphonRegion
+    private fun selectedPsiphonRegion(): String {
+        if (applyingRegionList || !::spinnerPsiphonRegion.isInitialized) return savedPsiphonRegion
+        val i = spinnerPsiphonRegion.selectedItemPosition
+        return psiphonRegionCodes.getOrElse(i) { savedPsiphonRegion }
+    }
 
     /** Transport spinner position: 0 = Auto, 1 = SSH/OSSH, 2 = QUIC,
      *  3 = unfronted meek, 4 = fronted meek (matches the XML entries and
@@ -2059,18 +2059,6 @@ class MainActivity : AppCompatActivity() {
             prefs.getInt("psiphonTransport", 0)
         else spinnerPsiphonTransport.selectedItemPosition
 
-
-    private fun psiphonRegionDisplayName(code: String): String {
-        if (code.isEmpty()) return "Auto"
-        val upper = code.trim().uppercase()
-        val loc = java.util.Locale("", upper)
-        val name = try { loc.getDisplayCountry(java.util.Locale.ENGLISH) } catch (_: Throwable) { "" }
-        return if (name.isNotBlank() && !name.equals(upper, ignoreCase = true)) {
-            "$name ($upper)"
-        } else {
-            upper
-        }
-    }
 
     private fun requestPsiphonRegions() {
         if (!hasActivePsiOwner()) return
@@ -2096,7 +2084,7 @@ class MainActivity : AppCompatActivity() {
         // UnsatisfiedLinkError -- an Error, not an Exception -- which would
         // escape a narrower catch and kill the app on launch. The region list
         // is cosmetic until Psiphon connects, so degrade to "Auto".
-        val codes = try {
+        val nativeCodes = try {
             NativeEngine.nativePsiphonRegions()
                 .split(',')
                 .map { it.trim().uppercase() }
@@ -2105,16 +2093,23 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.w("FCAE_VPN", "psiphon regions unavailable: $t")
             emptyList()
         }
-
-        // The core list is authoritative whenever non-empty (engine-side
-        // psiphon). On Android it stays empty because psiphon runs in the
-        // AAR service, whose broadcasts deliver the regions instead — an
-        // empty reply must never shrink the learned + persisted list,
-        // otherwise the spinner collapses to "Auto" and the chosen region
-        // appears to be forgotten after every connect.
+        // The Android AAR runs in :psiphon, so its callback is also persisted
+        // to a small file shared by both processes. This avoids depending on
+        // the native Psiphon bridge, which is empty on the AAR path.
+        val reportedCodes = readReportedRegionFile()
+        val codes = (reportedCodes + nativeCodes).distinct()
         if (codes.isNotEmpty()) persistRegionCodes(codes)
         val combined = (persistedRegionCodes() + codes).distinct()
         applyPsiphonRegionCodes(combined)
+    }
+
+    private fun readReportedRegionFile(): List<String> = try {
+        java.io.File(filesDir, PsiphonTunnelService.REGIONS_FILE).readText()
+            .split(',')
+            .map { it.trim().uppercase() }
+            .filter { it.isNotEmpty() }
+    } catch (_: Exception) {
+        emptyList()
     }
 
     /** Egress regions learned so far, persisted across restarts. Written only
@@ -2150,34 +2145,31 @@ class MainActivity : AppCompatActivity() {
             .filter { it.isNotEmpty() }.distinct().sorted()
         val normalized = listOf("") + allCodes
         if (spinnerPsiphonRegion.adapter != null && normalized == psiphonRegionCodes) return
-        if (spinnerPsiphonRegion.adapter != null && spinnerPsiphonRegion.isPopupShowing) {
+        if (spinnerPsiphonRegion.adapter != null && !hasWindowFocus()) {
             pendingRegionCodes = normalized
             return // a popup is open; don't rebuild underneath the user's finger
         }
         pendingRegionCodes = null
         applyingRegionList = true
         psiphonRegionCodes = normalized
-        val displayItems = normalized.map { psiphonRegionDisplayName(it) }
-        spinnerPsiphonRegion.setAdapter(ArrayAdapter(this,
+        val displayItems = normalized.map { if (it.isEmpty()) "Auto" else it }
+        spinnerPsiphonRegion.adapter = ArrayAdapter(this,
             R.layout.spinner_dark_item,
-            displayItems))
+            displayItems)
         val savedIndex = if (want.isEmpty()) -1 else normalized.indexOf(want)
         val selIndex = if (savedIndex >= 0) savedIndex else 0
-        spinnerPsiphonRegion.setText(displayItems[selIndex], false)
+        spinnerPsiphonRegion.setSelection(selIndex, false)
         savedPsiphonRegion = normalized.getOrElse(selIndex) { "" }
         spinnerPsiphonRegion.post { applyingRegionList = false }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && ::spinnerPsiphonRegion.isInitialized &&
-            !spinnerPsiphonRegion.isPopupShowing) {
-            pendingRegionCodes?.let {
-                // A popup can return window focus before its dismiss callback.
-                // Read its new selection before applying the deferred list.
-                savedPsiphonRegion = selectedPsiphonRegion()
-                applyPsiphonRegionCodes(it)
-            }
+        if (hasFocus && ::spinnerPsiphonRegion.isInitialized) pendingRegionCodes?.let {
+            // A popup can return window focus before onItemSelected is dispatched.
+            // Read its new selection before applying the deferred network list.
+            savedPsiphonRegion = selectedPsiphonRegion()
+            applyPsiphonRegionCodes(it)
         }
     }
 

@@ -46,6 +46,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String BROADCAST_STAGE = "com.fc.fcaevpn.PSI_STAGE";
     public static final String BROADCAST_STOPPED = "com.fc.fcaevpn.PSI_STOPPED";
     public static final String BROADCAST_LOG = "com.fc.fcaevpn.PSI_LOG";
+    public static final String BROADCAST_REGIONS = "com.fc.fcaevpn.PSI_REGIONS_AVAILABLE";
+    // Written by the isolated Psiphon process and read by the UI process.
+    public static final String REGIONS_FILE = "psiphon_egress_regions.txt";
     // Live telemetry while the tunnel is up: byte rates, cumulative totals
     // and tunnel RTT measured through Psiphon's own local HTTP proxy.
     public static final String BROADCAST_STATS = "com.fc.fcaevpn.PSI_STATS";
@@ -642,6 +645,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             // Upstream resolves "any" to 0.0.0.0; empty means loopback-only.
             o.put("ListenInterface", lanSharing ? "any" : "");
             o.put("EmitDiagnosticNotices", true);
+            // Keep Psiphon's own server-entry scan enabled. This scan is the
+            // source of AvailableEgressRegions; do not derive regions from
+            // connected-server notices or from a local country list.
+            o.put("DisableServerEntriesReporter", false);
             o.put("UseIndistinguishableTLS", true);
             // tunnel-core's own resolver binds its socket to the underlying
             // network, so its bootstrap lookups (fronting domains, server
@@ -784,7 +791,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 emitLog("importing embedded server entries from assets/psiphon_servers.txt"
                         + " (" + out.size() + " bytes)");
                 String raw = out.toString("UTF-8");
-                extractAndBroadcastEmbeddedRegions(raw);
                 return raw;
             }
         } catch (Exception ignored) {
@@ -793,28 +799,26 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         return "";
     }
 
-    private void extractAndBroadcastEmbeddedRegions(String raw) {
-        java.util.regex.Pattern p = java.util.regex.Pattern.compile("\"[Rr]egion\"\\s*:\\s*\"([A-Za-z]{2})\"");
-        java.util.regex.Matcher m = p.matcher(raw);
-        java.util.Set<String> set = new java.util.TreeSet<>();
-        while (m.find()) {
-            set.add(m.group(1).toUpperCase(java.util.Locale.US));
-        }
-        if (!set.isEmpty()) {
-            lastRegions = String.join(",", set);
-            emitLog("embedded regions: " + lastRegions);
-            broadcastRegions();
+    private void persistReportedRegions(String csv) {
+        File target = new File(getFilesDir(), REGIONS_FILE);
+        File temporary = new File(getFilesDir(), REGIONS_FILE + ".tmp");
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(temporary, false)) {
+            out.write(csv.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            out.flush();
+            if (!temporary.renameTo(target)) temporary.delete();
+        } catch (Exception e) {
+            temporary.delete();
+            Log.w(TAG, "unable to persist Psiphon regions", e);
         }
     }
 
     /** Replay the non-empty learned list when the Activity returns from the background. */
     private void broadcastRegions() {
         if (lastRegions.isEmpty() || stopping) return;
-        Intent i = new Intent(BROADCAST_READY);
+        Intent i = new Intent(BROADCAST_REGIONS);
         i.setPackage(getPackageName());
         i.putExtra("psiSession", session);
         i.putExtra("requestId", attachRequestId);
-        i.putExtra("regionsOnly", true);
         i.putExtra(EXTRA_REGIONS, lastRegions);
         sendBroadcast(i);
     }
@@ -892,17 +896,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public void onAvailableEgressRegions(List<String> regions) {
         if (regions == null || regions.isEmpty()) return;
         java.util.Set<String> set = new java.util.TreeSet<>();
-        if (!lastRegions.isEmpty()) {
-            for (String r : lastRegions.split(",")) {
-                String t = r.trim().toUpperCase(java.util.Locale.US);
-                if (!t.isEmpty()) set.add(t);
-            }
-        }
         for (String r : regions) {
+            if (r == null) continue;
             String t = r.trim().toUpperCase(java.util.Locale.US);
             if (!t.isEmpty()) set.add(t);
         }
+        if (set.isEmpty()) return;
         lastRegions = String.join(",", set);
+        persistReportedRegions(lastRegions);
         emitLog("regions: " + lastRegions);
         broadcastRegions();
     }
