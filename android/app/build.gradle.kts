@@ -20,7 +20,7 @@ val appVersion = readVersionFromJson()
 
 android {
     namespace = "com.fc.fcaevpn"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.fc.fcaevpn"
