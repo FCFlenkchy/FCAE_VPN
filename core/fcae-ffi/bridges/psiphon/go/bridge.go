@@ -106,14 +106,9 @@ var (
 	psiBytesUp   uint64
 	psiBytesDown uint64
 
-	defaultPsiRegions = []string{
-		"AT", "AU", "BE", "BG", "CA", "CH", "CZ", "DE", "DK", "ES",
-		"FI", "FR", "GB", "HU", "IE", "IN", "IT", "JP", "NL", "NO",
-		"PL", "RO", "SE", "SG", "US",
-	}
 
 	// psiRegions is the set of egress psiRegions the server reported.
-	psiRegions = append([]string{}, defaultPsiRegions...)
+	psiRegions []string
 
 	// psiLogMu is deliberately separate from psiMu: psiEmit() is called from Psiphon's
 	// notice goroutine while psiMu may be held by start/stop, and sharing one

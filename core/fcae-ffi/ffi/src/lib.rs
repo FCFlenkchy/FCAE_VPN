@@ -335,6 +335,25 @@ pub extern "C" fn fcae_is_running() -> bool {
         .unwrap_or(false)
 }
 
+/// Detect the local IPv4 address selected by the default route without sending traffic.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_detect_lan_ip(
+    out: *mut c_char,
+    capacity: u32,
+) -> FcaeStatus {
+    guard("fcae_detect_lan_ip", move || {
+        if out.is_null() || capacity == 0 {
+            return Err(CoreError::NullArgument("out"));
+        }
+        let ip = telemetry::detect_lan_ip();
+        let bytes = ip.as_bytes();
+        let len = bytes.len().min(capacity as usize - 1);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), len);
+        *out.add(len) = 0;
+        Ok(())
+    })
+}
+
 /// Write the current telemetry snapshot into `out`.
 ///
 /// # Safety

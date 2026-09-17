@@ -614,7 +614,7 @@ jobs:
           sdkmanager "platforms;android-34" "build-tools;34.0.0"
 
           cd android
-          gradle wrapper --gradle-version 9.0
+          gradle wrapper --gradle-version 8.10.2
           if [ "${{ matrix.name }}" = "android-universal" ]; then
             ./gradlew assembleRelease -PUNIVERSAL=true -PBUILD_TYPE=android_universal
           else

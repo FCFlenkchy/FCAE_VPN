@@ -147,6 +147,14 @@ impl TelemetryCell {
     pub fn set_state(&self, state: FcaeState, message: String) {
         let changed = {
             let mut g = self.inner.lock();
+            if state == FcaeState::Disconnected {
+                g.counters = Counters::default();
+                g.raw_total_rx = 0;
+                g.raw_total_tx = 0;
+                g.folded_rx = 0;
+                g.folded_tx = 0;
+                g.connected_peer.clear();
+            }
             // An error is sticky until the next explicit session start or a
             // successful (re)connect: the Android watchdog calls stop() right
             // after an engine error, and the old code clobbered the reason.

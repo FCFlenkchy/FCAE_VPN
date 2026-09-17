@@ -384,6 +384,10 @@ bool       fcae_is_running(void);
 /* `out->struct_size` and `out->abi_version` must be set before calling. */
 FcaeStatus fcae_get_telemetry(FcaeTelemetry *out);
 
+/* Detect the local IPv4 address selected by the default route. The UDP
+ * connect used by the implementation sends no packet. */
+FcaeStatus fcae_detect_lan_ip(char *out, uint32_t capacity);
+
 /* Android: hand over the VpnService descriptor. The library dups it and
  * closes only its own copy, so ParcelFileDescriptor stays the owner. */
 FcaeStatus fcae_set_tun_fd(int32_t fd);

@@ -179,12 +179,22 @@ static bool ui_stats_live() {
 /// (rates() consumes a sampling window).
 static void ui_poll_telemetry(double now) {
     const double interval = ui_stats_live() ? 0.25 : 1.0;
-    if (now - g_app.last_telem_t < interval) return;
+    const bool stop_refresh = g_app.ffi_state.load() == FCAE_STATE_DISCONNECTED
+                            && g_app.telem.state != FCAE_STATE_DISCONNECTED;
+    if (!stop_refresh && now - g_app.last_telem_t < interval) return;
 
     FcaeTelemetry telem = {};
     telem.struct_size = sizeof(telem);
     telem.abi_version = FCAE_ABI_VERSION;
     fcae_get_telemetry(&telem);
+    static double next_lan_probe = 0.0;
+    if (telem.lan_enabled && now >= next_lan_probe) {
+        char lan_ip[64] = {};
+        if (fcae_detect_lan_ip(lan_ip, sizeof(lan_ip)) == FCAE_OK && lan_ip[0]) {
+            snprintf(telem.lan_ip, sizeof(telem.lan_ip), "%s", lan_ip);
+        }
+        next_lan_probe = now + 1.0;
+    }
     g_app.telem = telem;
     g_app.ffi_state.store(telem.state);
     g_app.ffi_connected.store(telem.state == FCAE_STATE_CONNECTED);
@@ -959,45 +969,6 @@ static std::string psiphon_region_label(const std::string& code) {
     return code;
 }
 
-static void extract_regions_from_server_list(const std::string& text, std::vector<std::string>& out_codes) {
-    size_t pos = 0;
-    while (pos < text.size()) {
-        size_t key_pos = text.find("\"region\"", pos);
-        if (key_pos == std::string::npos) {
-            key_pos = text.find("\"Region\"", pos);
-        }
-        if (key_pos == std::string::npos) break;
-        size_t colon_pos = text.find(':', key_pos);
-        if (colon_pos == std::string::npos || colon_pos - key_pos > 20) {
-            pos = key_pos + 8;
-            continue;
-        }
-        size_t quote1 = text.find('"', colon_pos);
-        if (quote1 == std::string::npos || quote1 - colon_pos > 10) {
-            pos = colon_pos + 1;
-            continue;
-        }
-        size_t quote2 = text.find('"', quote1 + 1);
-        if (quote2 == std::string::npos) break;
-        std::string code = text.substr(quote1 + 1, quote2 - quote1 - 1);
-        for (auto& ch : code) ch = (char)toupper((unsigned char)ch);
-        if (code.size() == 2 && isalpha((unsigned char)code[0]) && isalpha((unsigned char)code[1])) {
-            bool exists = false;
-            for (const auto& c : out_codes) {
-                if (c == code) { exists = true; break; }
-            }
-            if (!exists) out_codes.push_back(code);
-        }
-        pos = quote2 + 1;
-    }
-}
-
-static const char* kDefaultPsiphonRegions[] = {
-    "AT", "AU", "BE", "BG", "CA", "CH", "CZ", "DE", "DK", "ES",
-    "FI", "FR", "GB", "HU", "IE", "IN", "IT", "JP", "NL", "NO",
-    "PL", "RO", "SE", "SG", "US",
-};
-
 void render_ui() {
     const ImGuiIO& io = ImGui::GetIO();
     const bool narrow = io.DisplaySize.x < 720.0f;
@@ -1433,10 +1404,15 @@ void render_ui() {
             rtt_buf[0] = '-';
             rtt_buf[1] = '\0';
         }
-        ImGui::TextWrapped("Peer: %s  |  RTT: %s  |  Mode: %s",
-            telem.connected_peer[0] ? telem.connected_peer : "-",
-            rtt_buf,
-            g_app.mode == 0 ? "Proxy" : "TUN");
+        if (telem.backend == FCAE_BACKEND_PSIPHON || g_app.protocol == 4) {
+            ImGui::TextWrapped("RTT: %s  |  Mode: %s", rtt_buf,
+                              g_app.mode == 0 ? "Proxy" : "TUN");
+        } else {
+            ImGui::TextWrapped("Peer: %s  |  RTT: %s  |  Mode: %s",
+                telem.connected_peer[0] ? telem.connected_peer : "-",
+                rtt_buf,
+                g_app.mode == 0 ? "Proxy" : "TUN");
+        }
         if (telem.status_message[0]) {
             ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.60f, 1.0f), "%s", telem.status_message);
         }
@@ -1650,7 +1626,7 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Psiphon");
             ImGui::TextDisabled("Config is built automatically. Select a target egress region;");
-            ImGui::TextDisabled("the list includes default regions and updates dynamically from servers.");
+            ImGui::TextDisabled("the list is populated after Psiphon reports available regions.");
 
             // Region selection with human-readable country names and dynamic discovery
             {
@@ -1661,9 +1637,6 @@ void render_ui() {
                 if (!seeded) {
                     seeded = true;
                     codes.push_back(""); // Auto
-                    for (const char* def : kDefaultPsiphonRegions) {
-                        codes.push_back(def);
-                    }
                     const char* q = g_app.psiphon_region_list;
                     while (*q) {
                         const char* comma = strchr(q, ',');
@@ -1688,13 +1661,6 @@ void render_ui() {
                             if (existing == want) { found = true; break; }
                         }
                         if (!found) codes.push_back(want);
-                    }
-                    std::string bundled = exe_dir() + "/psiphon_servers.txt";
-                    std::ifstream f(bundled, std::ios::binary);
-                    if (f) {
-                        std::ostringstream ss;
-                        ss << f.rdbuf();
-                        extract_regions_from_server_list(ss.str(), codes);
                     }
                     std::sort(codes.begin() + 1, codes.end());
                 }

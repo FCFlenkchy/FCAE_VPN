@@ -158,62 +158,11 @@ class MainActivity : AppCompatActivity() {
         psiTotalDown = 0L
     }
 
-    // ── Persistent session-total snapshot ────────────────────────────────
-    // Last non-zero cumulative totals seen from either stats source (the
-    // native poll or the :psiphon broadcast). Kept in SharedPreferences so
-    // the totals line survives Activity/process recreation: closing and
-    // reopening the app, a pause/stop from the notification, or a plain
-    // disconnect must never blank the transferred-bytes history. Only a NEW
-    // connect resets it (totals are per-session, mirroring the engine).
-    @Volatile private var lastTotalRx = 0L
-    @Volatile private var lastTotalTx = 0L
-    @Volatile private var totalsDirty = false
-
-    private fun noteTotals(rx: Long, tx: Long) {
-        // Monotonic per session: a transient zero (engine mid-restart) or a
-        // regressed value from a freshly-restarted counter source must never
-        // pull the high-water mark down.
-        if (rx > lastTotalRx) { lastTotalRx = rx; totalsDirty = true }
-        if (tx > lastTotalTx) { lastTotalTx = tx; totalsDirty = true }
-    }
-
-    /** One async prefs write per lifecycle edge, never per poll tick. */
-    private fun persistTotals() {
-        if (!totalsDirty) return
-        totalsDirty = false
-        prefs.edit()
-            .putLong(KEY_TOTAL_RX, lastTotalRx)
-            .putLong(KEY_TOTAL_TX, lastTotalTx)
-            .apply()
-    }
-
-    /** Merge the persisted snapshot; totals are monotonic per session, so
-     *  the stored value only wins when it is larger (the in-memory copy may
-     *  already be ahead of the last write). */
-    private fun restoreTotals() {
-        lastTotalRx = maxOf(lastTotalRx, prefs.getLong(KEY_TOTAL_RX, 0L))
-        lastTotalTx = maxOf(lastTotalTx, prefs.getLong(KEY_TOTAL_TX, 0L))
-        // Also harvest the Psiphon owner's cached snapshot. Its restore path
-        // (restoreLatestPsiStats) is gated by isCurrentBroadcast(), whose
-        // activeSession id is a per-process static — after a process restart
-        // it is 0, every cached snapshot fails the guard, and the totals it
-        // carried were silently dropped (stats visible in the notification,
-        // cleared the moment the UI opened). The guard is right to refuse
-        // stale SESSION state (ports, endpoints); the cumulative byte counts
-        // are still the truth of what was transferred, so merge just those.
-        ProxyNotification.latestPsiphonStats(this)?.let {
-            noteTotals(
-                it.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, 0L),
-                it.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, 0L),
-            )
+    private fun resetStats() {
+        resetPsiStats()
+        if (::statsText.isInitialized) {
+            statsText.text = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)  |  RTT —"
         }
-    }
-
-    /** Frozen stats line: totals stay on screen, rates go quiet. Replaces
-     *  every site that used to blank statsText on disconnect/pause/death. */
-    private fun showFrozenStats() {
-        statsText.text = if (lastTotalRx == 0L && lastTotalTx == 0L) ""
-        else "\u2193 ${fmt(0L)}/s (${fmt(lastTotalRx)})  |  \u2191 ${fmt(0L)}/s (${fmt(lastTotalTx)})  |  RTT \u2014"
     }
 
     /** Render the latest service-owned telemetry without touching native FFI.
@@ -229,12 +178,8 @@ class MainActivity : AppCompatActivity() {
             peerText.text = if (current.isEmpty()) psiphonEndpointText(nativeLanFallback(lastNativeLan))
             else "$current\n${psiphonEndpointText(nativeLanFallback(lastNativeLan))}"
         }
-        // Same monotonic guard as the native path: a snapshot from a
-        // freshly-restarted :psiphon process must not regress the totals.
-        val shownDown = maxOf(psiTotalDown, lastTotalRx)
-        val shownUp = maxOf(psiTotalUp, lastTotalTx)
         statsText.text =
-            "↓ ${fmt(psiDownBps)}/s (${fmt(shownDown)})  |  ↑ ${fmt(psiUpBps)}/s (${fmt(shownUp)})  |  RTT ${if (psiRttMs > 0) "${psiRttMs}ms" else "—"}"
+            "↓ ${fmt(psiDownBps)}/s (${fmt(psiTotalDown)})  |  ↑ ${fmt(psiUpBps)}/s (${fmt(psiTotalUp)})  |  RTT ${if (psiRttMs > 0) "${psiRttMs}ms" else "—"}"
     }
 
     private fun acceptPsiStats(intent: Intent) {
@@ -246,7 +191,6 @@ class MainActivity : AppCompatActivity() {
         psiDownBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, psiDownBps)
         psiTotalUp = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, psiTotalUp)
         psiTotalDown = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, psiTotalDown)
-        noteTotals(psiTotalDown, psiTotalUp)
     }
 
     private fun restoreLatestPsiStats() {
@@ -357,8 +301,8 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 PsiphonTunnelService.BROADCAST_STOPPED -> {
-                    resetPsiStats()
                     handler.post {
+                        resetStats()
                         if (userInitiatedDisconnect) return@post
                         connecting = false
                         engineRunning = false
@@ -384,15 +328,8 @@ class MainActivity : AppCompatActivity() {
                         if (gen < lastBroadcastGeneration) return@post
 
                         if (isConnecting) {
-                            // A new-generation connect (e.g. notification
-                            // Start) begins a new session: drop the previous
-                            // session's totals or the monotonic display
-                            // guard would pin them over the fresh counters.
-                            if (gen > lastBroadcastGeneration) {
-                                lastTotalRx = 0L
-                                lastTotalTx = 0L
-                                totalsDirty = false
-                            }
+                            // A new-generation connect starts a fresh stats session.
+                            if (gen > lastBroadcastGeneration) resetStats()
                             userInitiatedDisconnect = false
                             commandPaused = false
                             commandConnecting = true
@@ -427,10 +364,6 @@ class MainActivity : AppCompatActivity() {
                             updateButton()
                             statusText.text = "STOPPED"
                             statusText.setTextColor(Color.parseColor("#8A93A6"))
-                            // Keep session totals visible while paused; only
-                            // the live rates go quiet.
-                            showFrozenStats()
-                            persistTotals()
                             handler.removeCallbacks(poll)
                         } else if (!isRunning && !isPaused) {
 
@@ -443,10 +376,7 @@ class MainActivity : AppCompatActivity() {
                             updateButton()
                             statusText.text = "DISCONNECTED"
                             statusText.setTextColor(Color.parseColor("#8A93A6"))
-                            // A disconnect ends the session but not the
-                            // user's view of what it transferred.
-                            showFrozenStats()
-                            persistTotals()
+                            resetStats()
                             peerText.text = ""
                             handler.removeCallbacks(poll)
                         }
@@ -532,10 +462,6 @@ class MainActivity : AppCompatActivity() {
         activityAlive = true
         setContentView(R.layout.activity_main)
         prefs = getSharedPreferences("aether_vpn", MODE_PRIVATE)
-        // Rehydrate the session transfer totals before any stats render, so
-        // reopening the app never shows the counters reset to zero.
-        restoreTotals()
-
         statusText = findViewById(R.id.statusText)
         statsText = findViewById(R.id.statsText)
         peerText = findViewById(R.id.peerText)
@@ -930,9 +856,6 @@ class MainActivity : AppCompatActivity() {
                             engineRunning = false
                             connecting = false
                             updateButton()
-                            // Show the last session's totals instead of a
-                            // blank line after an app restart.
-                            showFrozenStats()
                         }
                     }
                 }
@@ -988,16 +911,11 @@ class MainActivity : AppCompatActivity() {
         // "still connected" signal while we're not visible.
         handler.removeCallbacks(poll)
         saveSettings()
-        // One write per background transition keeps the totals snapshot
-        // durable without touching disk on every poll tick.
-        persistTotals()
     }
 
     override fun onResume() {
         super.onResume()
         inForeground = true
-        restoreTotals()
-
         // Pure Psiphon proxy mode is owned by PsiphonTunnelService and its
         // foreground owner, not by NativeEngine. NativeEngine.nativeGetState()
         // is therefore expected to be idle on this path. Do not turn that
@@ -1049,8 +967,7 @@ class MainActivity : AppCompatActivity() {
                             updateButton()
                             statusText.text = "DISCONNECTED"
                             statusText.setTextColor(Color.parseColor("#8A93A6"))
-                            showFrozenStats()
-                            persistTotals()
+                            resetStats()
                             peerText.text = ""
                         }
                     }
@@ -1062,7 +979,7 @@ class MainActivity : AppCompatActivity() {
                         updateButton()
                         statusText.text = "DISCONNECTED"
                         statusText.setTextColor(Color.parseColor("#8A93A6"))
-                        showFrozenStats()
+                        resetStats()
                         peerText.text = ""
                     }
                 }
@@ -1378,12 +1295,8 @@ class MainActivity : AppCompatActivity() {
         pendingPsiSocks = 0
         pendingPsiHttp = 0
         pendingPsiLan = ""
-        lastNativeLan = ""
-        // Totals are per-session: only a NEW connect resets the snapshot.
-        lastTotalRx = 0L
-        lastTotalTx = 0L
-        totalsDirty = false
-        prefs.edit().remove(KEY_TOTAL_RX).remove(KEY_TOTAL_TX).apply()
+        lastNativeLan = try { NativeEngine.nativeGetLanIp() } catch (_: Throwable) { "" }
+        resetStats()
         if (isPsiphonSelected()) {
             if (isTunModeSelected()) {
                 val prep = VpnService.prepare(this)
@@ -1421,7 +1334,7 @@ class MainActivity : AppCompatActivity() {
             vpnActive = true
             updateButton()
             saveSettings()
-            resetPsiStats()
+            resetStats()
             statusText.text = "CONNECTING"
             statusText.setTextColor(COLOR_PROGRESS)
         }
@@ -1664,10 +1577,7 @@ class MainActivity : AppCompatActivity() {
     
     statusText.text = "DISCONNECTED"
     statusText.setTextColor(Color.parseColor("#8A93A6"))
-    // Session is over, but its transfer history stays on screen (and in
-    // prefs) until the next connect starts a fresh session.
-    showFrozenStats()
-    persistTotals()
+    resetStats()
     peerText.text = ""
 
     try {
@@ -1960,23 +1870,20 @@ class MainActivity : AppCompatActivity() {
                 },
             )
             if (isPsiphonSelected() || isEgressPsiphon()) {
-                // Owned by BROADCAST_STATS from :psiphon — writing native
-                // zeros here would step on the live tunnel telemetry.
+                // Psiphon owns this line through BROADCAST_STATS.
+            } else if (state == 0 || state == 5) {
+                resetStats()
             } else {
-                noteTotals(totalRx, totalTx)
-                // Never let a transient native zero (engine restarting,
-                // telemetry cell mid-reset) wipe the on-screen totals: show
-                // the session high-water mark, which the engine's own
-                // monotonic counters can only ever meet or exceed.
-                val shownRx = maxOf(totalRx, lastTotalRx)
-                val shownTx = maxOf(totalTx, lastTotalTx)
                 statsText.text =
-                    "\u2193 ${fmt(rx)}/s (${fmt(shownRx)})  |  \u2191 ${fmt(tx)}/s (${fmt(shownTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "\u2014"}"
+                    "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "—"}"
             }
 
-            // Build peer line — include LAN proxy addresses when sharing is on
+            // Psiphon direct and Tor-only sessions do not expose an Aether peer.
+            // Keep their listener endpoints without rendering a misleading peer line.
             val peerLine = StringBuilder()
-            peerLine.append("Peer: ${peer.ifEmpty { " \u2014 " }}")
+            if (!isPsiphonSelected() && !isTorOnly()) {
+                peerLine.append("Peer: ${peer.ifEmpty { " \u2014 " }}")
+            }
             // Show only listeners belonging to the active backend. Tor-only
             // has its own SOCKS port; Psiphon has ports assigned by its service.
             if (state == 4 && !isPsiphonSelected()) {
@@ -2141,11 +2048,6 @@ class MainActivity : AppCompatActivity() {
             prefs.getInt("psiphonTransport", 0)
         else spinnerPsiphonTransport.selectedItemPosition
 
-    private val DEFAULT_PSIPHON_REGIONS = listOf(
-        "AT", "AU", "BE", "BG", "CA", "CH", "CZ", "DE", "DK", "ES",
-        "FI", "FR", "GB", "HU", "IE", "IN", "IT", "JP", "NL", "NO",
-        "PL", "RO", "SE", "SG", "US"
-    )
 
     private fun psiphonRegionDisplayName(code: String): String {
         if (code.isEmpty()) return "Auto"
@@ -2162,8 +2064,8 @@ class MainActivity : AppCompatActivity() {
     /**
      * Rebuild the region list from the core.
      *
-     * Psiphon learns which egress regions exist after connecting, and we also
-     * offer default regions so the user can pick a region before first connect.
+     * Psiphon reports the egress regions after connecting; before then only
+     * the automatic choice is available.
      */
     private fun refreshPsiphonRegions() {
         if (!::spinnerPsiphonRegion.isInitialized) return
@@ -2190,7 +2092,7 @@ class MainActivity : AppCompatActivity() {
         // otherwise the spinner collapses to "Auto" and the chosen region
         // appears to be forgotten after every connect.
         if (codes.isNotEmpty()) persistRegionCodes(codes)
-        val combined = (DEFAULT_PSIPHON_REGIONS + persistedRegionCodes() + codes).distinct()
+        val combined = (persistedRegionCodes() + codes).distinct()
         applyPsiphonRegionCodes(combined)
     }
 
@@ -2213,14 +2115,14 @@ class MainActivity : AppCompatActivity() {
         // Authoritative service list: persist (regions survive restarts) and
         // fall back to what is already stored on the odd empty broadcast.
         if (codes.isNotEmpty()) persistRegionCodes(codes)
-        val combined = (DEFAULT_PSIPHON_REGIONS + persistedRegionCodes() + codes).distinct()
+        val combined = (persistedRegionCodes() + codes).distinct()
         applyPsiphonRegionCodes(combined)
     }
 
     private fun applyPsiphonRegionCodes(newCodes: List<String>) {
         if (!::spinnerPsiphonRegion.isInitialized) return
         val want = savedPsiphonRegion.trim().uppercase()
-        val allCodes = (DEFAULT_PSIPHON_REGIONS + newCodes + (if (want.isNotEmpty()) listOf(want) else emptyList()))
+        val allCodes = (newCodes + (if (want.isNotEmpty()) listOf(want) else emptyList()))
             .map { it.trim().uppercase() }.filter { it.isNotEmpty() }.distinct().sorted()
         val normalized = listOf("") + allCodes
         if (spinnerPsiphonRegion.adapter != null && normalized == psiphonRegionCodes) return
@@ -2293,9 +2195,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val POLL_INTERVAL_MS = 1000L
-        // Session cumulative totals, persisted so UI restarts can't lose them.
-        private const val KEY_TOTAL_RX = "sessionTotalRx"
-        private const val KEY_TOTAL_TX = "sessionTotalTx"
         // ~70+ log messages on screen. Psiphon's JSON notices average
         // 150-350 chars, so 8000 showed only ~20-30 lines and older lines
         // (handshake, CandidateServers) scrolled away before the connect

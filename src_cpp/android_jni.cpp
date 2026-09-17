@@ -670,9 +670,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeGetPeer(JNIEnv* env, jclass) {
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeGetLanIp(JNIEnv* env, jclass) {
-    ensure_init();
-    FcaeTelemetry t = telemetry_snapshot();
-    return env->NewStringUTF(t.lan_ip[0] ? t.lan_ip : "");
+    char ip[64] = {};
+    if (fcae_detect_lan_ip(ip, sizeof(ip)) != FCAE_OK) return env->NewStringUTF("");
+    return env->NewStringUTF(ip);
 }
 
 extern "C" JNIEXPORT jstring JNICALL

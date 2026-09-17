@@ -5,7 +5,6 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
-import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.VpnService;
@@ -238,31 +237,19 @@ public class FCAEVpnService extends VpnService {
         return "UNKNOWN";
     }
 
-    /**
-     * The active network excluding our own VPN.
-     *
-     * getActiveNetwork() returns the VPN itself once our interface is up, and
-     * its LinkProperties carry the DNS servers we configured on the Builder.
-     * Handing those to Psiphon would point it at resolvers reachable only
-     * through the tunnel it is still trying to build.
-     */
+    /** Return the active physical network, never the VPN interface. */
     private Network underlyingNetwork(ConnectivityManager cm) {
-        Network best = null;
         try {
-            for (Network n : cm.getAllNetworks()) {
-                NetworkCapabilities caps = cm.getNetworkCapabilities(n);
-                if (caps == null) continue;
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
-                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue;
-                if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
-                    return n;
-                }
-                if (best == null) best = n;
-            }
+            Network active = cm.getActiveNetwork();
+            NetworkCapabilities caps = active == null ? null : cm.getNetworkCapabilities(active);
+            return caps != null
+                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                    ? active : null;
         } catch (Throwable t) {
             Log.w(TAG, "underlyingNetwork failed: " + t);
+            return null;
         }
-        return best;
     }
 
     /**

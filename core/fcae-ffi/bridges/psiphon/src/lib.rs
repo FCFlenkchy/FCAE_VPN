@@ -67,11 +67,6 @@ static STOP_TASK: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>> =
 /// region for the *next* session.
 static REGIONS: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
 
-const DEFAULT_PSIPHON_REGIONS: &[&str] = &[
-    "AT", "AU", "BE", "BG", "CA", "CH", "CZ", "DE", "DK", "ES",
-    "FI", "FR", "GB", "HU", "IE", "IN", "IT", "JP", "NL", "NO",
-    "PL", "RO", "SE", "SG", "US",
-];
 
 /// Actual bound desktop listener ports. Android reports them by broadcast.
 pub fn proxy_ports() -> (u16, u16) {
@@ -99,11 +94,7 @@ pub fn regions() -> Vec<String> {
             lock.sort();
         }
     }
-    let mut lock = REGIONS.lock();
-    if lock.is_empty() {
-        *lock = DEFAULT_PSIPHON_REGIONS.iter().map(|s| (*s).to_string()).collect();
-    }
-    lock.clone()
+    REGIONS.lock().clone()
 }
 
 /// Android's `VpnService.protect(fd)`, installed by the FFI layer.
