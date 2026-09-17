@@ -399,14 +399,18 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             }
             return START_NOT_STICKY;
         }
-        if (stopping || startInFlight || psiphonUp) {
+        if (stopping) {
+            return START_NOT_STICKY;
+        }
+        if (startInFlight || psiphonUp) {
             // Duplicate start (double-tap, poll re-fire, redelivery). The
             // wrapper stops the running instance before every new start, so
             // a second start mid-boot aborts the first controller — repeat
             // deliveries turned into the connect/stop crash loop. The UI
-            // always stops before reconfiguring, so ignore extras here.
-            emitLog("start ignored: tunnel already " + (startInFlight ? "starting" : "running"));
-            flushLogs();
+            // always stops before reconfiguring, so ignore extras quietly;
+            // this is an idempotent lifecycle race, not a tunnel error.
+            Log.d(TAG, "Duplicate Psiphon start ignored while "
+                    + (startInFlight ? "starting" : "running"));
             return START_NOT_STICKY;
         }
         {

@@ -586,14 +586,14 @@ func (g *udpgwGateway) channel() (net.Conn, error) {
 		g.lastDialErr = err.Error()
 		g.mu.Unlock()
 		if first {
-			// "general SOCKS server failure" = the local SOCKS listener had
-			// no active tunnel (reconnecting); "connection refused" = the
-			// exit rejected the udpgw CONNECT itself (no UDP intercept on
-			// this server) -- the latter means DNS stays dead until the
-			// controller moves to another exit.
-			emit(logError, "[dns] Psiphon UDPGW CONNECT failed: %v", err)
+			// These failures are expected while Psiphon is still opening its
+			// local SOCKS listener or while it is reconnecting. DNS retries
+			// through the same gateway and reports a warning only if the
+			// query ultimately cannot be answered; do not turn each startup
+			// race into an application-level error line.
+			emit(logDebug, "[dns] Psiphon UDPGW CONNECT pending: %v", err)
 		}
-		return nil, fmt.Errorf("Psiphon UDPGW CONNECT failed: %w", err)
+		return nil, fmt.Errorf("Psiphon UDPGW CONNECT pending: %w", err)
 	}
 	g.mu.Lock()
 	g.lastDial = time.Now()
@@ -602,7 +602,7 @@ func (g *udpgwGateway) channel() (net.Conn, error) {
 	g.lastDialErr = ""
 	g.mu.Unlock()
 	if recovered {
-		emit(logError, "[dns] Psiphon UDPGW channel re-established")
+		emit(logDebug, "[dns] Psiphon UDPGW channel re-established")
 	}
 
 	g.keepaliveOnce.Do(func() { go g.keepaliveLoop() })
