@@ -384,6 +384,19 @@ func dnsServfail(query []byte) []byte {
 	return response
 }
 
+// dnsRelayTimeout bounds one native DNS exchange and the initial UDPGW
+// CONNECT. A warmed gateway normally answers well below this limit; the
+// bound prevents a dead egress from parking a TUN flow indefinitely.
+const dnsRelayTimeout = 8 * time.Second
+
+// dnsReply is one completed native Psiphon DNS answer. Failed exchanges are
+// converted to SERVFAIL before they reach this channel so the resolver can
+// retry without tearing down the UDP flow.
+type dnsReply struct {
+	payload []byte
+	src     net.Addr
+}
+
 // dnsRelayConn is the PacketConn handed to one Psiphon DNS flow. The native
 // Psiphon UDP gateway returns the answer without sending SOCKS UDP ASSOCIATE.
 type dnsRelayConn struct {
@@ -452,7 +465,6 @@ func (c *dnsRelayConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		select {
 		case r := <-c.replies:
 			if timer != nil { timer.Stop() }
-			if r.err != nil { return 0, nil, r.err }
 			if len(r.payload) > len(p) { return 0, nil, io.ErrShortBuffer }
 			return copy(p, r.payload), r.src, nil
 		case <-c.done:
