@@ -598,13 +598,10 @@ impl BackendHandle for AetherHandle {
                 .then(|| format!("127.0.0.1:{}", http_port).parse().ok())
                 .flatten(),
             peer_ip: aether_engine::stats::peer().map(|peer| peer.ip().to_string()),
-            // The engine's SOCKS listener carries UDP (gVisor netstack) —
-            // but only while the egress is WARP. Tor has no UDP: every UDP
-            // flow sent there (rare stray DNS, QUIC probes) dies with a
-            // Tor-protocol error and spams the log, so advertise UDP-less
-            // whenever a Tor mode is active and let tun2socks drop those
-            // flows locally instead.
-            udp: self.cfg.tor.mode == FcaeTorMode::Off,
+            // Aether owns its Tor/WARP DNS handling and its SOCKS endpoint
+            // accepts the full UDP path. Keep the standard SOCKS5 behavior;
+            // only the Psiphon backend needs the native-DNS query flag.
+            udp: true,
             psiphon_dns: false,
         }
     }
