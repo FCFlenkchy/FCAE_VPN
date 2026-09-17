@@ -1653,15 +1653,6 @@ void render_ui() {
                         if (!comma) break;
                         q = comma + 1;
                     }
-                    if (g_app.psiphon_region[0]) {
-                        std::string want = g_app.psiphon_region;
-                        for (auto& ch : want) ch = (char)toupper((unsigned char)ch);
-                        bool found = false;
-                        for (const auto& existing : codes) {
-                            if (existing == want) { found = true; break; }
-                        }
-                        if (!found) codes.push_back(want);
-                    }
                     std::sort(codes.begin() + 1, codes.end());
                 }
                 double now = ImGui::GetTime();
@@ -1704,9 +1695,11 @@ void render_ui() {
                     }
                 }
 
+                std::string wanted = g_app.psiphon_region;
+                for (auto& ch : wanted) ch = (char)toupper((unsigned char)ch);
                 int sel = 0;
                 for (size_t i = 0; i < codes.size(); ++i) {
-                    if (codes[i] == g_app.psiphon_region) { sel = (int)i; break; }
+                    if (codes[i] == wanted) { sel = (int)i; break; }
                 }
 
                 std::vector<std::string> label_strs;

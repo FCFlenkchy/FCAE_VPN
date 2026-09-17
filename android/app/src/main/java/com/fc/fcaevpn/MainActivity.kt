@@ -916,6 +916,13 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         inForeground = true
+        if (isPsiphonSelected() || isEgressPsiphon()) {
+            // The Activity receiver is not registered while it is stopped.
+            // Ask the still-bound service to replay its learned list before
+            // deciding which Psiphon UI path to restore.
+            refreshPsiphonRegions()
+            requestPsiphonRegions()
+        }
         // Pure Psiphon proxy mode is owned by PsiphonTunnelService and its
         // foreground owner, not by NativeEngine. NativeEngine.nativeGetState()
         // is therefore expected to be idle on this path. Do not turn that
@@ -2061,6 +2068,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun requestPsiphonRegions() {
+        if (!hasActivePsiOwner()) return
+        try {
+            startService(Intent(this, PsiphonTunnelService::class.java)
+                .setAction(PsiphonTunnelService.ACTION_REGIONS))
+        } catch (t: Throwable) {
+            android.util.Log.w("FCAE_VPN", "unable to refresh Psiphon regions: $t")
+        }
+    }
+
     /**
      * Rebuild the region list from the core.
      *
@@ -2122,8 +2139,11 @@ class MainActivity : AppCompatActivity() {
     private fun applyPsiphonRegionCodes(newCodes: List<String>) {
         if (!::spinnerPsiphonRegion.isInitialized) return
         val want = savedPsiphonRegion.trim().uppercase()
-        val allCodes = (newCodes + (if (want.isNotEmpty()) listOf(want) else emptyList()))
-            .map { it.trim().uppercase() }.filter { it.isNotEmpty() }.distinct().sorted()
+        // Only reported or previously learned codes are available choices.
+        // A stale saved value must not manufacture a region entry or make the
+        // spinner look connected to a server list Psiphon never reported.
+        val allCodes = newCodes.map { it.trim().uppercase() }
+            .filter { it.isNotEmpty() }.distinct().sorted()
         val normalized = listOf("") + allCodes
         if (spinnerPsiphonRegion.adapter != null && normalized == psiphonRegionCodes) return
         if (spinnerPsiphonRegion.adapter != null && !hasWindowFocus()) {
@@ -2137,7 +2157,8 @@ class MainActivity : AppCompatActivity() {
         spinnerPsiphonRegion.adapter = ArrayAdapter(this,
             R.layout.spinner_dark_item,
             displayItems)
-        val selIndex = if (want.isEmpty()) 0 else normalized.indexOf(want).coerceAtLeast(0)
+        val savedIndex = if (want.isEmpty()) -1 else normalized.indexOf(want)
+        val selIndex = if (savedIndex >= 0) savedIndex else 0
         spinnerPsiphonRegion.setSelection(selIndex, false)
         savedPsiphonRegion = normalized.getOrElse(selIndex) { "" }
         spinnerPsiphonRegion.post { applyingRegionList = false }

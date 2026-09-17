@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 // Read version from repo-root version.json (single source of truth)
@@ -21,7 +20,7 @@ val appVersion = readVersionFromJson()
 
 android {
     namespace = "com.fc.fcaevpn"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.fc.fcaevpn"
@@ -142,9 +141,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
 
-    kotlinOptions {
-        jvmTarget = "17"
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
 }
 

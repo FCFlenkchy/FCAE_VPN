@@ -36,6 +36,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private static final String TAG = "FCAE_PSI";
     public static final String ACTION_START = "com.fc.fcaevpn.PSI_START";
     public static final String ACTION_STOP  = "com.fc.fcaevpn.PSI_STOP";
+    public static final String ACTION_REGIONS = "com.fc.fcaevpn.PSI_REGIONS";
     public static final String BROADCAST_READY = "com.fc.fcaevpn.PSI_READY";
     public static final String BROADCAST_FAILED = "com.fc.fcaevpn.PSI_FAILED";
     // Staged connect progress (like the Tor bootstrap percentage): INTEGER
@@ -399,6 +400,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             stopNow();
             return START_NOT_STICKY;
         }
+        if (intent != null && ACTION_REGIONS.equals(intent.getAction())) {
+            broadcastRegions();
+            return (psiphonUp || startInFlight) ? START_STICKY : START_NOT_STICKY;
+        }
         if (intent == null) {
             // Sticky restart after this process was killed: the user's
             // region/transport/ports/upstream extras died with it, so
@@ -411,6 +416,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             }
             return START_NOT_STICKY;
         }
+        // startBound() starts the service before Android invokes onBind().
+        // Capture the session here as well as in onBind(), otherwise a very
+        // fast handshake can publish a valid region list with the old
+        // sentinel session and every app-process receiver will discard it.
+        long requestedSession = intent.getLongExtra("psiSession", -1);
+        if (requestedSession >= 0) session = requestedSession;
         if (stopping) {
             return START_NOT_STICKY;
         }
@@ -792,14 +803,20 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (!set.isEmpty()) {
             lastRegions = String.join(",", set);
             emitLog("embedded regions: " + lastRegions);
-            Intent i = new Intent(BROADCAST_READY);
-            i.setPackage(getPackageName());
-            i.putExtra("psiSession", session);
-            i.putExtra("requestId", attachRequestId);
-            i.putExtra("regionsOnly", true);
-            i.putExtra(EXTRA_REGIONS, lastRegions);
-            sendBroadcast(i);
+            broadcastRegions();
         }
+    }
+
+    /** Replay the non-empty learned list when the Activity returns from the background. */
+    private void broadcastRegions() {
+        if (lastRegions.isEmpty() || stopping) return;
+        Intent i = new Intent(BROADCAST_READY);
+        i.setPackage(getPackageName());
+        i.putExtra("psiSession", session);
+        i.putExtra("requestId", attachRequestId);
+        i.putExtra("regionsOnly", true);
+        i.putExtra(EXTRA_REGIONS, lastRegions);
+        sendBroadcast(i);
     }
 
     private static byte[] readAll(File f) throws Exception {
@@ -887,13 +904,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         }
         lastRegions = String.join(",", set);
         emitLog("regions: " + lastRegions);
-        Intent i = new Intent(BROADCAST_READY);
-        i.setPackage(getPackageName());
-        i.putExtra("psiSession", session);
-        i.putExtra("requestId", attachRequestId);
-        i.putExtra("regionsOnly", true);
-        i.putExtra(EXTRA_REGIONS, lastRegions);
-        sendBroadcast(i);
+        broadcastRegions();
     }
 
     @Override
