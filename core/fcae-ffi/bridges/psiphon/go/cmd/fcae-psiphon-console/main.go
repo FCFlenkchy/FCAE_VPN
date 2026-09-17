@@ -68,6 +68,8 @@ func main() {
 		"egress region (ISO country code; empty = auto)")
 	socksPort := flag.Int("socks", 0, "local SOCKS port (0 = Psiphon chooses)")
 	httpPort := flag.Int("http", 0, "local HTTP CONNECT port (0 = Psiphon chooses)")
+	lan := flag.Bool("lan", false,
+		"listen on all interfaces (0.0.0.0) instead of loopback")
 	upstream := flag.String("upstream", "",
 		"upstream proxy URL, e.g. socks5://127.0.0.1:1819 (chains Psiphon behind Aether)")
 	wait := flag.Duration("wait", 0,
@@ -85,6 +87,7 @@ func main() {
 		region:   *region,
 		socks:    *socksPort,
 		http:     *httpPort,
+		lan:      *lan,
 		upstream: *upstream,
 	})
 	if err != nil {
@@ -109,7 +112,11 @@ func main() {
 		os.Exit(exitUsage)
 	}
 
-	provider := newConsoleProvider()
+	listenIP := "127.0.0.1"
+	if *lan {
+		listenIP = "0.0.0.0"
+	}
+	provider := newConsoleProvider(listenIP)
 
 	fmt.Fprintln(os.Stderr, "fcae-psiphon-console: starting Psiphon library…")
 	if err := psi.Start(string(config), embedded, "", provider, false, false, false); err != nil {
@@ -150,11 +157,12 @@ func signalCh() chan os.Signal {
 
 // consoleProvider implements psi.PsiphonProvider for a plain desktop process.
 type consoleProvider struct {
-	notices chan string
+	notices  chan string
+	listenIP string
 }
 
-func newConsoleProvider() *consoleProvider {
-	return &consoleProvider{notices: make(chan string, 512)}
+func newConsoleProvider(listenIP string) *consoleProvider {
+	return &consoleProvider{notices: make(chan string, 512), listenIP: listenIP}
 }
 
 func (p *consoleProvider) Notice(noticeJSON string) {
@@ -184,12 +192,12 @@ func (p *consoleProvider) watchNotices(connected chan struct{}) {
 		case "ListeningSocksProxyPort":
 			if n.Data.Port > 0 {
 				fmt.Fprintf(os.Stderr,
-					"fcae-psiphon-console: SOCKS proxy on 127.0.0.1:%d\n", n.Data.Port)
+					"fcae-psiphon-console: SOCKS proxy on %s:%d\n", p.listenIP, n.Data.Port)
 			}
 		case "ListeningHttpProxyPort":
 			if n.Data.Port > 0 {
 				fmt.Fprintf(os.Stderr,
-					"fcae-psiphon-console: HTTP proxy on 127.0.0.1:%d\n", n.Data.Port)
+					"fcae-psiphon-console: HTTP proxy on %s:%d\n", p.listenIP, n.Data.Port)
 			}
 		case "Tunnels":
 			if n.Data.Count > 0 && !seen {
@@ -224,6 +232,7 @@ type renderOptions struct {
 	region   string
 	socks    int
 	http     int
+	lan      bool
 	upstream string
 }
 
@@ -252,6 +261,9 @@ func renderConfig(raw []byte, opts renderOptions) ([]byte, error) {
 	}
 	if strings.TrimSpace(opts.upstream) != "" {
 		object["UpstreamProxyURL"] = opts.upstream
+	}
+	if opts.lan {
+		object["ListenInterface"] = "any"
 	}
 	out, err := json.Marshal(object)
 	if err != nil {

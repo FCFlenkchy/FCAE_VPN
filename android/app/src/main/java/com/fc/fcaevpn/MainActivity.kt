@@ -35,6 +35,10 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var pendingPsiSocks = 0
     @Volatile private var pendingPsiHttp = 0
     @Volatile private var pendingPsiLan = ""
+    // Last LAN IP from native telemetry — fallback for the Psiphon LAN line
+    // when :psiphon resolved none of its own (hotspot/tether interfaces it
+    // cannot see). The bind itself is 0.0.0.0, so any device LAN IP dials it.
+    @Volatile private var lastNativeLan = ""
     private var lastLogHash = 0L
     private var disconnecting = false
     @Volatile private var connectionEpoch = 0L
@@ -218,12 +222,12 @@ class MainActivity : AppCompatActivity() {
      * therefore look like a stopped engine and erase perfectly live stats. */
     private fun renderPsiStats() {
         if (isPsiphonSelected()) {
-            peerText.text = psiphonEndpointText()
+            peerText.text = psiphonEndpointText(nativeLanFallback(lastNativeLan))
         } else if (isEgressPsiphon() && pendingPsiSocks > 0 &&
             !peerText.text.toString().contains("Psiphon local:")) {
             val current = peerText.text.toString().trim()
-            peerText.text = if (current.isEmpty()) psiphonEndpointText()
-            else "$current\n${psiphonEndpointText()}"
+            peerText.text = if (current.isEmpty()) psiphonEndpointText(nativeLanFallback(lastNativeLan))
+            else "$current\n${psiphonEndpointText(nativeLanFallback(lastNativeLan))}"
         }
         // Same monotonic guard as the native path: a snapshot from a
         // freshly-restarted :psiphon process must not regress the totals.
@@ -330,7 +334,7 @@ class MainActivity : AppCompatActivity() {
                         // pure-psiphon mode never polls the engine, so this
                         // and BROADCAST_STATS are the only UI updates.
                         if (!isTunModeSelected() && socks > 0) {
-                            peerText.text = psiphonEndpointText()
+                            peerText.text = psiphonEndpointText(nativeLanFallback(lastNativeLan))
                         }
                         if (isPsiphonSelected() && isTunModeSelected() && socks > 0) {
                             startTunServiceWithConfig()
@@ -346,7 +350,10 @@ class MainActivity : AppCompatActivity() {
                         updateButton()
                         statusText.text = "ERROR: $err"
                         statusText.setTextColor(COLOR_ERROR)
-                        Toast.makeText(this@MainActivity, err, Toast.LENGTH_LONG).show()
+                        // No Toast: the status line is the persistent error
+                        // surface, and Psiphon chain churn (rebinds, egress
+                        // retries) must not pop up over whatever the user is
+                        // doing — especially while the app is backgrounded.
                     }
                 }
                 PsiphonTunnelService.BROADCAST_STOPPED -> {
@@ -1371,6 +1378,7 @@ class MainActivity : AppCompatActivity() {
         pendingPsiSocks = 0
         pendingPsiHttp = 0
         pendingPsiLan = ""
+        lastNativeLan = ""
         // Totals are per-session: only a NEW connect resets the snapshot.
         lastTotalRx = 0L
         lastTotalTx = 0L
@@ -1878,6 +1886,8 @@ class MainActivity : AppCompatActivity() {
         logs: String
     ) {
         try {
+            // Freshest device LAN IP for the Psiphon LAN fallback below.
+            lastNativeLan = lan
             // Update engine state based on native telemetry.
             // In proxy mode, this is the ONLY source of truth — there are no
             // service broadcasts. In TUN mode, broadcasts may also update
@@ -1991,7 +2001,7 @@ class MainActivity : AppCompatActivity() {
                     if (switchTorHttp.isChecked) editTorHttpPort.text.toString() else null)
             }
             if (state == 4 && (isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0)
-                peerLine.append("\n" + psiphonEndpointText())
+                peerLine.append("\n" + psiphonEndpointText(nativeLanFallback(lan)))
             // Only append error here if not already shown in statusText (state 5 = ERROR)
             if (errMsg.isNotEmpty() && state != 5) peerLine.append("\nError: $errMsg")
             peerText.text = peerLine.toString()
@@ -2003,20 +2013,30 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun psiphonEndpointText(): String {
+    /**
+     * Psiphon proxy endpoints, with the LAN line on Psiphon's own ports.
+     * `fallbackLan` (already gated on the LAN switch + a usable address)
+     * covers a :psiphon process that could not resolve its own LAN IP.
+     */
+    private fun psiphonEndpointText(fallbackLan: String = ""): String {
+        val lanIp = pendingPsiLan.ifEmpty { fallbackLan }
         val local = mutableListOf<String>()
         val shared = mutableListOf<String>()
         if (pendingPsiSocks > 0) {
             local.add("SOCKS5 127.0.0.1:$pendingPsiSocks")
-            if (pendingPsiLan.isNotEmpty()) shared.add("SOCKS5 $pendingPsiLan:$pendingPsiSocks")
+            if (lanIp.isNotEmpty()) shared.add("SOCKS5 $lanIp:$pendingPsiSocks")
         }
         if (pendingPsiHttp > 0) {
             local.add("HTTP 127.0.0.1:$pendingPsiHttp")
-            if (pendingPsiLan.isNotEmpty()) shared.add("HTTP $pendingPsiLan:$pendingPsiHttp")
+            if (lanIp.isNotEmpty()) shared.add("HTTP $lanIp:$pendingPsiHttp")
         }
         return "Psiphon local: " + local.joinToString(" | ") +
             if (shared.isEmpty()) "" else "\nPsiphon LAN: " + shared.joinToString(" | ")
     }
+
+    /** Native-detected LAN IP, usable as a Psiphon LAN fallback when :psiphon reported none. */
+    private fun nativeLanFallback(nativeLan: String): String =
+        if (switchLan.isChecked && nativeLan.isNotEmpty() && nativeLan != "127.0.0.1") nativeLan else ""
 
     private fun updateButton() {
         btnConnect.isEnabled = !disconnecting

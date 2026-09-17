@@ -203,7 +203,16 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     static android.content.ServiceConnection makeConnection(final Context app, final Intent intent) {
         return new android.content.ServiceConnection() {
-            @Override public void onServiceConnected(android.content.ComponentName name, IBinder binder) {}
+            @Override public void onServiceConnected(android.content.ComponentName name, IBinder binder) {
+                // Claim the current-connection slot for a rebound binder.
+                // startBound sets it eagerly, but the rebind path can only
+                // claim it here: leaving it null makes the 20 s watchdog
+                // unable to tell a healthy rebound tunnel from a bind that
+                // never connected, so it rebinds a LIVE session every 20 s
+                // until the counter hits MAX_REBIND_ATTEMPTS and a working
+                // tunnel is failed as "rebind exhausted".
+                if (connection == null && liveConnections.contains(this)) connection = this;
+            }
             @Override public void onServiceDisconnected(android.content.ComponentName name) {
                 // Process death: drop this binder from the live set no matter
                 // what; only the CURRENT connection triggers a rebind (a
@@ -323,7 +332,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private volatile String lastRegions = "";
     private String upstreamProxy = "";
     private boolean lanSharing;
-    private String lanAddress = "";
+    private volatile String lanAddress = "";
     public static final String EXTRA_LAN = "psiphonLanIp";
     /** Default local listeners; kept clear of the engine (1819/1820) and Tor (1821/1822). */
     public static final int DEFAULT_SOCKS_PORT = 1823;
@@ -582,16 +591,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             for (Network n : cm.getAllNetworks()) {
                 NetworkCapabilities cap = cm.getNetworkCapabilities(n);
                 if (cap == null || cap.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
-                if (cap.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                    android.net.LinkProperties links = cm.getLinkProperties(n);
-                    if (links != null) for (android.net.LinkAddress address : links.getLinkAddresses()) {
-                        java.net.InetAddress ip = address.getAddress();
-                        if (ip instanceof java.net.Inet4Address && !ip.isLoopbackAddress() && !ip.isLinkLocalAddress()) {
-                            lanAddress = ip.getHostAddress();
-                            break;
-                        }
-                    }
-                }
                 if (!cap.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue;
                 int rank = cap.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ? 10 : 0;
                 if (cap.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) rank += 2;
@@ -602,23 +601,108 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             // cellular network mark can prevent replies to WiFi/hotspot LAN
             // clients. In LAN mode use normal routing for accepted sockets.
             cm.bindProcessToNetwork(lanSharing ? null : chosen);
-            if (lanSharing && lanAddress.isEmpty()) {
-                java.util.Enumeration<java.net.NetworkInterface> interfaces = java.net.NetworkInterface.getNetworkInterfaces();
-                while (interfaces != null && interfaces.hasMoreElements() && lanAddress.isEmpty()) {
-                    java.net.NetworkInterface nic = interfaces.nextElement();
-                    String name = nic.getName();
-                    if (!nic.isUp() || !(name.startsWith("wlan") || name.startsWith("swlan") || name.startsWith("ap"))) continue;
-                    java.util.Enumeration<java.net.InetAddress> addresses = nic.getInetAddresses();
-                    while (addresses.hasMoreElements()) {
-                        java.net.InetAddress ip = addresses.nextElement();
-                        if (ip instanceof java.net.Inet4Address && !ip.isLoopbackAddress() && !ip.isLinkLocalAddress()) {
-                            lanAddress = ip.getHostAddress(); break;
-                        }
+            if (lanSharing) lanAddress = resolveLanAddress();
+            Log.i(TAG, "Psiphon LAN=" + lanSharing + ", address=" + lanAddress + ", underlying=" + chosen);
+        } catch (Exception e) { Log.w(TAG, "bindToUnderlyingNetwork", e); }
+    }
+
+    /**
+     * Best-effort LAN IPv4 for {@link #EXTRA_LAN} — the address LAN clients
+     * dial for Psiphon's own SOCKS/HTTP listeners (which bind 0.0.0.0 while
+     * {@link #lanSharing} is on, via {@code ListenInterface: "any"}).
+     *
+     * Two sources, because neither covers everything alone. LinkProperties
+     * is authoritative while associated as a station (WiFi/Ethernet), but a
+     * SoftAP hotspot or USB tethering creates NO ConnectivityManager network,
+     * so those only show up in the raw interface scan. Cellular (rmnet/ccmni)
+     * addresses are carrier-NAT and useless to LAN clients — never selected.
+     *
+     * Pure local enumeration (no packets, no DNS); cheap enough to re-run on
+     * every READY and periodically from the stats loop, so a network that
+     * comes up mid-dial or a DHCP renewal cannot leave EXTRA_LAN stale.
+     */
+    private String resolveLanAddress() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                for (Network n : cm.getAllNetworks()) {
+                    NetworkCapabilities cap = cm.getNetworkCapabilities(n);
+                    if (cap == null
+                            || cap.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                            || cap.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) continue;
+                    android.net.LinkProperties links = cm.getLinkProperties(n);
+                    if (links == null) continue;
+                    for (android.net.LinkAddress address : links.getLinkAddresses()) {
+                        java.net.InetAddress ip = address.getAddress();
+                        if (isLanAddress(ip)) return ip.getHostAddress();
                     }
                 }
             }
-            Log.i(TAG, "Psiphon LAN=" + lanSharing + ", address=" + lanAddress + ", underlying=" + chosen);
-        } catch (Exception e) { Log.w(TAG, "bindToUnderlyingNetwork", e); }
+        } catch (Exception ignored) {}
+        try {
+            String best = "";
+            int bestScore = -1;
+            java.util.Enumeration<java.net.NetworkInterface> ifs =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (ifs != null && ifs.hasMoreElements()) {
+                java.net.NetworkInterface nic = ifs.nextElement();
+                String name = nic.getName();
+                if (name == null || !nic.isUp() || nic.isLoopback()) continue;
+                if (isNonLanInterface(name)) continue;
+                java.util.Enumeration<java.net.InetAddress> addrs = nic.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    java.net.InetAddress ip = addrs.nextElement();
+                    if (!isLanAddress(ip)) continue;
+                    int score = lanInterfaceScore(name, ip);
+                    if (score > bestScore) { bestScore = score; best = ip.getHostAddress(); }
+                    break; // one address per interface is enough
+                }
+            }
+            return best;
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    /** Usable LAN address: IPv4, neither loopback nor link-local. */
+    private static boolean isLanAddress(java.net.InetAddress ip) {
+        return ip instanceof java.net.Inet4Address
+                && !ip.isLoopbackAddress() && !ip.isLinkLocalAddress();
+    }
+
+    /** Interface families that can never serve LAN clients. */
+    private static boolean isNonLanInterface(String name) {
+        return name.startsWith("rmnet") || name.startsWith("ccmni")
+                || name.startsWith("wwan") || name.startsWith("qmap")
+                || name.startsWith("tun") || name.startsWith("tap")
+                || name.startsWith("vpn") || name.startsWith("wg")
+                || name.startsWith("dummy") || name.startsWith("ifb")
+                || name.startsWith("sit") || name.startsWith("ip6");
+    }
+
+    /** Prefer AP/WiFi over USB-tether/Ethernet; site-local wins ties. */
+    private static int lanInterfaceScore(String name, java.net.InetAddress ip) {
+        int score;
+        if (name.startsWith("ap") || name.startsWith("softap")) score = 60;
+        else if (name.startsWith("wlan") || name.startsWith("swlan")) score = 50;
+        else if (name.startsWith("p2p")) score = 45;
+        else if (name.startsWith("rndis") || name.startsWith("usb")) score = 40;
+        else if (name.startsWith("eth") || name.startsWith("en")
+                || name.startsWith("bnep") || name.startsWith("bt-pan")) score = 40;
+        else score = 10;
+        if (ip.isSiteLocalAddress()) score += 5;
+        return score;
+    }
+
+    /** Local-proxy bind host, derived from the same flag as ListenInterface. */
+    private String proxyBindHost() {
+        return lanSharing ? "0.0.0.0" : "127.0.0.1";
+    }
+
+    /** " (LAN 192.168.1.5:port)" once the address is known, else "". */
+    private String lanSuffix(int port) {
+        if (!lanSharing || lanAddress.isEmpty()) return "";
+        return " (LAN " + lanAddress + ":" + port + ")";
     }
 
     // ── HostService ──────────────────────────────────────────────────────
@@ -839,13 +923,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public void onListeningSocksProxyPort(int port) {
         socksPort.set(port);
         if (!stopping) broadcastStage(5, "ESTABLISHING TUNNEL");
-        emitLog("SOCKS 127.0.0.1:" + port);
+        emitLog("SOCKS " + proxyBindHost() + ":" + port + lanSuffix(port));
     }
 
     @Override
     public void onListeningHttpProxyPort(int port) {
         httpPort.set(port);
-        emitLog("HTTP 127.0.0.1:" + port);
+        emitLog("HTTP " + proxyBindHost() + ":" + port + lanSuffix(port));
     }
 
     @Override
@@ -874,10 +958,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public void onConnected() {
         if (stopping) return;
         psiphonUp = true;
+        // The dial can take a minute; a network that came up mid-dial (or a
+        // DHCP change) leaves the start-time address stale or empty.
+        if (lanSharing) lanAddress = resolveLanAddress();
         int s = socksPort.get();
         if (s <= 0) s = tunnel.getLocalSocksProxyPort();
         socksPort.set(s);
-        emitLog("connected, SOCKS 127.0.0.1:" + s);
+        emitLog("connected, SOCKS " + proxyBindHost() + ":" + s + lanSuffix(s));
         flushLogs();
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());
@@ -968,6 +1055,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             long prevAt = System.currentTimeMillis();
             int rttAttempts = 0;
             long nextRttProbeAt = 0L;
+            int lanTick = 0;
             while (psiphonUp && !stopping) {
                 try {
                     Thread.sleep(2000L);
@@ -982,6 +1070,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 prevUp = up;
                 prevDown = down;
                 prevAt = now;
+                // Keep EXTRA_LAN honest across roams/DHCP renewals: re-resolve
+                // while empty every tick, otherwise every ~10 s. Pure local
+                // enumeration, no traffic on the tunnel.
+                if (lanSharing && (lanAddress.isEmpty() || (++lanTick % 5 == 0))) {
+                    String fresh = resolveLanAddress();
+                    if (!fresh.isEmpty()) lanAddress = fresh;
+                }
                 // RTT is measured ONCE per connect (probe now, then a small
                 // retry budget with backoff) instead of every 2 s: periodic
                 // probing spams per-second notices and, on a broken server,

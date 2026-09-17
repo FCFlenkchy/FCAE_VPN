@@ -94,6 +94,11 @@ var (
 	psiSocksPort int
 	psiHttpPort  int
 
+	// Effective local-proxy bind IP, derived from ListenInterface ("any" →
+	// 0.0.0.0, "" → 127.0.0.1). Session-scoped like the ports; only used so
+	// log lines name the address the proxies actually bound.
+	psiListenIP = "127.0.0.1"
+
 	// Cumulative tunneled bytes from BytesTransferred notices (deltas --
 	// accumulate). Read by psi_bytes() for the UI/notification counters.
 	psiBytesUp   uint64
@@ -144,6 +149,26 @@ func psiDataRootFromConfig(configJSON string) string {
 		return ""
 	}
 	return probe.DataRootDirectory
+}
+
+// psiListenIPFromConfig mirrors the controller's ListenInterface mapping
+// ("any" → 0.0.0.0, empty → 127.0.0.1) so log lines name the address the
+// local proxies actually bound. Anything else is echoed verbatim.
+func psiListenIPFromConfig(configJSON string) string {
+	var probe struct {
+		ListenInterface string `json:"ListenInterface"`
+	}
+	if err := json.Unmarshal([]byte(configJSON), &probe); err != nil {
+		return "127.0.0.1"
+	}
+	switch probe.ListenInterface {
+	case "any":
+		return "0.0.0.0"
+	case "":
+		return "127.0.0.1"
+	default:
+		return probe.ListenInterface
+	}
 }
 
 func psiEmit(level int, format string, args ...interface{}) {
@@ -270,8 +295,9 @@ func psiHandleNotice(noticeJSON string) {
 		if json.Unmarshal(n.Data, &d) == nil && d.Port > 0 {
 			psiMu.Lock()
 			psiSocksPort = d.Port
+			listenIP := psiListenIP
 			psiMu.Unlock()
-			psiEmit(psiLogInfo, "[psiphon] socks proxy on 127.0.0.1:%d", d.Port)
+			psiEmit(psiLogInfo, "[psiphon] socks proxy on %s:%d", listenIP, d.Port)
 		}
 
 	case "ListeningHttpProxyPort":
@@ -281,7 +307,9 @@ func psiHandleNotice(noticeJSON string) {
 		if json.Unmarshal(n.Data, &d) == nil && d.Port > 0 {
 			psiMu.Lock()
 			psiHttpPort = d.Port
+			listenIP := psiListenIP
 			psiMu.Unlock()
+			psiEmit(psiLogInfo, "[psiphon] http proxy on %s:%d", listenIP, d.Port)
 		}
 
 	case "Tunnels":
@@ -419,6 +447,7 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	// start look like it had succeeded.
 	psiSocksPort = 0
 	psiHttpPort = 0
+	psiListenIP = psiListenIPFromConfig(cfg)
 	atomic.StoreUint64(&psiBytesUp, 0)
 	atomic.StoreUint64(&psiBytesDown, 0)
 	psiRegions = nil
@@ -550,6 +579,7 @@ func psi_stop() C.int {
 	psiState = psiStateStopped
 	psiSocksPort = 0
 	psiHttpPort = 0
+	psiListenIP = "127.0.0.1"
 	atomic.StoreUint64(&psiBytesUp, 0)
 	atomic.StoreUint64(&psiBytesDown, 0)
 	psiMu.Unlock()

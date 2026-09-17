@@ -116,11 +116,16 @@ impl TelemetryCell {
         *self.state_hook.lock() = hook;
     }
 
-    /// Reset for a new session, preserving the discovered LAN IP.
+    /// Reset for a new session, refreshing the LAN IP.
     pub fn begin_session(&self, backend: FcaeBackend, mode: FcaeMode, lan_enabled: bool) {
+        // Fresh route lookup every session: the init-time address goes stale
+        // across WiFi roams, hotspot/tether toggles, or an app started before
+        // the network was up. detect_lan_ip() sends no packets (a UDP
+        // connect() only selects a route) and costs microseconds, so it stays
+        // inline on the start path instead of a spawned thread.
+        let lan_ip = detect_lan_ip();
         {
             let mut g = self.inner.lock();
-            let lan_ip = std::mem::take(&mut g.lan_ip);
             *g = Inner::new();
             g.lan_ip = lan_ip;
             g.backend = backend;
@@ -342,11 +347,12 @@ mod tests {
     }
 
     #[test]
-    fn session_reset_keeps_lan_ip() {
+    fn session_reset_refreshes_the_lan_ip() {
         let cell = TelemetryCell::new();
         cell.set_lan_ip("192.168.1.50");
         cell.begin_session(FcaeBackend::Aether, FcaeMode::Tun, true);
-        assert_eq!(cell.snapshot().lan_ip, "192.168.1.50");
+        // begin_session() re-detects instead of keeping the previous value.
+        assert_eq!(cell.snapshot().lan_ip, detect_lan_ip());
         assert_eq!(cell.snapshot().state, FcaeState::Provisioning);
     }
 }
