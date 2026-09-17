@@ -1618,8 +1618,12 @@ void render_ui() {
             }
             ImGui::Spacing();
 
-            // Selectable multi-line log view (click lines to select; Ctrl+C via ImGui input)
-            ImGui::BeginChild("##log", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 4), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            // Selectable multi-line log view (click lines to select; Ctrl+C via ImGui input).
+            // Reserve a real footer below the log rows so the Latest control
+            // never covers the newest lines, including on short desktop windows.
+            const float log_footer_h = ImGui::GetFrameHeightWithSpacing()
+                + 2.0f * ImGui::GetStyle().WindowPadding.y + 4.0f;
+            ImGui::BeginChild("##log", ImVec2(0, -log_footer_h), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
             // Take a thread-safe snapshot of the logs for rendering.
             // This avoids a data race with the FFI callback thread which
@@ -1693,7 +1697,8 @@ void render_ui() {
                 }
             }
             ImGui::EndChild();
-            // Fixed footer, outside the scrolled/clipped log rows.
+            // Fixed footer, below and outside the scrolled/clipped log rows.
+            ImGui::BeginChild("##log_footer", ImVec2(0, log_footer_h), ImGuiChildFlags_None);
             if (ImGui::Button("Latest##logs")) {
                 g_app.auto_scroll = true;
                 follow_tail = true;
@@ -1702,6 +1707,7 @@ void render_ui() {
             }
             ImGui::SameLine();
             ImGui::TextDisabled("Scroll up to pause; Latest resumes following");
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
 

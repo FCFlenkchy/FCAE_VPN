@@ -154,6 +154,33 @@ class MainActivity : AppCompatActivity() {
         psiTotalDown = 0L
     }
 
+    /** Render the latest service-owned telemetry without touching native FFI.
+     * Pure Psiphon proxy mode has no native engine state to poll; using
+     * nativeGetState() after the activity returns from the background would
+     * therefore look like a stopped engine and erase perfectly live stats. */
+    private fun renderPsiStats() {
+        if (isPsiphonSelected()) peerText.text = psiphonEndpointText()
+        statsText.text =
+            "↓ ${fmt(psiDownBps)}/s (${fmt(psiTotalDown)})  |  ↑ ${fmt(psiUpBps)}/s (${fmt(psiTotalUp)})  |  RTT ${if (psiRttMs > 0) "${psiRttMs}ms" else "—"}"
+    }
+
+    private fun acceptPsiStats(intent: Intent) {
+        pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: pendingPsiLan
+        pendingPsiSocks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, pendingPsiSocks)
+        pendingPsiHttp = intent.getIntExtra(PsiphonTunnelService.EXTRA_HTTP, pendingPsiHttp)
+        psiRttMs = intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, psiRttMs)
+        psiUpBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, psiUpBps)
+        psiDownBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, psiDownBps)
+        psiTotalUp = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, psiTotalUp)
+        psiTotalDown = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, psiTotalDown)
+    }
+
+    private fun restoreLatestPsiStats() {
+        val latest = ProxyNotification.latestPsiphonStats() ?: return
+        if (!PsiphonTunnelService.isCurrentBroadcast(latest)) return
+        acceptPsiStats(latest)
+    }
+
     private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action?.startsWith("com.fc.fcaevpn.PSI_") == true &&
@@ -194,18 +221,9 @@ class MainActivity : AppCompatActivity() {
                     // every psiphon path (the engine getters are empty there).
                     pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: ""
                     pendingPsiSocks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, pendingPsiSocks)
-                    pendingPsiHttp = intent.getIntExtra(PsiphonTunnelService.EXTRA_HTTP, pendingPsiHttp)
-                    psiRttMs = intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, 0)
-                    psiUpBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, 0L)
-                    psiDownBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, 0L)
-                    psiTotalUp = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, 0L)
-                    psiTotalDown = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, 0L)
+                    acceptPsiStats(intent)
                     if (vpnActive && (isPsiphonSelected() || isEgressPsiphon())) {
-                        handler.post {
-                            if (isPsiphonSelected()) peerText.text = psiphonEndpointText()
-                            statsText.text =
-                                "↓ ${fmt(psiDownBps)}/s (${fmt(psiTotalDown)})  |  ↑ ${fmt(psiUpBps)}/s (${fmt(psiTotalUp)})  |  RTT ${if (psiRttMs > 0) "${psiRttMs}ms" else "—"}"
-                        }
+                        handler.post { renderPsiStats() }
                     }
                 }
                 PsiphonTunnelService.BROADCAST_READY -> {
@@ -845,12 +863,32 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         inForeground = true
-        // Resume polling immediately if a tunnel is active, instead of
-        // waiting up to the next tick or for a broadcast.
-        // Check both vpnActive AND check native state to catch proxy mode
-        // connections that are still alive after backgrounding.
+
+        // Pure Psiphon proxy mode is owned by PsiphonTunnelService and its
+        // foreground owner, not by NativeEngine. NativeEngine.nativeGetState()
+        // is therefore expected to be idle on this path. Do not turn that
+        // idle value into DISCONNECTED or erase the service's last snapshot
+        // when the Activity returns from the background.
+        val psiphonServiceActive = (isPsiphonSelected() || isEgressPsiphon()) &&
+            PsiphonTunnelService.hasActiveBinding()
+        val purePsiphonProxy = isPsiphonSelected() && !isTunModeSelected()
+        if (psiphonServiceActive) restoreLatestPsiStats()
+        if (purePsiphonProxy && (psiphonServiceActive || connecting)) {
+            vpnActive = true
+            engineRunning = true
+            updateButton()
+            handler.removeCallbacks(poll)
+            if (!connecting) {
+                statusText.text = "CONNECTED - PROXY"
+                statusText.setTextColor(COLOR_CONNECTED)
+            }
+            renderPsiStats()
+            return
+        }
+
+        // Resume native polling immediately if a native-backed tunnel is
+        // active, instead of waiting up to the next tick or for a broadcast.
         if (vpnActive || engineRunning) {
-            // Verify the engine is actually still running before resuming poll
             bgExecutor.execute {
                 try {
                     val state = NativeEngine.nativeGetState()
@@ -862,6 +900,10 @@ class MainActivity : AppCompatActivity() {
                             vpnActive = true
                             engineRunning = true
                             connecting = state in 1..3 || state == 6
+                            if (psiphonServiceActive) {
+                                restoreLatestPsiStats()
+                                renderPsiStats()
+                            }
                             updateButton()
                             handler.removeCallbacks(poll)
                             // Force an immediate poll tick to refresh UI instantly
@@ -902,6 +944,10 @@ class MainActivity : AppCompatActivity() {
                             vpnActive = true
                             engineRunning = true
                             connecting = state in 1..3 || state == 6
+                            if (psiphonServiceActive) {
+                                restoreLatestPsiStats()
+                                renderPsiStats()
+                            }
                             updateButton()
                             handler.removeCallbacks(poll)
                             handler.post(poll)

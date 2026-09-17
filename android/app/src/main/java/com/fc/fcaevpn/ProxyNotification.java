@@ -24,10 +24,25 @@ public class ProxyNotification extends Service {
     private volatile boolean nativeFreed = false;
     public static final String ACTION_PSIPHON = "com.fc.fcaevpn.PROXY_PSIPHON";
     private static ProxyNotification instance;
+    // Main-process snapshot kept by the foreground notification owner. The
+    // Activity's dynamic receiver is not sticky and may miss broadcasts while
+    // it is being recreated, so resume can rehydrate from this copy without
+    // asking the native engine for Psiphon state.
+    private static volatile Intent latestPsiphonStats;
     private boolean externalPsiphon;
     private boolean handingOff;
     private long ownerGeneration;
     private Intent lastPsiphonStats;
+
+    public static void cachePsiphonStats(Intent stats) {
+        latestPsiphonStats = stats == null ? null : new Intent(stats);
+    }
+
+    public static Intent latestPsiphonStats() {
+        Intent stats = latestPsiphonStats;
+        return stats == null ? null : new Intent(stats);
+    }
+
     /** Remove only the obsolete notification owned by older Psiphon builds. */
     public static void clearLegacyPsiphonNotification(android.content.Context context) {
         android.app.NotificationManager manager = context.getSystemService(android.app.NotificationManager.class);
@@ -59,6 +74,7 @@ public class ProxyNotification extends Service {
             if (stopping || handingOff || !PsiphonTunnelService.isCurrentBroadcast(intent)) return;
             if (PsiphonTunnelService.BROADCAST_STATS.equals(intent.getAction())) {
                 lastPsiphonStats = new Intent(intent);
+                cachePsiphonStats(lastPsiphonStats);
                 updateNotification();
                 return;
             }
@@ -87,7 +103,10 @@ public class ProxyNotification extends Service {
             // Terminal states: 0 = DISCONNECTED, 5 = ERROR. Transient states
             // (1 provisioning, 2 scanning/reconnecting, 3 connecting,
             // 4 connected) must NOT tear down.
-            if (!stopping) {
+            // NativeEngine owns ordinary Aether proxy mode only. Pure
+            // Psiphon proxy mode is owned by PsiphonTunnelService, so an idle
+            // native state there must not stop its foreground owner.
+            if (!stopping && !externalPsiphon) {
                 int engineState = 5; // pessimistic if the JNI call throws
                 try {
                     engineState = NativeEngine.nativeGetState();

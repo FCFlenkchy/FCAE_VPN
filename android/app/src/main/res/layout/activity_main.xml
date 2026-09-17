@@ -812,8 +812,7 @@
         android:scrollbarStyle="insideInset"
         android:scrollbarTrackVertical="@android:color/darker_gray"
         android:scrollbarThumbVertical="@android:color/holo_blue_light"
-        android:padding="10dp"
-        android:paddingBottom="52dp">
+        android:padding="10dp">
 
         <TextView
             android:id="@+id/logText"
@@ -824,15 +823,6 @@
             android:textSize="11sp"
             android:textIsSelectable="true" />
     </ScrollView>
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/btnLatestLogs"
-        android:layout_width="wrap_content"
-        android:layout_height="48dp"
-        android:layout_gravity="bottom|end"
-        android:layout_marginEnd="10dp"
-        android:text="Latest"
-        android:textAllCaps="false"
-        android:contentDescription="Jump to latest log and resume following" />
     </FrameLayout>
 
     <LinearLayout
@@ -846,19 +836,36 @@
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnCopyLogs"
-            style="@style/Widget.MaterialComponents.Button.TextButton"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:backgroundTint="#FF1A3A5C"
+            android:textColor="#FFFFFFFF"
             android:text="Copy logs"
             android:textAllCaps="false" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnClearLogs"
-            style="@style/Widget.MaterialComponents.Button.TextButton"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:backgroundTint="#FF1A3A5C"
+            android:textColor="#FFFFFFFF"
             android:text="Clear logs"
             android:textAllCaps="false" />
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnLatestLogs"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:backgroundTint="#FF1A3A5C"
+            android:textColor="#FFFFFFFF"
+            android:text="Latest"
+            android:textAllCaps="false"
+            android:contentDescription="Jump to latest log and resume following" />
     </LinearLayout>
 
 </LinearLayout>

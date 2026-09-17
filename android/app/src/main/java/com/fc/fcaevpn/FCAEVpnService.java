@@ -1036,6 +1036,7 @@ public class FCAEVpnService extends VpnService {
         @Override public void onReceive(android.content.Context context, Intent intent) {
             if (shuttingDown || !running || !PsiphonTunnelService.isCurrentBroadcast(intent)) return;
             lastPsiphonStats = new Intent(intent);
+            ProxyNotification.cachePsiphonStats(lastPsiphonStats);
             updateNotification();
         }
     };

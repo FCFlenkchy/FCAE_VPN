@@ -264,6 +264,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 new java.util.ArrayList<>(liveConnections);
         liveConnections.clear();
         connection = null;
+        // This is an actual Psiphon stop or session replacement, not an
+        // Activity lifecycle event. Drop the main-process rehydration snapshot
+        // only here so pause/resume cannot erase live telemetry.
+        ProxyNotification.cachePsiphonStats(null);
         final long request = clientAttachId;
         clientAttachId = 0;
         if (request != 0) NativeEngine.nativePsiphonAttachComplete(request, 0, 0);
