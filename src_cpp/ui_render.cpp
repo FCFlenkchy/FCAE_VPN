@@ -606,7 +606,10 @@ void ui_init() {
         g_app.add_log(FCAE_LOG_ERROR, fcae_last_error());
     }
     if (!load_config()) {
-        // First run: write defaults next to the executable (or app files on Android).
+        // First run: write defaults next to the executable (or app files on
+        // Android). AppState defaults mode = 1, so a fresh install starts in
+        // TUN (full-system) mode on every desktop platform; a saved config
+        // keeps whatever the user last chose.
         save_config();
         snprintf(g_app.save_status, sizeof(g_app.save_status), "Created FCAE_VPN.cfg");
         g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());

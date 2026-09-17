@@ -755,31 +755,33 @@ public class FCAEVpnService extends VpnService {
 
                 pendingSessionGen = sessionGen;
 
-                // Psiphon sessions raise OUR TUN first, before the backend
-                // starts. FCAEVpnService + tun2socks is the only VPN
-                // interface on the device; the Psiphon library stays a
-                // plain SOCKS/HTTP backend (setVpnMode(false)). Its
-                // NetworkMonitor watches the default network, so in the
-                // old order (backend first, TUN later) the monitor saw our
-                // TUN appear only after the tunnel was live and the
-                // controller terminated it on the network-change event --
-                // a dead DNS/connection window on every session. With the
-                // TUN up first, that event lands while no tunnel is active
-                // yet and is harmless (a late one, if the validation lands
-                // just after tunnel-up, is absorbed by the controller's
-                // automatic reconnect).
+                // TUN is raised only AFTER the tunnel is connected — on
+                // every protocol.
                 //
-                // This cannot loop the way the old establish-up-front
-                // design could: every process in this package (the
-                // in-process core and the :psiphon process) is excluded
-                // from the TUN by addDisallowedApplication() in the
-                // Builder, and :psiphon is additionally pinned to the
-                // physical network, so no handshake packet re-enters the
-                // TUN. Non-Psiphon TUN sessions keep the on-demand order:
-                // the core's fd provider still calls establishTunNow()
-                // once the backend reports a live SOCKS endpoint. Proxy
-                // mode never establishes an interface at all.
-                if (mode == 1 && sessionPsiphonExit) {
+                // Protocol=Psiphon (backend == 1): by the time this start
+                // intent arrives the AAR has already broadcast READY
+                // (MainActivity's BROADCAST_READY handler is what calls
+                // startTunServiceWithConfig()), so the tunnel is live and
+                // establishing here IS the connected-first order. Raising
+                // it now, before nativeStart(), also keeps Psiphon's
+                // NetworkMonitor quiet: the network-change event from our
+                // interface appearing lands before the native attach, not
+                // on top of a session it would terminate.
+                //
+                // Egress "Psiphon through the tunnel" deliberately does
+                // NOT establish here: nothing is connected yet (Aether has
+                // not even started dialling). It uses the same on-demand
+                // order as every other protocol — the core's fd provider
+                // calls establishTunNow() only once the whole chain
+                // (Aether up, Psiphon chained, exit SOCKS live) has
+                // connected. A late NetworkMonitor event in :psiphon is
+                // absorbed by the controller's automatic reconnect, and no
+                // packet can loop back: every process in this package is
+                // excluded from the TUN by addDisallowedApplication(), and
+                // :psiphon is additionally pinned to the physical network.
+                //
+                // Proxy mode never establishes an interface at all.
+                if (mode == 1 && backend == 1) {
                     establishTunNow();
                 }
 

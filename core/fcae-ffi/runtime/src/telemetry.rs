@@ -41,6 +41,18 @@ struct Inner {
     mode: FcaeMode,
     lan_enabled: bool,
     counters: Counters,
+    /// Raw byte totals as last reported by the backend. Backends report
+    /// process-local counters that restart at zero every time the engine is
+    /// (re)started — and the supervisor's reconnect loop starts a fresh
+    /// backend on every attempt, so without restart detection the UI totals
+    /// snapped back to zero in the middle of a live session.
+    raw_total_rx: u64,
+    raw_total_tx: u64,
+    /// Bytes accumulated by earlier backend runs within this session. The
+    /// published total is `folded + raw`, which is monotonic for the whole
+    /// session no matter how many times the engine re-dials underneath.
+    folded_rx: u64,
+    folded_tx: u64,
     connected_at: Option<Instant>,
     connected_peer: String,
     lan_ip: String,
@@ -62,6 +74,10 @@ impl Inner {
                 tx_bytes_sec: 0,
                 rtt_ms: 0,
             },
+            raw_total_rx: 0,
+            raw_total_tx: 0,
+            folded_rx: 0,
+            folded_tx: 0,
             connected_at: None,
             connected_peer: String::new(),
             lan_ip: String::new(),
@@ -181,7 +197,25 @@ impl TelemetryCell {
     }
 
     pub fn set_counters(&self, c: Counters) {
-        self.inner.lock().counters = c;
+        let mut g = self.inner.lock();
+        // Restart detection: a backend that was torn down and re-dialled
+        // (supervisor reconnect, engine-internal restart) reports totals
+        // that went BACKWARDS. Fold the previous run's high-water mark into
+        // the session accumulator so the published totals never regress.
+        if c.total_rx < g.raw_total_rx {
+            g.folded_rx = g.folded_rx.saturating_add(g.raw_total_rx);
+        }
+        if c.total_tx < g.raw_total_tx {
+            g.folded_tx = g.folded_tx.saturating_add(g.raw_total_tx);
+        }
+        g.raw_total_rx = c.total_rx;
+        g.raw_total_tx = c.total_tx;
+        let published = Counters {
+            total_rx: g.folded_rx.saturating_add(c.total_rx),
+            total_tx: g.folded_tx.saturating_add(c.total_tx),
+            ..c
+        };
+        g.counters = published;
     }
 
     pub fn snapshot(&self) -> TelemetrySnapshot {
@@ -282,6 +316,29 @@ mod tests {
         let snap = cell.snapshot();
         assert_eq!(snap.state, FcaeState::Connected);
         assert!(snap.last_error.is_empty());
+    }
+
+    #[test]
+    fn totals_never_regress_across_backend_restarts() {
+        let cell = TelemetryCell::new();
+        cell.begin_session(FcaeBackend::Aether, FcaeMode::Tun, false);
+        let c = |rx: u64, tx: u64| Counters {
+            total_rx: rx,
+            total_tx: tx,
+            rx_bytes_sec: 0,
+            tx_bytes_sec: 0,
+            rtt_ms: 0,
+        };
+        cell.set_counters(c(1_000, 500));
+        cell.set_counters(c(5_000, 2_000));
+        // Engine re-dialled: its counters restarted from zero.
+        cell.set_counters(c(100, 40));
+        let snap = cell.snapshot();
+        assert_eq!(snap.counters.total_rx, 5_100);
+        assert_eq!(snap.counters.total_tx, 2_040);
+        // A fresh user session starts back at zero.
+        cell.begin_session(FcaeBackend::Aether, FcaeMode::Tun, false);
+        assert_eq!(cell.snapshot().counters.total_rx, 0);
     }
 
     #[test]

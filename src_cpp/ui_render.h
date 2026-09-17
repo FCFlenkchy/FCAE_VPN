@@ -32,7 +32,11 @@ struct AppState {
     int  protocol        = 0;
     // 0 = Aether, 1 = Psiphon (FcaeBackend).
     int  backend         = 0;
-    int  mode            = 0;
+    // 0 = Proxy, 1 = TUN. TUN is the product default on every desktop
+    // platform (and Android): full-system tunneling out of the box. The
+    // device itself is still only raised AFTER the backend reports a live
+    // SOCKS endpoint (fcae-runtime session supervisor), never before.
+    int  mode            = 1;
     bool lan_sharing     = false;
     int  scan_mode       = 0;
     int  ip_version      = 4;
