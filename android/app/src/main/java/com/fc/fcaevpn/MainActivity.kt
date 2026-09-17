@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.content.SharedPreferences
 import android.widget.ArrayAdapter
+import android.widget.AutoCompleteTextView
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
@@ -69,7 +70,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerEngineLog: Spinner
     private lateinit var spinnerT2sLog: Spinner
     private lateinit var editTorSocksPort: android.widget.EditText
-    private lateinit var spinnerPsiphonRegion: Spinner
+    private lateinit var spinnerPsiphonRegion: AutoCompleteTextView
     private lateinit var spinnerPsiphonTransport: Spinner
     private lateinit var editPsiphonSocksPort: android.widget.EditText
     private lateinit var editPsiphonHttpPort: android.widget.EditText
@@ -633,22 +634,30 @@ class MainActivity : AppCompatActivity() {
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
-        // Record a region pick the moment it happens. Without this a later
-        // refreshPsiphonRegions()/broadcast re-applied the OLD saved value and
-        // the spinner snapped back, so selecting a region "didn't work".
-        spinnerPsiphonRegion.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(
-                parent: android.widget.AdapterView<*>?,
-                view: android.view.View?,
-                position: Int,
-                id: Long
-            ) {
-                if (applyingRegionList) return
-                savedPsiphonRegion = psiphonRegionCodes.getOrElse(position) { savedPsiphonRegion }
-                prefs.edit().putString("psiphonRegion", savedPsiphonRegion).apply()
+        // AutoCompleteTextView owns the popup and reports the clicked row
+        // directly; unlike Spinner, it does not race selectedItemPosition
+        // updates with the adapter callback.
+        spinnerPsiphonRegion.setOnClickListener {
+            // Clear the display text only while opening so AutoCompleteTextView
+            // filters against an empty query and shows every reported region.
+            spinnerPsiphonRegion.setText("", false)
+            spinnerPsiphonRegion.showDropDown()
+        }
+        spinnerPsiphonRegion.setOnItemClickListener { _, _, position, _ ->
+            if (applyingRegionList) return@setOnItemClickListener
+            savedPsiphonRegion = psiphonRegionCodes.getOrElse(position) { "" }
+            prefs.edit().putString("psiphonRegion", savedPsiphonRegion).apply()
+        }
+        spinnerPsiphonRegion.setOnDismissListener {
+            val pending = pendingRegionCodes
+            if (pending == null) {
+                if (spinnerPsiphonRegion.text.isNullOrEmpty()) {
+                    spinnerPsiphonRegion.setText(psiphonRegionDisplayName(savedPsiphonRegion), false)
+                }
+                return@setOnDismissListener
             }
-
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            savedPsiphonRegion = selectedPsiphonRegion()
+            applyPsiphonRegionCodes(pending)
         }
         spinnerTor.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -2040,12 +2049,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** The ISO code currently chosen, or "" for automatic. */
-    private fun selectedPsiphonRegion(): String {
-        if (applyingRegionList) return savedPsiphonRegion
-        if (!::spinnerPsiphonRegion.isInitialized) return savedPsiphonRegion
-        val i = spinnerPsiphonRegion.selectedItemPosition
-        return psiphonRegionCodes.getOrElse(i) { "" }
-    }
+    private fun selectedPsiphonRegion(): String = savedPsiphonRegion
 
     /** Transport spinner position: 0 = Auto, 1 = SSH/OSSH, 2 = QUIC,
      *  3 = unfronted meek, 4 = fronted meek (matches the XML entries and
@@ -2146,7 +2150,7 @@ class MainActivity : AppCompatActivity() {
             .filter { it.isNotEmpty() }.distinct().sorted()
         val normalized = listOf("") + allCodes
         if (spinnerPsiphonRegion.adapter != null && normalized == psiphonRegionCodes) return
-        if (spinnerPsiphonRegion.adapter != null && !hasWindowFocus()) {
+        if (spinnerPsiphonRegion.adapter != null && spinnerPsiphonRegion.isPopupShowing) {
             pendingRegionCodes = normalized
             return // a popup is open; don't rebuild underneath the user's finger
         }
@@ -2154,23 +2158,26 @@ class MainActivity : AppCompatActivity() {
         applyingRegionList = true
         psiphonRegionCodes = normalized
         val displayItems = normalized.map { psiphonRegionDisplayName(it) }
-        spinnerPsiphonRegion.adapter = ArrayAdapter(this,
+        spinnerPsiphonRegion.setAdapter(ArrayAdapter(this,
             R.layout.spinner_dark_item,
-            displayItems)
+            displayItems))
         val savedIndex = if (want.isEmpty()) -1 else normalized.indexOf(want)
         val selIndex = if (savedIndex >= 0) savedIndex else 0
-        spinnerPsiphonRegion.setSelection(selIndex, false)
+        spinnerPsiphonRegion.setText(displayItems[selIndex], false)
         savedPsiphonRegion = normalized.getOrElse(selIndex) { "" }
         spinnerPsiphonRegion.post { applyingRegionList = false }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && ::spinnerPsiphonRegion.isInitialized) pendingRegionCodes?.let {
-            // A popup can return window focus before onItemSelected is dispatched.
-            // Read its new selection before applying the deferred network list.
-            savedPsiphonRegion = selectedPsiphonRegion()
-            applyPsiphonRegionCodes(it)
+        if (hasFocus && ::spinnerPsiphonRegion.isInitialized &&
+            !spinnerPsiphonRegion.isPopupShowing) {
+            pendingRegionCodes?.let {
+                // A popup can return window focus before its dismiss callback.
+                // Read its new selection before applying the deferred list.
+                savedPsiphonRegion = selectedPsiphonRegion()
+                applyPsiphonRegionCodes(it)
+            }
         }
     }
 
