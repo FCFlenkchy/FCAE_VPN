@@ -8,7 +8,6 @@
     android:focusableInTouchMode="true"
     android:background="#FF141420">
 
-    <!-- Scrollable controls area — fills all space above the fixed log section -->
     <ScrollView
         android:id="@+id/outerScroll"
         android:layout_width="match_parent"
@@ -32,9 +31,6 @@
                 android:textSize="24sp"
                 android:textStyle="bold" />
 
-            <!-- Running build, compact "ver · type": "<version> · release"
-                 or "<version> · pre-release". Filled in from BuildConfig at
-                 startup (base version; the type word carries the channel). -->
             <TextView
                 android:id="@+id/versionText"
                 android:layout_width="match_parent"
@@ -786,7 +782,6 @@
         </LinearLayout>
     </ScrollView>
 
-    <!-- Fixed log section at bottom — NO nested ScrollView, no scroll fighting -->
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -838,6 +833,8 @@
             android:id="@+id/btnCopyLogs"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
             android:backgroundTint="#FF1A3A5C"
             android:textColor="#FFFFFFFF"
             android:text="Copy logs"
@@ -847,6 +844,9 @@
             android:id="@+id/btnClearLogs"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
             android:backgroundTint="#FF1A3A5C"
             android:textColor="#FFFFFFFF"
             android:text="Clear logs"
@@ -861,6 +861,8 @@
             android:id="@+id/btnLatestLogs"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
             android:backgroundTint="#FF1A3A5C"
             android:textColor="#FFFFFFFF"
             android:text="Latest"
