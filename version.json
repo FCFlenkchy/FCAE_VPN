@@ -6,9 +6,9 @@
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases",
   "prerelease": {
     "type": "pre-release",
-    "version": "v1.3.2-prerelease",
-    "release_date": "2026-09-16",
-    "release_notes": "Bump aether engine to 2.0.0 which now possible to connect tor and added psiphon u can chain psiphon too havent tested destkops version but android is mostly stable",
-    "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/v1.3.2"
+    "version": "v1.3.3-prerelease",
+    "release_date": "2026-09-17",
+    "release_notes": "Fixed psiphon in tun dns didnt got resolved",
+    "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/v1.3.3"
   }
 }
