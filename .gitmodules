@@ -7,7 +7,6 @@
 [submodule "psiphon"]
 	path = core/psiphon
 	url = https://github.com/Psiphon-Labs/psiphon-tunnel-core.git
-	branch = master
 [submodule "zeptun"]
 	path = core/zeptun
 	url = https://github.com/Noisemux/zeptun.git
