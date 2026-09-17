@@ -462,7 +462,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
 
     cfg.backend = (FcaeBackend)backend;
     cfg.protocol = (FcaeProtocol)protocol;
-    cfg.mode = (FcaeMode)mode;
+    // Mode is independent of protocol/backend. The Android UI passes 1 for
+    // TUN, and no protocol-specific path may silently turn that into Proxy.
+    cfg.mode = mode == 1 ? FCAE_MODE_TUN : FCAE_MODE_PROXY;
     cfg.lan_sharing = lanSharing == JNI_TRUE;
     cfg.scan_mode = (FcaeScanMode)scanMode;
     cfg.ip_version = (FcaeIpVersion)ipVersion;

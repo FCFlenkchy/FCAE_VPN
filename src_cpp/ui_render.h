@@ -204,7 +204,9 @@ struct AppState {
 
         c.backend          = (FcaeBackend)backend;
         c.protocol         = (FcaeProtocol)protocol;
-        c.mode             = (FcaeMode)mode;
+        // Mode is shared by every protocol/backend: once the UI selects TUN,
+        // never let a Psiphon/Tor mapping silently turn it back into Proxy.
+        c.mode             = mode == 1 ? FCAE_MODE_TUN : FCAE_MODE_PROXY;
         c.scan_mode        = (FcaeScanMode)scan_mode;
         c.ip_version       = (FcaeIpVersion)ip_version;
         c.sys_profile      = (FcaeSysProfile)sys_profile;

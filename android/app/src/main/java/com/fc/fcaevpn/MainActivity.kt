@@ -159,7 +159,14 @@ class MainActivity : AppCompatActivity() {
      * nativeGetState() after the activity returns from the background would
      * therefore look like a stopped engine and erase perfectly live stats. */
     private fun renderPsiStats() {
-        if (isPsiphonSelected()) peerText.text = psiphonEndpointText()
+        if (isPsiphonSelected()) {
+            peerText.text = psiphonEndpointText()
+        } else if (isEgressPsiphon() && pendingPsiSocks > 0 &&
+            !peerText.text.toString().contains("Psiphon local:")) {
+            val current = peerText.text.toString().trim()
+            peerText.text = if (current.isEmpty()) psiphonEndpointText()
+            else "$current\n${psiphonEndpointText()}"
+        }
         statsText.text =
             "↓ ${fmt(psiDownBps)}/s (${fmt(psiTotalDown)})  |  ↑ ${fmt(psiUpBps)}/s (${fmt(psiTotalUp)})  |  RTT ${if (psiRttMs > 0) "${psiRttMs}ms" else "—"}"
     }
@@ -176,9 +183,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun restoreLatestPsiStats() {
-        val latest = ProxyNotification.latestPsiphonStats() ?: return
+        val latest = ProxyNotification.latestPsiphonStats(this) ?: return
         if (!PsiphonTunnelService.isCurrentBroadcast(latest)) return
         acceptPsiStats(latest)
+    }
+
+    private fun hasActivePsiOwner(): Boolean {
+        if (!isPsiphonSelected() && !isEgressPsiphon()) return false
+        if (PsiphonTunnelService.hasActiveBinding()) return true
+        val latest = ProxyNotification.latestPsiphonStats(this) ?: return false
+        return PsiphonTunnelService.isCurrentBroadcast(latest)
     }
 
     private val vpnStateReceiver = object : BroadcastReceiver() {
@@ -774,6 +788,11 @@ class MainActivity : AppCompatActivity() {
         // Init native engine on background thread, then check if VPN is already
         // running (e.g. service started from notification while app was closed,
         // or proxy mode engine was left running from a previous session).
+        // Pure Psiphon proxy has no native engine state; capture that owner
+        // state on the UI thread before the background query can overwrite it.
+        val psiServiceActiveAtCreate = hasActivePsiOwner()
+        val purePsiphonProxyAtCreate = isPsiphonSelected() && !isTunModeSelected()
+        if (psiServiceActiveAtCreate) restoreLatestPsiStats()
         bgExecutor.execute {
             try {
                 NativeEngine.nativeInit()
@@ -789,33 +808,53 @@ class MainActivity : AppCompatActivity() {
             // engine alive we must NOT kill it, and if the engine is truly
             // stale the user can disconnect from the UI.
             try {
-                val state = NativeEngine.nativeGetState()
-                // 1..4 = running, 6 = Reconnecting (session alive, the engine
-                // is recovering on its own). Anything else is terminal.
-                if (state in 1..4 || state == 6) {
+                if (purePsiphonProxyAtCreate && psiServiceActiveAtCreate) {
                     handler.post {
+                        restoreLatestPsiStats()
                         vpnActive = true
                         engineRunning = true
-                        connecting = state in 1..3 || state == 6
+                        connecting = false
                         updateButton()
-                        handler.post(poll)
+                        handler.removeCallbacks(poll)
+                        if (!statusText.text.toString().contains("CONNECTING")) {
+                            statusText.text = "CONNECTED - PROXY"
+                            statusText.setTextColor(COLOR_CONNECTED)
+                        }
+                        renderPsiStats()
                     }
-                } else if (state == 0 || state == 5) {
-                    // Engine is not running — ensure UI reflects that
+                } else {
+                    val state = NativeEngine.nativeGetState()
+                    // 1..4 = running, 6 = Reconnecting (session alive, the engine
+                    // is recovering on its own). Anything else is terminal.
+                    if (state in 1..4 || state == 6) {
+                        handler.post {
+                            vpnActive = true
+                            engineRunning = true
+                            connecting = state in 1..3 || state == 6
+                            updateButton()
+                            handler.post(poll)
+                        }
+                    } else if (state == 0 || state == 5) {
+                        // A native idle state must not clear a live pure
+                        // Psiphon owner; that path was handled above.
+                        handler.post {
+                            vpnActive = false
+                            engineRunning = false
+                            connecting = false
+                            updateButton()
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+                // If we can't query state, assume disconnected, except for a
+                // live pure Psiphon owner whose state is intentionally not JNI.
+                if (!purePsiphonProxyAtCreate || !psiServiceActiveAtCreate) {
                     handler.post {
                         vpnActive = false
                         engineRunning = false
                         connecting = false
                         updateButton()
                     }
-                }
-            } catch (_: Throwable) {
-                // If we can't query state, assume disconnected
-                handler.post {
-                    vpnActive = false
-                    engineRunning = false
-                    connecting = false
-                    updateButton()
                 }
             }
 
@@ -869,8 +908,7 @@ class MainActivity : AppCompatActivity() {
         // is therefore expected to be idle on this path. Do not turn that
         // idle value into DISCONNECTED or erase the service's last snapshot
         // when the Activity returns from the background.
-        val psiphonServiceActive = (isPsiphonSelected() || isEgressPsiphon()) &&
-            PsiphonTunnelService.hasActiveBinding()
+        val psiphonServiceActive = hasActivePsiOwner()
         val purePsiphonProxy = isPsiphonSelected() && !isTunModeSelected()
         if (psiphonServiceActive) restoreLatestPsiStats()
         if (purePsiphonProxy && (psiphonServiceActive || connecting)) {
@@ -1149,7 +1187,7 @@ class MainActivity : AppCompatActivity() {
                 prefs.getBoolean("h2", true),
                 prefs.getInt("backend", 0),
             ))
-        spinnerMode.setSelection(prefs.getInt("mode", 1))
+        spinnerMode.setSelection(prefs.getInt("mode", 1).coerceIn(0, 1))
         spinnerScan.setSelection(prefs.getInt("scan", 0))
         spinnerIpVersion.setSelection(prefs.getInt("ipVersion", 0))
         spinnerNoize.setSelection(prefs.getInt("noize", 2))
@@ -1310,7 +1348,9 @@ class MainActivity : AppCompatActivity() {
         val i = Intent(this, FCAEVpnService::class.java)
         i.action = FCAEVpnService.ACTION_START
         i.putExtra("protocol", coreProtocolFromSelection())
-        i.putExtra("mode", spinnerMode.selectedItemPosition)
+        // The selected mode is authoritative for every protocol, including
+        // Psiphon and Tor: TUN must never be silently downgraded to proxy.
+        i.putExtra("mode", if (isTunModeSelected()) 1 else 0)
         i.putExtra("tunMtu", tunMtuBytes())
         i.putExtra("tunTcpSndbuf", tcpBufferBytes(editTunTcpSndbuf))
         i.putExtra("tunTcpRcvbuf", tcpBufferBytes(editTunTcpRcvbuf))
@@ -1372,7 +1412,9 @@ class MainActivity : AppCompatActivity() {
         startForegroundService(proxyIntent)
 
         val protocol = coreProtocolFromSelection()
-        val mode = spinnerMode.selectedItemPosition
+        // Do not let a protocol/backend mapping override the user's TUN
+        // selection: all protocols use the same native mode bit.
+        val mode = if (isTunModeSelected()) 1 else 0
         val scanMode = spinnerScan.selectedItemPosition
         val ipVersion = spinnerIpVersionToInt()
         val quick = switchQuick.isChecked

@@ -675,7 +675,9 @@ public class FCAEVpnService extends VpnService {
         notifyUi();
 
         final int protocol    = intent.getIntExtra("protocol", 0);
-        final int mode        = intent.getIntExtra("mode", 1);
+        // Mode is protocol-independent: a selected TUN session is always
+        // FCAE_MODE_TUN, including Tor, Psiphon, and every Aether protocol.
+        final int mode        = intent.getIntExtra("mode", 1) == 1 ? 1 : 0;
         final int scanMode    = intent.getIntExtra("scanMode", 0);
         final int ipVersion   = intent.getIntExtra("ipVersion", 4);
         final boolean quick   = intent.getBooleanExtra("quickReconnect", false);
@@ -1036,7 +1038,7 @@ public class FCAEVpnService extends VpnService {
         @Override public void onReceive(android.content.Context context, Intent intent) {
             if (shuttingDown || !running || !PsiphonTunnelService.isCurrentBroadcast(intent)) return;
             lastPsiphonStats = new Intent(intent);
-            ProxyNotification.cachePsiphonStats(lastPsiphonStats);
+            ProxyNotification.cachePsiphonStats(context, lastPsiphonStats);
             updateNotification();
         }
     };

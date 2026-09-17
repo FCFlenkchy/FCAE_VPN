@@ -29,6 +29,7 @@ public class ProxyNotification extends Service {
     // it is being recreated, so resume can rehydrate from this copy without
     // asking the native engine for Psiphon state.
     private static volatile Intent latestPsiphonStats;
+    private static final String PSI_SNAPSHOT_PREFS = "psiphon_ui_snapshot";
     private boolean externalPsiphon;
     private boolean handingOff;
     private long ownerGeneration;
@@ -38,9 +39,76 @@ public class ProxyNotification extends Service {
         latestPsiphonStats = stats == null ? null : new Intent(stats);
     }
 
+    /**
+     * Keep the latest service snapshot outside the Activity as well as in
+     * memory. The foreground owner continues receiving PSI_STATS while the
+     * Activity is gone; SharedPreferences covers a notification-owner or
+     * Activity recreation before the next non-sticky broadcast arrives.
+     */
+    public static void cachePsiphonStats(android.content.Context context, Intent stats) {
+        cachePsiphonStats(stats);
+        android.content.SharedPreferences.Editor e = context.getApplicationContext()
+                .getSharedPreferences(PSI_SNAPSHOT_PREFS, android.content.Context.MODE_PRIVATE).edit();
+        if (stats == null) {
+            e.clear().apply();
+            return;
+        }
+        e.putLong("psiSession", stats.getLongExtra("psiSession", -1L));
+        e.putLong("requestId", stats.getLongExtra("requestId", 0L));
+        e.putString(PsiphonTunnelService.EXTRA_LAN,
+                stats.getStringExtra(PsiphonTunnelService.EXTRA_LAN));
+        e.putInt(PsiphonTunnelService.EXTRA_SOCKS,
+                stats.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, 0));
+        e.putInt(PsiphonTunnelService.EXTRA_HTTP,
+                stats.getIntExtra(PsiphonTunnelService.EXTRA_HTTP, 0));
+        e.putInt(PsiphonTunnelService.EXTRA_RTT,
+                stats.getIntExtra(PsiphonTunnelService.EXTRA_RTT, 0));
+        e.putLong(PsiphonTunnelService.EXTRA_UP_BPS,
+                stats.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, 0L));
+        e.putLong(PsiphonTunnelService.EXTRA_DOWN_BPS,
+                stats.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, 0L));
+        e.putLong(PsiphonTunnelService.EXTRA_TOTAL_UP,
+                stats.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, 0L));
+        e.putLong(PsiphonTunnelService.EXTRA_TOTAL_DOWN,
+                stats.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, 0L));
+        e.apply();
+    }
+
     public static Intent latestPsiphonStats() {
         Intent stats = latestPsiphonStats;
         return stats == null ? null : new Intent(stats);
+    }
+
+    /** Return the in-memory snapshot, or the last owner snapshot after a
+     * process/Activity recreation. */
+    public static Intent latestPsiphonStats(android.content.Context context) {
+        Intent stats = latestPsiphonStats();
+        if (stats != null) return stats;
+        android.content.SharedPreferences p = context.getApplicationContext()
+                .getSharedPreferences(PSI_SNAPSHOT_PREFS, android.content.Context.MODE_PRIVATE);
+        if (!p.contains("psiSession")) return null;
+        Intent restored = new Intent(PsiphonTunnelService.BROADCAST_STATS);
+        restored.setPackage(context.getPackageName());
+        restored.putExtra("psiSession", p.getLong("psiSession", -1L));
+        restored.putExtra("requestId", p.getLong("requestId", 0L));
+        restored.putExtra(PsiphonTunnelService.EXTRA_LAN,
+                p.getString(PsiphonTunnelService.EXTRA_LAN, ""));
+        restored.putExtra(PsiphonTunnelService.EXTRA_SOCKS,
+                p.getInt(PsiphonTunnelService.EXTRA_SOCKS, 0));
+        restored.putExtra(PsiphonTunnelService.EXTRA_HTTP,
+                p.getInt(PsiphonTunnelService.EXTRA_HTTP, 0));
+        restored.putExtra(PsiphonTunnelService.EXTRA_RTT,
+                p.getInt(PsiphonTunnelService.EXTRA_RTT, 0));
+        restored.putExtra(PsiphonTunnelService.EXTRA_UP_BPS,
+                p.getLong(PsiphonTunnelService.EXTRA_UP_BPS, 0L));
+        restored.putExtra(PsiphonTunnelService.EXTRA_DOWN_BPS,
+                p.getLong(PsiphonTunnelService.EXTRA_DOWN_BPS, 0L));
+        restored.putExtra(PsiphonTunnelService.EXTRA_TOTAL_UP,
+                p.getLong(PsiphonTunnelService.EXTRA_TOTAL_UP, 0L));
+        restored.putExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN,
+                p.getLong(PsiphonTunnelService.EXTRA_TOTAL_DOWN, 0L));
+        latestPsiphonStats = new Intent(restored);
+        return restored;
     }
 
     /** Remove only the obsolete notification owned by older Psiphon builds. */
@@ -74,7 +142,7 @@ public class ProxyNotification extends Service {
             if (stopping || handingOff || !PsiphonTunnelService.isCurrentBroadcast(intent)) return;
             if (PsiphonTunnelService.BROADCAST_STATS.equals(intent.getAction())) {
                 lastPsiphonStats = new Intent(intent);
-                cachePsiphonStats(lastPsiphonStats);
+                cachePsiphonStats(context, lastPsiphonStats);
                 updateNotification();
                 return;
             }
