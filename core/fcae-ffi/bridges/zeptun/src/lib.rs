@@ -28,14 +28,14 @@
 //!
 //! On Android the VpnService descriptor is created and owned by the JVM. The
 //! bridge **dups** it and hands the dup to zeptun (`device_kind=FD`, created
-//! with `zeptun_create`); zeptun owns the dup from `zeptun_create` on, and
-//! `zeptun_destroy` releases the device. Only the original stays with the JVM.
+//! with `zeptun_create`). Zeptun borrows FD devices; the bridge closes its
+//! duplicate after `zeptun_destroy`. The original stays with the JVM.
 //!
 //! ## Build requirements
 //!
 //! * Zig built artifacts produced OUTSIDE the cargo graph (see `build.rs`):
 //!   * desktop → `make -C core/zeptun` (lands in `core/zeptun/zig-out/lib/`)
-//!   * android → `sh core/zeptun/scripts/build_android.sh`
+//!   * android → per-ABI API-24 builds with `-Dandroid-libc` (see CI)
 //!     (lands in `core/zeptun/zig-out/android/prebuilt/<abi>/`)
 //! * or `FCAE_ZEPTUN_LIBDIR=<dir>` pointing at a directory with `libzeptun.a`.
 //!
@@ -340,7 +340,7 @@ fn set_c_str<const N: usize>(field: &mut [c_char; N], value: &str) -> Result<()>
 
 /// Owning engine handle. zeptun is thread-safe; lifecycle calls are
 /// serialised by the bridge's `active` lock.
-struct Handle(NonNull<c_void>);
+struct Handle(NonNull<c_void>, Option<i32>);
 unsafe impl Send for Handle {}
 
 impl Handle {
@@ -357,6 +357,9 @@ impl Drop for Handle {
         unsafe {
             zeptun_stop(self.0.as_ptr());
             zeptun_destroy(self.0.as_ptr());
+            if let Some(fd) = self.1.take() {
+                libc::close(fd);
+            }
         }
     }
 }
@@ -476,6 +479,12 @@ impl TunBridge for ZeptunBridge {
             (f >= 0).then_some(f)
         });
 
+        if platform::is_android() && fd.is_none() {
+            return Err(CoreError::Internal(
+                "zeptun on Android requires a TUN descriptor from VpnService".into(),
+            ));
+        }
+
         match fd {
             // Android: VpnService pre-created and pre-configured the device;
             // the engine only owns the data plane.
@@ -517,7 +526,7 @@ impl TunBridge for ZeptunBridge {
         config.log_level = zeptun_log_level(cfg.tun.t2s_log_level);
         self.install_log_hook(config.log_level);
 
-        // Handoff: no Handle must escape until zeptun owns the dup.
+        // Keep the duplicated FD alive until the engine is destroyed.
         let mut active = self.active.lock();
         if self.closing.load(Ordering::SeqCst) {
             return Err(CoreError::Internal(
@@ -542,8 +551,11 @@ impl TunBridge for ZeptunBridge {
             platform::close_dup(fd, &config);
             return Err(zeptun_err("create", rc));
         }
-        let handle = NonNull::new(raw).ok_or_else(|| CoreError::Internal("zeptun_create returned NULL".into()))?;
-        let handle = Handle(handle);
+        let handle = NonNull::new(raw).ok_or_else(|| {
+            platform::close_dup(fd, &config);
+            CoreError::Internal("zeptun_create returned NULL".into())
+        })?;
+        let handle = Handle(handle, fd.map(|_| config.tun_fd));
 
         let rc = unsafe { zeptun_start(handle.as_ptr()) };
         if rc != ZEPTUN_OK {

@@ -38,14 +38,14 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             name: linux-x64
-            os: ubuntu-24.04
+            os: ubuntu-latest
             cmake_args: >-
               -DCMAKE_BUILD_TYPE=Release
               -DAETHER_TARGET=LINUX_X64
 
           - target: x86_64-pc-windows-gnu
             name: windows-x64
-            os: ubuntu-24.04
+            os: ubuntu-latest
             cmake_args: >-
               -DCMAKE_BUILD_TYPE=Release
               -DCMAKE_SYSTEM_NAME=Windows
@@ -55,25 +55,25 @@ jobs:
 
           - target: aarch64-linux-android
             name: android-arm64-v8a
-            os: ubuntu-24.04
+            os: ubuntu-latest
             abi: arm64-v8a
             cmake_args: "-DAETHER_TARGET=ANDROID_ARM64"
 
           - target: armv7-linux-androideabi
             name: android-armeabi-v7a
-            os: ubuntu-24.04
+            os: ubuntu-latest
             abi: armeabi-v7a
             cmake_args: "-DAETHER_TARGET=ANDROID_ARM32"
 
           - target: x86_64-linux-android
             name: android-x86_64
-            os: ubuntu-24.04
+            os: ubuntu-latest
             abi: x86_64
             cmake_args: "-DAETHER_TARGET=ANDROID_X86_64"
 
           - target: x86_64-linux-android
             name: android-universal
-            os: ubuntu-24.04
+            os: ubuntu-latest
             abi: ""
             build_type: android_universal
             cmake_args: "-DAETHER_TARGET=ANDROID_UNIVERSAL"
@@ -219,7 +219,7 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euxo pipefail
-          # Freshly-booted ubuntu-24.04 VMs run apt-daily/unattended-upgrades at
+          # Freshly-booted ubuntu-latest VMs run apt-daily/unattended-upgrades at
           # boot; they hold the apt/dpkg locks while apt 2.7 waits on them
           # FOREVER (this is what made the workflow look "stuck" here).
           sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
@@ -256,7 +256,7 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euxo pipefail
-          # Freshly-booted ubuntu-24.04 VMs run apt-daily/unattended-upgrades at
+          # Freshly-booted ubuntu-latest VMs run apt-daily/unattended-upgrades at
           # boot; they hold the apt/dpkg locks while apt 2.7 waits on them
           # FOREVER (this is what made the workflow look "stuck" here).
           sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
@@ -432,7 +432,7 @@ jobs:
       # The zeptun TUN engine (Zig, static C ABI) must exist BEFORE cargo
       # links the bridge below: its build script consumes
       # core/zeptun/zig-out/lib (desktop) or zig-out/android/prebuilt (the
-      # `zig build android` matrix step). Windows excludes zeptun until
+      # per-ABI Android builds). Windows excludes zeptun until
       # upstream supports the required adapter GUID.
       - name: build zeptun engine (libzeptun)
         if: matrix.name != 'windows-x64'
@@ -444,7 +444,34 @@ jobs:
             linux-x64)   zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSmall ;;
             macos-arm64) zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall ;;
             macos-x64)   zig build -Dtarget=x86_64-macos -Doptimize=ReleaseSmall ;;
-            android-*)   zig build android -Doptimize=ReleaseSmall ;;
+            android-*)
+              SYSROOT="${ANDROID_NDK_HOME:?}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+              test -d "$SYSROOT/usr/include"
+              LIBC_DIR="$(mktemp -d)"
+              trap 'rm -rf "$LIBC_DIR"' EXIT
+              for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+                case "$abi" in
+                  arm64-v8a)   ZIG_TARGET=aarch64-linux-android.24; NDK_TARGET=aarch64-linux-android ;;
+                  armeabi-v7a) ZIG_TARGET=arm-linux-androideabi.24; NDK_TARGET=arm-linux-androideabi ;;
+                  x86_64)      ZIG_TARGET=x86_64-linux-android.24; NDK_TARGET=x86_64-linux-android ;;
+                  x86)         ZIG_TARGET=x86-linux-android.24; NDK_TARGET=i686-linux-android ;;
+                esac
+                test -d "$SYSROOT/usr/include/$NDK_TARGET"
+                test -f "$SYSROOT/usr/lib/$NDK_TARGET/24/libc.so"
+                test -f "$SYSROOT/usr/lib/$NDK_TARGET/24/crtbegin_so.o"
+                printf '%s\n' \
+                  "include_dir=$SYSROOT/usr/include" \
+                  "sys_include_dir=$SYSROOT/usr/include/$NDK_TARGET" \
+                  "crt_dir=$SYSROOT/usr/lib/$NDK_TARGET/24" \
+                  'msvc_lib_dir=' 'kernel32_lib_dir=' 'gcc_dir=' > "$LIBC_DIR/$abi.conf"
+                # API 24 selects emulated TLS; Bionic enables zeptun_start's pthread workers.
+                zig build -Dtarget="$ZIG_TARGET" -Doptimize=ReleaseSmall -Dstrip=true \
+                  -Dandroid-libc="$LIBC_DIR/$abi.conf" --libc "$LIBC_DIR/$abi.conf" \
+                  --prefix "$PWD/zig-out/android/$abi"
+                install -D -m 644 "zig-out/android/$abi/lib/libzeptun.a" \
+                  "zig-out/android/prebuilt/$abi/libzeptun.a"
+              done
+              ;;
             *) echo "::error::Unsupported zeptun target: ${{ matrix.name }}"; exit 1 ;;
           esac
           case "${{ matrix.name }}" in
@@ -976,7 +1003,7 @@ jobs:
   release:
     name: release/pre-release
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
