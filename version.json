@@ -6,9 +6,9 @@
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases",
   "prerelease": {
     "type": "pre-release",
-    "version": "v1.3.4-prerelease",
+    "version": "v1.3.5-prerelease",
     "release_date": "2026-09-18",
-    "release_notes": "Fix psiphon lan sharing and region selecting",
-    "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/v1.3.4"
+    "release_notes": "Added zeptun (currently not for windows due to bad support for windows)",
+    "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/v1.3.5"
   }
 }
