@@ -41,12 +41,6 @@
 //!
 //! Building without it: `cargo build --features fcae-bridge-zeptun/stub`
 //! compiles a stub where TUN reports "unavailable". Do not ship a stub build.
-//!
-//! ## Rollout
-//!
-//! Linux, macOS and Android only, for now: Windows is intentionally held
-//! back until upstream exposes the wintun `RequestedGUID` so the adapter
-//! lands on the pinned GUID tun2socks already uses. See [`WINDOWS_ENABLED`].
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr::NonNull;
@@ -198,6 +192,8 @@ extern "C" {
     fn zeptun_stop(tun: *mut c_void) -> c_int;
     fn zeptun_stats(tun: *mut c_void, out: *mut ZeptunStats) -> c_int;
     fn zeptun_interface_name(tun: *mut c_void, buffer: *mut c_char, len: usize) -> c_int;
+    #[cfg(windows)]
+    fn zeptun_set_adapter_guid(tun: *mut c_void, guid: *const c_char) -> c_int;
 }
 
 /// Same entry points, used when the engine isn't linked (`stub` feature) so
@@ -240,6 +236,10 @@ mod stub {
     pub unsafe fn zeptun_interface_name(_t: *mut c_void, _b: *mut c_char, _l: usize) -> c_int {
         -100
     }
+    #[cfg(windows)]
+    pub unsafe fn zeptun_set_adapter_guid(_t: *mut c_void, _g: *const c_char) -> c_int {
+        -100
+    }
 }
 
 #[cfg(not(zeptun_linked))]
@@ -248,31 +248,19 @@ use stub::{
     zeptun_config_init, zeptun_create, zeptun_destroy, zeptun_set_log_callback, zeptun_start,
     zeptun_stats, zeptun_stop, zeptun_strerror, zeptun_version_string, zeptun_interface_name,
 };
+#[cfg(all(not(zeptun_linked), windows))]
+use stub::zeptun_set_adapter_guid;
 
 /// True when the engine archive was linked into this binary.
 pub fn is_supported() -> bool {
     cfg!(zeptun_linked)
 }
 
-/// Windows rollout gate. zeptun ships on Linux, macOS and Android now;
-/// Windows stays OFF until upstream (Noisemux/zeptun) exposes the wintun
-/// `RequestedGUID`: without the pin, a zeptun-first install creates the
-/// shared adapter with a random GUID instead of
-/// `24198F4C-7895-434C-AD65-9E29A92DDC61` (the identity tun2socks pins),
-/// splitting it from the registration every other engine reuses. When the
-/// GUID lands upstream, flip this to `true`.
-///
-/// Defined on every platform (not `#[cfg(windows)]`) because `cfg!()` in
-/// [`platform_enabled`] evaluates at runtime — the name must resolve
-/// everywhere; non-Windows targets short-circuit the `||`.
-const WINDOWS_ENABLED: bool = false;
+#[cfg(windows)]
+const WINTUN_ADAPTER_GUID: &str = "24198F4C-7895-434C-AD65-9E29A92DDC61";
 
-/// True when this build may actually open a TUN device on this platform:
-/// engine linked AND rolled out here. Platform-agnostic callers
-/// (engine selection, UI availability probes) must use this, not
-/// [`is_supported`].
 pub fn platform_enabled() -> bool {
-    is_supported() && (cfg!(not(windows)) || WINDOWS_ENABLED)
+    is_supported()
 }
 
 /// Engine version string zeptun was built from; a placeholder in stub builds.
@@ -313,15 +301,6 @@ unsafe extern "C" fn log_trampoline(_ctx: *mut c_void, level: c_int, message: *c
     }
 }
 
-/// Adapter name contract shared with the tun2socks bridge.
-///
-/// Windows: wintun adapter identity — the same GUID, hence the same
-/// firewall profile and DNS/device registration — is keyed by pool + name,
-/// not by an app-supplied GUID. Zeptun and the Go bridge both load the
-/// stock `wintun.dll` (pool "Wintun") and open by name FIRST, creating with
-/// a random GUID only when the name is absent, so one name gives both
-/// engines the very same adapter. The fallback mirrors
-/// `TunConfig::default().name`.
 fn adapter_name(cfg: &SessionConfig) -> &str {
     if cfg.tun.name.is_empty() { "FCAE_VPN" } else { &cfg.tun.name }
 }
@@ -431,17 +410,10 @@ impl ZeptunBridge {
 
 impl TunBridge for ZeptunBridge {
     fn start(&self, cfg: &SessionConfig, endpoints: &fcae_runtime::backend::Endpoints) -> Result<()> {
-        if !is_supported() {
+        if !platform_enabled() {
             return Err(CoreError::Internal(
                 "this build was compiled without the zeptun bridge (feature `stub`); \
                  TUN mode is unavailable"
-                    .into(),
-            ));
-        }
-        if !platform_enabled() {
-            return Err(CoreError::Internal(
-                "the zeptun TUN engine is disabled on Windows pending upstream \
-                 adapter-GUID support (Noisemux/zeptun); select tun2socks"
                     .into(),
             ));
         }
@@ -596,6 +568,15 @@ impl TunBridge for ZeptunBridge {
             _tor_adapter: tor_adapter,
             dns: None,
         };
+
+        #[cfg(windows)]
+        {
+            let guid = CString::new(WINTUN_ADAPTER_GUID).unwrap();
+            let rc = unsafe { zeptun_set_adapter_guid(handle.as_ptr(), guid.as_ptr()) };
+            if rc != ZEPTUN_OK {
+                return Err(zeptun_err("set_adapter_guid", rc));
+            }
+        }
 
         let rc = unsafe { zeptun_start(handle.as_ptr()) };
         if rc != ZEPTUN_OK {

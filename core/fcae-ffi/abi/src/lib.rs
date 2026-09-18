@@ -101,10 +101,9 @@ pub struct FcaeBackendInfo {
 /// hardcoding which engines a build carries.
 ///
 /// Same motivation as [`FcaeBackendInfo`]: the zeptun engine may be absent
-/// (built without the `zeptun` feature), present-but-disabled on this
-/// platform (Windows, pending upstream adapter-GUID support), or replaced by
-/// a stub. `fcae_tun_engine_count`/`fcae_tun_engine_info` describe all of
-/// that instead of the UI guessing.
+/// (built without the `zeptun` feature) or replaced by a stub.
+/// `fcae_tun_engine_count`/`fcae_tun_engine_info` describe that instead of
+/// the UI guessing.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct FcaeTunEngineInfo {

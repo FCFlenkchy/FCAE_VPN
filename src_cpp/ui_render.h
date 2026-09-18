@@ -228,9 +228,6 @@ struct AppState {
         c.tun_tcp_rcvbuf = rcv ? rcv : 0xffffffffu;
         c.tun_tcp_auto_tuning = mode == 1 && tun_engine == 0 && tun_tcp_auto_tuning ? 1 : 2;
         c.tun2socks_log_level = (uint64_t)t2s_log;
-        // Engine choice passes through as-is: only the core knows whether an
-        // engine can start here (zeptun on Windows reports its reason on
-        // connect, which is exactly what reaches the status line).
         c.tun_engine     = (uint64_t)(tun_engine == 1 ? 1 : 0);
         // TUN tunnels through the local SOCKS5 listener tun2socks dials, so
         // the checkbox is ignored in that mode: a port is always sent (same

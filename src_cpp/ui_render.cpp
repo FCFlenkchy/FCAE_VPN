@@ -1528,11 +1528,6 @@ void render_ui() {
                 ImGui::TextDisabled("TUN always raises the local SOCKS5 listener; this checkbox only governs proxy mode.");
             ImGui::Spacing();
             if (g_app.mode == 1 && ImGui::CollapsingHeader("TUN Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-                // TUN engine choice, listed from the core (never hardcoded):
-                // a build without zeptun shows it as unavailable with its
-                // reason. Unavailable entries STAY selectable — on Windows
-                // zeptun reports "pending upstream adapter-GUID support" as
-                // the connect error, exactly what the status line surfaces.
                 ImGui::Text("TUN engine");
                 ImGui::SameLine(0, 8);
                 ImGui::PushItemWidth(140);

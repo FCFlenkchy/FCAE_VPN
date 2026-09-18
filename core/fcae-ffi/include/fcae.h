@@ -96,8 +96,7 @@ typedef struct {
 
 /* What a TUN engine supports, so the UI can offer the selector without
  * hardcoding which engines a build carries. Same motivation as
- * FcaeBackendInfo: zeptun may be absent, present-but-disabled on this
- * platform (Windows, pending upstream adapter-GUID support), or a stub.
+ * FcaeBackendInfo: zeptun may be absent from the build or replaced by a stub.
  * Iterate fcae_tun_engine_count() and fill one of these per index. */
 typedef struct {
     uint32_t        struct_size;

@@ -785,11 +785,12 @@ pub unsafe extern "C" fn fcae_tun_engine_info(index: u32, out: *mut FcaeTunEngin
     })
 }
 
-/// (engine, id, display, available, reason) for zeptun, with reason resolving
-/// the full chain: not compiled → stub-linked → held back on Windows.
+/// (engine, id, display, available, reason) for zeptun: linked vs stub.
 #[cfg(feature = "zeptun")]
 fn zeptun_info_fields() -> (u64, &'static str, &'static str, bool, &'static str) {
-    if !fcae_bridge_zeptun::is_supported() {
+    if fcae_bridge_zeptun::platform_enabled() {
+        (FCAE_TUN_ENGINE_ZEPTUN, "zeptun", "zeptun", true, "")
+    } else {
         (
             FCAE_TUN_ENGINE_ZEPTUN,
             "zeptun",
@@ -797,16 +798,6 @@ fn zeptun_info_fields() -> (u64, &'static str, &'static str, bool, &'static str)
             false,
             "zeptun engine not linked (stub build)",
         )
-    } else if !fcae_bridge_zeptun::platform_enabled() {
-        (
-            FCAE_TUN_ENGINE_ZEPTUN,
-            "zeptun",
-            "zeptun",
-            false,
-            "disabled on Windows pending upstream adapter-GUID support (Noisemux/zeptun)",
-        )
-    } else {
-        (FCAE_TUN_ENGINE_ZEPTUN, "zeptun", "zeptun", true, "")
     }
 }
 
@@ -817,11 +808,7 @@ fn zeptun_info_fields() -> (u64, &'static str, &'static str, bool, &'static str)
         "zeptun",
         "zeptun",
         false,
-        if cfg!(windows) {
-            "disabled on Windows pending upstream adapter-GUID support (Noisemux/zeptun)"
-        } else {
-            "not compiled into this build (feature `zeptun`)"
-        },
+        "not compiled into this build (feature `zeptun`)",
     )
 }
 

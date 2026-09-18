@@ -1628,7 +1628,25 @@ class MainActivity : AppCompatActivity() {
             val ok = try {
                 NativeEngine.nativeStart(
                     protocol = protocol,
-                    modeysProfile = sysProfile,
+                    mode = mode,
+                    lanSharing = lan,
+                    scanMode = scanMode,
+                    ipVersion = ipVersion,
+                    quickReconnect = quick,
+                    noizeProfile = noizeProfile,
+                    fragmentEnabled = false,
+                    fragMinSize = 16,
+                    fragMaxSize = 32,
+                    fragMinDelay = 2,
+                    fragMaxDelay = 10,
+                    socksPort = socksPort,
+                    httpPort = httpPort,
+                    forcePeer = forcePeer,
+                    configPath = cfgPath,
+                    h2Enabled = h2,
+                    echEnabled = ech,
+                    sni = sni,
+                    sysProfile = sysProfile,
                     teamName = teamName,
                     accessToken = accessToken,
                     accessEmail = accessEmail,
@@ -2345,22 +2363,5 @@ class MainActivity : AppCompatActivity() {
         private val COLOR_CONNECT_BTN = Color.parseColor("#15803D")
         private val COLOR_UPDATE_AVAILABLE = Color.parseColor("#FF8C00")  // orange
         private val COLOR_UPDATE_IDLE = Color.parseColor("#60A5FA")        // blue theme
-    }
-}
-"#60A5FA")        // blue theme
-    }
-}
-      // Pre-computed Color constants — avoids String.parseColor() on every poll tick.
-        private val COLOR_CONNECTED = Color.parseColor("#34D399")
-        private val COLOR_ERROR = Color.parseColor("#F87171")
-        private val COLOR_DISCONNECTED = Color.parseColor("#8A93A6")
-        private val COLOR_PROGRESS = Color.parseColor("#60A5FA")
-        private val COLOR_DISCONNECT_BTN = Color.parseColor("#B91C1C")
-        private val COLOR_CONNECT_BTN = Color.parseColor("#15803D")
-        private val COLOR_UPDATE_AVAILABLE = Color.parseColor("#FF8C00")  // orange
-        private val COLOR_UPDATE_IDLE = Color.parseColor("#60A5FA")        // blue theme
-    }
-}
-"#60A5FA")        // blue theme
     }
 }
