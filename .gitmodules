@@ -10,3 +10,6 @@
 [submodule "zeptun"]
 	path = core/zeptun
 	url = https://github.com/Noisemux/zeptun.git
+[submodule "hev-socks5-tunnel"]
+	path = core/hev-socks5-tunnel
+	url = https://github.com/heiher/hev-socks5-tunnel.git
