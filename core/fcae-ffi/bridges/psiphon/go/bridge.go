@@ -93,6 +93,12 @@ var (
 	psiRunning bool
 	psiState   = psiStateStopped
 
+	// Handshake: Tunnels count>0 is not enough — SOCKS can listen and a
+	// tunnel can be counted before ConnectedServerRegion. TUN waits on
+	// psiStateConnected, which requires both.
+	psiTunnelCount int
+	psiHaveRegion  bool
+
 	psiSocksPort int
 	psiHttpPort  int
 
@@ -124,6 +130,18 @@ var (
 	psiConnectivityCb C.psi_connectivity_cb
 	psiNetworkIDCb    C.psi_network_id_cb
 )
+
+func psiUpdateStateLocked() {
+	if !psiRunning {
+		psiState = psiStateStopped
+		return
+	}
+	if psiTunnelCount > 0 && psiHaveRegion {
+		psiState = psiStateConnected
+	} else {
+		psiState = psiStateStarting
+	}
+}
 
 // psiTakeCString converts a host-allocated C string and releases it.
 //
@@ -314,17 +332,13 @@ func psiHandleNotice(noticeJSON string) {
 		}
 
 	case "Tunnels":
-		// count>0 means at least one tunnel is established.
 		var d struct {
 			Count int `json:"count"`
 		}
 		if json.Unmarshal(n.Data, &d) == nil {
 			psiMu.Lock()
-			if d.Count > 0 {
-				psiState = psiStateConnected
-			} else if psiRunning {
-				psiState = psiStateStarting
-			}
+			psiTunnelCount = d.Count
+			psiUpdateStateLocked()
 			psiMu.Unlock()
 			if d.Count > 0 {
 				psiEmit(psiLogInfo, "[psiphon] tunnel established")
@@ -367,6 +381,7 @@ func psiHandleNotice(noticeJSON string) {
 		if json.Unmarshal(n.Data, &d) == nil && d.ServerRegion != "" {
 			reg := strings.ToUpper(d.ServerRegion)
 			psiMu.Lock()
+			psiHaveRegion = true
 			found := false
 			for _, r := range psiRegions {
 				if r == reg {
@@ -378,6 +393,7 @@ func psiHandleNotice(noticeJSON string) {
 				psiRegions = append(psiRegions, reg)
 				sort.Strings(psiRegions)
 			}
+			psiUpdateStateLocked()
 			psiMu.Unlock()
 		}
 
@@ -503,6 +519,8 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	// Reset per-session cached psiState.
 	psiSocksPort = 0
 	psiHttpPort = 0
+	psiTunnelCount = 0
+	psiHaveRegion = false
 	psiListenIP = psiListenIPFromConfig(cfg)
 	atomic.StoreUint64(&psiBytesUp, 0)
 	atomic.StoreUint64(&psiBytesDown, 0)
@@ -657,6 +675,8 @@ func psi_stop() C.int {
 	psiState = psiStateStopped
 	psiSocksPort = 0
 	psiHttpPort = 0
+	psiTunnelCount = 0
+	psiHaveRegion = false
 	psiListenIP = "127.0.0.1"
 	atomic.StoreUint64(&psiBytesUp, 0)
 	atomic.StoreUint64(&psiBytesDown, 0)

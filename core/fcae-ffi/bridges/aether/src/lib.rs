@@ -119,7 +119,7 @@ impl Backend for AetherBackend {
         // poll, which is the race it exists for.
         aether_engine::shutdown::reset();
 
-        cx.report(FcaeState::Scanning, "Scanning gateways…");
+        cx.report(FcaeState::Scanning, "Establishing tunnel…");
 
         let done = Arc::new(Notify::new());
         let finished = Arc::new(AtomicBool::new(false));
@@ -274,7 +274,7 @@ impl Backend for AetherBackend {
         // happen: the listener answered TCP while arti was still
         // bootstrapping, and the first real requests failed.
         if cfg.tor.mode == FcaeTorMode::Only {
-            cx.report(FcaeState::Connecting, "Bootstrapping Tor…");
+            cx.report(FcaeState::Connecting, "Establishing tunnel…");
             let ready = wait_for_socks(engine_socks, cfg.tor_start_timeout(), &finished).await;
             if !ready {
                 let msg = outcome
@@ -328,7 +328,7 @@ impl Backend for AetherBackend {
             // connect would call tor "ready" while it cannot route anything
             // yet.
             if let Some(tor_addr) = tor_socks {
-                cx.report(FcaeState::Connecting, "Bootstrapping Tor…");
+                cx.report(FcaeState::Connecting, "Establishing tunnel…");
                 if !wait_for_socks(tor_addr, cfg.tor_start_timeout(), &finished).await {
                     let msg = outcome
                         .lock()

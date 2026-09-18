@@ -680,7 +680,7 @@ async fn start_psiphon_through_tunnel(
     let backend = registry::resolve(FcaeBackend::Psiphon)?;
     sink.set_state(
         FcaeState::Connecting,
-        format!("Starting Psiphon through {url}…"),
+        "Establishing tunnel…".to_string(),
     );
     let cx = BackendContext::new(psi_cfg, sink.clone(), cancel.clone());
     let handle = tokio::select! {

@@ -580,8 +580,8 @@ static const char* state_label(FcaeState s) {
         return g_app.mode == 1 ? "CONNECTED - TUN" : "CONNECTED - PROXY";
     switch (s) {
         case FCAE_STATE_DISCONNECTED: return "DISCONNECTED";
-        case FCAE_STATE_PROVISIONING: return "PROVISIONING";
-        case FCAE_STATE_SCANNING:     return "SCANNING";
+        case FCAE_STATE_PROVISIONING:
+        case FCAE_STATE_SCANNING:
         case FCAE_STATE_CONNECTING:   return "CONNECTING";
         case FCAE_STATE_RECONNECTING: return "RECONNECTING";
         case FCAE_STATE_CONNECTED:    return "CONNECTED";

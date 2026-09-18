@@ -282,7 +282,7 @@ class MainActivity : AppCompatActivity() {
                         engineRunning = true
                         vpnActive = true
                         updateButton()
-                        statusText.text = if (isTunModeSelected()) "ESTABLISHING PSIPHON TUN" else "CONNECTED - PROXY"
+                        statusText.text = if (isTunModeSelected()) "ESTABLISHING TUNNEL" else "CONNECTED - PROXY"
                         statusText.setTextColor(COLOR_CONNECTED)
                         // Surface psiphon's actual proxy endpoints here too —
                         // pure-psiphon mode never polls the engine, so this
@@ -1977,9 +1977,7 @@ class MainActivity : AppCompatActivity() {
 
             val label = when (state) {
                 0 -> "DISCONNECTED"
-                1 -> "PROVISIONING"
-                2 -> "SCANNING"
-                3 -> "CONNECTING"
+                1, 2, 3 -> "CONNECTING"
                 4 -> {
                     val isTun = spinnerMode.selectedItemPosition == 1
                     if (statusMsg.isNotBlank()) statusMsg.uppercase()

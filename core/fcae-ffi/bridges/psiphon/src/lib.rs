@@ -272,7 +272,7 @@ impl Backend for PsiphonBackend {
             }).to_string();
             *HOST_ATTACH.lock() = Some(HostAttach { id, request, ports: None, failed: false });
             lease = Some(HostLease(id));
-            cx.report(FcaeState::Connecting, "Waiting for Android Psiphon exit…");
+            cx.report(FcaeState::Connecting, "Establishing tunnel…");
             loop {
                 if cx.cancel.is_cancelled() { return Err(CoreError::StartFailed("chain cancelled".into())); }
                 let result = HOST_ATTACH.lock().as_ref().filter(|s| s.id == id)
@@ -350,7 +350,7 @@ impl Backend for PsiphonBackend {
         }
         ffi::set_network_callbacks(dns, connectivity, network_id);
 
-        cx.report(FcaeState::Connecting, "Starting Psiphon…");
+        cx.report(FcaeState::Connecting, "Connecting…");
 
         // psi.Start() only launches the controller; it does not wait for a
         // tunnel. Kick it off, then poll for the handshake.
@@ -360,7 +360,7 @@ impl Backend for PsiphonBackend {
             .await
             .map_err(|e| CoreError::Internal(format!("psiphon start task panicked: {e}")))??;
 
-        cx.report(FcaeState::Connecting, "Establishing Psiphon tunnel…");
+        cx.report(FcaeState::Connecting, "Establishing tunnel…");
 
         let deadline = std::time::Instant::now() + cx.config.start_timeout();
         let socks_port = loop {

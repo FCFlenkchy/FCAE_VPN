@@ -698,25 +698,6 @@ jobs:
             DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
             ls -lh "$DEST"
             test -f "$DEST"
-
-            # Standalone Psiphon console: the tunnel-core library driven by a
-            # plain desktop binary (same psi code path as libfcae_psiphon,
-            # no GUI). Pure Go, so it cross-compiles with CGO_ENABLED=0.
-            ROOT="$(pwd)"
-            mkdir -p build
-            BINEXT=""
-            case "${{ matrix.target }}" in
-              x86_64-pc-windows-gnu)     GOOS=windows GOARCH=amd64 BINEXT=".exe" ;;
-              aarch64-apple-darwin)      GOOS=darwin  GOARCH=arm64 ;;
-              x86_64-apple-darwin)       GOOS=darwin  GOARCH=amd64 ;;
-              aarch64-unknown-linux-gnu) GOOS=linux   GOARCH=arm64 ;;
-              *)                         GOOS=linux   GOARCH=amd64 ;;
-            esac
-            ( cd core/fcae-ffi/bridges/psiphon/go \
-              && CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-                 go build -trimpath -ldflags "-s -w" \
-                 -o "$ROOT/build/fcae-psiphon-console$BINEXT" ./cmd/fcae-psiphon-console )
-            ls -lh "$ROOT/build/fcae-psiphon-console$BINEXT"
           fi
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
@@ -840,8 +821,6 @@ jobs:
           # libfcae_ffi.a on desktop — do not look for libfcae_go_bridge here.
           cp build/libfcae_psiphon.* package/ 2>/dev/null || true
           cp build/fcae_psiphon.dll package/ 2>/dev/null || true
-          # Standalone Psiphon console binary (same psi code path, no GUI).
-          cp build/fcae-psiphon-console* package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
 
           if [ "${{ matrix.name }}" = "linux-x64" ]; then
@@ -975,9 +954,6 @@ jobs:
           chmod +x "$APP/Contents/MacOS/fcaevpn"
           if [ -f build/libfcae_psiphon.dylib ]; then
             cp build/libfcae_psiphon.dylib "$APP/Contents/MacOS/"
-          fi
-          if [ -f build/fcae-psiphon-console ]; then
-            cp build/fcae-psiphon-console "$APP/Contents/MacOS/"
           fi
 
           # ── App icon ────────────────────────────────────────────────

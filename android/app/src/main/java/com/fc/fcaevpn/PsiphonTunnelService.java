@@ -360,6 +360,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // "starting tunnel → stopping Psiphon library" crash loop.
     private volatile boolean startInFlight;
     private volatile boolean psiphonUp;
+    private volatile boolean handshakeConnected;
+    private volatile boolean handshakeRegion;
+    private volatile boolean readyBroadcast;
     private final Handler logHandler = new Handler(Looper.getMainLooper());
     private boolean logFlushPending;
     private final StringBuilder logBuf = new StringBuilder();
@@ -460,6 +463,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         stopping = false;
         startInFlight = true;
         psiphonUp = false;
+        handshakeConnected = false;
+        handshakeRegion = false;
+        readyBroadcast = false;
         bytesUp.set(0);
         bytesDown.set(0);
         broadcastStage(1, "CONNECTING");
@@ -1002,6 +1008,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 broadcastStage(2, "CONNECTING");
             } else if (message.contains("\"noticeType\":\"ConnectingServer\"")) {
                 broadcastStage(3, "ESTABLISHING TUNNEL");
+            } else if (message.contains("ConnectedServerRegion")) {
+                handshakeRegion = true;
+                broadcastStage(4, "ESTABLISHING TUNNEL");
+                maybeBroadcastReady();
             } else if (message.contains("\"noticeType\":\"ConnectedServer\"")
                     || message.contains("\"noticeType\":\"ActiveTunnel\"")) {
                 broadcastStage(4, "ESTABLISHING TUNNEL");
@@ -1059,6 +1069,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public void onConnected() {
         if (stopping) return;
         psiphonUp = true;
+        handshakeConnected = true;
         int s = socksPort.get();
         if (s <= 0) s = tunnel.getLocalSocksProxyPort();
         socksPort.set(s);
@@ -1067,6 +1078,17 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         // Last-chance discovery when nothing reported regions during
         // establishing (e.g. a stale replay older than the freshness window).
         if (lastRegions.isEmpty()) fetchRemoteServerRegions();
+        startStatsLoop();
+        maybeBroadcastReady();
+    }
+
+    private synchronized void maybeBroadcastReady() {
+        if (stopping || readyBroadcast) return;
+        if (!handshakeConnected || !handshakeRegion) return;
+        int s = socksPort.get();
+        if (s <= 0 && tunnel != null) s = tunnel.getLocalSocksProxyPort();
+        if (s > 0) socksPort.set(s);
+        readyBroadcast = true;
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());
         i.putExtra("psiSession", session);
@@ -1076,7 +1098,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         i.putExtra(EXTRA_HTTP, httpPort.get());
         if (!lastRegions.isEmpty()) i.putExtra(EXTRA_REGIONS, lastRegions);
         sendBroadcast(i);
-        startStatsLoop();
     }
 
     @Override
