@@ -58,6 +58,7 @@ use fcae_runtime::session::TunBridge;
 use parking_lot::Mutex;
 
 mod platform;
+mod socks5p;
 
 #[cfg(all(windows, wintun_staged))]
 static WINTUN_DLL: &[u8] = include_bytes!(env!("FCAE_WINTUN_DLL"));
@@ -244,7 +245,7 @@ mod stub {
 #[allow(unused_imports)]
 use stub::{
     zeptun_config_init, zeptun_create, zeptun_destroy, zeptun_set_log_callback, zeptun_start,
-    zeptun_stats, zeptun_stop, zeptun_strerror, zeptun_version_string,
+    zeptun_stats, zeptun_stop, zeptun_strerror, zeptun_version_string, zeptun_interface_name,
 };
 
 /// True when the engine archive was linked into this binary.
@@ -340,12 +341,17 @@ fn set_c_str<const N: usize>(field: &mut [c_char; N], value: &str) -> Result<()>
 
 /// Owning engine handle. zeptun is thread-safe; lifecycle calls are
 /// serialised by the bridge's `active` lock.
-struct Handle(NonNull<c_void>, Option<i32>);
+struct Handle {
+    engine: NonNull<c_void>,
+    fd: Option<i32>,
+    _psiphon_adapter: Option<socks5p::Adapter>,
+    dns: Option<fcae_runtime::tun_dns::DnsGuard>,
+}
 unsafe impl Send for Handle {}
 
 impl Handle {
     fn as_ptr(&self) -> *mut c_void {
-        self.0.as_ptr()
+        self.engine.as_ptr()
     }
 }
 
@@ -354,10 +360,11 @@ impl Drop for Handle {
         // 'stop' before 'destroy' per the C API contract; both are
         // idempotent in zeptun, and stop here only runs if stop() raced and
         // abandoned the handle.
+        drop(self.dns.take());
         unsafe {
-            zeptun_stop(self.0.as_ptr());
-            zeptun_destroy(self.0.as_ptr());
-            if let Some(fd) = self.1.take() {
+            zeptun_stop(self.engine.as_ptr());
+            zeptun_destroy(self.engine.as_ptr());
+            if let Some(fd) = self.fd.take() {
                 libc::close(fd);
             }
         }
@@ -453,6 +460,19 @@ impl TunBridge for ZeptunBridge {
             CoreError::Internal("TUN requested but the backend exposed no SOCKS endpoint".into())
         })?;
 
+        // The final endpoint marks both standalone and chained Psiphon exits.
+        let psiphon_adapter = if endpoints.psiphon_dns {
+            Some(socks5p::Adapter::start(socks).map_err(|e| {
+                CoreError::Internal(format!("zeptun socks5p adapter: {e}"))
+            })?)
+        } else {
+            None
+        };
+        let socks = psiphon_adapter.as_ref().map_or(socks, |adapter| adapter.endpoint());
+        if psiphon_adapter.is_some() {
+            log::info!("[zeptun] socks5p: native Psiphon DNS gateway, no direct DNS fallback");
+        }
+
         // Windows needs wintun.dll discoverable before the device is created:
         // zeptun loads it from the application directory or System32.
         #[cfg(windows)]
@@ -518,10 +538,9 @@ impl TunBridge for ZeptunBridge {
 
         config.handler_kind = ZEPTUN_HANDLER_SOCKS5;
         set_c_str(&mut config.socks5_server, &socks.to_string())?;
-        // Psiphon's local SOCKS is CONNECT-only; Aether carries UDP
-        // ASSOCIATE. The backend tells us which (same contract the
-        // tun2socks bridge's socks5p adapter encodes).
-        config.socks5_udp = u8::from(endpoints.udp && !endpoints.psiphon_dns);
+        // UDP ASSOCIATE terminates at our adapter, never at Psiphon. It
+        // sends DNS through UDPGW and absorbs non-DNS UDP like socks5p.
+        config.socks5_udp = u8::from(endpoints.udp || psiphon_adapter.is_some());
         config.socks5_pipeline = ZEPTUN_SOCKS5_PIPELINE_AUTO;
         config.log_level = zeptun_log_level(cfg.tun.t2s_log_level);
         self.install_log_hook(config.log_level);
@@ -555,11 +574,25 @@ impl TunBridge for ZeptunBridge {
             platform::close_dup(fd, &config);
             CoreError::Internal("zeptun_create returned NULL".into())
         })?;
-        let handle = Handle(handle, fd.map(|_| config.tun_fd));
+        let mut handle = Handle {
+            engine: handle,
+            fd: fd.map(|_| config.tun_fd),
+            _psiphon_adapter: psiphon_adapter,
+            dns: None,
+        };
 
         let rc = unsafe { zeptun_start(handle.as_ptr()) };
         if rc != ZEPTUN_OK {
             return Err(zeptun_err("start", rc)); // Handle drops: stop+destroy.
+        }
+
+        if fd.is_none() && !platform::is_android() {
+            let mut name = [0 as c_char; 64];
+            let rc = unsafe { zeptun_interface_name(handle.as_ptr(), name.as_mut_ptr(), name.len()) };
+            if rc < 0 { return Err(zeptun_err("interface_name", rc)); }
+            let name = unsafe { CStr::from_ptr(name.as_ptr()) }.to_str()
+                .map_err(|_| CoreError::Internal("zeptun returned an invalid interface name".into()))?;
+            handle.dns = Some(fcae_runtime::tun_dns::DnsGuard::apply(cfg, name)?);
         }
 
         self.running.store(true, Ordering::SeqCst);

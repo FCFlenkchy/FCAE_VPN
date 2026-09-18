@@ -220,13 +220,13 @@ struct AppState {
         c.sys_profile      = (FcaeSysProfile)sys_profile;
         c.lan_sharing      = lan_sharing;
         c.quick_reconnect  = quick_reconnect;
-        c.tun_mtu = parsed_tun_mtu();
-        const uint32_t snd = fcae_parse_tcp_buffer_size(tun_tcp_sndbuf);
-        const uint32_t rcv = fcae_parse_tcp_buffer_size(tun_tcp_rcvbuf);
+        c.tun_mtu = mode == 1 ? parsed_tun_mtu() : 1500;
+        const uint32_t snd = mode == 1 && tun_engine == 0 ? fcae_parse_tcp_buffer_size(tun_tcp_sndbuf) : 256000;
+        const uint32_t rcv = mode == 1 && tun_engine == 0 ? fcae_parse_tcp_buffer_size(tun_tcp_rcvbuf) : 256000;
         // Never turn malformed UI input into the ABI's zero/default sentinel.
         c.tun_tcp_sndbuf = snd ? snd : 0xffffffffu;
         c.tun_tcp_rcvbuf = rcv ? rcv : 0xffffffffu;
-        c.tun_tcp_auto_tuning = tun_tcp_auto_tuning ? 1 : 2;
+        c.tun_tcp_auto_tuning = mode == 1 && tun_engine == 0 && tun_tcp_auto_tuning ? 1 : 2;
         c.tun2socks_log_level = (uint64_t)t2s_log;
         // Engine choice passes through as-is: only the core knows whether an
         // engine can start here (zeptun on Windows reports its reason on

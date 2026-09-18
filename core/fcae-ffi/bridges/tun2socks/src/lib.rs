@@ -513,7 +513,13 @@ impl TunBridge for Tun2SocksBridge {
         // Now that the device exists, apply addresses, routes and DNS. The
         // peer IP is excluded so tunnelled traffic does not loop back into
         // the tunnel.
-        let undo = platform::configure(cfg, endpoints.peer_ip.as_deref())?;
+        let undo = match platform::configure(cfg, endpoints.peer_ip.as_deref()) {
+            Ok(undo) => undo,
+            Err(error) => {
+                let _ = unsafe { t2s_stop() };
+                return Err(error);
+            }
+        };
 
         let mut active = self.active.lock();
         if self.closing.load(Ordering::SeqCst) {

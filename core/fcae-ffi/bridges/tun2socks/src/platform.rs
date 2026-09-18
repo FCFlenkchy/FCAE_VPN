@@ -30,6 +30,8 @@ pub struct TunUndo {
     pub peer_route: Option<String>,
     /// Interfaces whose DNS we overrode, with their previous servers.
     pub dns_backup: Vec<(String, Vec<String>)>,
+    /// DNS host routes installed through the Linux TUN interface.
+    pub dns_routes: Vec<String>,
     /// True if we installed a default route through the TUN device.
     pub default_route: bool,
     pub ipv6: bool,
@@ -182,7 +184,10 @@ pub fn configure(cfg: &SessionConfig, peer_ip: Option<&str>) -> Result<TunUndo> 
     #[cfg(target_os = "windows")]
     configure_windows(cfg, peer_ip, &mut undo)?;
     #[cfg(target_os = "linux")]
-    configure_linux(cfg, peer_ip, &mut undo)?;
+    if let Err(error) = configure_linux(cfg, peer_ip, &mut undo) {
+        restore_linux(&undo);
+        return Err(error);
+    }
     #[cfg(target_os = "macos")]
     configure_macos(cfg, peer_ip, &mut undo)?;
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
@@ -406,6 +411,7 @@ fn configure_linux(cfg: &SessionConfig, peer_ip: Option<&str>, undo: &mut TunUnd
         undo.default_route = true;
     }
 
+    undo.dns_routes = fcae_runtime::tun_dns::configure_linux(cfg, name)?;
     Ok(())
 }
 
@@ -430,7 +436,7 @@ fn restore_linux(undo: &TunUndo) {
     }
     // resolvectl reverts automatically when the link disappears, but be
     // explicit in case the device lingers.
-    run("resolvectl", &["revert", name]);
+    fcae_runtime::tun_dns::restore_linux(name, &undo.dns_routes);
     log::info!("[tun] Linux routes/DNS restored for `{name}`");
 }
 

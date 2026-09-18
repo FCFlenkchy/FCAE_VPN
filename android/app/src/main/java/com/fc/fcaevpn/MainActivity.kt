@@ -104,6 +104,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editTunTcpSndbuf: android.widget.EditText
     private lateinit var editTunTcpRcvbuf: android.widget.EditText
     private lateinit var switchTunTcpAutoTuning: SwitchMaterial
+    private lateinit var layoutTunSettings: android.view.View
+    private lateinit var layoutTun2socksSettings: android.view.View
+    private lateinit var textTunDnsHint: android.widget.TextView
     private lateinit var editTunDnsV4: android.widget.EditText
     private lateinit var editTunDnsV6: android.widget.EditText
     private lateinit var editTeam: android.widget.EditText
@@ -519,6 +522,9 @@ class MainActivity : AppCompatActivity() {
         editTunTcpSndbuf = findViewById(R.id.editTunTcpSndbuf)
         editTunTcpRcvbuf = findViewById(R.id.editTunTcpRcvbuf)
         switchTunTcpAutoTuning = findViewById(R.id.switchTunTcpAutoTuning)
+        layoutTunSettings = findViewById(R.id.layoutTunSettings)
+        layoutTun2socksSettings = findViewById(R.id.layoutTun2socksSettings)
+        textTunDnsHint = findViewById(R.id.textTunDnsHint)
         editTunDnsV4 = findViewById(R.id.editTunDnsV4)
         editTunDnsV6 = findViewById(R.id.editTunDnsV6)
         editTeam = findViewById(R.id.editTeam)
@@ -1146,6 +1152,8 @@ class MainActivity : AppCompatActivity() {
             textTunEngineHint.visibility = android.view.View.GONE
             return
         }
+        layoutTun2socksSettings.visibility = if (spinnerTunEngine.selectedItemPosition == 0)
+            android.view.View.VISIBLE else android.view.View.GONE
         val reason = tunEngineEntries.getOrNull(spinnerTunEngine.selectedItemPosition)?.second ?: ""
         textTunEngineHint.text = reason
         textTunEngineHint.visibility =
@@ -1156,6 +1164,7 @@ class MainActivity : AppCompatActivity() {
     private fun applyTunEngineVisibility() {
         if (!::spinnerTunEngine.isInitialized) return
         val v = if (isTunModeSelected()) android.view.View.VISIBLE else android.view.View.GONE
+        layoutTunSettings.visibility = v
         textTunEngineLabel.visibility = v
         spinnerTunEngine.visibility = v
         showTunEngineHint()
@@ -1165,25 +1174,15 @@ class MainActivity : AppCompatActivity() {
         if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
         ensureEgressAdapter()
         updateTorHint()
-        applyDnsFieldsLock()
+        updateTunDnsHint()
     }
 
-    /**
-     * The TUN DNS fields only decide the resolver for Aether/Tor sessions.
-     * When Psiphon is the exit (protocol Psiphon, or "Psiphon through the
-     * tunnel"), every app DNS query is carried to the Psiphon exit and
-     * answered by the exit's own resolver -- these IPs are ignored. Gray
-     * them so the UI says what the data plane does.
-     */
-    private fun applyDnsFieldsLock() {
-        if (!::editTunDnsV4.isInitialized || !::editTunDnsV6.isInitialized) return
+    private fun updateTunDnsHint() {
+        if (!::textTunDnsHint.isInitialized) return
         val psiphonExit = isPsiphonSelected() || isEgressPsiphon()
-        for (e in listOf(editTunDnsV4, editTunDnsV6)) {
-            e.isEnabled = !psiphonExit
-            e.alpha = if (psiphonExit) 0.45f else 1f
-        }
-        editTunDnsV4.hint = if (psiphonExit) "Psiphon: resolved at the exit" else null
-        editTunDnsV6.hint = if (psiphonExit) "Psiphon: resolved at the exit" else null
+        textTunDnsHint.text = if (psiphonExit)
+            "Psiphon resolves DNS at the exit. These IPv4 addresses identify TUN DNS destinations; IPv6 entries are saved for other exits."
+        else "DNS queries use these servers through the selected tunnel."
     }
 
     /**
@@ -1365,12 +1364,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun tunMtuBytes(): Int {
+        if (!isTunModeSelected()) return 1500
         val text = editTunMtu.text.toString().trim()
         return if (text.isNotEmpty() && text.all { it in '0'..'9' }) text.toIntOrNull() ?: -1 else -1
     }
 
+    private fun usesTun2socksSettings(): Boolean =
+        isTunModeSelected() && spinnerTunEngine.selectedItemPosition == 0
+
     private fun tcpBufferBytes(field: android.widget.EditText): Int =
-        NativeEngine.nativeParseTcpBufferSize(field.text.toString()).let { if (it == 0) -1 else it }
+        if (usesTun2socksSettings())
+            NativeEngine.nativeParseTcpBufferSize(field.text.toString()).let { if (it == 0) -1 else it }
+        else 256000
 
     private fun connectClicked() {
         if (disconnecting || connecting || engineRunning || vpnActive) return
@@ -1474,7 +1479,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("tunMtu", tunMtuBytes())
         i.putExtra("tunTcpSndbuf", tcpBufferBytes(editTunTcpSndbuf))
         i.putExtra("tunTcpRcvbuf", tcpBufferBytes(editTunTcpRcvbuf))
-        i.putExtra("tunTcpAutoTuning", switchTunTcpAutoTuning.isChecked)
+        i.putExtra("tunTcpAutoTuning", usesTun2socksSettings() && switchTunTcpAutoTuning.isChecked)
         i.putExtra("scanMode", spinnerScan.selectedItemPosition)
         i.putExtra("ipVersion", spinnerIpVersionToInt())
         i.putExtra("quickReconnect", switchQuick.isChecked)
@@ -1574,7 +1579,7 @@ class MainActivity : AppCompatActivity() {
         val tunMtu = tunMtuBytes()
         val tunTcpSndbuf = tcpBufferBytes(editTunTcpSndbuf)
         val tunTcpRcvbuf = tcpBufferBytes(editTunTcpRcvbuf)
-        val tunTcpAutoTuning = switchTunTcpAutoTuning.isChecked
+        val tunTcpAutoTuning = usesTun2socksSettings() && switchTunTcpAutoTuning.isChecked
         // TUN DNS servers for the core (in-tunnel resolver choice); same
         // fields the VpnService builder uses. Blanks collapse to "".
         val tunDnsServers = listOf(editTunDnsV4.text.toString().trim(), editTunDnsV6.text.toString().trim())

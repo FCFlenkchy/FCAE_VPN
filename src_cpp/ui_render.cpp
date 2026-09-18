@@ -1517,34 +1517,6 @@ void render_ui() {
             ImGui::Text("Mode");
             ImGui::RadioButton("Proxy", &g_app.mode, 0);
             ImGui::RadioButton("TUN",   &g_app.mode, 1);
-            if (g_app.mode == 1) {
-                // TUN engine choice, listed from the core (never hardcoded):
-                // a build without zeptun shows it as unavailable with its
-                // reason. Unavailable entries STAY selectable — on Windows
-                // zeptun reports "pending upstream adapter-GUID support" as
-                // the connect error, exactly what the status line surfaces.
-                ImGui::SameLine(0, 24);
-                ImGui::Text("engine:");
-                ImGui::SameLine(0, 8);
-                ImGui::PushItemWidth(140);
-                FcaeTunEngineInfo tei[4];
-                const char* te_names[4];
-                uint32_t te_n = fcae_tun_engine_count();
-                if (te_n > 4) te_n = 4;
-                for (uint32_t i = 0; i < te_n; ++i) {
-                    memset(&tei[i], 0, sizeof(tei[i]));
-                    tei[i].struct_size = sizeof(tei[i]);
-                    tei[i].abi_version = FCAE_ABI_VERSION;
-                    te_names[i] = fcae_tun_engine_info(i, &tei[i]) == FCAE_OK ? tei[i].display_name : "?";
-                }
-                int te_sel = (g_app.tun_engine < (int)te_n) ? g_app.tun_engine : 0;
-                if (ImGui::Combo("##tun_engine", &te_sel, te_names, (int)te_n))
-                    g_app.tun_engine = te_sel;
-                ImGui::PopItemWidth();
-                if (te_sel < (int)te_n && !tei[te_sel].available)
-                    ImGui::TextColored(ImVec4(1, 0.6f, 0.2f, 1), "%s", tei[te_sel].unavailable_reason);
-                ImGui::Spacing();
-            }
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Transport Options");
@@ -1567,47 +1539,65 @@ void render_ui() {
             if (g_app.mode == 1)
                 ImGui::TextDisabled("TUN always raises the local SOCKS5 listener; this checkbox only governs proxy mode.");
             ImGui::Spacing();
-            ImGui::PushItemWidth(160);
-            ImGui::InputText("TCP send buffer (bytes)", g_app.tun_tcp_sndbuf, sizeof(g_app.tun_tcp_sndbuf));
-            ImGui::InputText("TCP receive buffer (bytes)", g_app.tun_tcp_rcvbuf, sizeof(g_app.tun_tcp_rcvbuf));
-            ImGui::InputText("TUN MTU (bytes)", g_app.tun_mtu, sizeof(g_app.tun_mtu));
-            ImGui::PopItemWidth();
-            if (g_app.parsed_tun_mtu() == 0xffffffffu)
-                ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "MTU: 1280..9000 bytes.");
-            ImGui::Checkbox("TCP auto-tuning", &g_app.tun_tcp_auto_tuning);
-            if (!fcae_parse_tcp_buffer_size(g_app.tun_tcp_sndbuf) || !fcae_parse_tcp_buffer_size(g_app.tun_tcp_rcvbuf))
-                ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "Buffers: 4096..4194304 bytes.");
-            ImGui::Spacing();
-            ImGui::Text("tun2socks log (data plane)");
-            // Verbosity of the tun2socks data plane (bridge + gVisor
-            // netstack), separate from the engine log above. Default is
-            // silent: it would otherwise log a line per connection.
-            // Combo position p is FcaeT2sLog value p+1; the ABI's 0 sentinel
-            // ("app default") means silent too, so silent is listed once.
-            const char* t2s_logs[] = { "Silent", "Error", "Warn", "Info", "Debug" };
-            int t2s_pos = g_app.t2s_log > 0 ? g_app.t2s_log - 1 : 0;
-            if (t2s_pos > 4) t2s_pos = 4;
-            if (ImGui::Combo("tun2socks log", &t2s_pos, t2s_logs, 5))
-                g_app.t2s_log = t2s_pos + 1;
-            ImGui::Spacing();
-            // These only pick the resolver for Aether/Tor sessions. With
-            // Psiphon as the exit (protocol Psiphon or egress "Psiphon through
-            // the tunnel") every app query is carried to the exit and answered
-            // by the exit's own resolver; the IPs here are ignored, so say so
-            // instead of letting the user believe they are in effect.
-            {
-                const bool psiphon_exit = (g_app.backend == 1) || (g_app.backend != 1 && g_app.tor_mode == 3);
-                if (psiphon_exit) {
-                    ImGui::TextDisabled("TUN DNS: Psiphon resolves at the exit; these fields apply to Aether/Tor only");
-                } else {
-                    ImGui::TextDisabled("TUN DNS (comma separated; applied on up, restored on down)");
+            if (g_app.mode == 1 && ImGui::CollapsingHeader("TUN Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+                // TUN engine choice, listed from the core (never hardcoded):
+                // a build without zeptun shows it as unavailable with its
+                // reason. Unavailable entries STAY selectable — on Windows
+                // zeptun reports "pending upstream adapter-GUID support" as
+                // the connect error, exactly what the status line surfaces.
+                ImGui::Text("TUN engine");
+                ImGui::SameLine(0, 8);
+                ImGui::PushItemWidth(140);
+                FcaeTunEngineInfo tei[4];
+                const char* te_names[4];
+                uint32_t te_n = fcae_tun_engine_count();
+                if (te_n > 4) te_n = 4;
+                for (uint32_t i = 0; i < te_n; ++i) {
+                    memset(&tei[i], 0, sizeof(tei[i]));
+                    tei[i].struct_size = sizeof(tei[i]);
+                    tei[i].abi_version = FCAE_ABI_VERSION;
+                    te_names[i] = fcae_tun_engine_info(i, &tei[i]) == FCAE_OK ? tei[i].display_name : "?";
                 }
-                ImGui::BeginDisabled(psiphon_exit);
+                int te_sel = (g_app.tun_engine >= 0 && g_app.tun_engine < (int)te_n) ? g_app.tun_engine : 0;
+                if (ImGui::Combo("##tun_engine", &te_sel, te_names, (int)te_n))
+                    g_app.tun_engine = te_sel;
+                ImGui::PopItemWidth();
+                if (te_sel < (int)te_n && !tei[te_sel].available)
+                    ImGui::TextColored(ImVec4(1, 0.6f, 0.2f, 1), "%s", tei[te_sel].unavailable_reason);
+                ImGui::Spacing();
+                ImGui::PushItemWidth(160);
+                ImGui::InputText("TUN MTU (bytes)", g_app.tun_mtu, sizeof(g_app.tun_mtu));
+                ImGui::PopItemWidth();
+                if (g_app.parsed_tun_mtu() == 0xffffffffu)
+                    ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "MTU: 1280..9000 bytes.");
+                const char* t2s_logs[] = { "Silent", "Error", "Warn", "Info", "Debug" };
+                int t2s_pos = g_app.t2s_log > 0 ? g_app.t2s_log - 1 : 0;
+                if (t2s_pos > 4) t2s_pos = 4;
+                if (ImGui::Combo("TUN engine log", &t2s_pos, t2s_logs, 5))
+                    g_app.t2s_log = t2s_pos + 1;
+
+                ImGui::Spacing();
+                ImGui::Text("TUN DNS (comma-separated IP addresses)");
+                const bool psiphon_exit = g_app.backend == 1 || g_app.tor_mode == 3;
+                if (psiphon_exit)
+                    ImGui::TextWrapped("Psiphon resolves DNS at the exit. These IPv4 addresses identify TUN DNS destinations; IPv6 entries are saved for other exits.");
+                else
+                    ImGui::TextWrapped("DNS queries use these servers through the selected tunnel.");
                 ImGui::PushItemWidth(-1);
                 ImGui::InputTextWithHint("##tun_dns4", "IPv4 DNS — e.g. 1.1.1.1,1.0.0.1", g_app.tun_dns4, sizeof(g_app.tun_dns4));
-                ImGui::InputTextWithHint("##tun_dns6", "IPv6 DNS — e.g. 2606:4700:4700::1111,2606:4700:4700::1001", g_app.tun_dns6, sizeof(g_app.tun_dns6));
+                ImGui::InputTextWithHint("##tun_dns6", "IPv6 DNS — e.g. 2606:4700:4700::1111", g_app.tun_dns6, sizeof(g_app.tun_dns6));
                 ImGui::PopItemWidth();
-                ImGui::EndDisabled();
+                if (g_app.tun_engine == 0) {
+                    ImGui::Spacing();
+                    ImGui::Text("tun2socks TCP settings");
+                    ImGui::PushItemWidth(160);
+                    ImGui::InputText("TCP send buffer (bytes)", g_app.tun_tcp_sndbuf, sizeof(g_app.tun_tcp_sndbuf));
+                    ImGui::InputText("TCP receive buffer (bytes)", g_app.tun_tcp_rcvbuf, sizeof(g_app.tun_tcp_rcvbuf));
+                    ImGui::PopItemWidth();
+                    ImGui::Checkbox("TCP auto-tuning", &g_app.tun_tcp_auto_tuning);
+                    if (!fcae_parse_tcp_buffer_size(g_app.tun_tcp_sndbuf) || !fcae_parse_tcp_buffer_size(g_app.tun_tcp_rcvbuf))
+                        ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "Buffers: 4096..4194304 bytes.");
+                }
             }
             ImGui::Spacing();
             ImGui::InputTextWithHint("##force_peer", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));

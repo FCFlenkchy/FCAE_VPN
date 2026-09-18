@@ -21,6 +21,7 @@ pub mod error;
 pub mod registry;
 pub mod session;
 pub mod telemetry;
+pub mod tun_dns;
 pub mod update;
 
 pub use error::{CoreError, Result};
