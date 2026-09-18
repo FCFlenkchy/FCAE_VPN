@@ -34,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      version_full: ${{ steps.version.outputs.version_full }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
       macos_version: ${{ steps.version.outputs.macos_version }}
     steps:
       - name: validate version and channel
@@ -56,15 +58,20 @@ jobs:
             if (revision && BigInt(revision) > 18446744073709551615n) {
               throw new Error('Prerelease revision is too large');
             }
-            const version = `${match[1]}${pre ? match[2] || '_pre-release' : ''}`;
-            core.setOutput('version', version);
+            const versionClean = match[1];
+            const versionFull = `${match[1]}${pre ? match[2] || '_pre-release' : ''}`;
+            core.setOutput('version', versionClean);
+            core.setOutput('version_full', versionFull);
+            core.setOutput('is_prerelease', pre ? 'true' : 'false');
             core.setOutput('macos_version', match[1].split('.').slice(0, 3).join('.'));
-            core.info(`Release tag and embedded app version: ${version}`);
+            core.info(`Release version: ${versionClean} (full: ${versionFull}, prerelease: ${pre})`);
 
   build:
     needs: prepare
     env:
       FCAE_VERSION: ${{ needs.prepare.outputs.version }}
+      FCAE_VERSION_FULL: ${{ needs.prepare.outputs.version_full }}
+      FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -977,6 +984,8 @@ jobs:
     needs: [prepare, build]
     env:
       FCAE_VERSION: ${{ needs.prepare.outputs.version }}
+      FCAE_VERSION_FULL: ${{ needs.prepare.outputs.version_full }}
+      FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
     runs-on: ubuntu-latest
     if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch'
     permissions:
@@ -1065,7 +1074,8 @@ jobs:
             const path = require('path');
 
             const tag = ${{ toJSON(needs.prepare.outputs.version) }};
-            const isPrerelease = ${{ inputs.prerelease }};
+            const versionFull = ${{ toJSON(needs.prepare.outputs.version_full) }};
+            const isPrerelease = ${{ needs.prepare.outputs.is_prerelease }} === 'true';
             const extraNotes = ${{ toJSON(inputs.extra_notes) }};
 
             const parseVersion = (version) => {
@@ -1148,7 +1158,7 @@ jobs:
               make_latest: isPrerelease ? 'false' : 'legacy',
             });
             const entry = {
-              version: tag,
+              version: versionFull,
               date: published.data.published_at.slice(0, 10),
               notes: body,
               url: published.data.html_url,
