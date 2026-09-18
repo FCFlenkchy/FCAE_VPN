@@ -792,7 +792,11 @@ fn zeptun_info_fields() -> (u64, &'static str, &'static str, bool, &'static str)
         "zeptun",
         "Zeptun",
         false,
-        "not compiled into this build (feature `zeptun`)",
+        if cfg!(windows) {
+            "disabled on Windows pending upstream adapter-GUID support (Noisemux/zeptun)"
+        } else {
+            "not compiled into this build (feature `zeptun`)"
+        },
     )
 }
 

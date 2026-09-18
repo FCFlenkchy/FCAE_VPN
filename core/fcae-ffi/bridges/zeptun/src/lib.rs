@@ -301,7 +301,7 @@ unsafe extern "C" fn log_trampoline(_ctx: *mut c_void, level: c_int, message: *c
     if message.is_null() {
         return;
     }
-    let text = std::str::from_utf8_lossy(std::slice::from_raw_parts(message.cast(), len));
+    let text = String::from_utf8_lossy(std::slice::from_raw_parts(message.cast(), len));
     let text = text.trim_end();
     match level as u32 {
         ZEPTUN_LOG_ERROR => log::error!("{text}"),
