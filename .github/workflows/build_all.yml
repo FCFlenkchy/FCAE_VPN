@@ -449,11 +449,74 @@ jobs:
           if [ ! -d "third_party/imgui" ]; then
             git clone --depth 1 --branch v1.91.8 https://github.com/ocornut/imgui.git third_party/imgui
           fi
-      # zeptun's minimum_zig_version; the stable 0.16.x line.
-      - name: setup zig
-        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2; Node.js 24
+      - name: cache zig
+        uses: actions/cache@v6
         with:
-          version: 0.16.0
+          path: ${{ runner.tool_cache }}/zig-0.16.0
+          key: zig-0.16.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: setup zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIG_VER=0.16.0
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64)  TUPLE=x86_64-linux;  SHA=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;;
+            Darwin-arm64)  TUPLE=aarch64-macos; SHA=b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489 ;;
+            Darwin-x86_64) TUPLE=x86_64-macos;  SHA=0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7 ;;
+            *) echo "::error::unsupported runner $(uname -s)-$(uname -m)"; exit 1 ;;
+          esac
+          ARCHIVE="zig-${TUPLE}-${ZIG_VER}.tar.xz"
+          PREFIX="${RUNNER_TOOL_CACHE}/zig-${ZIG_VER}"
+          mkdir -p "$PREFIX"
+          if [ ! -x "${PREFIX}/zig" ]; then
+            file_sha() {
+              if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+              else shasum -a 256 "$1" | awk '{print $1}'; fi
+            }
+            URLS=(
+              "https://ziglang.org/download/${ZIG_VER}/${ARCHIVE}"
+              "https://ziglang.freetls.fastly.net/${ARCHIVE}"
+              "https://pkg.hexops.org/zig/${ARCHIVE}"
+              "https://zig.linus.dev/zig/${ARCHIVE}"
+              "https://zig.squirl.dev/${ARCHIVE}"
+              "https://zig.mirror.mschae23.de/zig/${ARCHIVE}"
+              "https://zigmirror.com/${ARCHIVE}"
+              "https://zig.tilok.dev/${ARCHIVE}"
+              "https://zigmirror.hryx.net/zig/${ARCHIVE}"
+            )
+            if list=$(curl -fsSL --retry 2 --connect-timeout 15 --max-time 30 \
+                 https://ziglang.org/download/community-mirrors.txt 2>/dev/null); then
+              while IFS= read -r base; do
+                [ -n "$base" ] || continue
+                URLS+=("${base%/}/${ARCHIVE}")
+              done <<< "$list"
+            fi
+            TMP="${RUNNER_TEMP}/${ARCHIVE}"
+            ok=0
+            seen=
+            for url in "${URLS[@]}"; do
+              case " $seen " in *" $url "*) continue ;; esac
+              seen+=" $url"
+              echo "Trying $url"
+              rm -f "$TMP"
+              if curl -fL --retry 3 --retry-delay 2 --retry-all-errors \
+                   --connect-timeout 20 --max-time 180 -o "$TMP" "$url" \
+                   && [ "$(file_sha "$TMP")" = "$SHA" ]; then
+                ok=1
+                break
+              fi
+              echo "failed: $url"
+            done
+            if [ "$ok" != 1 ]; then
+              echo "::error::failed to download Zig ${ZIG_VER} from every mirror"
+              exit 1
+            fi
+            tar -xJf "$TMP" -C "$PREFIX" --strip-components=1
+            rm -f "$TMP"
+          fi
+          echo "$PREFIX" >> "$GITHUB_PATH"
+          "${PREFIX}/zig" version
 
       # libzeptun.a must exist before cargo links the bridge
       # (zig-out/lib on desktop, zig-out/android/prebuilt/<abi> on Android).
