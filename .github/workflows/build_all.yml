@@ -31,21 +31,21 @@ env:
 jobs:
   build:
     name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             name: linux-x64
-            os: ubuntu-latest
+            os: ubuntu-24.04
             cmake_args: >-
               -DCMAKE_BUILD_TYPE=Release
               -DAETHER_TARGET=LINUX_X64
 
           - target: x86_64-pc-windows-gnu
             name: windows-x64
-            os: ubuntu-latest
+            os: ubuntu-24.04
             cmake_args: >-
               -DCMAKE_BUILD_TYPE=Release
               -DCMAKE_SYSTEM_NAME=Windows
@@ -55,25 +55,25 @@ jobs:
 
           - target: aarch64-linux-android
             name: android-arm64-v8a
-            os: ubuntu-latest
+            os: ubuntu-24.04
             abi: arm64-v8a
             cmake_args: "-DAETHER_TARGET=ANDROID_ARM64"
 
           - target: armv7-linux-androideabi
             name: android-armeabi-v7a
-            os: ubuntu-latest
+            os: ubuntu-24.04
             abi: armeabi-v7a
             cmake_args: "-DAETHER_TARGET=ANDROID_ARM32"
 
           - target: x86_64-linux-android
             name: android-x86_64
-            os: ubuntu-latest
+            os: ubuntu-24.04
             abi: x86_64
             cmake_args: "-DAETHER_TARGET=ANDROID_X86_64"
 
           - target: x86_64-linux-android
             name: android-universal
-            os: ubuntu-latest
+            os: ubuntu-24.04
             abi: ""
             build_type: android_universal
             cmake_args: "-DAETHER_TARGET=ANDROID_UNIVERSAL"
@@ -219,7 +219,7 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euxo pipefail
-          # Freshly-booted ubuntu-latest VMs run apt-daily/unattended-upgrades at
+          # Freshly-booted ubuntu-24.04 VMs run apt-daily/unattended-upgrades at
           # boot; they hold the apt/dpkg locks while apt 2.7 waits on them
           # FOREVER (this is what made the workflow look "stuck" here).
           sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
@@ -256,7 +256,7 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euxo pipefail
-          # Freshly-booted ubuntu-latest VMs run apt-daily/unattended-upgrades at
+          # Freshly-booted ubuntu-24.04 VMs run apt-daily/unattended-upgrades at
           # boot; they hold the apt/dpkg locks while apt 2.7 waits on them
           # FOREVER (this is what made the workflow look "stuck" here).
           sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
@@ -976,7 +976,7 @@ jobs:
   release:
     name: release/pre-release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
