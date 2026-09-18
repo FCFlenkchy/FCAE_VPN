@@ -425,7 +425,7 @@ jobs:
       # zeptun's minimum_zig_version; the stable 0.16.x line.
       - name: setup zig
         if: matrix.name != 'windows-x64'
-        uses: mlugg/setup-zig@v2
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2; Node.js 24
         with:
           version: 0.16.0
 
