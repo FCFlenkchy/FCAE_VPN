@@ -768,7 +768,7 @@ fn zeptun_info_fields() -> (u64, &'static str, &'static str, bool, &'static str)
         (
             FCAE_TUN_ENGINE_ZEPTUN,
             "zeptun",
-            "Zeptun",
+            "zeptun",
             false,
             "zeptun engine not linked (stub build)",
         )
@@ -776,12 +776,12 @@ fn zeptun_info_fields() -> (u64, &'static str, &'static str, bool, &'static str)
         (
             FCAE_TUN_ENGINE_ZEPTUN,
             "zeptun",
-            "Zeptun",
+            "zeptun",
             false,
             "disabled on Windows pending upstream adapter-GUID support (Noisemux/zeptun)",
         )
     } else {
-        (FCAE_TUN_ENGINE_ZEPTUN, "zeptun", "Zeptun", true, "")
+        (FCAE_TUN_ENGINE_ZEPTUN, "zeptun", "zeptun", true, "")
     }
 }
 
@@ -790,7 +790,7 @@ fn zeptun_info_fields() -> (u64, &'static str, &'static str, bool, &'static str)
     (
         FCAE_TUN_ENGINE_ZEPTUN,
         "zeptun",
-        "Zeptun",
+        "zeptun",
         false,
         if cfg!(windows) {
             "disabled on Windows pending upstream adapter-GUID support (Noisemux/zeptun)"

@@ -1127,7 +1127,7 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.e("FCAE_VPN", "TUN engine list unavailable; using defaults", t)
             emptyList()
         }
-        tunEngineEntries = entries.ifEmpty { listOf("tun2socks" to "", "Zeptun" to "") }
+        tunEngineEntries = entries.ifEmpty { listOf("tun2socks" to "", "zeptun" to "") }
         spinnerTunEngine.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
             tunEngineEntries.map { it.first },

@@ -168,6 +168,7 @@ cmake --build build --config Release
 - **[Quiche](https://github.com/cloudflare/quiche)** — Cloudflare 的 HTTP/3 和 QUIC 实现。作为 MASQUE 协议支持的 QUIC 传输后端。
 - **[Wintun](https://www.wintun.net/)** — 由 WireGuard 开发的 Windows TUN 驱动程序。提供高性能的第 3 层网络接口，用于隧道传输流量。
 - **[tun2socks](https://github.com/xjasonlyu/tun2socks)** — 一个 Go 库，可透明地将 TUN 设备流量通过 SOCKS5 代理路由。为所有支持的平台（Linux、Windows、macOS 和 Android）上的系统级 VPN TUN 模式提供支持。
+- **[zeptun](https://github.com/Noisemux/zeptun)** — 使用 Zig 编写的 TUN 引擎，通过静态链接在应用进程内运行。在 Linux、macOS 和 Android 上提供 tun2socks 之外的另一种选择。
 
 ## 贡献
 
