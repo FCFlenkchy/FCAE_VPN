@@ -27,6 +27,12 @@ psiphon = ["dep:fcae-bridge-psiphon"]
 psiphon-live = ["psiphon", "tun", "fcae-bridge-psiphon/enabled"]
 # Link the in-process tun2socks bridge.
 tun = ["dep:fcae-bridge-tun2socks"]
+# Link the in-process zeptun bridge. Opt-in (not in `default`): it requires a
+# prebuilt libzeptun.a for the target (CI builds one from core/zeptun with
+# Zig first; without the archive any consumer can still build with the
+# default tun2socks engine only). Compile with
+# `fcae-bridge-zeptun/stub` to type-check without the engine.
+zeptun = ["dep:fcae-bridge-zeptun"]
 # Tor egress inside the Aether engine. OFF by default: it pulls in arti-client
 # and a statically built liblzma, which need a C cross-toolchain on the
 # Android and Windows-cross runners.
@@ -38,6 +44,7 @@ fcae-runtime.workspace = true
 fcae-bridge-tun2socks = { workspace = true, optional = true }
 fcae-bridge-aether = { workspace = true, optional = true }
 fcae-bridge-psiphon = { workspace = true, optional = true }
+fcae-bridge-zeptun = { workspace = true, optional = true }
 libc.workspace = true
 log.workspace = true
 once_cell.workspace = true

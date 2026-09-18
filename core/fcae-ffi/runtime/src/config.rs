@@ -167,14 +167,29 @@ fn tcp_buffer_or_default(bytes: u32, field: &str) -> Result<u32> {
     Ok(bytes)
 }
 
+/// TUN data-plane engine: which in-process bridge converts the backend's
+/// SOCKS endpoint into a TUN device. Mirrors `FCAE_TUN_ENGINE_*` in the ABI.
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub enum TunEngine {
+    /// Go tun2socks + gVisor netstack — the long-tested default.
+    #[default]
+    Tun2socks,
+    /// Zig zeptun userspace engine (static C ABI, no runtime).
+    Zeptun,
+}
+
 /// TUN parameters. Owned by the supervisor, not the backend: whichever
 /// backend runs, TUN is raised the same way on top of its SOCKS endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TunConfig {
+    /// Which TUN engine runs this session. The ffi crate installs a
+    /// dispatcher bridge that reads this field per start.
+    pub engine: TunEngine,
     pub tcp_sndbuf: u32,
     pub tcp_rcvbuf: u32,
     pub tcp_auto_tuning: bool,
     /// tun2socks log verbosity: one of the T2S_LOG_* values (0 = default/silent).
+    /// The zeptun engine maps the same knob onto its own log tiers.
     pub t2s_log_level: u8,
     pub name: String,
     pub mtu: u32,
@@ -194,6 +209,7 @@ impl Default for TunConfig {
             // tends to overshoot and add queueing delay, so it is OFF by
             // default on every platform and opt-in from both UIs.
             tcp_auto_tuning: false,
+            engine: TunEngine::Tun2socks,
             t2s_log_level: T2S_LOG_DEFAULT,
             name: "FCAE_VPN".into(),
             mtu: 1500,
@@ -706,6 +722,15 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     };
     let psiphon_exit = cfg.backend == FcaeBackend::Psiphon || cfg.psiphon.through_tunnel;
     cfg.tun = TunConfig {
+        engine: match raw.tun_engine {
+            0 => TunEngine::Tun2socks,
+            1 => TunEngine::Zeptun,
+            _ => {
+                return Err(CoreError::InvalidConfig(
+                    "tun_engine must be 0 (tun2socks) or 1 (zeptun)".into(),
+                ))
+            }
+        },
         tcp_sndbuf: tcp_buffer_or_default(raw.tun_tcp_sndbuf, "tun_tcp_sndbuf")?,
         tcp_rcvbuf: tcp_buffer_or_default(raw.tun_tcp_rcvbuf, "tun_tcp_rcvbuf")?,
         // 0 = default (now OFF), 1 = explicitly on, 2 = explicitly off.

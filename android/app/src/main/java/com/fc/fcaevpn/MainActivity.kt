@@ -68,6 +68,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editTorBridgeLines: android.widget.EditText
     private lateinit var spinnerEngineLog: Spinner
     private lateinit var spinnerT2sLog: Spinner
+    private lateinit var spinnerTunEngine: Spinner
+    private lateinit var textTunEngineLabel: android.widget.TextView
+    private lateinit var textTunEngineHint: android.widget.TextView
+    // (display name, unavailability reason) per engine, listed from the core
+    // — never hardcoded: a build without zeptun must say so in the UI.
+    private var tunEngineEntries: List<Pair<String, String>> = emptyList()
     private lateinit var editTorSocksPort: android.widget.EditText
     private lateinit var spinnerPsiphonRegion: Spinner
     private lateinit var spinnerPsiphonTransport: Spinner
@@ -485,6 +491,9 @@ class MainActivity : AppCompatActivity() {
         editTorBridgeLines = findViewById(R.id.editTorBridgeLines)
         spinnerEngineLog = findViewById(R.id.spinnerEngineLog)
         spinnerT2sLog = findViewById(R.id.spinnerT2sLog)
+        spinnerTunEngine = findViewById(R.id.spinnerTunEngine)
+        textTunEngineLabel = findViewById(R.id.textTunEngineLabel)
+        textTunEngineHint = findViewById(R.id.textTunEngineHint)
         editTorSocksPort = findViewById(R.id.editTorSocksPort)
         spinnerPsiphonRegion = findViewById(R.id.spinnerPsiphonRegion)
         spinnerPsiphonTransport = findViewById(R.id.spinnerPsiphonTransport)
@@ -625,6 +634,20 @@ class MainActivity : AppCompatActivity() {
             this, R.layout.spinner_dark_item,
             listOf("Silent", "Error", "Warn", "Info", "Debug"),
         )
+        setupTunEngineSpinner()
+        spinnerTunEngine.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: android.widget.AdapterView<*>?,
+                view: android.view.View?,
+                position: Int,
+                id: Long
+            ) {
+                prefs.edit().putInt("tunEngine", position).apply()
+                showTunEngineHint()
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
         spinnerTorBridges.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: android.widget.AdapterView<*>?,
@@ -702,11 +725,13 @@ class MainActivity : AppCompatActivity() {
                 id: Long
             ) {
                 applyModeSocksLock()
+                applyTunEngineVisibility()
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
         applyModeSocksLock()
+        applyTunEngineVisibility()
 
         // The protocol list owns "Tor only", so the tor hint (which port
         // carries tor traffic in proxy mode) must refresh on protocol change
@@ -1080,6 +1105,62 @@ class MainActivity : AppCompatActivity() {
     /** Inverse of t2sLogValue; a stored 0 (old "default" entry) is Silent. */
     private fun t2sLogPosition(value: Int): Int = (value - 1).coerceIn(0, 4)
 
+    /**
+     * Build the TUN-engine spinner from the core (fcae_tun_engine_info): the
+     * entry list, display names and unavailability reasons are what THIS
+     * build actually carries, so a build without zeptun shows the reason
+     * instead of silently missing the entry. Falls back to static names when
+     * the native library cannot be loaded — the same resilience rule
+     * loadSettings() applies to its first native call.
+     */
+    private fun setupTunEngineSpinner() {
+        val entries: List<Pair<String, String>> = try {
+            val n = NativeEngine.nativeTunEngineCount().coerceIn(0, 8)
+            (0 until n).map { parseTunEngineEntry(NativeEngine.nativeTunEngineInfo(it)) }
+        } catch (t: Throwable) {
+            android.util.Log.e("FCAE_VPN", "TUN engine list unavailable; using defaults", t)
+            emptyList()
+        }
+        tunEngineEntries = entries.ifEmpty { listOf("tun2socks" to "", "Zeptun" to "") }
+        spinnerTunEngine.adapter = ArrayAdapter(
+            this, R.layout.spinner_dark_item,
+            tunEngineEntries.map { it.first },
+        )
+    }
+
+    /** Splits the core's "display_name|unavailable_reason" wire format. */
+    private fun parseTunEngineEntry(raw: String): Pair<String, String> {
+        val bar = raw.indexOf('|')
+        return if (bar >= 0) raw.substring(0, bar) to raw.substring(bar + 1) else raw to ""
+    }
+
+    /**
+     * Orange hint under the engine spinner when the selected engine cannot
+     * run in this build on this platform (mirrors the desktop's colored
+     * reason line). Unavailable entries stay selectable: the core rejects
+     * them on connect with the same reason text.
+     */
+    private fun showTunEngineHint() {
+        if (!::textTunEngineHint.isInitialized) return
+        if (!isTunModeSelected()) {
+            textTunEngineHint.visibility = android.view.View.GONE
+            return
+        }
+        val reason = tunEngineEntries.getOrNull(spinnerTunEngine.selectedItemPosition)?.second ?: ""
+        textTunEngineHint.text = reason
+        textTunEngineHint.visibility =
+            if (reason.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
+    }
+
+    /** The engine row only exists in TUN mode, like the desktop combo. */
+    private fun applyTunEngineVisibility() {
+        if (!::spinnerTunEngine.isInitialized) return
+        val v = if (isTunModeSelected()) android.view.View.VISIBLE else android.view.View.GONE
+        textTunEngineLabel.visibility = v
+        spinnerTunEngine.visibility = v
+        showTunEngineHint()
+    }
+
     private fun applyTorLock() {
         if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
         ensureEgressAdapter()
@@ -1160,6 +1241,7 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().apply {
             putInt("protocol", coreProtocolFromSelection())
             putInt("mode", spinnerMode.selectedItemPosition)
+            putInt("tunEngine", spinnerTunEngine.selectedItemPosition)
             putInt("scan", spinnerScan.selectedItemPosition)
             putInt("ipVersion", spinnerIpVersion.selectedItemPosition)
             putInt("noize", spinnerNoize.selectedItemPosition)
@@ -1218,6 +1300,11 @@ class MainActivity : AppCompatActivity() {
         // provider calls establishTunNow() once the backend reports a live
         // SOCKS endpoint, and the Psiphon path raises it on BROADCAST_READY.
         spinnerMode.setSelection(prefs.getInt("mode", 1).coerceIn(0, 1))
+        // Clamp: an entry list from an older/newer build may be shorter than
+        // a stored position (the core collapses unknown values at start).
+        spinnerTunEngine.setSelection(
+            prefs.getInt("tunEngine", 0).coerceIn(0, (tunEngineEntries.size - 1).coerceAtLeast(0)),
+        )
         spinnerScan.setSelection(prefs.getInt("scan", 0))
         spinnerIpVersion.setSelection(prefs.getInt("ipVersion", 0))
         spinnerNoize.setSelection(prefs.getInt("noize", 2))
@@ -1383,6 +1470,7 @@ class MainActivity : AppCompatActivity() {
         // The selected mode is authoritative for every protocol, including
         // Psiphon and Tor: TUN must never be silently downgraded to proxy.
         i.putExtra("mode", if (isTunModeSelected()) 1 else 0)
+        i.putExtra("tunEngine", spinnerTunEngine.selectedItemPosition)
         i.putExtra("tunMtu", tunMtuBytes())
         i.putExtra("tunTcpSndbuf", tcpBufferBytes(editTunTcpSndbuf))
         i.putExtra("tunTcpRcvbuf", tcpBufferBytes(editTunTcpRcvbuf))
@@ -1471,6 +1559,9 @@ class MainActivity : AppCompatActivity() {
         val torBridgeLines = editTorBridgeLines.text.toString().trim()
         val engineLog = spinnerEngineLog.selectedItemPosition
         val t2sLog = t2sLogValue()
+        // TUN mode only consumes it, but pass it in every mode so the native
+        // side always sees one consistent session description.
+        val tunEngine = spinnerTunEngine.selectedItemPosition
         val backend = backendFromSelection()
         val torSocksPort = deferredTorSocksPort()
         val torHttpPort = if (switchTorHttp.isChecked) editTorHttpPort.text.toString().toIntOrNull() ?: 1822 else 0
@@ -1540,6 +1631,7 @@ class MainActivity : AppCompatActivity() {
                     tunTcpRcvbuf = tunTcpRcvbuf,
                     tunTcpAutoTuning = tunTcpAutoTuning,
                     t2sLog = t2sLog,
+                    tunEngine = tunEngine,
                     tunMtu = tunMtu,
                     tunDnsServers = tunDnsServers,
                 )

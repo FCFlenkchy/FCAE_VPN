@@ -293,6 +293,32 @@ impl Tun2SocksBridge {
         if fd >= 0 { Some(fd) } else { None }
     }
 
+    /// True when a host callback creates the TUN device on demand
+    /// (deferred-creation hosts like Android's VpnService).
+    pub fn has_fd_provider(&self) -> bool {
+        self.fd_provider().is_some()
+    }
+
+    /// Ask the host to build the TUN interface now.
+    ///
+    /// Runs the registered provider and latches the result into
+    /// `external_fd`, exactly like the on-demand path of
+    /// [`Self::device_spec`], so a later tun2socks start reuses the same
+    /// interface. The FFI dispatcher uses this to hand a descriptor to the
+    /// zeptun engine, which consumes fds but cannot create the device
+    /// itself. `None` when the host could not build the interface.
+    pub fn establish_now(&self) -> Option<i32> {
+        let provide = self.fd_provider()?;
+        let fd = unsafe { provide() };
+        if fd >= 0 {
+            log::info!("[tun] host provided VpnService fd {fd} on demand");
+            self.external_fd.store(fd, Ordering::SeqCst);
+            Some(fd)
+        } else {
+            None
+        }
+    }
+
     fn install_log_hook(&self) {
         if !self.log_installed.swap(true, Ordering::SeqCst) {
             unsafe { t2s_set_log_callback(Some(go_log_trampoline)) };

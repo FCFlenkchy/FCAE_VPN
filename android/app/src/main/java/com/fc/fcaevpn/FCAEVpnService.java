@@ -706,6 +706,8 @@ public class FCAEVpnService extends VpnService {
         final boolean tunTcpAutoTuning = intent.getBooleanExtra("tunTcpAutoTuning", false);
         // tun2socks data-plane log level (FcaeT2sLog); 0 = silent.
         final int t2sLog = intent.getIntExtra("t2sLog", 0);
+        // TUN data-plane engine (FCAE_TUN_ENGINE_*): 0 = tun2socks, 1 = zeptun.
+        final int tunEngine = intent.getIntExtra("tunEngine", 0);
         final int torHttpPort = intent.getIntExtra("torHttpPort", 0);
         final boolean throughPsiphon = intent.getBooleanExtra("psiphonThroughTunnel", false);
         final String psiphonCfg    = intent.getStringExtra("psiphonConfig");
@@ -813,7 +815,7 @@ public class FCAEVpnService extends VpnService {
                     torMode, torBridges, torLinesV, engineLog,
                     backend, torSocksPort, torHttpPort, throughPsiphon,
                     psiphonCfgV, psiphonRegionV, psiphonSocks, psiphonHttp,
-                    tunTcpSndbuf, tunTcpRcvbuf, tunTcpAutoTuning, t2sLog, tunMtu,
+                    tunTcpSndbuf, tunTcpRcvbuf, tunTcpAutoTuning, t2sLog, tunEngine, tunMtu,
                     tunDnsCfgV
                 );
                 if (!ok) {
@@ -1107,6 +1109,7 @@ public class FCAEVpnService extends VpnService {
         putInt(e, i, "tunTcpRcvbuf", 256000);
         putBool(e, i, "tunTcpAutoTuning", false);
         putInt(e, i, "t2sLog", 0);
+        putInt(e, i, "tunEngine", 0);
         putInt(e, i, "torHttpPort", 0);
         putInt(e, i, "torSocksPort", 0); // 0 = engine default (defer)
         putStr(e, i, "psiphonConfig");
@@ -1152,6 +1155,7 @@ public class FCAEVpnService extends VpnService {
         copyInt(p, i, "tunTcpRcvbuf", 256000);
         copyBool(p, i, "tunTcpAutoTuning", false);
         copyInt(p, i, "t2sLog", 0);
+        copyInt(p, i, "tunEngine", 0);
         copyInt(p, i, "torHttpPort", 0);
         copyInt(p, i, "torSocksPort", 0); // 0 = engine default (defer)
         copyStr(p, i, "psiphonConfig");

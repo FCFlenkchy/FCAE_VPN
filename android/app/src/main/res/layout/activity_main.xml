@@ -149,6 +149,34 @@
                 android:popupBackground="#FF1E1E2C" />
 
             <TextView
+                android:id="@+id/textTunEngineLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="TUN Engine"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp"
+                android:visibility="gone" />
+
+            <Spinner
+                android:id="@+id/spinnerTunEngine"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:popupBackground="#FF1E1E2C"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/textTunEngineHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textColor="#FFB87333"
+                android:textSize="12sp"
+                android:visibility="gone" />
+
+            <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"

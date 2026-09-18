@@ -20,7 +20,12 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 7;
+pub const FCAE_ABI_VERSION: u32 = 8;
+
+/// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
+/// backend's SOCKS endpoint into a TUN device.
+pub const FCAE_TUN_ENGINE_TUN2SOCKS: u64 = 0;
+pub const FCAE_TUN_ENGINE_ZEPTUN: u64 = 1;
 
 // ── Enumerations ────────────────────────────────────────────────────────
 
@@ -88,6 +93,35 @@ pub struct FcaeBackendInfo {
     pub supports_routing_rules: bool,
     /// Needs elevation even in proxy mode.
     pub requires_privileges: bool,
+
+    pub _reserved: [u64; 4],
+}
+
+/// What a TUN engine supports, so the UI can offer the selector without
+/// hardcoding which engines a build carries.
+///
+/// Same motivation as [`FcaeBackendInfo`]: the zeptun engine may be absent
+/// (built without the `zeptun` feature), present-but-disabled on this
+/// platform (Windows, pending upstream adapter-GUID support), or replaced by
+/// a stub. `fcae_tun_engine_count`/`fcae_tun_engine_info` describe all of
+/// that instead of the UI guessing.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FcaeTunEngineInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+
+    /// One of `FCAE_TUN_ENGINE_*`; feeds `FcaeConfig::tun_engine`.
+    pub engine: u64,
+    /// Stable lowercase id, e.g. "tun2socks", "zeptun".
+    pub id: [c_char; 32],
+    /// Human-readable name for a menu entry.
+    pub display_name: [c_char; 64],
+
+    /// Compiled in AND enabled on this platform AND able to start.
+    pub available: bool,
+    /// Why it is unavailable; empty when `available` is true.
+    pub unavailable_reason: [c_char; 192],
 
     pub _reserved: [u64; 4],
 }
@@ -440,6 +474,10 @@ pub struct FcaeConfig {
     /// (silent), 1 = silent, 2 = error, 3 = warn, 4 = info, 5 = debug.
     /// ABI v7: appended after `tor_http_port` so all earlier offsets hold.
     pub tun2socks_log_level: u64,
+    /// TUN data-plane engine: one of `FCAE_TUN_ENGINE_*`. Only consumed in
+    /// TUN mode. ABI v8: appended after `tun2socks_log_level` so all earlier
+    /// offsets hold.
+    pub tun_engine: u64,
 }
 
 // ── Telemetry ───────────────────────────────────────────────────────────

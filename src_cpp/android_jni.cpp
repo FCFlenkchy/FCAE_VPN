@@ -2,6 +2,7 @@
 #include <jni.h>
 #include <android/log.h>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -437,6 +438,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jint tunTcpRcvbuf,
     jboolean tunTcpAutoTuning,
     jint t2sLog,
+    jint tunEngine,
     jint tunMtu,
     jstring tunDnsServers
 ) {
@@ -525,6 +527,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.tun_tcp_auto_tuning = tunTcpAutoTuning == JNI_TRUE ? 1 : 2;
     // tun2socks data-plane log level (FcaeT2sLog); 0 = default = silent.
     cfg.tun2socks_log_level = (uint64_t)t2sLog;
+    // TUN data-plane engine (FCAE_TUN_ENGINE_*); only consumed in TUN mode.
+    // Anything but 1 collapses to the default engine.
+    cfg.tun_engine = (tunEngine == 1) ? FCAE_TUN_ENGINE_ZEPTUN : FCAE_TUN_ENGINE_TUN2SOCKS;
 
     // The UI's TUN DNS servers: the core also gets them so the in-tunnel
     // Psiphon gateway queries THESE resolvers. Empty keeps the core
@@ -593,6 +598,32 @@ Java_com_fc_fcaevpn_NativeEngine_nativePsiphonRegions(JNIEnv* env, jclass) {
     // post-handshake notice, so the UI offers "Auto" and refreshes later.
     char buf[1024] = {0};
     fcae_psiphon_regions(buf, (uint32_t)sizeof(buf));
+    return env->NewStringUTF(buf);
+}
+
+// TUN engine enumeration. These do NOT call ensure_init(): engine
+// availability is a compile-/platform-time property, and the activity
+// queries it while the engine is down (before any session exists).
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeTunEngineCount(JNIEnv*, jclass) {
+    return (jint)fcae_tun_engine_count();
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeTunEngineInfo(JNIEnv* env, jclass, jint index) {
+    FcaeTunEngineInfo info;
+    std::memset(&info, 0, sizeof(info));
+    info.struct_size = sizeof(info);
+    info.abi_version = FCAE_ABI_VERSION;
+    if (fcae_tun_engine_info((uint32_t)index, &info) != FCAE_OK) {
+        return env->NewStringUTF("?");
+    }
+    // "display_name|unavailable_reason"; the reason is empty when available.
+    // Both fields are NUL-terminated by the core; size bound keeps snprintf
+    // from even attempting to overflow.
+    char buf[1 + 64 + 1 + 192 + 1];
+    std::snprintf(buf, sizeof(buf), "%s|%s", info.display_name, info.unavailable_reason);
     return env->NewStringUTF(buf);
 }
 

@@ -41,6 +41,12 @@
 //!
 //! Building without it: `cargo build --features fcae-bridge-zeptun/stub`
 //! compiles a stub where TUN reports "unavailable". Do not ship a stub build.
+//!
+//! ## Rollout
+//!
+//! Linux, macOS and Android only, for now: Windows is intentionally held
+//! back until upstream exposes the wintun `RequestedGUID` so the adapter
+//! lands on the pinned GUID tun2socks already uses. See [`WINDOWS_ENABLED`].
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr::NonNull;
@@ -246,6 +252,27 @@ pub fn is_supported() -> bool {
     cfg!(zeptun_linked)
 }
 
+/// Windows rollout gate. zeptun ships on Linux, macOS and Android now;
+/// Windows stays OFF until upstream (Noisemux/zeptun) exposes the wintun
+/// `RequestedGUID`: without the pin, a zeptun-first install creates the
+/// shared adapter with a random GUID instead of
+/// `24198F4C-7895-434C-AD65-9E29A92DDC61` (the identity tun2socks pins),
+/// splitting it from the registration every other engine reuses. When the
+/// GUID lands upstream, flip this to `true`.
+///
+/// Defined on every platform (not `#[cfg(windows)]`) because `cfg!()` in
+/// [`platform_enabled`] evaluates at runtime — the name must resolve
+/// everywhere; non-Windows targets short-circuit the `||`.
+const WINDOWS_ENABLED: bool = false;
+
+/// True when this build may actually open a TUN device on this platform:
+/// engine linked AND rolled out here. Platform-agnostic callers
+/// (engine selection, UI availability probes) must use this, not
+/// [`is_supported`].
+pub fn platform_enabled() -> bool {
+    is_supported() && (cfg!(not(windows)) || WINDOWS_ENABLED)
+}
+
 /// Engine version string zeptun was built from; a placeholder in stub builds.
 pub fn version() -> String {
     unsafe { CStr::from_ptr(zeptun_version_string()) }
@@ -344,7 +371,6 @@ pub struct ZeptunBridge {
     /// Set by `stop`/`abort` so an in-flight `start` aborts instead of
     /// bringing the interface up after the user already disconnected.
     closing: AtomicBool,
-    log_installed: AtomicBool,
     /// Android VpnService descriptor set out-of-band via the FFI, in case the
     /// session config didn't carry one.
     external_fd: AtomicI32,
@@ -362,7 +388,6 @@ impl ZeptunBridge {
             active: Mutex::new(None),
             running: AtomicBool::new(false),
             closing: AtomicBool::new(false),
-            log_installed: AtomicBool::new(false),
             external_fd: AtomicI32::new(-1),
         }
     }
@@ -373,11 +398,13 @@ impl ZeptunBridge {
         self.external_fd.store(fd, Ordering::SeqCst);
     }
 
+    /// Re-point the engine's (single, process-global) log hook at our
+    /// trampoline with the session's level. Called on every start: the
+    /// level is a per-session setting, so it must not latch from the first.
     fn install_log_hook(&self, level: u32) {
         unsafe {
             zeptun_set_log_callback(Some(log_trampoline), std::ptr::null_mut(), level as c_int);
         }
-        self.log_installed.store(true, Ordering::Relaxed);
     }
 
     /// Live engine counters (see `ZeptunStats`); `None` when not running.
@@ -396,6 +423,13 @@ impl TunBridge for ZeptunBridge {
             return Err(CoreError::Internal(
                 "this build was compiled without the zeptun bridge (feature `stub`); \
                  TUN mode is unavailable"
+                    .into(),
+            ));
+        }
+        if !platform_enabled() {
+            return Err(CoreError::Internal(
+                "the zeptun TUN engine is disabled on Windows pending upstream \
+                 adapter-GUID support (Noisemux/zeptun); select tun2socks"
                     .into(),
             ));
         }
@@ -489,9 +523,7 @@ impl TunBridge for ZeptunBridge {
         config.socks5_udp = u8::from(endpoints.udp && !endpoints.psiphon_dns);
         config.socks5_pipeline = ZEPTUN_SOCKS5_PIPELINE_AUTO;
         config.log_level = zeptun_log_level(cfg.tun.t2s_log_level);
-        if !self.log_installed.load(Ordering::Relaxed) {
-            self.install_log_hook(config.log_level);
-        }
+        self.install_log_hook(config.log_level);
 
         // Handoff: no Handle must escape until zeptun owns the dup.
         let mut active = self.active.lock();

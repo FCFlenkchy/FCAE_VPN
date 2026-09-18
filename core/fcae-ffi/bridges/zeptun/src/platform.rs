@@ -19,7 +19,7 @@ pub const fn is_android() -> bool {
 /// name, the same physical device and GUID.
 #[cfg(windows)]
 pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> fcae_runtime::error::Result<()> {
-    use crate::fcae_runtime::error::CoreError;
+    use fcae_runtime::error::CoreError;
     use std::io::Write;
 
     let dir = std::env::current_exe()

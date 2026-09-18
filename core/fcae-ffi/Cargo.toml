@@ -13,10 +13,7 @@ members = [
     "bridges/tun2socks",
     "bridges/aether",
     "bridges/psiphon",
-    # Rolled out later with the zeptun engine build (libzeptun.a must exist
-    # first); until then the crate is intentionally NOT a workspace member,
-    # so cargo never runs its build script.
-    # "bridges/zeptun",
+    "bridges/zeptun",
 ]
 exclude = ["../Aether", "../quiche"]
 resolver = "2"
@@ -34,7 +31,7 @@ fcae-build = { path = "buildtools" }
 fcae-bridge-tun2socks = { path = "bridges/tun2socks" }
 fcae-bridge-aether = { path = "bridges/aether" }
 fcae-bridge-psiphon = { path = "bridges/psiphon" }
-# fcae-bridge-zeptun = { path = "bridges/zeptun" } # re-enable with the workspace member above
+fcae-bridge-zeptun = { path = "bridges/zeptun" }
 aether-engine = { path = "../Aether" }
 
 

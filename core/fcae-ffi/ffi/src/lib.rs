@@ -34,8 +34,172 @@ mod logger;
 struct Runtime {
     supervisor: Supervisor,
     telemetry: Arc<TelemetryCell>,
+    #[cfg(any(feature = "tun", feature = "zeptun"))]
+    engines: Arc<TunEngines>,
+}
+
+/// Both TUN engines, dispatched per session from `SessionConfig::tun.engine`.
+///
+/// A build may carry tun2socks, zeptun, or both; the choice is per-session
+/// (the user flips it in Settings), so the supervisor is handed one static
+/// `Arc<dyn TunBridge>` here and the decision happens at `start`. The fd
+/// setters forward to BOTH engines: Android hands the descriptor over before
+/// the session parses, and whichever engine later runs must see it.
+struct TunEngines {
     #[cfg(feature = "tun")]
-    bridge: Arc<fcae_bridge_tun2socks::Tun2SocksBridge>,
+    t2s: Arc<fcae_bridge_tun2socks::Tun2SocksBridge>,
+    #[cfg(feature = "zeptun")]
+    zeptun: Arc<fcae_bridge_zeptun::ZeptunBridge>,
+}
+
+impl TunEngines {
+    fn set_android_fd(&self, fd: i32) {
+        #[cfg(feature = "tun")]
+        self.t2s.set_android_fd(fd);
+        #[cfg(feature = "zeptun")]
+        self.zeptun.set_external_fd(fd);
+    }
+
+    fn clear_android_fd(&self) {
+        #[cfg(feature = "tun")]
+        self.t2s.clear_android_fd();
+        #[cfg(feature = "zeptun")]
+        self.zeptun.set_external_fd(-1);
+    }
+
+    /// On-demand fd creation is a tun2socks mechanism (its `fd_provider`).
+    /// The provider is retained there even when zeptun is the selected
+    /// engine: `zeptun_start` borrows it via [`Self::establish_via_provider`]
+    /// to hand zeptun the descriptor, since zeptun consumes fds rather than
+    /// creating the device.
+    #[cfg(feature = "tun")]
+    fn set_fd_provider(&self, provider: Option<unsafe extern "C" fn() -> std::ffi::c_int>) {
+        self.t2s.set_fd_provider(provider);
+    }
+
+    fn t2s_start(
+        &self,
+        cfg: &config::SessionConfig,
+        endpoints: &fcae_runtime::backend::Endpoints,
+    ) -> Result<(), CoreError> {
+        #[cfg(feature = "tun")]
+        {
+            self.t2s.start(cfg, endpoints)
+        }
+        #[cfg(not(feature = "tun"))]
+        {
+            let _ = (cfg, endpoints);
+            Err(CoreError::Internal(
+                "the tun2socks TUN engine is not compiled into this build".into(),
+            ))
+        }
+    }
+
+    fn zeptun_start(
+        &self,
+        cfg: &config::SessionConfig,
+        endpoints: &fcae_runtime::backend::Endpoints,
+    ) -> Result<(), CoreError> {
+        #[cfg(feature = "zeptun")]
+        {
+            // Deferred interface creation (Android): the provider is a
+            // tun2socks mechanism (see `set_fd_provider`), while zeptun only
+            // consumes a descriptor. When the session carries no fd of its
+            // own, ask the host for one the same way tun2socks would; on
+            // desktop no provider is registered and zeptun creates the
+            // device itself.
+            if cfg.tun.fd.is_none() && self.zeptun.preauthorised_fd().is_none() {
+                if let Some(fd) = self.establish_via_provider()? {
+                    self.zeptun.set_external_fd(fd);
+                }
+            }
+            self.zeptun.start(cfg, endpoints)
+        }
+        #[cfg(not(feature = "zeptun"))]
+        {
+            let _ = (cfg, endpoints);
+            Err(CoreError::Internal(
+                "the zeptun TUN engine is not compiled into this build (feature `zeptun`)".into(),
+            ))
+        }
+    }
+
+    /// Ask the host to build the TUN interface now, if a provider is
+    /// registered. `Ok(None)` = no provider (the engine creates the device
+    /// itself); `Err` = the host refused to build the interface.
+    #[cfg(all(feature = "tun", feature = "zeptun"))]
+    fn establish_via_provider(&self) -> Result<Option<i32>, CoreError> {
+        if !self.t2s.has_fd_provider() {
+            return Ok(None);
+        }
+        self.t2s.establish_now().ok_or_else(|| {
+            CoreError::Internal("the host could not establish the VPN interface".into())
+        })
+    }
+
+    #[cfg(not(feature = "tun"))]
+    fn establish_via_provider(&self) -> Result<Option<i32>, CoreError> {
+        Ok(None)
+    }
+}
+
+impl TunBridge for TunEngines {
+    fn start(
+        &self,
+        cfg: &config::SessionConfig,
+        endpoints: &fcae_runtime::backend::Endpoints,
+    ) -> Result<(), CoreError> {
+        match cfg.tun.engine {
+            config::TunEngine::Tun2socks => self.t2s_start(cfg, endpoints),
+            config::TunEngine::Zeptun => self.zeptun_start(cfg, endpoints),
+        }
+    }
+
+    fn stop(&self, timeout: std::time::Duration) {
+        #[cfg(feature = "tun")]
+        self.t2s.stop(timeout);
+        #[cfg(feature = "zeptun")]
+        self.zeptun.stop(timeout);
+    }
+
+    fn abort(&self) {
+        #[cfg(feature = "tun")]
+        self.t2s.abort();
+        #[cfg(feature = "zeptun")]
+        self.zeptun.abort();
+    }
+
+    fn is_running(&self) -> bool {
+        #[cfg(feature = "tun")]
+        {
+            if self.t2s.is_running() {
+                return true;
+            }
+        }
+        #[cfg(feature = "zeptun")]
+        {
+            if self.zeptun.is_running() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn preauthorised_fd(&self) -> Option<i32> {
+        #[cfg(feature = "tun")]
+        {
+            if let Some(fd) = self.t2s.preauthorised_fd() {
+                return Some(fd);
+            }
+        }
+        #[cfg(feature = "zeptun")]
+        {
+            if let Some(fd) = self.zeptun.preauthorised_fd() {
+                return Some(fd);
+            }
+        }
+        None
+    }
 }
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
@@ -181,6 +345,8 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
         tun_tcp_auto_tuning: 0,
         // 0 = follow the app default: tun2socks logs stay silent.
         tun2socks_log_level: 0,
+        // 0 = tun2socks: the long-tested engine stays the default.
+        tun_engine: FCAE_TUN_ENGINE_TUN2SOCKS,
     });
     FcaeStatus::Ok
 }
@@ -232,12 +398,17 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         #[cfg(feature = "psiphon")]
         fcae_bridge_psiphon::register();
 
-        #[cfg(feature = "tun")]
-        let bridge = Arc::new(fcae_bridge_tun2socks::Tun2SocksBridge::new());
+        #[cfg(any(feature = "tun", feature = "zeptun"))]
+        let engines = Arc::new(TunEngines {
+            #[cfg(feature = "tun")]
+            t2s: Arc::new(fcae_bridge_tun2socks::Tun2SocksBridge::new()),
+            #[cfg(feature = "zeptun")]
+            zeptun: Arc::new(fcae_bridge_zeptun::ZeptunBridge::new()),
+        });
 
-        #[cfg(feature = "tun")]
-        let tun_bridge: Arc<dyn TunBridge> = bridge.clone();
-        #[cfg(not(feature = "tun"))]
+        #[cfg(any(feature = "tun", feature = "zeptun"))]
+        let tun_bridge: Arc<dyn TunBridge> = engines.clone();
+        #[cfg(not(any(feature = "tun", feature = "zeptun")))]
         let tun_bridge: Arc<dyn TunBridge> = Arc::new(fcae_runtime::session::NullTunBridge);
 
         let supervisor = Supervisor::new(
@@ -255,8 +426,8 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         let _ = RUNTIME.set(Runtime {
             supervisor,
             telemetry,
-            #[cfg(feature = "tun")]
-            bridge,
+            #[cfg(any(feature = "tun", feature = "zeptun"))]
+            engines,
         });
 
         log::info!(
@@ -295,11 +466,11 @@ pub unsafe extern "C" fn fcae_start(cfg: *const FcaeConfig) -> FcaeStatus {
         // here. Otherwise the stale fd kept the bridge looking "armed": the
         // supervisor saw a pre-authorised fd and a proxy-only run could still
         // reach into tun2socks.
-        #[cfg(feature = "tun")]
+        #[cfg(any(feature = "tun", feature = "zeptun"))]
         match (parsed.mode, parsed.tun.fd) {
-            (fcae_abi::FcaeMode::Tun, Some(fd)) => rt.bridge.set_android_fd(fd),
+            (fcae_abi::FcaeMode::Tun, Some(fd)) => rt.engines.set_android_fd(fd),
             (fcae_abi::FcaeMode::Tun, None) => {}
-            (fcae_abi::FcaeMode::Proxy, _) => rt.bridge.clear_android_fd(),
+            (fcae_abi::FcaeMode::Proxy, _) => rt.engines.clear_android_fd(),
         }
 
         rt.supervisor.start(parsed)
@@ -398,9 +569,9 @@ pub unsafe extern "C" fn fcae_get_telemetry(out: *mut FcaeTelemetry) -> FcaeStat
 pub extern "C" fn fcae_set_tun_fd(fd: i32) -> FcaeStatus {
     guard("fcae_set_tun_fd", move || {
         let _rt = runtime()?;
-        #[cfg(feature = "tun")]
-        _rt.bridge.set_android_fd(fd);
-        #[cfg(not(feature = "tun"))]
+        #[cfg(any(feature = "tun", feature = "zeptun"))]
+        _rt.engines.set_android_fd(fd);
+        #[cfg(not(any(feature = "tun", feature = "zeptun")))]
         let _ = fd;
         Ok(())
     })
@@ -426,7 +597,7 @@ pub extern "C" fn fcae_set_tun_fd_provider(
     guard("fcae_set_tun_fd_provider", move || {
         let _rt = runtime()?;
         #[cfg(feature = "tun")]
-        _rt.bridge.set_fd_provider(provider);
+        _rt.engines.set_fd_provider(provider);
         #[cfg(not(feature = "tun"))]
         let _ = provider;
         Ok(())
@@ -529,6 +700,100 @@ pub unsafe extern "C" fn fcae_backend_info(index: u32, out: *mut FcaeBackendInfo
         out.requires_privileges = caps.requires_privileges;
         Ok(())
     })
+}
+
+/// How many TUN engines [`fcae_tun_engine_info`] can describe. Constant
+/// across builds: unavailable engines are reported, not hidden, so a UI can
+/// say why (not compiled / stub / disabled on this platform).
+#[no_mangle]
+pub extern "C" fn fcae_tun_engine_count() -> u32 {
+    2
+}
+
+/// Detail of one TUN engine: id, name, and whether selecting it can succeed
+/// in this build on this platform.
+///
+/// Engine 0 is always tun2socks and 1 always zeptun, matching
+/// `FCAE_TUN_ENGINE_*` — the `index` order is fixed so a UI can also persist
+/// the raw `engine` value across runs.
+///
+/// Unlike [`fcae_backend_info`] this does not require [`fcae_init`]: engine
+/// availability is a compile-/platform-time property, not backend runtime
+/// state.
+///
+/// Returns `InvalidConfig` if `index` is out of range.
+///
+/// # Safety
+/// `out` must point to a valid, correctly-stamped [`FcaeTunEngineInfo`].
+#[no_mangle]
+pub unsafe extern "C" fn fcae_tun_engine_info(index: u32, out: *mut FcaeTunEngineInfo) -> FcaeStatus {
+    guard("fcae_tun_engine_info", move || {
+        let out = out.as_mut().ok_or(CoreError::NullArgument("out"))?;
+        if out.abi_version != FCAE_ABI_VERSION
+            || out.struct_size as usize != std::mem::size_of::<FcaeTunEngineInfo>()
+        {
+            return Err(CoreError::AbiMismatch("FcaeTunEngineInfo".into()));
+        }
+
+        let (engine, id, name, available, reason): (u64, &str, &str, bool, &str) = match index {
+            0 => (
+                FCAE_TUN_ENGINE_TUN2SOCKS,
+                "tun2socks",
+                "tun2socks",
+                cfg!(feature = "tun"),
+                if cfg!(feature = "tun") { "" } else { "not compiled into this build" },
+            ),
+            1 => zeptun_info_fields(),
+            _ => {
+                return Err(CoreError::InvalidConfig(format!(
+                    "TUN engine index {index} is out of range (fcae_tun_engine_count() = 2)"
+                )))
+            }
+        };
+
+        out.engine = engine;
+        fill(&mut out.id, id);
+        fill(&mut out.display_name, name);
+        out.available = available;
+        fill(&mut out.unavailable_reason, reason);
+        Ok(())
+    })
+}
+
+/// (engine, id, display, available, reason) for zeptun, with reason resolving
+/// the full chain: not compiled → stub-linked → held back on Windows.
+#[cfg(feature = "zeptun")]
+fn zeptun_info_fields() -> (u64, &'static str, &'static str, bool, &'static str) {
+    if !fcae_bridge_zeptun::is_supported() {
+        (
+            FCAE_TUN_ENGINE_ZEPTUN,
+            "zeptun",
+            "Zeptun",
+            false,
+            "zeptun engine not linked (stub build)",
+        )
+    } else if !fcae_bridge_zeptun::platform_enabled() {
+        (
+            FCAE_TUN_ENGINE_ZEPTUN,
+            "zeptun",
+            "Zeptun",
+            false,
+            "disabled on Windows pending upstream adapter-GUID support (Noisemux/zeptun)",
+        )
+    } else {
+        (FCAE_TUN_ENGINE_ZEPTUN, "zeptun", "Zeptun", true, "")
+    }
+}
+
+#[cfg(not(feature = "zeptun"))]
+fn zeptun_info_fields() -> (u64, &'static str, &'static str, bool, &'static str) {
+    (
+        FCAE_TUN_ENGINE_ZEPTUN,
+        "zeptun",
+        "Zeptun",
+        false,
+        "not compiled into this build (feature `zeptun`)",
+    )
 }
 
 /// Psiphon egress regions discovered so far, as a comma-separated list of
@@ -682,8 +947,8 @@ pub extern "C" fn fcae_shutdown() -> FcaeStatus {
             // Drop any Android descriptor from the finished session. It is a
             // small integer that the JVM will recycle onto an unrelated file,
             // so a latched value makes the next start dup a stranger's fd.
-            #[cfg(feature = "tun")]
-            rt.bridge.clear_android_fd();
+            #[cfg(any(feature = "tun", feature = "zeptun"))]
+            rt.engines.clear_android_fd();
         }
         logger::uninstall();
         Ok(())

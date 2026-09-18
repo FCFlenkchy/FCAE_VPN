@@ -422,6 +422,33 @@ jobs:
           if [ ! -d "third_party/imgui" ]; then
             git clone --depth 1 --branch v1.91.8 https://github.com/ocornut/imgui.git third_party/imgui
           fi
+      # zeptun's minimum_zig_version; the stable 0.16.x line.
+      - name: setup zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # The zeptun TUN engine (Zig, static C ABI) must exist BEFORE cargo
+      # links the bridge below: its build script consumes
+      # core/zeptun/zig-out/lib (desktop) or zig-out/android/prebuilt (the
+      # `zig build android` matrix step). Windows cross-compiles the GNU
+      # archive; the engine stays runtime-gated there (Windows rollout
+      # pending upstream adapter-GUID support).
+      - name: build zeptun engine (libzeptun)
+        run: |
+          set -euo pipefail
+          cd core/zeptun
+          case "${{ matrix.name }}" in
+            linux-x64)   zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSmall ;;
+            windows-x64) zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSmall ;;
+            macos-arm64) zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall ;;
+            macos-x64)   zig build -Dtarget=x86_64-macos -Doptimize=ReleaseSmall ;;
+            android-*)   zig build android -Doptimize=ReleaseSmall ;;
+          esac
+          test -f zig-out/lib/libzeptun.a || find zig-out/android/prebuilt -name libzeptun.a | grep -q .
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+
       - name: build rust (engine + ffi, in-process)
         run: |
           set -euo pipefail
@@ -485,7 +512,7 @@ jobs:
                 
                 # psiphon = attach to the official AAR (no Go psi in this .so).
                 # psiphon-live would compile a second Go runtime — do not.
-                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon
+                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,zeptun
 
                 # CARGO_TARGET_DIR (set in env: below) puts every artifact in
                 # one place, so there is no longer a fallback copy to do.
@@ -531,7 +558,7 @@ jobs:
               "$CLANG" --version | head -1
               
               # psiphon = attach to the official AAR. Do not enable psiphon-live.
-              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon
+              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon,zeptun
 
               DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
               ls -lh "$DEST"
@@ -540,7 +567,7 @@ jobs:
           else
             # Non-Android: compile desktop Psiphon as libfcae_psiphon (force_shared).
             # Android keeps AAR-only (no psiphon-live).
-            cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon-live
+            cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon-live,zeptun
 
             DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
             ls -lh "$DEST"

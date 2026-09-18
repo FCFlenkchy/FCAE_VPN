@@ -117,6 +117,7 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.protocol);
     h = fnv_value(h, g_app.backend);
     h = fnv_value(h, g_app.mode);
+    h = fnv_value(h, g_app.tun_engine);
     h = fnv_value(h, g_app.scan_mode);
     h = fnv_value(h, g_app.ip_version);
     h = fnv_value(h, g_app.lan_sharing);
@@ -359,6 +360,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "psiphon_socks_port") g_app.psiphon_socks_port = atoi(val.c_str());
     else if (key == "psiphon_http_port") g_app.psiphon_http_port = atoi(val.c_str());
     else if (key == "mode") g_app.mode = atoi(val.c_str());
+    else if (key == "tun_engine") { int e = atoi(val.c_str()); g_app.tun_engine = e == 1 ? 1 : 0; }
     else if (key == "lan_sharing") g_app.lan_sharing = atoi(val.c_str()) != 0;
     else if (key == "scan_mode") g_app.scan_mode = atoi(val.c_str());
     else if (key == "ip_version") g_app.ip_version = atoi(val.c_str());
@@ -430,6 +432,7 @@ static void save_config() {
     fprintf(f, "psiphon_socks_port=%d\n", g_app.psiphon_socks_port);
     fprintf(f, "psiphon_http_port=%d\n", g_app.psiphon_http_port);
     fprintf(f, "mode=%d\n", g_app.mode);
+    fprintf(f, "tun_engine=%d\n", g_app.tun_engine);
     fprintf(f, "lan_sharing=%d\n", g_app.lan_sharing ? 1 : 0);
     fprintf(f, "scan_mode=%d\n", g_app.scan_mode);
     fprintf(f, "ip_version=%d\n", g_app.ip_version);
@@ -1514,7 +1517,34 @@ void render_ui() {
             ImGui::Text("Mode");
             ImGui::RadioButton("Proxy", &g_app.mode, 0);
             ImGui::RadioButton("TUN",   &g_app.mode, 1);
-            ImGui::Spacing();
+            if (g_app.mode == 1) {
+                // TUN engine choice, listed from the core (never hardcoded):
+                // a build without zeptun shows it as unavailable with its
+                // reason. Unavailable entries STAY selectable — on Windows
+                // zeptun reports "pending upstream adapter-GUID support" as
+                // the connect error, exactly what the status line surfaces.
+                ImGui::SameLine(0, 24);
+                ImGui::Text("engine:");
+                ImGui::SameLine(0, 8);
+                ImGui::PushItemWidth(140);
+                FcaeTunEngineInfo tei[4];
+                const char* te_names[4];
+                uint32_t te_n = fcae_tun_engine_count();
+                if (te_n > 4) te_n = 4;
+                for (uint32_t i = 0; i < te_n; ++i) {
+                    memset(&tei[i], 0, sizeof(tei[i]));
+                    tei[i].struct_size = sizeof(tei[i]);
+                    tei[i].abi_version = FCAE_ABI_VERSION;
+                    te_names[i] = fcae_tun_engine_info(i, &tei[i]) == FCAE_OK ? tei[i].display_name : "?";
+                }
+                int te_sel = (g_app.tun_engine < (int)te_n) ? g_app.tun_engine : 0;
+                if (ImGui::Combo("##tun_engine", &te_sel, te_names, (int)te_n))
+                    g_app.tun_engine = te_sel;
+                ImGui::PopItemWidth();
+                if (te_sel < (int)te_n && !tei[te_sel].available)
+                    ImGui::TextColored(ImVec4(1, 0.6f, 0.2f, 1), "%s", tei[te_sel].unavailable_reason);
+                ImGui::Spacing();
+            }
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Transport Options");

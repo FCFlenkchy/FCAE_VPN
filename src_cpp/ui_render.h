@@ -37,6 +37,10 @@ struct AppState {
     // device itself is still only raised AFTER the backend reports a live
     // SOCKS endpoint (fcae-runtime session supervisor), never before.
     int  mode            = 1;
+    // TUN data-plane engine: 0 = tun2socks (default), 1 = zeptun
+    // (FCAE_TUN_ENGINE_*). Only consumed in TUN mode; the core rejects
+    // engines that cannot run on this platform at connect time.
+    int  tun_engine      = 0;
     bool lan_sharing     = false;
     int  scan_mode       = 0;
     int  ip_version      = 4;
@@ -224,6 +228,10 @@ struct AppState {
         c.tun_tcp_rcvbuf = rcv ? rcv : 0xffffffffu;
         c.tun_tcp_auto_tuning = tun_tcp_auto_tuning ? 1 : 2;
         c.tun2socks_log_level = (uint64_t)t2s_log;
+        // Engine choice passes through as-is: only the core knows whether an
+        // engine can start here (zeptun on Windows reports its reason on
+        // connect, which is exactly what reaches the status line).
+        c.tun_engine     = (uint64_t)(tun_engine == 1 ? 1 : 0);
         // TUN tunnels through the local SOCKS5 listener tun2socks dials, so
         // the checkbox is ignored in that mode: a port is always sent (same
         // rule as Android's FCAEVpnService). Port 0 means "off" for proxy

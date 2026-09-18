@@ -44,7 +44,12 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 7
+#define FCAE_ABI_VERSION 8
+
+/* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
+ * backend's SOCKS endpoint into a TUN device. */
+#define FCAE_TUN_ENGINE_TUN2SOCKS 0
+#define FCAE_TUN_ENGINE_ZEPTUN 1
 
 /* ── Enumerations ──────────────────────────────────────────────────── */
 
@@ -88,6 +93,25 @@ typedef struct {
 
     uint64_t        _reserved[4];
 } FcaeBackendInfo;
+
+/* What a TUN engine supports, so the UI can offer the selector without
+ * hardcoding which engines a build carries. Same motivation as
+ * FcaeBackendInfo: zeptun may be absent, present-but-disabled on this
+ * platform (Windows, pending upstream adapter-GUID support), or a stub.
+ * Iterate fcae_tun_engine_count() and fill one of these per index. */
+typedef struct {
+    uint32_t        struct_size;
+    uint32_t        abi_version;
+
+    uint64_t        engine;                /* FCAE_TUN_ENGINE_*            */
+    char            id[32];                /* "tun2socks", "zeptun"        */
+    char            display_name[64];      /* for a menu entry             */
+
+    bool            available;             /* compiled in AND can start    */
+    char            unavailable_reason[192]; /* empty when available       */
+
+    uint64_t        _reserved[4];
+} FcaeTunEngineInfo;
 
 typedef enum {
     FCAE_PROTOCOL_MASQUE    = 0,
@@ -295,6 +319,7 @@ typedef struct {
     uint64_t        tun_tcp_auto_tuning; /* 0=default(off), 1=on, 2=off */
     uint64_t        tor_http_port; /* 0 disables; 1..65535; formerly reserved[3] */
     uint64_t        tun2socks_log_level; /* FcaeT2sLog; 0 = default (silent) */
+    uint64_t        tun_engine;      /* FCAE_TUN_ENGINE_*; TUN mode only; ABI v8 */
 } FcaeConfig;
 
 /* ── Telemetry ─────────────────────────────────────────────────────── */
@@ -417,6 +442,16 @@ FcaeStatus fcae_backend_info(uint32_t index, FcaeBackendInfo *out);
 /* How many backends fcae_backend_info() can describe. */
 uint32_t   fcae_backend_count(void);
 
+/* How many TUN engines fcae_tun_engine_info() can describe. Constant (2):
+ * unavailable engines are reported, not hidden, so the UI can say why. */
+uint32_t   fcae_tun_engine_count(void);
+
+/* Detail of TUN engine `index` (0 = tun2socks, 1 = zeptun, matching
+ * FCAE_TUN_ENGINE_*). Does not require fcae_init(): engine availability is a
+ * compile-/platform-time property. FcaeConfig.tun_engine takes the info's
+ * `engine` value. */
+FcaeStatus fcae_tun_engine_info(uint32_t index, FcaeTunEngineInfo *out);
+
 /* Psiphon egress regions discovered so far, as a comma-separated list of ISO
  * country codes ("GB,DE,US"), written into `out`. Empty until the first
  * successful Psiphon connect. Returns the length that would be written,
@@ -490,4 +525,4 @@ FcaeStatus fcae_poll_update(FcaeUpdateInfo *out);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x1899eda7527e4783 */
+/* fcae-abi-fingerprint: 0x36f0559573e3093d */

@@ -88,6 +88,9 @@ object NativeEngine {
         // tun2socks data-plane log level (FcaeT2sLog): 0=default(silent)
         // 1=silent 2=error 3=warn 4=info 5=debug.
         t2sLog: Int,
+        // TUN data-plane engine (FCAE_TUN_ENGINE_*): 0 = tun2socks (default),
+        // 1 = zeptun. Only consumed in TUN mode.
+        tunEngine: Int,
         tunMtu: Int,
         // TUN DNS servers from the UI (comma separated) or "" for defaults.
         // Fed to the core so the in-tunnel Psiphon gateway queries THESE
@@ -112,6 +115,13 @@ object NativeEngine {
     @JvmStatic external fun nativeClearLogs()
     /** Inject a host-side line (Psiphon AAR notices live in :psiphon). */
     @JvmStatic external fun nativeAppendLog(line: String)
+
+    // ── TUN engine enumeration ───────────────────────────────────────
+    // No engine start required: availability is a compile-/platform-time
+    // property, queried by the UI while the engine is down.
+    @JvmStatic external fun nativeTunEngineCount(): Int
+    /** "display_name|unavailable_reason"; reason is "" when available. */
+    @JvmStatic external fun nativeTunEngineInfo(index: Int): String
 
     // ── Structured telemetry getters ──
     @JvmStatic external fun nativeGetState(): Int
