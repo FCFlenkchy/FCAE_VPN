@@ -311,10 +311,6 @@ jobs:
             core -> target
           cache-on-failure: true
 
-      - name: prepare build dir
-        if: "!startsWith(matrix.name, 'android-')"
-        run: mkdir -p build
-
       - name: cache cmake
         if: "!startsWith(matrix.name, 'android-')"
         uses: actions/cache@v6
