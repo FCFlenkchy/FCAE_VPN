@@ -30,7 +30,7 @@ env:
 
 jobs:
   prepare:
-    name: resolve release version
+    name: resolve release/pre-release version
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -57,25 +57,6 @@ jobs:
               throw new Error('Prerelease revision is too large');
             }
             const version = `${match[1]}${pre ? match[2] || '_pre-release' : ''}`;
-            const releases = await github.paginate(github.rest.repos.listReleases, {
-              owner: context.repo.owner, repo: context.repo.repo, per_page: 100,
-            });
-            const releaseVersion = (release) => {
-              let tag = release.tag_name.replace(/^[vV]/, '').replace(/-prerelease(?=\.|$)/, '_pre-release');
-              if (release.prerelease && /^[0-9]+(?:\.[0-9]+){2,3}$/.test(tag)) tag += '_pre-release';
-              return tag;
-            };
-            if (releases.some(release => releaseVersion(release) === version)) {
-              throw new Error(`Release ${version} already exists; choose a new version or explicitly remove the failed draft before retrying`);
-            }
-            try {
-              await github.rest.git.getRef({
-                owner: context.repo.owner, repo: context.repo.repo, ref: `tags/${version}`,
-              });
-              throw new Error(`Tag ${version} already exists; release tags are not overwritten`);
-            } catch (error) {
-              if (error.status !== 404) throw error;
-            }
             core.setOutput('version', version);
             core.setOutput('macos_version', match[1].split('.').slice(0, 3).join('.'));
             core.info(`Release tag and embedded app version: ${version}`);
@@ -166,26 +147,12 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 
-      # The in-process tun2socks bridge links Go code into libfcae_ffi.a, so
-      # every runner needs a Go toolchain -- including the Android and
-      # Windows-cross jobs, which previously needed none because tun2socks
-      # shipped as a prebuilt binary.
-      #
-      # The version is driven by the tun2socks submodule's go.mod, which
-      # declares `go 1.26.3`. Go refuses to build a module that requires a
-      # newer toolchain than the one running, so anything older fails with
-      # "module ... requires go >= 1.26.3". Keep this >= that value; `stable`
-      # tracks the current release so submodule bumps do not break the build.
       - name: setup go
         uses: actions/setup-go@v7
         with:
           go-version: 'stable'
           cache: false
 
-      # setup-go puts its Go first on PATH, but the distro `golang-go` package
-      # previously installed below was far older and some toolchains resolve
-      # /usr/bin/go directly. Pin GO_BIN (honoured by the bridge build
-      # scripts) to the toolchain setup-go provisioned.
       - name: pin go toolchain
         shell: bash
         run: |
@@ -200,7 +167,6 @@ jobs:
           script: |
             const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
             const prefixes = ['cmake-', 'gradle-', 'sccache-', 'glfw-'];
-            // Rust caches are managed by Swatinem/rust-cache â€” skip those.
 
             for (const prefix of prefixes) {
               let page = 1;
@@ -217,7 +183,6 @@ jobs:
                 if (caches.length === 0) break;
 
                 const old = caches.filter(c => new Date(c.created_at).getTime() < oneDayAgo);
-                // Also cap at 3 most recent per prefix
                 const recent = caches.filter(c => new Date(c.created_at).getTime() >= oneDayAgo);
                 const excess = recent.slice(3);
                 const toDelete = [...old, ...excess];
@@ -246,24 +211,17 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euxo pipefail
-          # Freshly-booted ubuntu-latest VMs run apt-daily/unattended-upgrades at
-          # boot; they hold the apt/dpkg locks while apt 2.7 waits on them
-          # FOREVER (this is what made the workflow look "stuck" here).
           sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
           while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
             echo "waiting for boot-time apt processes to release locks..."
             sleep 5
           done
-          # NOTE: sudo strips env vars, so DEBIAN_FRONTEND must be assigned
-          # after sudo (as below); an env: block on the step does NOT reach apt.
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
             libxrandr-dev libxinerama-dev libxxf86vm-dev \
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
             libevent-dev protobuf-compiler nasm cmake ninja-build
-          # GitHub's codeload endpoint occasionally answers 5xx/connection
-          # resets on fresh runners; retry instead of failing the job.
           curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
             https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
           tar xzf glfw.tar.gz
@@ -283,20 +241,12 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euxo pipefail
-          # Freshly-booted ubuntu-latest VMs run apt-daily/unattended-upgrades at
-          # boot; they hold the apt/dpkg locks while apt 2.7 waits on them
-          # FOREVER (this is what made the workflow look "stuck" here).
           sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
           while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
             echo "waiting for boot-time apt processes to release locks..."
             sleep 5
           done
-          # NOTE: sudo strips env vars, so DEBIAN_FRONTEND must be assigned
-          # after sudo (as below); an env: block on the step does NOT reach apt.
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          # Go itself comes from the setup-go step (the distro package is too
-          # old for the tun2socks submodule); cgo drives the mingw toolchain
-          # installed here for the Windows cross build.
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 nasm \
             cmake
@@ -316,13 +266,6 @@ jobs:
       - name: install deps (macOS)
         if: startsWith(matrix.name, 'macos-')
         run: |
-          # `go` intentionally omitted: the setup-go step above provisions a
-          # toolchain new enough for the tun2socks submodule, and brew's would
-          # only compete with it on PATH.
-          #
-          # Bottle downloads go through ghcr.io and intermittently hit 5xx on
-          # brand-new runner images; give brew a few attempts rather than
-          # failing the whole job on one bad fetch.
           brew_ok=0
           for attempt in 1 2 3; do
             brew install cmake ninja nasm protobuf && { brew_ok=1; break; }
@@ -340,8 +283,6 @@ jobs:
             ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
             GLFW_PREFIX=/usr/local/glfw_arm64
           fi
-          # Same transient-5xx hardening as the Linux step: codeload 504s on
-          # fresh runners used to kill this step (curl exit 56).
           curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
             https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
           tar xzf glfw.tar.gz
@@ -401,11 +342,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Use this submodule's vendored gomobile and Docker-pinned Go/NDK.
-          # Do not mix module-aware fork tooling with this upstream checkout:
-          # this revision's make.bash explicitly uses GOPATH mode.
           ROOT="$PWD"
-          # Build the gitlink pinned by FCAE, not the tip of the upstream branch.
           PSIPHON_REV=$(git rev-parse HEAD:core/psiphon)
           test "$(git -C core/psiphon rev-parse HEAD)" = "$PSIPHON_REV"
           PSIPHON_GIT_DIR=$(git -C core/psiphon rev-parse --absolute-git-dir)
@@ -422,8 +359,6 @@ jobs:
             -v "$ROOT/core/psiphon:/go/src/github.com/Psiphon-Labs/psiphon-tunnel-core" \
             fcae-psiphon-android /bin/bash -c '
               set -euo pipefail
-              # The submodule .git file points outside its source mount.
-              # GIT_DIR/GIT_WORK_TREE use the explicit metadata mount instead.
               cd "$GIT_WORK_TREE/MobileLibrary/Android"
               test "$(git rev-parse HEAD)" = "$PSIPHON_REV"
               git rev-parse --short=10 HEAD
@@ -440,15 +375,13 @@ jobs:
             readelf -lW "$LIB" | awk '$1 == "LOAD" { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
           done
 
-      # ca.psiphon.aar is an intermediate consumed by :app below, not an
-      # artifact or a standalone release asset.
-
       - name: fetch imgui
         run: |
           mkdir -p third_party
           if [ ! -d "third_party/imgui" ]; then
             git clone --depth 1 --branch v1.91.8 https://github.com/ocornut/imgui.git third_party/imgui
           fi
+
       - name: cache zig
         uses: actions/cache@v6
         with:
@@ -518,8 +451,6 @@ jobs:
           echo "$PREFIX" >> "$GITHUB_PATH"
           "${PREFIX}/zig" version
 
-      # libzeptun.a must exist before cargo links the bridge
-      # (zig-out/lib on desktop, zig-out/android/prebuilt/<abi> on Android).
       - name: build zeptun engine (libzeptun)
         shell: bash
         run: |
@@ -550,7 +481,6 @@ jobs:
                   "sys_include_dir=$SYSROOT/usr/include/$NDK_TARGET" \
                   "crt_dir=$SYSROOT/usr/lib/$NDK_TARGET/24" \
                   'msvc_lib_dir=' 'kernel32_lib_dir=' 'gcc_dir=' > "$LIBC_DIR/$abi.conf"
-                # API 24 selects emulated TLS; Bionic enables zeptun_start's pthread workers.
                 zig build -Dtarget="$ZIG_TARGET" -Doptimize=ReleaseSmall -Dstrip=true \
                   -Dandroid-libc="$LIBC_DIR/$abi.conf" --libc "$LIBC_DIR/$abi.conf" \
                   --prefix "$PWD/zig-out/android/$abi"
@@ -596,10 +526,10 @@ jobs:
 
             if [ "${{ matrix.name }}" = "android-universal" ]; then
               echo "Building Rust for all Android ABIs (universal)..."
-              
+
               for TARGET_TRIPLE in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
                 echo "  -> Building for $TARGET_TRIPLE"
-                
+
                 if [ "$TARGET_TRIPLE" = "aarch64-linux-android" ]; then
                   NDK_CLANG_PREFIX=aarch64-linux-android
                   RUST_ENV_LOWER=aarch64_linux_android
@@ -613,10 +543,10 @@ jobs:
                   RUST_ENV_LOWER=armv7_linux_androideabi
                   RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
                 fi
-                
+
                 CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
                 CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
-                
+
                 export "CC_${RUST_ENV_LOWER}"="$CLANG"
                 export "CXX_${RUST_ENV_LOWER}"="$CLANGXX"
                 export "AR_${RUST_ENV_LOWER}"="$BIN/llvm-ar"
@@ -627,17 +557,13 @@ jobs:
                 export CC="${NDK_CLANG_PREFIX}24-clang"
                 export CXX="${NDK_CLANG_PREFIX}24-clang++"
                 export AR=llvm-ar
-                
+
                 export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
                 export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
                 export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-                
-                # psiphon = attach to the official AAR (no Go psi in this .so).
-                # psiphon-live would compile a second Go runtime — do not.
+
                 cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,zeptun
 
-                # CARGO_TARGET_DIR (set in env: below) puts every artifact in
-                # one place, so there is no longer a fallback copy to do.
                 DEST="$(pwd)/target/$TARGET_TRIPLE/release/libfcae_ffi.a"
                 ls -lh "$DEST"
                 test -f "$DEST"
@@ -678,8 +604,7 @@ jobs:
 
               echo "Using NDK: $NDK"
               "$CLANG" --version | head -1
-              
-              # psiphon = attach to the official AAR. Do not enable psiphon-live.
+
               cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon,zeptun
 
               DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
@@ -687,8 +612,6 @@ jobs:
               test -f "$DEST"
             fi
           else
-            # Non-Android: compile desktop Psiphon as libfcae_psiphon (force_shared).
-            # Android keeps AAR-only (no psiphon-live).
             case "${{ matrix.name }}" in
               windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,zeptun ;;
               *) echo "::error::Unsupported desktop target: ${{ matrix.name }}"; exit 1 ;;
@@ -817,8 +740,6 @@ jobs:
           set -euo pipefail
           mkdir -p package
           cp build/fcaevpn* package/ 2>/dev/null || true
-          # Desktop Psiphon is libfcae_psiphon (c-shared). tun2socks is inside
-          # libfcae_ffi.a on desktop — do not look for libfcae_go_bridge here.
           cp build/libfcae_psiphon.* package/ 2>/dev/null || true
           cp build/fcae_psiphon.dll package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
@@ -832,7 +753,6 @@ jobs:
               printf '%s\n' \
                 '#!/bin/sh' \
                 'DIR="$(cd "$(dirname "$0")" && pwd)"' \
-                '# $DIR covers libfcae_go_bridge.so, which sits next to the binary.' \
                 'export LD_LIBRARY_PATH="$DIR/lib:$DIR:$LD_LIBRARY_PATH"' \
                 'exec "$DIR/FCAE_VPN-linux-x64" "$@"' > package/fcaevpn.sh
               chmod +x package/fcaevpn.sh
@@ -847,7 +767,7 @@ jobs:
             elif [[ "$f" == *.sh ]]; then
               mv "$f" "FCAE_VPN-${{ matrix.name }}.sh"
             elif [[ "$f" != *.so* ]] && [[ "$f" != fcaevpn ]]; then
-              : # skip libs, already in lib/
+              :
             fi
           done
           if [ -f fcaevpn ]; then
@@ -923,7 +843,6 @@ jobs:
             gpg --batch --yes --local-user "$KEY_ID" --detach-sign --armor "$f"
           done
 
-          # publish the public key alongside the binaries so users can verify
           gpg --batch --armor --export "$KEY_ID" > package/FCAE_VPN-public-key.asc
 
           rm -rf "$GNUPGHOME"
@@ -956,10 +875,6 @@ jobs:
             cp build/libfcae_psiphon.dylib "$APP/Contents/MacOS/"
           fi
 
-          # ── App icon ────────────────────────────────────────────────
-          # Build a real .icns from src_cpp/icon_48.png. Finder and the Dock
-          # ignore a bare .png referenced by CFBundleIconFile, which is why the
-          # app previously showed the blank generic icon.
           ICONSET="$RUNNER_TEMP/AppIcon.iconset"
           rm -rf "$ICONSET"
           mkdir -p "$ICONSET"
@@ -1018,8 +933,6 @@ jobs:
             '</dict>' \
             '</plist>' > "$APP/Contents/Info.plist"
 
-          # Bump the bundle mtime so Finder/LaunchServices does not serve a
-          # stale (icon-less) cache entry for this bundle identifier.
           touch "$APP"
 
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
@@ -1032,7 +945,6 @@ jobs:
           fi
           codesign --verify --deep --strict --verbose=2 "$APP" || true
 
-          # Stage a clean DMG root: the .app plus an /Applications drop target.
           DMG_ROOT="$RUNNER_TEMP/dmgroot"
           rm -rf "$DMG_ROOT"
           mkdir -p "$DMG_ROOT"
@@ -1072,6 +984,35 @@ jobs:
         with:
           ref: main
 
+      - name: delete existing release and tag
+        uses: actions/github-script@v8
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        with:
+          script: |
+            const tag = process.env.VERSION;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner, repo: context.repo.repo, per_page: 100,
+            });
+            for (const release of releases) {
+              if (release.tag_name === tag || release.tag_name === `v${tag}`) {
+                console.log(`Deleting existing release ${release.id} for tag ${release.tag_name}`);
+                await github.rest.repos.deleteRelease({
+                  owner: context.repo.owner, repo: context.repo.repo, release_id: release.id,
+                });
+              }
+            }
+            for (const ref of [`tags/${tag}`, `tags/v${tag}`]) {
+              try {
+                await github.rest.git.deleteRef({
+                  owner: context.repo.owner, repo: context.repo.repo, ref,
+                });
+                console.log(`Deleted ref ${ref}`);
+              } catch (error) {
+                if (error.status !== 404 && error.status !== 422) throw error;
+              }
+            }
+
       - name: download app package artifacts
         uses: actions/download-artifact@v8
         with:
@@ -1094,7 +1035,6 @@ jobs:
           for dir in artifacts/*/; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
-            # macOS artifacts contain only the .dmg â€” copy it directly (already compressed)
             if ls "$dir"/*.dmg 1>/dev/null 2>&1; then
               for dmg in "$dir"/*.dmg; do
                 dmg_base=$(basename "$dmg" .dmg)
@@ -1147,10 +1087,6 @@ jobs:
               return cmp(x.revision, y.revision);
             };
 
-            // Release notes = what was typed into the workflow input. The
-            // auto-generated changelog ("Full Changelog" compare link + raw
-            // commit titles) is only a fallback for when the input is empty,
-            // it never mixes in with typed notes.
             let changelog = '';
             try {
               const notes = await github.rest.repos.generateReleaseNotes({
@@ -1178,7 +1114,6 @@ jobs:
             });
             console.log(`Created release ${release.data.id} for tag ${tag} (prerelease=${isPrerelease})`);
 
-            // Upload every file in release-zips as a release asset
             const dir = 'release-zips';
             for (const file of fs.readdirSync(dir)) {
               const filePath = path.join(dir, file);
