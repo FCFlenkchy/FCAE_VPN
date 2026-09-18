@@ -52,10 +52,10 @@ fn main() {
     fcae_build::rerun_if_changed(&header);
 
     let lib_dir = locate_lib_dir(&submodule, target);
-    let archive = lib_dir.join("libzeptun.a");
+    let archive = resolve_zeptun_archive(&lib_dir);
     if !archive.is_file() {
         panic!(
-            "libzeptun.a not found in {}.\n\
+            "libzeptun.a / zeptun.lib not found in {}.\n\
              Desktop: `make -C core/zeptun`\n\
              Android: `sh core/zeptun/scripts/build_android.sh` (needs ANDROID_NDK_HOME)\n\
              Or set FCAE_ZEPTUN_LIBDIR to a directory containing libzeptun.a,\n\
@@ -100,4 +100,19 @@ fn android_abi_dir(arch: fcae_build::target::Arch) -> &'static str {
         fcae_build::target::Arch::X86 => "x86",
         _ => panic!("unsupported Android arch for zeptun: {arch:?}"),
     }
+}
+
+/// Zig names the static archive `libzeptun.a` on POSIX targets but
+/// `zeptun.lib` on Windows. Accept either so the build works whether the
+/// CI renamed it or a developer built natively on Windows.
+fn resolve_zeptun_archive(lib_dir: &Path) -> PathBuf {
+    let posix = lib_dir.join("libzeptun.a");
+    if posix.is_file() {
+        return posix;
+    }
+    let windows = lib_dir.join("zeptun.lib");
+    if windows.is_file() {
+        return windows;
+    }
+    posix
 }

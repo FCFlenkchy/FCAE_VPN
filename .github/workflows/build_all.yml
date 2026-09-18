@@ -490,6 +490,9 @@ jobs:
               ;;
             *) echo "::error::Unsupported zeptun target: ${{ matrix.name }}"; exit 1 ;;
           esac
+          if [[ -f zig-out/lib/zeptun.lib ]]; then
+            mv zig-out/lib/zeptun.lib zig-out/lib/libzeptun.a
+          fi
           case "${{ matrix.name }}" in
             android-*)
               for abi in arm64-v8a armeabi-v7a x86_64 x86; do
