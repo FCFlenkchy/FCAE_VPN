@@ -117,6 +117,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var outerScroll: ScrollView
 
     private val buildIsPrerelease = BuildConfig.APP_VERSION.contains("_pre-release")
+    private val displayVersion = BuildConfig.APP_VERSION.substringBefore("_pre-release")
 
     private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         val t = Thread(r, "bgExecutor")
@@ -355,11 +356,23 @@ class MainActivity : AppCompatActivity() {
                         } else if (isRunning) {
                             userInitiatedDisconnect = false
                             commandPaused = false
-                            commandConnecting = false
                             lastBroadcastGeneration = gen
-                            connecting = false
                             engineRunning = true
                             vpnActive = true
+                            // Psiphon paths: keep commandConnecting true until
+                            // BROADCAST_READY fires so the staged labels
+                            // (CONNECTING / ESTABLISHING TUNNEL) continue to
+                            // display. Clearing it here caused the engine's
+                            // Connected broadcast to flip the UI to
+                            // "CONNECTED - TUN" before Psiphon had actually
+                            // finished its handshake — the visible "hole"
+                            // between the connecting stages and the final
+                            // ESTABLISHING TUNNEL from BROADCAST_READY.
+                            if (!(isPsiphonSelected() || isEgressPsiphon())
+                                    || pendingPsiSocks != 0) {
+                                commandConnecting = false
+                                connecting = false
+                            }
                             updateButton()
                             handler.removeCallbacks(poll)
                             handler.post(poll)
@@ -709,7 +722,7 @@ class MainActivity : AppCompatActivity() {
         applyTorLock()
 
         findViewById<TextView>(R.id.versionText).apply {
-            text = "${BuildConfig.APP_VERSION}  \u00b7  ${if (buildIsPrerelease) "pre-release" else "release"}"
+            text = "$displayVersion  \u00b7  ${if (buildIsPrerelease) "pre-release" else "release"}"
             setTextColor(Color.parseColor(if (buildIsPrerelease) "#FFF0B429" else "#FF8A93A6"))
         }
 
@@ -1823,7 +1836,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showUpdateDialog(info: FcaeUpdateInfo) {
         val msg = buildString {
-            append("Current: ${BuildConfig.APP_VERSION}  (${if (buildIsPrerelease) "pre-release" else "release"})\n")
+            append("Current: $displayVersion  (${if (buildIsPrerelease) "pre-release" else "release"})\n")
             append("Latest: ${info.latestVersion}  (${if (info.isPrerelease) "pre-release" else "release"})\n")
             if (info.releaseDate.isNotEmpty()) append("Date: ${info.releaseDate}\n")
             append("\n")
@@ -1975,31 +1988,40 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            val label = when (state) {
-                0 -> "DISCONNECTED"
-                1, 2, 3 -> "CONNECTING"
-                4 -> {
+            // Psiphon chain guard: the engine reports Connected once Aether's
+            // SOCKS endpoint is live, but on a Psiphon path the egress tunnel
+            // is still dialling. Keep showing the chain progress instead of
+            // prematurely flipping to "CONNECTED — ...".
+            val psiphonStillChaining = state == 4
+                    && (isPsiphonSelected() || isEgressPsiphon())
+                    && commandConnecting
+                    && pendingPsiSocks == 0
+            val label = when {
+                psiphonStillChaining -> "ESTABLISHING TUNNEL"
+                state == 0 -> "DISCONNECTED"
+                state in 1..3 -> "CONNECTING"
+                state == 4 -> {
                     val isTun = spinnerMode.selectedItemPosition == 1
                     if (statusMsg.isNotBlank()) statusMsg.uppercase()
                     else "CONNECTED - ${if (isTun) "TUN" else "PROXY"}"
                 }
-                5 -> "ERROR"
-                6 -> "RECONNECTING"
+                state == 5 -> "ERROR"
+                state == 6 -> "RECONNECTING"
                 else -> "UNKNOWN"
             }
-            // If error state, show the error message directly instead of label + message concatenation
             if (state == 5 && errMsg.isNotEmpty()) {
                 statusText.text = "ERROR: $errMsg"
-            } else if (state == 4) {
+            } else if (state == 4 && !psiphonStillChaining) {
                 statusText.text = label
             } else {
-                statusText.text = if (statusMsg.isNotEmpty() && state != 0) "$label \u2014 $statusMsg" else label
+                statusText.text = if (statusMsg.isNotEmpty() && state != 0 && !psiphonStillChaining) "$label \u2014 $statusMsg" else label
             }
             statusText.setTextColor(
-                when (state) {
-                    4 -> COLOR_CONNECTED
-                    5 -> COLOR_ERROR
-                    0 -> COLOR_DISCONNECTED
+                when {
+                    psiphonStillChaining -> COLOR_PROGRESS
+                    state == 4 -> COLOR_CONNECTED
+                    state == 5 -> COLOR_ERROR
+                    state == 0 -> COLOR_DISCONNECTED
                     else -> COLOR_PROGRESS
                 },
             )

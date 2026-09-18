@@ -58,6 +58,17 @@ bool build_is_prerelease() {
     return strstr(FCAE_VERSION, "_pre-release") != nullptr;
 }
 
+static const char* display_version() {
+    static char buf[64] = {0};
+    if (buf[0]) return buf;
+    const char* suffix = strstr(FCAE_VERSION, "_pre-release");
+    size_t len = suffix ? (size_t)(suffix - FCAE_VERSION) : strlen(FCAE_VERSION);
+    if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+    memcpy(buf, FCAE_VERSION, len);
+    buf[len] = '\0';
+    return buf;
+}
+
 double ui_now_seconds() {
     using clock = std::chrono::steady_clock;
     return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
@@ -1005,18 +1016,18 @@ void render_ui() {
         ImGui::PopStyleColor();
 
         ImGui::SameLine(0, 10);
-        ImGui::TextColored(ImVec4(0.62f, 0.66f, 0.74f, 1.0f), "%s", FCAE_VERSION);
+        ImGui::TextColored(ImVec4(0.62f, 0.66f, 0.74f, 1.0f), "%s", display_version());
         ImGui::SameLine(0, 8);
         if (build_is_prerelease()) {
             ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.20f, 1.0f), "PRE-RELEASE");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("This build is a pre-release (" FCAE_VERSION ").\n"
+                ImGui::SetTooltip("This build is a pre-release (%s).\n"
                                   "Update checks offer only newer versions, respecting\n"
-                                  "your pre-releases setting.");
+                                  "your pre-releases setting.", FCAE_VERSION);
         } else {
             ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.52f, 1.0f), "RELEASE");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("This build is a release (" FCAE_VERSION ").");
+                ImGui::SetTooltip("This build is a release (%s).", FCAE_VERSION);
         }
         ImGui::SameLine(0, 10);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.75f, 0.80f, 1.0f));
