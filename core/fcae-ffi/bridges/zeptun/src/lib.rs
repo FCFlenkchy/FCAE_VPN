@@ -479,20 +479,12 @@ impl TunBridge for ZeptunBridge {
         match fd {
             // Android: VpnService pre-created and pre-configured the device;
             // the engine only owns the data plane.
-            Some(fd) => {
+            Some(_) => {
                 config.device_kind = ZEPTUN_DEVICE_FD;
                 // VpnService already owns addressing/routing/DNS for this
                 // interface; never let the engine re-configure it.
                 config.configure = 0;
                 config.auto_route = 0;
-                let dup = unsafe { libc::dup(fd) };
-                if dup < 0 {
-                    return Err(CoreError::Internal(format!(
-                        "dup(tun fd {fd}) failed: {}",
-                        std::io::Error::last_os_error()
-                    )));
-                }
-                config.tun_fd = dup;
                 set_c_str(&mut config.tun_name, adapter_name(cfg))?;
                 config.mtu = cfg.tun.mtu;
                 set_c_str(&mut config.address4, &cfg.tun.ipv4)?;
@@ -531,6 +523,17 @@ impl TunBridge for ZeptunBridge {
             return Err(CoreError::Internal(
                 "TUN start cancelled before engine creation".into(),
             ));
+        }
+
+        if let Some(fd) = fd {
+            let dup = unsafe { libc::dup(fd) };
+            if dup < 0 {
+                return Err(CoreError::Internal(format!(
+                    "dup(tun fd {fd}) failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            config.tun_fd = dup;
         }
 
         let mut raw: *mut c_void = std::ptr::null_mut();

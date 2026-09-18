@@ -1080,6 +1080,20 @@ mod tests {
     }
 
     #[test]
+    fn tun_engine_selection_is_validated() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        assert_eq!(unsafe { parse(&raw) }.unwrap().tun.engine, TunEngine::Tun2socks);
+        raw.tun_engine = 1;
+        assert_eq!(unsafe { parse(&raw) }.unwrap().tun.engine, TunEngine::Zeptun);
+        for invalid in [2, u64::MAX] {
+            raw.tun_engine = invalid;
+            assert!(matches!(unsafe { parse(&raw) }, Err(CoreError::InvalidConfig(_))));
+        }
+    }
+
+    #[test]
     fn tcp_buffer_sizes_are_plain_bytes_only() {
         for (text, expected) in [("128000", 128000), (" 256000 ", 256000),
                                  ("4096", MIN_TCP_BUFFER), ("4194304", MAX_TCP_BUFFER)] {

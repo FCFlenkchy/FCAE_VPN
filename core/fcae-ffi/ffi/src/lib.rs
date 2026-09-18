@@ -132,12 +132,12 @@ impl TunEngines {
         if !self.t2s.has_fd_provider() {
             return Ok(None);
         }
-        self.t2s.establish_now().ok_or_else(|| {
+        self.t2s.establish_now().map(Some).ok_or_else(|| {
             CoreError::Internal("the host could not establish the VPN interface".into())
         })
     }
 
-    #[cfg(not(feature = "tun"))]
+    #[cfg(all(feature = "zeptun", not(feature = "tun")))]
     fn establish_via_provider(&self) -> Result<Option<i32>, CoreError> {
         Ok(None)
     }
@@ -1071,5 +1071,30 @@ pub unsafe extern "C" fn fcae_poll_update(out: *mut FcaeUpdateInfo) -> FcaeStatu
         FcaeStatus::Ok
     } else {
         FcaeStatus::Timeout
+    }
+}
+
+#[cfg(all(test, feature = "tun", feature = "zeptun"))]
+mod tun_provider_tests {
+    use super::*;
+
+    unsafe extern "C" fn provide_fd() -> std::ffi::c_int { 42 }
+    unsafe extern "C" fn refuse_fd() -> std::ffi::c_int { -1 }
+
+    #[test]
+    fn provider_result_preserves_absence_success_and_failure() {
+        let engines = TunEngines {
+            t2s: Arc::new(fcae_bridge_tun2socks::Tun2SocksBridge::new()),
+            zeptun: Arc::new(fcae_bridge_zeptun::ZeptunBridge::new()),
+        };
+        assert!(matches!(engines.establish_via_provider(), Ok(None)));
+        engines.set_fd_provider(Some(provide_fd));
+        assert!(matches!(engines.establish_via_provider(), Ok(Some(42))));
+        assert_eq!(engines.t2s.android_fd(), Some(42));
+        engines.clear_android_fd();
+        engines.set_fd_provider(Some(refuse_fd));
+        assert!(matches!(engines.establish_via_provider(), Err(CoreError::Internal(_))));
+        assert_eq!(engines.t2s.android_fd(), None);
+        engines.set_fd_provider(None);
     }
 }
