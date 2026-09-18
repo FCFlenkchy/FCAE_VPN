@@ -587,8 +587,22 @@ public class FCAEVpnService extends VpnService {
         rememberStart(lastStartIntent);
 
         synchronized (cmdLock) {
-            if (engineOpInFlight || (running && !vpnPaused)) {
-                if (running && !vpnPaused) {
+            if (vpnPaused) {
+                if (engineOpInFlight) {
+                    queuedStart = lastStartIntent;
+                    Log.i(TAG, "Start queued until TUN pause finishes");
+                    uiConnecting = true;
+                    notification.show("FCAE VPN — Starting…", VpnNotification.BUTTONS_CONNECTING);
+                    startFg(notification.build("FCAE VPN — Starting…", VpnNotification.BUTTONS_CONNECTING));
+                    notifyUi();
+                    return;
+                }
+                engineOpInFlight = true;
+                resumeVpn();
+                return;
+            }
+            if (engineOpInFlight || running) {
+                if (running) {
                     Log.i(TAG, "Start ignored: tunnel already up");
                     return;
                 }
@@ -613,18 +627,25 @@ public class FCAEVpnService extends VpnService {
 
     private synchronized void finishEngineOp() {
         Intent next;
+        boolean resumePaused;
         synchronized (cmdLock) {
             engineOpInFlight = false;
             next = queuedStart;
             queuedStart = null;
+            resumePaused = vpnPaused && next != null;
         }
         if (next != null && !shuttingDown) {
-            Log.i(TAG, "Running queued Start from notification");
+            Log.i(TAG, resumePaused
+                    ? "Running queued Start as TUN resume"
+                    : "Running queued Start from notification");
             synchronized (cmdLock) {
                 engineOpInFlight = true;
             }
-            final Intent src = next;
-            startVpn(src);
+            if (resumePaused) {
+                resumeVpn();
+            } else {
+                startVpn(next);
+            }
         }
     }
 
@@ -961,15 +982,6 @@ public class FCAEVpnService extends VpnService {
         // pause landing in the connect window would not stop the worker, and
         // it would resurrect "running" (live TUN) after the pause.
         final long myGen = cleanupGeneration.incrementAndGet();
-        // ANY Psiphon exit keeps the tunnel process bound for the whole
-        // session. Stopping only the chained variant leaked the plain
-        // Psiphon (backend == 1) :psiphon process — and its live tunnel —
-        // after a Stop.
-        final Intent lsi = lastStartIntent;
-        if (lsi != null && (lsi.getIntExtra("backend", 0) == 1
-                || lsi.getBooleanExtra("psiphonThroughTunnel", false))) {
-            PsiphonTunnelService.stopBound(this);
-        }
         running = false;
         vpnPaused = true;
         uiConnecting = false;
@@ -985,9 +997,8 @@ public class FCAEVpnService extends VpnService {
             vpnInterface = null;
         }
         closeQuiet(pfd);
-        try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
+        sweepTun();
 
-        // 1. INSTANT UI & NOTIFICATION UPDATE
         Runnable uiCleanup = () -> {
             notifyUi();
             handler.removeCallbacks(statsRunnable);
@@ -1000,16 +1011,87 @@ public class FCAEVpnService extends VpnService {
             handler.post(uiCleanup);
         }
 
-        // 2. Reap only. TUN already down. No join.
-        //
-        // freeNativeOnce() is deliberately absent: pause is resumable, and
-        // releasing the library here meant resuming had to re-init a
-        // shut-down FFI.
+        // TUN data plane only. The session and backend stay up so Start can
+        // re-enable the interface without a full reconnect.
         NativeEngine.lifecycleExecutor.execute(() -> {
             if (myGen != cleanupGeneration.get()) return;
-            try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+            try { NativeEngine.nativePauseTun(); } catch (Exception ignored) {}
             handler.post(() -> {
                 if (myGen == cleanupGeneration.get()) finishEngineOp();
+            });
+        });
+    }
+
+    /**
+     * Notification Start after Stop: recreate the VpnService interface and
+     * re-attach the TUN engine. The backend is already up.
+     */
+    private synchronized void resumeVpn() {
+        if (shuttingDown) {
+            synchronized (cmdLock) { engineOpInFlight = false; }
+            return;
+        }
+        if (lastStartIntent == null) {
+            Intent recalled = recalledStart();
+            if (recalled == null) {
+                Log.w(TAG, "resumeVpn: no last session");
+                vpnPaused = false;
+                synchronized (cmdLock) { engineOpInFlight = false; }
+                showReady();
+                return;
+            }
+            Log.w(TAG, "resumeVpn: no last session; falling back to a full start");
+            vpnPaused = false;
+            startVpn(recalled);
+            return;
+        }
+        sGeneration.incrementAndGet();
+        vpnPaused = false;
+        shuttingDown = false;
+        uiConnecting = true;
+        pendingSessionGen = cleanupGeneration.get();
+        notification.show("FCAE VPN — Starting…", VpnNotification.BUTTONS_CONNECTING);
+        startFg(notification.build("FCAE VPN — Starting…", VpnNotification.BUTTONS_CONNECTING));
+        notifyUi();
+
+        final Intent fallback = lastStartIntent;
+        final long myGen = cleanupGeneration.get();
+        NativeEngine.lifecycleExecutor.execute(() -> {
+            if (myGen != cleanupGeneration.get() || shuttingDown) return;
+            int fd = establishTunNow();
+            if (fd < 0) {
+                Log.w(TAG, "resumeVpn: establish failed; full start");
+                handler.post(() -> {
+                    if (myGen != cleanupGeneration.get() || shuttingDown) return;
+                    vpnPaused = false;
+                    startVpn(fallback);
+                });
+                return;
+            }
+            try { nativeSetTunFd(fd); } catch (Exception ignored) {}
+            boolean ok = false;
+            try { ok = NativeEngine.nativeResumeTun(); } catch (Exception ignored) {}
+            if (!ok) {
+                Log.w(TAG, "resumeVpn: native resume failed; full start");
+                handler.post(() -> {
+                    if (myGen != cleanupGeneration.get() || shuttingDown) return;
+                    vpnPaused = false;
+                    startVpn(fallback);
+                });
+                return;
+            }
+            handler.post(() -> {
+                synchronized (FCAEVpnService.this) {
+                    if (myGen != cleanupGeneration.get() || shuttingDown) return;
+                    running = true;
+                    vpnPaused = false;
+                    uiConnecting = false;
+                    synchronized (cmdLock) { engineOpInFlight = false; }
+                    lastNotifText = null;
+                    updateNotification();
+                    handler.post(statsRunnable);
+                    notifyUi();
+                }
             });
         });
     }

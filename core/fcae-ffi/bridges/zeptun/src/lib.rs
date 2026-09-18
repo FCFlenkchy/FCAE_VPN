@@ -59,6 +59,7 @@ use parking_lot::Mutex;
 
 mod platform;
 mod socks5p;
+mod socks5t;
 
 #[cfg(all(windows, wintun_staged))]
 static WINTUN_DLL: &[u8] = include_bytes!(env!("FCAE_WINTUN_DLL"));
@@ -345,6 +346,7 @@ struct Handle {
     engine: NonNull<c_void>,
     fd: Option<i32>,
     _psiphon_adapter: Option<socks5p::Adapter>,
+    _tor_adapter: Option<socks5t::Adapter>,
     dns: Option<fcae_runtime::tun_dns::DnsGuard>,
 }
 unsafe impl Send for Handle {}
@@ -461,6 +463,9 @@ impl TunBridge for ZeptunBridge {
         })?;
 
         // The final endpoint marks both standalone and chained Psiphon exits.
+        // Tor exits have no UDP ASSOCIATE: socks5t turns UDP/53 into SOCKS
+        // CONNECT dest:53 with length-prefixed DNS-over-TCP. Zeptun still
+        // ASSOCIATEs at the facade (socks5_udp) so it never talks UDP to Tor.
         let psiphon_adapter = if endpoints.psiphon_dns {
             Some(socks5p::Adapter::start(socks).map_err(|e| {
                 CoreError::Internal(format!("zeptun socks5p adapter: {e}"))
@@ -468,9 +473,20 @@ impl TunBridge for ZeptunBridge {
         } else {
             None
         };
-        let socks = psiphon_adapter.as_ref().map_or(socks, |adapter| adapter.endpoint());
+        let tor_adapter = if psiphon_adapter.is_none() && cfg.tor.is_exit() {
+            Some(socks5t::Adapter::start(socks).map_err(|e| {
+                CoreError::Internal(format!("zeptun socks5t adapter: {e}"))
+            })?)
+        } else {
+            None
+        };
+        let socks = psiphon_adapter.as_ref().map(|adapter| adapter.endpoint())
+            .or_else(|| tor_adapter.as_ref().map(|adapter| adapter.endpoint()))
+            .unwrap_or(socks);
         if psiphon_adapter.is_some() {
             log::info!("[zeptun] socks5p: native Psiphon DNS gateway, no direct DNS fallback");
+        } else if tor_adapter.is_some() {
+            log::info!("[zeptun] socks5t: DNS-over-TCP through Tor SOCKS");
         }
 
         // Windows needs wintun.dll discoverable before the device is created:
@@ -538,9 +554,8 @@ impl TunBridge for ZeptunBridge {
 
         config.handler_kind = ZEPTUN_HANDLER_SOCKS5;
         set_c_str(&mut config.socks5_server, &socks.to_string())?;
-        // UDP ASSOCIATE terminates at our adapter, never at Psiphon. It
-        // sends DNS through UDPGW and absorbs non-DNS UDP like socks5p.
-        config.socks5_udp = u8::from(endpoints.udp || psiphon_adapter.is_some());
+        // UDP ASSOCIATE terminates at our adapter, never at Psiphon/Tor.
+        config.socks5_udp = u8::from(endpoints.udp || psiphon_adapter.is_some() || tor_adapter.is_some());
         config.socks5_pipeline = ZEPTUN_SOCKS5_PIPELINE_AUTO;
         config.log_level = zeptun_log_level(cfg.tun.t2s_log_level);
         self.install_log_hook(config.log_level);
@@ -578,6 +593,7 @@ impl TunBridge for ZeptunBridge {
             engine: handle,
             fd: fd.map(|_| config.tun_fd),
             _psiphon_adapter: psiphon_adapter,
+            _tor_adapter: tor_adapter,
             dns: None,
         };
 
@@ -598,7 +614,7 @@ impl TunBridge for ZeptunBridge {
         self.running.store(true, Ordering::SeqCst);
         *active = Some(handle);
         log::info!(
-            "[tun] up (zeptun {}, socks {}, mtu {})",
+            "[tun] up ({}, socks {}, mtu {})",
             version(),
             socks,
             config.mtu

@@ -57,7 +57,7 @@ fn run(program: &str, args: &[&str]) -> bool {
     match cmd.status() {
         Ok(s) => s.success(),
         Err(e) => {
-            log::debug!("[tun] `{program}` failed to run: {e}");
+            log::debug!("[tun2socks] `{program}` failed to run: {e}");
             false
         }
     }
@@ -177,7 +177,7 @@ pub fn configure(cfg: &SessionConfig, peer_ip: Option<&str>) -> Result<TunUndo> 
     // Android: the VpnService already owns addressing, routing and DNS.
     // Touching them from native code is both unnecessary and forbidden.
     if cfg!(target_os = "android") {
-        log::info!("[tun] Android: VpnService owns routing/DNS; nothing to configure natively");
+        log::info!("[tun2socks] Android: VpnService owns routing/DNS; nothing to configure natively");
         return Ok(undo);
     }
 
@@ -239,7 +239,7 @@ pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {
     if let Some(bytes) = bytes {
         if let Ok(mut f) = std::fs::File::create(&dest) {
             if f.write_all(bytes).is_ok() {
-                log::info!("[tun] wintun.dll written to {}", dest.display());
+                log::info!("[tun2socks] wintun.dll written to {}", dest.display());
                 return Ok(());
             }
         }
@@ -255,7 +255,7 @@ pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {
         // Prepend to the DLL search path so the loader finds it.
         let path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{};{path}", alt.display()));
-        log::info!("[tun] wintun.dll staged in {}", alt.display());
+        log::info!("[tun2socks] wintun.dll staged in {}", alt.display());
         return Ok(());
     }
 
@@ -371,7 +371,7 @@ fn restore_windows(undo: &TunUndo) {
             &format!("name={name}"), "dhcp"]);
     }
     run("ipconfig", &["/flushdns"]);
-    log::info!("[tun] Windows routes/DNS restored for `{name}`");
+    log::info!("[tun2socks] Windows routes/DNS restored for `{name}`");
 }
 
 // ── Linux ───────────────────────────────────────────────────────────────
@@ -437,7 +437,7 @@ fn restore_linux(undo: &TunUndo) {
     // resolvectl reverts automatically when the link disappears, but be
     // explicit in case the device lingers.
     fcae_runtime::tun_dns::restore_linux(name, &undo.dns_routes);
-    log::info!("[tun] Linux routes/DNS restored for `{name}`");
+    log::info!("[tun2socks] Linux routes/DNS restored for `{name}`");
 }
 
 // ── macOS ───────────────────────────────────────────────────────────────
@@ -536,7 +536,7 @@ fn restore_macos(undo: &TunUndo) {
             run("networksetup", &args);
         }
     }
-    log::info!("[tun] macOS routes/DNS restored");
+    log::info!("[tun2socks] macOS routes/DNS restored");
 }
 
 #[cfg(test)]

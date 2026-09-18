@@ -404,6 +404,18 @@ FcaeStatus fcae_stop(void);
  * Native joins and routes/DNS restoration run off the caller. Idempotent. */
 FcaeStatus fcae_stop_begin(void);
 
+/* Bring the TUN data plane down without cancelling the session or backend.
+ * The host should close its VpnService descriptor. Re-enable with
+ * fcae_set_tun_fd() then fcae_resume_tun(). */
+FcaeStatus fcae_pause_tun(void);
+
+/* Re-raise TUN on a live paused session. Publish a fresh descriptor first
+ * (fcae_set_tun_fd or the fd provider). */
+FcaeStatus fcae_resume_tun(void);
+
+/* True while a session is alive and its TUN data plane is paused. */
+bool       fcae_tun_paused(void);
+
 bool       fcae_is_running(void);
 
 /* `out->struct_size` and `out->abi_version` must be set before calling. */

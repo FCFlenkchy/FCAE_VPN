@@ -766,7 +766,7 @@ pub fn register_update_provider() {
                 current,
                 &info,
                 include_prereleases,
-            );
+            )?;
             Ok(to_core_result(r))
         },
         parse: |current, json, include_prereleases| {

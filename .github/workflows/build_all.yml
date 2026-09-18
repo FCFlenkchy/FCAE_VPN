@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'release tag (e.g. v1.0.0)'
+        description: 'version (e.g. 1.4.0; the prerelease option adds _pre-release)'
         required: true
-        default: 'v1.0.0'
+        default: '1.0.0'
       prerelease:
         description: 'pre-release'
         required: false
@@ -29,7 +29,61 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    name: resolve release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      macos_version: ${{ steps.version.outputs.macos_version }}
+    steps:
+      - name: validate version and channel
+        id: version
+        uses: actions/github-script@v8
+        env:
+          RELEASE_VERSION: ${{ inputs.release_tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        with:
+          script: |
+            const raw = process.env.RELEASE_VERSION.trim();
+            const pre = process.env.PRERELEASE === 'true';
+            const match = /^[vV]?((?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2,3})(_pre-release(?:\.(?:0|[1-9][0-9]*))?)?$/.exec(raw);
+            if (!match) throw new Error('Use a version such as 1.4.0 or 1.4.0_pre-release');
+            if (match[1].split('.').some(n => BigInt(n) > 65535n)) {
+              throw new Error('Numeric version components must fit Windows version resources (0..65535)');
+            }
+            if (!pre && match[2]) throw new Error('Select the prerelease option for a _pre-release version');
+            const revision = match[2]?.split('.')[1];
+            if (revision && BigInt(revision) > 18446744073709551615n) {
+              throw new Error('Prerelease revision is too large');
+            }
+            const version = `${match[1]}${pre ? match[2] || '_pre-release' : ''}`;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner, repo: context.repo.repo, per_page: 100,
+            });
+            const releaseVersion = (release) => {
+              let tag = release.tag_name.replace(/^[vV]/, '').replace(/-prerelease(?=\.|$)/, '_pre-release');
+              if (release.prerelease && /^[0-9]+(?:\.[0-9]+){2,3}$/.test(tag)) tag += '_pre-release';
+              return tag;
+            };
+            if (releases.some(release => releaseVersion(release) === version)) {
+              throw new Error(`Release ${version} already exists; choose a new version or explicitly remove the failed draft before retrying`);
+            }
+            try {
+              await github.rest.git.getRef({
+                owner: context.repo.owner, repo: context.repo.repo, ref: `tags/${version}`,
+              });
+              throw new Error(`Tag ${version} already exists; release tags are not overwritten`);
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            core.setOutput('version', version);
+            core.setOutput('macos_version', match[1].split('.').slice(0, 3).join('.'));
+            core.info(`Release tag and embedded app version: ${version}`);
+
   build:
+    needs: prepare
+    env:
+      FCAE_VERSION: ${{ needs.prepare.outputs.version }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -186,33 +240,6 @@ jobs:
               }
               console.log(`Cleaned ${totalDeleted} caches for prefix '${prefix}'`);
             }
-
-      - name: update version.json for build
-        run: |
-          set -euo pipefail
-          export TAG="${{ github.event.inputs.release_tag }}${{ inputs.prerelease && '-prerelease' || '' }}"
-          export DATE=$(date +%Y-%m-%d)
-          export NOTES="${{ github.event.inputs.extra_notes }}"
-          export DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases"
-
-          python3 << 'PYEOF'
-          import json, os
-          tag = os.environ['TAG']
-          date = os.environ['DATE']
-          notes = os.environ.get('NOTES', '')
-          download_url = os.environ['DOWNLOAD_URL']
-          data = {
-              'version': tag,
-              'release_date': date,
-              'release_notes': notes,
-              'download_url': download_url
-          }
-          with open('version.json', 'w') as f:
-              json.dump(data, f, indent=2)
-              f.write('\n')
-          print('Updated version.json for build:')
-          print(open('version.json').read())
-          PYEOF
 
       - name: install deps (linux)
         if: matrix.name == 'linux-x64'
@@ -645,7 +672,7 @@ jobs:
           cmake .. -G Ninja -DCMAKE_CXX_COMPILER=g++ \
             -DCMAKE_PREFIX_PATH=/usr/local/glfw_static \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}${{ inputs.prerelease && '-prerelease' || '' }}"
+            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION"
           cmake --build . --config Release
 
       - name: build frontend (windows)
@@ -654,7 +681,7 @@ jobs:
           mkdir -p build && cd build
           cmake .. -G Ninja \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}${{ inputs.prerelease && '-prerelease' || '' }}"
+            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION"
           cmake --build . --config Release
 
       - name: build frontend (macOS)
@@ -668,7 +695,7 @@ jobs:
           fi
           cmake .. -G Ninja \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="${{ github.event.inputs.release_tag }}${{ inputs.prerelease && '-prerelease' || '' }}"
+            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION"
           cmake --build . --config Release
 
       - name: build apk
@@ -918,11 +945,7 @@ jobs:
           echo "Binary dynamic dependencies:"
           otool -L "$APP/Contents/MacOS/fcaevpn" || true
 
-          # Strip leading 'v' from release_tag for macOS version (must be x.y.z format)
-          RAW_TAG="${{ github.event.inputs.release_tag }}"
-          MACOS_VER="${RAW_TAG#v}"
-          # If MACOS_VER has more than 3 dots (e.g. 1.0.9.4), use only first 3 components
-          MACOS_VER=$(echo "$MACOS_VER" | awk -F. '{if(NF>3) print $1"."$2"."$3; else print $0}')
+          MACOS_VER="${{ needs.prepare.outputs.macos_version }}"
           printf '%s\n' \
             '<?xml version="1.0" encoding="UTF-8"?>' \
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
@@ -1002,7 +1025,9 @@ jobs:
 
   release:
     name: release/pre-release
-    needs: build
+    needs: [prepare, build]
+    env:
+      FCAE_VERSION: ${{ needs.prepare.outputs.version }}
     runs-on: ubuntu-latest
     if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch'
     permissions:
@@ -1035,20 +1060,15 @@ jobs:
           for dir in artifacts/*/; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
-            if [ "${{ inputs.prerelease }}" = "true" ]; then
-              suffix="-prerelease"
-            else
-              suffix=""
-            fi
             # macOS artifacts contain only the .dmg â€” copy it directly (already compressed)
             if ls "$dir"/*.dmg 1>/dev/null 2>&1; then
               for dmg in "$dir"/*.dmg; do
                 dmg_base=$(basename "$dmg" .dmg)
-                cp "$dmg" "release-zips/${dmg_base}${suffix}.dmg"
-                echo "Copied release-zips/${dmg_base}${suffix}.dmg"
+                cp "$dmg" "release-zips/${dmg_base}-${FCAE_VERSION}.dmg"
+                echo "Copied release-zips/${dmg_base}-${FCAE_VERSION}.dmg"
               done
             else
-              zip_name="${name}${suffix}.zip"
+              zip_name="${name}-${FCAE_VERSION}.zip"
               (
                 cd "$dir"
                 zip -9 -j "../../release-zips/${zip_name}" ./*
@@ -1060,27 +1080,6 @@ jobs:
           ls -lah release-zips/
           test $(ls -1 release-zips/* 2>/dev/null | wc -l) -ge 1
 
-      - name: delete existing release + tag
-        uses: actions/github-script@v8
-        continue-on-error: true
-        with:
-          script: |
-            const tag = ${{ toJSON(inputs.release_tag) }};
-            try {
-              const rel = await github.rest.repos.getReleaseByTag({
-                owner: context.repo.owner, repo: context.repo.repo, tag
-              });
-              await github.rest.repos.deleteRelease({
-                owner: context.repo.owner, repo: context.repo.repo, release_id: rel.data.id
-              });
-              console.log(`Deleted release ${rel.data.id} for tag ${tag}`);
-            } catch (e) { console.log(`No existing release: ${e.message}`); }
-            try {
-              await github.rest.git.deleteRef({
-                owner: context.repo.owner, repo: context.repo.repo, ref: `tags/${tag}`
-              });
-            } catch (e) { console.log(`No existing tag: ${e.message}`); }
-
       - name: release/pre-release
         uses: actions/github-script@v8
         with:
@@ -1088,22 +1087,30 @@ jobs:
             const fs = require('fs');
             const path = require('path');
 
-            const tag = ${{ toJSON(inputs.release_tag) }};
+            const tag = ${{ toJSON(needs.prepare.outputs.version) }};
             const isPrerelease = ${{ inputs.prerelease }};
             const extraNotes = ${{ toJSON(inputs.extra_notes) }};
 
-            // Compare the numeric base of two version strings (ignoring the
-            // leading v and any -prerelease/+build suffix); returns true when
-            // the first base is strictly newer.
-            const baseKey = (v) => String(v).replace(/^[vV]/, '').split(/[-+]/)[0].split('.')
-              .map((n) => parseInt(n, 10) || 0);
-            const baseNewer = (a, b) => {
-              const ka = baseKey(a), kb = baseKey(b);
-              for (let i = 0; i < 4; i++) {
-                const d = (ka[i] || 0) - (kb[i] || 0);
-                if (d !== 0) return d > 0;
+            const parseVersion = (version) => {
+              const match = /^((?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2,3})(_pre-release(?:\.(?:0|[1-9][0-9]*))?)?$/.exec(version);
+              if (!match) throw new Error(`Invalid release version: ${version}`);
+              const nums = match[1].split('.').map(BigInt);
+              while (nums.length < 4) nums.push(0n);
+              const revision = match[2]?.split('.')[1];
+              if (nums.some(n => n > 18446744073709551615n) || revision && BigInt(revision) > 18446744073709551615n) {
+                throw new Error(`Invalid numeric version component: ${version}`);
               }
-              return false;
+              return { nums, pre: Boolean(match[2]), revision: revision === undefined ? -1n : BigInt(revision) };
+            };
+            const compareVersion = (a, b) => {
+              const x = parseVersion(a), y = parseVersion(b);
+              const cmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+              for (let i = 0; i < 4; i++) {
+                const d = cmp(x.nums[i], y.nums[i]);
+                if (d) return d;
+              }
+              if (x.pre !== y.pre) return x.pre ? -1 : 1;
+              return cmp(x.revision, y.revision);
             };
 
             // Release notes = what was typed into the workflow input. The
@@ -1126,14 +1133,14 @@ jobs:
             const body = (extraNotes || '').trim() ? extraNotes.trim() : changelog;
 
             const release = await github.rest.repos.createRelease({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            tag_name: tag,
-            target_commitish: context.sha,
-            name: `FCAE VPN ${tag}`,
-            body,
-            prerelease: isPrerelease,
-            draft: false,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              target_commitish: context.sha,
+              name: `FCAE VPN ${tag}`,
+              body,
+              prerelease: isPrerelease,
+              draft: true,
             });
             console.log(`Created release ${release.data.id} for tag ${tag} (prerelease=${isPrerelease})`);
 
@@ -1161,24 +1168,18 @@ jobs:
             }
             console.log('All assets uploaded.');
 
-            // Publish update metadata only after every asset uploaded successfully.
-            // Use the Contents API to commit just this file without pushing a
-            // stale checkout.
-            //
-            // version.json is a TWO-SLOT manifest (see
-            // core/Aether/src/version_checker.rs): the top level is always the
-            // latest STABLE release, the optional `prerelease` block is the
-            // latest pre-release, and `type` tells the client which is which.
-            // A pre-release run must never overwrite the stable slot — that
-            // is what used to hide the last stable release from stable users.
-            // The top-level keys must stay BEFORE the prerelease block: CMake
-            // and Gradle read the first "version" match of this file.
+            const published = await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.data.id,
+              draft: false,
+              make_latest: isPrerelease ? 'false' : 'legacy',
+            });
             const entry = {
-              type: isPrerelease ? 'pre-release' : 'release',
-              version: isPrerelease ? `${tag}-prerelease` : tag,
-              release_date: (release.data.published_at || new Date().toISOString()).slice(0, 10),
-              release_notes: body,
-              download_url: release.data.html_url,
+              version: tag,
+              date: published.data.published_at.slice(0, 10),
+              notes: body,
+              url: published.data.html_url,
             };
 
             const current = await github.rest.repos.getContent({
@@ -1190,35 +1191,20 @@ jobs:
             if (Array.isArray(current.data) || current.data.type !== 'file') {
               throw new Error('Expected version.json to be a file on main');
             }
-            let previous = {};
-            try {
-              previous = JSON.parse(Buffer.from(current.data.content, 'base64').toString('utf8'));
-            } catch (e) {
-              console.log(`Existing version.json is not valid JSON, rewriting it: ${e.message}`);
+            const previous = JSON.parse(Buffer.from(current.data.content, 'base64').toString('utf8'));
+            if (!Array.isArray(previous) || !previous.length) {
+              throw new Error('version.json must be a nonempty release array');
             }
-
-            const next = {};
-            if (isPrerelease) {
-              // Only the pre-release slot moves; the stable slot is kept
-              // verbatim so stable clients keep seeing the last stable.
-              for (const key of ['type', 'version', 'release_date', 'release_notes', 'download_url']) {
-                if (previous[key] !== undefined) next[key] = previous[key];
-              }
-              next.prerelease = entry;
-            } else {
-              next.type = 'release';
-              next.version = entry.version;
-              next.release_date = entry.release_date;
-              next.release_notes = entry.release_notes;
-              next.download_url = entry.download_url;
-              // Keep an in-flight pre-release only if its base version is still
-              // ahead of this stable (v1.5.0-beta.1 survives a v1.4.0 release);
-              // otherwise the stable supersedes it.
-              const oldPre = previous.prerelease;
-              if (oldPre && typeof oldPre.version === 'string' && baseNewer(oldPre.version, tag)) {
-                next.prerelease = oldPre;
+            for (const release of previous) {
+              parseVersion(release.version);
+              if (typeof release.date !== 'string' || typeof release.notes !== 'string' || typeof release.url !== 'string') {
+                throw new Error('Each release requires version, date, notes and url');
               }
             }
+            const next = previous.filter(release => compareVersion(release.version, entry.version) !== 0);
+            next.push(entry);
+            next.sort((a, b) => Number(parseVersion(a.version).pre) - Number(parseVersion(b.version).pre)
+              || compareVersion(b.version, a.version));
             const content = `${JSON.stringify(next, null, 2)}\n`;
             if (content !== Buffer.from(current.data.content, 'base64').toString('utf8')) {
               await github.rest.repos.createOrUpdateFileContents({

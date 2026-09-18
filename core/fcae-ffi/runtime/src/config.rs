@@ -252,6 +252,12 @@ impl TorConfig {
     pub fn is_enabled(&self) -> bool {
         self.mode != FcaeTorMode::Off
     }
+
+    /// Tor is the traffic exit (Only or Chain). Reverse carries the tunnel
+    /// *over* Tor, so DNS still exits through the WARP peer.
+    pub fn is_exit(&self) -> bool {
+        matches!(self.mode, FcaeTorMode::Only | FcaeTorMode::Chain)
+    }
 }
 
 /// Fully validated session configuration.

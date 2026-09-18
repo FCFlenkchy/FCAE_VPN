@@ -189,10 +189,10 @@ pub struct Tun2SocksBridge {
     active: Mutex<Option<Active>>,
     running: AtomicBool,
     log_installed: AtomicBool,
-    /// Set when "[tun] up" was logged; "[tun] down" logs only on a matching
+    /// Set when "[tun2socks] up" was logged; "[tun2socks] down" logs only on a matching
     /// swap back to false. Teardown (abort/stop, session end, supervisor)
     /// can run several times for one up — without this gate every extra
-    /// pass printed another "[tun] down".
+    /// pass printed another "[tun2socks] down".
     up_logged: AtomicBool,
     /// Android VpnService descriptor set out-of-band via the FFI.
     external_fd: AtomicI32,
@@ -311,7 +311,7 @@ impl Tun2SocksBridge {
         let provide = self.fd_provider()?;
         let fd = unsafe { provide() };
         if fd >= 0 {
-            log::info!("[tun] host provided VpnService fd {fd} on demand");
+            log::info!("[tun2socks] host provided VpnService fd {fd} on demand");
             self.external_fd.store(fd, Ordering::SeqCst);
             Some(fd)
         } else {
@@ -348,7 +348,7 @@ impl Tun2SocksBridge {
             if let Some(provide) = self.fd_provider() {
                 let fd = unsafe { provide() };
                 if fd >= 0 {
-                    log::info!("[tun] host provided VpnService fd {fd} on demand");
+                    log::info!("[tun2socks] host provided VpnService fd {fd} on demand");
                     self.external_fd.store(fd, Ordering::SeqCst);
                     external = Some(fd);
                 } else {
@@ -368,7 +368,7 @@ impl Tun2SocksBridge {
                     std::io::Error::last_os_error()
                 )));
             }
-            log::info!("[tun] using VpnService fd {fd} (dup -> {dup}), in-process");
+            log::info!("[tun2socks] using VpnService fd {fd} (dup -> {dup}), in-process");
             self.pending_fd.store(dup, Ordering::SeqCst);
             if self.closing.load(Ordering::SeqCst) {
                 if self
@@ -419,7 +419,7 @@ impl TunBridge for Tun2SocksBridge {
         {
             let slot = self.active.lock();
             if slot.is_some() {
-                log::warn!("[tun] start called while a device is already up; ignoring");
+                log::warn!("[tun2socks] start called while a device is already up; ignoring");
                 return Ok(());
             }
         }
@@ -446,7 +446,7 @@ impl TunBridge for Tun2SocksBridge {
         // socks5p adapter so its CONNECT-only listener never receives UDP
         // ASSOCIATE (0x03); DNS is sent through the native UDP gateway.
         let proxy = if endpoints.psiphon_dns {
-            log::info!("[tun] Psiphon DNS: native UDP gateway through the selected exit (no fallback)");
+            log::info!("[tun2socks] Psiphon DNS: native UDP gateway through the selected exit (no fallback)");
             format!("socks5p://{socks}")
         } else {
             format!("socks5://{socks}")
@@ -471,7 +471,7 @@ impl TunBridge for Tun2SocksBridge {
         // always wins.
         let level = cfg.tun.t2s_log_str();
         let c_level = CString::new(level.clone()).expect("level has no NUL");
-        log::info!("[tun] TCP sndbuf={} bytes, rcvbuf={} bytes, auto-tuning={}, t2s log={}",
+        log::info!("[tun2socks] TCP sndbuf={} bytes, rcvbuf={} bytes, auto-tuning={}, t2s log={}",
             cfg.tun.tcp_sndbuf, cfg.tun.tcp_rcvbuf, cfg.tun.tcp_auto_tuning, level);
 
         // Serialize the fd handoff with abort. Never close a numeric fd while
@@ -535,7 +535,7 @@ impl TunBridge for Tun2SocksBridge {
         let _ = owned_fd; // transferred to Go by t2s_start
         *active = Some(Active { undo });
         self.up_logged.store(true, Ordering::SeqCst);
-        log::info!("[tun] up: {device} <-> {proxy} (in-process)");
+        log::info!("[tun2socks] up: {device} <-> {proxy} (in-process)");
         Ok(())
     }
 
@@ -567,12 +567,12 @@ impl TunBridge for Tun2SocksBridge {
 
         let rc = unsafe { t2s_stop() };
         if rc != 0 {
-            log::warn!("[tun] t2s_stop returned {rc}");
+            log::warn!("[tun2socks] t2s_stop returned {rc}");
         }
 
         // Leave `closing` set. The next start() clears it.
         if self.up_logged.swap(false, Ordering::SeqCst) {
-            log::info!("[tun] down");
+            log::info!("[tun2socks] down");
         }
     }
 

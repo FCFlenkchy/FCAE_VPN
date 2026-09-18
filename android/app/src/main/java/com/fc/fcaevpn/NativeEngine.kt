@@ -107,6 +107,15 @@ object NativeEngine {
      * worker thread. Returns in ~1ms; follow with nativeStop() to reap.
      */
     @JvmStatic external fun nativeStopBegin()
+
+    /** TUN down, session/backend stay up. Pair with [nativeResumeTun]. */
+    @JvmStatic external fun nativePauseTun(): Boolean
+
+    /** Re-raise TUN on a live paused session after a fresh VpnService fd. */
+    @JvmStatic external fun nativeResumeTun(): Boolean
+
+    /** True while a session is alive and its TUN data plane is paused. */
+    @JvmStatic external fun nativeTunPaused(): Boolean
     @JvmStatic external fun nativeFree()
     /// Psiphon egress regions as comma-separated ISO codes, or "" before the
     /// first successful connect.

@@ -116,10 +116,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editRoutesInline: android.widget.EditText
     private lateinit var outerScroll: ScrollView
 
-    /// True when this build came from a pre-release workflow run: its own
-    /// version carries a suffix (v1.4.0-beta.2 vs v1.3.2). Drives the channel
-    /// label in the header and in the update dialog.
-    private val buildIsPrerelease = BuildConfig.APP_VERSION.contains('-')
+    private val buildIsPrerelease = BuildConfig.APP_VERSION.contains("_pre-release")
 
     private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         val t = Thread(r, "bgExecutor")
@@ -711,12 +708,8 @@ class MainActivity : AppCompatActivity() {
         }
         applyTorLock()
 
-        // Running build as "ver · type": a pre-release build stamps a suffix
-        // into the version itself, so show the base version and let the
-        // single type word carry the channel — no duplication.
         findViewById<TextView>(R.id.versionText).apply {
-            val baseVersion = BuildConfig.APP_VERSION.substringBefore('-')
-            text = "$baseVersion  \u00b7  ${if (buildIsPrerelease) "pre-release" else "release"}"
+            text = "${BuildConfig.APP_VERSION}  \u00b7  ${if (buildIsPrerelease) "pre-release" else "release"}"
             setTextColor(Color.parseColor(if (buildIsPrerelease) "#FFF0B429" else "#FF8A93A6"))
         }
 
@@ -872,6 +865,8 @@ class MainActivity : AppCompatActivity() {
                         }
                         renderPsiStats()
                     }
+                } else if (try { NativeEngine.nativeTunPaused() } catch (_: Throwable) { false }) {
+                    handler.post { showStoppedFromPause() }
                 } else {
                     val state = NativeEngine.nativeGetState()
                     // 1..4 = running, 6 = Reconnecting (session alive, the engine
@@ -949,6 +944,18 @@ class MainActivity : AppCompatActivity() {
         saveSettings()
     }
 
+    private fun showStoppedFromPause() {
+        commandPaused = true
+        commandConnecting = false
+        connecting = false
+        engineRunning = false
+        vpnActive = false
+        updateButton()
+        statusText.text = "STOPPED"
+        statusText.setTextColor(Color.parseColor("#8A93A6"))
+        handler.removeCallbacks(poll)
+    }
+
     override fun onResume() {
         super.onResume()
         inForeground = true
@@ -958,6 +965,11 @@ class MainActivity : AppCompatActivity() {
             // deciding which Psiphon UI path to restore.
             refreshPsiphonRegions()
             requestPsiphonRegions()
+        }
+        val tunPaused = try { NativeEngine.nativeTunPaused() } catch (_: Throwable) { false }
+        if (commandPaused || tunPaused) {
+            showStoppedFromPause()
+            return
         }
         // Pure Psiphon proxy mode is owned by PsiphonTunnelService and its
         // foreground owner, not by NativeEngine. NativeEngine.nativeGetState()
@@ -1379,6 +1391,26 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectClicked() {
         if (disconnecting || connecting || engineRunning || vpnActive) return
+        if (commandPaused) {
+            userInitiatedDisconnect = false
+            commandPaused = false
+            commandConnecting = true
+            connecting = true
+            vpnActive = true
+            updateButton()
+            statusText.text = "CONNECTING"
+            statusText.setTextColor(COLOR_PROGRESS)
+            if (isTunModeSelected()) {
+                startTunServiceWithConfig()
+            } else {
+                startForegroundService(
+                    Intent(this, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_START)
+                )
+                handler.removeCallbacks(poll)
+                handler.post(poll)
+            }
+            return
+        }
         var buffersValid = true
         for (field in listOf(editTunTcpSndbuf, editTunTcpRcvbuf)) {
             field.error = if (tcpBufferBytes(field) < 0) {
@@ -1596,25 +1628,7 @@ class MainActivity : AppCompatActivity() {
             val ok = try {
                 NativeEngine.nativeStart(
                     protocol = protocol,
-                    mode = mode,
-                    lanSharing = lan,
-                    scanMode = scanMode,
-                    ipVersion = ipVersion,
-                    quickReconnect = quick,
-                    noizeProfile = noizeProfile,
-                    fragmentEnabled = false,
-                    fragMinSize = 16,
-                    fragMaxSize = 32,
-                    fragMinDelay = 2,
-                    fragMaxDelay = 10,
-                    socksPort = socksPort,
-                    httpPort = httpPort,
-                    forcePeer = forcePeer,
-                    configPath = cfgPath,
-                    h2Enabled = h2,
-                    echEnabled = ech,
-                    sni = sni,
-                    sysProfile = sysProfile,
+                    modeysProfile = sysProfile,
                     teamName = teamName,
                     accessToken = accessToken,
                     accessEmail = accessEmail,
@@ -1702,7 +1716,7 @@ class MainActivity : AppCompatActivity() {
             val hadVpnService = FCAEVpnService.disconnectNow()
             if (!hadVpnService && !psiphonBooting) ProxyNotification.notifyCleanupComplete(this)
             if (psiphonBooting) {
-                val stop = Intent(this, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_STOP)
+                val stop = Intent(this, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_DISCONNECT)
                 try { startForegroundService(stop) } catch (e: Exception) {
                     android.util.Log.w("FCAE", "Cannot deliver proxy Stop", e)
                     ProxyNotification.notifyCleanupComplete(this)
@@ -1720,7 +1734,7 @@ class MainActivity : AppCompatActivity() {
             // reaches the UI — self-healing a stuck "CONNECTED" state.
             try {
                 val i = Intent(this, ProxyNotification::class.java)
-                i.action = ProxyNotification.ACTION_STOP
+                i.action = ProxyNotification.ACTION_DISCONNECT
                 startForegroundService(i)
             } catch (_: Throwable) {}
         }
@@ -1734,11 +1748,6 @@ class MainActivity : AppCompatActivity() {
         updateStatus.text = "Checking for updates..."
         updateAvailableInfo = null  // Clear cached info on new check
 
-        // Use the core's native async update checker (reqwest-based HTTP fetch).
-        // The core spawns a background tokio runtime, fetches version.json from
-        // GitHub, parses it, and stores the result. We poll with nativePollUpdate().
-        // Channel gate is the user's toggle: off = stable slot only; on = both
-        // slots compete and the higher version wins (engine: compare_versions).
         NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION, switchPreReleases.isChecked)
 
         // Poll for result on a background thread
@@ -1774,7 +1783,7 @@ class MainActivity : AppCompatActivity() {
                     } else if (info.checkDone) {
                         btnCheckUpdates.text = "Check for Updates"
                         btnCheckUpdates.setTextColor(COLOR_UPDATE_IDLE)
-                        updateStatus.text = "Up to date (${info.statusMessage})"
+                        updateStatus.text = info.statusMessage
                         updateAvailableInfo = null
                     } else {
                         btnCheckUpdates.text = "Check for Updates"
@@ -1798,10 +1807,10 @@ class MainActivity : AppCompatActivity() {
         val msg = buildString {
             append("Current: ${BuildConfig.APP_VERSION}  (${if (buildIsPrerelease) "pre-release" else "release"})\n")
             append("Latest: ${info.latestVersion}  (${if (info.isPrerelease) "pre-release" else "release"})\n")
-            if (info.releaseDate.isNotEmpty()) append("Released: ${info.releaseDate}\n")
+            if (info.releaseDate.isNotEmpty()) append("Date: ${info.releaseDate}\n")
             append("\n")
             if (info.releaseNotes.isNotEmpty()) {
-                append("Release Notes:\n${info.releaseNotes}\n\n")
+                append("Notes:\n${info.releaseNotes}\n\n")
             }
             if (info.downloadUrl.isNotEmpty()) {
                 append("Download: ${info.downloadUrl}")
@@ -2336,5 +2345,22 @@ class MainActivity : AppCompatActivity() {
         private val COLOR_CONNECT_BTN = Color.parseColor("#15803D")
         private val COLOR_UPDATE_AVAILABLE = Color.parseColor("#FF8C00")  // orange
         private val COLOR_UPDATE_IDLE = Color.parseColor("#60A5FA")        // blue theme
+    }
+}
+"#60A5FA")        // blue theme
+    }
+}
+      // Pre-computed Color constants — avoids String.parseColor() on every poll tick.
+        private val COLOR_CONNECTED = Color.parseColor("#34D399")
+        private val COLOR_ERROR = Color.parseColor("#F87171")
+        private val COLOR_DISCONNECTED = Color.parseColor("#8A93A6")
+        private val COLOR_PROGRESS = Color.parseColor("#60A5FA")
+        private val COLOR_DISCONNECT_BTN = Color.parseColor("#B91C1C")
+        private val COLOR_CONNECT_BTN = Color.parseColor("#15803D")
+        private val COLOR_UPDATE_AVAILABLE = Color.parseColor("#FF8C00")  // orange
+        private val COLOR_UPDATE_IDLE = Color.parseColor("#60A5FA")        // blue theme
+    }
+}
+"#60A5FA")        // blue theme
     }
 }

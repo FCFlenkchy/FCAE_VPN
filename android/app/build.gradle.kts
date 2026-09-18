@@ -2,21 +2,55 @@ plugins {
     id("com.android.application")
 }
 
-// Read version from repo-root version.json (single source of truth)
-fun readVersionFromJson(): String {
-    val versionFile = file("${rootProject.projectDir}/../version.json")
-    if (!versionFile.exists()) return "dev"
-    try {
-        val content = versionFile.readText()
-        // Extract "version" field with regex (avoids needing json lib at build time)
-        val regex = Regex(""""version"\s*:\s*"([^"]+)"""")
-        return regex.find(content)?.groupValues?.getOrNull(1) ?: "dev"
-    } catch (_: Exception) {
-        return "dev"
+data class ReleaseVersion(
+    val text: String,
+    val components: List<Int>,
+    val prerelease: Boolean,
+    val revision: String
+) : Comparable<ReleaseVersion> {
+    override fun compareTo(other: ReleaseVersion): Int {
+        for (i in components.indices) {
+            val result = components[i].compareTo(other.components[i])
+            if (result != 0) return result
+        }
+        if (prerelease != other.prerelease) return if (prerelease) -1 else 1
+        val lengthOrder = revision.length.compareTo(other.revision.length)
+        if (lengthOrder != 0) return lengthOrder
+        val revisionOrder = revision.compareTo(other.revision)
+        return if (revisionOrder != 0) revisionOrder else text.compareTo(other.text)
     }
 }
 
-val appVersion = readVersionFromJson()
+fun parseReleaseVersion(value: String): ReleaseVersion {
+    val match = Regex("""^([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)(_pre-release(?:\.([0-9]+))?)?$""")
+        .matchEntire(value) ?: error("Invalid release version: $value")
+    val components = match.groupValues[1].split('.').map {
+        require(it == "0" || !it.startsWith('0')) { "Invalid release version: $value" }
+        val number = it.toIntOrNull() ?: error("Invalid release version: $value")
+        require(number in 0..65535) { "Version components must be in 0..65535: $value" }
+        number
+    }.toMutableList()
+    while (components.size < 4) components.add(0)
+    val revision = match.groupValues[3]
+    require(revision.isEmpty() || revision == "0" || !revision.startsWith('0')) {
+        "Invalid prerelease revision: $value"
+    }
+    require(revision.length < 20 || revision.length == 20 && revision <= "18446744073709551615") {
+        "Prerelease revision is too large: $value"
+    }
+    return ReleaseVersion(value, components, match.groupValues[2].isNotEmpty(), revision)
+}
+
+val appVersion = System.getenv("FCAE_VERSION")?.let { parseReleaseVersion(it).text } ?: run {
+    val releases = groovy.json.JsonSlurper().parse(
+        file("${rootProject.projectDir}/../version.json")
+    ) as? List<*> ?: error("version.json must be a release array")
+    releases.map { entry ->
+        val release = entry as? Map<*, *> ?: error("Each release must be an object")
+        val version = release["version"] as? String ?: error("Release version must be a string")
+        parseReleaseVersion(version)
+    }.maxOrNull()?.text ?: error("version.json must contain a release")
+}
 
 android {
     namespace = "com.fc.fcaevpn"
@@ -71,6 +105,7 @@ android {
 
                 arguments += listOf(
                     "-DCMAKE_BUILD_TYPE=Release",
+                    "-DFCAE_VERSION_OVERRIDE=$appVersion",
                     "-DANDROID_STL=c++_shared",
                     // Android 15 uses 16 KB memory pages on new devices and
                     // its loader rejects shared objects laid out for 4 KB

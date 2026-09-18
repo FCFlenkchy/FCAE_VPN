@@ -54,12 +54,8 @@ static double   s_last_paint_t = 0.0;
 static bool s_busy_anim = false;      // connect/scan spinner is on screen
 static bool s_text_input = false;     // a text field is focused (blinking caret)
 
-/// Monotonic seconds. Shared by the telemetry poll and the render gate so both
-/// use one clock (ImGui::GetTime() is only meaningful inside a frame).
-/// True when the running build came from a pre-release workflow run. The tag is
-/// the build's own version (FCAE_VERSION), e.g. "v1.4.0-beta.2" vs "v1.3.2".
 bool build_is_prerelease() {
-    return strchr(FCAE_VERSION, '-') != nullptr;
+    return strstr(FCAE_VERSION, "_pre-release") != nullptr;
 }
 
 double ui_now_seconds() {
@@ -1008,24 +1004,15 @@ void render_ui() {
         ImGui::Text("FCAE VPN");
         ImGui::PopStyleColor();
 
-        // Which build is running, compact "ver · type": the version with any
-        // "-prerelease" suffix trimmed (the chip right after it says the
-        // channel — saying it twice is redundant), amber when pre-release.
         ImGui::SameLine(0, 10);
-        {
-            const char* dash = strchr(FCAE_VERSION, '-');
-            ImGui::TextColored(ImVec4(0.62f, 0.66f, 0.74f, 1.0f), "%.*s",
-                               dash ? (int)(dash - FCAE_VERSION)
-                                    : (int)strlen(FCAE_VERSION),
-                               FCAE_VERSION);
-        }
+        ImGui::TextColored(ImVec4(0.62f, 0.66f, 0.74f, 1.0f), "%s", FCAE_VERSION);
         ImGui::SameLine(0, 8);
         if (build_is_prerelease()) {
             ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.20f, 1.0f), "PRE-RELEASE");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("This build is a pre-release (" FCAE_VERSION ").\n"
-                                  "It may contain unfinished work; update checks\n"
-                                  "only ever offer stable releases.");
+                                  "Update checks offer only newer versions, respecting\n"
+                                  "your pre-releases setting.");
         } else {
             ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.52f, 1.0f), "RELEASE");
             if (ImGui::IsItemHovered())
@@ -1299,6 +1286,7 @@ void render_ui() {
         if ((done || (info.check_in_progress && s_update_checked)) && !s_update_available && s_update_checked) {
             ImGui::SetCursorPosX((avail - btn_width) * 0.5f);
             bool is_error = strstr(s_update_status, "Failed") != nullptr ||
+                            strstr(s_update_status, "failed") != nullptr ||
                             strstr(s_update_status, "HTTP") != nullptr ||
                             strstr(s_update_status, "error") != nullptr ||
                             strstr(s_update_status, "timed out") != nullptr;
@@ -1327,18 +1315,18 @@ void render_ui() {
                 ImGui::Text("Latest:  %s%s", s_update_latest,
                             s_update_is_pre ? "  (pre-release)" : "  (release)");
                 if (s_update_date[0]) {
-                    ImGui::Text("Released: %s", s_update_date);
+                    ImGui::Text("Date: %s", s_update_date);
                 }
                 ImGui::Spacing();
                 if (s_update_notes[0]) {
-                    ImGui::Text("Release Notes:");
+                    ImGui::Text("Notes:");
                     ImGui::TextWrapped("%s", s_update_notes);
                 }
                 ImGui::Spacing();
                 if (s_update_dl_url[0]) {
                     ImGui::Text("Download: %s", s_update_dl_url);
                     ImGui::Spacing();
-                    if (ImGui::Button("Open Releases Page")) {
+                    if (ImGui::Button("Open Release Page")) {
 #if defined(_WIN32)
                         ShellExecuteA(nullptr, "open", s_update_dl_url, nullptr, nullptr, SW_SHOWNORMAL);
 #elif defined(__APPLE__)

@@ -638,6 +638,34 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStopBegin(JNIEnv*, jclass) {
     }
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativePauseTun(JNIEnv*, jclass) {
+    if (!g_inited) return JNI_FALSE;
+    if (fcae_pause_tun() != FCAE_OK) {
+        LOGE("fcae_pause_tun: %s", fcae_last_error());
+        return JNI_FALSE;
+    }
+    LOGI("fcae_pause_tun");
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeResumeTun(JNIEnv*, jclass) {
+    if (!g_inited) return JNI_FALSE;
+    if (fcae_resume_tun() != FCAE_OK) {
+        LOGE("fcae_resume_tun: %s", fcae_last_error());
+        return JNI_FALSE;
+    }
+    LOGI("fcae_resume_tun");
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeTunPaused(JNIEnv*, jclass) {
+    if (!g_inited) return JNI_FALSE;
+    return fcae_tun_paused() ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeFree(JNIEnv*, jclass) {
     if (!g_inited) return;

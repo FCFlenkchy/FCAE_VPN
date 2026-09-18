@@ -106,7 +106,7 @@ fn finish(result: Result<UpdateResult, String>) {
             s.result = Some(r);
         }
         Err(e) => {
-            s.status = e;
+            s.status = format!("Update check failed: {e}");
             s.result = None;
         }
     }
@@ -210,6 +210,6 @@ mod tests {
         let s = snapshot();
         assert!(s.done);
         assert!(s.result.is_none());
-        assert_eq!(s.status, "bad manifest");
+        assert_eq!(s.status, "Update check failed: bad manifest");
     }
 }

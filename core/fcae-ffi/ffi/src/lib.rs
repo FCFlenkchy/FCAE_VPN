@@ -497,6 +497,31 @@ pub extern "C" fn fcae_stop_begin() -> FcaeStatus {
     })
 }
 
+/// Bring the TUN data plane down without cancelling the session or backend.
+#[no_mangle]
+pub extern "C" fn fcae_pause_tun() -> FcaeStatus {
+    guard("fcae_pause_tun", || {
+        runtime()?.supervisor.pause_tun();
+        Ok(())
+    })
+}
+
+/// Re-raise TUN on a live paused session. The host must publish a fresh
+/// descriptor first (`fcae_set_tun_fd` or the fd provider).
+#[no_mangle]
+pub extern "C" fn fcae_resume_tun() -> FcaeStatus {
+    guard("fcae_resume_tun", || runtime()?.supervisor.resume_tun())
+}
+
+/// True while a session is alive and its TUN data plane is paused.
+#[no_mangle]
+pub extern "C" fn fcae_tun_paused() -> bool {
+    RUNTIME
+        .get()
+        .map(|rt| rt.supervisor.tun_is_paused())
+        .unwrap_or(false)
+}
+
 /// True while a session is active.
 #[no_mangle]
 pub extern "C" fn fcae_is_running() -> bool {
