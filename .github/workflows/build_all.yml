@@ -694,7 +694,7 @@ jobs:
             *) echo "::error::Unsupported hev target: ${{ matrix.name }}"; exit 1 ;;
           esac
           case "${{ matrix.name }}" in
-            windows-x64) ls -lh sidecar ;;
+            windows-x64) ls -lh "$GITHUB_WORKSPACE/sidecar" ;;
             android-universal) ls -lh bin/android/*/lib*.a ;;
             *) ls -lh bin/libhev-socks5-tunnel.a ;;
           esac
