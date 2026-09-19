@@ -13,7 +13,7 @@ on:
         default: 'true'
         type: boolean
       extra_notes:
-        description: 'release notes (used as the release body and the update-dialog notes)'
+        description: 'notes'
         required: false
         default: ''
 
