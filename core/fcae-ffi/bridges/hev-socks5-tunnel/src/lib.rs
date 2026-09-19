@@ -21,9 +21,9 @@
 //! MSYS binaries. Cross-building it against MinGW cannot work: those code paths
 //! are compiled out and the remaining sources need POSIX socket headers MinGW
 //! does not ship. So Windows runs upstream's `hev-socks5-tunnel.exe` — built by
-//! the `build-hev-windows` CI job and installed next to the app — as a child
-//! process with the same config file, the same adapter and the same GUID as the
-//! in-process engines use elsewhere.
+//! the Windows leg of `build_all.yml` (MSYS2 under Wine) and installed next to
+//! the app — as a child process with the same config file, the same adapter and
+//! the same GUID as the in-process engines use elsewhere.
 //!
 //! ## Build requirements
 //!

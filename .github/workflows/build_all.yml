@@ -66,67 +66,8 @@ jobs:
             core.setOutput('macos_version', match[1].split('.').slice(0, 3).join('.'));
             core.info(`Release version: ${versionClean} (full: ${versionFull}, prerelease: ${pre})`);
 
-  build-hev-windows:
-    name: hev-socks5-tunnel sidecar (windows)
-    needs: prepare
-    runs-on: windows-latest
-    steps:
-      - name: checkout
-        uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - name: ensure submodules
-        run: |
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth 1
-
-      # The engine's Windows backend is MSYS-only, so upstream's own toolchain is
-      # the only one that can build it -- the same recipe upstream's CI uses.
-      - name: setup msys2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MSYS
-          update: true
-          install: >-
-            make
-            gcc
-
-      - name: build hev-socks5-tunnel (MSYS)
-        shell: msys2 {0}
-        run: |
-          set -euo pipefail
-          # Everything stays workspace-relative: inside the MSYS shell a Windows
-          # path such as $GITHUB_WORKSPACE is not a usable path.
-          make -C core/hev-socks5-tunnel -j"$(nproc)"
-          test -s core/hev-socks5-tunnel/bin/hev-socks5-tunnel.exe
-
-          # Ship the runtime the engine was linked against; anything else ldd
-          # reports from the MSYS prefix joins it (only msys-2.0.dll is expected:
-          # the rest of the stack is static or comes from Windows itself).
-          mkdir -p sidecar
-          cp -v core/hev-socks5-tunnel/bin/hev-socks5-tunnel.exe sidecar/
-          cp -v /usr/bin/msys-2.0.dll sidecar/
-          if command -v ldd >/dev/null 2>&1; then
-            ldd core/hev-socks5-tunnel/bin/hev-socks5-tunnel.exe |
-              awk '$3 ~ /^\/usr\/bin\// { print $3 }' | sort -u |
-              while read -r dll; do
-                cp -v "$dll" sidecar/
-              done
-          fi
-          test -s sidecar/msys-2.0.dll
-          ls -l sidecar
-
-      - name: upload hev sidecar
-        uses: actions/upload-artifact@v7
-        with:
-          name: hev-windows-sidecar
-          path: sidecar/*
-          if-no-files-found: error
-          retention-days: 7
-
   build:
-    needs: [prepare, build-hev-windows]
+    needs: prepare
     env:
       FCAE_VERSION: ${{ needs.prepare.outputs.version }}
       FCAE_VERSION_FULL: ${{ needs.prepare.outputs.version_full }}
@@ -212,26 +153,6 @@ jobs:
         run: |
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
-
-      # The Rust build must know the sidecar is part of the install; the
-      # packaging step below copies it next to the app.
-      - name: fetch hev sidecar (windows)
-        if: matrix.name == 'windows-x64'
-        uses: actions/download-artifact@v8
-        with:
-          name: hev-windows-sidecar
-          path: ${{ runner.temp }}/hev-sidecar
-
-      - name: publish hev sidecar (windows)
-        if: matrix.name == 'windows-x64'
-        run: |
-          set -euo pipefail
-          EXE="${{ runner.temp }}/hev-sidecar/hev-socks5-tunnel.exe"
-          test -s "$EXE"
-          test -s "${{ runner.temp }}/hev-sidecar/msys-2.0.dll"
-          echo "FCAE_HEV_SIDECAR_EXE=$EXE" >> "$GITHUB_ENV"
-          echo "FCAE_HEV_SIDECAR_DIR=${{ runner.temp }}/hev-sidecar" >> "$GITHUB_ENV"
-          ls -la "${{ runner.temp }}/hev-sidecar"
 
       - name: setup go
         uses: actions/setup-go@v7
@@ -602,20 +523,84 @@ jobs:
           set -euo pipefail
           cd core/hev-socks5-tunnel
           case "${{ matrix.name }}" in
-            linux-x64|macos-arm64|macos-x64)
+            linux-x64|macos-arm64)
               make static
               ;;
+            macos-x64)
+              # Both macOS legs run on an arm64 runner, so the host toolchain
+              # would hand this leg arm64 objects -- which ld silently ignores
+              # while linking x86_64, leaving every engine symbol undefined.
+              # Build for the architecture this leg actually ships, with the
+              # deployment target the Rust and CMake halves use.
+              make static CFLAGS="-arch x86_64 -mmacosx-version-min=13.0"
+              ;;
             windows-x64)
-              # Nothing to build here: the engine's Windows backend is MSYS-only
-              # (tunnel, hev-task-system IOCP reactor, Win64 ABI assembly and the
-              # wintun session all sit behind __MSYS__, and the rest of the stack
-              # needs POSIX socket headers MinGW does not ship), so it cannot be
-              # linked into this native MinGW binary at all. The
-              # `build-hev-windows` job builds upstream's executable with MSYS2
-              # and this job ships it as a sidecar process: same engine, same
-              # config, same wintun adapter as the in-process engines use
-              # everywhere else.
-              echo "hev-socks5-tunnel runs as a sidecar on Windows (build-hev-windows)"
+              # The engine's Windows backend is MSYS-only (tunnel, hev-task-system
+              # IOCP reactor, Win64 ABI assembly and the wintun session all sit
+              # behind __MSYS__, and the rest of the stack needs POSIX socket
+              # headers MinGW does not ship), so it cannot be linked into this
+              # MinGW binary at all -- and no Linux toolchain targets the MSYS
+              # runtime either. So MSYS2 itself runs here, on Wine: upstream's
+              # own recipe, its own executable, built by the job that ships it
+              # (no artifact round trip), and shipped as a sidecar process with
+              # the same config and wintun adapter the other engines use.
+              WS="$(cd ../.. && pwd)"
+              SIDECAR_DIR="$RUNNER_TEMP/hev-sidecar"
+              MSYS2="$RUNNER_TEMP/msys64"
+              MSYS_ROOT_DIR="/z$WS"
+
+              # wine is not part of the runner image; wine64 is the whole
+              # 64-bit runtime (the `wine` metapackage only adds the 32-bit half).
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq wine64
+              WINE="$(command -v wine64 || command -v wine || true)"
+              if [ -z "$WINE" ] || ! "$WINE" --version >/dev/null 2>&1; then
+                sudo apt-get install -y -qq wine
+                WINE="$(command -v wine64 || command -v wine)"
+              fi
+              "$WINE" --version
+              export WINEPREFIX="$RUNNER_TEMP/wineprefix"
+              export WINEDEBUG=-all
+              export WINEDLLOVERRIDES="mscoree,mshtml="
+
+              # The base distribution is a self-extracting 7z, so it unpacks
+              # without running the installer.
+              ASSET="$(curl -fsSL https://repo.msys2.org/distrib/x86_64/ |
+                grep -o 'msys2-base-x86_64-[0-9]*\.sfx\.exe' | sort -u | tail -1)"
+              test -n "$ASSET"
+              curl -fsSL -o "$RUNNER_TEMP/msys2.sfx.exe" \
+                "https://repo.msys2.org/distrib/x86_64/$ASSET"
+              7z x -y -o"$RUNNER_TEMP" "$RUNNER_TEMP/msys2.sfx.exe" >/dev/null
+
+              # First run creates the Wine prefix; then MSYS2 installs its own
+              # make and gcc (a stale keyring is the one failure worth retrying).
+              "$WINE" "$MSYS2/usr/bin/bash.exe" -lc "true"
+              if ! "$WINE" "$MSYS2/usr/bin/bash.exe" -lc \
+                   "pacman -S --noconfirm --needed make gcc"; then
+                "$WINE" "$MSYS2/usr/bin/bash.exe" -lc \
+                  "pacman-key --init; pacman-key --populate msys2; pacman -Syu --noconfirm"
+                "$WINE" "$MSYS2/usr/bin/bash.exe" -lc \
+                  "pacman -S --noconfirm --needed make gcc"
+              fi
+              "$WINE" "$MSYS2/usr/bin/bash.exe" -lc \
+                "cd '$MSYS_ROOT_DIR' && make -C core/hev-socks5-tunnel -j$(nproc)"
+
+              # Ship the runtime the engine was linked against; anything else
+              # ldd reports from the MSYS prefix joins it (only msys-2.0.dll is
+              # expected: the rest of the stack is static or comes from Windows).
+              mkdir -p "$SIDECAR_DIR"
+              cp -v "$WS/core/hev-socks5-tunnel/bin/hev-socks5-tunnel.exe" "$SIDECAR_DIR/"
+              cp -v "$MSYS2/usr/bin/msys-2.0.dll" "$SIDECAR_DIR/"
+              "$WINE" "$MSYS2/usr/bin/bash.exe" -lc \
+                "cd '$MSYS_ROOT_DIR' && ldd core/hev-socks5-tunnel/bin/hev-socks5-tunnel.exe" \
+                2>/dev/null | awk '{ print $3 }' | grep '^/usr/bin/' | sort -u |
+                while read -r dll; do cp -v "$MSYS2$dll" "$SIDECAR_DIR/"; done || true
+              test -s "$SIDECAR_DIR/msys-2.0.dll"
+
+              # The Rust build compiles the sidecar backend from these and the
+              # packaging step copies them next to the app.
+              echo "FCAE_HEV_SIDECAR_EXE=$SIDECAR_DIR/hev-socks5-tunnel.exe" >> "$GITHUB_ENV"
+              echo "FCAE_HEV_SIDECAR_DIR=$SIDECAR_DIR" >> "$GITHUB_ENV"
               ;;
             android-*)
               if [ -z "${ANDROID_NDK_HOME:-}" ]; then
@@ -628,6 +613,13 @@ jobs:
               else
                 ABIS="${{ matrix.abi }}"
               fi
+              # `make clean` removes the whole bin/ tree -- including the ABIs
+              # already staged in it -- so every ABI is collected outside the
+              # build tree and copied in once the last clean has happened.
+              # (Without this a universal build kept only its last ABI, and the
+              # Rust build of the earlier ones failed on a missing archive.)
+              STAGE="$RUNNER_TEMP/hev-android"
+              rm -rf "$STAGE"
               for abi in $ABIS; do
                 echo "  -> Building hev-socks5-tunnel for $abi"
                 make clean
@@ -655,12 +647,17 @@ jobs:
                   STRIP="$TOOLCHAIN/bin/llvm-strip" \
                   PP="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang -E" \
                   CFLAGS="$ANDROID_CFLAGS"
-                mkdir -p "bin/android/$abi"
+                mkdir -p "$STAGE/$abi"
                 cp bin/libhev-socks5-tunnel.a \
                    third-part/lwip/bin/liblwip.a \
                    third-part/yaml/bin/libyaml.a \
                    third-part/hev-task-system/bin/libhev-task-system.a \
-                   "bin/android/$abi/"
+                   "$STAGE/$abi/"
+              done
+              for abi in $ABIS; do
+                mkdir -p "bin/android/$abi"
+                cp "$STAGE/$abi/"*.a "bin/android/$abi/"
+                test -s "bin/android/$abi/libhev-socks5-tunnel.a"
               done
               if [ "${{ matrix.name }}" != "android-universal" ]; then
                 cp "bin/android/${{ matrix.abi }}/libhev-socks5-tunnel.a" bin/libhev-socks5-tunnel.a
@@ -669,7 +666,7 @@ jobs:
             *) echo "::error::Unsupported hev target: ${{ matrix.name }}"; exit 1 ;;
           esac
           case "${{ matrix.name }}" in
-            windows-x64) echo "hev-socks5-tunnel: stub (engine not built)" ;;
+            windows-x64) ls -lh "$SIDECAR_DIR" ;;
             android-universal) ls -lh bin/android/*/lib*.a ;;
             *) ls -lh bin/libhev-socks5-tunnel.a ;;
           esac
@@ -934,7 +931,7 @@ jobs:
             # The hev-socks5-tunnel engine: a sidecar process beside the app,
             # with the MSYS runtime it links against. It picks up wintun.dll
             # from this same directory.
-            : "${FCAE_HEV_SIDECAR_DIR:?the hev sidecar artifact was not staged}"
+            : "${FCAE_HEV_SIDECAR_DIR:?the hev sidecar was not staged (build hev-socks5-tunnel engine)}"
             cp "$FCAE_HEV_SIDECAR_DIR"/hev-socks5-tunnel.exe \
                "$FCAE_HEV_SIDECAR_DIR"/msys-2.0.dll package/
             WINTUN_TMP=$(mktemp -d)
