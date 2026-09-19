@@ -644,7 +644,8 @@ jobs:
           cmake .. -G Ninja -DCMAKE_CXX_COMPILER=g++ \
             -DCMAKE_PREFIX_PATH=/usr/local/glfw_static \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION"
+            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION" \
+            -DFCAE_IS_PRERELEASE="$FCAE_IS_PRERELEASE"
           cmake --build . --config Release
 
       - name: build frontend (windows)
@@ -653,7 +654,8 @@ jobs:
           mkdir -p build && cd build
           cmake .. -G Ninja \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION"
+            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION" \
+            -DFCAE_IS_PRERELEASE="$FCAE_IS_PRERELEASE"
           cmake --build . --config Release
 
       - name: build frontend (macOS)
@@ -667,7 +669,8 @@ jobs:
           fi
           cmake .. -G Ninja \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION"
+            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION" \
+            -DFCAE_IS_PRERELEASE="$FCAE_IS_PRERELEASE"
           cmake --build . --config Release
 
       - name: build apk

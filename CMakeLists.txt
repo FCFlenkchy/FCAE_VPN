@@ -88,7 +88,20 @@ else()
     endif()
   endforeach()
 endif()
+
+# Determine prerelease status
+if(NOT DEFINED FCAE_IS_PRERELEASE)
+  # Try to read from version.json
+  if(NOT DEFINED FCAE_VERSION_OVERRIDE)
+    string(JSON _selected_pre GET "${_ver_json}" ${_release_last} prerelease)
+    set(FCAE_IS_PRERELEASE "${_selected_pre}")
+  else()
+    set(FCAE_IS_PRERELEASE "false")
+  endif()
+endif()
+
 message(STATUS "FCAE_VERSION = ${FCAE_VERSION}")
+message(STATUS "FCAE_IS_PRERELEASE = ${FCAE_IS_PRERELEASE}")
 
 # ── Parse version into MAJOR.MINOR.PATCH.BUILD for Windows RC ────────────
 # FCAE_VERSION is e.g. "v0.2.0-beta", "v1.4.1", or "v1.0.9.4"
@@ -436,6 +449,9 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         AETHER_TARGET_WIN_X64
         FCAE_VERSION="${FCAE_VERSION}"
     )
+    if(FCAE_IS_PRERELEASE)
+      target_compile_definitions(fcaevpn PRIVATE FCAE_IS_PRERELEASE)
+    endif()
 
     target_compile_options(fcaevpn PRIVATE -municode)
 
@@ -519,6 +535,9 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         AETHER_TARGET_MACOS
         FCAE_VERSION="${FCAE_VERSION}"
     )
+    if(FCAE_IS_PRERELEASE)
+      target_compile_definitions(fcaevpn PRIVATE FCAE_IS_PRERELEASE)
+    endif()
 
     if(AETHER_TARGET STREQUAL "MACOS_ARM64")
         fcae_ffi_lib_path(FCAE_FFI_A aarch64-apple-darwin)
@@ -613,6 +632,9 @@ elseif(UNIX)
         AETHER_TARGET_LINUX_X64
         FCAE_VERSION="${FCAE_VERSION}"
     )
+    if(FCAE_IS_PRERELEASE)
+      target_compile_definitions(fcaevpn PRIVATE FCAE_IS_PRERELEASE)
+    endif()
 
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-unknown-linux-gnu)
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")

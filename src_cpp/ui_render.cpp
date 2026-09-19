@@ -55,7 +55,11 @@ static bool s_busy_anim = false;      // connect/scan spinner is on screen
 static bool s_text_input = false;     // a text field is focused (blinking caret)
 
 bool build_is_prerelease() {
-    return strstr(FCAE_VERSION, "_pre-release") != nullptr;
+#ifdef FCAE_IS_PRERELEASE
+    return true;
+#else
+    return false;
+#endif
 }
 
 static const char* display_version() {

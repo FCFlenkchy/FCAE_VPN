@@ -14,6 +14,7 @@ members = [
     "bridges/aether",
     "bridges/psiphon",
     "bridges/zeptun",
+    "bridges/hev-socks5-tunnel",
 ]
 exclude = ["../Aether", "../quiche"]
 resolver = "2"
@@ -32,6 +33,7 @@ fcae-bridge-tun2socks = { path = "bridges/tun2socks" }
 fcae-bridge-aether = { path = "bridges/aether" }
 fcae-bridge-psiphon = { path = "bridges/psiphon" }
 fcae-bridge-zeptun = { path = "bridges/zeptun" }
+fcae-bridge-hev-socks5-tunnel = { path = "bridges/hev-socks5-tunnel" }
 aether-engine = { path = "../Aether" }
 
 

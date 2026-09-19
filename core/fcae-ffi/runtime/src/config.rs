@@ -176,6 +176,8 @@ pub enum TunEngine {
     Tun2socks,
     /// Zig zeptun userspace engine (static C ABI, no runtime).
     Zeptun,
+    /// C hev-socks5-tunnel engine (static library, coroutine-based I/O).
+    Hev,
 }
 
 /// TUN parameters. Owned by the supervisor, not the backend: whichever
@@ -731,9 +733,10 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         engine: match raw.tun_engine {
             0 => TunEngine::Tun2socks,
             1 => TunEngine::Zeptun,
+            2 => TunEngine::Hev,
             _ => {
                 return Err(CoreError::InvalidConfig(
-                    "tun_engine must be 0 (tun2socks) or 1 (zeptun)".into(),
+                    "tun_engine must be 0 (tun2socks), 1 (zeptun), or 2 (hev)".into(),
                 ))
             }
         },
@@ -1093,7 +1096,9 @@ mod tests {
         assert_eq!(unsafe { parse(&raw) }.unwrap().tun.engine, TunEngine::Tun2socks);
         raw.tun_engine = 1;
         assert_eq!(unsafe { parse(&raw) }.unwrap().tun.engine, TunEngine::Zeptun);
-        for invalid in [2, u64::MAX] {
+        raw.tun_engine = 2;
+        assert_eq!(unsafe { parse(&raw) }.unwrap().tun.engine, TunEngine::Hev);
+        for invalid in [3, u64::MAX] {
             raw.tun_engine = invalid;
             assert!(matches!(unsafe { parse(&raw) }, Err(CoreError::InvalidConfig(_))));
         }

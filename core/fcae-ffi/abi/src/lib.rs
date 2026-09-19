@@ -26,6 +26,7 @@ pub const FCAE_ABI_VERSION: u32 = 8;
 /// backend's SOCKS endpoint into a TUN device.
 pub const FCAE_TUN_ENGINE_TUN2SOCKS: u64 = 0;
 pub const FCAE_TUN_ENGINE_ZEPTUN: u64 = 1;
+pub const FCAE_TUN_ENGINE_HEV: u64 = 2;
 
 // ── Enumerations ────────────────────────────────────────────────────────
 

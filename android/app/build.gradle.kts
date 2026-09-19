@@ -52,6 +52,8 @@ val appVersion = System.getenv("FCAE_VERSION")?.let { parseReleaseVersion(it).te
     }.maxOrNull()?.text ?: error("version.json must contain a release")
 }
 
+val isPrerelease = System.getenv("FCAE_IS_PRERELEASE")?.toBoolean() ?: false
+
 android {
     namespace = "com.fc.fcaevpn"
     compileSdk = 36
@@ -64,6 +66,7 @@ android {
         versionName = appVersion
 
         buildConfigField("String", "APP_VERSION", "\"${appVersion}\"")
+        buildConfigField("Boolean", "IS_PRERELEASE", "${isPrerelease}")
 
         val universal = (project.findProperty("UNIVERSAL") as? String)?.toBoolean() ?: false
         val buildType = (project.findProperty("BUILD_TYPE") as? String)

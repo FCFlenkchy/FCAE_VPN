@@ -116,7 +116,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editRoutesInline: android.widget.EditText
     private lateinit var outerScroll: ScrollView
 
-    private val buildIsPrerelease = BuildConfig.APP_VERSION.contains("_pre-release")
+    private val buildIsPrerelease = BuildConfig.IS_PRERELEASE
     private val displayVersion = BuildConfig.APP_VERSION.substringBefore("_pre-release")
 
     private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->

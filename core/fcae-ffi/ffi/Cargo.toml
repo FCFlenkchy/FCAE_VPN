@@ -33,6 +33,12 @@ tun = ["dep:fcae-bridge-tun2socks"]
 # default tun2socks engine only). Compile with
 # `fcae-bridge-zeptun/stub` to type-check without the engine.
 zeptun = ["dep:fcae-bridge-zeptun"]
+# Link the in-process hev-socks5-tunnel bridge. Opt-in (not in `default`): it
+# requires a prebuilt libhev-socks5-tunnel.a for the target (CI builds it with
+# make first; without the archive any consumer can still build with the
+# default tun2socks engine only). Compile with
+# `fcae-bridge-hev-socks5-tunnel/stub` to type-check without the engine.
+hev = ["dep:fcae-bridge-hev-socks5-tunnel"]
 # Tor egress inside the Aether engine. OFF by default: it pulls in arti-client
 # and a statically built liblzma, which need a C cross-toolchain on the
 # Android and Windows-cross runners.
@@ -45,6 +51,7 @@ fcae-bridge-tun2socks = { workspace = true, optional = true }
 fcae-bridge-aether = { workspace = true, optional = true }
 fcae-bridge-psiphon = { workspace = true, optional = true }
 fcae-bridge-zeptun = { workspace = true, optional = true }
+fcae-bridge-hev-socks5-tunnel = { workspace = true, optional = true }
 libc.workspace = true
 log.workspace = true
 once_cell.workspace = true
