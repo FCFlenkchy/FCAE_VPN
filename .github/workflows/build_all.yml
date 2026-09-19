@@ -103,8 +103,12 @@ jobs:
           # The Makefile targets MSYS2 (MSYSTEM=MSYS); a bare POSIX environment
           # such as Cygwin is kept working below rather than by the Makefile.
           # `tp-shared` builds the third-party DLLs the engine DLL links
-          # against (yaml, lwip, hev-task-system).
-          make -C core/hev-socks5-tunnel tp-shared -j"$(nproc)"
+          # against (yaml, lwip, hev-task-system). Cygwin's gcc -shared exports
+          # nothing by default (unlike mingw), so force the exports: without
+          # them the import libraries minted below are empty and every symbol
+          # the engine takes from these DLLs is an undefined reference at the
+          # final link.
+          make -C core/hev-socks5-tunnel tp-shared -j"$(nproc)" LFLAGS="-Wl,--export-all-symbols"
 
           # The final link resolves them as -lyaml -llwip -lhev-task-system.
           # Cygwin's ld will not link a PE .so directly, so mint an import
@@ -116,13 +120,16 @@ jobs:
             done
           fi
 
+          # The engine DLL must export its C API (main_from_str, quit, stats)
+          # for the bridge's GetProcAddress, so the same export flag goes on
+          # its link too.
           if [ -n "${MSYSTEM:-}" ]; then
-            make -C core/hev-socks5-tunnel shared -j"$(nproc)"
+            make -C core/hev-socks5-tunnel shared -j"$(nproc)" LFLAGS="-Wl,--export-all-symbols"
           else
-            # Outside MSYS the Makefile skips the Windows system libraries,
-            # so supply them here (LFLAGS is appended at the end of its
-            # LDFLAGS, which is where -l flags belong).
-            make -C core/hev-socks5-tunnel shared -j"$(nproc)" LFLAGS="-lws2_32 -lIphlpapi"
+            # Outside MSYS the Makefile also skips the Windows system
+            # libraries, so supply them here (LFLAGS is appended at the end of
+            # its LDFLAGS, which is where -l flags belong).
+            make -C core/hev-socks5-tunnel shared -j"$(nproc)" LFLAGS="-Wl,--export-all-symbols -lws2_32 -lIphlpapi"
           fi
 
           test -s core/hev-socks5-tunnel/bin/libhev-socks5-tunnel.so

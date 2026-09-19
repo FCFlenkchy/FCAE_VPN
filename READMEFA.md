@@ -164,6 +164,7 @@ cmake --build build --config Release
 
 - **[Aether](https://github.com/CluvexStudio/aether)** — موتور اصلی دور زدن سانسور توسط CluvexStudio. پروتکل‌های MASQUE، WireGuard و WARP-in-WARP را فراهم می‌کند.
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — کتابخانه رابط گرافیکی حالت فوری. برای تمام رندرهای بومی دسکتاپ استفاده می‌شود.
+- **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — موتور تونل SOCKS5 به زبان C، داخل فرایند اجرا می‌شود.
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — کتابخانه هسته تونل سایفون.
 - **[Quiche](https://github.com/cloudflare/quiche)** — پیاده‌سازی HTTP/3 و QUIC کلادفلر. به‌عنوان بک‌اند حمل‌ونقل QUIC برای پشتیبانی از پروتکل MASQUE استفاده می‌شود.
 - **[Wintun](https://www.wintun.net/)** — یک درایور TUN برای ویندوز ساخته‌شده توسط WireGuard. یک رابط شبکه با کارایی بالا در لایه ۳ برای تونل کردن ترافیک فراهم می‌کند.

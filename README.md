@@ -162,6 +162,7 @@ Open `android/` in Android Studio and build. The Gradle config invokes CMake wit
 
 - **[Aether](https://github.com/CluvexStudio/aether)** — The core censorship circumvention engine by CluvexStudio. Provides MASQUE, WireGuard, and WARP-in-WARP protocols.
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — Immediate-mode GUI library Used for all native desktop rendering.
+- **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C SOCKS5 tunnel engine, runs in-process.
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — Psiphon tunnel core library.
 - **[Quiche](https://github.com/cloudflare/quiche)** — Cloudflare's HTTP/3 and QUIC implementation. Used as the QUIC transport backend for MASQUE protocol support.
 - **[Wintun](https://www.wintun.net/)** — A TUN driver for Windows by WireGuard. Provides a high-performance network interface at Layer 3 for tunneling traffic.

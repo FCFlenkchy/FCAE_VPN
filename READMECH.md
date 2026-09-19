@@ -164,6 +164,7 @@ cmake --build build --config Release
 
 - **[Aether](https://github.com/CluvexStudio/aether)** — 由 CluvexStudio 开发的核心审查绕过引擎。提供 MASQUE、WireGuard 和 WARP-in-WARP 协议。
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — 即时模式 GUI 库，用于所有原生桌面渲染。
+- **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C 语言 SOCKS5 隧道引擎，进程内运行。
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — Psiphon 隧道核心库。
 - **[Quiche](https://github.com/cloudflare/quiche)** — Cloudflare 的 HTTP/3 和 QUIC 实现。作为 MASQUE 协议支持的 QUIC 传输后端。
 - **[Wintun](https://www.wintun.net/)** — 由 WireGuard 开发的 Windows TUN 驱动程序。提供高性能的第 3 层网络接口，用于隧道传输流量。
