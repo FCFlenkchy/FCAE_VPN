@@ -32,7 +32,6 @@ pub mod tunnelping;
 pub mod upstream;
 pub mod wg_prober;
 pub mod wireguard;
-pub mod version_checker;
 pub mod zerotrust;
 
 // Re-exported for core/fcae-ffi, which reads the live counters for telemetry.

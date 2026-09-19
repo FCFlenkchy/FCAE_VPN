@@ -63,7 +63,6 @@ static LAST_ENGINE: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None
 /// Register this backend with the core registry.
 pub fn register() {
     fcae_runtime::registry::register(fcae_abi::FcaeBackend::Aether, || Arc::new(AetherBackend));
-    register_update_provider();
 }
 
 pub struct AetherBackend;
@@ -740,57 +739,5 @@ fn tor_mode_label(mode: FcaeTorMode) -> &'static str {
         FcaeTorMode::Chain => "chain",
         FcaeTorMode::Reverse => "reverse",
         FcaeTorMode::Only => "only",
-    }
-}
-
-// ── Update-check provider ───────────────────────────────────────────────
-
-/// Install Aether's `version_checker` as the app's update provider.
-///
-/// The update check is an application concern, so `fcae-runtime` owns the state
-/// machine and only the fetch/parse pair is supplied here. That keeps the
-/// version.json format an Aether-repo detail while leaving the UI, the FFI and
-/// any future backend untouched.
-pub fn register_update_provider() {
-    fcae_runtime::update::install_provider(fcae_runtime::update::Provider {
-        check: |current, include_prereleases| {
-            // The engine's fetcher is async and needs a reactor; core calls us
-            // on a plain worker thread, so give it a small current-thread
-            // runtime rather than requiring a global one.
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("failed to build update runtime: {e}"))?;
-            let info = rt.block_on(aether_engine::version_checker::fetch_latest_version())?;
-            let r = aether_engine::version_checker::compare_versions(
-                current,
-                &info,
-                include_prereleases,
-            )?;
-            Ok(to_core_result(r))
-        },
-        parse: |current, json, include_prereleases| {
-            let r = aether_engine::version_checker::check_from_json(
-                current,
-                json,
-                include_prereleases,
-            )?;
-            Ok(to_core_result(r))
-        },
-    });
-}
-
-/// Translate the engine's result type into the backend-neutral one.
-fn to_core_result(
-    r: aether_engine::version_checker::UpdateCheckResult,
-) -> fcae_runtime::update::UpdateResult {
-    fcae_runtime::update::UpdateResult {
-        update_available: r.update_available,
-        is_prerelease: r.is_prerelease,
-        current_version: r.current_version,
-        latest_version: r.latest_version,
-        release_notes: r.release_notes,
-        download_url: r.download_url,
-        release_date: r.release_date,
     }
 }

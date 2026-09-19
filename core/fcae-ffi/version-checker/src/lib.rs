@@ -1,8 +1,76 @@
+//! FCAE VPN release manifest: fetch, decode, compare.
+//!
+//! Application concern (the FCAE VPN release feed), not a backend concern:
+//! `fcae-runtime` owns the check's state machine, and this crate is installed
+//! as its provider via [`install_provider`] from the FFI crate's init.
+//!
+//! A manifest that fails to decode is reported with the raw body the server
+//! returned: that body (an HTML error page, a redirect, a truncated file) is
+//! exactly the diagnostic the operator needs, and the message ends with a
+//! "could not decode" flag so the app can tell "no update" from "broken
+//! manifest".
+
+use fcae_runtime::update::{Provider, UpdateResult};
 use serde::Deserialize;
 use std::cmp::Ordering;
 
 const VERSION_URL: &str =
     "https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/version.json";
+
+/// How much of the raw body a decode error keeps: long enough to diagnose an
+/// HTML error page, short enough to stay readable in the UI.
+const RAW_EXCERPT_MAX: usize = 200;
+
+/// Install this crate's fetch/decode/compare pair as the app's update
+/// provider. Called once from the FFI crate's init.
+pub fn install_provider() {
+    fcae_runtime::update::install_provider(Provider {
+        check: |current, include_prereleases| {
+            // The fetcher is async and needs a reactor; core calls us on a
+            // plain worker thread, so give it a small current-thread runtime
+            // rather than requiring a global one.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("failed to build update runtime: {e}"))?;
+            let info = rt.block_on(fetch_latest_version())?;
+            compare_versions(current, &info, include_prereleases).map(to_core_result)
+        },
+        parse: |current, json, include_prereleases| {
+            check_from_json(current, json, include_prereleases).map(to_core_result)
+        },
+    });
+}
+
+/// Translate this crate's result type into the backend-neutral one.
+fn to_core_result(r: UpdateCheckResult) -> UpdateResult {
+    UpdateResult {
+        update_available: r.update_available,
+        is_prerelease: r.is_prerelease,
+        current_version: r.current_version,
+        latest_version: r.latest_version,
+        release_notes: r.release_notes,
+        download_url: r.download_url,
+        release_date: r.release_date,
+    }
+}
+
+/// Raw body for decode errors: the message crosses the FFI as a C string, so
+/// NULs and control characters are stripped, and it is cut off so a whole
+/// HTML error page does not end up in the UI.
+fn raw_excerpt(raw: &str) -> String {
+    let clean: String = raw
+        .chars()
+        .filter(|c| *c >= ' ' || matches!(c, '\n' | '\t'))
+        .collect();
+    let clean = clean.trim();
+    if clean.len() <= RAW_EXCERPT_MAX {
+        return clean.to_owned();
+    }
+    let mut out: String = clean.chars().take(RAW_EXCERPT_MAX).collect();
+    out.push('…');
+    out
+}
 
 pub type VersionInfo = Vec<ReleaseEntry>;
 
@@ -67,10 +135,14 @@ pub async fn fetch_latest_version() -> Result<VersionInfo, String> {
         return Err(format!("HTTP {}", resp.status()));
     }
 
-    let info: VersionInfo = resp
-        .json()
+    // Read the body as text first so a decode failure can quote what the
+    // server actually returned.
+    let text = resp
+        .text()
         .await
-        .map_err(|e| format!("Failed to parse version.json: {e}"))?;
+        .map_err(|e| format!("Failed to read version.json body: {e}"))?;
+    let info: VersionInfo = serde_json::from_str(&text)
+        .map_err(|e| format!("version.json raw: {} -- could not decode: {e}", raw_excerpt(&text)))?;
 
     validate(&info)?;
     Ok(info)
@@ -117,10 +189,9 @@ pub fn check_from_json(
     include_prereleases: bool,
 ) -> Result<UpdateCheckResult, String> {
     let info: VersionInfo = serde_json::from_str(json)
-        .map_err(|e| format!("Failed to parse version.json: {e}"))?;
+        .map_err(|e| format!("version manifest raw: {} -- could not decode: {e}", raw_excerpt(json)))?;
     compare_versions(current, &info, include_prereleases)
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PreId {
@@ -342,5 +413,22 @@ mod tests {
         assert!(check_from_json("1.3.1", &catalog(&["1.3.4", "1.3.4"]), true).is_err());
         assert!(check_from_json("1.3.1", &catalog(&[]), true).is_err());
         assert!(check_from_json("1.3.1", &json.replace("https://github.com", "https://example.com"), true).is_err());
+    }
+
+    #[test]
+    fn decode_errors_show_the_raw_body_and_the_could_not_decode_trailer() {
+        let raw = r#"<?xml version="1.0"?><Error><Code>NoSuchKey</Code><Message>object not found</Message></Error>"#;
+        let err = check_from_json("1.3.1", raw, true).unwrap_err();
+        assert!(err.contains("NoSuchKey"), "raw body missing: {err}");
+        assert!(err.contains("could not decode"), "trailer missing: {err}");
+    }
+
+    #[test]
+    fn raw_excerpt_strips_nuls_and_truncates() {
+        let raw = format!("ab\0cd{}", "x".repeat(500));
+        let out = raw_excerpt(&raw);
+        assert!(!out.contains('\0'));
+        assert!(out.len() <= RAW_EXCERPT_MAX + 1);
+        assert!(out.ends_with('…'));
     }
 }

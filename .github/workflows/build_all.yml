@@ -67,7 +67,7 @@ jobs:
             core.info(`Release version: ${versionClean} (full: ${versionFull}, prerelease: ${pre})`);
 
   build-hev-windows:
-    name: hev-socks5-tunnel sidecar (windows)
+    name: hev-socks5-tunnel engine DLL (windows)
     needs: prepare
     runs-on: windows-latest
     steps:
@@ -92,41 +92,55 @@ jobs:
             make
             gcc
 
-      - name: build hev-socks5-tunnel (MSYS)
+      - name: build hev-socks5-tunnel DLL (MSYS)
         shell: msys2 {0}
         run: |
           set -euo pipefail
           # Everything stays workspace-relative: inside the MSYS shell a Windows
           # path such as $GITHUB_WORKSPACE is not a usable path.
-          make -C core/hev-socks5-tunnel -j"$(nproc)"
-          test -s core/hev-socks5-tunnel/bin/hev-socks5-tunnel.exe
+          # `shared` builds the DLL the app loads in-process (no exe, no child
+          # process); tp-shared builds the engine's third-party imports (yaml,
+          # lwip, hev-task-system) as the DLLs the engine DLL links against.
+          make -C core/hev-socks5-tunnel shared -j"$(nproc)"
+          test -s core/hev-socks5-tunnel/bin/libhev-socks5-tunnel.so
+          test -s core/hev-socks5-tunnel/third-part/yaml/bin/libyaml.so
+          test -s core/hev-socks5-tunnel/third-part/lwip/bin/liblwip.so
+          test -s core/hev-socks5-tunnel/third-part/hev-task-system/bin/libhev-task-system.so
 
-          # Ship the runtime the engine was linked against; anything else ldd
-          # reports from the MSYS prefix joins it (only msys-2.0.dll is expected:
-          # the rest of the stack is static or comes from Windows itself).
-          mkdir -p sidecar
-          cp -v core/hev-socks5-tunnel/bin/hev-socks5-tunnel.exe sidecar/
-          cp -v /usr/bin/msys-2.0.dll sidecar/
+          # The engine DLL is loaded by explicit path, so it may carry a proper
+          # Windows name; its imports keep the names the linker recorded, so
+          # the third-party DLLs stay named lib*.so.
+          mkdir -p engine
+          mv core/hev-socks5-tunnel/bin/libhev-socks5-tunnel.so engine/libhev-socks5-tunnel.dll
+          cp -v core/hev-socks5-tunnel/third-part/yaml/bin/libyaml.so engine/
+          cp -v core/hev-socks5-tunnel/third-part/lwip/bin/liblwip.so engine/
+          cp -v core/hev-socks5-tunnel/third-part/hev-task-system/bin/libhev-task-system.so engine/
+
+          # Ship the runtime every DLL in the set was linked against; the
+          # loader resolves each import next to its own DLL, so only the MSYS
+          # prefix libraries need collecting (only msys-2.0.dll is expected).
           if command -v ldd >/dev/null 2>&1; then
-            ldd core/hev-socks5-tunnel/bin/hev-socks5-tunnel.exe |
-              awk '$3 ~ /^\/usr\/bin\// { print $3 }' | sort -u |
-              while read -r dll; do
-                cp -v "$dll" sidecar/
-              done
+            for dll in engine/libhev-socks5-tunnel.dll engine/*.so; do
+              ldd "$dll" |
+                awk '$3 ~ /^\/usr\/bin\// { print $3 }' | sort -u |
+                while read -r lib; do
+                  cp -v "$lib" engine/
+                done
+            done
           fi
-          test -s sidecar/msys-2.0.dll
-          ls -l sidecar
+          test -s engine/msys-2.0.dll
+          ls -l engine
 
       # The windows-x64 leg runs on ubuntu, where no toolchain can produce an MSYS
-      # binary, so the sidecar crosses runners in the run's cache (restored by that
-      # leg alone) instead of an artifact. The key carries the attempt so a re-run
-      # never collides with its own earlier entry, and cross-os archives are
-      # allowed because the cache version is otherwise salted per platform.
-      - name: hand the sidecar to the windows-x64 leg
+      # binary, so the engine DLL crosses runners in the run's cache (restored by
+      # that leg alone) instead of an artifact. The key carries the attempt so a
+      # re-run never collides with its own earlier entry, and cross-os archives
+      # are allowed because the cache version is otherwise salted per platform.
+      - name: hand the engine DLL to the windows-x64 leg
         uses: actions/cache/save@v6
         with:
-          path: sidecar
-          key: hev-windows-sidecar-${{ github.run_id }}-${{ github.run_attempt }}
+          path: engine
+          key: hev-windows-engine-${{ github.run_id }}-${{ github.run_attempt }}
           enableCrossOsArchive: true
 
   build:
@@ -217,27 +231,27 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 
-      # The sidecar arrives from build-hev-windows through the run's cache; the
-      # cache restores the saved layout, so it lands in $GITHUB_WORKSPACE/sidecar.
-      - name: restore hev sidecar (windows)
+      # The engine DLL arrives from build-hev-windows through the run's cache; the
+      # cache restores the saved layout, so it lands in $GITHUB_WORKSPACE/engine.
+      - name: restore hev engine DLL (windows)
         if: matrix.name == 'windows-x64'
         uses: actions/cache/restore@v6
         with:
-          path: sidecar
-          key: hev-windows-sidecar-${{ github.run_id }}-${{ github.run_attempt }}
+          path: engine
+          key: hev-windows-engine-${{ github.run_id }}-${{ github.run_attempt }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      - name: publish hev sidecar (windows)
+      - name: publish hev engine DLL (windows)
         if: matrix.name == 'windows-x64'
         run: |
           set -euo pipefail
-          SIDECAR="$GITHUB_WORKSPACE/sidecar"
-          test -s "$SIDECAR/hev-socks5-tunnel.exe"
-          test -s "$SIDECAR/msys-2.0.dll"
-          echo "FCAE_HEV_SIDECAR_EXE=$SIDECAR/hev-socks5-tunnel.exe" >> "$GITHUB_ENV"
-          echo "FCAE_HEV_SIDECAR_DIR=$SIDECAR" >> "$GITHUB_ENV"
-          ls -la "$SIDECAR"
+          ENGINE="$GITHUB_WORKSPACE/engine"
+          test -s "$ENGINE/libhev-socks5-tunnel.dll"
+          test -s "$ENGINE/msys-2.0.dll"
+          echo "FCAE_HEV_DLL=$ENGINE/libhev-socks5-tunnel.dll" >> "$GITHUB_ENV"
+          echo "FCAE_HEV_ENGINE_DIR=$ENGINE" >> "$GITHUB_ENV"
+          ls -la "$ENGINE"
 
       - name: setup go
         uses: actions/setup-go@v7
@@ -265,7 +279,7 @@ jobs:
         with:
           script: |
             const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
-            const prefixes = ['cmake-', 'gradle-', 'sccache-', 'glfw-', 'hev-windows-sidecar-'];
+            const prefixes = ['cmake-', 'gradle-', 'sccache-', 'glfw-', 'hev-windows-engine-'];
 
             for (const prefix of prefixes) {
               let page = 1;
@@ -629,13 +643,11 @@ jobs:
             windows-x64)
               # Nothing to build here: the engine's Windows backend is MSYS-only
               # (tunnel, hev-task-system IOCP reactor, Win64 ABI assembly and the
-              # wintun session all sit behind __MSYS__, and the rest of the stack
-              # needs POSIX socket headers MinGW does not ship), so it cannot be
-              # linked into this MinGW binary at all. The `build-hev-windows` job
-              # builds upstream's executable with MSYS2 and this leg ships it as a
-              # sidecar process: same engine, same config, same wintun adapter as
-              # the in-process engines use everywhere else.
-              echo "hev-socks5-tunnel runs as a sidecar (built by build-hev-windows)"
+              # wintun session all sit behind __MSYS__), so only MSYS2 can build
+              # it. The `build-hev-windows` job builds the engine DLL and this
+              # leg loads it in-process at runtime: no exe, no child process,
+              # same adapter and GUID as the in-process engines use elsewhere.
+              echo "hev-socks5-tunnel ships as a DLL (built by build-hev-windows)"
               ;;
             android-*)
               if [ -z "${ANDROID_NDK_HOME:-}" ]; then
@@ -701,7 +713,7 @@ jobs:
             *) echo "::error::Unsupported hev target: ${{ matrix.name }}"; exit 1 ;;
           esac
           case "${{ matrix.name }}" in
-            windows-x64) ls -lh "$GITHUB_WORKSPACE/sidecar" ;;
+            windows-x64) ls -lh "$GITHUB_WORKSPACE/engine" ;;
             android-universal) ls -lh bin/android/*/lib*.a ;;
             *) ls -lh bin/libhev-socks5-tunnel.a ;;
           esac
@@ -828,9 +840,9 @@ jobs:
             fi
           else
             case "${{ matrix.name }}" in
-              # Windows runs hev-socks5-tunnel as a sidecar executable (the
-              # engine has no native Windows port); the crate sees the staged
-              # exe through FCAE_HEV_SIDECAR_EXE.
+              # Windows runs hev-socks5-tunnel in-process through the DLL that
+              # build-hev-windows stages; FCAE_HEV_DLL says it is part of the
+              # install, which switches the crate to the dynamic backend.
               windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,zeptun,hev ;;
               *) echo "::error::Unsupported desktop target: ${{ matrix.name }}"; exit 1 ;;
             esac
@@ -963,13 +975,13 @@ jobs:
 
           if [ "${{ matrix.name }}" = "windows-x64" ]; then
             cp core/zeptun/zig-out/bin/zeptun.dll package/ 2>/dev/null || true
-            # The hev-socks5-tunnel engine: a sidecar process beside the app,
-            # with the MSYS runtime it links against. It picks up wintun.dll
-            # from this same directory. The build-hev-windows job already
-            # collects every MSYS DLL ldd reports, so copy the whole sidecar
-            # dir — not just two files — to ensure the runtime is complete.
-            : "${FCAE_HEV_SIDECAR_DIR:?the hev sidecar was not staged (build-hev-windows)}"
-            cp -v "$FCAE_HEV_SIDECAR_DIR"/* package/
+            # The hev-socks5-tunnel engine: a DLL the app loads in-process,
+            # with the third-party DLLs it imports and the MSYS runtime they
+            # link against. It picks up wintun.dll from this same directory.
+            # build-hev-windows already collected every MSYS DLL ldd reports,
+            # so copy the whole engine dir to keep the runtime complete.
+            : "${FCAE_HEV_ENGINE_DIR:?the hev engine was not staged (build-hev-windows)}"
+            cp -v "$FCAE_HEV_ENGINE_DIR"/* package/
             WINTUN_TMP=$(mktemp -d)
             if curl -fsSL --connect-timeout 30 --max-time 180 \
                  -o "$WINTUN_TMP/wintun.zip" "https://www.wintun.net/builds/wintun-0.14.1.zip"; then
@@ -1039,7 +1051,7 @@ jobs:
           fi
           echo "$WIN_CERT_BASE64" | base64 -d > "$RUNNER_TEMP/wincert.pfx"
 
-          for f in package/*.exe; do
+          for f in package/*.exe package/libhev-socks5-tunnel.dll; do
             [ -f "$f" ] || continue
             osslsigncode sign \
               -pkcs12 "$RUNNER_TEMP/wincert.pfx" \

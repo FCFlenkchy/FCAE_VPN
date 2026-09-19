@@ -103,13 +103,11 @@ endif()
 message(STATUS "FCAE_VERSION = ${FCAE_VERSION}")
 message(STATUS "FCAE_IS_PRERELEASE = ${FCAE_IS_PRERELEASE}")
 
-# ── Parse version into MAJOR.MINOR.PATCH.BUILD for Windows RC ────────────
-# FCAE_VERSION is e.g. "v0.2.0-beta", "v1.4.1", or "v1.0.9.4"
+# ── Parse version into MAJOR.MINOR.PATCH.BUILD for the Windows RC ────────
 set(FCAE_VERSION_MAJOR 0)
 set(FCAE_VERSION_MINOR 0)
 set(FCAE_VERSION_PATCH 0)
 set(FCAE_VERSION_BUILD 0)
-# Try 4-component first (v1.0.9.4), then 3-component (v1.4.1)
 string(REGEX MATCH "^[vV]?([0-9]+)\\.([0-9]+)\\.([0-9]+)\\.([0-9]+)" _v4_match "${FCAE_VERSION}")
 if(_v4_match)
   set(FCAE_VERSION_MAJOR "${CMAKE_MATCH_1}")
@@ -152,16 +150,12 @@ set(UI_SOURCES
     ${CMAKE_SOURCE_DIR}/src_cpp/ui_render.cpp
 )
 
-# Public C header for the shared FFI layer. Every C++ target gets this on its
-# include path, so sources say #include "fcae.h" rather than reaching up out of
-# the tree with a relative path.
+# Public C header for the FFI layer, so sources just #include "fcae.h".
 set(FCAE_FFI_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/core/fcae-ffi/include)
 
-# Resolve libfcae_ffi.a from cargo.
-#
-# This one staticlib now contains everything: the shared core, the selected
-# backends, and the tun2socks Go bridge as a c-archive. There is no separate
-# tun2socks executable to build, sign, package or ship any more.
+# Resolve libfcae_ffi.a from cargo; it carries the whole Rust side (core,
+# selected backends, Go bridges) — there is no separate engine executable to
+# build, sign or ship any more.
 function(fcae_ffi_lib_path out_var triple)
     set(candidates
         ${CMAKE_SOURCE_DIR}/core/fcae-ffi/target/${triple}/release/libfcae_ffi.a
@@ -176,12 +170,12 @@ function(fcae_ffi_lib_path out_var triple)
     set(${out_var} "${CMAKE_SOURCE_DIR}/core/fcae-ffi/target/${triple}/release/libfcae_ffi.a" PARENT_SCOPE)
 endfunction()
 
-# Link the Rust staticlib once as a full path.
-# Do NOT use --whole-archive: cargo packs C objects (BoringSSL bcm.o, the Go
-# runtime from the tun2socks c-archive, etc.) that can appear more than once in
-# the archive; whole-archive then causes thousands of "multiple definition"
-# errors. Normal archive linking is enough because the C++ frontend references
-# fcae_init/start/stop/... which pull the rest of the graph.
+# Link the Rust staticlib once, as a full path, through an IMPORTED target so
+# CMake does not re-scan or duplicate the archive.
+# Do NOT use --whole-archive: the archive packs C objects (BoringSSL, the Go
+# runtime) that appear more than once and whole-archive then fails with
+# thousands of "multiple definition" errors; normal linking is enough because
+# the C++ frontend references fcae_init/start/stop/... and pulls the graph.
 function(fcae_link_ffi target_name lib_path)
     if(NOT EXISTS "${lib_path}")
         message(WARNING "libfcae_ffi.a not found at ${lib_path} (build rust first)")
@@ -197,19 +191,11 @@ function(fcae_link_ffi target_name lib_path)
     target_include_directories(${target_name} PRIVATE ${FCAE_FFI_INCLUDE_DIR})
 endfunction()
 
-# Give an Android shared object 16 KB-aligned LOAD segments.
-#
-# Android 15 runs with 16 KB memory pages on new devices, and its loader
-# rejects a .so whose segments are laid out for the historical 4 KB pages.
-# The Go bridge already asks for this through CGO_LDFLAGS in buildtools/go.rs,
-# but libfcaevpn_native.so is linked here by CMake and inherited none of it --
-# so on a 16 KB device System.loadLibrary() threw UnsatisfiedLinkError from
-# NativeEngine's static initialiser and the process died at launch.
-#
-# NDK r27+ honours ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES; the explicit linker
-# flags cover older NDKs and cost nothing on newer ones.
-#
-# Verify with:  llvm-readelf -l libfcaevpn_native.so | grep LOAD   (Align 0x4000)
+# Give an Android shared object 16 KB-aligned LOAD segments: Android 15 runs
+# with 16 KB pages on new devices and its loader rejects 4 KB-layout .so's
+# (System.loadLibrary threw UnsatisfiedLinkError at launch). NDK r27+ honours
+# ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES; the explicit flags cover older NDKs.
+# Verify: llvm-readelf -l libfcaevpn_native.so | grep LOAD  (Align 0x4000)
 function(fcae_align_16k target_name)
     target_link_options(${target_name} PRIVATE
         "-Wl,-z,max-page-size=16384"
@@ -218,22 +204,15 @@ function(fcae_align_16k target_name)
     message(STATUS "16 KB page alignment enabled for ${target_name}")
 endfunction()
 
-# Link the tun2socks Go bridge (Android only).
-#
-# On Android the Go toolchain rejects -buildmode=c-archive, so tun2socks
-# is built as libfcae_go_bridge.so and staged into jniLibs/<abi>/.
-# It is therefore NOT inside libfcae_ffi.a: the Rust side only *references*
-# t2s_start/t2s_stop/... and cargo emits `rustc-link-lib=dylib=...` directives
-# that apply when rustc links a final artifact. Here CMake performs the link,
-# so cargo's directives never reach it and we must name the .so explicitly --
-# otherwise ld.lld reports "undefined symbol: t2s_start" and friends.
-#
-# Psiphon is not in this .so. Android Psiphon is the official AAR
-# (android/psiphon, not in the Gradle graph). Do not link a second Go
-# runtime next to this library — that SIGSEGVs at dlopen.
+# Link the Go bridge on Android. The Go toolchain rejects
+# -buildmode=c-archive there, so tun2socks is built as
+# libfcae_go_bridge.so and staged into jniLibs/<abi>/ — it is NOT inside
+# libfcae_ffi.a, and cargo's dylib directives never reach this CMake link,
+# so the .so must be named explicitly (or ld.lld reports undefined t2s_*).
+# Do not link a second Go runtime next to it — that SIGSEGVs at dlopen.
 function(fcae_link_go_bridges target_name abi)
     set(jni_dir ${CMAKE_SOURCE_DIR}/android/app/src/main/jniLibs/${abi})
-    # tun2socks_bridge is a hard dependency: TUN mode always needs it.
+    # TUN mode always needs it: a hard dependency.
     set(t2s ${jni_dir}/libfcae_go_bridge.so)
     if(EXISTS "${t2s}")
         target_link_libraries(${target_name} PRIVATE "${t2s}")
@@ -244,9 +223,9 @@ function(fcae_link_go_bridges target_name abi)
     target_link_options(${target_name} PRIVATE "-Wl,-rpath,\\$ORIGIN")
 endfunction()
 
-# Desktop Psiphon: second Go runtime as libfcae_psiphon (c-shared). Cargo
-# stages it next to libfcae_ffi.a. CMake must link and copy it because rustc's
-# dylib directives never reach this link. Missing is a warning so a build
+# Desktop Psiphon: a second Go runtime as libfcae_psiphon (c-shared), staged
+# by cargo next to libfcae_ffi.a. CMake must link and copy it because rustc's
+# dylib directives never reach this link. Missing is a warning: a build
 # without psiphon-live still configures.
 function(fcae_link_psiphon target_name triple)
     set(dirs
@@ -382,11 +361,8 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_X86_64")
 
 elseif(AETHER_TARGET STREQUAL "ANDROID_UNIVERSAL")
 
-    # Universal Android build — all ABIs in a single APK.
-    # Each ABI variant is compiled separately by CMake (via ANDROID_ABI loop in build.gradle).
-    # This branch acts as a fallback/sentinel; actual ABI selection happens in the
-    # Gradle script which invokes CMake once per ABI with the correct ANDROID_ABI.
-    # We default to arm64-v8a here just so CMake configuration succeeds.
+    # Universal Android build: a sentinel so configuration succeeds; Gradle
+    # invokes CMake once per ABI with the correct ANDROID_ABI.
     message(STATUS "ANDROID_UNIVERSAL: building for all Android ABIs (arm64-v8a, armeabi-v7a, x86_64)")
     
     add_library(fcaevpn_native SHARED
@@ -459,15 +435,13 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
     fcae_link_psiphon(fcaevpn x86_64-pc-windows-gnu)
 
-    # System libs only — crypto is inside the Rust staticlib (BoringSSL), not OpenSSL.
+    # System libs only — crypto lives in the Rust staticlib (BoringSSL).
     # pthread MUST come after libfcae_ffi.a (BoringSSL thread_pthread needs it).
     target_link_libraries(fcaevpn PRIVATE
         d3d11 dxgi d3dcompiler dwmapi ntdll
         ws2_32 userenv bcrypt shell32 ole32 uuid crypt32 secur32 ncrypt
         iphlpapi
-        # winmm: the Go runtime (tun2socks c-archive) calls timeBeginPeriod.
-        # The rest of the Go runtime's imports (ws2_32/ntdll/userenv/bcrypt/
-        # iphlpapi) happen to be listed above already.
+        # winmm: the Go runtime in libfcae_ffi.a calls timeBeginPeriod.
         winmm
     )
 
@@ -486,9 +460,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
 elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "MACOS_X64")
 
-    # Find GLFW: look for static lib in custom prefixes first (from CI build),
-    # then fall back to system/dynamic GLFW.
-    # Prefer glfw3Config.cmake which handles IMPORTED targets properly.
+    # Find GLFW: CI-built static prefixes first, then system GLFW.
     set(GLFW_PREFIX_HINT "")
     if(AETHER_TARGET STREQUAL "MACOS_X64" OR (APPLE AND NOT AETHER_TARGET STREQUAL "MACOS_ARM64" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64"))
         set(GLFW_PREFIX_HINT /usr/local/glfw_x64)
@@ -577,12 +549,8 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         "-framework IOKit"
         "-framework CoreFoundation"
         "-framework CoreVideo"
-        # Required by the Go runtime inside libfcae_ffi.a (tun2socks c-archive):
-        # crypto/x509 calls SecCertificate*/SecTrust* to read the system trust
-        # store, and net resolves DNS through libresolv. Cargo emits these as
-        # rustc-link-lib directives, but they only take effect when rustc links
-        # the final artifact -- here CMake does, so they must be repeated or the
-        # link fails with "Undefined symbols: _SecTrustEvaluateWithError", etc.
+        # Go runtime in libfcae_ffi.a: Security for the system trust store,
+        # resolv for DNS — cargo's directives never reach this CMake link.
         "-framework Security"
         resolv
         pthread dl m
@@ -649,12 +617,11 @@ elseif(UNIX)
         target_link_libraries(fcaevpn PRIVATE glfw)
     endif()
 
-    # Do not link system OpenSSL (ssl/crypto) — BoringSSL is already in libfcae_ffi.a
+    # Do not link system OpenSSL (ssl/crypto) — BoringSSL is in libfcae_ffi.a.
     target_link_libraries(fcaevpn PRIVATE
         OpenGL::GL X11::X11 X11::Xi pthread dl m
         z bz2 lzma
-        # The Go runtime in the tun2socks c-archive resolves names through
-        # libresolv when cgo is enabled.
+        # libresolv: the Go runtime in libfcae_ffi.a resolves names through it.
         resolv
     )
 

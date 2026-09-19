@@ -4,34 +4,41 @@
 //! C SOCKS5 tunnel engine (coroutine I/O over lwip) that converts the local
 //! SOCKS5 endpoint a backend already exposes into a TUN device. It is a drop-in
 //! sibling of `fcae-bridge-tun2socks` and `fcae-bridge-zeptun`: no Go runtime,
-//! no subprocess overhead, and every engine shares one wintun adapter identity
+//! no subprocess, and every engine shares one wintun adapter identity
 //! (see [`WINTUN_ADAPTER_GUID`]).
 //!
 //! ## Backends
 //!
 //! | platform | backend | why |
 //! |----------|---------|-----|
-//! | Linux, macOS, Android | [`engine`] — in-process, C ABI | the engine's own TUN code compiles for these |
-//! | Windows | [`sidecar`] — upstream's executable beside the app | the engine has no native Windows port to link |
+//! | Linux, macOS, Android | linked in-process, C ABI | the engine's own TUN code compiles for these |
+//! | Windows | DLL loaded in-process at runtime | the engine's Windows backend is `__MSYS__`-only and links the MSYS runtime, which the MinGW build cannot link; a DLL is the one MSYS2 artifact a native process can host |
 //!
 //! Windows is the odd one out: the engine's Windows backend (tun device, the
 //! hev-task-system IOCP reactor, Win64 ABI assembly, the wintun session) is
-//! behind `__MSYS__`, so it needs the MSYS runtime to own the process, upstream
-//! ships `msys-2.0.dll` beside its own win64 binary, and no Rust target produces
-//! MSYS binaries. Cross-building it against MinGW cannot work: those code paths
+//! behind `__MSYS__`, so it needs the MSYS runtime. No Rust target produces
+//! MSYS binaries and the MinGW link cannot take the archive (those code paths
 //! are compiled out and the remaining sources need POSIX socket headers MinGW
-//! does not ship. So Windows runs upstream's `hev-socks5-tunnel.exe` — built with
-//! MSYS2 by the `build-hev-windows` job and installed next to the app — as a
-//! child process with the same config file, the same adapter and the same GUID
-//! as the in-process engines use elsewhere.
+//! does not ship). So MSYS2 builds the engine as a DLL (`make shared`, by the
+//! `build-hev-windows` job) and the app loads it next to the executable with
+//! `LoadLibraryExW` at first use: same process and same wintun adapter
+//! (name and GUID) as the in-process engines use everywhere else. The DLL
+//! drags its `msys-2.0.dll` runtime and third-party imports along, so the app
+//! itself stays a plain MinGW binary.
+//!
+//! Loading is lazy and isolated: a missing or unloadable DLL surfaces as
+//! "engine unavailable" (or a specific start error) instead of taking the app
+//! down at startup.
 //!
 //! ## Build requirements
 //!
 //! * in-process: an archive built outside the cargo graph (see `build.rs`), i.e.
 //!   `make -C core/hev-socks5-tunnel static`, or `FCAE_HEV_LIBDIR=<dir>`.
-//! * Windows sidecar: `FCAE_HEV_SIDECAR_EXE=<path to hev-socks5-tunnel.exe>`
-//!   during the build tells the crate the executable is part of the install.
-//!   Without it a Windows build must use the stub:
+//! * Windows: `FCAE_HEV_DLL=<path to libhev-socks5-tunnel.dll>` during the
+//!   build tells the crate the DLL is part of the install. At runtime it is
+//!   loaded from beside the executable, or from the path in `FCAE_HEV_DLL`
+//!   when that variable is set. Without the build-time variable a Windows
+//!   build must use the stub:
 //!   `cargo build --features fcae-bridge-hev-socks5-tunnel/stub`.
 //!
 //! Do not ship a stub build: it reports the engine as unavailable in the UI.
@@ -39,19 +46,15 @@
 mod socks5p;
 mod socks5t;
 
-#[cfg(not(all(windows, hev_sidecar)))]
+#[cfg(any(hev_linked, hev_dynamic))]
 mod engine;
-#[cfg(all(windows, hev_sidecar))]
-mod sidecar;
 
-/// Wintun only; the in-process backend stages the driver DLL from here.
-#[cfg(all(windows, not(hev_sidecar)))]
+/// Wintun only: the in-process backend stages the driver DLL from here.
+#[cfg(windows)]
 mod platform;
 
-#[cfg(not(all(windows, hev_sidecar)))]
+#[cfg(any(hev_linked, hev_dynamic))]
 pub use engine::HevSocks5TunnelBridge;
-#[cfg(all(windows, hev_sidecar))]
-pub use sidecar::HevSocks5TunnelBridge;
 
 /// The wintun adapter GUID every FCAE TUN engine pins.
 ///
@@ -60,29 +63,21 @@ pub use sidecar::HevSocks5TunnelBridge;
 /// DNS assignment and registered-network settings across engines, sessions and
 /// reinstalls, and makes repeated creation idempotent instead of accruing
 /// `FCAE_VPN 2`, `FCAE_VPN 3` duplicates. `fcae-bridge-tun2socks` passes it in
-/// the device URL and `fcae-bridge-zeptun` through `zeptun_set_adapter_guid`;
-/// the Windows sidecar hands it to the engine as `tunnel.guid` (the copy in its
-/// hardcoded config is checked against this constant at compile time).
+/// the device URL, `fcae-bridge-zeptun` through `zeptun_set_adapter_guid`, and
+/// the hev engine (every platform) receives it as `tunnel.guid` in the config
+/// this bridge renders.
 pub const WINTUN_ADAPTER_GUID: &str = "24198F4C-7895-434C-AD65-9E29A92DDC61";
 
-/// True when this build can actually run the engine: the C engine is linked in,
-/// or (Windows) the sidecar executable is beside the running binary.
+/// True when this build can actually run the engine: the C engine is linked
+/// in, or (Windows) the engine DLL loads from beside the running binary.
 pub fn is_supported() -> bool {
-    #[cfg(all(windows, hev_sidecar))]
-    {
-        return sidecar::is_available();
-    }
-    #[cfg(not(all(windows, hev_sidecar)))]
-    {
-        engine::is_supported()
-    }
+    engine::is_supported()
 }
 
 /// Traffic statistics from the engine.
 ///
-/// The in-process backend reads the engine's counters directly. The Windows
-/// sidecar reports `None`: the counters live in the engine process and the
-/// engine's CLI exposes no channel for them.
+/// The in-process backend reads the engine's counters directly, on every
+/// platform including Windows (the engine runs inside this process).
 #[derive(Default, Clone, Copy, Debug)]
 pub struct HevStats {
     pub tx_packets: usize,

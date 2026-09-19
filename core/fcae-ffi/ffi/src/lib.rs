@@ -451,6 +451,10 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         #[cfg(feature = "psiphon")]
         fcae_bridge_psiphon::register();
 
+        // Update checking is app-level, not backend-level, so it is
+        // installed here rather than by a backend.
+        fcae_version_checker::install_provider();
+
         #[cfg(any(feature = "tun", feature = "zeptun", feature = "hev"))]
         let engines = Arc::new(TunEngines {
             #[cfg(feature = "tun")]

@@ -2,26 +2,27 @@
 //!
 //! Two backends, one per platform family:
 //!
-//! * **In-process** (Linux, macOS, Android): the engine is built with its own
-//!   Makefile outside the cargo graph — `make -C core/hev-socks5-tunnel static`,
-//!   cross-compiled with the NDK on Android — and the archive is linked into
-//!   libfcae_ffi. `FCAE_HEV_LIBDIR=<dir>` overrides the search path.
-//! * **Sidecar** (Windows): the engine has no native Windows port (its Windows
-//!   backend is `__MSYS__`-only and needs the MSYS runtime to own the process),
-//!   so the app ships upstream's `hev-socks5-tunnel.exe`, built with MSYS2 by
-//!   the `build-hev-windows` job of `build_all.yml` and installed beside it.
-//!   `FCAE_HEV_SIDECAR_EXE=<path>` says that executable is part of the install,
-//!   which is what makes the crate compile the sidecar backend and report the
-//!   engine as available. Without it a Windows build must use `stub`.
+//! * **In-process, linked** (Linux, macOS, Android): the engine is built with
+//!   its own Makefile outside the cargo graph — `make -C core/hev-socks5-tunnel
+//!   static`, cross-compiled with the NDK on Android — and the archive is
+//!   linked into libfcae_ffi. `FCAE_HEV_LIBDIR=<dir>` overrides the search path.
+//! * **In-process, DLL** (Windows): the engine has no native Windows port
+//!   (its Windows backend is `__MSYS__`-only and links the MSYS runtime), so
+//!   it cannot be linked from the MinGW build. Instead the `build-hev-windows`
+//!   job builds it as a DLL with MSYS2 and the app loads it at runtime, next
+//!   to the executable: same process, no child process, no exe. `FCAE_HEV_DLL`
+//!   says that DLL is part of the install, which is what makes the crate
+//!   compile the dynamic backend and report the engine as available.
+//!   Without it a Windows build must use `stub`.
 
 use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(hev_linked)");
     println!("cargo::rustc-check-cfg=cfg(wintun_staged)");
-    println!("cargo::rustc-check-cfg=cfg(hev_sidecar)");
+    println!("cargo::rustc-check-cfg=cfg(hev_dynamic)");
     fcae_build::rerun_if_env_changed("FCAE_HEV_LIBDIR");
-    fcae_build::rerun_if_env_changed("FCAE_HEV_SIDECAR_EXE");
+    fcae_build::rerun_if_env_changed("FCAE_HEV_DLL");
     fcae_build::rerun_if_env_changed("ANDROID_NDK_HOME");
 
     // Checked before anything else: a stub build links no engine, so it must
@@ -36,28 +37,27 @@ fn main() {
 
     let target = fcae_build::target::Target::from_cargo_env();
 
-    // Windows: the engine cannot be linked at all, so the executable ships
-    // beside the app and runs as a child process. Staging it is a packaging
-    // step; all this needs to know is that it will be there.
-    if target.os == fcae_build::target::Os::Windows && !msys_target() {
-        let staged = std::env::var("FCAE_HEV_SIDECAR_EXE").unwrap_or_default();
+    // Windows: the engine cannot be linked (MSYS-only runtime), so it ships
+    // beside the app as a DLL that the bridge loads at runtime. Staging it is
+    // a packaging step; all this needs to know is that it will be there.
+    if target.os == fcae_build::target::Os::Windows {
+        let staged = std::env::var("FCAE_HEV_DLL").unwrap_or_default();
         let staged = staged.trim();
         if !staged.is_empty() && Path::new(staged).is_file() {
             fcae_build::rerun_if_changed(staged);
-            println!("cargo:rustc-cfg=hev_sidecar");
+            println!("cargo:rustc-cfg=hev_dynamic");
             fcae_build::note(format!(
-                "hev-socks5-tunnel runs as a sidecar process on Windows ({staged})"
+                "hev-socks5-tunnel loads as a DLL in-process on Windows ({staged})"
             ));
             return;
         }
         panic!(
             "the hev-socks5-tunnel engine has no native Windows port (its Windows backend is \
-             MSYS-only and links the MSYS runtime), so Windows runs it as a sidecar process.\n\
-             `make -C core/hev-socks5-tunnel` inside MSYS2 builds it (the build-hev-windows job \
-             does that and passes the result on); point FCAE_HEV_SIDECAR_EXE at the resulting \
-             hev-socks5-tunnel.exe, or build with \
-             `--features fcae-bridge-hev-socks5-tunnel/stub`; the engine then reports itself \
-             unavailable in the UI."
+             MSYS-only and links the MSYS runtime), so it cannot be linked into this MinGW \
+             build. The build-hev-windows job builds it as a DLL with MSYS2 and hands the \
+             result over; point FCAE_HEV_DLL at the resulting libhev-socks5-tunnel.dll, or \
+             build with `--features fcae-bridge-hev-socks5-tunnel/stub`; the engine then \
+             reports itself unavailable in the UI."
         );
     }
 
@@ -133,11 +133,6 @@ fn main() {
         println!("cargo:rustc-link-lib=static={name}");
     }
 
-    // Link dependencies required by hev-socks5-tunnel
-    if target.os == fcae_build::target::Os::Windows {
-        println!("cargo:rustc-link-lib=ws2_32");
-        println!("cargo:rustc-link-lib=iphlpapi");
-    }
     println!("cargo:rustc-link-lib=pthread");
 
     println!("cargo:rustc-cfg=hev_linked");
@@ -146,12 +141,6 @@ fn main() {
         "hev-socks5-tunnel linked in-process from {} (no subprocess, no embedded binary)",
         archive.display()
     ));
-}
-
-/// `x86_64-pc-msys` is the only Windows target whose C ABI matches the
-/// engine's Windows backend; cargo passes it as `TARGET` to build scripts.
-fn msys_target() -> bool {
-    std::env::var("TARGET").is_ok_and(|triple| triple.contains("msys"))
 }
 
 fn locate_lib_dir(submodule: &Path, target: fcae_build::target::Target) -> PathBuf {

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "In-process TUN bridge over hev-socks5-tunnel (C engine, static link)."
+description = "In-process TUN bridge over hev-socks5-tunnel (C engine, static link or runtime DLL on Windows)."
 links = "hev_socks5_tunnel"
 
 [lib]
@@ -23,11 +23,11 @@ log.workspace = true
 parking_lot.workspace = true
 tokio.workspace = true
 
-# Windows runs the engine as a child process and owns the interface for it:
-# addresses, routes and DNS come from the tun2socks bridge's platform layer, so
-# the routing policy exists exactly once. Target-scoped because the sidecar is
-# Windows-only, and pulling the Go bridge into, say, an Android build of this
-# crate would be pointless work.
+# Windows runs the engine as a DLL inside this process and owns the interface
+# for it: addresses, routes and DNS come from the tun2socks bridge's platform
+# layer, so the routing policy exists exactly once. Target-scoped because it
+# is Windows-only, and pulling the Go bridge into, say, an Android build of
+# this crate would be pointless work.
 [target.'cfg(windows)'.dependencies]
 fcae-bridge-tun2socks.workspace = true
 

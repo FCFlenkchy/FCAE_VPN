@@ -47,6 +47,7 @@ tor = ["aether", "fcae-bridge-aether/tor"]
 [dependencies]
 fcae-abi.workspace = true
 fcae-runtime.workspace = true
+fcae-version-checker.workspace = true
 fcae-bridge-tun2socks = { workspace = true, optional = true }
 fcae-bridge-aether = { workspace = true, optional = true }
 fcae-bridge-psiphon = { workspace = true, optional = true }
