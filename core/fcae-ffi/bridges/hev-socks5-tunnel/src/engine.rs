@@ -347,7 +347,7 @@ fn generate_config(cfg: &SessionConfig, socks: SocketAddr) -> Result<(SocketAddr
     yaml.push_str("socks5:\n");
     yaml.push_str(&format!("  port: {}\n", socks.port()));
     yaml.push_str(&format!("  address: {}\n", socks.ip()));
-    yaml.push_str("  udp: 'tcp'\n");
+    yaml.push_str("  udp: 'udp'\n");
     yaml.push_str("\nmisc:\n");
     yaml.push_str(&format!("  log-level: '{}'\n", log_level(cfg.tun.t2s_log_level)));
     Ok((socks, yaml))

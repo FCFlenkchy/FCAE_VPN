@@ -43,7 +43,7 @@ tunnel:
 socks5:
   port: {port}
   address: '{address}'
-  udp: 'tcp'
+  udp: 'udp'
 
 misc:
   log-level: '{level}'

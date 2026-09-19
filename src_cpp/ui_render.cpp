@@ -593,6 +593,13 @@ static ImVec4 state_color(FcaeState s) {
 static const char* state_label(FcaeState s) {
     if (s == FCAE_STATE_CONNECTED)
         return g_app.mode == 1 ? "CONNECTED - TUN" : "CONNECTED - PROXY";
+    // Avoid flicker on Psiphon exits: CONNECTING with Psiphon backend should
+    // show ESTABLISHING TUNNEL stably instead of flipping between
+    // CONNECTING and ESTABLISHING via status_message
+    if ((s == FCAE_STATE_CONNECTING || s == FCAE_STATE_RECONNECTING) &&
+        (g_app.backend == 1 || g_app.tor_mode == 3)) {
+        return "ESTABLISHING TUNNEL";
+    }
     switch (s) {
         case FCAE_STATE_DISCONNECTED: return "DISCONNECTED";
         case FCAE_STATE_PROVISIONING:
@@ -1062,9 +1069,11 @@ void render_ui() {
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(btn.x - 0.05f, btn.y - 0.05f, btn.z - 0.05f, 1.0f));
 
         float btn_w = narrow ? (ImGui::GetContentRegionAvail().x - 72.0f) : 140.0f;
-        if (btn_w < 100.0f) btn_w = 100.0f;
-        if (ImGui::Button(connected || busy ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 34))) {
-            if (connected || busy || errored) {
+        bool tun_paused = false;
+        try { tun_paused = fcae_tun_paused(); } catch (...) {}
+        bool show_disconnect = connected || busy || tun_paused;
+        if (ImGui::Button(show_disconnect ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 34))) {
+            if (connected || busy || errored || tun_paused) {
                 g_app.start_busy.store(false);
                 // fcae_stop() is a fast control path: it cancels the session
                 // and aborts the TUN descriptors, then returns while the full
@@ -1213,6 +1222,41 @@ void render_ui() {
             }
         }
         ImGui::PopStyleColor(3);
+
+        if (g_app.mode == 1 && (connected || tun_paused)) {
+            ImGui::SameLine(0, 6);
+            if (tun_paused) {
+                ImVec4 start_col(0.18f, 0.35f, 0.85f, 1.0f);
+                ImVec4 start_h(0.26f, 0.45f, 0.95f, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button, start_col);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, start_h);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(start_col.x - 0.05f, start_col.y - 0.05f, start_col.z - 0.05f, 1.0f));
+                if (ImGui::Button(" START ", ImVec2(80, 26))) {
+                    std::thread([] {
+                        if (fcae_resume_tun() != FCAE_OK) {
+                            g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
+                        }
+                        ui_request_redraw();
+                    }).detach();
+                }
+                ImGui::PopStyleColor(3);
+            } else {
+                ImVec4 stop_col(0.85f, 0.55f, 0.15f, 1.0f);
+                ImVec4 stop_h(0.95f, 0.65f, 0.25f, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button, stop_col);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, stop_h);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(stop_col.x - 0.05f, stop_col.y - 0.05f, stop_col.z - 0.05f, 1.0f));
+                if (ImGui::Button(" STOP ", ImVec2(80, 26))) {
+                    std::thread([] {
+                        if (fcae_pause_tun() != FCAE_OK) {
+                            g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
+                        }
+                        ui_request_redraw();
+                    }).detach();
+                }
+                ImGui::PopStyleColor(3);
+            }
+        }
 
         ImGui::SameLine(0, 6);
         if (ImGui::Button("Save", ImVec2(60, 34))) {

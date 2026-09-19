@@ -54,6 +54,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
     private lateinit var logScroll: ScrollView
     private lateinit var btnConnect: MaterialButton
+    private lateinit var btnTunStop: MaterialButton
+    private lateinit var btnTunStart: MaterialButton
+    private lateinit var layoutTunPauseResume: android.view.View
     private lateinit var btnCheckUpdates: MaterialButton
     private lateinit var updateStatus: TextView
     private var updateAvailableInfo: FcaeUpdateInfo? = null
@@ -156,8 +159,10 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var psiDownBps = 0L
     @Volatile private var psiTotalUp = 0L
     @Volatile private var psiTotalDown = 0L
+    @Volatile private var lastPsiphonStageLabel = ""
 
     private fun resetPsiStats() {
+        lastPsiphonStageLabel = ""
         psiRttMs = 0
         psiUpBps = 0L
         psiDownBps = 0L
@@ -239,14 +244,11 @@ class MainActivity : AppCompatActivity() {
                 // still in flight — READY/FAILED own the terminal states.
                 PsiphonTunnelService.BROADCAST_STAGE -> {
                     val label = intent.getStringExtra(PsiphonTunnelService.EXTRA_STAGE_LABEL) ?: return
+                    lastPsiphonStageLabel = label
                     handler.post {
-                        // commandConnecting covers the egress chain, where
-                        // 'connecting' already flipped off when the Aether
-                        // state hit Connected before psiphon finished.
                         if ((connecting || commandConnecting)
                                 && (isPsiphonSelected() || isEgressPsiphon())) {
-                            // Same status vocabulary as the other protocols —
-                            // the label is already the full staged phrase.
+                            // Store stage for poll to use, show stable label without CONNECTING prefix flicker
                             statusText.text = label
                             statusText.setTextColor(COLOR_PROGRESS)
                         }
@@ -494,6 +496,9 @@ class MainActivity : AppCompatActivity() {
         logText = findViewById(R.id.logText)
         logScroll = findViewById(R.id.logScroll)
         btnConnect = findViewById(R.id.btnConnect)
+        btnTunStop = findViewById(R.id.btnTunStop)
+        btnTunStart = findViewById(R.id.btnTunStart)
+        layoutTunPauseResume = findViewById(R.id.layoutTunPauseResume)
         btnCheckUpdates = findViewById(R.id.btnCheckUpdates)
         updateStatus = findViewById(R.id.updateStatus)
         spinnerProtocol = findViewById(R.id.spinnerProtocol)
@@ -741,6 +746,7 @@ class MainActivity : AppCompatActivity() {
             ) {
                 applyModeSocksLock()
                 applyTunEngineVisibility()
+                updateButton()
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
@@ -775,7 +781,39 @@ class MainActivity : AppCompatActivity() {
         lastLogHash = 0L
 
         btnConnect.setOnClickListener {
-            if (vpnActive || engineRunning || connecting) disconnectAll() else connectClicked()
+            if (vpnActive || engineRunning || connecting || commandPaused) disconnectAll() else connectClicked()
+        }
+
+        btnTunStop.setOnClickListener {
+            if (isTunModeSelected()) {
+                try {
+                    val intent = android.content.Intent(this, FCAEVpnService::class.java)
+                    intent.action = FCAEVpnService.ACTION_STOP
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        startForegroundService(intent)
+                    } else {
+                        startService(intent)
+                    }
+                } catch (t: Throwable) {
+                    try { NativeEngine.nativePauseTun() } catch (_: Throwable) {}
+                }
+            }
+        }
+
+        btnTunStart.setOnClickListener {
+            if (isTunModeSelected()) {
+                try {
+                    val intent = android.content.Intent(this, FCAEVpnService::class.java)
+                    intent.action = FCAEVpnService.ACTION_START
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        startForegroundService(intent)
+                    } else {
+                        startService(intent)
+                    }
+                } catch (t: Throwable) {
+                    try { NativeEngine.nativeResumeTun() } catch (_: Throwable) {}
+                }
+            }
         }
 
         findViewById<MaterialButton>(R.id.btnLatestLogs).setOnClickListener {
@@ -2005,17 +2043,32 @@ class MainActivity : AppCompatActivity() {
             // SOCKS endpoint is live, but on a Psiphon path the egress tunnel
             // is still dialling. Keep showing the chain progress instead of
             // prematurely flipping to "CONNECTED — ...".
+            // Also fix flicker: previously poll showed "CONNECTING — ESTABLISHING TUNNEL"
+            // while stage broadcast showed "ESTABLISHING TUNNEL", causing rapid flip.
+            // Now Psiphon paths show stable ESTABLISHING label without CONNECTING prefix.
+            val isPsiphonPath = isPsiphonSelected() || isEgressPsiphon()
             val psiphonStillChaining = state == 4
-                    && (isPsiphonSelected() || isEgressPsiphon())
+                    && isPsiphonPath
                     && commandConnecting
                     && pendingPsiSocks == 0
             val label = when {
                 psiphonStillChaining -> "ESTABLISHING TUNNEL"
                 state == 0 -> "DISCONNECTED"
-                state in 1..3 -> "CONNECTING"
+                state in 1..3 -> {
+                    if (isPsiphonPath && commandConnecting) {
+                        // For Psiphon, show stable establishing label from stage or statusMsg
+                        when {
+                            lastPsiphonStageLabel.isNotBlank() -> lastPsiphonStageLabel
+                            statusMsg.isNotBlank() -> statusMsg.uppercase()
+                            else -> "ESTABLISHING TUNNEL"
+                        }
+                    } else {
+                        "CONNECTING"
+                    }
+                }
                 state == 4 -> {
                     val isTun = spinnerMode.selectedItemPosition == 1
-                    if (statusMsg.isNotBlank()) statusMsg.uppercase()
+                    if (statusMsg.isNotBlank() && !isPsiphonPath) statusMsg.uppercase()
                     else "CONNECTED - ${if (isTun) "TUN" else "PROXY"}"
                 }
                 state == 5 -> "ERROR"
@@ -2027,7 +2080,13 @@ class MainActivity : AppCompatActivity() {
             } else if (state == 4 && !psiphonStillChaining) {
                 statusText.text = label
             } else {
-                statusText.text = if (statusMsg.isNotEmpty() && state != 0 && !psiphonStillChaining) "$label \u2014 $statusMsg" else label
+                // For Psiphon connecting, avoid "CONNECTING — ESTABLISHING TUNNEL" flicker
+                // by showing just the establishing label
+                if (isPsiphonPath && (state in 1..3 || psiphonStillChaining) && commandConnecting) {
+                    statusText.text = label
+                } else {
+                    statusText.text = if (statusMsg.isNotEmpty() && state != 0 && !psiphonStillChaining && !isPsiphonPath) "$label \u2014 $statusMsg" else label
+                }
             }
             statusText.setTextColor(
                 when {
@@ -2118,9 +2177,25 @@ class MainActivity : AppCompatActivity() {
         btnConnect.isEnabled = !disconnecting
         if (disconnecting) {
             btnConnect.text = "DISCONNECTING"
+            if (::layoutTunPauseResume.isInitialized) layoutTunPauseResume.visibility = android.view.View.GONE
             return
         }
-        if (vpnActive || engineRunning || connecting) {
+        val isTun = isTunModeSelected()
+        val showPauseResume = isTun && (vpnActive || engineRunning || commandPaused || connecting)
+        if (::layoutTunPauseResume.isInitialized) {
+            layoutTunPauseResume.visibility = if (showPauseResume) android.view.View.VISIBLE else android.view.View.GONE
+            if (showPauseResume) {
+                val isPaused = commandPaused || try { NativeEngine.nativeTunPaused() } catch (_: Throwable) { false }
+                btnTunStop.visibility = if (isPaused) android.view.View.GONE else android.view.View.VISIBLE
+                btnTunStart.visibility = if (isPaused) android.view.View.VISIBLE else android.view.View.GONE
+                btnTunStop.setBackgroundColor(Color.parseColor("#B45309"))
+                btnTunStart.setBackgroundColor(Color.parseColor("#1D4ED8"))
+            } else {
+                btnTunStop.visibility = android.view.View.GONE
+                btnTunStart.visibility = android.view.View.GONE
+            }
+        }
+        if (vpnActive || engineRunning || connecting || commandPaused) {
             btnConnect.text = "DISCONNECT"
             btnConnect.setBackgroundColor(COLOR_DISCONNECT_BTN)
         } else {
