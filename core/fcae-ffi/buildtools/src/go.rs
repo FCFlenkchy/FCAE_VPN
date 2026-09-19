@@ -127,7 +127,7 @@ impl<'a> CArchive<'a> {
             }
         }
         Err(GoError::ToolchainMissing(
-            "`go` not found on PATH. Install Go 1.26.3+ (https://go.dev/dl/) or set GO_BIN.".into(),
+            "`go` not found on PATH. Install Go (https://go.dev/dl/) or set GO_BIN. The module toolchain directive auto-selects via GOTOOLCHAIN=auto.".into(),
         ))
     }
 
@@ -192,6 +192,7 @@ impl<'a> CArchive<'a> {
             .args(args)
             .env("GOFLAGS", "-mod=mod")
             .env("CGO_ENABLED", "0")
+            .env("GOTOOLCHAIN", "auto")
             .output()
             .map_err(|e| GoError::Build(format!("could not run `go {}`: {e}", args.join(" "))))?;
 
@@ -304,7 +305,8 @@ impl<'a> CArchive<'a> {
         cmd.arg("-o").arg(&archive).arg(self.package);
 
         // cgo is mandatory for c-archive.
-        cmd.env("CGO_ENABLED", "1")
+        cmd.env("GOTOOLCHAIN", "auto")
+            .env("CGO_ENABLED", "1")
             .env("GOOS", self.target.goos())
             .env("GOARCH", self.target.goarch())
             .env("CC", &cc);

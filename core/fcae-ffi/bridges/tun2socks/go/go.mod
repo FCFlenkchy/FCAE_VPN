@@ -14,6 +14,8 @@ module github.com/FCFlenkchy/FCAE_VPN/core/fcae-ffi/bridges/tun2socks
 // the main module declares. Bump this whenever the submodule is updated.
 go 1.26.3
 
+toolchain go1.26.8
+
 require (
 	github.com/xjasonlyu/tun2socks/v2 v2.6.0
 	// Needed to install a non-fatal logger: engine.Start/Stop report errors

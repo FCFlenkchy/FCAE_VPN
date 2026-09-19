@@ -83,7 +83,7 @@ fn main() {
         }
         Err(e) => panic!(
             "failed to build the desktop Psiphon Go bridge: {e}\n\
-             Install Go 1.26.3+ and a C toolchain for the target, or omit \
+             Install Go (toolchain auto via GOTOOLCHAIN=auto from go.mod) and a C toolchain for the target, or omit \
              `--features psiphon-live`."
         ),
     }

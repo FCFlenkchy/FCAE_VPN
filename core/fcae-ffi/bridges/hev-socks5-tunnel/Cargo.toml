@@ -21,6 +21,7 @@ fcae-runtime.workspace = true
 libc.workspace = true
 log.workspace = true
 parking_lot.workspace = true
+tokio.workspace = true
 
 # Windows runs the engine as a child process and owns the interface for it:
 # addresses, routes and DNS come from the tun2socks bridge's platform layer, so

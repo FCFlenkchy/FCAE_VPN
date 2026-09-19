@@ -242,15 +242,22 @@ jobs:
       - name: setup go
         uses: actions/setup-go@v7
         with:
-          go-version: 'stable'
+          go-version-file: 'core/psiphon/go.mod'
           cache: false
 
       - name: pin go toolchain
         shell: bash
+        env:
+          GOTOOLCHAIN: auto
         run: |
           set -euo pipefail
           echo "GO_BIN=$(command -v go)" >> "$GITHUB_ENV"
+          echo "GOTOOLCHAIN=auto" >> "$GITHUB_ENV"
           go version
+          go env GOTOOLCHAIN
+          cat core/psiphon/go.mod | grep -E "^go |^toolchain" || true
+          cat core/fcae-ffi/bridges/psiphon/go/go.mod | grep -E "^go |^toolchain" || true
+          cat core/fcae-ffi/bridges/tun2socks/go/go.mod | grep -E "^go |^toolchain" || true
 
       - name: cleanup old caches
         uses: actions/github-script@v8
@@ -958,10 +965,11 @@ jobs:
             cp core/zeptun/zig-out/bin/zeptun.dll package/ 2>/dev/null || true
             # The hev-socks5-tunnel engine: a sidecar process beside the app,
             # with the MSYS runtime it links against. It picks up wintun.dll
-            # from this same directory.
+            # from this same directory. The build-hev-windows job already
+            # collects every MSYS DLL ldd reports, so copy the whole sidecar
+            # dir — not just two files — to ensure the runtime is complete.
             : "${FCAE_HEV_SIDECAR_DIR:?the hev sidecar was not staged (build-hev-windows)}"
-            cp "$FCAE_HEV_SIDECAR_DIR"/hev-socks5-tunnel.exe \
-               "$FCAE_HEV_SIDECAR_DIR"/msys-2.0.dll package/
+            cp -v "$FCAE_HEV_SIDECAR_DIR"/* package/
             WINTUN_TMP=$(mktemp -d)
             if curl -fsSL --connect-timeout 30 --max-time 180 \
                  -o "$WINTUN_TMP/wintun.zip" "https://www.wintun.net/builds/wintun-0.14.1.zip"; then
@@ -1402,8 +1410,19 @@ jobs:
                 throw new Error('Each release requires version, date, notes and url');
               }
             }
-            const next = previous.filter(release => compareVersion(release.version, entry.version) !== 0);
-            next.push(entry);
+            const merged = previous.filter(release => compareVersion(release.version, entry.version) !== 0);
+            merged.push(entry);
+            const stable = [];
+            const prerelease = [];
+            for (const r of merged) {
+              const v = parseVersion(r.version);
+              if (v.pre) prerelease.push(r); else stable.push(r);
+            }
+            stable.sort((a, b) => compareVersion(b.version, a.version));
+            prerelease.sort((a, b) => compareVersion(b.version, a.version));
+            const next = [];
+            if (stable.length) next.push(stable[0]);
+            if (prerelease.length) next.push(prerelease[0]);
             next.sort((a, b) => Number(parseVersion(a.version).pre) - Number(parseVersion(b.version).pre)
               || compareVersion(b.version, a.version));
             const content = `${JSON.stringify(next, null, 2)}\n`;

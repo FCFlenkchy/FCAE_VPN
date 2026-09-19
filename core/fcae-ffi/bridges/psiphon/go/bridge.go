@@ -291,6 +291,8 @@ func (p *psiProvider) GetDNSServersAsString() string {
 	return psiBootstrapDNS
 }
 
+func (p *psiProvider) OnAccessToken(_ string) {}
+
 func (p *psiProvider) IPv6Synthesize(ipv4 string) string { return "" }
 func (p *psiProvider) HasIPv6Route() int                 { return 0 }
 
