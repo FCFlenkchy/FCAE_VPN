@@ -98,10 +98,33 @@ jobs:
           set -euo pipefail
           # Everything stays workspace-relative: inside the MSYS shell a Windows
           # path such as $GITHUB_WORKSPACE is not a usable path.
-          # `shared` builds the DLL the app loads in-process (no exe, no child
-          # process); tp-shared builds the engine's third-party imports (yaml,
-          # lwip, hev-task-system) as the DLLs the engine DLL links against.
-          make -C core/hev-socks5-tunnel shared -j"$(nproc)"
+          echo "toolchain: $(gcc -dumpmachine) -- $(gcc --version | head -1)"
+
+          # The Makefile targets MSYS2 (MSYSTEM=MSYS); a bare POSIX environment
+          # such as Cygwin is kept working below rather than by the Makefile.
+          # `tp-shared` builds the third-party DLLs the engine DLL links
+          # against (yaml, lwip, hev-task-system).
+          make -C core/hev-socks5-tunnel tp-shared -j"$(nproc)"
+
+          # The final link resolves them as -lyaml -llwip -lhev-task-system.
+          # Cygwin's ld will not link a PE .so directly, so mint an import
+          # library per DLL; that makes -l resolution work on every flavor.
+          if command -v dlltool >/dev/null 2>&1; then
+            for name in yaml lwip hev-task-system; do
+              dir=core/hev-socks5-tunnel/third-part/$name/bin
+              dlltool -D "$dir/lib$name.so" -l "$dir/lib$name.dll.a"
+            done
+          fi
+
+          if [ -n "${MSYSTEM:-}" ]; then
+            make -C core/hev-socks5-tunnel shared -j"$(nproc)"
+          else
+            # Outside MSYS the Makefile skips the Windows system libraries,
+            # so supply them here (LFLAGS is appended at the end of its
+            # LDFLAGS, which is where -l flags belong).
+            make -C core/hev-socks5-tunnel shared -j"$(nproc)" LFLAGS="-lws2_32 -lIphlpapi"
+          fi
+
           test -s core/hev-socks5-tunnel/bin/libhev-socks5-tunnel.so
           test -s core/hev-socks5-tunnel/third-part/yaml/bin/libyaml.so
           test -s core/hev-socks5-tunnel/third-part/lwip/bin/liblwip.so
@@ -116,9 +139,10 @@ jobs:
           cp -v core/hev-socks5-tunnel/third-part/lwip/bin/liblwip.so engine/
           cp -v core/hev-socks5-tunnel/third-part/hev-task-system/bin/libhev-task-system.so engine/
 
-          # Ship the runtime every DLL in the set was linked against; the
-          # loader resolves each import next to its own DLL, so only the MSYS
-          # prefix libraries need collecting (only msys-2.0.dll is expected).
+          # Ship the runtime every DLL in the set was linked against
+          # (msys-2.0.dll on MSYS, cygwin1.dll on Cygwin); the loader resolves
+          # each import next to its own DLL, so only the POSIX prefix libraries
+          # need collecting.
           if command -v ldd >/dev/null 2>&1; then
             for dll in engine/libhev-socks5-tunnel.dll engine/*.so; do
               ldd "$dll" |
@@ -128,7 +152,9 @@ jobs:
                 done
             done
           fi
-          test -s engine/msys-2.0.dll
+          if [ -n "${MSYSTEM:-}" ]; then
+            test -s engine/msys-2.0.dll
+          fi
           ls -l engine
 
       # The windows-x64 leg runs on ubuntu, where no toolchain can produce an MSYS

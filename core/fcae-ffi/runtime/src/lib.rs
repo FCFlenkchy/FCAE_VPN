@@ -8,7 +8,7 @@
 //! * [`backend`] — the [`Backend`](backend::Backend) plugin trait that Aether
 //!   implements today and Psiphon will implement unchanged.
 //! * [`telemetry`] — the single shared telemetry cell + log bus.
-//! * [`update`] — app-level update checking, with a pluggable fetcher.
+//! * [`update`] — app-level update checking: release manifest fetch, decode, compare.
 //! * [`session`] — the supervisor that owns the runtime thread, starts the
 //!   backend, raises the TUN bridge, and guarantees teardown ordering.
 //!
