@@ -289,7 +289,15 @@ impl TunBridge for HevSocks5TunnelBridge {
                 // The engine parses the YAML on this thread, after `start` has
                 // returned, so the buffer is owned here rather than borrowed
                 // from a stack frame that is already gone.
-                let bytes = config.as_bytes_with_nul();
+                //
+                // The length must NOT include the terminating NUL: hev hands
+                // both straight to yaml_parser_set_input_string(), and libyaml
+                // reads exactly that many bytes — one byte past the document
+                // (the NUL) is a parse error, so the whole engine exits with
+                // rc -1 before it ever opens the tun device. as_bytes() keeps
+                // the buffer NUL-terminated (CString guarantee) while
+                // reporting the document length only.
+                let bytes = config.as_bytes();
                 let rc = unsafe {
                     hev_socks5_tunnel_main_from_str(
                         bytes.as_ptr() as *const c_uchar,

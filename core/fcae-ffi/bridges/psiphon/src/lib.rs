@@ -36,6 +36,7 @@
 //! successful handshake, which is why the UI offers "Auto" until the first
 //! connect completes and then fills the list from [`regions`].
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,7 +44,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fcae_abi::FcaeState;
 use fcae_runtime::backend::{
-    Backend, BackendContext, BackendHandle, BackendId, Capabilities, Endpoints,
+    Backend, BackendContext, BackendHandle, BackendId, CancelToken, Capabilities, Endpoints,
 };
 use fcae_runtime::error::{CoreError, Result};
 
@@ -223,6 +224,53 @@ impl Drop for HostLease {
     }
 }
 
+/// Grace given to an already-announced exit to accept its first connection.
+///
+/// The port arrives with the attach handshake or with the connected notices,
+/// so this absorbs scheduling latency on a loaded device -- it is not a window
+/// for a tunnel to finish dialling.
+const PROXY_READY_GRACE: Duration = Duration::from_secs(10);
+/// Per-attempt budget; loopback refuses instantly when nothing listens.
+const PROXY_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+const PROXY_PROBE_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Wait until the exit's SOCKS listener on loopback accepts a connection.
+///
+/// "Connected" is what makes the supervisor raise the TUN, so it must never be
+/// reported on a port number alone: the attach path takes whatever port the
+/// host hands over, and a recalled session replays the last one -- a stale or
+/// dead exit would otherwise be announced as live, and the TUN would be raised
+/// onto nothing (device offline, no data plane). The probe dials exactly the
+/// address the TUN engine will dial, so a refusal here is a refusal there.
+async fn wait_for_local_proxy(socks_port: u16, cancel: &CancelToken) -> Result<()> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], socks_port));
+    let deadline = tokio::time::Instant::now() + PROXY_READY_GRACE;
+    let mut announced = false;
+    loop {
+        let probe = tokio::time::timeout(
+            PROXY_PROBE_TIMEOUT,
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await;
+        if let Ok(Ok(_accepted)) = probe {
+            return Ok(());
+        }
+        if cancel.is_cancelled() {
+            return Err(CoreError::StartFailed("cancelled".into()));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CoreError::StartFailed(format!(
+                "Psiphon's local SOCKS proxy {addr} accepted no connection: the exit \
+                 is not there (restart Psiphon and connect again)"
+            )));
+        }
+        if !announced {
+            announced = true;
+            log::info!("[psiphon] waiting for the local SOCKS proxy on {addr}");
+        }
+        tokio::time::sleep(PROXY_PROBE_INTERVAL).await;
+    }
+}
 
 #[async_trait]
 impl Backend for PsiphonBackend {
@@ -292,6 +340,7 @@ impl Backend for PsiphonBackend {
                     .into(),
             ));
         }
+        wait_for_local_proxy(socks, &cx.cancel).await?;
         Ok(Box::new(PsiphonHandle {
             socks_port: socks,
             http_port: http,
@@ -404,6 +453,7 @@ impl Backend for PsiphonBackend {
         }
 
         log::info!("[psiphon] tunnel established, socks 127.0.0.1:{socks_port}");
+        wait_for_local_proxy(socks_port, &cx.cancel).await?;
 
         Ok(Box::new(PsiphonHandle {
             socks_port,
