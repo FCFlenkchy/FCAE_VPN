@@ -1,9 +1,9 @@
 [
   {
-    "version": "1.3.1",
-    "date": "2026-09-12",
-    "notes": "use tun2socks for android too and fixed warp in warp counting bytes and warp in warp or wireguard in android now also perform well in tun mode due to this switchand",
-    "url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/v1.3.1"
+    "version": "1.3.5.3",
+    "date": "2026-09-19",
+    "notes": "added stop/start buttons in ui's",
+    "url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/1.3.5.3"
   },
   {
     "version": "1.3.5.3_pre-release",
