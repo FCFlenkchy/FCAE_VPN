@@ -258,7 +258,7 @@ jobs:
         with:
           script: |
             const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
-            const prefixes = ['cmake-', 'gradle-', 'sccache-', 'glfw-'];
+            const prefixes = ['cmake-', 'gradle-', 'sccache-', 'glfw-', 'hev-windows-sidecar-'];
 
             for (const prefix of prefixes) {
               let page = 1;
