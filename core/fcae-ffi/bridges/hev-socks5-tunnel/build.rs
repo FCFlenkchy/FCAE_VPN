@@ -85,12 +85,26 @@ fn main() {
     ));
 }
 
-fn locate_lib_dir(submodule: &Path, _target: fcae_build::target::Target) -> PathBuf {
+fn locate_lib_dir(submodule: &Path, target: fcae_build::target::Target) -> PathBuf {
     if let Ok(dir) = std::env::var("FCAE_HEV_LIBDIR") {
         let dir = dir.trim();
         if !dir.is_empty() {
             return PathBuf::from(dir);
         }
     }
-    submodule.join("bin")
+    if target.os == fcae_build::target::Os::Android {
+        submodule.join("bin/android").join(android_abi_dir(target.arch))
+    } else {
+        submodule.join("bin")
+    }
+}
+
+fn android_abi_dir(arch: fcae_build::target::Arch) -> &'static str {
+    match arch {
+        fcae_build::target::Arch::Aarch64 => "arm64-v8a",
+        fcae_build::target::Arch::Arm => "armeabi-v7a",
+        fcae_build::target::Arch::X86_64 => "x86_64",
+        fcae_build::target::Arch::X86 => "x86",
+        _ => panic!("unsupported Android arch for hev-socks5-tunnel: {arch:?}"),
+    }
 }

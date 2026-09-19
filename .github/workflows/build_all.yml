@@ -517,25 +517,55 @@ jobs:
           set -euo pipefail
           cd core/hev-socks5-tunnel
           case "${{ matrix.name }}" in
-            linux-x64)   make static ;;
-            windows-x64)
-              # hev-socks5-tunnel doesn't build cleanly on Windows
-              echo "::warning::hev-socks5-tunnel not built for windows-x64, using stub"
+            linux-x64)
+              make static
               ;;
-            macos-arm64|macos-x64) make static ;;
+            windows-x64)
+              make static \
+                CC=x86_64-w64-mingw32-gcc \
+                AR=x86_64-w64-mingw32-ar \
+                STRIP=x86_64-w64-mingw32-strip \
+                PP=x86_64-w64-mingw32-cpp
+              ;;
+            macos-arm64|macos-x64)
+              make static
+              ;;
             android-*)
-              # hev-socks5-tunnel doesn't build cleanly on Windows/Android
-              # For now, build as stub on Android (will report unavailable)
-              echo "::warning::hev-socks5-tunnel not built for ${{ matrix.name }}, using stub"
+              if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+                echo "::error::ANDROID_NDK_HOME not set, cannot build hev-socks5-tunnel"
+                exit 1
+              fi
+              TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+              if [ "${{ matrix.name }}" = "android-universal" ]; then
+                ABIS="arm64-v8a armeabi-v7a x86_64 x86"
+              else
+                ABIS="${{ matrix.abi }}"
+              fi
+              for abi in $ABIS; do
+                echo "  -> Building hev-socks5-tunnel for $abi"
+                make clean
+                case "$abi" in
+                  arm64-v8a)    CLANG_TARGET=aarch64-linux-android ;;
+                  armeabi-v7a)  CLANG_TARGET=armv7a-linux-androideabi ;;
+                  x86_64)       CLANG_TARGET=x86_64-linux-android ;;
+                  x86)          CLANG_TARGET=i686-linux-android ;;
+                esac
+                make static \
+                  CC="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang" \
+                  AR="$TOOLCHAIN/bin/llvm-ar" \
+                  AS="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang" \
+                  STRIP="$TOOLCHAIN/bin/llvm-strip" \
+                  PP="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang -E"
+                mkdir -p "bin/android/$abi"
+                cp bin/libhev-socks5-tunnel.a "bin/android/$abi/"
+              done
+              if [ "${{ matrix.name }}" != "android-universal" ]; then
+                cp "bin/android/${{ matrix.abi }}/libhev-socks5-tunnel.a" bin/libhev-socks5-tunnel.a
+              fi
               ;;
             *) echo "::error::Unsupported hev target: ${{ matrix.name }}"; exit 1 ;;
           esac
-          case "${{ matrix.name }}" in
-            windows-x64|android-*)
-              # Skip verification for stub platforms
-              ;;
-            *) test -s bin/libhev-socks5-tunnel.a ;;
-          esac
+          ls -lh bin/libhev-socks5-tunnel.a
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
@@ -600,7 +630,15 @@ jobs:
                 export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
                 export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
 
-                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,zeptun,fcae-bridge-hev-socks5-tunnel/stub
+                case "$TARGET_TRIPLE" in
+                  aarch64-linux-android)   HEV_ABI=arm64-v8a ;;
+                  armv7-linux-androideabi) HEV_ABI=armeabi-v7a ;;
+                  x86_64-linux-android)    HEV_ABI=x86_64 ;;
+                esac
+                export FCAE_HEV_LIBDIR="$(pwd)/core/hev-socks5-tunnel/bin/android/$HEV_ABI"
+                export FCAE_ZEPTUN_LIBDIR="$(pwd)/core/zeptun/zig-out/android/prebuilt/$HEV_ABI"
+
+                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
 
                 DEST="$(pwd)/target/$TARGET_TRIPLE/release/libfcae_ffi.a"
                 ls -lh "$DEST"
@@ -643,7 +681,7 @@ jobs:
               echo "Using NDK: $NDK"
               "$CLANG" --version | head -1
 
-              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon,zeptun,fcae-bridge-hev-socks5-tunnel/stub
+              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
 
               DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
               ls -lh "$DEST"
@@ -651,8 +689,7 @@ jobs:
             fi
           else
             case "${{ matrix.name }}" in
-              windows-x64) FEATURES=aether,tor,psiphon-live,zeptun,fcae-bridge-hev-socks5-tunnel/stub ;;
-              linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,zeptun,hev ;;
+              windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,zeptun,hev ;;
               *) echo "::error::Unsupported desktop target: ${{ matrix.name }}"; exit 1 ;;
             esac
             cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features "$FEATURES"
@@ -785,6 +822,19 @@ jobs:
           cp build/libfcae_psiphon.* package/ 2>/dev/null || true
           cp build/fcae_psiphon.dll package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
+
+          if [ "${{ matrix.name }}" = "windows-x64" ]; then
+            cp core/zeptun/zig-out/bin/zeptun.dll package/ 2>/dev/null || true
+            WINTUN_TMP=$(mktemp -d)
+            if curl -fsSL --connect-timeout 30 --max-time 180 \
+                 -o "$WINTUN_TMP/wintun.zip" "https://www.wintun.net/builds/wintun-0.14.1.zip"; then
+              unzip -oq "$WINTUN_TMP/wintun.zip" -d "$WINTUN_TMP"
+              cp "$WINTUN_TMP/wintun/bin/amd64/wintun.dll" package/ 2>/dev/null || true
+            fi
+            rm -rf "$WINTUN_TMP"
+            echo "Windows DLLs in package:"
+            ls -la package/*.dll 2>/dev/null || echo "  (no DLLs found)"
+          fi
 
           if [ "${{ matrix.name }}" = "linux-x64" ]; then
             mkdir -p package/lib
