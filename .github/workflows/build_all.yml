@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'version (e.g. 1.4.0; the prerelease option adds _pre-release)'
+        description: 'version'
         required: true
         default: '1.0.0'
       prerelease:
