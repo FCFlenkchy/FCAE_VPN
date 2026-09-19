@@ -50,6 +50,7 @@ extern "C" {
  * backend's SOCKS endpoint into a TUN device. */
 #define FCAE_TUN_ENGINE_TUN2SOCKS 0
 #define FCAE_TUN_ENGINE_ZEPTUN 1
+#define FCAE_TUN_ENGINE_HEV 2
 
 /* ── Enumerations ──────────────────────────────────────────────────── */
 
@@ -536,4 +537,4 @@ FcaeStatus fcae_poll_update(FcaeUpdateInfo *out);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x36f0559573e3093d */
+/* fcae-abi-fingerprint: 0xcc85ec86a65b14e8 */

@@ -1,114 +1,85 @@
-//! # fcae-bridge-hev-socks5-tunnel — in-process TUN bridge (C engine)
+//! # fcae-bridge-hev-socks5-tunnel — TUN bridge over the hev-socks5-tunnel engine
 //!
-//! Implements [`fcae_runtime::session::TunBridge`] by driving the
-//! **hev-socks5-tunnel** userspace network engine inside this process via
-//! its stable C ABI (`core/hev-socks5-tunnel/include/hev-socks5-tunnel.h`),
-//! statically linked.
+//! Implements [`fcae_runtime::session::TunBridge`] with **hev-socks5-tunnel**, a
+//! C SOCKS5 tunnel engine (coroutine I/O over lwip) that converts the local
+//! SOCKS5 endpoint a backend already exposes into a TUN device. It is a drop-in
+//! sibling of `fcae-bridge-tun2socks` and `fcae-bridge-zeptun`: no Go runtime,
+//! no subprocess overhead, and every engine shares one wintun adapter identity
+//! (see [`WINTUN_ADAPTER_GUID`]).
 //!
-//! This is a drop-in sibling of `fcae-bridge-tun2socks` and `fcae-bridge-zeptun`:
-//! all are *TUN* bridges that **consume** the local SOCKS5 endpoint a tunnel
-//! bridge (aether / psiphon) **produces**, and expose it as a TUN device.
+//! ## Backends
 //!
-//! ## Why hev-socks5-tunnel
+//! | platform | backend | why |
+//! |----------|---------|-----|
+//! | Linux, macOS, Android | [`engine`] — in-process, C ABI | the engine's own TUN code compiles for these |
+//! | Windows | [`sidecar`] — upstream's executable beside the app | the engine has no native Windows port to link |
 //!
-//! hev-socks5-tunnel is a lightweight, high-performance SOCKS5 tunnel engine
-//! written in C with coroutine-based I/O. It supports:
-//! * TUN/TAP devices on Linux, macOS, Windows (via Wintun), and Android
-//! * SOCKS5 UDP and TCP
-//! * IPv4 and IPv6
-//! * ICMP echo handling
-//! * Multi-queue for parallel packet processing
-//!
-//! The engine is simpler than tun2socks (no Go runtime overhead) and provides
-//! comparable performance to zeptun while being easier to cross-compile.
+//! Windows is the odd one out: the engine's Windows backend (tun device, the
+//! hev-task-system IOCP reactor, Win64 ABI assembly, the wintun session) is
+//! behind `__MSYS__`, so it needs the MSYS runtime to own the process, upstream
+//! ships `msys-2.0.dll` beside its own win64 binary, and no Rust target produces
+//! MSYS binaries. Cross-building it against MinGW cannot work: those code paths
+//! are compiled out and the remaining sources need POSIX socket headers MinGW
+//! does not ship. So Windows runs upstream's `hev-socks5-tunnel.exe` — built by
+//! the `build-hev-windows` CI job and installed next to the app — as a child
+//! process with the same config file, the same adapter and the same GUID as the
+//! in-process engines use elsewhere.
 //!
 //! ## Build requirements
 //!
-//! * Built artifacts produced OUTSIDE the cargo graph (see `build.rs`):
-//!   * desktop → `make -C core/hev-socks5-tunnel static` (lands in `core/hev-socks5-tunnel/bin/`)
-//!   * android → cross-compile with NDK (see CI)
-//! * or `FCAE_HEV_LIBDIR=<dir>` pointing at a directory with `libhev-socks5-tunnel.a`.
+//! * in-process: an archive built outside the cargo graph (see `build.rs`), i.e.
+//!   `make -C core/hev-socks5-tunnel static`, or `FCAE_HEV_LIBDIR=<dir>`.
+//! * Windows sidecar: `FCAE_HEV_SIDECAR_EXE=<path to hev-socks5-tunnel.exe>`
+//!   during the build tells the crate the executable is part of the install.
+//!   Without it a Windows build must use the stub:
+//!   `cargo build --features fcae-bridge-hev-socks5-tunnel/stub`.
 //!
-//! Building without it: `cargo build --features fcae-bridge-hev-socks5-tunnel/stub`
-//! compiles a stub where TUN reports "unavailable". Do not ship a stub build.
+//! Do not ship a stub build: it reports the engine as unavailable in the UI.
 
-use std::ffi::{c_char, c_int, c_uchar, c_uint, CStr, CString};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::time::Duration;
+#[cfg(not(all(windows, hev_sidecar)))]
+mod engine;
+#[cfg(all(windows, hev_sidecar))]
+mod sidecar;
 
-use fcae_runtime::backend::Endpoints;
-use fcae_runtime::config::SessionConfig;
-use fcae_runtime::error::{CoreError, Result};
-use fcae_runtime::session::TunBridge;
-use parking_lot::Mutex;
-
+/// Wintun only; the in-process backend stages the driver DLL from here.
+#[cfg(all(windows, not(hev_sidecar)))]
 mod platform;
 
-#[cfg(all(windows, wintun_staged))]
-static WINTUN_DLL: &[u8] = include_bytes!(env!("FCAE_HEV_WINTUN_DLL"));
+#[cfg(not(all(windows, hev_sidecar)))]
+pub use engine::HevSocks5TunnelBridge;
+#[cfg(all(windows, hev_sidecar))]
+pub use sidecar::HevSocks5TunnelBridge;
 
-#[cfg(all(windows, wintun_staged))]
-fn wintun_bytes() -> Option<&'static [u8]> {
-    Some(WINTUN_DLL)
-}
+/// The wintun adapter GUID every FCAE TUN engine pins.
+///
+/// Wintun identifies an adapter by name *and* GUID: the GUID decides the NLA
+/// entry and the NetCfgInstanceId, so a stable one keeps the firewall profile,
+/// DNS assignment and registered-network settings across engines, sessions and
+/// reinstalls, and makes repeated creation idempotent instead of accruing
+/// `FCAE_VPN 2`, `FCAE_VPN 3` duplicates. `fcae-bridge-tun2socks` passes it in
+/// the device URL and `fcae-bridge-zeptun` through `zeptun_set_adapter_guid`;
+/// the Windows sidecar hands it to the engine as `tunnel.guid` (the copy in its
+/// hardcoded config is checked against this constant at compile time).
+pub const WINTUN_ADAPTER_GUID: &str = "24198F4C-7895-434C-AD65-9E29A92DDC61";
 
-#[cfg(all(windows, not(wintun_staged)))]
-fn wintun_bytes() -> Option<&'static [u8]> {
-    None
-}
-
-// ---------------------------------------------------------------------------
-// C ABI
-// ---------------------------------------------------------------------------
-
-#[cfg(hev_linked)]
-extern "C" {
-    fn hev_socks5_tunnel_main_from_str(
-        config_str: *const c_uchar,
-        config_len: c_uint,
-        tun_fd: c_int,
-    ) -> c_int;
-    fn hev_socks5_tunnel_quit();
-    fn hev_socks5_tunnel_stats(
-        tx_packets: *mut usize,
-        tx_bytes: *mut usize,
-        rx_packets: *mut usize,
-        rx_bytes: *mut usize,
-    );
-}
-
-// Stub build (`--features stub`): the crate still compiles and every call
-// reports the bridge as unavailable.
-#[cfg(not(hev_linked))]
-#[allow(unused_variables)]
-mod stub {
-    use super::*;
-    pub unsafe fn hev_socks5_tunnel_main_from_str(
-        _config_str: *const c_uchar,
-        _config_len: c_uint,
-        _tun_fd: c_int,
-    ) -> c_int {
-        -100
+/// True when this build can actually run the engine: the C engine is linked in,
+/// or (Windows) the sidecar executable is beside the running binary.
+pub fn is_supported() -> bool {
+    #[cfg(all(windows, hev_sidecar))]
+    {
+        return sidecar::is_available();
     }
-    pub unsafe fn hev_socks5_tunnel_quit() {}
-    pub unsafe fn hev_socks5_tunnel_stats(
-        _tx_packets: *mut usize,
-        _tx_bytes: *mut usize,
-        _rx_packets: *mut usize,
-        _rx_bytes: *mut usize,
-    ) {
+    #[cfg(not(all(windows, hev_sidecar)))]
+    {
+        engine::is_supported()
     }
-}
-
-#[cfg(not(hev_linked))]
-use stub::*;
-
-/// True when this build actually links the C engine.
-pub const fn is_supported() -> bool {
-    cfg!(hev_linked)
 }
 
 /// Traffic statistics from the engine.
+///
+/// The in-process backend reads the engine's counters directly. The Windows
+/// sidecar reports `None`: the counters live in the engine process and the
+/// engine's CLI exposes no channel for them.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct HevStats {
     pub tx_packets: usize,
@@ -117,230 +88,25 @@ pub struct HevStats {
     pub rx_bytes: usize,
 }
 
-/// State owned by a live TUN session.
-struct Active {
-    fd: Option<i32>,
+/// `tunnel.ipv4`/`tunnel.ipv6` take bare addresses: the engine derives the
+/// netmask itself (`inet_pton` plus a fixed /32 and /128), so a CIDR from the
+/// session config is reduced to its address.
+pub(crate) fn bare_address(cidr: &str) -> &str {
+    cidr.split('/').next().unwrap_or(cidr)
 }
 
-/// The bridge. One per process; `TunBridge` methods are safe to call from any
-/// thread and are idempotent.
-pub struct HevSocks5TunnelBridge {
-    active: Mutex<Option<Active>>,
-    running: AtomicBool,
-    closing: AtomicBool,
-    /// Android VpnService descriptor set out-of-band via the FFI.
-    external_fd: AtomicI32,
-}
-
-impl Default for HevSocks5TunnelBridge {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl HevSocks5TunnelBridge {
-    pub const fn new() -> Self {
-        Self {
-            active: Mutex::new(None),
-            running: AtomicBool::new(false),
-            closing: AtomicBool::new(false),
-            external_fd: AtomicI32::new(-1),
-        }
-    }
-
-    /// Supply the Android VpnService file descriptor. Called from the FFI
-    /// before `fcae_start`; the bridge never takes ownership of this fd.
-    pub fn set_android_fd(&self, fd: i32) {
-        self.external_fd.store(fd, Ordering::SeqCst);
-    }
-
-    /// Forget a previously supplied descriptor.
-    pub fn clear_android_fd(&self) {
-        self.external_fd.store(-1, Ordering::SeqCst);
-    }
-
-    /// The TUN fd handed over by the platform (Android's VpnService), if any.
-    pub fn android_fd(&self) -> Option<i32> {
-        let fd = self.external_fd.load(Ordering::SeqCst);
-        (fd >= 0).then_some(fd)
-    }
-
-    /// Live engine statistics; `None` when not running.
-    pub fn stats(&self) -> Option<HevStats> {
-        if !self.running.load(Ordering::SeqCst) {
-            return None;
-        }
-        let mut stats = HevStats::default();
-        unsafe {
-            hev_socks5_tunnel_stats(
-                &mut stats.tx_packets,
-                &mut stats.tx_bytes,
-                &mut stats.rx_packets,
-                &mut stats.rx_bytes,
-            );
-        }
-        Some(stats)
-    }
-
-    /// Generate YAML configuration string for hev-socks5-tunnel.
-    fn generate_config(cfg: &SessionConfig, endpoints: &Endpoints) -> Result<String> {
-        let socks = endpoints.socks.ok_or_else(|| {
-            CoreError::Internal("TUN requested but the backend exposed no SOCKS endpoint".into())
-        })?;
-
-        // Parse SOCKS address (host:port)
-        let socks_str = socks.to_string();
-        let parts: Vec<&str> = socks_str.rsplitn(2, ':').collect();
-        if parts.len() != 2 {
-            return Err(CoreError::Internal(format!(
-                "invalid SOCKS endpoint format: {socks_str}"
-            )));
-        }
-        let port = parts[0];
-        let address = parts[1].trim_start_matches("socks5://");
-
-        let mut yaml = String::new();
-        yaml.push_str("tunnel:\n");
-        yaml.push_str(&format!("  name: {}\n", cfg.tun.name));
-        yaml.push_str(&format!("  mtu: {}\n", cfg.tun.mtu));
-        yaml.push_str("  multi-queue: false\n");
-        yaml.push_str(&format!("  ipv4: {}\n", cfg.tun.ipv4));
-        if let Some(ipv6) = &cfg.tun.ipv6 {
-            yaml.push_str(&format!("  ipv6: '{}'\n", ipv6));
-        }
-        yaml.push_str("  icmp: 'off'\n");
-        yaml.push_str("\n");
-        yaml.push_str("socks5:\n");
-        yaml.push_str(&format!("  port: {}\n", port));
-        yaml.push_str(&format!("  address: {}\n", address));
-        yaml.push_str("  udp: 'tcp'\n"); // UDP over TCP for reliability
-        yaml.push_str("\n");
-        yaml.push_str("misc:\n");
-        yaml.push_str("  log-level: 'warn'\n");
-
-        Ok(yaml)
-    }
-}
-
-impl TunBridge for HevSocks5TunnelBridge {
-    fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
-        if !is_supported() {
-            return Err(CoreError::Internal(
-                "hev-socks5-tunnel is not available in this build".into(),
-            ));
-        }
-
-        self.closing.store(false, Ordering::SeqCst);
-        {
-            let active = self.active.lock();
-            if active.is_some() {
-                log::warn!("[hev] start called while a device is already up; ignoring");
-                return Ok(());
-            }
-        }
-
-        if self.closing.load(Ordering::SeqCst) {
-            return Err(CoreError::Internal(
-                "TUN start cancelled (session is stopping)".into(),
-            ));
-        }
-
-        // Windows needs wintun.dll discoverable before the device is created:
-        // hev-socks5-tunnel loads it from the application directory or System32.
-        #[cfg(windows)]
-        platform::ensure_wintun(wintun_bytes())?;
-
-        // Get the TUN fd
-        let fd = cfg.tun.fd.or_else(|| {
-            let f = self.external_fd.load(Ordering::SeqCst);
-            (f >= 0).then_some(f)
-        });
-
-        let fd = fd.ok_or_else(|| {
-            CoreError::Internal(
-                "hev-socks5-tunnel requires a TUN descriptor".into(),
-            )
-        })?;
-
-        // Dup the fd so we own our copy
-        let dup = unsafe { libc::dup(fd) };
-        if dup < 0 {
-            return Err(CoreError::Internal(format!(
-                "dup(tun fd {fd}) failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        // Generate YAML config
-        let config_yaml = Self::generate_config(cfg, endpoints)?;
-        let config_cstring = CString::new(config_yaml.clone())
-            .map_err(|_| CoreError::Internal("config contains a NUL".into()))?;
-        let config_bytes = config_cstring.as_bytes_with_nul();
-
-        log::info!("[hev] starting with config:\n{}", config_yaml);
-
-        // Start the engine in a background thread (it blocks)
-        let active = self.active.lock();
-        if self.closing.load(Ordering::SeqCst) {
-            unsafe { libc::close(dup) };
-            return Err(CoreError::Internal(
-                "TUN start cancelled before engine start".into(),
-            ));
-        }
-
-        let config_ptr = config_bytes.as_ptr() as *const c_uchar;
-        let config_len = config_bytes.len() as c_uint;
-
-        // Start in background thread
-        let running = self.running.clone();
-        let closing = self.closing.clone();
-        std::thread::spawn(move || {
-            let rc = unsafe { hev_socks5_tunnel_main_from_str(config_ptr, config_len, dup) };
-            running.store(false, Ordering::SeqCst);
-            if rc != 0 && !closing.load(Ordering::SeqCst) {
-                log::error!("[hev] engine exited with code {rc}");
-            }
-        });
-
-        self.running.store(true, Ordering::SeqCst);
-        *self.active.lock() = Some(Active { fd: Some(dup) });
-
-        log::info!(
-            "[hev] up (socks {}, mtu {})",
-            endpoints.socks.unwrap(),
-            cfg.tun.mtu
-        );
-        Ok(())
-    }
-
-    fn abort(&self) {
-        self.closing.store(true, Ordering::SeqCst);
-
-        let mut active = self.active.lock();
-        if let Some(a) = active.take() {
-            if let Some(fd) = a.fd {
-                unsafe { libc::close(fd) };
-            }
-        }
-        self.clear_android_fd();
-        self.running.store(false, Ordering::SeqCst);
-    }
-
-    fn stop(&self, timeout: Duration) {
-        self.abort();
-
-        // Signal the engine to quit
-        unsafe { hev_socks5_tunnel_quit() };
-
-        log::info!("[hev] down");
-    }
-
-    fn preauthorised_fd(&self) -> Option<i32> {
-        self.android_fd()
-    }
-
-    fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+/// Map the UI's TUN log knob onto the engine's levels.
+///
+/// `FcaeT2sLog`: 0 = default, 1 = silent, 2 = error, 3 = warn, 4 = info,
+/// 5 = debug. The engine takes exactly `debug`, `info`, `warn`, `error` (and
+/// falls back to warn), so a quiet setting still keeps failures — the log is
+/// what a failed startup is diagnosed from.
+pub(crate) fn log_level(t2s_log_level: u8) -> &'static str {
+    match t2s_log_level {
+        5 => "debug",
+        4 => "info",
+        3 => "warn",
+        _ => "error",
     }
 }
 
@@ -348,24 +114,22 @@ impl TunBridge for HevSocks5TunnelBridge {
 mod tests {
     use super::*;
 
+    /// Only levels the engine understands may be emitted: an unknown string
+    /// silently becomes `warn`, which would hide the errors a failed start is
+    /// diagnosed from.
     #[test]
-    fn stub_build_reports_unavailable_rather_than_panicking() {
-        let bridge = HevSocks5TunnelBridge::new();
-        assert!(!bridge.is_running());
-        bridge.stop(Duration::from_secs(1));
-    }
-
-    #[test]
-    fn clearing_the_android_fd_drops_preauthorisation() {
-        let bridge = HevSocks5TunnelBridge::new();
-        assert!(bridge.android_fd().is_none());
-
-        bridge.set_android_fd(114);
-        assert_eq!(bridge.android_fd(), Some(114));
-        assert_eq!(bridge.preauthorised_fd(), Some(114));
-
-        bridge.clear_android_fd();
-        assert!(bridge.android_fd().is_none());
-        assert!(bridge.preauthorised_fd().is_none());
+    fn the_engine_log_level_follows_the_ui_knob() {
+        for level in [0u8, 1, 2, 3, 4, 5] {
+            let emitted = log_level(level);
+            assert!(
+                ["debug", "info", "warn", "error"].contains(&emitted),
+                "level {level} became {emitted}"
+            );
+        }
+        assert_eq!(log_level(5), "debug");
+        assert_eq!(log_level(4), "info");
+        assert_eq!(log_level(3), "warn");
+        assert_eq!(log_level(2), "error");
+        assert_eq!(log_level(0), "error");
     }
 }

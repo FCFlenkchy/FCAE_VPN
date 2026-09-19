@@ -22,5 +22,13 @@ libc.workspace = true
 log.workspace = true
 parking_lot.workspace = true
 
+# Windows runs the engine as a child process and owns the interface for it:
+# addresses, routes and DNS come from the tun2socks bridge's platform layer, so
+# the routing policy exists exactly once. Target-scoped because the sidecar is
+# Windows-only, and pulling the Go bridge into, say, an Android build of this
+# crate would be pointless work.
+[target.'cfg(windows)'.dependencies]
+fcae-bridge-tun2socks.workspace = true
+
 [build-dependencies]
 fcae-build.workspace = true

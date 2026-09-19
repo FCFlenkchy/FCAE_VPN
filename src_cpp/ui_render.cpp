@@ -371,7 +371,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "psiphon_socks_port") g_app.psiphon_socks_port = atoi(val.c_str());
     else if (key == "psiphon_http_port") g_app.psiphon_http_port = atoi(val.c_str());
     else if (key == "mode") g_app.mode = atoi(val.c_str());
-    else if (key == "tun_engine") { int e = atoi(val.c_str()); g_app.tun_engine = e == 1 ? 1 : 0; }
+    else if (key == "tun_engine") { int e = atoi(val.c_str()); g_app.tun_engine = (e > 0 && e < (int)fcae_tun_engine_count()) ? e : 0; }
     else if (key == "lan_sharing") g_app.lan_sharing = atoi(val.c_str()) != 0;
     else if (key == "scan_mode") g_app.scan_mode = atoi(val.c_str());
     else if (key == "ip_version") g_app.ip_version = atoi(val.c_str());

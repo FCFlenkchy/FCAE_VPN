@@ -66,8 +66,67 @@ jobs:
             core.setOutput('macos_version', match[1].split('.').slice(0, 3).join('.'));
             core.info(`Release version: ${versionClean} (full: ${versionFull}, prerelease: ${pre})`);
 
-  build:
+  build-hev-windows:
+    name: hev-socks5-tunnel sidecar (windows)
     needs: prepare
+    runs-on: windows-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: ensure submodules
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1
+
+      # The engine's Windows backend is MSYS-only, so upstream's own toolchain is
+      # the only one that can build it -- the same recipe upstream's CI uses.
+      - name: setup msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: >-
+            make
+            gcc
+
+      - name: build hev-socks5-tunnel (MSYS)
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          # Everything stays workspace-relative: inside the MSYS shell a Windows
+          # path such as $GITHUB_WORKSPACE is not a usable path.
+          make -C core/hev-socks5-tunnel -j"$(nproc)"
+          test -s core/hev-socks5-tunnel/bin/hev-socks5-tunnel.exe
+
+          # Ship the runtime the engine was linked against; anything else ldd
+          # reports from the MSYS prefix joins it (only msys-2.0.dll is expected:
+          # the rest of the stack is static or comes from Windows itself).
+          mkdir -p sidecar
+          cp -v core/hev-socks5-tunnel/bin/hev-socks5-tunnel.exe sidecar/
+          cp -v /usr/bin/msys-2.0.dll sidecar/
+          if command -v ldd >/dev/null 2>&1; then
+            ldd core/hev-socks5-tunnel/bin/hev-socks5-tunnel.exe |
+              awk '$3 ~ /^\/usr\/bin\// { print $3 }' | sort -u |
+              while read -r dll; do
+                cp -v "$dll" sidecar/
+              done
+          fi
+          test -s sidecar/msys-2.0.dll
+          ls -l sidecar
+
+      - name: upload hev sidecar
+        uses: actions/upload-artifact@v7
+        with:
+          name: hev-windows-sidecar
+          path: sidecar/*
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    needs: [prepare, build-hev-windows]
     env:
       FCAE_VERSION: ${{ needs.prepare.outputs.version }}
       FCAE_VERSION_FULL: ${{ needs.prepare.outputs.version_full }}
@@ -153,6 +212,26 @@ jobs:
         run: |
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
+
+      # The Rust build must know the sidecar is part of the install; the
+      # packaging step below copies it next to the app.
+      - name: fetch hev sidecar (windows)
+        if: matrix.name == 'windows-x64'
+        uses: actions/download-artifact@v8
+        with:
+          name: hev-windows-sidecar
+          path: ${{ runner.temp }}/hev-sidecar
+
+      - name: publish hev sidecar (windows)
+        if: matrix.name == 'windows-x64'
+        run: |
+          set -euo pipefail
+          EXE="${{ runner.temp }}/hev-sidecar/hev-socks5-tunnel.exe"
+          test -s "$EXE"
+          test -s "${{ runner.temp }}/hev-sidecar/msys-2.0.dll"
+          echo "FCAE_HEV_SIDECAR_EXE=$EXE" >> "$GITHUB_ENV"
+          echo "FCAE_HEV_SIDECAR_DIR=${{ runner.temp }}/hev-sidecar" >> "$GITHUB_ENV"
+          ls -la "${{ runner.temp }}/hev-sidecar"
 
       - name: setup go
         uses: actions/setup-go@v7
@@ -263,12 +342,14 @@ jobs:
           x86_64-w64-mingw32-g++ --version | head -1
 
       - name: cache macos glfw build
-        if: matrix.name == 'macos-x64'
+        if: startsWith(matrix.name, 'macos-')
         id: cache-glfw
         uses: actions/cache@v6
         with:
-          path: /usr/local/glfw_x64
-          key: glfw-x64-3.4
+          # Workspace-relative: caching an absolute /usr/local path made the
+          # macOS runner's gtar fail the restore step outright.
+          path: ${{ github.workspace }}/.glfw/${{ matrix.name }}
+          key: glfw-3.4-${{ matrix.name }}
 
       - name: install deps (macOS)
         if: startsWith(matrix.name, 'macos-')
@@ -285,24 +366,28 @@ jobs:
           fi
           if [ "${{ matrix.name }}" = "macos-x64" ]; then
             ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
-            GLFW_PREFIX=/usr/local/glfw_x64
           else
             ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
-            GLFW_PREFIX=/usr/local/glfw_arm64
           fi
-          curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
-            https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
-          tar xzf glfw.tar.gz
-          cd glfw-3.4
-          cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            ${ARCH_ARGS} \
-            -DCMAKE_INSTALL_PREFIX=${GLFW_PREFIX} \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF
-          cmake --build build
-          sudo cmake --install build
-          cd ..
+          GLFW_PREFIX="${GITHUB_WORKSPACE}/.glfw/${{ matrix.name }}"
+          echo "GLFW_PREFIX=${GLFW_PREFIX}" >> "$GITHUB_ENV"
+          if [ -f "${GLFW_PREFIX}/lib/libglfw3.a" ]; then
+            echo "glfw restored from cache at ${GLFW_PREFIX}"
+          else
+            curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
+              https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
+            tar xzf glfw.tar.gz
+            cd glfw-3.4
+            cmake -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              ${ARCH_ARGS} \
+              -DCMAKE_INSTALL_PREFIX="${GLFW_PREFIX}" \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF
+            cmake --build build
+            cmake --install build
+            cd ..
+          fi
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
@@ -517,18 +602,20 @@ jobs:
           set -euo pipefail
           cd core/hev-socks5-tunnel
           case "${{ matrix.name }}" in
-            linux-x64)
+            linux-x64|macos-arm64|macos-x64)
               make static
               ;;
             windows-x64)
-              make static \
-                CC=x86_64-w64-mingw32-gcc \
-                AR=x86_64-w64-mingw32-ar \
-                STRIP=x86_64-w64-mingw32-strip \
-                PP=x86_64-w64-mingw32-cpp
-              ;;
-            macos-arm64|macos-x64)
-              make static
+              # Nothing to build here: the engine's Windows backend is MSYS-only
+              # (tunnel, hev-task-system IOCP reactor, Win64 ABI assembly and the
+              # wintun session all sit behind __MSYS__, and the rest of the stack
+              # needs POSIX socket headers MinGW does not ship), so it cannot be
+              # linked into this native MinGW binary at all. The
+              # `build-hev-windows` job builds upstream's executable with MSYS2
+              # and this job ships it as a sidecar process: same engine, same
+              # config, same wintun adapter as the in-process engines use
+              # everywhere else.
+              echo "hev-socks5-tunnel runs as a sidecar on Windows (build-hev-windows)"
               ;;
             android-*)
               if [ -z "${ANDROID_NDK_HOME:-}" ]; then
@@ -537,7 +624,7 @@ jobs:
               fi
               TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
               if [ "${{ matrix.name }}" = "android-universal" ]; then
-                ABIS="arm64-v8a armeabi-v7a x86_64 x86"
+                ABIS="arm64-v8a armeabi-v7a x86_64"
               else
                 ABIS="${{ matrix.abi }}"
               fi
@@ -548,16 +635,32 @@ jobs:
                   arm64-v8a)    CLANG_TARGET=aarch64-linux-android ;;
                   armeabi-v7a)  CLANG_TARGET=armv7a-linux-androideabi ;;
                   x86_64)       CLANG_TARGET=x86_64-linux-android ;;
-                  x86)          CLANG_TARGET=i686-linux-android ;;
+                  *) echo "::error::Unsupported Android ABI: $abi"; exit 1 ;;
                 esac
+                # `make static` archives only the engine's own objects, so the
+                # lwip/yaml/hev-task-system archives are staged next to it per
+                # ABI (the bridge links all four). The flags mirror upstream's
+                # Android.mk: bionic already types fd_set and socklen_t (lwip's
+                # unix port redefines both otherwise), the third-party sources
+                # are not warning-clean under the Makefile's -Werror with a
+                # current NDK clang, and the archive ends up in a shared object,
+                # so it must be PIC.
+                ANDROID_CFLAGS="-fPIC -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -Wno-error"
+                if [ "$abi" = "armeabi-v7a" ]; then
+                  ANDROID_CFLAGS="$ANDROID_CFLAGS -mfpu=neon"
+                fi
                 make static \
                   CC="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang" \
                   AR="$TOOLCHAIN/bin/llvm-ar" \
-                  AS="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang" \
                   STRIP="$TOOLCHAIN/bin/llvm-strip" \
-                  PP="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang -E"
+                  PP="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang -E" \
+                  CFLAGS="$ANDROID_CFLAGS"
                 mkdir -p "bin/android/$abi"
-                cp bin/libhev-socks5-tunnel.a "bin/android/$abi/"
+                cp bin/libhev-socks5-tunnel.a \
+                   third-part/lwip/bin/liblwip.a \
+                   third-part/yaml/bin/libyaml.a \
+                   third-part/hev-task-system/bin/libhev-task-system.a \
+                   "bin/android/$abi/"
               done
               if [ "${{ matrix.name }}" != "android-universal" ]; then
                 cp "bin/android/${{ matrix.abi }}/libhev-socks5-tunnel.a" bin/libhev-socks5-tunnel.a
@@ -565,7 +668,11 @@ jobs:
               ;;
             *) echo "::error::Unsupported hev target: ${{ matrix.name }}"; exit 1 ;;
           esac
-          ls -lh bin/libhev-socks5-tunnel.a
+          case "${{ matrix.name }}" in
+            windows-x64) echo "hev-socks5-tunnel: stub (engine not built)" ;;
+            android-universal) ls -lh bin/android/*/lib*.a ;;
+            *) ls -lh bin/libhev-socks5-tunnel.a ;;
+          esac
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
@@ -689,6 +796,9 @@ jobs:
             fi
           else
             case "${{ matrix.name }}" in
+              # Windows runs hev-socks5-tunnel as a sidecar executable (the
+              # engine has no native Windows port); the crate sees the staged
+              # exe through FCAE_HEV_SIDECAR_EXE.
               windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,zeptun,hev ;;
               *) echo "::error::Unsupported desktop target: ${{ matrix.name }}"; exit 1 ;;
             esac
@@ -728,11 +838,7 @@ jobs:
         if: startsWith(matrix.name, 'macos-')
         run: |
           mkdir -p build && cd build
-          if [ "${{ matrix.name }}" = "macos-x64" ]; then
-            export CMAKE_PREFIX_PATH=/usr/local/glfw_x64
-          else
-            export CMAKE_PREFIX_PATH=/usr/local/glfw_arm64
-          fi
+          export CMAKE_PREFIX_PATH="${GLFW_PREFIX:?glfw prefix not published by the install step}"
           cmake .. -G Ninja \
             ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
             -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION" \
@@ -825,6 +931,12 @@ jobs:
 
           if [ "${{ matrix.name }}" = "windows-x64" ]; then
             cp core/zeptun/zig-out/bin/zeptun.dll package/ 2>/dev/null || true
+            # The hev-socks5-tunnel engine: a sidecar process beside the app,
+            # with the MSYS runtime it links against. It picks up wintun.dll
+            # from this same directory.
+            : "${FCAE_HEV_SIDECAR_DIR:?the hev sidecar artifact was not staged}"
+            cp "$FCAE_HEV_SIDECAR_DIR"/hev-socks5-tunnel.exe \
+               "$FCAE_HEV_SIDECAR_DIR"/msys-2.0.dll package/
             WINTUN_TMP=$(mktemp -d)
             if curl -fsSL --connect-timeout 30 --max-time 180 \
                  -o "$WINTUN_TMP/wintun.zip" "https://www.wintun.net/builds/wintun-0.14.1.zip"; then

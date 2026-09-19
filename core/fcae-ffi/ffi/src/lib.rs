@@ -137,16 +137,12 @@ impl TunEngines {
     ) -> Result<(), CoreError> {
         #[cfg(feature = "hev")]
         {
-            // Hev requires a TUN fd; on Android this comes from
-            // VpnService. Unlike zeptun, hev does not create the device itself,
-            // so we must use the fd provider path if no fd was supplied.
+            // Android: the descriptor belongs to VpnService, so reuse the one
+            // the host hands over. Desktop: none exists, and the engine opens
+            // the device itself from its config (root, like the other engines).
             if cfg.tun.fd.is_none() && self.hev.preauthorised_fd().is_none() {
                 if let Some(fd) = self.establish_via_provider()? {
                     self.hev.set_android_fd(fd);
-                } else {
-                    return Err(CoreError::Internal(
-                        "hev-socks5-tunnel requires a TUN descriptor (no fd and no provider)".into(),
-                    ));
                 }
             }
             self.hev.start(cfg, endpoints)
@@ -163,7 +159,7 @@ impl TunEngines {
     /// Ask the host to build the TUN interface now, if a provider is
     /// registered. `Ok(None)` = no provider (the engine creates the device
     /// itself); `Err` = the host refused to build the interface.
-    #[cfg(all(feature = "tun", feature = "zeptun"))]
+    #[cfg(all(feature = "tun", any(feature = "zeptun", feature = "hev")))]
     fn establish_via_provider(&self) -> Result<Option<i32>, CoreError> {
         if !self.t2s.has_fd_provider() {
             return Ok(None);
@@ -173,7 +169,11 @@ impl TunEngines {
         })
     }
 
-    #[cfg(all(feature = "zeptun", not(feature = "tun")))]
+    /// The provider is a tun2socks mechanism, so a build that carries only
+    /// zeptun or hev has nothing to borrow: those engines take their
+    /// descriptor from VpnService (`set_android_fd`) or create the device
+    /// themselves.
+    #[cfg(all(not(feature = "tun"), any(feature = "zeptun", feature = "hev")))]
     fn establish_via_provider(&self) -> Result<Option<i32>, CoreError> {
         Ok(None)
     }
@@ -874,12 +874,20 @@ fn hev_info_fields() -> (u64, &'static str, &'static str, bool, &'static str) {
     if fcae_bridge_hev_socks5_tunnel::is_supported() {
         (FCAE_TUN_ENGINE_HEV, "hev-socks5-tunnel", "hev-socks5-tunnel", true, "")
     } else {
+        // Windows runs the engine as a sidecar executable (its Windows backend
+        // is MSYS-only, so it cannot be linked in), which makes "stub build"
+        // the wrong explanation there: what is missing is the executable.
+        let reason = if cfg!(windows) {
+            "hev-socks5-tunnel.exe is missing from this installation (Windows runs the engine as a sidecar)"
+        } else {
+            "hev-socks5-tunnel not linked (stub build)"
+        };
         (
             FCAE_TUN_ENGINE_HEV,
             "hev-socks5-tunnel",
             "hev-socks5-tunnel",
             false,
-            "hev-socks5-tunnel not linked (stub build)",
+            reason,
         )
     }
 }

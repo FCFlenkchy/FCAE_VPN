@@ -727,7 +727,8 @@ public class FCAEVpnService extends VpnService {
         final boolean tunTcpAutoTuning = intent.getBooleanExtra("tunTcpAutoTuning", false);
         // tun2socks data-plane log level (FcaeT2sLog); 0 = silent.
         final int t2sLog = intent.getIntExtra("t2sLog", 0);
-        // TUN data-plane engine (FCAE_TUN_ENGINE_*): 0 = tun2socks, 1 = zeptun.
+        // TUN data-plane engine (FCAE_TUN_ENGINE_*): 0 = tun2socks, 1 = zeptun,
+        // 2 = hev-socks5-tunnel.
         final int tunEngine = intent.getIntExtra("tunEngine", 0);
         final int torHttpPort = intent.getIntExtra("torHttpPort", 0);
         final boolean throughPsiphon = intent.getBooleanExtra("psiphonThroughTunnel", false);

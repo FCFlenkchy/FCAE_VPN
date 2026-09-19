@@ -528,8 +528,11 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     // tun2socks data-plane log level (FcaeT2sLog); 0 = default = silent.
     cfg.tun2socks_log_level = (uint64_t)t2sLog;
     // TUN data-plane engine (FCAE_TUN_ENGINE_*); only consumed in TUN mode.
-    // Anything but 1 collapses to the default engine.
-    cfg.tun_engine = (tunEngine == 1) ? FCAE_TUN_ENGINE_ZEPTUN : FCAE_TUN_ENGINE_TUN2SOCKS;
+    // Ids the core does not know collapse to the default engine, so a config
+    // written by a build with more engines stays loadable.
+    cfg.tun_engine = (tunEngine > 0 && tunEngine < (jint)fcae_tun_engine_count())
+                         ? (uint64_t)tunEngine
+                         : FCAE_TUN_ENGINE_TUN2SOCKS;
 
     // The UI's TUN DNS servers: the core also gets them so the in-tunnel
     // Psiphon gateway queries THESE resolvers. Empty keeps the core

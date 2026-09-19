@@ -89,7 +89,7 @@ object NativeEngine {
         // 1=silent 2=error 3=warn 4=info 5=debug.
         t2sLog: Int,
         // TUN data-plane engine (FCAE_TUN_ENGINE_*): 0 = tun2socks (default),
-        // 1 = zeptun. Only consumed in TUN mode.
+        // 1 = zeptun, 2 = hev-socks5-tunnel. Only consumed in TUN mode.
         tunEngine: Int,
         tunMtu: Int,
         // TUN DNS servers from the UI (comma separated) or "" for defaults.
