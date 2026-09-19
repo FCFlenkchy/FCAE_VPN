@@ -609,17 +609,29 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
             if (cm == null) return;
-            Network chosen = cm.getActiveNetwork();
-            android.net.NetworkCapabilities caps = chosen == null
-                    ? null : cm.getNetworkCapabilities(chosen);
-            if (caps == null
-                    || !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    || !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
-                chosen = null;
+            Network chosen = null;
+            Network active = cm.getActiveNetwork();
+            if (active != null) {
+                android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(active);
+                if (caps != null
+                        && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                        && !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
+                    chosen = active;
+                }
             }
-            // VpnService excludes our whole UID, including :psiphon. A forced
-            // network mark can prevent replies to WiFi/hotspot LAN clients.
-            // In LAN mode use normal routing for accepted sockets.
+            if (chosen == null) {
+                for (Network net : cm.getAllNetworks()) {
+                    android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(net);
+                    if (caps != null
+                            && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                            && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                            && !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
+                        chosen = net;
+                        break;
+                    }
+                }
+            }
             cm.bindProcessToNetwork(lanSharing ? null : chosen);
             lanAddress = "";
             Log.i(TAG, "Psiphon LAN=" + lanSharing + ", address=" + lanAddress + ", underlying=" + chosen);

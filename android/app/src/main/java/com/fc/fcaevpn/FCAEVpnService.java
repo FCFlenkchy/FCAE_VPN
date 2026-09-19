@@ -244,15 +244,31 @@ public class FCAEVpnService extends VpnService {
         return "UNKNOWN";
     }
 
-    /** Return the active physical network, never the VPN interface. */
+    /** Return the active physical network, never the VPN interface.
+     *  When VPN is up, getActiveNetwork() returns the VPN itself, so we must
+     *  scan all networks to find the underlying Wi-Fi/cellular with INTERNET+NOT_VPN.
+     *  This prevents Psiphon from losing connectivity or resetting on STOP/START. */
     private Network underlyingNetwork(ConnectivityManager cm) {
         try {
             Network active = cm.getActiveNetwork();
-            NetworkCapabilities caps = active == null ? null : cm.getNetworkCapabilities(active);
-            return caps != null
-                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                    ? active : null;
+            if (active != null) {
+                NetworkCapabilities caps = cm.getNetworkCapabilities(active);
+                if (caps != null
+                        && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
+                    return active;
+                }
+            }
+            for (Network net : cm.getAllNetworks()) {
+                NetworkCapabilities caps = cm.getNetworkCapabilities(net);
+                if (caps != null
+                        && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                        && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                    return net;
+                }
+            }
+            return null;
         } catch (Throwable t) {
             Log.w(TAG, "underlyingNetwork failed: " + t);
             return null;
