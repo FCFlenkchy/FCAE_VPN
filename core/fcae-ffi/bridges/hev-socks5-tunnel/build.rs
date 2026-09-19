@@ -8,8 +8,8 @@
 //!   libfcae_ffi. `FCAE_HEV_LIBDIR=<dir>` overrides the search path.
 //! * **Sidecar** (Windows): the engine has no native Windows port (its Windows
 //!   backend is `__MSYS__`-only and needs the MSYS runtime to own the process),
-//!   so the app ships upstream's `hev-socks5-tunnel.exe`, built by the Windows
-//!   leg of `build_all.yml` (MSYS2 running under Wine) and installed beside it.
+//!   so the app ships upstream's `hev-socks5-tunnel.exe`, built with MSYS2 by
+//!   the `build-hev-windows` job of `build_all.yml` and installed beside it.
 //!   `FCAE_HEV_SIDECAR_EXE=<path>` says that executable is part of the install,
 //!   which is what makes the crate compile the sidecar backend and report the
 //!   engine as available. Without it a Windows build must use `stub`.
@@ -53,9 +53,9 @@ fn main() {
         panic!(
             "the hev-socks5-tunnel engine has no native Windows port (its Windows backend is \
              MSYS-only and links the MSYS runtime), so Windows runs it as a sidecar process.\n\
-             `make -C core/hev-socks5-tunnel` inside MSYS2 builds it (the Windows leg of \
-             build_all.yml does that with MSYS2 running under Wine); point FCAE_HEV_SIDECAR_EXE \
-             at the resulting hev-socks5-tunnel.exe, or build with \
+             `make -C core/hev-socks5-tunnel` inside MSYS2 builds it (the build-hev-windows job \
+             does that and passes the result on); point FCAE_HEV_SIDECAR_EXE at the resulting \
+             hev-socks5-tunnel.exe, or build with \
              `--features fcae-bridge-hev-socks5-tunnel/stub`; the engine then reports itself \
              unavailable in the UI."
         );
