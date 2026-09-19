@@ -616,10 +616,14 @@ async fn run_session(
             _ = pump_counters(&*handle, &sink) => Ok(()),
         };
 
-        // Tunnel ended. Tear the bridge down before retrying so the new
-        // session gets a clean device instead of inheriting a half-configured
-        // one. Psiphon (the chained hop) goes down with the bridge, before
-        // Aether, so it never outlives its own upstream.
+        // Tunnel ended. Set reconnecting state immediately so the UI doesn't
+        // briefly show Connected after the backend exits. Then tear the bridge
+        // down before retrying so the new session gets a clean device instead
+        // of inheriting a half-configured one. Psiphon (the chained hop) goes
+        // down with the bridge, before Aether, so it never outlives its own upstream.
+        if should_retry(auto_reconnect, max_reconnects, attempt, &cancel) {
+            sink.set_state(FcaeState::Reconnecting, "Tunnel dropped; reconnecting…".into());
+        }
         tun_bridge.stop(stop_timeout);
         stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
 
@@ -633,7 +637,6 @@ async fn run_session(
 
         attempt += 1;
         sink.cell().note_reconnect();
-        sink.set_state(FcaeState::Reconnecting, "Tunnel dropped; reconnecting…".into());
         if backoff(&cancel, attempt).await.is_break() {
             return Ok(());
         }

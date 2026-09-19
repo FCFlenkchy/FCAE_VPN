@@ -42,6 +42,21 @@ use fcae_runtime::error::{CoreError, Result};
 use fcae_runtime::session::TunBridge;
 use parking_lot::Mutex;
 
+mod platform;
+
+#[cfg(all(windows, wintun_staged))]
+static WINTUN_DLL: &[u8] = include_bytes!(env!("FCAE_HEV_WINTUN_DLL"));
+
+#[cfg(all(windows, wintun_staged))]
+fn wintun_bytes() -> Option<&'static [u8]> {
+    Some(WINTUN_DLL)
+}
+
+#[cfg(all(windows, not(wintun_staged)))]
+fn wintun_bytes() -> Option<&'static [u8]> {
+    None
+}
+
 // ---------------------------------------------------------------------------
 // C ABI
 // ---------------------------------------------------------------------------
@@ -229,6 +244,11 @@ impl TunBridge for HevSocks5TunnelBridge {
                 "TUN start cancelled (session is stopping)".into(),
             ));
         }
+
+        // Windows needs wintun.dll discoverable before the device is created:
+        // hev-socks5-tunnel loads it from the application directory or System32.
+        #[cfg(windows)]
+        platform::ensure_wintun(wintun_bytes())?;
 
         // Get the TUN fd
         let fd = cfg.tun.fd.or_else(|| {
