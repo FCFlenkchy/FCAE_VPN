@@ -137,7 +137,7 @@ impl TunEngines {
     ) -> Result<(), CoreError> {
         #[cfg(feature = "hev")]
         {
-            // hev-socks5-tunnel requires a TUN fd; on Android this comes from
+            // Hev requires a TUN fd; on Android this comes from
             // VpnService. Unlike zeptun, hev does not create the device itself,
             // so we must use the fd provider path if no fd was supplied.
             if cfg.tun.fd.is_none() && self.hev.preauthorised_fd().is_none() {
@@ -155,7 +155,7 @@ impl TunEngines {
         {
             let _ = (cfg, endpoints);
             Err(CoreError::Internal(
-                "the hev-socks5-tunnel TUN engine is not compiled into this build (feature `hev`)".into(),
+                "hev-socks5-tunnel is not compiled into this build".into(),
             ))
         }
     }
@@ -793,7 +793,7 @@ pub extern "C" fn fcae_tun_engine_count() -> u32 {
 /// Detail of one TUN engine: id, name, and whether selecting it can succeed
 /// in this build on this platform.
 ///
-/// Engine 0 is always tun2socks, 1 is zeptun, and 2 is hev-socks5-tunnel,
+/// Engine 0 is always tun2socks, 1 is zeptun, and 2 is Hev,
 /// matching `FCAE_TUN_ENGINE_*` — the `index` order is fixed so a UI can
 /// also persist the raw `engine` value across runs.
 ///
@@ -868,7 +868,7 @@ fn zeptun_info_fields() -> (u64, &'static str, &'static str, bool, &'static str)
     )
 }
 
-/// (engine, id, display, available, reason) for hev-socks5-tunnel: linked vs stub.
+/// (engine, id, display, available, reason) for Hev: linked vs stub.
 #[cfg(feature = "hev")]
 fn hev_info_fields() -> (u64, &'static str, &'static str, bool, &'static str) {
     if fcae_bridge_hev_socks5_tunnel::is_supported() {
@@ -879,7 +879,7 @@ fn hev_info_fields() -> (u64, &'static str, &'static str, bool, &'static str) {
             "hev-socks5-tunnel",
             "hev-socks5-tunnel",
             false,
-            "hev-socks5-tunnel engine not linked (stub build)",
+            "hev-socks5-tunnel not linked (stub build)",
         )
     }
 }
@@ -891,7 +891,7 @@ fn hev_info_fields() -> (u64, &'static str, &'static str, bool, &'static str) {
         "hev-socks5-tunnel",
         "hev-socks5-tunnel",
         false,
-        "not compiled into this build (feature `hev`)",
+        "hev-socks5-tunnel not compiled into this build",
     )
 }
 

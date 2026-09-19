@@ -511,6 +511,31 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
+      - name: build hev-socks5-tunnel engine (libhev-socks5-tunnel)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd core/hev-socks5-tunnel
+          case "${{ matrix.name }}" in
+            linux-x64)   make static ;;
+            windows-x64) make static CROSS_PREFIX=x86_64-w64-mingw32- ;;
+            macos-arm64|macos-x64) make static ;;
+            android-*)
+              # hev uses Makefile which doesn't cross-compile easily
+              # For now, build as stub on Android (will report unavailable)
+              echo "::warning::hev-socks5-tunnel not yet built for Android, using stub"
+              ;;
+            *) echo "::error::Unsupported hev target: ${{ matrix.name }}"; exit 1 ;;
+          esac
+          case "${{ matrix.name }}" in
+            android-*)
+              # Skip verification for Android
+              ;;
+            *) test -s bin/libhev-socks5-tunnel.a ;;
+          esac
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+
       - name: build rust (engine + ffi, in-process)
         run: |
           set -euo pipefail
@@ -572,7 +597,7 @@ jobs:
                 export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
                 export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
 
-                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,zeptun
+                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,zeptun,hev/stub
 
                 DEST="$(pwd)/target/$TARGET_TRIPLE/release/libfcae_ffi.a"
                 ls -lh "$DEST"
@@ -615,7 +640,7 @@ jobs:
               echo "Using NDK: $NDK"
               "$CLANG" --version | head -1
 
-              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon,zeptun
+              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon,zeptun,hev/stub
 
               DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
               ls -lh "$DEST"
@@ -623,7 +648,7 @@ jobs:
             fi
           else
             case "${{ matrix.name }}" in
-              windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,zeptun ;;
+              windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,zeptun,hev ;;
               *) echo "::error::Unsupported desktop target: ${{ matrix.name }}"; exit 1 ;;
             esac
             cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features "$FEATURES"

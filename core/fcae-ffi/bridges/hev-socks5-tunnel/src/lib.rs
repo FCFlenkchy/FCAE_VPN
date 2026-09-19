@@ -211,9 +211,7 @@ impl TunBridge for HevSocks5TunnelBridge {
     fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
         if !is_supported() {
             return Err(CoreError::Internal(
-                "this build was compiled without the hev-socks5-tunnel bridge (feature `stub`); \
-                 TUN mode is unavailable"
-                    .into(),
+                "hev-socks5-tunnel is not available in this build".into(),
             ));
         }
 
@@ -240,7 +238,7 @@ impl TunBridge for HevSocks5TunnelBridge {
 
         let fd = fd.ok_or_else(|| {
             CoreError::Internal(
-                "hev-socks5-tunnel requires a TUN descriptor (Android VpnService or desktop TUN)".into(),
+                "hev-socks5-tunnel requires a TUN descriptor".into(),
             )
         })?;
 

@@ -65,11 +65,6 @@ pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> fcae_runtime::error::Resul
     ))
 }
 
-#[cfg(not(windows))]
-pub fn ensure_wintun(_bytes: Option<&'static [u8]>) -> fcae_runtime::error::Result<()> {
-    Ok(())
-}
-
 /// Close the device-fd dup after a failed `zeptun_create`: the engine never
 /// saw it, so ownership is still ours.
 pub fn close_dup(source: Option<i32>, config: &super::ZeptunConfig) {
