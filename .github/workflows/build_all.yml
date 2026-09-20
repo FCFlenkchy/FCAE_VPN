@@ -667,9 +667,6 @@ jobs:
               ;;
             *) echo "::error::Unsupported zeptun target: ${{ matrix.name }}"; exit 1 ;;
           esac
-          if [[ -f zig-out/lib/zeptun.lib ]]; then
-            mv zig-out/lib/zeptun.lib zig-out/lib/libzeptun.a
-          fi
           # `-lzeptun` must resolve to the static archive. On Windows-gnu the
           # import library (libzeptun.dll.a) is an archive too, and the linker
           # prefers it over libzeptun.a — the exe then imports zeptun.dll
