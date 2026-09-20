@@ -35,25 +35,32 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 
-      # ---- Clubapp branding: name, Telegram link, update removal, and custom icon ----
-      - name: apply Clubapp branding and custom icon
+      # ---- Clubapp branding: name, Telegram link, update removal, and Base64 custom icon ----
+      - name: apply Clubapp branding and Base64 icon
         env:
           REPO_SLUG: ${{ github.repository }}
         run: |
           set -euo pipefail
           python3 -m pip install Pillow
           python3 - <<'PY'
-          import os, re
+          import os, re, base64, io
           from PIL import Image
 
           ROOT = "android/app/src/main"
           RES = ROOT + "/res"
 
-          # ------------------------------------------------------ custom icon generation
-          icon_path = "icon.ico"
-          if os.path.exists(icon_path):
+          # ------------------------------------------------------ custom icon from Base64
+          # کد Base64 تصویر آیکون خود را بین دابل‌کوت‌های زیر قرار دهید
+          icon_base64 = "YOUR_BASE64_STRING_HERE"
+
+          if icon_base64 and icon_base64 != "YOUR_BASE64_STRING_HERE":
               try:
-                  img = Image.open(icon_path).convert("RGBA")
+                  if "," in icon_base64:
+                      icon_base64 = icon_base64.split(",")[1]
+                  
+                  img_data = base64.b64decode(icon_base64)
+                  img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+                  
                   sizes = {
                       "mipmap-mdpi": 48,
                       "mipmap-hdpi": 72,
@@ -67,11 +74,11 @@ jobs:
                       resized = img.resize((size, size), Image.Resampling.LANCZOS)
                       resized.save(os.path.join(dir_path, "ic_launcher.png"), "PNG")
                       resized.save(os.path.join(dir_path, "ic_launcher_round.png"), "PNG")
-                  print("App icons successfully generated and applied from icon.ico")
+                  print("App icons successfully generated and applied from Base64 code!")
               except Exception as e:
-                  print("Error processing icon:", e)
+                  print("Error processing base64 icon:", e)
           else:
-              print("Warning: icon.ico not found in root directory!")
+              print("Skipping custom icon: Base64 string not provided.")
 
           # ------------------------------------------------------ name + Telegram link
           tme, edited = set(), []
@@ -124,11 +131,8 @@ jobs:
                       n = re.sub(r'(?i)(checkUpdate|checkForUpdates|updateUrl|update_url)[^\n]*', '', n)
 
                       if n != t:
-                          open(p, "w", encoding="utf-8").write(n)
-                          link_edits.append(p)
-                      for i, line in enumerate(n.splitlines(), 1):
-                          if re.search(r"fcflenkchy", line, re.I):
-                              left.append("%s:%d: %s" % (p, i, line.strip()[:110]))
+                        open(p, "w", encoding="utf-8").write(n)
+                        link_edits.append(p)
           print("Creator-link files changed:", len(link_edits))
           PY
 
