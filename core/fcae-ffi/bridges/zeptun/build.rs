@@ -74,7 +74,16 @@ fn main() {
     let search_dir = isolate_static_archive(&archive);
 
     println!("cargo:rustc-link-search=native={}", search_dir.display());
+    // Force the Windows GNU linker to consume the staged archive itself.
+    // Without the mode switch, a DLL import archive can still win resolution
+    // and leave zeptun.dll in the final executable's PE imports.
+    if target.os == fcae_build::target::Os::Windows {
+        println!("cargo:rustc-link-arg=-Wl,-Bstatic");
+    }
     println!("cargo:rustc-link-lib=static=zeptun");
+    if target.os == fcae_build::target::Os::Windows {
+        println!("cargo:rustc-link-arg=-Wl,-Bdynamic");
+    }
     println!("cargo:rustc-cfg=zeptun_linked");
     println!("cargo:rustc-env=FCAE_ZEPTUN_HEADER={}", header.display());
     fcae_build::note(format!(

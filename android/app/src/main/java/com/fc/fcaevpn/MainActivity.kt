@@ -2068,8 +2068,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 state == 4 -> {
                     val isTun = spinnerMode.selectedItemPosition == 1
-                    if (statusMsg.isNotBlank() && !isPsiphonPath) statusMsg.uppercase()
-                    else "CONNECTED - ${if (isTun) "TUN" else "PROXY"}"
+                    "CONNECTED - ${if (isTun) "TUN" else "PROXY"}"
                 }
                 state == 5 -> "ERROR"
                 state == 6 -> "RECONNECTING"
