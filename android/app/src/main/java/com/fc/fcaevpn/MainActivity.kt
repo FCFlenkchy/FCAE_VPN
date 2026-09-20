@@ -248,9 +248,8 @@ class MainActivity : AppCompatActivity() {
                     handler.post {
                         if ((connecting || commandConnecting)
                                 && (isPsiphonSelected() || isEgressPsiphon())) {
-                            // Store stage for poll to use, show stable label without CONNECTING prefix flicker
-                            statusText.text = label
-                            statusText.setTextColor(COLOR_PROGRESS)
+                            // Stage text is diagnostic only; the state renderer owns
+                            // the visible status for every backend.
                         }
                     }
                 }
@@ -2052,7 +2051,7 @@ class MainActivity : AppCompatActivity() {
                     && commandConnecting
                     && pendingPsiSocks == 0
             val label = when {
-                psiphonStillChaining -> "ESTABLISHING TUNNEL"
+                psiphonStillChaining -> "CONNECTING"
                 state == 0 -> "DISCONNECTED"
                 state in 1..3 -> "CONNECTING"
                 state == 4 -> {

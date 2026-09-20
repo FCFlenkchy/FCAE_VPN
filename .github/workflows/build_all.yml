@@ -633,6 +633,11 @@ jobs:
         run: |
           set -euo pipefail
           cd core/zeptun
+          if [ "${{ matrix.name }}" = "windows-x64" ]; then
+            # Static and shared Windows artifacts otherwise share a basename;
+            # the DLL import library can overwrite the static archive.
+            sed -i 's/\.name = if (target\.result\.abi == \.msvc) "zeptun_static" else "zeptun"/.name = "fcae_zeptun_static"/' build.zig
+          fi
           case "${{ matrix.name }}" in
             linux-x64)   zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSmall ;;
             windows-x64) zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSmall ;;
@@ -667,16 +672,9 @@ jobs:
               ;;
             *) echo "::error::Unsupported zeptun target: ${{ matrix.name }}"; exit 1 ;;
           esac
-          # Zig may spell the GNU static archive `zeptun.lib` on some
-          # versions. Normalize it only after rejecting an import library.
-          if [ "${{ matrix.name }}" = "windows-x64" ] \
-              && [ ! -s zig-out/lib/libzeptun.a ] \
-              && [ -s zig-out/lib/zeptun.lib ]; then
-            if strings zig-out/lib/zeptun.lib | grep -qiE '(^|[^[:alnum:]_])zeptun\.dll([^[:alnum:]_]|$)'; then
-              echo "::error::zeptun.lib is a DLL import library, not a static archive"
-              exit 1
-            fi
-            cp zig-out/lib/zeptun.lib zig-out/lib/libzeptun.a
+          if [ "${{ matrix.name }}" = "windows-x64" ]; then
+            test -s zig-out/lib/libfcae_zeptun_static.a
+            cp zig-out/lib/libfcae_zeptun_static.a zig-out/lib/libzeptun.a
           fi
 
           # `-lzeptun` must resolve to the static archive. On Windows-gnu the

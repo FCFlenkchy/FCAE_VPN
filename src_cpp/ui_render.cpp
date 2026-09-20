@@ -593,13 +593,6 @@ static ImVec4 state_color(FcaeState s) {
 static const char* state_label(FcaeState s) {
     if (s == FCAE_STATE_CONNECTED)
         return g_app.mode == 1 ? "CONNECTED - TUN" : "CONNECTED - PROXY";
-    // Avoid flicker on Psiphon exits: CONNECTING with Psiphon backend should
-    // show ESTABLISHING TUNNEL stably instead of flipping between
-    // CONNECTING and ESTABLISHING via status_message
-    if ((s == FCAE_STATE_CONNECTING || s == FCAE_STATE_RECONNECTING) &&
-        (g_app.backend == 1 || g_app.tor_mode == 3)) {
-        return "ESTABLISHING TUNNEL";
-    }
     switch (s) {
         case FCAE_STATE_DISCONNECTED: return "DISCONNECTED";
         case FCAE_STATE_PROVISIONING:

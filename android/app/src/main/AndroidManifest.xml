@@ -44,6 +44,7 @@
         <service
             android:name=".ProxyNotification"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
@@ -57,6 +58,7 @@
         <service
             android:name=".PsiphonTunnelService"
             android:exported="false"
+            android:stopWithTask="false"
             android:process=":psiphon" />
 
     </application>
