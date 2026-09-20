@@ -111,17 +111,45 @@ fn android_abi_dir(arch: fcae_build::target::Arch) -> &'static str {
     }
 }
 
-/// Zig names the static archive `libzeptun.a` on POSIX targets but
-/// `zeptun.lib` on Windows. Accept either so the build works whether the
-/// CI renamed it or a developer built natively on Windows.
+/// Zig names the static archive `libzeptun.a` on POSIX and MinGW targets and
+/// `zeptun_static.lib` on MSVC, where `zeptun.lib` is the import library.
+/// Accept `zeptun.lib` last for static-only MSVC build trees.
 fn resolve_zeptun_archive(lib_dir: &Path) -> PathBuf {
     let posix = lib_dir.join("libzeptun.a");
     if posix.is_file() {
         return posix;
+    }
+    let msvc = lib_dir.join("zeptun_static.lib");
+    if msvc.is_file() {
+        return msvc;
     }
     let windows = lib_dir.join("zeptun.lib");
     if windows.is_file() {
         return windows;
     }
     posix
+}
+
+/// Stage the static archive into a dedicated directory and link from there, so
+/// a sibling shared/import library can never shadow `-lzeptun`.
+fn isolate_static_archive(archive: &Path) -> PathBuf {
+    let dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo always sets OUT_DIR"))
+        .join("zeptun_static");
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("cannot create {}: {e}", dir.display()));
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let mut name = archive
+        .file_name()
+        .expect("archive has a file name")
+        .to_os_string();
+    if name == "zeptun_static.lib" {
+        name = "zeptun.lib".into();
+    }
+    let staged = dir.join(&name);
+    std::fs::copy(archive, &staged)
+        .unwrap_or_else(|e| panic!("cannot stage {}: {e}", archive.display()));
+    dir
 }
