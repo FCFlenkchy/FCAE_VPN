@@ -607,11 +607,18 @@ elseif(UNIX)
     endif()
 
     # Do not link system OpenSSL (ssl/crypto) — BoringSSL is in libfcae_ffi.a.
+    # Compression libs link statically. X11/GL stay dynamic (driver dispatch
+    # through dlopen), as do glibc and its NSS plugins.
     target_link_libraries(fcaevpn PRIVATE
         OpenGL::GL X11::X11 X11::Xi pthread dl m
-        z bz2 lzma
+        -Wl,-Bstatic z bz2 lzma -Wl,-Bdynamic
         # libresolv: the Go runtime in libfcae_ffi.a resolves names through it.
         resolv
+    )
+
+    # Static toolchain runtime: no libstdc++/libgcc_s dependency at startup.
+    target_link_options(fcaevpn PRIVATE
+        -static-libgcc -static-libstdc++
     )
 
 endif()

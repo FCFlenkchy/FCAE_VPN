@@ -35,7 +35,8 @@ fn main() {
         println!("cargo:rustc-env=FCAE_WINTUN_DLL={}", dll.display());
     }
 
-    if cfg!(feature = "stub") {
+    // Features reach build scripts as CARGO_FEATURE_* env, never as cfg().
+    if std::env::var_os("CARGO_FEATURE_STUB").is_some() {
         fcae_build::note("fcae-bridge-zeptun: `stub` feature enabled — zeptun engine NOT linked");
         return;
     }
@@ -64,7 +65,15 @@ fn main() {
         );
     }
 
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    fcae_build::rerun_if_changed(&archive);
+
+    // Link from a directory holding only the static archive. The build output
+    // also contains the shared library and its import library, and on
+    // Windows-gnu the import library wins `-lzeptun` resolution — the final
+    // binary then imports zeptun.dll instead of linking the engine statically.
+    let search_dir = isolate_static_archive(&archive);
+
+    println!("cargo:rustc-link-search=native={}", search_dir.display());
     println!("cargo:rustc-link-lib=static=zeptun");
     println!("cargo:rustc-cfg=zeptun_linked");
     println!("cargo:rustc-env=FCAE_ZEPTUN_HEADER={}", header.display());

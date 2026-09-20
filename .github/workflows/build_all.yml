@@ -391,7 +391,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
             libxrandr-dev libxinerama-dev libxxf86vm-dev \
-            libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev \
+            libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev zlib1g-dev \
             libevent-dev protobuf-compiler nasm cmake ninja-build
           curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
             https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
@@ -669,6 +669,17 @@ jobs:
           esac
           if [[ -f zig-out/lib/zeptun.lib ]]; then
             mv zig-out/lib/zeptun.lib zig-out/lib/libzeptun.a
+          fi
+          # `-lzeptun` must resolve to the static archive. On Windows-gnu the
+          # import library (libzeptun.dll.a) is an archive too, and the linker
+          # prefers it over libzeptun.a — the exe then imports zeptun.dll
+          # instead of linking the engine statically. Purge every shared
+          # artifact so only the static archive remains linkable.
+          rm -f zig-out/lib/*.dll zig-out/lib/*.dll.a zig-out/lib/*.so* zig-out/lib/*.dylib
+          if ls zig-out/lib/*.dll zig-out/lib/*.dll.a >/dev/null 2>&1; then
+            echo "::error::shared zeptun artifacts survived the purge:"
+            ls -la zig-out/lib
+            exit 1
           fi
           case "${{ matrix.name }}" in
             android-*)
@@ -1101,7 +1112,7 @@ jobs:
               IMPORTS="$("$OBJDUMP" -p "$EXE" | awk '/DLL Name:/ { print $3 }' | sort -u)"
               echo "$EXE imports:"
               echo "$IMPORTS" | sed 's/^/  /'
-              if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|libyaml\.so|liblwip\.so|libhev-task-system\.so|msys-2\.0\.dll|wintun\.dll|zeptun\.dll|libfcae_psiphon\.dll)$'; then
+              if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|libyaml\.so|liblwip\.so|libhev-task-system\.so|msys-2\.0\.dll|wintun\.dll|zeptun\.dll|libfcae_psiphon\.dll|libgcc_s_seh-1\.dll|libstdc\+\+-6\.dll|libwinpthread-1\.dll)$'; then
                 echo "::error::$EXE imports a DLL that is supposed to be embedded or statically linked"
                 exit 1
               fi
@@ -1118,6 +1129,18 @@ jobs:
             # job through the workflow environment, and if that link broke the
             # failure would otherwise surface as a confusing rustc error.
             : "${FCAE_HEV_ENGINE_DIR:?the hev engine dir was not exported}"
+          fi
+
+          if [ "${{ matrix.name }}" = "linux-x64" ]; then
+            # Direct DT_NEEDED entries only: ldd shows transitive deps too
+            # (libGL pulls libz), which must not fail this check.
+            NEEDED="$(readelf -d "$SHIPPED" | awk -F'[][]' '/NEEDED/ { print $2 }' | sort -u)"
+            echo "$SHIPPED DT_NEEDED:"
+            echo "$NEEDED" | sed 's/^/  /'
+            if echo "$NEEDED" | grep -qiE 'libzeptun|libfcae_psiphon|libhev|libfcae_go_bridge|libglfw|libstdc\+\+|libgcc_s|libz\.so|libbz2|liblzma|libssl|libcrypto'; then
+              echo "::error::$SHIPPED links a library that is supposed to be statically linked"
+              exit 1
+            fi
           fi
 
       - name: install osslsigncode (windows signing)
@@ -1237,6 +1260,13 @@ jobs:
 
           echo "Binary dynamic dependencies:"
           otool -L "$APP/Contents/MacOS/fcaevpn" || true
+          # Every load must resolve from the OS: an engine library or a
+          # Homebrew prefix here means it linked dynamically instead of
+          # statically, and breaks on machines without that path.
+          if otool -L "$APP/Contents/MacOS/fcaevpn" | tail -n +2 | grep -qiE 'libzeptun|libfcae_psiphon|libhev|libfcae_go_bridge|/usr/local/|/opt/homebrew|/opt/local/'; then
+            echo "::error::fcaevpn links a library that is supposed to be statically linked or embedded"
+            exit 1
+          fi
 
           MACOS_VER="${{ needs.prepare.outputs.macos_version }}"
           printf '%s\n' \
