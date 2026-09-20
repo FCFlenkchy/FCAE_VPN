@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
+        android:name=".FCAEApplication"
         android:allowBackup="true"
         android:label="FCAE VPN"
         android:icon="@mipmap/ic_launcher"

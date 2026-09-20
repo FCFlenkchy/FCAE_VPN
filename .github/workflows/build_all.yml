@@ -1026,7 +1026,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p package
-          cp build/fcaevpn* package/ 2>/dev/null || true
+          # Named, never a glob: build/ is a restored cache and may still hold
+          # artifacts from an older run. zeptun is linked into the executable,
+          # so there is no zeptun binary or DLL to ship on any platform.
+          case "${{ matrix.name }}" in
+            windows-x64) cp build/fcaevpn.exe package/ ;;
+            *)           cp build/fcaevpn    package/ ;;
+          esac
           cp build/libfcae_psiphon.* package/ 2>/dev/null || true
           cp build/fcae_psiphon.dll package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
@@ -1036,31 +1042,6 @@ jobs:
             # wintun.dll are embedded in it and extracted at runtime, zeptun
             # links statically, and libfcae_psiphon.dll above is the Go
             # runtime the exe imports.
-
-            # No PE import may name a file that is supposed to be embedded, or
-            # a user with the exe alone fails at process start instead of at
-            # engine load. The cross objdump is what built the exe; fall back
-            # to a generic one, and warn rather than fail if neither is here.
-            OBJDUMP=""
-            for candidate in objdump x86_64-w64-mingw32-objdump; do
-              if command -v "$candidate" >/dev/null 2>&1; then
-                OBJDUMP="$candidate"
-                break
-              fi
-            done
-            if [ -z "$OBJDUMP" ]; then
-              echo "::warning::no objdump on PATH; skipping the exe import check"
-            else
-              IMPORTS="$("$OBJDUMP" -p build/fcaevpn.exe | awk '/DLL Name:/ { print $3 }')"
-              echo "$IMPORTS" | sed 's/^/  imports: /'
-              if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|libyaml\.so|liblwip\.so|libhev-task-system\.so|msys-2\.0\.dll|wintun\.dll|zeptun\.dll)$'; then
-                echo "::error::the exe imports a DLL that is supposed to be embedded"
-                exit 1
-              fi
-              echo "$IMPORTS" | grep -qi '^libfcae_psiphon\.dll$' \
-                || { echo "::error::the exe no longer imports libfcae_psiphon.dll"; exit 1; }
-            fi
-
             echo "Windows package:"
             ls -la package/
           fi
@@ -1096,6 +1077,44 @@ jobs:
           fi
           ls -la
           test $(ls -1 | wc -l) -ge 1
+
+          # Inspect the released artifact, never a path inside build/: that
+          # directory is a cache hit and can hold leftovers from an older run.
+          if [ "${{ matrix.name }}" = "windows-x64" ]; then
+            EXE="FCAE_VPN-windows-x64.exe"
+            STRAY="$(find . -maxdepth 1 -name '*.exe' ! -name fcaevpn.exe -printf '%f\n')"
+            if [ -n "$STRAY" ]; then
+              echo "::error::unexpected executable in the package:"
+              printf '%s\n' "$STRAY" | sed 's/^/  /'
+              exit 1
+            fi
+            test -f fcaevpn.exe || { echo "::error::fcaevpn.exe missing from the package"; exit 1; }
+            mv fcaevpn.exe "$EXE"
+
+            # The hev engine set and wintun.dll are embedded in the exe, so a
+            # PE import naming any of them means a user with the exe alone
+            # fails at process start instead of at engine load.
+            OBJDUMP=""
+            for candidate in objdump x86_64-w64-mingw32-objdump; do
+              if command -v "$candidate" >/dev/null 2>&1; then
+                OBJDUMP="$candidate"
+                break
+              fi
+            done
+            if [ -z "$OBJDUMP" ]; then
+              echo "::warning::no objdump on PATH; skipping the $EXE import check"
+            else
+              IMPORTS="$("$OBJDUMP" -p "$EXE" | awk '/DLL Name:/ { print $3 }' | sort -u)"
+              echo "$EXE imports:"
+              echo "$IMPORTS" | sed 's/^/  /'
+              if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|libyaml\.so|liblwip\.so|libhev-task-system\.so|msys-2\.0\.dll|wintun\.dll|zeptun\.dll)$'; then
+                echo "::error::$EXE imports a DLL that is supposed to be embedded or statically linked"
+                exit 1
+              fi
+              echo "$IMPORTS" | grep -qi '^libfcae_psiphon\.dll$' \
+                || { echo "::error::$EXE no longer imports libfcae_psiphon.dll"; exit 1; }
+            fi
+          fi
 
       - name: install osslsigncode (windows signing)
         if: matrix.name == 'windows-x64'
