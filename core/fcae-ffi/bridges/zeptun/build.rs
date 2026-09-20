@@ -64,14 +64,6 @@ fn main() {
             lib_dir.display()
         );
     }
-    if target.os == fcae_build::target::Os::Windows
-        && archive.file_name().and_then(|n| n.to_str()) != Some("libzeptun.a") {
-        panic!(
-            "Windows GNU requires the real static libzeptun.a; refusing {}",
-            archive.display()
-        );
-    }
-
     fcae_build::rerun_if_changed(&archive);
 
     // Link from a directory holding only the static archive. The build output

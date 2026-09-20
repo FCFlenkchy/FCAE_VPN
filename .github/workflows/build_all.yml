@@ -667,6 +667,18 @@ jobs:
               ;;
             *) echo "::error::Unsupported zeptun target: ${{ matrix.name }}"; exit 1 ;;
           esac
+          # Zig may spell the GNU static archive `zeptun.lib` on some
+          # versions. Normalize it only after rejecting an import library.
+          if [ "${{ matrix.name }}" = "windows-x64" ] \
+              && [ ! -s zig-out/lib/libzeptun.a ] \
+              && [ -s zig-out/lib/zeptun.lib ]; then
+            if strings zig-out/lib/zeptun.lib | grep -qiE '(^|[^[:alnum:]_])zeptun\.dll([^[:alnum:]_]|$)'; then
+              echo "::error::zeptun.lib is a DLL import library, not a static archive"
+              exit 1
+            fi
+            cp zig-out/lib/zeptun.lib zig-out/lib/libzeptun.a
+          fi
+
           # `-lzeptun` must resolve to the static archive. On Windows-gnu the
           # import library (libzeptun.dll.a) is an archive too, and the linker
           # prefers it over libzeptun.a — the exe then imports zeptun.dll
