@@ -66,6 +66,7 @@ public class FCAEVpnService extends VpnService {
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
     public static final String ACTION_START      = "com.fc.fcaevpn.START";
     public static final String ACTION_PSIPHON_REGIONS = "com.fc.fcaevpn.PSIPHON_REGIONS";
+    public static final String ACTION_PSIPHON_START = "com.fc.fcaevpn.PSIPHON_START";
 
     public static final String BROADCAST_VPN_DISCONNECTED  = "com.fc.fcaevpn.VPN_DISCONNECTED";
     public static final String BROADCAST_VPN_STATE_CHANGED = "com.fc.fcaevpn.VPN_STATE_CHANGED";
@@ -583,6 +584,13 @@ public class FCAEVpnService extends VpnService {
                 case ACTION_DISCONNECT:
                     requestDisconnect();
                     return START_NOT_STICKY;
+
+                case ACTION_PSIPHON_START:
+                    PsiphonTunnelService.startBound(this,
+                            new Intent(this, PsiphonTunnelService.class)
+                                    .setAction(PsiphonTunnelService.ACTION_START)
+                                    .putExtras(intent));
+                    return START_STICKY;
 
                 case ACTION_PSIPHON_REGIONS:
                     PsiphonTunnelService.startBound(this,

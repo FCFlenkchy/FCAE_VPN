@@ -1539,17 +1539,16 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
         if (!upstream.isNullOrBlank()) i.putExtra("upstreamProxy", upstream)
-        if (upstream.isNullOrBlank()) {
-            val owner = Intent(this, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_PSIPHON)
-            i.extras?.let { owner.putExtras(it) }
-            startForegroundService(owner)
+        // The foreground owner, not the Activity, owns the Psiphon bind.
+        val owner = if (isTunModeSelected()) {
+            Intent(this, FCAEVpnService::class.java)
+                .setAction(FCAEVpnService.ACTION_PSIPHON_START)
         } else {
-            // The foreground owner, not the Activity, owns the Psiphon bind.
-            val owner = Intent(this, ProxyNotification::class.java)
+            Intent(this, ProxyNotification::class.java)
                 .setAction(ProxyNotification.ACTION_PSIPHON)
-            i.extras?.let { owner.putExtras(it) }
-            startForegroundService(owner)
         }
+        i.extras?.let { owner.putExtras(it) }
+        startForegroundService(owner)
     }
 
     /**
