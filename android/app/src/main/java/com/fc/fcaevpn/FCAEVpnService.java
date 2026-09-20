@@ -1420,7 +1420,13 @@ public class FCAEVpnService extends VpnService {
         if (shuttingDown || killProcessOnCleanup) fullShutdown();
         // Drop the global ref before the service object dies, or the native
         // side keeps a stale reference and protect() calls a dead object.
-        try { nativeUnregisterVpnService(); } catch (Throwable ignored) {}
+        // Keep the native callback registered across an Android service
+        // recreation; unregister only on an explicit teardown. Otherwise a
+        // task swipe/recreate leaves the live Psiphon/TUN path with a stale
+        // host hook and triggers a reconnect or crash.
+        if (shuttingDown || killProcessOnCleanup) {
+            try { nativeUnregisterVpnService(); } catch (Throwable ignored) {}
+        }
         super.onDestroy();
     }
 

@@ -209,7 +209,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             if (!ACTION_REGIONS.equals(intent.getAction())) {
                 try { app.startService(intent); } catch (Throwable ignored) {}
             }
-            if (!app.bindService(intent, next, Context.BIND_AUTO_CREATE)) {
+            if (!app.bindService(intent, next,
+                    Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT)) {
                 connection = null;
                 liveConnections.remove(next);
                 Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
@@ -271,7 +272,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             Log.w(TAG, "Psiphon rebind attempt " + rebindAttempts + "/" + MAX_REBIND_ATTEMPTS);
             try { app.startService(original); } catch (Throwable ignored) {}
             android.content.ServiceConnection rebinding = makeConnection(app, original);
-            if (!app.bindService(original, rebinding, Context.BIND_AUTO_CREATE)) {
+            if (!app.bindService(original, rebinding,
+                    Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT)) {
                 Log.w(TAG, "Psiphon rebind " + rebindAttempts + " refused; retrying");
                 scheduleRebind(app, original);
             } else {
