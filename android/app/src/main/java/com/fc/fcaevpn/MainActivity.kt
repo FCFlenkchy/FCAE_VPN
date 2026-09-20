@@ -2054,18 +2054,7 @@ class MainActivity : AppCompatActivity() {
             val label = when {
                 psiphonStillChaining -> "ESTABLISHING TUNNEL"
                 state == 0 -> "DISCONNECTED"
-                state in 1..3 -> {
-                    if (isPsiphonPath && commandConnecting) {
-                        // For Psiphon, show stable establishing label from stage or statusMsg
-                        when {
-                            lastPsiphonStageLabel.isNotBlank() -> lastPsiphonStageLabel
-                            statusMsg.isNotBlank() -> statusMsg.uppercase()
-                            else -> "ESTABLISHING TUNNEL"
-                        }
-                    } else {
-                        "CONNECTING"
-                    }
-                }
+                state in 1..3 -> "CONNECTING"
                 state == 4 -> {
                     val isTun = spinnerMode.selectedItemPosition == 1
                     "CONNECTED - ${if (isTun) "TUN" else "PROXY"}"

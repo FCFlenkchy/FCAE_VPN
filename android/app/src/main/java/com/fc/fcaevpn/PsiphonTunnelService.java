@@ -608,7 +608,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     @Override
     public void onDestroy() {
-        stopNow();
+        // Android may recreate the owner/binding while the tunnel is live.
+        // Only an explicit stop is allowed to tear down Psiphon here.
+        if (stopping || processMustDie) stopNow();
         flushLogs();
         super.onDestroy();
         // Last thing this process does when the app is being closed for good.
@@ -1271,7 +1273,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 // probing spams per-second notices and, on a broken server,
                 // inflates the 'port forward failures' counter.
                 int port = httpPort.get();
-                if (lastRttMs == 0 && rttAttempts < 4 && port > 0 && now >= nextRttProbeAt) {
+                if (lastRttMs == 0 && rttAttempts < 12 && port > 0 && now >= nextRttProbeAt) {
                     rttAttempts++;
                     nextRttProbeAt = now + (1L << Math.min(rttAttempts, 3)) * 1000L;
                     Integer r = probeTunnelRtt(port);
