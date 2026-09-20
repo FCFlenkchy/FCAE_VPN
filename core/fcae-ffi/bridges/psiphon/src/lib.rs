@@ -202,6 +202,7 @@ struct HostAttach {
     failed: bool,
 }
 static HOST_ATTACH: parking_lot::Mutex<Option<HostAttach>> = parking_lot::Mutex::new(None);
+#[cfg(not(all(feature = "enabled", psiphon_linked)))]
 static NEXT_HOST_ATTACH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub fn host_request() -> String {
