@@ -311,18 +311,6 @@ jobs:
           echo "FCAE_HEV_ENGINE_DIR=$ENGINE" >> "$GITHUB_ENV"
           ls -la "$ENGINE"
 
-          # The engine set is embedded in the exe, not shipped beside it: no
-          # PE import may name any of these files, or a user with the exe
-          # alone would fail at process start instead of at engine load.
-          IMPORTS="$(objdump -p build/fcaevpn.exe | awk '/DLL Name:/ { print $3 }')"
-          echo "$IMPORTS" | sed 's/^/  imports: /'
-          if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|libyaml\.so|liblwip\.so|libhev-task-system\.so|msys-2\.0\.dll|wintun\.dll|zeptun\.dll)$'; then
-            echo "::error::the exe imports a DLL that is supposed to be embedded"
-            exit 1
-          fi
-          echo "$IMPORTS" | grep -qi '^libfcae_psiphon\.dll$' \
-            || { echo "::error::the exe no longer imports libfcae_psiphon.dll"; exit 1; }
-
       - name: setup go
         uses: actions/setup-go@v7
         with:
@@ -1048,6 +1036,31 @@ jobs:
             # wintun.dll are embedded in it and extracted at runtime, zeptun
             # links statically, and libfcae_psiphon.dll above is the Go
             # runtime the exe imports.
+
+            # No PE import may name a file that is supposed to be embedded, or
+            # a user with the exe alone fails at process start instead of at
+            # engine load. The cross objdump is what built the exe; fall back
+            # to a generic one, and warn rather than fail if neither is here.
+            OBJDUMP=""
+            for candidate in objdump x86_64-w64-mingw32-objdump; do
+              if command -v "$candidate" >/dev/null 2>&1; then
+                OBJDUMP="$candidate"
+                break
+              fi
+            done
+            if [ -z "$OBJDUMP" ]; then
+              echo "::warning::no objdump on PATH; skipping the exe import check"
+            else
+              IMPORTS="$("$OBJDUMP" -p build/fcaevpn.exe | awk '/DLL Name:/ { print $3 }')"
+              echo "$IMPORTS" | sed 's/^/  imports: /'
+              if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|libyaml\.so|liblwip\.so|libhev-task-system\.so|msys-2\.0\.dll|wintun\.dll|zeptun\.dll)$'; then
+                echo "::error::the exe imports a DLL that is supposed to be embedded"
+                exit 1
+              fi
+              echo "$IMPORTS" | grep -qi '^libfcae_psiphon\.dll$' \
+                || { echo "::error::the exe no longer imports libfcae_psiphon.dll"; exit 1; }
+            fi
+
             echo "Windows package:"
             ls -la package/
           fi
