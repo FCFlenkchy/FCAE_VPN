@@ -311,6 +311,18 @@ jobs:
           echo "FCAE_HEV_ENGINE_DIR=$ENGINE" >> "$GITHUB_ENV"
           ls -la "$ENGINE"
 
+          # The engine set is embedded in the exe, not shipped beside it: no
+          # PE import may name any of these files, or a user with the exe
+          # alone would fail at process start instead of at engine load.
+          IMPORTS="$(objdump -p build/fcaevpn.exe | awk '/DLL Name:/ { print $3 }')"
+          echo "$IMPORTS" | sed 's/^/  imports: /'
+          if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|libyaml\.so|liblwip\.so|libhev-task-system\.so|msys-2\.0\.dll|wintun\.dll|zeptun\.dll)$'; then
+            echo "::error::the exe imports a DLL that is supposed to be embedded"
+            exit 1
+          fi
+          echo "$IMPORTS" | grep -qi '^libfcae_psiphon\.dll$' \
+            || { echo "::error::the exe no longer imports libfcae_psiphon.dll"; exit 1; }
+
       - name: setup go
         uses: actions/setup-go@v7
         with:
@@ -1032,23 +1044,12 @@ jobs:
           chmod +x package/* 2>/dev/null || true
 
           if [ "${{ matrix.name }}" = "windows-x64" ]; then
-            cp core/zeptun/zig-out/bin/zeptun.dll package/ 2>/dev/null || true
-            # The hev-socks5-tunnel engine: a DLL the app loads in-process,
-            # with the third-party DLLs it imports and the MSYS runtime they
-            # link against. It picks up wintun.dll from this same directory.
-            # build-hev-windows already collected every MSYS DLL ldd reports,
-            # so copy the whole engine dir to keep the runtime complete.
-            : "${FCAE_HEV_ENGINE_DIR:?the hev engine was not staged (build-hev-windows)}"
-            cp -v "$FCAE_HEV_ENGINE_DIR"/* package/
-            WINTUN_TMP=$(mktemp -d)
-            if curl -fsSL --connect-timeout 30 --max-time 180 \
-                 -o "$WINTUN_TMP/wintun.zip" "https://www.wintun.net/builds/wintun-0.14.1.zip"; then
-              unzip -oq "$WINTUN_TMP/wintun.zip" -d "$WINTUN_TMP"
-              cp "$WINTUN_TMP/wintun/bin/amd64/wintun.dll" package/ 2>/dev/null || true
-            fi
-            rm -rf "$WINTUN_TMP"
-            echo "Windows DLLs in package:"
-            ls -la package/*.dll 2>/dev/null || echo "  (no DLLs found)"
+            # The released app is the exe alone. The hev engine set and
+            # wintun.dll are embedded in it and extracted at runtime, zeptun
+            # links statically, and libfcae_psiphon.dll above is the Go
+            # runtime the exe imports.
+            echo "Windows package:"
+            ls -la package/
           fi
 
           if [ "${{ matrix.name }}" = "linux-x64" ]; then
@@ -1109,7 +1110,7 @@ jobs:
           fi
           echo "$WIN_CERT_BASE64" | base64 -d > "$RUNNER_TEMP/wincert.pfx"
 
-          for f in package/*.exe package/libhev-socks5-tunnel.dll; do
+          for f in package/*.exe; do
             [ -f "$f" ] || continue
             osslsigncode sign \
               -pkcs12 "$RUNNER_TEMP/wincert.pfx" \

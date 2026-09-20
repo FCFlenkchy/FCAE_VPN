@@ -9,18 +9,19 @@
 //! * **In-process, DLL** (Windows): the engine has no native Windows port
 //!   (its Windows backend is `__MSYS__`-only and links the MSYS runtime), so
 //!   it cannot be linked from the MinGW build. Instead the `build-hev-windows`
-//!   job builds it as a DLL with MSYS2 and the app loads it at runtime, next
-//!   to the executable: same process, no child process, no exe. `FCAE_HEV_DLL`
-//!   says that DLL is part of the install, which is what makes the crate
-//!   compile the dynamic backend and report the engine as available.
+//!   job builds it as a DLL with MSYS2, this script embeds it — together with
+//!   every library it imports — in the binary, and the app loads it at
+//!   runtime: same process, no child process, no exe, no files beside the exe.
+//!   `FCAE_HEV_DLL` says that DLL is part of the build, which is what makes
+//!   the crate compile the dynamic backend and report the engine as available.
 //!   Without it a Windows build must use `stub`.
 
 use std::path::{Path, PathBuf};
 
 /// Every file the engine DLL needs beside it at load time: the engine itself,
 /// the POSIX-prefix libraries it imports, and the MSYS runtime. The bridge
-/// embeds the whole set in the binary, so the app keeps working even if the
-/// exe is moved away from the packaged files.
+/// embeds the whole set in the binary and extracts it as one directory before
+/// loading, so the released app is a single self-contained executable.
 const ENGINE_FILES: [&str; 5] = [
     "libhev-socks5-tunnel.dll",
     "libyaml.so",
@@ -49,10 +50,9 @@ fn main() {
 
     let target = fcae_build::target::Target::from_cargo_env();
 
-    // Windows: the engine cannot be linked (MSYS-only runtime), so it ships
-    // beside the app as a DLL that the bridge loads at runtime. The whole
-    // engine set is also embedded in the binary: if the exe is ever moved
-    // away from the packaged files, the bridge extracts its embedded copy.
+    // Windows: the engine cannot be linked (MSYS-only runtime), so it is
+    // loaded as a DLL at runtime. Nothing ships beside the app — the whole
+    // engine set is embedded here and the bridge extracts it before loading.
     if target.os == fcae_build::target::Os::Windows {
         let staged = std::env::var("FCAE_HEV_DLL").unwrap_or_default();
         let staged = staged.trim();
@@ -80,7 +80,7 @@ fn main() {
             println!("cargo:rustc-cfg=hev_dynamic");
             fcae_build::note(format!(
                 "hev-socks5-tunnel loads as a DLL in-process on Windows ({staged}); the full \
-                 engine set is embedded in the binary as a fallback"
+                 engine set is embedded in the binary and extracted at load time"
             ));
             return;
         }

@@ -441,6 +441,11 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         d3d11 dxgi d3dcompiler dwmapi ntdll
         ws2_32 userenv bcrypt shell32 ole32 uuid crypt32 secur32 ncrypt
         iphlpapi
+        # fwpuclnt: the statically linked zeptun engine drives the Windows
+        # Filtering Platform (Fwpm*) to keep the tunnel's own sockets out of
+        # the tunnel; its imports land in libfcae_ffi.a, and cargo's link
+        # directives never reach this link.
+        fwpuclnt
         # winmm: the Go runtime in libfcae_ffi.a calls timeBeginPeriod.
         winmm
     )

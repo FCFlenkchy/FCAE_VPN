@@ -39,10 +39,12 @@ const RESTART_GRACE: Duration = Duration::from_secs(2);
 /// The engine DLL and its dependencies, resolved once per process.
 ///
 /// The DLL is built by MSYS2 (the engine's only Windows toolchain), so it
-/// imports `msys-2.0.dll` and its own third-party DLLs — all of which ship in
-/// the same directory as the engine DLL and are resolved by the loader when
-/// it is loaded by explicit path. A load failure is cached: the DLL will not
-/// appear mid-session, and the UI reads `is_supported()` from there.
+/// imports `msys-2.0.dll` and its own third-party DLLs. Nothing ships beside
+/// the executable: the build embeds the whole set in the binary and this
+/// module extracts it as one directory at load time, which is what lets the
+/// loader resolve those imports when the DLL is loaded by explicit path. A
+/// load failure is cached: the DLL will not appear mid-session, and the UI
+/// reads `is_supported()` from there.
 #[cfg(hev_dynamic)]
 mod ffi {
     use std::ffi::{c_int, c_uchar, c_uint, c_void};
@@ -82,6 +84,10 @@ mod ffi {
         ("msys-2.0.dll", EMBED_MSYS),
     ];
 
+    /// The build embeds exactly what the loader needs beside the DLL; a drift
+    /// between the two lists would surface as a load failure at runtime.
+    const _: () = assert!(EMBEDDED.len() == ENGINE_FILES.len());
+
     type MainFn = unsafe extern "C" fn(*const c_uchar, c_uint, c_int) -> c_int;
     type QuitFn = unsafe extern "C" fn();
     type StatsFn = unsafe extern "C" fn(*mut usize, *mut usize, *mut usize, *mut usize);
@@ -103,9 +109,9 @@ mod ffi {
         fn GetLastError() -> u32;
     }
 
-    /// Resolves the engine DLL: the `FCAE_HEV_DLL` override, then the
-    /// packaged files beside the executable, then the copy embedded in this
-    /// binary (extracted below the temp directory).
+    /// Resolves the engine DLL: the `FCAE_HEV_DLL` override, else the copy
+    /// embedded in this binary. Nothing is expected beside the executable —
+    /// the app is a single self-contained file.
     fn path() -> Result<std::path::PathBuf, String> {
         if let Ok(raw) = std::env::var(DLL_ENV) {
             let raw = raw.trim();
@@ -116,41 +122,32 @@ mod ffi {
                 }
             }
             return Err(format!(
-                "{DLL_NAME} is missing from the installation (set {DLL_ENV} to override)"
+                "{DLL_ENV} points at {raw}, which is not a file"
             ));
-        }
-        let dir = std::env::current_exe()
-            .map_err(|e| format!("cannot resolve the executable path: {e}"))?
-            .parent()
-            .ok_or_else(|| "cannot resolve the executable directory".to_string())?
-            .to_path_buf();
-        if dir_is_complete(&dir) {
-            return Ok(dir.join(DLL_NAME));
         }
         extract_embedded()
     }
 
-    /// The engine DLL and every file it needs beside it are present.
-    fn dir_is_complete(dir: &std::path::Path) -> bool {
-        ENGINE_FILES.iter().all(|name| dir.join(name).is_file())
-    }
-
-    /// Extracts the embedded engine set below the temp directory, replacing
-    /// any earlier copy; each file is written to a temp name and renamed so a
-    /// concurrent load never reads a half-written DLL.
+    /// Extracts the embedded engine set below the temp directory; each file is
+    /// written to a temp name and renamed so a concurrent load never reads a
+    /// half-written DLL. A file already on disk at the embedded size is this
+    /// build's own copy, so a repeat start costs a stat per file.
     fn extract_embedded() -> Result<std::path::PathBuf, String> {
         let dir = std::env::temp_dir().join("FCAE_VPN").join("engine");
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         for (name, bytes) in EMBEDDED.iter().copied() {
-            let staged = dir.join(format!(".{name}.tmp"));
             let final_path = dir.join(name);
+            if final_path.metadata().map(|m| m.len()).ok() == Some(bytes.len() as u64) {
+                continue;
+            }
+            let staged = dir.join(format!(".{name}.tmp"));
             std::fs::write(&staged, bytes)
                 .map_err(|e| format!("cannot write {}: {e}", staged.display()))?;
             std::fs::rename(&staged, &final_path)
                 .map_err(|e| format!("cannot move {} into place: {e}", staged.display()))?;
         }
-        Ok(dir)
+        Ok(dir.join(DLL_NAME))
     }
 
     fn symbol<T: Copy>(module: *mut c_void, name: &str) -> Option<T> {
