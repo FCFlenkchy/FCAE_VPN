@@ -877,8 +877,22 @@ mod ffi {
     static SYMS: OnceLock<Syms> = OnceLock::new();
 
     fn syms() -> Result<&'static Syms> {
-        SYMS.get_or_try_init(load)
-            .map_err(|e| CoreError::StartFailed(e))
+        if let Some(syms) = SYMS.get() {
+            return Ok(syms);
+        }
+        // Not get_or_try_init: it is still unstable (rust-lang/rust#109737).
+        // Losing the race just costs one extra load, and set() hands the
+        // loser's value back. A failed load is retried on the next start
+        // rather than cached, which costs a temp write on a path that is
+        // already failing.
+        let loaded = load()?;
+        Ok(match SYMS.set(loaded) {
+            Ok(()) => SYMS.get().expect("set() succeeded, so the cell is full"),
+            Err(mine) => {
+                drop(mine);
+                SYMS.get().expect("a concurrent set filled the cell")
+            }
+        })
     }
 
     #[cfg(windows)]
@@ -937,20 +951,25 @@ mod ffi {
         let path = extract()?;
         let module = open(&path)?;
 
-        let mut missing: Vec<&str> = Vec::new();
         macro_rules! sym {
-            ($ty:ty, $name:ident) => {
-                match symbol::<$ty>(module, c_str!($name)) {
-                    Some(f) => f,
-                    None => {
-                        missing.push(stringify!($name));
-                        // SAFETY: never called; it only has to type-check so
-                        // the struct can be built in one pass.
-                        unsafe { std::mem::transmute::<usize, $ty>(0) }
-                    }
-                }
-            };
+            ($ty:ty, $name:ident) => {{
+                // SAFETY: the bytes are a string literal plus one NUL.
+                let name = unsafe {
+                    CStr::from_bytes_with_nul_unchecked(
+                        concat!(stringify!($name), "\0").as_bytes(),
+                    )
+                };
+                symbol::<$ty>(module, name).ok_or_else(|| {
+                    CoreError::StartFailed(format!(
+                        "{DLL_NAME} does not export {}",
+                        stringify!($name)
+                    ))
+                })?
+            }};
         }
+        // Resolved one at a time so the first missing export names itself.
+        // No placeholder pointers: a null function pointer is not a valid
+        // value, so a partially filled Syms cannot exist even transiently.
         let resolved = Syms {
             set_log_callback: sym!(SetLogCallback, psi_set_log_callback),
             set_protect_callback: sym!(SetProtectCallback, psi_set_protect_callback),
@@ -964,13 +983,6 @@ mod ffi {
             string_free: sym!(StringFree, psi_string_free),
             bytes: sym!(Bytes, psi_bytes),
         };
-        if !missing.is_empty() {
-            return Err(CoreError::StartFailed(format!(
-                "{} exports none of: {}",
-                DLL_NAME,
-                missing.join(", ")
-            )));
-        }
         log::info!("[psiphon] loaded {DLL_NAME} from {}", path.display());
         Ok(resolved)
     }
@@ -1050,9 +1062,11 @@ mod ffi {
         if ptr.is_null() {
             return None;
         }
-        // SAFETY: a non-null result is a live export; T is the matching
-        // function-pointer type, which is the same size as a data pointer.
-        Some(unsafe { std::mem::transmute::<*mut core::ffi::c_void, T>(ptr) })
+        // SAFETY: a non-null result is a live export, and every T used here
+        // is a function-pointer type, so it is the size of the data pointer
+        // being reinterpreted. transmute_copy rather than transmute because
+        // the latter cannot prove that of a generic parameter.
+        Some(unsafe { std::mem::transmute_copy::<*mut core::ffi::c_void, T>(&ptr) })
     }
 
     fn lookup(module: *mut core::ffi::c_void, name: *const u8) -> *mut core::ffi::c_void {

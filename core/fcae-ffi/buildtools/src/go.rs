@@ -79,6 +79,12 @@ pub struct Built {
     /// True when `archive` is a `c-shared` `.so` that must also be packaged
     /// into `jniLibs/<abi>/` for the runtime loader.
     pub shared: bool,
+    /// Carried over from [`CArchive::link_self`].
+    ///
+    /// `emit_link_directives` is a method on `Built`, not on `CArchive`, so it
+    /// cannot see the setting where it is made; the flag has to travel with
+    /// the build result.
+    pub link_self: bool,
 }
 
 #[derive(Debug)]
@@ -393,6 +399,7 @@ impl<'a> CArchive<'a> {
             header,
             search_dir: out_dir,
             shared,
+            link_self: self.link_self,
         })
     }
 }
