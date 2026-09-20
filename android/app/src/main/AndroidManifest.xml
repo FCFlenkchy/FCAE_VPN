@@ -31,6 +31,7 @@
         <service
             android:name=".FCAEVpnService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="specialUse"
             android:permission="android.permission.BIND_VPN_SERVICE">
             <intent-filter>
