@@ -80,7 +80,9 @@ fn main() {
     if target.os == fcae_build::target::Os::Windows {
         println!("cargo:rustc-link-arg=-Wl,-Bstatic");
     }
-    println!("cargo:rustc-link-lib=static=zeptun");
+    // Use a private archive name so the linker cannot resolve a zeptun DLL
+    // import archive, even if another search path exposes one.
+    println!("cargo:rustc-link-lib=static=fcae_zeptun_static");
     if target.os == fcae_build::target::Os::Windows {
         println!("cargo:rustc-link-arg=-Wl,-Bdynamic");
     }
@@ -150,14 +152,9 @@ fn isolate_static_archive(archive: &Path) -> PathBuf {
             let _ = std::fs::remove_file(entry.path());
         }
     }
-    let mut name = archive
-        .file_name()
-        .expect("archive has a file name")
-        .to_os_string();
-    if name == "zeptun_static.lib" {
-        name = "zeptun.lib".into();
-    }
-    let staged = dir.join(&name);
+    // Do not stage the archive as libzeptun.a: that name can collide with a
+    // DLL import archive in the final linker command.
+    let staged = dir.join("libfcae_zeptun_static.a");
     std::fs::copy(archive, &staged)
         .unwrap_or_else(|e| panic!("cannot stage {}: {e}", archive.display()));
     dir

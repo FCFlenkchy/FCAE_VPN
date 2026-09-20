@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.ConnectivityManager;
 import android.net.Network;
+import android.net.NetworkRequest;
 import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.IBinder;
@@ -16,6 +17,8 @@ import org.json.JSONObject;
 import java.io.File;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import ca.psiphon.PsiphonTunnel;
@@ -655,16 +658,29 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 }
             }
             if (chosen == null) {
-                for (Network net : cm.getAllNetworks()) {
-                    android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(net);
-                    if (caps != null
-                            && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                            && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                            && !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
-                        chosen = net;
-                        break;
+                final Network[] physical = new Network[1];
+                final CountDownLatch delivered = new CountDownLatch(1);
+                final ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
+                    @Override public void onAvailable(Network network) {
+                        android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+                        if (caps != null
+                                && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                                && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                                && !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+                                && physical[0] == null) {
+                            physical[0] = network;
+                            delivered.countDown();
+                        }
                     }
-                }
+                };
+                NetworkRequest request = new NetworkRequest.Builder()
+                        .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                        .build();
+                cm.registerNetworkCallback(request, callback);
+                try { delivered.await(250, TimeUnit.MILLISECONDS); }
+                finally { cm.unregisterNetworkCallback(callback); }
+                chosen = physical[0];
             }
             cm.bindProcessToNetwork(lanSharing ? null : chosen);
             lanAddress = "";

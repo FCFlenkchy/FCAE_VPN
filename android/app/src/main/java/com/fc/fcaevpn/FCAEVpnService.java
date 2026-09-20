@@ -7,6 +7,7 @@ import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.VpnService;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
@@ -17,6 +18,8 @@ import android.os.ParcelFileDescriptor;
 import android.telephony.TelephonyManager;
 import android.util.Log;
 import java.net.InetAddress;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class FCAEVpnService extends VpnService {
@@ -267,16 +270,29 @@ public class FCAEVpnService extends VpnService {
                     return active;
                 }
             }
-            for (Network net : cm.getAllNetworks()) {
-                NetworkCapabilities caps = cm.getNetworkCapabilities(net);
-                if (caps != null
-                        && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                        && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                        && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
-                    return net;
+            final Network[] physical = new Network[1];
+            final CountDownLatch delivered = new CountDownLatch(1);
+            final ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
+                @Override public void onAvailable(Network network) {
+                    NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+                    if (caps != null
+                            && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                            && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                            && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                            && physical[0] == null) {
+                        physical[0] = network;
+                        delivered.countDown();
+                    }
                 }
-            }
-            return null;
+            };
+            NetworkRequest request = new NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                    .build();
+            cm.registerNetworkCallback(request, callback);
+            try { delivered.await(250, TimeUnit.MILLISECONDS); }
+            finally { cm.unregisterNetworkCallback(callback); }
+            return physical[0];
         } catch (Throwable t) {
             Log.w(TAG, "underlyingNetwork failed: " + t);
             return null;
