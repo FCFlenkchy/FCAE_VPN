@@ -35,17 +35,43 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 
-      # ---- Clubapp branding: name, Telegram link (Icons untouched) ----
-      - name: apply Clubapp branding
+      # ---- Clubapp branding: name, Telegram link, update removal, and custom icon ----
+      - name: apply Clubapp branding and custom icon
         env:
           REPO_SLUG: ${{ github.repository }}
         run: |
           set -euo pipefail
+          python3 -m pip install Pillow
           python3 - <<'PY'
           import os, re
+          from PIL import Image
 
           ROOT = "android/app/src/main"
           RES = ROOT + "/res"
+
+          # ------------------------------------------------------ custom icon generation
+          icon_path = "icon.ico"
+          if os.path.exists(icon_path):
+              try:
+                  img = Image.open(icon_path).convert("RGBA")
+                  sizes = {
+                      "mipmap-mdpi": 48,
+                      "mipmap-hdpi": 72,
+                      "mipmap-xhdpi": 96,
+                      "mipmap-xxhdpi": 144,
+                      "mipmap-xxxhdpi": 192
+                  }
+                  for folder, size in sizes.items():
+                      dir_path = os.path.join(RES, folder)
+                      os.makedirs(dir_path, exist_ok=True)
+                      resized = img.resize((size, size), Image.Resampling.LANCZOS)
+                      resized.save(os.path.join(dir_path, "ic_launcher.png"), "PNG")
+                      resized.save(os.path.join(dir_path, "ic_launcher_round.png"), "PNG")
+                  print("App icons successfully generated and applied from icon.ico")
+              except Exception as e:
+                  print("Error processing icon:", e)
+          else:
+              print("Warning: icon.ico not found in root directory!")
 
           # ------------------------------------------------------ name + Telegram link
           tme, edited = set(), []
@@ -61,7 +87,7 @@ jobs:
                   n = t.replace("FCAE VPN", "Clubapp")
                   n = re.sub(r'(<string name="app_name"[^>]*>)[^<]*(</string>)', r'\1Clubapp\2', n)
                   
-                  # حذف قابلیت‌های بررسی آپدیت درون‌برنامه‌ای (در صورت وجود در متن کدهای XML یا سورس)
+                  # حذف قابلیت‌های بررسی آپدیت درون‌برنامه‌ای
                   n = re.sub(r'(?i)<string name="[^"]*update[^"]*">[^<]*</string>', '', n)
                   
                   tme.update(re.findall(r'https?://t\.me/[A-Za-z0-9_+]+', n))
@@ -69,7 +95,7 @@ jobs:
                   if n != t:
                       open(p, "w", encoding="utf-8").write(n)
                       edited.append(p)
-          print("Files edited:", len(edited))
+          print("Files edited for branding:", len(edited))
           for p in edited:
               print("  ", p)
           print("Telegram links found and replaced:", sorted(tme))
@@ -104,11 +130,6 @@ jobs:
                           if re.search(r"fcflenkchy", line, re.I):
                               left.append("%s:%d: %s" % (p, i, line.strip()[:110]))
           print("Creator-link files changed:", len(link_edits))
-          for p in link_edits:
-              print("  ", p)
-          print("Lines still mentioning the creator:", len(left))
-          for l in left[:40]:
-              print("  ", l)
           PY
 
       - name: setup go
