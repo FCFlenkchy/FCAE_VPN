@@ -123,9 +123,11 @@ jobs:
           mkdir -p "$ENG/build-compat"
           cat > "$ENG/build-compat/fcae-msys-compat.c" <<'EOF'
           #include <io.h>
+          #include <stdint.h>
           #ifdef get_osfhandle
           #undef get_osfhandle
           #endif
+          intptr_t _get_osfhandle (int fd);
           intptr_t get_osfhandle (int fd)
           {
               return _get_osfhandle (fd);
