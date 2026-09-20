@@ -80,11 +80,13 @@ fn main() {
     if target.os == fcae_build::target::Os::Windows {
         println!("cargo:rustc-link-arg=-Wl,-Bstatic");
     }
-    // Use a private archive name so the linker cannot resolve a zeptun DLL
-    // import archive, even if another search path exposes one.
-    println!("cargo:rustc-link-lib=static=fcae_zeptun_static");
+    // On Windows GNU, name the exact staged archive. `-lfoo` still permits
+    // the linker to consider import-library variants; `-l:filename` cannot.
     if target.os == fcae_build::target::Os::Windows {
+        println!("cargo:rustc-link-arg=-Wl,-l:libfcae_zeptun_static.a");
         println!("cargo:rustc-link-arg=-Wl,-Bdynamic");
+    } else {
+        println!("cargo:rustc-link-lib=static=fcae_zeptun_static");
     }
     println!("cargo:rustc-cfg=zeptun_linked");
     println!("cargo:rustc-env=FCAE_ZEPTUN_HEADER={}", header.display());

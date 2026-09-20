@@ -202,7 +202,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             // can be stopped explicitly. Its lifetime/priority is owned by
             // the app's single foreground notification owner; this isolated
             // service must not create a second foreground notification.
-            try { app.startService(intent); } catch (Throwable ignored) {}
+            // A region refresh is a bind-only reattachment. Starting the
+            // isolated service again on Activity recreation can redeliver its
+            // startup path and reset Psiphon; only real START requests need
+            // startService().
+            if (!ACTION_REGIONS.equals(intent.getAction())) {
+                try { app.startService(intent); } catch (Throwable ignored) {}
+            }
             if (!app.bindService(intent, next, Context.BIND_AUTO_CREATE)) {
                 connection = null;
                 liveConnections.remove(next);
