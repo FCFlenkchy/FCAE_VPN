@@ -566,19 +566,14 @@ public class ProxyNotification extends Service {
         unregisterReceiver(psiphonReceiver);
         if (instance == this) instance = null;
         if (handingOff || ownerGeneration != FCAEVpnService.sGeneration.get()) { super.onDestroy(); return; }
-        PsiphonTunnelService.stopBound(this);
         Log.i(TAG, "ProxyNotification onDestroy");
-
-        // The service can also be destroyed without stopProxy() -- e.g. the
-        // system reclaims it. Tell the UI in that case too, otherwise it keeps
-        // showing CONNECTED for an engine that is being torn down right here.
-        if (!stopping) {
-            stopping = true;
+        // Android may recreate the notification owner while Psiphon is live.
+        // Only an explicit stop may detach the Psiphon service or reset stats.
+        if (stopping) {
+            PsiphonTunnelService.stopBound(this);
             broadcastStopped();
+            freeNativeOnce();
         }
-
-        // Only cleanup native here if stopProxy() didn't already do it.
-        freeNativeOnce();
 
 
         super.onDestroy();

@@ -1309,7 +1309,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             java.io.BufferedReader reader = new java.io.BufferedReader(
                     new java.io.InputStreamReader(s.getInputStream(), java.nio.charset.StandardCharsets.US_ASCII));
             String status = reader.readLine();
-            if (status == null || !status.matches("HTTP/1\\.[01] 204(?: .*|)")) return null;
+            // Connectivity-check endpoints may answer 204, 200, or another
+            // successful 2xx response depending on the exit and cache path.
+            if (status == null || !status.matches("HTTP/1\\.[01] [23]\\d\\d(?: .*|)")) return null;
             return (int) Math.max(1L, System.currentTimeMillis() - t0);
         } catch (Exception e) {
             return null;
