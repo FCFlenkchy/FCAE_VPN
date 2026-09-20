@@ -17,6 +17,18 @@
 
 use std::path::{Path, PathBuf};
 
+/// Every file the engine DLL needs beside it at load time: the engine itself,
+/// the POSIX-prefix libraries it imports, and the MSYS runtime. The bridge
+/// embeds the whole set in the binary, so the app keeps working even if the
+/// exe is moved away from the packaged files.
+const ENGINE_FILES: [&str; 5] = [
+    "libhev-socks5-tunnel.dll",
+    "libyaml.so",
+    "liblwip.so",
+    "libhev-task-system.so",
+    "msys-2.0.dll",
+];
+
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(hev_linked)");
     println!("cargo::rustc-check-cfg=cfg(wintun_staged)");
@@ -38,16 +50,37 @@ fn main() {
     let target = fcae_build::target::Target::from_cargo_env();
 
     // Windows: the engine cannot be linked (MSYS-only runtime), so it ships
-    // beside the app as a DLL that the bridge loads at runtime. Staging it is
-    // a packaging step; all this needs to know is that it will be there.
+    // beside the app as a DLL that the bridge loads at runtime. The whole
+    // engine set is also embedded in the binary: if the exe is ever moved
+    // away from the packaged files, the bridge extracts its embedded copy.
     if target.os == fcae_build::target::Os::Windows {
         let staged = std::env::var("FCAE_HEV_DLL").unwrap_or_default();
         let staged = staged.trim();
         if !staged.is_empty() && Path::new(staged).is_file() {
-            fcae_build::rerun_if_changed(staged);
+            let engine_dir = Path::new(staged)
+                .parent()
+                .expect("FCAE_HEV_DLL must point inside the engine directory");
+            let out_dir =
+                Path::new(&std::env::var_os("OUT_DIR").expect("cargo must set OUT_DIR"))
+                    .join("engine");
+            std::fs::create_dir_all(&out_dir).expect("cannot create OUT_DIR/engine");
+            for name in ENGINE_FILES {
+                let file = engine_dir.join(name);
+                if !file.is_file() {
+                    panic!(
+                        "the staged engine set is incomplete: {name} is missing next to \
+                         {staged} (the build-hev-windows job ships all five files)"
+                    );
+                }
+                fcae_build::rerun_if_changed(&file);
+                std::fs::copy(&file, out_dir.join(name)).unwrap_or_else(|e| {
+                    panic!("cannot embed {name} from {}: {e}", file.display())
+                });
+            }
             println!("cargo:rustc-cfg=hev_dynamic");
             fcae_build::note(format!(
-                "hev-socks5-tunnel loads as a DLL in-process on Windows ({staged})"
+                "hev-socks5-tunnel loads as a DLL in-process on Windows ({staged}); the full \
+                 engine set is embedded in the binary as a fallback"
             ));
             return;
         }

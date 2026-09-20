@@ -55,14 +55,41 @@ mod ffi {
     const LOAD_LIBRARY_SEARCH_APPLICATION_DIR: u32 = 0x0000_0200;
     const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0000_1000;
 
+    /// Every file the engine DLL needs beside it at load time: the engine
+    /// itself, the POSIX-prefix libraries it imports and the MSYS runtime.
+    /// The build embeds the whole set in the binary.
+    const ENGINE_FILES: [&str; 5] = [
+        DLL_NAME,
+        "libyaml.so",
+        "liblwip.so",
+        "libhev-task-system.so",
+        "msys-2.0.dll",
+    ];
+
+    const EMBED_ENGINE: &[u8] =
+        include_bytes!(concat!(env!("OUT_DIR"), "/engine/libhev-socks5-tunnel.dll"));
+    const EMBED_YAML: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/engine/libyaml.so"));
+    const EMBED_LWIP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/engine/liblwip.so"));
+    const EMBED_TASK: &[u8] =
+        include_bytes!(concat!(env!("OUT_DIR"), "/engine/libhev-task-system.so"));
+    const EMBED_MSYS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/engine/msys-2.0.dll"));
+
+    const EMBEDDED: &[(&str, &[u8])] = &[
+        (DLL_NAME, EMBED_ENGINE),
+        ("libyaml.so", EMBED_YAML),
+        ("liblwip.so", EMBED_LWIP),
+        ("libhev-task-system.so", EMBED_TASK),
+        ("msys-2.0.dll", EMBED_MSYS),
+    ];
+
     type MainFn = unsafe extern "C" fn(*const c_uchar, c_uint, c_int) -> c_int;
     type QuitFn = unsafe extern "C" fn();
     type StatsFn = unsafe extern "C" fn(*mut usize, *mut usize, *mut usize, *mut usize);
 
-    struct Ffi {
-        main_from_str: MainFn,
-        quit: QuitFn,
-        stats: StatsFn,
+    pub struct Ffi {
+        pub(crate) main_from_str: MainFn,
+        pub(crate) quit: QuitFn,
+        pub(crate) stats: StatsFn,
     }
 
     #[link(name = "kernel32")]
@@ -76,39 +103,71 @@ mod ffi {
         fn GetLastError() -> u32;
     }
 
-    fn path() -> Option<std::path::PathBuf> {
+    /// Resolves the engine DLL: the `FCAE_HEV_DLL` override, then the
+    /// packaged files beside the executable, then the copy embedded in this
+    /// binary (extracted below the temp directory).
+    fn path() -> Result<std::path::PathBuf, String> {
         if let Ok(raw) = std::env::var(DLL_ENV) {
             let raw = raw.trim();
             if !raw.is_empty() {
                 let path = std::path::PathBuf::from(raw);
-                return path.is_file().then_some(path);
+                if path.is_file() {
+                    return Ok(path);
+                }
             }
-            return None;
+            return Err(format!(
+                "{DLL_NAME} is missing from the installation (set {DLL_ENV} to override)"
+            ));
         }
         let dir = std::env::current_exe()
-            .ok()?
-            .parent()?
+            .map_err(|e| format!("cannot resolve the executable path: {e}"))?
+            .parent()
+            .ok_or_else(|| "cannot resolve the executable directory".to_string())?
             .to_path_buf();
-        let path = dir.join(DLL_NAME);
-        path.is_file().then_some(path)
+        if dir_is_complete(&dir) {
+            return Ok(dir.join(DLL_NAME));
+        }
+        extract_embedded()
+    }
+
+    /// The engine DLL and every file it needs beside it are present.
+    fn dir_is_complete(dir: &std::path::Path) -> bool {
+        ENGINE_FILES.iter().all(|name| dir.join(name).is_file())
+    }
+
+    /// Extracts the embedded engine set below the temp directory, replacing
+    /// any earlier copy; each file is written to a temp name and renamed so a
+    /// concurrent load never reads a half-written DLL.
+    fn extract_embedded() -> Result<std::path::PathBuf, String> {
+        let dir = std::env::temp_dir().join("FCAE_VPN").join("engine");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        for (name, bytes) in EMBEDDED.iter().copied() {
+            let staged = dir.join(format!(".{name}.tmp"));
+            let final_path = dir.join(name);
+            std::fs::write(&staged, bytes)
+                .map_err(|e| format!("cannot write {}: {e}", staged.display()))?;
+            std::fs::rename(&staged, &final_path)
+                .map_err(|e| format!("cannot move {} into place: {e}", staged.display()))?;
+        }
+        Ok(dir)
     }
 
     fn symbol<T: Copy>(module: *mut c_void, name: &str) -> Option<T> {
         let mut proc = name.as_bytes().to_vec();
         proc.push(0);
         let ptr = unsafe { GetProcAddress(module, proc.as_ptr()) };
-        (!ptr.is_null()).then(|| unsafe { std::mem::transmute_copy::<*, T>(&ptr) })
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: a non-null GetProcAddress result is a live export of the
+        // engine DLL; T is the matching function-pointer type (same size).
+        let src: *const c_void = ptr as *const c_void;
+        Some(unsafe { std::mem::transmute_copy::<*const c_void, T>(&src) })
     }
 
     fn load_inner() -> Result<Box<Ffi>, String> {
-        let path = match path() {
-            Some(path) => path,
-            None => {
-                return Err(format!(
-                    "{DLL_NAME} is missing from the installation (set {DLL_ENV} to override)"
-                ))
-            }
-        };
+        let path = path()?;
         let wide: Vec<u16> = path
             .to_string_lossy()
             .encode_utf16()
@@ -122,10 +181,11 @@ mod ffi {
             )
         };
         if module.is_null() {
+            let code = unsafe { GetLastError() };
             return Err(format!(
                 "cannot load {}: {}",
                 path.display(),
-                std::io::Error::from_raw_os_error(unsafe { GetLastError() })
+                std::io::Error::from_raw_os_error(i32::try_from(code).unwrap_or(i32::MAX))
             ));
         }
         let main_from_str =
@@ -148,7 +208,10 @@ mod ffi {
     static FFI: OnceLock<Result<Box<Ffi>, String>> = OnceLock::new();
 
     pub fn try_load() -> Result<&'static Ffi, String> {
-        FFI.get_or_init(Self::load_inner).as_ref().map_err(|e| e.clone())
+        FFI.get_or_init(load_inner)
+            .as_ref()
+            .map(|ffi| &**ffi)
+            .map_err(|e| e.clone())
     }
 }
 
