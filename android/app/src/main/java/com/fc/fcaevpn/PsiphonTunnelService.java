@@ -682,7 +682,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 finally { cm.unregisterNetworkCallback(callback); }
                 chosen = physical[0];
             }
-            cm.bindProcessToNetwork(lanSharing ? null : chosen);
+            // LAN sharing changes the listener address only; Psiphon must still
+            // bind its sockets to the physical network, never the VPN/TUN.
+            if (chosen == null) {
+                Log.w(TAG, "No physical network available; leaving Psiphon unstarted");
+                return;
+            }
+            cm.bindProcessToNetwork(chosen);
             lanAddress = "";
             Log.i(TAG, "Psiphon LAN=" + lanSharing + ", address=" + lanAddress + ", underlying=" + chosen);
         } catch (Exception e) { Log.w(TAG, "bindToUnderlyingNetwork", e); }
