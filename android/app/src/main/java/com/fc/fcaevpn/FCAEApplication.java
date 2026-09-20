@@ -6,8 +6,7 @@ import android.os.Bundle;
 
 /** Activity lifecycle registration only; services own background session lifetime. */
 public class FCAEApplication extends Application {
-
-    private final ActivityLifecycleCallbacks reaper = new ActivityLifecycleCallbacks() {
+    private final ActivityLifecycleCallbacks callbacks = new ActivityLifecycleCallbacks() {
         @Override public void onActivityCreated(Activity activity, Bundle state) {}
         @Override public void onActivityStarted(Activity activity) {}
         @Override public void onActivityResumed(Activity activity) {}
@@ -19,6 +18,6 @@ public class FCAEApplication extends Application {
 
     @Override public void onCreate() {
         super.onCreate();
-        registerActivityLifecycleCallbacks(reaper);
+        registerActivityLifecycleCallbacks(callbacks);
     }
 }

@@ -2294,8 +2294,9 @@ class MainActivity : AppCompatActivity() {
     private fun requestPsiphonRegions() {
         if (!hasActivePsiOwner()) return
         try {
-            startService(Intent(this, PsiphonTunnelService::class.java)
-                .setAction(PsiphonTunnelService.ACTION_REGIONS))
+            PsiphonTunnelService.startBound(this,
+                Intent(this, PsiphonTunnelService::class.java)
+                    .setAction(PsiphonTunnelService.ACTION_REGIONS))
         } catch (t: Throwable) {
             android.util.Log.w("FCAE_VPN", "unable to refresh Psiphon regions: $t")
         }
