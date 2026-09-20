@@ -21,7 +21,8 @@ aether = ["dep:fcae-bridge-aether"]
 # Compile the Psiphon backend in. On its own this registers the backend so the
 # UI can list it, but starting a tunnel reports BackendUnavailable.
 psiphon = ["dep:fcae-bridge-psiphon"]
-# Psiphon that actually runs on desktop (libfcae_psiphon, force_shared).
+# Psiphon that actually runs on desktop (libfcae_psiphon, force_shared,
+# embedded rather than linked).
 # Android: do not use this feature; use the official AAR (android/psiphon).
 # ClientLibrary lacks BindToDevice and cannot work on Android.
 psiphon-live = ["psiphon", "tun", "fcae-bridge-psiphon/enabled"]

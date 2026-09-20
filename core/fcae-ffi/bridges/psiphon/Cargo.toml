@@ -12,7 +12,8 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# Desktop: compile go/ as libfcae_psiphon (force_shared). Android ignores
+# Desktop: compile go/ as libfcae_psiphon (force_shared), embedded into the
+# host binary and dlopen'd at runtime -- never linked. Android ignores
 # this and keeps the official AAR.
 enabled = []
 
@@ -20,6 +21,8 @@ enabled = []
 fcae-abi.workspace = true
 fcae-runtime.workspace = true
 async-trait.workspace = true
+# dlopen/dlsym plus the RTLD_* constants for the runtime-bound Go module.
+libc.workspace = true
 log.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true

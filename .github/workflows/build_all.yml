@@ -1029,19 +1029,19 @@ jobs:
           # Named, never a glob: build/ is a restored cache and may still hold
           # artifacts from an older run. zeptun is linked into the executable,
           # so there is no zeptun binary or DLL to ship on any platform.
+          ARTIFACT="FCAE_VPN-${{ matrix.name }}"
           case "${{ matrix.name }}" in
-            windows-x64) cp build/fcaevpn.exe package/ ;;
-            *)           cp build/fcaevpn    package/ ;;
+            windows-x64) cp build/fcaevpn.exe "package/$ARTIFACT.exe" ;;
+            *)           cp build/fcaevpn     "package/$ARTIFACT" ;;
           esac
-          cp build/libfcae_psiphon.* package/ 2>/dev/null || true
-          cp build/fcae_psiphon.dll package/ 2>/dev/null || true
           chmod +x package/* 2>/dev/null || true
 
           if [ "${{ matrix.name }}" = "windows-x64" ]; then
-            # The released app is the exe alone. The hev engine set and
-            # wintun.dll are embedded in it and extracted at runtime, zeptun
-            # links statically, and libfcae_psiphon.dll above is the Go
-            # runtime the exe imports.
+            # The released app is the exe alone, and that is now literally
+            # true: the hev engine set, wintun.dll and the second Go runtime
+            # (libfcae_psiphon) are all embedded and extracted to temp at
+            # runtime, and zeptun links statically. Nothing is copied beside
+            # it.
             echo "Windows package:"
             ls -la package/
           fi
@@ -1056,44 +1056,38 @@ jobs:
                 '#!/bin/sh' \
                 'DIR="$(cd "$(dirname "$0")" && pwd)"' \
                 'export LD_LIBRARY_PATH="$DIR/lib:$DIR:$LD_LIBRARY_PATH"' \
-                'exec "$DIR/FCAE_VPN-linux-x64" "$@"' > package/fcaevpn.sh
-              chmod +x package/fcaevpn.sh
+                "exec \"\$DIR/$ARTIFACT\" \"\$@\"" > "package/$ARTIFACT.sh"
+              chmod +x "package/$ARTIFACT.sh"
             fi
           fi
 
           cd package
-          for f in fcaevpn*; do
-            [ -f "$f" ] || continue
-            if [[ "$f" == *.exe ]]; then
-              mv "$f" "FCAE_VPN-${{ matrix.name }}.exe"
-            elif [[ "$f" == *.sh ]]; then
-              mv "$f" "FCAE_VPN-${{ matrix.name }}.sh"
-            elif [[ "$f" != *.so* ]] && [[ "$f" != fcaevpn ]]; then
-              :
-            fi
-          done
-          if [ -f fcaevpn ]; then
-            mv fcaevpn "FCAE_VPN-${{ matrix.name }}"
-          fi
           ls -la
-          test $(ls -1 | wc -l) -ge 1
+          case "${{ matrix.name }}" in
+            windows-x64) SHIPPED="$ARTIFACT.exe" ;;
+            *)           SHIPPED="$ARTIFACT" ;;
+          esac
+          test -f "$SHIPPED" || { echo "::error::$SHIPPED missing from the package"; exit 1; }
 
           # Inspect the released artifact, never a path inside build/: that
           # directory is a cache hit and can hold leftovers from an older run.
           if [ "${{ matrix.name }}" = "windows-x64" ]; then
-            EXE="FCAE_VPN-windows-x64.exe"
-            STRAY="$(find . -maxdepth 1 -name '*.exe' ! -name fcaevpn.exe -printf '%f\n')"
+            EXE="$ARTIFACT.exe"
+
+            # The app exe was copied straight to its released name, so it is
+            # the only .exe allowed to be here. Anything else is a leftover
+            # from the restored build/ cache.
+            STRAY="$(find . -maxdepth 1 -name '*.exe' ! -name "$EXE" -printf '%f\n')"
             if [ -n "$STRAY" ]; then
               echo "::error::unexpected executable in the package:"
               printf '%s\n' "$STRAY" | sed 's/^/  /'
               exit 1
             fi
-            test -f fcaevpn.exe || { echo "::error::fcaevpn.exe missing from the package"; exit 1; }
-            mv fcaevpn.exe "$EXE"
+            test -f "$EXE" || { echo "::error::$EXE missing from the package"; exit 1; }
 
-            # The hev engine set and wintun.dll are embedded in the exe, so a
-            # PE import naming any of them means a user with the exe alone
-            # fails at process start instead of at engine load.
+            # No PE import may name a file that is embedded in the exe or
+            # linked into it statically, or a user with the exe alone fails at
+            # process start instead of at engine load.
             OBJDUMP=""
             for candidate in objdump x86_64-w64-mingw32-objdump; do
               if command -v "$candidate" >/dev/null 2>&1; then
@@ -1107,13 +1101,23 @@ jobs:
               IMPORTS="$("$OBJDUMP" -p "$EXE" | awk '/DLL Name:/ { print $3 }' | sort -u)"
               echo "$EXE imports:"
               echo "$IMPORTS" | sed 's/^/  /'
-              if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|libyaml\.so|liblwip\.so|libhev-task-system\.so|msys-2\.0\.dll|wintun\.dll|zeptun\.dll)$'; then
+              if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|libyaml\.so|liblwip\.so|libhev-task-system\.so|msys-2\.0\.dll|wintun\.dll|zeptun\.dll|libfcae_psiphon\.dll)$'; then
                 echo "::error::$EXE imports a DLL that is supposed to be embedded or statically linked"
                 exit 1
               fi
-              echo "$IMPORTS" | grep -qi '^libfcae_psiphon\.dll$' \
-                || { echo "::error::$EXE no longer imports libfcae_psiphon.dll"; exit 1; }
             fi
+
+            # There is deliberately no "are the engine bytes really in here"
+            # check. The engine set is embedded with include_bytes!, which is a
+            # compile-time copy into the binary: if the dir is empty, stale or
+            # absent, cargo fails and this step never runs. The import check
+            # above already catches the one failure that would survive a
+            # successful build - a link that names one of those files.
+            #
+            # The engine dir is still asserted: it is exported by a different
+            # job through the workflow environment, and if that link broke the
+            # failure would otherwise surface as a confusing rustc error.
+            : "${FCAE_HEV_ENGINE_DIR:?the hev engine dir was not exported}"
           fi
 
       - name: install osslsigncode (windows signing)
@@ -1211,9 +1215,9 @@ jobs:
 
           cp build/fcaevpn "$APP/Contents/MacOS/fcaevpn"
           chmod +x "$APP/Contents/MacOS/fcaevpn"
-          if [ -f build/libfcae_psiphon.dylib ]; then
-            cp build/libfcae_psiphon.dylib "$APP/Contents/MacOS/"
-          fi
+          # No libfcae_psiphon.dylib: the second Go runtime is embedded in
+          # fcaevpn and dlopen'd from the temp directory at first start, so
+          # there is no framework for the bundle to carry.
 
           ICONSET="$RUNNER_TEMP/AppIcon.iconset"
           rm -rf "$ICONSET"

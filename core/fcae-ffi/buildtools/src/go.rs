@@ -57,6 +57,14 @@ pub struct CArchive<'a> {
     /// symbols. Only one Go archive per binary can be static; any second Go
     /// bridge has to be dynamic, which also gives it its own isolated runtime.
     pub force_shared: bool,
+    /// Emit the `rustc-link-lib` directive for this archive itself.
+    ///
+    /// Off for a library the host loads at runtime from its own embedded copy
+    /// (desktop Psiphon): the symbols are then resolved by hand, and naming
+    /// the library would make the dynamic loader require the file next to the
+    /// executable, which is exactly what embedding exists to avoid. The
+    /// platform system libraries this crate also lists are still emitted.
+    pub link_self: bool,
     /// Go build tags.
     pub tags: Vec<String>,
 }
@@ -107,6 +115,7 @@ impl<'a> CArchive<'a> {
             ldflags: vec!["-s".into(), "-w".into()],
             tags: Vec::new(),
             force_shared: false,
+            link_self: true,
         }
     }
 
@@ -520,7 +529,7 @@ impl Built {
         );
         // `lib_name` arrives as `libfoo`; rustc wants `foo`.
         let link_name = lib_name.strip_prefix("lib").unwrap_or(lib_name);
-        if self.shared {
+        if self.shared && self.link_self {
             // c-shared produces a .so/.dll/.dylib, so link it dynamically.
             // Android finds it via jniLibs/<abi>/ (see stage_android_so);
             // desktop finds it next to the executable (stage_desktop_shared).
@@ -537,7 +546,7 @@ impl Built {
                 };
                 println!("cargo:rustc-link-arg=-Wl,-rpath,{origin}");
             }
-        } else {
+        } else if self.link_self {
             println!("cargo:rustc-link-lib=static={link_name}");
         }
 

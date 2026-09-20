@@ -18,8 +18,14 @@
 //! ## Desktop
 //!
 //! When `enabled` is on (the `psiphon-live` feature), `go/` is built as
-//! `libfcae_psiphon` (`c-shared` `.so` / `.dll` / `.dylib`) and staged next
-//! to the cargo artifacts so CMake can package it beside the executable.
+//! `libfcae_psiphon` (`c-shared` `.so` / `.dll` / `.dylib`). The library is
+//! **not** linked: its bytes are embedded in the host binary and written to
+//! the temp directory on first use, then loaded and bound by hand, the same
+//! way the hev-socks5-tunnel engine is handled. That keeps the released
+//! desktop app a single file — the DLL is a build product, not a shippable
+//! one. A second Go runtime still needs its own module, so `force_shared`
+//! stays on; what changes is that the loader gets it from us at runtime
+//! instead of finding it beside the executable.
 
 use std::path::PathBuf;
 
@@ -65,9 +71,13 @@ fn main() {
     archive.target = target;
     // Second Go runtime in the process: must be dynamic.
     archive.force_shared = true;
+    // ...but loaded by us, not by the dynamic loader at process start.
+    archive.link_self = false;
 
     match archive.build() {
         Ok(built) => {
+            // Still staged so a plain `cargo run` finds the file where it
+            // always did; the shipped binary no longer needs it.
             if let Err(e) = built.stage_desktop_shared(target) {
                 panic!("failed to stage libfcae_psiphon next to the artifacts: {e}");
             }
@@ -77,8 +87,22 @@ fn main() {
                 "cargo:rustc-env=FCAE_PSIPHON_HEADER={}",
                 built.header.display()
             );
+            // The file src/lib.rs embeds with include_bytes!. The name is
+            // exported alongside it so the runtime extracts under exactly the
+            // file name the platform's loader expects.
+            println!(
+                "cargo:rustc-env=FCAE_PSIPHON_DLL={}",
+                built.archive.display()
+            );
+            let name = built
+                .archive
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_else(|| panic!("{} is not valid UTF-8", built.archive.display()));
+            println!("cargo:rustc-env=FCAE_PSIPHON_DLL_NAME={name}");
             fcae_build::note(
-                "desktop Psiphon linked as libfcae_psiphon (force_shared; not in tun2socks)",
+                "desktop Psiphon built as libfcae_psiphon (force_shared) and embedded \
+                 in the host binary; not linked, not shipped beside it",
             );
         }
         Err(e) => panic!(

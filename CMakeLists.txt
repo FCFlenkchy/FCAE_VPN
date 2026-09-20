@@ -223,47 +223,31 @@ function(fcae_link_go_bridges target_name abi)
     target_link_options(${target_name} PRIVATE "-Wl,-rpath,\\$ORIGIN")
 endfunction()
 
-# Desktop Psiphon: a second Go runtime as libfcae_psiphon (c-shared), staged
-# by cargo next to libfcae_ffi.a. CMake must link and copy it because rustc's
-# dylib directives never reach this link. Missing is a warning: a build
-# without psiphon-live still configures.
+# Desktop Psiphon: a second Go runtime as libfcae_psiphon (c-shared).
+#
+# Deliberately NOT linked and NOT copied. The Rust bridge embeds the built
+# library with include_bytes!, writes it under the temp directory on first
+# use, and binds its psi_* exports with dlopen/dlsym. Linking it here would
+# put it back in the executable's import table and make the loader require a
+# copy beside the app -- which is the one thing the embedding exists to
+# avoid. This stays a configuration-time report so a missing bridge is still
+# visible in the log.
 function(fcae_link_psiphon target_name triple)
     set(dirs
         ${CMAKE_SOURCE_DIR}/target/${triple}/release
         ${CMAKE_SOURCE_DIR}/core/fcae-ffi/target/${triple}/release
     )
-    set(found "")
-    set(found_dir "")
     foreach(d ${dirs})
-        if(EXISTS "${d}/libfcae_psiphon.dll")
-            set(found "${d}/libfcae_psiphon.dll")
-            set(found_dir "${d}")
-            break()
-        elseif(EXISTS "${d}/libfcae_psiphon.so")
-            set(found "${d}/libfcae_psiphon.so")
-            set(found_dir "${d}")
-            break()
-        elseif(EXISTS "${d}/libfcae_psiphon.dylib")
-            set(found "${d}/libfcae_psiphon.dylib")
-            set(found_dir "${d}")
-            break()
-        endif()
+        foreach(ext dll so dylib)
+            if(EXISTS "${d}/libfcae_psiphon.${ext}")
+                message(STATUS
+                    "desktop Psiphon embedded in ${target_name} "
+                    "(built at ${d}/libfcae_psiphon.${ext}; loaded at runtime, not linked)")
+                return()
+            endif()
+        endforeach()
     endforeach()
-    if(found STREQUAL "")
-        message(STATUS "libfcae_psiphon not staged for ${triple} (psiphon-live off?)")
-        return()
-    endif()
-    message(STATUS "linking desktop Psiphon: ${found}")
-    if(EXISTS "${found_dir}/libfcae_psiphon.dll.a")
-        target_link_libraries(${target_name} PRIVATE "${found_dir}/libfcae_psiphon.dll.a")
-    else()
-        target_link_libraries(${target_name} PRIVATE "${found}")
-    endif()
-    add_custom_command(TARGET ${target_name} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${found}" "$<TARGET_FILE_DIR:${target_name}>"
-        COMMENT "stage libfcae_psiphon next to ${target_name}"
-    )
+    message(STATUS "libfcae_psiphon not built for ${triple} (psiphon-live off?)")
 endfunction()
 
 # Android Psiphon: official AAR, not a second Go library.

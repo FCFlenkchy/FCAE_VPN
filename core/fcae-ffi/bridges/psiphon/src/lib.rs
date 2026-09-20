@@ -368,7 +368,7 @@ impl Backend for PsiphonBackend {
             *previous = None;
         }
 
-        ffi::install_log_hook();
+        ffi::install_log_hook()?;
         // Android hands the protect hook in through
         // fcae_set_psiphon_protect(); on desktop it stays unset and
         // BindToDevice is a no-op.
@@ -384,7 +384,7 @@ impl Backend for PsiphonBackend {
                     .into(),
             ));
         }
-        ffi::set_protect(protect);
+        ffi::set_protect(protect)?;
 
         let (dns, connectivity, network_id) = network_hooks();
         if cfg!(target_os = "android") && dns.is_none() {
@@ -397,7 +397,7 @@ impl Backend for PsiphonBackend {
                     .into(),
             ));
         }
-        ffi::set_network_callbacks(dns, connectivity, network_id);
+        ffi::set_network_callbacks(dns, connectivity, network_id)?;
 
         cx.report(FcaeState::Connecting, "Connecting…");
 
@@ -817,29 +817,253 @@ fn inject_psiphon_ports(config_json: &str, socks: u16, http: u16) -> Result<Stri
 
 
 
-/// The cgo boundary. Only compiled when the archive is actually linked.
+/// The Go boundary. Only compiled when the bridge was actually built.
 #[cfg(all(feature = "enabled", psiphon_linked))]
 mod ffi {
     use fcae_runtime::error::{CoreError, Result};
     use std::ffi::{c_char, c_int, CStr, CString};
+    use std::sync::OnceLock;
 
-    extern "C" {
-        fn psi_set_log_callback(cb: Option<unsafe extern "C" fn(c_int, *const c_char)>);
-        fn psi_set_protect_callback(cb: Option<unsafe extern "C" fn(c_int) -> c_int>);
-        fn psi_set_network_callbacks(
-            dns: Option<super::DnsFn>,
-            connectivity: Option<super::ConnectivityFn>,
-            network_id: Option<super::NetworkIdFn>,
-        );
-        fn psi_start(config_json: *const c_char, embedded: *const c_char, use_binder: c_int)
-            -> c_int;
-        fn psi_stop() -> c_int;
-        fn psi_state() -> c_int;
-        fn psi_socks_port() -> c_int;
-        fn psi_http_port() -> c_int;
-        fn psi_regions() -> *mut c_char;
-        fn psi_string_free(s: *mut c_char);
-        fn psi_bytes(up: *mut i64, down: *mut i64);
+    /// The whole second Go runtime, carried inside this binary.
+    ///
+    /// A Go runtime cannot be shared with the tun2socks bridge — two static
+    /// c-archives duplicate `_cgo_topofstack`/`crosscall2`, and one `dlopen`'d
+    /// beside another SIGSEGVs — so Psiphon is its own module. What it does
+    /// not have to be is a file next to the executable: the bytes are
+    /// embedded here, written under the temp directory on first use, and the
+    /// eleven `psi_*` exports below are bound by hand. Same shape as the
+    /// hev-socks5-tunnel engine, which is why the released desktop app is one
+    /// file rather than one file plus a DLL.
+    static EMBEDDED: &[u8] = include_bytes!(env!("FCAE_PSIPHON_DLL"));
+
+    /// The build derives this from the library it actually produced, so the
+    /// extension can never drift from what was built.
+    const DLL_NAME: &str = env!("FCAE_PSIPHON_DLL_NAME");
+    /// Beside the engine's own directory so neither overwrites the other.
+    const EXTRACT_DIR: &str = "psiphon";
+
+    type SetLogCallback = unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int, *const c_char)>);
+    type SetProtectCallback = unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int) -> c_int>);
+    type SetNetworkCallbacks = unsafe extern "C" fn(
+        Option<super::DnsFn>,
+        Option<super::ConnectivityFn>,
+        Option<super::NetworkIdFn>,
+    );
+    type Start = unsafe extern "C" fn(*const c_char, *const c_char, c_int) -> c_int;
+    type Stop = unsafe extern "C" fn() -> c_int;
+    type State = unsafe extern "C" fn() -> c_int;
+    type Port = unsafe extern "C" fn() -> c_int;
+    type Regions = unsafe extern "C" fn() -> *mut c_char;
+    type StringFree = unsafe extern "C" fn(*mut c_char);
+    type Bytes = unsafe extern "C" fn(*mut i64, *mut i64);
+
+    struct Syms {
+        set_log_callback: SetLogCallback,
+        set_protect_callback: SetProtectCallback,
+        set_network_callbacks: SetNetworkCallbacks,
+        start: Start,
+        stop: Stop,
+        state: State,
+        socks_port: Port,
+        http_port: Port,
+        regions: Regions,
+        string_free: StringFree,
+        bytes: Bytes,
+    }
+
+    // The module handle is deliberately leaked: unloading a Go runtime while
+    // its goroutines are parked is not a thing, and every caller holds raw
+    // pointers into it for the life of the process.
+    static SYMS: OnceLock<Syms> = OnceLock::new();
+
+    fn syms() -> Result<&'static Syms> {
+        SYMS.get_or_try_init(load)
+            .map_err(|e| CoreError::StartFailed(e))
+    }
+
+    #[cfg(windows)]
+    extern "system" {
+        fn LoadLibraryW(lp_lib_filename: *const u16) -> *mut core::ffi::c_void;
+        fn GetProcAddress(
+            h_module: *mut core::ffi::c_void,
+            lp_proc_name: *const u8,
+        ) -> *mut core::ffi::c_void;
+        fn GetLastError() -> u32;
+    }
+
+    /// `RTLD_NOW | RTLD_LOCAL`, taken from libc because the numeric values
+    /// differ per platform -- on Darwin `RTLD_LOCAL` is 0x4, on glibc it is 0.
+    ///
+    /// `RTLD_NOW` resolves the Go runtime's own imports at load time rather
+    /// than on first call, so a broken library fails in `open()` with a real
+    /// `dlerror()` instead of later inside a `psi_*` call. A zero mode is not
+    /// legal: glibc rejects it with `EINVAL`, macOS with `invalid mode for
+    /// dlopen()`.
+    #[cfg(unix)]
+    const DLOPEN_FLAGS: c_int = libc::RTLD_NOW | libc::RTLD_LOCAL;
+
+    struct Error(String);
+
+    impl Error {
+        /// Reads the platform's last-error slot.
+        ///
+        /// Has to run immediately after the failed call: both slots are
+        /// thread-local and any later allocation or FFI call can overwrite
+        /// them, which is why this takes the already-formatted context rather
+        /// than building the message first.
+        fn last(context: String, path: &std::path::Path) -> Self {
+            #[cfg(windows)]
+            {
+                let code = unsafe { GetLastError() };
+                let text = std::io::Error::from_raw_os_error(
+                    i32::try_from(code).unwrap_or(i32::MAX),
+                );
+                Error(format!("{context} {}: {text} ({code})", path.to_string_lossy()))
+            }
+            #[cfg(unix)]
+            {
+                let raw = unsafe { libc::dlerror() };
+                let text = if raw.is_null() {
+                    "no diagnostic available".to_string()
+                } else {
+                    unsafe { CStr::from_ptr(raw) }.to_string_lossy().into_owned()
+                };
+                Error(format!("{context} {}: {text}", path.to_string_lossy()))
+            }
+        }
+    }
+
+    fn load() -> Result<Syms> {
+        let path = extract()?;
+        let module = open(&path)?;
+
+        let mut missing: Vec<&str> = Vec::new();
+        macro_rules! sym {
+            ($ty:ty, $name:ident) => {
+                match symbol::<$ty>(module, c_str!($name)) {
+                    Some(f) => f,
+                    None => {
+                        missing.push(stringify!($name));
+                        // SAFETY: never called; it only has to type-check so
+                        // the struct can be built in one pass.
+                        unsafe { std::mem::transmute::<usize, $ty>(0) }
+                    }
+                }
+            };
+        }
+        let resolved = Syms {
+            set_log_callback: sym!(SetLogCallback, psi_set_log_callback),
+            set_protect_callback: sym!(SetProtectCallback, psi_set_protect_callback),
+            set_network_callbacks: sym!(SetNetworkCallbacks, psi_set_network_callbacks),
+            start: sym!(Start, psi_start),
+            stop: sym!(Stop, psi_stop),
+            state: sym!(State, psi_state),
+            socks_port: sym!(Port, psi_socks_port),
+            http_port: sym!(Port, psi_http_port),
+            regions: sym!(Regions, psi_regions),
+            string_free: sym!(StringFree, psi_string_free),
+            bytes: sym!(Bytes, psi_bytes),
+        };
+        if !missing.is_empty() {
+            return Err(CoreError::StartFailed(format!(
+                "{} exports none of: {}",
+                DLL_NAME,
+                missing.join(", ")
+            )));
+        }
+        log::info!("[psiphon] loaded {DLL_NAME} from {}", path.display());
+        Ok(resolved)
+    }
+
+    /// Writes the embedded library under the temp directory and returns its
+    /// path. A file already on disk at the embedded size is this build's own
+    /// copy, so a repeat start costs a stat.
+    fn extract() -> Result<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join("FCAE_VPN").join(EXTRACT_DIR);
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            CoreError::StartFailed(format!("cannot create {}: {e}", dir.display()))
+        })?;
+        let dest = dir.join(DLL_NAME);
+        if dest.metadata().map(|m| m.len()).ok() == Some(EMBEDDED.len() as u64) {
+            return Ok(dest);
+        }
+        let staged = dir.join(format!(".{DLL_NAME}.tmp"));
+        std::fs::write(&staged, EMBEDDED).map_err(|e| {
+            CoreError::StartFailed(format!("cannot write {}: {e}", staged.display()))
+        })?;
+        // Renamed into place so a concurrent load never maps a half-written
+        // library.
+        std::fs::rename(&staged, &dest).map_err(|e| {
+            CoreError::StartFailed(format!("cannot move {} into place: {e}", dest.display()))
+        })?;
+        Ok(dest)
+    }
+
+    fn open(path: &std::path::Path) -> Result<*mut core::ffi::c_void> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            let wide: Vec<u16> = path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            // An absolute path, so no search order and no dependency on a
+            // copy sitting beside the executable.
+            let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
+            if handle.is_null() {
+                return Err(CoreError::StartFailed(Error::last("cannot load".into(), path).0));
+            }
+            Ok(handle)
+        }
+        #[cfg(unix)]
+        {
+            let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
+                CoreError::StartFailed(format!("{} is not representable", path.display()))
+            })?;
+            let handle = unsafe { libc::dlopen(c.as_ptr(), DLOPEN_FLAGS) };
+            if handle.is_null() {
+                return Err(CoreError::StartFailed(Error::last("cannot load".into(), path).0));
+            }
+            Ok(handle)
+        }
+    }
+
+    /// Resolves one export.
+    ///
+    /// cgo's `-extld` writes the export table, and the spelling it picks for
+    /// `__cdecl` symbols is not the same on every toolchain, so the leading
+    /// underscore is tried as a fallback rather than assumed either way. The
+    /// previous static link went through Go's own import library, which hides
+    /// the distinction; a hand-rolled lookup does not get that for free.
+    fn symbol<T: Copy>(module: *mut core::ffi::c_void, name: &CStr) -> Option<T> {
+        let ptr = lookup(module, name.as_ptr().cast());
+        let ptr = if ptr.is_null() {
+            let mut decorated = Vec::with_capacity(name.to_bytes().len() + 2);
+            decorated.push(b'_');
+            decorated.extend(name.to_bytes());
+            decorated.push(0);
+            lookup(module, decorated.as_ptr())
+        } else {
+            ptr
+        };
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: a non-null result is a live export; T is the matching
+        // function-pointer type, which is the same size as a data pointer.
+        Some(unsafe { std::mem::transmute::<*mut core::ffi::c_void, T>(ptr) })
+    }
+
+    fn lookup(module: *mut core::ffi::c_void, name: *const u8) -> *mut core::ffi::c_void {
+        #[cfg(windows)]
+        {
+            unsafe { GetProcAddress(module, name) }
+        }
+        #[cfg(unix)]
+        {
+            unsafe { libc::dlsym(module, name.cast()) }
+        }
     }
 
     pub(super) const STATE_STOPPED: i32 = 0;
@@ -859,16 +1083,20 @@ mod ffi {
         }
     }
 
-    pub(super) fn install_log_hook() {
-        unsafe { psi_set_log_callback(Some(log_trampoline)) };
+    pub(super) fn install_log_hook() -> Result<()> {
+        let s = syms()?;
+        unsafe { (s.set_log_callback)(Some(log_trampoline)) };
+        Ok(())
     }
 
     /// Install the Android socket-protection hook.
     ///
     /// Without this Psiphon's own sockets are routed into our TUN and the
     /// tunnel deadlocks reaching the internet through itself.
-    pub(super) fn set_protect(cb: Option<unsafe extern "C" fn(c_int) -> c_int>) {
-        unsafe { psi_set_protect_callback(cb) };
+    pub(super) fn set_protect(cb: Option<unsafe extern "C" fn(c_int) -> c_int>) -> Result<()> {
+        let s = syms()?;
+        unsafe { (s.set_protect_callback)(cb) };
+        Ok(())
     }
 
     /// Install the host's view of the underlying network.
@@ -880,8 +1108,10 @@ mod ffi {
         dns: Option<super::DnsFn>,
         connectivity: Option<super::ConnectivityFn>,
         network_id: Option<super::NetworkIdFn>,
-    ) {
-        unsafe { psi_set_network_callbacks(dns, connectivity, network_id) };
+    ) -> Result<()> {
+        let s = syms()?;
+        unsafe { (s.set_network_callbacks)(dns, connectivity, network_id) };
+        Ok(())
     }
 
     pub(super) fn start(inputs: &super::StartInputs, use_binder: bool) -> Result<()> {
@@ -896,8 +1126,9 @@ mod ffi {
             CoreError::InvalidConfig("psiphon.embedded_server_list contains a NUL".into())
         })?;
 
+        let s = syms()?;
         let rc = unsafe {
-            psi_start(
+            (s.start)(
                 config.as_ptr(),
                 servers.as_ptr(),
                 if use_binder { 1 } else { 0 },
@@ -922,20 +1153,23 @@ mod ffi {
     }
 
     pub(super) fn stop() {
-        unsafe { psi_stop() };
+        let Ok(s) = syms() else { return };
+        unsafe { (s.stop)() };
     }
 
     pub(super) fn state() -> i32 {
-        unsafe { psi_state() as i32 }
+        syms().map(|s| unsafe { (s.state)() }).unwrap_or(STATE_STOPPED)
     }
 
     pub(super) fn socks_port() -> u16 {
-        let p = unsafe { psi_socks_port() };
+        let Ok(s) = syms() else { return 0 };
+        let p = unsafe { (s.socks_port)() };
         if p > 0 { p as u16 } else { 0 }
     }
 
     pub(super) fn http_port() -> u16 {
-        let p = unsafe { psi_http_port() };
+        let Ok(s) = syms() else { return 0 };
+        let p = unsafe { (s.http_port)() };
         if p > 0 { p as u16 } else { 0 }
     }
 
@@ -948,105 +1182,32 @@ mod ffi {
         fcae_runtime::backend::Counters {
             total_rx,
             total_tx,
-            rx_bytes_sec: rx_rate,
-            tx_bytes_sec: tx_rate,
-            rtt_ms: PSI_RTT_MS.load(std::sync::atomic::Ordering::Relaxed) as u32,
+            tx_rate,
+            rx_rate,
         }
-    }
-
-    // ── Tunnel RTT probe ───────────────────────────────────────────────
-    //
-    // The psiphon shim exports no latency telemetry, so the bridge measures
-    // it: one HTTP round trip through the shim's local HTTP proxy
-    // (absolute-URI HEAD against Google's generate_204 edge) — a full tunnel
-    // round trip to the internet. Runs ONCE per connect (immediate probe
-    // plus a small backoff retry budget) — continuous pings would spam the
-    // tunnel and the 'port forward failures' counter on a dead server. Runs
-    // off-thread so the ~500 ms telemetry pump never blocks. 0 = none yet.
-    static PSI_RTT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    static PSI_RTT_PROBE_ACTIVE: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-    static PSI_RTT_NEXT_PROBE_SECS: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
-    static PSI_RTT_ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    static PSI_RTT_DONE: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-
-    fn probe_rtt_once(port: u16) -> Option<u64> {
-        use std::io::{BufRead, Write};
-        let mut stream = std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-            std::time::Duration::from_millis(1500),
-        )
-        .ok()?;
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(1500)));
-        let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(1500)));
-        let started = std::time::Instant::now();
-        stream
-            .write_all(b"HEAD http://www.gstatic.com/generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n")
-            .ok()?;
-        let mut status = String::new();
-        use std::io::Read;
-        std::io::BufReader::new(stream).take(256).read_line(&mut status).ok()?;
-        let mut parts = status.split_whitespace();
-        if !parts.next()?.starts_with("HTTP/") || parts.next()? != "204" {
-            return None;
-        }
-        Some(started.elapsed().as_millis().max(1) as u64)
-    }
-
-    fn refresh_rtt() {
-        use std::sync::atomic::Ordering::Relaxed;
-        if PSI_RTT_DONE.load(Relaxed) || PSI_RTT_ATTEMPTS.load(Relaxed) >= 4 {
-            return;
-        }
-        let port = http_port();
-        if port == 0 {
-            PSI_RTT_MS.store(0, Relaxed);
-            return;
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if now < PSI_RTT_NEXT_PROBE_SECS.load(Relaxed) {
-            return;
-        }
-        if PSI_RTT_PROBE_ACTIVE.swap(true, Relaxed) {
-            return;
-        }
-        let attempts = PSI_RTT_ATTEMPTS.fetch_add(1, Relaxed);
-        // Backoff per failed attempt (0s, +2s, +4s, +8s), then give up —
-        // per-second probes on a dead server only log spam.
-        PSI_RTT_NEXT_PROBE_SECS.store(now + (1u64 << (attempts + 1).min(3)), Relaxed);
-        std::thread::spawn(move || {
-            if let Some(ms) = probe_rtt_once(port) {
-                PSI_RTT_MS.store(ms, Relaxed);
-                PSI_RTT_DONE.store(true, Relaxed);
-            }
-            PSI_RTT_PROBE_ACTIVE.store(false, Relaxed);
-        });
     }
 
     /// Cumulative tunneled bytes from the shim's BytesTransferred notices.
     /// Returns (up, down).
     pub(super) fn bytes() -> (u64, u64) {
+        let Ok(s) = syms() else { return (0, 0) };
         let mut up: i64 = 0;
         let mut down: i64 = 0;
-        unsafe { psi_bytes(&mut up, &mut down) };
+        unsafe { (s.bytes)(&mut up, &mut down) };
         (up.max(0) as u64, down.max(0) as u64)
     }
 
     /// Egress regions reported after the handshake, as country codes.
     pub(super) fn regions() -> Vec<String> {
-        let raw = unsafe { psi_regions() };
+        let Ok(s) = syms() else { return Vec::new() };
+        let raw = unsafe { (s.regions)() };
         if raw.is_null() {
             return Vec::new();
         }
         let text = unsafe { CStr::from_ptr(raw) }.to_string_lossy().into_owned();
         // The buffer is C.CString'd on the Go side, so it must be released
         // through the Go allocator's free, never Rust's.
-        unsafe { psi_string_free(raw) };
+        unsafe { (s.string_free)(raw) };
         text.split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
