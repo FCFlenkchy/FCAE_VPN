@@ -417,6 +417,16 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-pc-windows-gnu)
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
+    # Cargo native-link metadata is not propagated through the CMake link.
+    # Add the static zeptun archive explicitly after libfcae_ffi.a so the
+    # bridge's zeptun_* references resolve without importing zeptun.dll.
+    set(FCAE_ZEPTUN_A "${CMAKE_SOURCE_DIR}/core/zeptun/zig-out/lib/libzeptun.a")
+    if(NOT EXISTS "${FCAE_ZEPTUN_A}")
+        message(FATAL_ERROR "static zeptun archive missing: ${FCAE_ZEPTUN_A}")
+    endif()
+    target_link_options(fcaevpn PRIVATE "-Wl,-Bstatic")
+    target_link_libraries(fcaevpn PRIVATE "${FCAE_ZEPTUN_A}")
+    target_link_options(fcaevpn PRIVATE "-Wl,-Bdynamic")
     fcae_link_psiphon(fcaevpn x86_64-pc-windows-gnu)
 
     # System libs only — crypto lives in the Rust staticlib (BoringSSL).
