@@ -673,8 +673,20 @@ jobs:
             *) echo "::error::Unsupported zeptun target: ${{ matrix.name }}"; exit 1 ;;
           esac
           if [ "${{ matrix.name }}" = "windows-x64" ]; then
-            test -s zig-out/lib/libfcae_zeptun_static.a
-            cp zig-out/lib/libfcae_zeptun_static.a zig-out/lib/libzeptun.a
+            STATIC_ZEPTUN=""
+            for candidate in zig-out/lib/libfcae_zeptun_static.a zig-out/lib/libfcae_zeptun_static.lib zig-out/lib/fcae_zeptun_static.lib; do
+              if [ -s "$candidate" ]; then STATIC_ZEPTUN="$candidate"; break; fi
+            done
+            if [ -z "$STATIC_ZEPTUN" ]; then
+              echo "::error::Zig did not emit the uniquely named static zeptun archive"
+              ls -la zig-out/lib
+              exit 1
+            fi
+            if strings "$STATIC_ZEPTUN" | grep -qiE '(^|[^[:alnum:]_])zeptun\.dll([^[:alnum:]_]|$)'; then
+              echo "::error::the uniquely named zeptun archive is an import library"
+              exit 1
+            fi
+            cp "$STATIC_ZEPTUN" zig-out/lib/libzeptun.a
           fi
 
           # `-lzeptun` must resolve to the static archive. On Windows-gnu the

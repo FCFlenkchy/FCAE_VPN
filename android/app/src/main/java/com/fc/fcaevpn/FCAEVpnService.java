@@ -1414,7 +1414,10 @@ public class FCAEVpnService extends VpnService {
     public void onDestroy() {
         unregisterReceiver(psiphonStatsReceiver);
         instance = null;
-        fullShutdown();
+        // Task removal or service recreation is not a user disconnect. Do not
+        // tear down a live TUN/Psiphon session from onDestroy; explicit
+        // Disconnect, Stop, and Revoke already perform fullShutdown().
+        if (shuttingDown || killProcessOnCleanup) fullShutdown();
         // Drop the global ref before the service object dies, or the native
         // side keeps a stale reference and protect() calls a dead object.
         try { nativeUnregisterVpnService(); } catch (Throwable ignored) {}

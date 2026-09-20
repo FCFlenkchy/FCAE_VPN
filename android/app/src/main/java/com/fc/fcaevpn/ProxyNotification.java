@@ -277,7 +277,7 @@ public class ProxyNotification extends Service {
             Intent psi = new Intent(this, PsiphonTunnelService.class).setAction(PsiphonTunnelService.ACTION_START);
             if (intent.getExtras() != null) psi.putExtras(intent.getExtras());
             PsiphonTunnelService.startBound(this, psi);
-            return START_NOT_STICKY;
+            return START_STICKY;
         }
         if (intent != null && ACTION_DISCONNECT_KILL.equals(intent.getAction())) {
             // Notification Disconnect has no UI left to reconnect from, so the
@@ -300,13 +300,10 @@ public class ProxyNotification extends Service {
         }
 
         if (intent == null) {
-            // Sticky re-delivery (system restarts the service, typically
-            // after a process death). The engine runs IN-PROCESS, so nothing
-            // survives a process death: tearing down here instead of
-            // re-announcing "Proxy connecting..." for an engine that is
-            // gone (and re-bumping the shared generation counter for it).
-            stopProxy();
-            return START_NOT_STICKY;
+            // A task removal or service recreation is not a user disconnect.
+            // Do not call stopProxy(): that detaches Psiphon and causes the
+            // next Activity launch to start a second tunnel.
+            return START_STICKY;
         }
 
         // A fresh proxy session: bump the shared generation counter so this
