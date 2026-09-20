@@ -102,34 +102,57 @@ jobs:
 
           # The Makefile targets MSYS2 (MSYSTEM=MSYS); a bare POSIX environment
           # such as Cygwin is kept working below rather than by the Makefile.
-          # `tp-shared` builds the third-party DLLs the engine DLL links
-          # against (yaml, lwip, hev-task-system). Cygwin's gcc -shared exports
-          # nothing by default (unlike mingw), so force the exports: without
-          # them the import libraries minted below are empty and every symbol
-          # the engine takes from these DLLs is an undefined reference at the
-          # final link.
-          make -C core/hev-socks5-tunnel tp-shared -j"$(nproc)" LFLAGS="-Wl,--export-all-symbols"
+          # The third-party libraries the engine links against (yaml, lwip,
+          # hev-task-system) are built as static archives: this ld flavor
+          # cannot resolve symbols from the raw PE .so files it finds for
+          # -lyaml -llwip -lhev-task-system, so a minted import library was
+          # the only bridge, and a missing or empty one turns every symbol
+          # the engine takes from these DLLs into an undefined reference at
+          # the final link. Real archives need no bridge: the engine's link
+          # pulls their object code in directly. The engine's own tp-shared
+          # prerequisite links the same objects into lib*.so as well; those
+          # DLLs stay beside the engine so the loader finds them if the
+          # engine records a dependency on any of them.
+          make -C core/hev-socks5-tunnel tp-static -j"$(nproc)"
 
-          # The final link resolves them as -lyaml -llwip -lhev-task-system.
-          # Cygwin's ld will not link a PE .so directly, so mint an import
-          # library per DLL; that makes -l resolution work on every flavor.
-          if command -v dlltool >/dev/null 2>&1; then
-            for name in yaml lwip hev-task-system; do
-              dir=core/hev-socks5-tunnel/third-part/$name/bin
-              dlltool -D "$dir/lib$name.so" -l "$dir/lib$name.dll.a"
-            done
-          fi
+          # hev-task-system's IOCP reactor references get_osfhandle(), which
+          # msys-2.0.dll exports only as _get_osfhandle(); this compat object
+          # defines the plain name on top of it, so the static link resolves
+          # no matter how the MSYS <io.h> spellings line up.
+          ENG=core/hev-socks5-tunnel
+          mkdir -p "$ENG/build-compat"
+          cat > "$ENG/build-compat/fcae-msys-compat.c" <<'EOF'
+          #include <io.h>
+          #ifdef get_osfhandle
+          #undef get_osfhandle
+          #endif
+          intptr_t get_osfhandle (int fd)
+          {
+              return _get_osfhandle (fd);
+          }
+          EOF
+          gcc -O2 -c "$ENG/build-compat/fcae-msys-compat.c" -o "$ENG/build-compat/fcae-msys-compat.o"
 
           # The engine DLL must export its C API (main_from_str, quit, stats)
-          # for the bridge's GetProcAddress, so the same export flag goes on
-          # its link too.
+          # for the bridge's GetProcAddress, so the export flag goes on its
+          # link. The compat object and the three archives go in by absolute
+          # path: explicit files always link, whatever -l candidate form
+          # this ld prefers. Command-line LFLAGS propagates into the tp-shared
+          # prerequisite's relinks, where the same inputs are harmless: the
+          # archives contribute nothing those DLLs do not already reference,
+          # and a DLL link tolerates the rest.
+          LDFLAGS_HEV="-Wl,--export-all-symbols \
+            $PWD/$ENG/build-compat/fcae-msys-compat.o \
+            $PWD/$ENG/third-part/yaml/bin/libyaml.a \
+            $PWD/$ENG/third-part/lwip/bin/liblwip.a \
+            $PWD/$ENG/third-part/hev-task-system/bin/libhev-task-system.a"
           if [ -n "${MSYSTEM:-}" ]; then
-            make -C core/hev-socks5-tunnel shared -j"$(nproc)" LFLAGS="-Wl,--export-all-symbols"
+            make -C "$ENG" shared -j"$(nproc)" LFLAGS="$LDFLAGS_HEV"
           else
             # Outside MSYS the Makefile also skips the Windows system
             # libraries, so supply them here (LFLAGS is appended at the end of
             # its LDFLAGS, which is where -l flags belong).
-            make -C core/hev-socks5-tunnel shared -j"$(nproc)" LFLAGS="-Wl,--export-all-symbols -lws2_32 -lIphlpapi"
+            make -C "$ENG" shared -j"$(nproc)" LFLAGS="$LDFLAGS_HEV -lws2_32 -lIphlpapi"
           fi
 
           test -s core/hev-socks5-tunnel/bin/libhev-socks5-tunnel.so
