@@ -1544,7 +1544,11 @@ class MainActivity : AppCompatActivity() {
             i.extras?.let { owner.putExtras(it) }
             startForegroundService(owner)
         } else {
-            PsiphonTunnelService.startBound(this, i)
+            // The foreground owner, not the Activity, owns the Psiphon bind.
+            val owner = Intent(this, ProxyNotification::class.java)
+                .setAction(ProxyNotification.ACTION_PSIPHON)
+            i.extras?.let { owner.putExtras(it) }
+            startForegroundService(owner)
         }
     }
 
@@ -2282,9 +2286,14 @@ class MainActivity : AppCompatActivity() {
     private fun requestPsiphonRegions() {
         if (!hasActivePsiOwner()) return
         try {
-            PsiphonTunnelService.startBound(this,
-                Intent(this, PsiphonTunnelService::class.java)
-                    .setAction(PsiphonTunnelService.ACTION_REGIONS))
+            val owner = if (isTunModeSelected()) {
+                Intent(this, FCAEVpnService::class.java)
+                    .setAction(FCAEVpnService.ACTION_PSIPHON_REGIONS)
+            } else {
+                Intent(this, ProxyNotification::class.java)
+                    .setAction(ProxyNotification.ACTION_PSIPHON_REGIONS)
+            }
+            startForegroundService(owner)
         } catch (t: Throwable) {
             android.util.Log.w("FCAE_VPN", "unable to refresh Psiphon regions: $t")
         }

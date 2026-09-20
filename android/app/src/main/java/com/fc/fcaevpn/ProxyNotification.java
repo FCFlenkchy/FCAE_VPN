@@ -41,6 +41,7 @@ public class ProxyNotification extends Service {
     private volatile boolean nativeFreed = false;
     private volatile boolean proxyPaused = false;
     public static final String ACTION_PSIPHON = "com.fc.fcaevpn.PROXY_PSIPHON";
+    public static final String ACTION_PSIPHON_REGIONS = "com.fc.fcaevpn.PROXY_PSIPHON_REGIONS";
     private static ProxyNotification instance;
     // Main-process snapshot kept by the foreground notification owner. The
     // Activity's dynamic receiver is not sticky and may miss broadcasts while
@@ -270,6 +271,12 @@ public class ProxyNotification extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_PSIPHON_REGIONS.equals(intent.getAction())) {
+            PsiphonTunnelService.startBound(this,
+                    new Intent(this, PsiphonTunnelService.class)
+                            .setAction(PsiphonTunnelService.ACTION_REGIONS));
+            return START_STICKY;
+        }
         if (intent != null && ACTION_PSIPHON.equals(intent.getAction())) {
             ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
             externalPsiphon = true;

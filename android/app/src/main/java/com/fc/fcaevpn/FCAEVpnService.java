@@ -65,6 +65,7 @@ public class FCAEVpnService extends VpnService {
     public static final String ACTION_STOP       = "com.fc.fcaevpn.STOP";
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
     public static final String ACTION_START      = "com.fc.fcaevpn.START";
+    public static final String ACTION_PSIPHON_REGIONS = "com.fc.fcaevpn.PSIPHON_REGIONS";
 
     public static final String BROADCAST_VPN_DISCONNECTED  = "com.fc.fcaevpn.VPN_DISCONNECTED";
     public static final String BROADCAST_VPN_STATE_CHANGED = "com.fc.fcaevpn.VPN_STATE_CHANGED";
@@ -583,6 +584,12 @@ public class FCAEVpnService extends VpnService {
                     requestDisconnect();
                     return START_NOT_STICKY;
 
+                case ACTION_PSIPHON_REGIONS:
+                    PsiphonTunnelService.startBound(this,
+                            new Intent(this, PsiphonTunnelService.class)
+                                    .setAction(PsiphonTunnelService.ACTION_REGIONS));
+                    return START_STICKY;
+
                 case ACTION_START:
                     requestStart(intent);
                     return START_STICKY;
@@ -715,6 +722,16 @@ public class FCAEVpnService extends VpnService {
     }
 
     private synchronized void startVpn(Intent intent) {
+        // TUN-through-Psiphon must be owned by this foreground service, not by
+        // MainActivity. Keep the Psiphon binding alive when the Activity is
+        // destroyed or removed from recents.
+        if (intent.getBooleanExtra("psiphonThroughTunnel", false)
+                && !PsiphonTunnelService.hasActiveBinding()) {
+            Intent psi = new Intent(this, PsiphonTunnelService.class)
+                    .setAction(PsiphonTunnelService.ACTION_START);
+            psi.putExtras(intent);
+            PsiphonTunnelService.startBound(this, psi);
+        }
         final int tunMtu = intent.getIntExtra("tunMtu", 1500);
         if (tunMtu < 1280 || tunMtu > 9000) {
             Log.e(TAG, "Invalid TUN MTU: " + tunMtu);
