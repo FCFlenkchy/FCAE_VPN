@@ -1132,8 +1132,6 @@ mod ffi {
         // Fresh session: drop the previous tunnel's RTT measurement.
         PSI_RTT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
         PSI_RTT_NEXT_PROBE_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
-        PSI_RTT_ATTEMPTS.store(0, std::sync::atomic::Ordering::Relaxed);
-        PSI_RTT_DONE.store(false, std::sync::atomic::Ordering::Relaxed);
         let config = CString::new(inputs.config_json.as_str())
             .map_err(|_| CoreError::InvalidConfig("psiphon.config_json contains a NUL".into()))?;
         let servers = CString::new(inputs.embedded_server_list.as_str()).map_err(|_| {
@@ -1196,9 +1194,66 @@ mod ffi {
         fcae_runtime::backend::Counters {
             total_rx,
             total_tx,
-            tx_rate,
-            rx_rate,
+            tx_bytes_sec: tx_rate,
+            rx_bytes_sec: rx_rate,
+            rtt_ms: PSI_RTT_MS.load(std::sync::atomic::Ordering::Relaxed) as u32,
         }
+    }
+
+    // The psiphon shim exports no latency telemetry, so the bridge measures
+    // it: one HTTP round trip through the shim's local HTTP proxy
+    // (absolute-URI HEAD against Google's generate_204 edge) -- a full tunnel
+    // round trip to the internet. Runs on a short-lived thread at most every
+    // 2 s so the ~500 ms telemetry pump in counters() never blocks on a dead
+    // or filtered tunnel. 0 means "no measurement yet".
+    static PSI_RTT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static PSI_RTT_PROBE_ACTIVE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static PSI_RTT_NEXT_PROBE_SECS: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    fn probe_rtt_once(port: u16) -> Option<u64> {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            std::time::Duration::from_millis(1500),
+        )
+        .ok()?;
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(1500)));
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(1500)));
+        let started = std::time::Instant::now();
+        stream
+            .write_all(b"HEAD http://www.gstatic.com/generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n")
+            .ok()?;
+        let mut one = [0u8; 1];
+        stream.read(&mut one).ok()?;
+        Some(started.elapsed().as_millis().max(1) as u64)
+    }
+
+    fn refresh_rtt() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let port = http_port();
+        if port == 0 {
+            PSI_RTT_MS.store(0, Relaxed);
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now < PSI_RTT_NEXT_PROBE_SECS.load(Relaxed) {
+            return;
+        }
+        if PSI_RTT_PROBE_ACTIVE.swap(true, Relaxed) {
+            return;
+        }
+        PSI_RTT_NEXT_PROBE_SECS.store(now + 2, Relaxed);
+        std::thread::spawn(move || {
+            if let Some(ms) = probe_rtt_once(port) {
+                PSI_RTT_MS.store(ms, Relaxed);
+            }
+            PSI_RTT_PROBE_ACTIVE.store(false, Relaxed);
+        });
     }
 
     /// Cumulative tunneled bytes from the shim's BytesTransferred notices.
