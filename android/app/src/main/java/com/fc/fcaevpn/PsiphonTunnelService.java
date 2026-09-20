@@ -37,6 +37,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String ACTION_START = "com.fc.fcaevpn.PSI_START";
     public static final String ACTION_STOP  = "com.fc.fcaevpn.PSI_STOP";
     public static final String ACTION_REGIONS = "com.fc.fcaevpn.PSI_REGIONS";
+    /**
+     * This service runs in the {@code :psiphon} process, so the UI process
+     * killing itself does not take the tunnel down with it. Set on the way
+     * out; the process ends once the service is destroyed and the tunnel has
+     * had its teardown window.
+     */
+    private static volatile boolean processMustDie = false;
+    private static final long PROCESS_KILL_DELAY_MS = 500L;
     public static final String BROADCAST_READY = "com.fc.fcaevpn.PSI_READY";
     public static final String BROADCAST_FAILED = "com.fc.fcaevpn.PSI_FAILED";
     // Staged connect progress (like the Tor bootstrap percentage): INTEGER
@@ -594,6 +602,32 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         stopNow();
         flushLogs();
         super.onDestroy();
+        // Last thing this process does when the app is being closed for good.
+        // Delayed so stopNow()'s controller teardown gets its window instead
+        // of being cut off mid-stop.
+        if (processMustDie) {
+            new Handler(Looper.getMainLooper()).postDelayed(
+                    FCAEVpnService::killProcessQuietly, PROCESS_KILL_DELAY_MS);
+        }
+    }
+
+    /**
+     * Make sure the {@code :psiphon} process does not outlive the app.
+     *
+     * Called from the UI process on every terminal path. {@link #processMustDie}
+     * lives in this class's own process, so the flag is what actually ends it
+     * — {@code stopService} is only what makes Android destroy the service
+     * there. A stop never reaching it leaves an empty cached process, which
+     * holds no tunnel and no sockets.
+     */
+    public static void killProcessOnExit(Context context) {
+        processMustDie = true;
+        try {
+            context.getApplicationContext()
+                    .stopService(new Intent(context.getApplicationContext(),
+                            PsiphonTunnelService.class));
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override

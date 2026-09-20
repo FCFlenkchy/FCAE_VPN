@@ -1144,6 +1144,22 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    /**
+     * Swiping the app away ends the process.
+     *
+     * A live session is torn down by the service that owns it — both services
+     * get their own onTaskRemoved and kill the process once their engine has
+     * stopped. Nothing running means there is no teardown to wait for, so the
+     * process ends here instead of being left cached in the background.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (!ProxyNotification.isAlive() && !FCAEVpnService.ownsSession()) {
+            PsiphonTunnelService.killProcessOnExit(this)
+            FCAEVpnService.killProcessQuietly()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     private fun isTunModeSelected(): Boolean = spinnerMode.selectedItemPosition == 1
 
     /**

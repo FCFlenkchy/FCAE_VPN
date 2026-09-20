@@ -93,6 +93,14 @@ public class FCAEVpnService extends VpnService {
     private volatile boolean running = false;
     private volatile boolean vpnPaused = false;
     private volatile boolean shuttingDown = false;
+    /**
+     * Set when teardown must end with the process gone: notification
+     * Disconnect, the task being swiped away, or the VPN being revoked. The
+     * kill runs after nativeStop so the engine shuts down cleanly first, and
+     * is queued on the main looper so the disconnect broadcast reaches the UI
+     * ahead of it.
+     */
+    private volatile boolean killProcessOnCleanup = false;
 
     private Intent lastStartIntent;
     private VpnNotification notification;
@@ -500,6 +508,19 @@ public class FCAEVpnService extends VpnService {
         return true;
     }
 
+    /**
+     * Whether this service still owns a session or a teardown. MainActivity
+     * reads it before ending the process on task removal: a live tunnel has
+     * to be torn down by the service, which then kills the process itself.
+     */
+    static boolean ownsSession() {
+        FCAEVpnService current = instance;
+        if (current == null) return false;
+        return current.running || current.uiConnecting || current.vpnPaused
+                || current.engineOpInFlight || current.vpnThread != null
+                || current.vpnInterface != null;
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -568,7 +589,11 @@ public class FCAEVpnService extends VpnService {
         pauseVpn();
     }
 
-    /** Notification / UI command: Disconnect. Kills the session and the service. */
+    /**
+     * Notification / UI command: Disconnect. Kills the session, the service
+     * and — from the notification, where there is no UI left to reconnect
+     * from — the process.
+     */
     private void requestDisconnect() {
         synchronized (cmdLock) {
             queuedStart = null;
@@ -583,9 +608,10 @@ public class FCAEVpnService extends VpnService {
             notification.dismiss();
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
+            scheduleProcessKill();
             return;
         }
-        fullShutdown();
+        fullShutdown(true);
     }
 
     /**
@@ -934,7 +960,16 @@ public class FCAEVpnService extends VpnService {
         closeQuiet(pfd);
     }
 
-    private synchronized void fullShutdown() {
+    private void fullShutdown() {
+        fullShutdown(false);
+    }
+
+    /**
+     * @param killProcess end the process once the engine has stopped. Only the
+     *                    terminal paths ask for it — the UI's own Disconnect
+     *                    keeps the process so the user can reconnect.
+     */
+    private synchronized void fullShutdown(boolean killProcess) {
         // Idempotent teardown. Disconnect (UI or notification), onRevoke
         // and onDestroy can ALL fire for the same session, and the first
         // call's cleanup thread may already be past its generation check
@@ -943,8 +978,12 @@ public class FCAEVpnService extends VpnService {
         // twice ("tun2socks 2 times torn down"). All fields below are
         // already cleared/poisoned by the first pass, so a repeat call has
         // nothing to do.
+        if (killProcess) killProcessOnCleanup = true;
         if (shuttingDown && !running && vpnThread == null
                 && vpnInterface == null) {
+            // Nothing left to tear down, so the async completion that normally
+            // carries the kill will never run. Do it here or not at all.
+            if (killProcess) scheduleProcessKill();
             return;
         }
         PsiphonTunnelService.stopBound(this);
@@ -1005,11 +1044,40 @@ public class FCAEVpnService extends VpnService {
                     }
                     stopSelf();
                     ProxyNotification.notifyCleanupComplete(this);
+                    // Queued, not immediate: notifyCleanupComplete's broadcast
+                    // is already on the main looper's queue and must be
+                    // delivered before the process disappears.
+                    if (killProcessOnCleanup) scheduleProcessKill();
                 }
             });
-            // Activity absence/recreation is not process shutdown. Never free
-            // the global FFI or kill a process that may already be reconnecting.
+            // Activity absence/recreation is not process shutdown. The kill is
+            // decided by the caller, never by teardown itself.
         });
+    }
+
+    private void scheduleProcessKill() {
+        handler.post(this::killEverything);
+    }
+
+    /**
+     * Last resort so nothing of this app survives in the background. Safe from
+     * any thread; used once the tunnel and the native engine are already down.
+     * Psiphon runs in its own process, so it is sent on its way separately.
+     */
+    static void killProcessQuietly() {
+        try {
+            android.os.Process.killProcess(android.os.Process.myPid());
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Ends this process and the {@code :psiphon} one. */
+    private void killEverything() {
+        try {
+            PsiphonTunnelService.killProcessOnExit(this);
+        } catch (Throwable ignored) {
+        }
+        killProcessQuietly();
     }
 
     private synchronized void pauseVpn() {
@@ -1338,8 +1406,17 @@ public class FCAEVpnService extends VpnService {
     }
 
     @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        Log.i(TAG, "App removed from recent tasks — tearing down and ending the process");
+        fullShutdown(true);
+        super.onTaskRemoved(rootIntent);
+    }
+
+    @Override
     public void onRevoke() {
-        fullShutdown();
+        // The user revoked the VPN from system settings: there is nothing left
+        // to run for, so the process goes with the session.
+        fullShutdown(true);
         super.onRevoke();
     }
 }

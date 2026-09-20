@@ -13,10 +13,20 @@ public class ProxyNotification extends Service {
     private static final String TAG = "FCAE_PROXY";
     private static final String CHANNEL_ID = "fcaevpn_proxy_hi";
     public static final int NOTIFICATION_ID = 2;
+    /** Long enough for nativeStop and the disconnect broadcast, short enough
+     *  that the process is gone before the user can tell it lingered. */
+    private static final long PROCESS_KILL_DELAY_MS = 600L;
 
     public static final String ACTION_START = "com.fc.fcaevpn.PROXY_START";
     public static final String ACTION_STOP  = "com.fc.fcaevpn.PROXY_STOP";
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.PROXY_DISCONNECT";
+    /**
+     * Same teardown as {@link #ACTION_DISCONNECT}, but the process goes too.
+     * Only the notification uses it: MainActivity sends plain
+     * ACTION_DISCONNECT from its own Disconnect button, where the user is
+     * still in the app and expects to reconnect.
+     */
+    public static final String ACTION_DISCONNECT_KILL = "com.fc.fcaevpn.PROXY_DISCONNECT_KILL";
 
     private static final int BUTTONS_CONNECTING = 0;
     private static final int BUTTONS_RUNNING = 1;
@@ -239,7 +249,7 @@ public class ProxyNotification extends Service {
         piMain = PendingIntent.getActivity(this, 20, mainIntent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        disconnectAction = buildAction("Disconnect", ACTION_DISCONNECT, 21);
+        disconnectAction = buildAction("Disconnect", ACTION_DISCONNECT_KILL, 21);
         stopAction = buildAction("Stop", ACTION_STOP, 22);
         startAction = buildAction("Start", ACTION_START, 23);
     }
@@ -267,6 +277,12 @@ public class ProxyNotification extends Service {
             Intent psi = new Intent(this, PsiphonTunnelService.class).setAction(PsiphonTunnelService.ACTION_START);
             if (intent.getExtras() != null) psi.putExtras(intent.getExtras());
             PsiphonTunnelService.startBound(this, psi);
+            return START_NOT_STICKY;
+        }
+        if (intent != null && ACTION_DISCONNECT_KILL.equals(intent.getAction())) {
+            // Notification Disconnect has no UI left to reconnect from, so the
+            // process goes with the session — same contract as TUN mode.
+            tearDownAndKillProcess("Notification Disconnect");
             return START_NOT_STICKY;
         }
         if (intent != null && ACTION_DISCONNECT.equals(intent.getAction())) {
@@ -435,8 +451,14 @@ public class ProxyNotification extends Service {
         handler.post(statsRunnable);
     }
 
-    private synchronized void stopProxy() {
-        if (stopping || ownerGeneration != FCAEVpnService.sGeneration.get()) return;
+    /**
+     * @return true when this call performed the teardown, false when it was
+     *         already stopping or another owner holds the session. Callers
+     *         that must not leave the process behind use it to decide whether
+     *         to end the process themselves.
+     */
+    private synchronized boolean stopProxy() {
+        if (stopping || ownerGeneration != FCAEVpnService.sGeneration.get()) return false;
         stopping = true;
         proxyPaused = false;
         handler.removeCallbacks(statsRunnable);
@@ -459,6 +481,47 @@ public class ProxyNotification extends Service {
 
         freeNativeOnce();
 
+        return true;
+    }
+
+    /**
+     * Tear the proxy down and end the process, so nothing of the app keeps
+     * running in the background. The kill is queued on the main looper rather
+     * than fired here: nativeStop and the disconnect broadcast both have to
+     * land first, and both are already on their way by the time this runs.
+     */
+    private void tearDownAndKillProcess(String reason) {
+        Log.i(TAG, reason + " — tearing down and ending the process");
+        boolean tornDown = false;
+        try {
+            tornDown = stopProxy();
+        } catch (Throwable t) {
+            Log.w(TAG, "teardown failed: " + t);
+        }
+        if (!tornDown) {
+            try {
+                stopForeground(STOP_FOREGROUND_REMOVE);
+            } catch (Throwable ignored) {
+            }
+            stopSelf();
+        }
+        try {
+            PsiphonTunnelService.killProcessOnExit(this);
+        } catch (Throwable ignored) {
+        }
+        if (handler != null) {
+            handler.postDelayed(this::killOwnProcess, PROCESS_KILL_DELAY_MS);
+        } else {
+            killOwnProcess();
+        }
+    }
+
+    private void killOwnProcess() {
+        FCAEVpnService.killProcessQuietly();
+    }
+
+    static boolean isAlive() {
+        return instance != null;
     }
 
     /** Mirrors FCAEVpnService's disconnect broadcast so MainActivity resets. */
@@ -523,6 +586,7 @@ public class ProxyNotification extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        Log.i(TAG, "App removed from recent tasks — proxy continues in background");
+        tearDownAndKillProcess("App removed from recent tasks");
+        super.onTaskRemoved(rootIntent);
     }
 }
