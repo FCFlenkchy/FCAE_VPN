@@ -1423,8 +1423,9 @@ public class FCAEVpnService extends VpnService {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        Log.i(TAG, "App removed from recent tasks — tearing down and ending the process");
-        fullShutdown(true);
+        // Removing the task is not a disconnect request. Keep the foreground
+        // VPN alive; the notification and explicit Disconnect own teardown.
+        Log.i(TAG, "App removed from recent tasks — keeping VPN session alive");
         super.onTaskRemoved(rootIntent);
     }
 

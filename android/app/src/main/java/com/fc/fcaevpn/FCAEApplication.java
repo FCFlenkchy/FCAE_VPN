@@ -33,7 +33,10 @@ public class FCAEApplication extends Application {
     };
 
     private final Runnable reapIfIdle = () -> {
-        if (startedActivities != 0 || ProxyNotification.isAlive() || FCAEVpnService.ownsSession()) return;
+        if (startedActivities != 0
+                || ProxyNotification.isAlive()
+                || PsiphonTunnelService.hasActiveBinding()
+                || FCAEVpnService.ownsSession()) return;
         Log.i(TAG, "UI gone and nothing connected — ending the process");
         try {
             PsiphonTunnelService.killProcessOnExit(FCAEApplication.this);

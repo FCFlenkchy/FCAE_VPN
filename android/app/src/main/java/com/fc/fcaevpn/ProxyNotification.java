@@ -586,7 +586,9 @@ public class ProxyNotification extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        tearDownAndKillProcess("App removed from recent tasks");
+        // Removing the task is not a disconnect request. Keep proxy mode alive;
+        // the notification and explicit Disconnect own teardown.
+        Log.i(TAG, "App removed from recent tasks — keeping proxy session alive");
         super.onTaskRemoved(rootIntent);
     }
 }
