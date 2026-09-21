@@ -316,6 +316,9 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 PsiphonTunnelService.BROADCAST_STOPPED -> {
+                    // A stop of an older session arriving after a reconnect
+                    // must not reset a live one.
+                    if (!PsiphonTunnelService.isCurrentBroadcast(intent)) return
                     handler.post {
                         resetStats()
                         if (userInitiatedDisconnect) return@post

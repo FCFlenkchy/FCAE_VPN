@@ -290,6 +290,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     public static void stopBound(Context context) {
         Context app = context.getApplicationContext();
+        // Dispatch the explicit stop FIRST, while the component is still
+        // started and bound: the command reaches the live instance and its
+        // stopNow() runs the real teardown. stopService() below only
+        // destroys the component — it cannot reach the Go tunnel running
+        // in the :psiphon process, which would keep connecting (or stay
+        // connected) in an empty cached process.
+        deliverStop(app, true);
         bindingEpoch.incrementAndGet(); // invalidate starts not yet delivered
         final java.util.List<android.content.ServiceConnection> old =
                 new java.util.ArrayList<>(liveConnections);
@@ -349,7 +356,18 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private static final Object LIBRARY_LOCK = new Object();
     private static final java.util.concurrent.ExecutorService libraryWorker =
             java.util.concurrent.Executors.newSingleThreadExecutor(r -> new Thread(r, "FCAE-PsiLibrary"));
-    private PsiphonTunnel tunnel;
+    // The AAR permits one PsiphonTunnel per process (its own static
+    // INSTANCE), and this service owns the :psiphon process, so the live
+    // tunnel is PROCESS state, not instance state: an instance recreated
+    // after its component was destroyed (binding churn, killProcessOnExit's
+    // stopService) must still be able to stop the tunnel the dead instance
+    // left behind.
+    private static volatile PsiphonTunnel liveTunnel;
+    // A START that arrived while a teardown was in flight (session switch:
+    // stopBound() for the old request, then startBound() for the next).
+    // Replayed once the library is quiet; cleared by a later ACTION_STOP.
+    private volatile Intent pendingStart;
+    private volatile boolean destroyed;
     private String region = "";
     private volatile String lastRegions = "";
     private String upstreamProxy = "";
@@ -422,6 +440,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public int onStartCommand(Intent intent, int flags, int startId) {
         boolean stop = intent != null && ACTION_STOP.equals(intent.getAction());
         if (stop) {
+            // A stop invalidates any restart parked below.
+            pendingStart = null;
             stopNow();
             return START_NOT_STICKY;
         }
@@ -441,15 +461,21 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             }
             return START_NOT_STICKY;
         }
+        if (stopping) {
+            // A teardown is in flight (user disconnect or session switch).
+            // Dropping a START here would hang the new session: nothing ever
+            // re-sends it. Park it — the stop completion replays it once the
+            // library is quiet. Checked BEFORE the session capture so the
+            // teardown's own broadcasts keep the old session.
+            if (ACTION_START.equals(intent.getAction())) pendingStart = intent;
+            return START_NOT_STICKY;
+        }
         // startBound() starts the service before Android invokes onBind().
         // Capture the session here as well as in onBind(), otherwise a very
         // fast handshake can publish a valid region list with the old
         // sentinel session and every app-process receiver will discard it.
         long requestedSession = intent.getLongExtra("psiSession", -1);
         if (requestedSession >= 0) session = requestedSession;
-        if (stopping) {
-            return START_NOT_STICKY;
-        }
         if (startInFlight || psiphonUp) {
             // Duplicate start (double-tap, poll re-fire, redelivery). The
             // wrapper stops the running instance before every new start, so
@@ -506,9 +532,18 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 // falls back to whatever the datastore still holds plus any
                 // remote server list configured in getPsiphonConfig().
                 emitLog("startTunneling: calling");
+                // The lock is held ONLY around create+publish, never across
+                // startTunneling(): a stop must be able to swap the tunnel
+                // out and call stop() from its own thread while a dial is
+                // still in progress. Holding the lock across the dial is
+                // what made mid-connect disconnects wait for the connect.
+                final PsiphonTunnel t;
                 synchronized (LIBRARY_LOCK) {
                     if (stopping) return;
-                    tunnel = PsiphonTunnel.newPsiphonTunnel(this);
+                    t = PsiphonTunnel.newPsiphonTunnel(this);
+                    liveTunnel = t;
+                }
+                try {
                     // Plain proxy mode, by design: FCAEVpnService +
                     // tun2socks is the ONLY VPN/TUN interface on the
                     // device (Android and desktop alike); this library
@@ -522,8 +557,16 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                     // the TUN BEFORE this tunnel starts, so the event
                     // lands with no active tunnel; a late one is
                     // absorbed by the controller's automatic reconnect.
-                    tunnel.setVpnMode(false);
-                    tunnel.startTunneling(embeddedList);
+                    t.setVpnMode(false);
+                    t.startTunneling(embeddedList);
+                } finally {
+                    // A stop that landed mid-dial swapped liveTunnel out and
+                    // issued its own stop(), which cannot have reached a
+                    // controller this dial created afterwards. Stop here, on
+                    // the worker, before the restart replay can run.
+                    if (stopping) {
+                        try { t.stop(); } catch (Throwable ignored) {}
+                    }
                 }
                 emitLog("startTunneling: returned");
                 if (!stopping) psiphonUp = true;
@@ -563,36 +606,39 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         logHandler.removeCallbacks(dialHeartbeat);
         Thread st = statsThread;
         if (st != null) st.interrupt();
-        // Only touch the native library when a tunnel is actually up or a
-        // start is in flight (whose blocked startTunneling() needs stop()
-        // to unblock it). After a FAILED start the controller never ran;
-        // calling the wrapper's stop() then — its stopPsiphon() emits the
-        // "stopping Psiphon library" line even for a null controller and
-        // would needlessly re-enter libgojni on an already-dying service.
-        final boolean needsLibraryStop = psiphonUp || startInFlight;
         psiphonUp = false;
         emitLog("stopping");
         flushLogs();
-        if (tunnel != null && needsLibraryStop) {
-            // The AAR's stop() joins the whole controller and can take
-            // seconds (see HARD_STOP_TIMEOUT_MS). Run it, and race it
-            // against a deadline: a stop still running when the deadline
-            // fires gets the process killed, which drops the tunnel
-            // instantly instead of letting it outlive the user's
-            // disconnect by however long the in-flight dials take.
-            final PsiphonTunnel t = tunnel;
+        // Swap the tunnel out under the lock. The start task holds the lock
+        // only while creating one, so this never queues behind a dial; a
+        // start that has not created its tunnel yet sees stopping and never
+        // will. t == null after a failed start is safe too: Psi.stop()
+        // no-ops on a nil controller and closes a half-open datastore.
+        final PsiphonTunnel t;
+        synchronized (LIBRARY_LOCK) {
+            t = liveTunnel;
+            liveTunnel = null;
+        }
+        if (t != null) {
             final java.util.concurrent.CountDownLatch stopDone =
                     new java.util.concurrent.CountDownLatch(1);
-            libraryWorker.execute(() -> {
-                try {
-                    synchronized (LIBRARY_LOCK) {
-                        try { t.stop(); } catch (Throwable ignored) {}
-                    }
-                } finally {
-                    stopDone.countDown();
-                }
-                broadcastStopped();
-            });
+            // NOT libraryWorker: that worker may itself be blocked inside
+            // startTunneling(), and a stop queued behind it can never
+            // interrupt the connect. A dedicated thread calls stop()
+            // immediately; the AAR serializes it against an in-flight
+            // startTunneling() with its own monitor — the supported way to
+            // abort a connecting tunnel. The deadline watchdog below still
+            // guarantees the drop.
+            new Thread(() -> {
+                try { t.stop(); } catch (Throwable ignored) {}
+                finally { stopDone.countDown(); }
+                // A pending START means a session switch is in progress,
+                // not a terminal stop: the notification owner must not be
+                // told "stopped" for a session it is already handing to
+                // the next request.
+                if (pendingStart == null) broadcastStopped();
+                scheduleRestartReplay();
+            }, "FCAE-PsiStop").start();
             new Thread(() -> {
                 try {
                     if (stopDone.await(HARD_STOP_TIMEOUT_MS,
@@ -604,12 +650,36 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 catch (Throwable ignored) {}
                 Runtime.getRuntime().halt(2); // backstop: guaranteed exit
             }, "FCAE-PsiHardStop").start();
+        } else {
+            scheduleRestartReplay();
         }
         stopSelf();
     }
 
+    /**
+     * Replay a START that was parked because a teardown was in flight (the
+     * session-switch path: stopBound() for the old request, then
+     * startBound() for the next). Queued on libraryWorker so it runs only
+     * after any in-flight start task — including its post-dial stop — has
+     * fully exited, then hops to the main thread, where onStartCommand
+     * finds a clean stopped instance and replays the intent as a normal
+     * start. Without this the switch's START lands on a stopping instance
+     * and is silently dropped, hanging the new session.
+     */
+    private void scheduleRestartReplay() {
+        libraryWorker.execute(() -> logHandler.post(() -> {
+            if (destroyed) return;
+            Intent restart = pendingStart;
+            pendingStart = null;
+            if (restart == null) return;
+            stopping = false;
+            onStartCommand(restart, 0, 0);
+        }));
+    }
+
     @Override
     public void onDestroy() {
+        destroyed = true;
         // Android may recreate the owner/binding while the tunnel is live.
         // Only an explicit stop is allowed to tear down Psiphon here.
         if (stopping || processMustDie) stopNow();
@@ -635,11 +705,36 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
      */
     public static void killProcessOnExit(Context context) {
         processMustDie = true;
+        // processMustDie is a static in THIS (UI) process; the :psiphon
+        // process has its own copy and never sees it. The only signal that
+        // crosses the process boundary is the explicit ACTION_STOP command,
+        // so deliver it before destroying the component. The start command
+        // is already with the system and is delivered to :psiphon even
+        // though this process exits right after.
+        deliverStop(context.getApplicationContext(), false);
         try {
             context.getApplicationContext()
                     .stopService(new Intent(context.getApplicationContext(),
                             PsiphonTunnelService.class));
         } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * Dispatch the explicit stop to the isolated service. Plain
+     * startService, never startForegroundService: this service deliberately
+     * posts no notification of its own. Sent while the component is alive,
+     * the command reaches the live instance; if the component is already
+     * gone it is briefly recreated, finds no tunnel and stops itself.
+     */
+    private static void deliverStop(Context app, boolean onlyIfBound) {
+        if (onlyIfBound && liveConnections.isEmpty()) return;
+        try {
+            app.startService(new Intent(app, PsiphonTunnelService.class)
+                    .setAction(ACTION_STOP));
+        } catch (Throwable ignored) {
+            // Background-start refusal or the caller dying: stopService
+            // still destroys the component, as before.
         }
     }
 
@@ -1149,7 +1244,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         psiphonUp = true;
         handshakeConnected = true;
         int s = socksPort.get();
-        if (s <= 0) s = tunnel.getLocalSocksProxyPort();
+        PsiphonTunnel t = liveTunnel;
+        if (s <= 0 && t != null) s = t.getLocalSocksProxyPort();
         socksPort.set(s);
         emitLog("connected, SOCKS " + proxyBindHost() + ":" + s + lanSuffix(s));
         flushLogs();
@@ -1164,7 +1260,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (stopping || readyBroadcast) return;
         if (!handshakeConnected || !handshakeRegion) return;
         int s = socksPort.get();
-        if (s <= 0 && tunnel != null) s = tunnel.getLocalSocksProxyPort();
+        PsiphonTunnel t = liveTunnel;
+        if (s <= 0 && t != null) s = t.getLocalSocksProxyPort();
         if (s > 0) socksPort.set(s);
         readyBroadcast = true;
         Intent i = new Intent(BROADCAST_READY);
