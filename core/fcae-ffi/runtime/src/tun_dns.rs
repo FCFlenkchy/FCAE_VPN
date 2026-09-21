@@ -101,7 +101,7 @@ const RESOLV_MARKER: &str = "# written by FCAE VPN";
 /// without systemd-resolved (Alpine, Devuan, containers, WSL1) fall through
 /// to managing /etc/resolv.conf directly instead of refusing to run TUN.
 #[cfg(target_os = "linux")]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum LinuxDns {
     Resolvectl,
     Resolvconf,
