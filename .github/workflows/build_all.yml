@@ -1,4 +1,4 @@
-name: Clubapp APK (v7a)
+name: Clubapp APK (v8a)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ env:
 
 jobs:
   android:
-    name: Clubapp android-v7a
+    name: Clubapp android-v8a
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -226,10 +226,10 @@ jobs:
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: armv7-linux-androideabi
+          targets: aarch64-linux-android
           components: rust-src
 
-      - name: Build Psiphon AAR (v7a only)
+      - name: Build Psiphon AAR (v8a only)
         shell: bash
         run: |
           set -euo pipefail
@@ -253,7 +253,7 @@ jobs:
             '
           mkdir -p android/psiphon/libs
           cp core/psiphon/MobileLibrary/Android/ca.psiphon.aar android/psiphon/libs/
-          zip -d android/psiphon/libs/ca.psiphon.aar 'jni/arm64-v8a/*' 'jni/x86/*' 'jni/x86_64/*' || true
+          zip -d android/psiphon/libs/ca.psiphon.aar 'jni/armeabi-v7a/*' 'jni/x86/*' 'jni/x86_64/*' || true
 
       - name: fetch imgui
         run: |
@@ -278,16 +278,16 @@ jobs:
           export PATH="$PREFIX:$PATH"
           zig version
 
-      - name: build zeptun (v7a)
+      - name: build zeptun (v8a)
         shell: bash
         run: |
           set -euo pipefail
           cd core/zeptun
           SYSROOT="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           LIBC_DIR=$(mktemp -d)
-          abi=armeabi-v7a
-          ZIG_TARGET=arm-linux-androideabi.24
-          NDK_TARGET=arm-linux-androideabi
+          abi=arm64-v8a
+          ZIG_TARGET=aarch64-linux-android.24
+          NDK_TARGET=aarch64-linux-android
           printf '%s\n' \
             "include_dir=$SYSROOT/usr/include" \
             "sys_include_dir=$SYSROOT/usr/include/$NDK_TARGET" \
@@ -301,7 +301,7 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: build hev-socks5-tunnel (v7a)
+      - name: build hev-socks5-tunnel (v8a)
         shell: bash
         run: |
           set -euo pipefail
@@ -309,17 +309,17 @@ jobs:
           TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
           make clean
           make static \
-            CC="$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang" \
+            CC="$TOOLCHAIN/bin/aarch64-linux-android24-clang" \
             AR="$TOOLCHAIN/bin/llvm-ar" \
             STRIP="$TOOLCHAIN/bin/llvm-strip" \
-            PP="$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang -E" \
-            CFLAGS="-fPIC -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -Wno-error -mfpu=neon"
-          mkdir -p bin/android/armeabi-v7a
+            PP="$TOOLCHAIN/bin/aarch64-linux-android24-clang -E" \
+            CFLAGS="-fPIC -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -Wno-error"
+          mkdir -p bin/android/arm64-v8a
           cp bin/libhev-socks5-tunnel.a \
              third-part/lwip/bin/liblwip.a \
              third-part/yaml/bin/libyaml.a \
              third-part/hev-task-system/bin/libhev-task-system.a \
-             bin/android/armeabi-v7a/
+             bin/android/arm64-v8a/
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
@@ -356,7 +356,7 @@ jobs:
           print("patched")
           PY
 
-      - name: build rust (v7a only)
+      - name: build rust (v8a only)
         run: |
           set -euo pipefail
           NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
@@ -364,21 +364,21 @@ jobs:
           BIN="$PREBUILT/bin"
           export PATH="$BIN:$PATH"
           export ANDROID_NDK_HOME="$NDK"
-          TARGET_TRIPLE=armv7-linux-androideabi
-          CLANG="$BIN/armv7a-linux-androideabi24-clang"
-          export CC_armv7_linux_androideabi="$CLANG"
-          export CXX_armv7_linux_androideabi="$BIN/armv7a-linux-androideabi24-clang++"
-          export AR_armv7_linux_androideabi="$BIN/llvm-ar"
-          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$CLANG"
-          export FCAE_HEV_LIBDIR="$(pwd)/core/hev-socks5-tunnel/bin/android/armeabi-v7a"
-          export FCAE_ZEPTUN_LIBDIR="$(pwd)/core/zeptun/zig-out/android/prebuilt/armeabi-v7a"
+          TARGET_TRIPLE=aarch64-linux-android
+          CLANG="$BIN/aarch64-linux-android24-clang"
+          export CC_aarch64_linux_android="$CLANG"
+          export CXX_aarch64_linux_android="$BIN/aarch64-linux-android24-clang++"
+          export AR_aarch64_linux_android="$BIN/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CLANG"
+          export FCAE_HEV_LIBDIR="$(pwd)/core/hev-socks5-tunnel/bin/android/arm64-v8a"
+          export FCAE_ZEPTUN_LIBDIR="$(pwd)/core/zeptun/zig-out/android/prebuilt/arm64-v8a"
           cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" \
             -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: build apk (v7a only)
+      - name: build apk (v8a only)
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_HOME: /usr/local/lib/android/sdk
@@ -395,13 +395,13 @@ jobs:
           yes | sdkmanager --licenses || true
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
-          cat > /tmp/v7a.init.gradle <<'GRADLE'
+          cat > /tmp/v8a.init.gradle <<'GRADLE'
           allprojects {
               plugins.withId('com.android.application') {
                   androidComponents.finalizeDsl { dsl ->
                       try {
                           dsl.defaultConfig.ndk.abiFilters.clear()
-                          dsl.defaultConfig.ndk.abiFilters.add('armeabi-v7a')
+                          dsl.defaultConfig.ndk.abiFilters.add('arm64-v8a')
                           dsl.packaging.jniLibs.useLegacyPackaging = true
                       } catch (Throwable t) {}
                   }
@@ -411,9 +411,9 @@ jobs:
 
           cd android
           gradle wrapper --gradle-version 9.6.0
-          ./gradlew -I /tmp/v7a.init.gradle assembleRelease \
+          ./gradlew -I /tmp/v8a.init.gradle assembleRelease \
             -PUNIVERSAL=true -PBUILD_TYPE=android_universal \
-            -Pandroid.injected.build.abi=armeabi-v7a
+            -Pandroid.injected.build.abi=arm64-v8a
 
       - name: strip other ABIs + sign
         run: |
@@ -431,7 +431,7 @@ jobs:
           fi
           echo "Using APK: $APKPATH"
           cp "$APKPATH" /tmp/in.apk
-          zip -d /tmp/in.apk 'lib/arm64-v8a/*' 'lib/x86/*' 'lib/x86_64/*' || true
+          zip -d /tmp/in.apk 'lib/armeabi-v7a/*' 'lib/x86/*' 'lib/x86_64/*' || true
           zip -d /tmp/in.apk 'META-INF/*.SF' 'META-INF/*.RSA' 'META-INF/*.DSA' || true
           "${BT}zipalign" -f -p 4 /tmp/in.apk /tmp/aligned.apk
           keytool -genkeypair -keystore /tmp/clubapp.keystore -alias clubapp \
@@ -442,20 +442,20 @@ jobs:
             --ks-pass pass:clubapp-pass \
             --key-pass pass:clubapp-pass \
             --ks-key-alias clubapp \
-            --out /tmp/Clubapp-v7a.apk /tmp/aligned.apk
+            --out /tmp/Clubapp-v8a.apk /tmp/aligned.apk
           echo "--- verify signature ---"
-          "${BT}apksigner" verify --verbose --print-certs /tmp/Clubapp-v7a.apk || true
+          "${BT}apksigner" verify --verbose --print-certs /tmp/Clubapp-v8a.apk || true
           echo "--- apk info ---"
-          "${BT}aapt2" dump badging /tmp/Clubapp-v7a.apk | grep -E "^package:|sdkVersion|targetSdkVersion|native-code" || true
+          "${BT}aapt2" dump badging /tmp/Clubapp-v8a.apk | grep -E "^package:|sdkVersion|targetSdkVersion|native-code" || true
           echo "--- native libs ---"
-          unzip -l /tmp/Clubapp-v7a.apk | grep -E " lib/" || true
+          unzip -l /tmp/Clubapp-v8a.apk | grep -E " lib/" || true
           mkdir -p package
-          cp /tmp/Clubapp-v7a.apk package/
+          cp /tmp/Clubapp-v8a.apk package/
           ls -lah package/
 
       - name: upload
         uses: actions/upload-artifact@v7
         with:
-          name: Clubapp-apk-v7a
+          name: Clubapp-apk-v8a
           path: package/*
           if-no-files-found: error
