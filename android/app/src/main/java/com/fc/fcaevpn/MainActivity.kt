@@ -293,10 +293,11 @@ class MainActivity : AppCompatActivity() {
                             peerText.text = psiphonEndpointText(nativeLanFallback(lastNativeLan))
                         }
                         if (isPsiphonSelected() && isTunModeSelected() && socks > 0) {
-                            // READY: the AAR's tunnel is up and its proxies are
-                            // listening — the one start allowed to raise the
-                            // interface before the core does.
-                            startTunServiceWithConfig(psiphonReady = true)
+                            // READY: the AAR's tunnel is up and its proxies
+                            // are listening. The interface went up at the
+                            // connect click; this start attaches the data
+                            // plane (the service reuses that interface).
+                            startTunServiceWithConfig()
                         }
                     }
                 }
@@ -1363,9 +1364,10 @@ class MainActivity : AppCompatActivity() {
             ))
         // TUN (system VPN) is the default config on first run; a saved user
         // choice is respected afterwards. In TUN mode the device itself is
-        // only established AFTER the tunnel connects — the core's fd
-        // provider calls establishTunNow() once the backend reports a live
-        // SOCKS endpoint, and the Psiphon path raises it on BROADCAST_READY.
+        // established when the tunnel connects — the core's fd provider
+        // calls establishTunNow() once the backend reports a live SOCKS
+        // endpoint — except on Psiphon exits, which raise the interface at
+        // the connect click and connect the tunnel behind it.
         spinnerMode.setSelection(prefs.getInt("mode", 1).coerceIn(0, 1))
         // Clamp: an entry list from an older/newer build may be shorter than
         // a stored position (the core collapses unknown values at start).
@@ -1556,19 +1558,21 @@ class MainActivity : AppCompatActivity() {
                 .setAction(ProxyNotification.ACTION_START)
         }
         i.extras?.let { owner.putExtras(it) }
+        // The TUN-mode owner raises the interface before the AAR connects
+        // (TUN first); it needs the session's MTU for that first Builder.
+        if (isTunModeSelected()) owner.putExtra("tunMtu", tunMtuBytes())
         startForegroundService(owner)
     }
 
     /**
      * Start the VPN service with the current settings.
      *
-     * [psiphonReady] marks the one caller that knows the AAR already reported a
-     * connected tunnel (the READY broadcast handler). The service raises the
-     * interface up front only for such a start; every other psiphon start
-     * waits for the core's on-demand fd provider, so the TUN can never appear
-     * before the tunnel it carries exists.
+     * A Psiphon exit in TUN mode has usually already raised the interface at
+     * the connect click (FCAEVpnService.ACTION_PSIPHON_START); the service
+     * reuses it and attaches the data plane once the tunnel is live. Every
+     * other protocol waits for the core's on-demand fd provider.
      */
-    private fun startTunServiceWithConfig(psiphonReady: Boolean = false) {
+    private fun startTunServiceWithConfig() {
         // Cancel any pending disconnect fallback — we're connecting now.
         connecting = true
         vpnActive = true
@@ -1577,7 +1581,6 @@ class MainActivity : AppCompatActivity() {
         val i = Intent(this, FCAEVpnService::class.java)
         i.action = FCAEVpnService.ACTION_START
         i.putExtra("protocol", coreProtocolFromSelection())
-        i.putExtra("psiphonReady", psiphonReady)
         // The selected mode is authoritative for every protocol, including
         // Psiphon and Tor: TUN must never be silently downgraded to proxy.
         i.putExtra("mode", if (isTunModeSelected()) 1 else 0)

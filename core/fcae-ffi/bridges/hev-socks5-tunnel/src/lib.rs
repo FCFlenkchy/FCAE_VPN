@@ -49,9 +49,11 @@ mod socks5t;
 #[cfg(any(hev_linked, hev_dynamic))]
 mod engine;
 
-/// Wintun only: the in-process backend stages the driver DLL from here.
-#[cfg(windows)]
-mod platform;
+/// Platform glue: the privilege probe compiles on every target (the FFI
+/// layer's `fcae_is_privileged()` reaches it as
+/// `fcae_bridge_hev_socks5_tunnel::platform::is_privileged`), the Wintun
+/// DLL staging is Windows-only and cfg-gated inside the module.
+pub mod platform;
 
 #[cfg(any(hev_linked, hev_dynamic))]
 pub use engine::HevSocks5TunnelBridge;

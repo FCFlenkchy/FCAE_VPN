@@ -51,9 +51,12 @@ use fcae_runtime::error::{CoreError, Result};
 use fcae_runtime::session::TunBridge;
 use parking_lot::Mutex;
 
-mod platform;
 mod socks5p;
 mod socks5t;
+
+// Public for the FFI layer's fcae_is_privileged(), which ORs the privilege
+// probe across every TUN bridge linked into the build (see tun2socks).
+pub mod platform;
 
 #[cfg(all(windows, wintun_staged))]
 static WINTUN_DLL: &[u8] = include_bytes!(env!("FCAE_WINTUN_DLL"));
