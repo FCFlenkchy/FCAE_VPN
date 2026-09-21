@@ -589,6 +589,20 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     if !config_json.contains("\"InproxyEnableProxy\"") {
         config_json = inject_bool_field(&config_json, "InproxyEnableProxy", false)?;
     }
+
+    // An explicit transport family (LimitTunnelProtocols, spliced in by the
+    // host UI) must survive contact with the server. tunnel-core applies the
+    // tactics payload AFTER the config values and the last map wins, so
+    // production tactics carrying LimitTunnelProtocols silently replaced the
+    // user's pick — the transport option appeared to do nothing.
+    // DisableTactics skips tactics requests, payload handling and parameter
+    // application, pinning the choice. Auto (no LimitTunnelProtocols) keeps
+    // tactics fully enabled.
+    if config_json.contains("\"LimitTunnelProtocols\"")
+        && !config_json.contains("\"DisableTactics\"")
+    {
+        config_json = inject_bool_field(&config_json, "DisableTactics", true)?;
+    }
     // BytesTransferred notices feed the UI/notification counters; without
     // this a working tunnel displays 0 B everywhere.
     if !config_json.contains("\"EmitBytesTransferred\"") {
@@ -1518,6 +1532,43 @@ mod tests {
     #[test]
     fn egress_region_rejects_injection_attempts() {
         assert!(inject_egress_region(r#"{}"#, r#"a","X":"b"#).is_err());
+    }
+
+    /// An explicit transport family must survive the server: tunnel-core
+    /// applies tactics parameters after the config values (last map wins),
+    /// so DisableTactics pins the choice the UI spliced in.
+    #[test]
+    fn explicit_transport_pins_protocols_with_disable_tactics() {
+        let cfg = make_config(
+            Some(r#"{"LimitTunnelProtocols":["QUIC-OSSH"]}"#),
+            Some("/tmp/psi"),
+        );
+        let local: serde_json::Value =
+            serde_json::from_str(&validate(&cfg).unwrap().config_json).unwrap();
+        assert_eq!(local["DisableTactics"], true);
+        assert_eq!(local["LimitTunnelProtocols"][0], "QUIC-OSSH");
+    }
+
+    #[test]
+    fn auto_transport_keeps_tactics_enabled() {
+        let cfg = make_config(Some("{}"), Some("/tmp/psi"));
+        let local: serde_json::Value =
+            serde_json::from_str(&validate(&cfg).unwrap().config_json).unwrap();
+        assert!(local.get("DisableTactics").is_none());
+        assert!(local.get("LimitTunnelProtocols").is_none());
+    }
+
+    /// A caller that deliberately sets DisableTactics (even to false) wins
+    /// over the injection.
+    #[test]
+    fn caller_provided_disable_tactics_is_not_overwritten() {
+        let cfg = make_config(
+            Some(r#"{"LimitTunnelProtocols":["OSSH"],"DisableTactics":false}"#),
+            Some("/tmp/psi"),
+        );
+        let local: serde_json::Value =
+            serde_json::from_str(&validate(&cfg).unwrap().config_json).unwrap();
+        assert_eq!(local["DisableTactics"], false);
     }
 
     #[test]

@@ -124,11 +124,9 @@ pub fn snapshot() -> UpdateSnapshot {
 
 fn status_for(r: &UpdateResult) -> String {
     if r.update_available {
-        if r.is_prerelease {
-            format!("Pre-release available: {}", r.latest_version)
-        } else {
-            format!("Update available: {}", r.latest_version)
-        }
+        // One label for both channels: the UI advertises "Update available:
+        // <version>" whether the target is a release or a pre-release.
+        format!("Update available: {}", r.latest_version)
     } else {
         format!("Up to date ({})", r.current_version)
     }
@@ -201,7 +199,7 @@ pub fn check_async(current_version: String, include_prereleases: bool) {
         s.status = "Checking for updates…".into();
     }
 
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("fcae-update".into())
         .spawn(move || {
             // The fetcher is async and needs a reactor; this is a plain worker
@@ -217,8 +215,13 @@ pub fn check_async(current_version: String, include_prereleases: bool) {
             })();
             finish(outcome);
             RUNNING.store(false, AtomicOrdering::SeqCst);
-        })
-        .ok();
+        });
+    if spawned.is_err() {
+        // A leaked RUNNING would silently swallow every future check; report
+        // the failure through the normal state machine instead.
+        finish(Err("failed to spawn the update thread".into()));
+        RUNNING.store(false, AtomicOrdering::SeqCst);
+    }
 }
 
 /// Evaluate a manifest the host already fetched (Android does its HTTP in
@@ -531,7 +534,9 @@ mod tests {
         let raw = format!("ab\0cd{}", "x".repeat(500));
         let out = raw_excerpt(&raw);
         assert!(!out.contains('\0'));
-        assert!(out.len() <= RAW_EXCERPT_MAX + 1);
+        // The cap is in chars; the trailer '…' is three UTF-8 bytes, so a
+        // byte-length bound would be off by two.
+        assert!(out.chars().count() <= RAW_EXCERPT_MAX + 1);
         assert!(out.ends_with('…'));
     }
 }

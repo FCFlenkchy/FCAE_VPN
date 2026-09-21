@@ -1014,6 +1014,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 org.json.JSONArray a = new org.json.JSONArray();
                 for (String pr : protocols) a.put(pr);
                 o.put("LimitTunnelProtocols", a);
+                // An explicit transport choice must beat server agility:
+                // tunnel-core applies the tactics payload AFTER the config
+                // values and the last map wins, so production tactics
+                // carrying LimitTunnelProtocols silently replaced the
+                // spinner's pick — the option appeared to do nothing.
+                // DisableTactics skips tactics requests and parameter
+                // application; Auto leaves tactics fully enabled.
+                o.put("DisableTactics", true);
             }
             File root = new File(getFilesDir(), "psiphon");
             if (!root.exists() && !root.mkdirs()) {

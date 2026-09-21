@@ -43,7 +43,6 @@ static char s_update_latest[32] = {};
 static char s_update_notes[1024] = {};
 static char s_update_dl_url[512] = {};
 static bool s_update_popup_open = false;
-static bool s_update_is_pre = false;      // offered update is a pre-release
 static char s_update_date[32] = {};
 static std::chrono::steady_clock::time_point s_check_start_time = std::chrono::steady_clock::now();
 static bool s_update_in_progress = false;
@@ -179,7 +178,6 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, s_update_latest);
     h = fnv_cstr(h, s_update_notes);
     h = fnv_cstr(h, s_update_dl_url);
-    h = fnv_value(h, s_update_is_pre);
     return h;
 }
 
@@ -1354,7 +1352,6 @@ void render_ui() {
         // The render gate watches this so the "Checking... (Ns)" counter keeps
         // ticking (1 Hz) even when the user is not touching the window.
         s_update_in_progress = info.check_in_progress;
-        s_update_is_pre = info.is_prerelease;
         snprintf(s_update_date, sizeof(s_update_date), "%s", info.release_date);
 
         if (info.check_in_progress) {
@@ -1388,7 +1385,7 @@ void render_ui() {
 
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
-                const char* label = info.is_prerelease ? "Pre-release Available!" : "Update Available!";
+                const char* label = "Update Available!";
                 if (ImGui::Button(label, ImVec2(btn_width, 34))) {
                     s_update_popup_open = true;
                 }
@@ -1435,16 +1432,11 @@ void render_ui() {
             }
             if (ImGui::BeginPopupModal("##update_popup", nullptr,
                     ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::Text(s_update_is_pre ? "Pre-release Available" : "Update Available");
-                if (s_update_is_pre) {
-                    ImGui::SameLine(0, 8);
-                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.20f, 1.0f), "BETA");
-                }
+                ImGui::Text("Update Available");
                 ImGui::Spacing();
                 ImGui::Text("Current: %s  (%s)", FCAE_VERSION,
                             build_is_prerelease() ? "pre-release" : "release");
-                ImGui::Text("Latest:  %s%s", s_update_latest,
-                            s_update_is_pre ? "  (pre-release)" : "  (release)");
+                ImGui::Text("Latest:  %s", s_update_latest);
                 if (s_update_date[0]) {
                     ImGui::Text("Date: %s", s_update_date);
                 }
@@ -2105,7 +2097,20 @@ void render_ui() {
             ImGui::SameLine(0, 12);
             ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
             ImGui::SameLine(0, 20);
-            ImGui::Checkbox("Also check for pre-releases", &g_app.check_prereleases);
+            if (ImGui::Checkbox("Also check for pre-releases", &g_app.check_prereleases)) {
+                // Channel change takes effect immediately, like the Android
+                // switch: without a re-check the panel keeps serving the
+                // previous channel's cached result, and while an update is
+                // available the "Check for Updates" button is replaced by the
+                // result button — there would be no way to re-check without
+                // a restart.
+                if (!s_update_in_progress) {
+                    fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
+                    s_update_checked = false;
+                    s_update_available = false;
+                    s_check_start_time = std::chrono::steady_clock::now();
+                }
+            }
             ImGui::SameLine(0, 12);
             if (ImGui::Button("Clear")) {
                 g_app.clear_logs();

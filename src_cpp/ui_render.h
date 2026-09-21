@@ -146,11 +146,10 @@ struct AppState {
     bool logging_enabled = true;
     bool auto_update_check  = true;
     // Update channel: off = stable slot only; on = pre-releases also compete
-    // (engine picks the higher of the two). Default off.
+    // (engine picks the higher of the two). Default off. Toggling the Logs-tab
+    // checkbox re-runs the check immediately with the new value; the saved
+    // config is what the startup auto-check uses.
     bool check_prereleases  = false;
-    // NOTE: there is no pre-release update channel. Update checks always pass
-    // include_prereleases=false (ui_render.cpp), so only stable releases are
-    // ever advertised. The old "Include pre-releases" toggle was removed.
     char save_status[128] = {};
     char copy_status[64] = {};
 

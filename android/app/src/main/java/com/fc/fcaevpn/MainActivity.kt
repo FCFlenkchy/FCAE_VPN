@@ -1897,7 +1897,7 @@ class MainActivity : AppCompatActivity() {
                 handler.post {
                     btnCheckUpdates.isEnabled = true
                     if (info.updateAvailable) {
-                        btnCheckUpdates.text = if (info.isPrerelease) "Pre-release!" else "Update Available!"
+                        btnCheckUpdates.text = "Update Available!"
                         btnCheckUpdates.setTextColor(COLOR_UPDATE_AVAILABLE)
                         updateStatus.text = info.statusMessage
                         // Don't auto-show dialog — just update the button.
@@ -1929,7 +1929,7 @@ class MainActivity : AppCompatActivity() {
     private fun showUpdateDialog(info: FcaeUpdateInfo) {
         val msg = buildString {
             append("Current: $displayVersion  (${if (buildIsPrerelease) "pre-release" else "release"})\n")
-            append("Latest: ${info.latestVersion}  (${if (info.isPrerelease) "pre-release" else "release"})\n")
+            append("Latest: ${info.latestVersion}\n")
             if (info.releaseDate.isNotEmpty()) append("Date: ${info.releaseDate}\n")
             append("\n")
             if (info.releaseNotes.isNotEmpty()) {
