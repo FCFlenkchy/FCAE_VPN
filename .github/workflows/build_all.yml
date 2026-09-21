@@ -250,6 +250,7 @@ jobs:
             tar -xJf /tmp/zig.tar.xz -C "$PREFIX" --strip-components=1
           fi
           echo "$PREFIX" >> "$GITHUB_PATH"
+          export PATH="$PREFIX:$PATH"
           zig version
 
       - name: build zeptun (v7a)
