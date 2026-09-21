@@ -187,12 +187,13 @@ static bool ui_stats_live() {
     return g_app.ffi_state.load() != FCAE_STATE_DISCONNECTED || g_app.start_busy.load();
 }
 
-/// Pull telemetry from the FFI when due: 4 Hz while the engine is live (so the
-/// counters feel live), 1 Hz when everything is idle. Throttled by
-/// g_app.last_telem_t, so the in-frame poll and this one never double-poll
-/// (rates() consumes a sampling window).
+/// Pull telemetry from the FFI when due: once per second, matching the
+/// engine's 1 s rate window — the published rates are bytes-per-second
+/// measured over exactly that window, so faster polling would only repaint
+/// the same numbers. Throttled by g_app.last_telem_t, so the in-frame poll
+/// and this one never double-poll.
 static void ui_poll_telemetry(double now) {
-    const double interval = ui_stats_live() ? 0.25 : 1.0;
+    const double interval = 1.0;
     const bool stop_refresh = g_app.ffi_state.load() == FCAE_STATE_DISCONNECTED
                             && g_app.telem.state != FCAE_STATE_DISCONNECTED;
     if (!stop_refresh && now - g_app.last_telem_t < interval) return;
@@ -251,7 +252,7 @@ unsigned ui_sleep_ms() {
     if (s_busy_anim) return 16;              // connect spinner: keep it smooth
     if (s_update_in_progress) return 250;    // "Checking... (Ns)" counter
     if (s_text_input) return 250;            // caret blink in a focused field
-    if (ui_stats_live()) return 250;         // counter/state changes (4 Hz poll)
+    if (ui_stats_live()) return 1000;        // counters/state refresh once a second
     return 1000;                             // idle: poll the engine once a second
 }
 
@@ -1066,10 +1067,17 @@ void render_ui() {
         ImGui::Text("|");
         ImGui::PopStyleColor();
         ImGui::SameLine(0, 10);
+        bool tun_paused = false;
+        try { tun_paused = fcae_tun_paused(); } catch (...) {}
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
         // If errored and we have an error message, show it instead of just "ERROR"
         if (errored && telem.last_error[0]) {
             ImGui::Text("ERROR: %s", telem.last_error);
+        } else if (tun_paused) {
+            // Parity with Android's STOPPED: the STOP button halts the TUN
+            // data flow, not the session — the traffic counters below keep
+            // showing this session's totals while stopped.
+            ImGui::TextColored(ImVec4(0.54f, 0.58f, 0.65f, 1.0f), "STOPPED");
         } else {
             ImGui::Text("%s", state_label(cur));
         }
@@ -1090,8 +1098,6 @@ void render_ui() {
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(btn.x - 0.05f, btn.y - 0.05f, btn.z - 0.05f, 1.0f));
 
         float btn_w = narrow ? (ImGui::GetContentRegionAvail().x - 72.0f) : 140.0f;
-        bool tun_paused = false;
-        try { tun_paused = fcae_tun_paused(); } catch (...) {}
         bool show_disconnect = connected || busy || tun_paused;
         if (ImGui::Button(show_disconnect ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 34))) {
             if (connected || busy || errored || tun_paused) {

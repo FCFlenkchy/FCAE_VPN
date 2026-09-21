@@ -1267,7 +1267,7 @@ mod ffi {
     }
 
     /// Live counters for the telemetry pump: cumulative totals plus a naive
-    /// bytes/sec rate between successive polls (~500 ms apart).
+    /// bytes/sec rate between successive polls (1 s apart).
     pub(super) fn counters() -> fcae_runtime::backend::Counters {
         refresh_rtt();
         let (up, down) = bytes();
@@ -1392,7 +1392,7 @@ mod counters_state {
         if prev_ms == 0 {
             return (up, down, 0, 0);
         }
-        // bytes/sec between successive samples (~500 ms apart), computed in
+        // bytes/sec between successive samples (1 s apart), computed in
         // milliseconds so a fast pump does not collapse to 0/1. Saturating
         // end to end: a restarted shim resets its counters to 0 and the
         // deltas must clamp instead of wrapping.

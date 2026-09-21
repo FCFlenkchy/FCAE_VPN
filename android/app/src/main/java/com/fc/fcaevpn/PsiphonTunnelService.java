@@ -1491,7 +1491,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     /**
      * While the tunnel is up, publishes byte rates, cumulative totals and
-     * tunnel RTT every 2 s as BROADCAST_STATS. RTT is one HTTP round trip
+     * tunnel RTT every 1 s as BROADCAST_STATS — the same cadence (and rate
+     * window) as the native telemetry pump, so the notification and the
+     * Psiphon-only UI refresh their bytes/s once per second everywhere. RTT is one HTTP round trip
      * through Psiphon's own local proxy (absolute-URI HEAD against Google's
      * generate_204 edge), so it measures the actual tunnel latency to the
      * internet — the engine's RTT field is not available on this path.
@@ -1507,7 +1509,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             long nextRttProbeAt = 0L;
             while (psiphonUp && !stopping) {
                 try {
-                    Thread.sleep(2000L);
+                    Thread.sleep(1000L);
                 } catch (InterruptedException ie) {
                     return;
                 }

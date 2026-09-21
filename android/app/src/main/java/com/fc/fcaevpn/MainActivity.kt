@@ -415,7 +415,7 @@ class MainActivity : AppCompatActivity() {
         override fun run() {
             if (!vpnActive) return
             if (!pollBusy.compareAndSet(false, true)) {
-                handler.postDelayed(this, currentPollInterval())
+                handler.postDelayed(this, POLL_INTERVAL_MS)
                 return
             }
             bgExecutor.execute {
@@ -445,12 +445,6 @@ class MainActivity : AppCompatActivity() {
                     val errMsg = NativeEngine.nativeGetLastError()
                     val logs = if (switchLogging.isChecked) NativeEngine.nativeGetLogs() else ""
 
-                    if (rx == 0L && tx == 0L) {
-                        idleTicks++
-                    } else {
-                        idleTicks = 0
-                    }
-
                     handler.post { applyStatus(state, rtt, rx, tx, totalRx, totalTx, peer, lan, statusMsg, errMsg, logs) }
                 } catch (e: Throwable) {
                     handler.post {
@@ -460,16 +454,8 @@ class MainActivity : AppCompatActivity() {
                     pollBusy.set(false)
                 }
             }
-            handler.postDelayed(this, currentPollInterval())
+            handler.postDelayed(this, POLL_INTERVAL_MS)
         }
-    }
-
-    private var idleTicks = 0
-
-    private fun currentPollInterval(): Long {
-        // After 5 idle ticks at 1s, switch to 2s to reduce JNI overhead.
-        // Resets to 1s as soon as traffic resumes.
-        return if (idleTicks >= 5) 2000L else POLL_INTERVAL_MS
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

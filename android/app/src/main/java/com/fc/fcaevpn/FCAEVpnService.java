@@ -1426,7 +1426,25 @@ public class FCAEVpnService extends VpnService {
         if (uiConnecting) {
             notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
         } else if (vpnPaused) {
-            notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_PAUSED);
+            // STOP halts the TUN data flow, not the counters: keep the
+            // session's byte totals on the notification with the rates at
+            // zero instead of zeroing the display. A live Psiphon exit keeps
+            // its own counters (that tunnel stays up underneath the pause).
+            if (PsiphonTunnelService.hasActiveBinding() && lastPsiphonStats != null
+                    && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
+                notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats),
+                        VpnNotification.BUTTONS_PAUSED);
+            } else {
+                long totalRx = 0, totalTx = 0;
+                try {
+                    long[] stats = nativeGetTrafficStats();
+                    if (stats != null && stats.length >= 4) {
+                        totalRx = stats[2]; totalTx = stats[3];
+                    }
+                } catch (Exception ignored) {}
+                notification.show(VpnNotification.trafficText(0, 0, totalRx, totalTx),
+                        VpnNotification.BUTTONS_PAUSED);
+            }
         } else if (running) {
             if (PsiphonTunnelService.hasActiveBinding() && lastPsiphonStats != null
                     && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {

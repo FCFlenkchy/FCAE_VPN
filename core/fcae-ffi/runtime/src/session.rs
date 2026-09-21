@@ -721,9 +721,14 @@ async fn backoff(cancel: &CancelToken, attempt: u32) -> std::ops::ControlFlow<()
     }
 }
 
-/// Never returns; sampled by the `select!` above.
+/// Never returns; sampled by the `select!` above. The 1 s cadence is the
+/// rate window: both the Aether window-swap and the Psiphon delta sampler
+/// divide accumulated bytes by the real elapsed time, so this tick is what
+/// makes the published rates a true bytes-per-second — and it matches the
+/// 1 s refresh of every UI surface (desktop window, Android UI, and both
+/// notification tickers).
 async fn pump_counters(handle: &dyn BackendHandle, sink: &TelemetrySink) {
-    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tick.tick().await;
         sink.set_counters(handle.counters());
