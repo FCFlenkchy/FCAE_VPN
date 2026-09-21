@@ -14,7 +14,8 @@ public class VpnNotification {
     public static final String CHANNEL_ID = "fcaevpn_service_hi";
     public static final int NOTIFICATION_ID = 1;
 
-    /** Connecting / establishing: Disconnect cancels. */
+    /** Connecting / establishing: the full running controls — Stop cancels
+        the dial and leaves the session resumable. */
     public static final int BUTTONS_CONNECTING = 0;
     /** Tunnel up: Disconnect (kill) + Stop (pause, keep process). */
     public static final int BUTTONS_RUNNING = 1;
@@ -80,17 +81,17 @@ public class VpnNotification {
         // Notification actions are the command source of truth. The app UI
         // follows whatever these send into FCAEVpnService.
         switch (buttons) {
-            case BUTTONS_RUNNING:
-                nb.addAction(disconnectAction);
-                nb.addAction(stopAction);
-                break;
             case BUTTONS_PAUSED:
                 nb.addAction(disconnectAction);
                 nb.addAction(startAction);
                 break;
+            // Connecting shows the same controls as running, so the button
+            // set never appears incomplete while a dial is in flight.
             case BUTTONS_CONNECTING:
+            case BUTTONS_RUNNING:
             default:
                 nb.addAction(disconnectAction);
+                nb.addAction(stopAction);
                 break;
         }
 

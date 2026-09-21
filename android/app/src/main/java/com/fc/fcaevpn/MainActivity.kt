@@ -284,7 +284,7 @@ class MainActivity : AppCompatActivity() {
                         engineRunning = true
                         vpnActive = true
                         updateButton()
-                        statusText.text = if (isTunModeSelected()) "ESTABLISHING TUNNEL" else "CONNECTED - PROXY"
+                        statusText.text = if (isTunModeSelected()) "CONNECTING" else "CONNECTED - PROXY"
                         statusText.setTextColor(COLOR_CONNECTED)
                         // Surface psiphon's actual proxy endpoints here too —
                         // pure-psiphon mode never polls the engine, so this
@@ -365,14 +365,11 @@ class MainActivity : AppCompatActivity() {
                             engineRunning = true
                             vpnActive = true
                             // Psiphon paths: keep commandConnecting true until
-                            // BROADCAST_READY fires so the staged labels
-                            // (CONNECTING / ESTABLISHING TUNNEL) continue to
-                            // display. Clearing it here caused the engine's
-                            // Connected broadcast to flip the UI to
+                            // BROADCAST_READY fires, so the status keeps
+                            // showing CONNECTING. Clearing it here caused the
+                            // engine's Connected broadcast to flip the UI to
                             // "CONNECTED - TUN" before Psiphon had actually
-                            // finished its handshake — the visible "hole"
-                            // between the connecting stages and the final
-                            // ESTABLISHING TUNNEL from BROADCAST_READY.
+                            // finished its handshake.
                             if (!(isPsiphonSelected() || isEgressPsiphon())
                                     || pendingPsiSocks != 0) {
                                 commandConnecting = false
@@ -2087,9 +2084,6 @@ class MainActivity : AppCompatActivity() {
             // SOCKS endpoint is live, but on a Psiphon path the egress tunnel
             // is still dialling. Keep showing the chain progress instead of
             // prematurely flipping to "CONNECTED — ...".
-            // Also fix flicker: previously poll showed "CONNECTING — ESTABLISHING TUNNEL"
-            // while stage broadcast showed "ESTABLISHING TUNNEL", causing rapid flip.
-            // Now Psiphon paths show stable ESTABLISHING label without CONNECTING prefix.
             val isPsiphonPath = isPsiphonSelected() || isEgressPsiphon()
             val psiphonStillChaining = state == 4
                     && isPsiphonPath
@@ -2109,16 +2103,11 @@ class MainActivity : AppCompatActivity() {
             }
             if (state == 5 && errMsg.isNotEmpty()) {
                 statusText.text = "ERROR: $errMsg"
-            } else if (state == 4 && !psiphonStillChaining) {
-                statusText.text = label
             } else {
-                // For Psiphon connecting, avoid "CONNECTING — ESTABLISHING TUNNEL" flicker
-                // by showing just the establishing label
-                if (isPsiphonPath && (state in 1..3 || psiphonStillChaining) && commandConnecting) {
-                    statusText.text = label
-                } else {
-                    statusText.text = if (statusMsg.isNotEmpty() && state != 0 && !psiphonStillChaining && !isPsiphonPath) "$label \u2014 $statusMsg" else label
-                }
+                // Just the state word — "CONNECTING" for every backend and
+                // mode while a dial is in flight, matching the desktop UI
+                // and the Psiphon paths: no staged sub-messages appended.
+                statusText.text = label
             }
             statusText.setTextColor(
                 when {

@@ -387,17 +387,17 @@ public class ProxyNotification extends Service {
             .setStyle(new Notification.BigTextStyle().bigText(text));
 
         switch (buttons) {
-            case BUTTONS_RUNNING:
-                nb.addAction(disconnectAction);
-                nb.addAction(stopAction);
-                break;
             case BUTTONS_PAUSED:
                 nb.addAction(disconnectAction);
                 nb.addAction(startAction);
                 break;
+            // Connecting shows the same controls as running, so the button
+            // set never appears incomplete while a dial is in flight.
             case BUTTONS_CONNECTING:
+            case BUTTONS_RUNNING:
             default:
                 nb.addAction(disconnectAction);
+                nb.addAction(stopAction);
                 break;
         }
 

@@ -554,6 +554,15 @@ public class FCAEVpnService extends VpnService {
         ProxyNotification.clearLegacyPsiphonNotification(this);
         instance = this;
 
+        // The status notification must not wait for the native libraries
+        // below: post it the moment the service spawns so a connect click
+        // surfaces it immediately. This also satisfies the
+        // startForegroundService obligation for every command the UI sends
+        // (including region refreshes).
+        notification = new VpnNotification(this);
+        startFg(notification.build(VpnNotification.zeroTrafficText(),
+                VpnNotification.BUTTONS_RUNNING));
+
         // Force the native libraries to load before calling ANY native method
         // on this class.
         //
@@ -576,7 +585,6 @@ public class FCAEVpnService extends VpnService {
         }
 
         handler = new Handler(Looper.getMainLooper());
-        notification = new VpnNotification(this);
         android.content.IntentFilter psiphonFilter = new android.content.IntentFilter();
         psiphonFilter.addAction(PsiphonTunnelService.BROADCAST_READY);
         psiphonFilter.addAction(PsiphonTunnelService.BROADCAST_STATS);
@@ -615,6 +623,16 @@ public class FCAEVpnService extends VpnService {
                     PsiphonTunnelService.startBound(this,
                             new Intent(this, PsiphonTunnelService.class)
                                     .setAction(PsiphonTunnelService.ACTION_REGIONS));
+                    // onCreate's foreground post satisfied the
+                    // startForegroundService obligation; with nothing to
+                    // show, drop it instead of leaving a zeroed status
+                    // notification behind.
+                    if (!running && !uiConnecting && vpnThread == null
+                            && !vpnPaused && !engineOpInFlight) {
+                        notification.dismiss();
+                        stopForeground(STOP_FOREGROUND_REMOVE);
+                        stopSelf();
+                    }
                     return START_STICKY;
 
                 case ACTION_START:

@@ -1584,7 +1584,10 @@ void render_ui() {
                 rtt_buf,
                 g_app.mode == 0 ? "Proxy" : "TUN");
         }
-        if (telem.status_message[0]) {
+        // The state line owns the connect phase ("CONNECTING", nothing
+        // else — same as the Psiphon paths and the Android UI); the
+        // engine's sub-message is connected-state telemetry only.
+        if (telem.status_message[0] && telem.state == FCAE_STATE_CONNECTED) {
             ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.60f, 1.0f), "%s", telem.status_message);
         }
     }
