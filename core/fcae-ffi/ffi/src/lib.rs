@@ -685,13 +685,37 @@ pub extern "C" fn fcae_set_tun_fd_provider(
 }
 
 /// True if the process can create a TUN device (admin/root).
+///
+/// 1.3.5.4 PATCH: previously the check only consulted the tun2socks bridge
+/// (and returned `false` outright on builds without the `tun` feature). On a
+/// Windows release built with only `zeptun` or `hev`, this caused the C++
+/// frontend to skip its UAC elevation prompt even though the chosen engine
+/// still requires admin to raise the Wintun adapter. The host saw "CONNECT"
+/// start the engine, the bridge then refused to create the device, and the
+/// session went ERROR with no obvious cause -- the exact symptom in
+/// FCFlenkchy/FCAE_VPN#8. We now OR the privilege status across every TUN
+/// bridge that is actually linked into this build.
 #[no_mangle]
 pub extern "C" fn fcae_is_privileged() -> bool {
     #[cfg(feature = "tun")]
     {
-        fcae_bridge_tun2socks::platform::is_privileged()
+        if fcae_bridge_tun2socks::platform::is_privileged() {
+            return true;
+        }
     }
-    #[cfg(not(feature = "tun"))]
+    #[cfg(feature = "zeptun")]
+    {
+        if fcae_bridge_zeptun::platform::is_privileged() {
+            return true;
+        }
+    }
+    #[cfg(feature = "hev")]
+    {
+        if fcae_bridge_hev_socks5_tunnel::platform::is_privileged() {
+            return true;
+        }
+    }
+    #[allow(unreachable_code)]
     {
         false
     }

@@ -1082,11 +1082,63 @@ jobs:
             if [ -f "$BIN" ]; then
               echo "Checking dynamic dependencies:"
               ldd "$BIN" 2>/dev/null | grep -v -E 'linux-vdso|ld-linux|libc\.|libm\.|libdl\.|librt\.|libpthread\.|libstdc\+\+\.|libgcc_s\.|libX11\.|libXi\.|libGL\.|libGLX\.|libGLdispatch\.|libxcb\.|libXau\.|libXdmcp\.|libbsd\.|libmd\.' || true
-              printf '%s\n' \
-                '#!/bin/sh' \
-                'DIR="$(cd "$(dirname "$0")" && pwd)"' \
-                'export LD_LIBRARY_PATH="$DIR/lib:$DIR:$LD_LIBRARY_PATH"' \
-                "exec \"\$DIR/$ARTIFACT\" \"\$@\"" > "package/$ARTIFACT.sh"
+              # 1.3.5.4 PATCH: the launcher used to be a four-line wrapper that
+              # trusted the user to have libopengl0 installed. The shipped
+              # binary is built against glvnd and pulls libOpenGL.so.0 by
+              # default; on a minimal install that package is missing and
+              # the binary refuses to start with
+              #   error while loading shared libraries: libOpenGL.so.0
+              # The launcher now probes the loader, falls back to libGL.so.1
+              # (always present alongside libgl1), and prints an actionable
+              # error when even that is missing. CMakeLists.txt picks up the
+              # build-side counterpart that links libGL.so.1 first.
+              cat > "package/$ARTIFACT.sh" <<'FCAE_LAUNCHER_EOF'
+#!/bin/sh
+# FCAE VPN -- Linux launcher (auto-detects missing GLVND dispatch lib).
+set -eu
+DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="$DIR/FCAE_VPN-linux-x64"
+if [ ! -x "$BIN" ]; then
+    echo "FCAE VPN: launcher could not find executable at $BIN" >&2
+    exit 127
+fi
+need_libopengl=0
+if LD_TRACE_LOADED_OBJECTS=1 "$BIN" 2>&1 | grep -q 'libOpenGL\.so\.0 => not found'; then
+    need_libopengl=1
+elif command -v ldd >/dev/null 2>&1; then
+    if ldd "$BIN" 2>&1 | grep -q 'libOpenGL\.so\.0 => not found'; then
+        need_libopengl=1
+    fi
+fi
+if [ "$need_libopengl" = "1" ]; then
+    found=""
+    for c in \
+        /usr/lib/x86_64-linux-gnu/libGL.so.1 \
+        /usr/lib64/libGL.so.1 \
+        /usr/lib/libGL.so.1 \
+        /usr/lib/x86_64-linux-gnu/libGL.so.3 \
+        /usr/lib/x86_64-linux-gnu/libGL.so.0 \
+        /usr/lib/libGL.so.0 \
+        /lib/x86_64-linux-gnu/libGL.so.1; do
+        if [ -f "$c" ]; then found="$c"; break; fi
+    done
+    if [ -n "$found" ]; then
+        export LD_PRELOAD="${found}${LD_PRELOAD:+:$LD_PRELOAD}"
+    else
+        cat >&2 <<'EOF'
+FCAE VPN: requires libOpenGL.so.0 (Khronos GL dispatch). It is missing on this system.
+
+  Debian / Ubuntu :  sudo apt-get install libopengl0
+  Fedora / RHEL   :  sudo dnf install libglvnd-glx libglvnd-opengl
+  Arch Linux      :  sudo pacman -S libglvnd
+  Alpine          :  sudo apk add libglvnd
+EOF
+        exit 127
+    fi
+fi
+export LD_LIBRARY_PATH="$DIR/lib:$DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$BIN" "$@"
+FCAE_LAUNCHER_EOF
               chmod +x "package/$ARTIFACT.sh"
             fi
           fi
@@ -1156,8 +1208,19 @@ jobs:
             NEEDED="$(readelf -d "$SHIPPED" | awk -F'[][]' '/NEEDED/ { print $2 }' | sort -u)"
             echo "$SHIPPED DT_NEEDED:"
             echo "$NEEDED" | sed 's/^/  /'
+            # 1.3.5.4 PATCH: libOpenGL.so.0 was implicitly allowed here
+            # before; with the launcher fallback in place, the build can
+            # still ship with it but the operator-friendly path is to link
+            # against libGL.so.1 directly so minimal installs do not need
+            # libopengl0. Reject any regression that brings libOpenGL.so.0
+            # back into the DT_NEEDED list (CMakeLists.txt chooses the
+            # link target explicitly).
             if echo "$NEEDED" | grep -qiE 'libzeptun|libfcae_psiphon|libhev|libfcae_go_bridge|libglfw|libstdc\+\+|libgcc_s|libz\.so|libbz2|liblzma|libssl|libcrypto'; then
               echo "::error::$SHIPPED links a library that is supposed to be statically linked"
+              exit 1
+            fi
+            if echo "$NEEDED" | grep -q 'libOpenGL\.so'; then
+              echo "::error::$SHIPPED still pulls libOpenGL.so.0; CMakeLists.txt should link libGL.so.1 instead"
               exit 1
             fi
           fi

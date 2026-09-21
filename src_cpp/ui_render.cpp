@@ -15,8 +15,12 @@
 #include <shellapi.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #elif !defined(ANDROID)
+#include <fcntl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -712,8 +716,26 @@ void ui_shutdown() {
     // so the process may exit with nothing left dangling. The wait is capped
     // because the slow tail (a Psiphon controller join) dies with the process
     // anyway, and the kernel cleans that up.
-    fcae_shutdown();
+    FcaeStatus s = fcae_shutdown();
+    if (s != FCAE_OK) {
+        // 1.3.5.4 PATCH: log the failure before forcing termination, otherwise
+        // a misbehaving session worker (e.g. a stuck route restore) hides
+        // the cause entirely -- "FCAE VPN closes and the OS DNS stays broken"
+        // is the resulting support ticket. Not a stderr printf (this runs on
+        // every platform, including GUI subsystem on Windows where no console
+        // is attached); the in-process log is the only thing still alive here.
+        const char* why = fcae_last_error();
+        g_app.add_log(FCAE_LOG_ERROR,
+            why && why[0]
+                ? why
+                : "fcae_shutdown() failed; routes/DNS may need manual restore");
+    }
 #if defined(_WIN32)
+    // ExitProcess is the right call here: a normal `return` would unwind the
+    // GUI thread while background workers are still tearing down, and a
+    // runtime shutdown abort would still leave the ImGui render thread
+    // holding the only strong reference to device resources. Process exit is
+    // the documented contract for this binary.
     ExitProcess(0);
 #endif
 }
@@ -1100,16 +1122,61 @@ void render_ui() {
                     sei.nShow = SW_NORMAL;
                     sei.fMask = SEE_MASK_NOASYNC;
                     if (ShellExecuteExW(&sei)) {
-                        // Successfully launched elevated — close current instance.
+                        // Successfully launched elevated copy — give it a moment
+                        // to take over the launcher slot and surface any UAC
+                        // prompt before we exit. Without this sleep, the
+                        // elevated process can race the parent teardown and
+                        // produce an orphaned elevated instance plus the
+                        // confusing "the app just quit" support report.
+                        // 1.3.5.4 PATCH: also log the relaunch so the user can
+                        // see in the Logs tab which elevated PID is being
+                        // handed off to (and so we leave a breadcrumb when
+                        // the elevated child later fails to bind).
+                        char msg[160];
+                        snprintf(msg, sizeof(msg),
+                            "[ui] TUN mode needs elevation -- relaunching elevated (PID %lu). "
+                            "The non-elevated copy will exit in ~700ms.",
+                            GetProcessId(sei.hProcess));
+                        g_app.add_log(FCAE_LOG_INFO, msg);
+                        snprintf(g_app.save_status, sizeof(g_app.save_status),
+                            "Restarting elevated -- current copy will close");
+                        std::thread([] {
+                            // Hand-off window: enough for UAC to dismiss and
+                            // for the elevated copy to enter its message loop
+                            // before this instance's WM_DESTROY arrives.
+                            Sleep(700);
+                            g_app.running.store(false);
+                            PostQuitMessage(0);
+                        }).detach();
                         ImGui::PopStyleColor(3);  // button colors
                         ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
                         ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
                         ImGui::End();
-                        g_app.running.store(false);
-                        PostQuitMessage(0);
                         return;
                     } else {
-                        g_app.add_log(3, "[ui] TUN mode requires administrator privileges. Please run as Administrator.");
+                        // 1.3.5.4 PATCH: tell the user what happened instead of
+                // leaving them wondering why TUN "doesn't work". The
+                // common cause is the UAC consent dialog being declined,
+                // in which case GetLastError() returns ERROR_CANCELLED.
+                        DWORD err = GetLastError();
+                        const char* why =
+                            err == ERROR_CANCELLED ? "UAC consent was cancelled"
+                            : err == ERROR_ACCESS_DENIED ? "access was denied"
+                            : err == ERROR_FILE_NOT_FOUND ? "the executable path is missing"
+                            : "ShellExecuteExW failed";
+                        char msg[160];
+                        snprintf(msg, sizeof(msg),
+                            "[ui] TUN mode requires Administrator privileges (%s, Win32 error %lu). "
+                            "Click CONNECT again, accept the UAC prompt, or restart FCAE VPN "
+                            "elevated once and the elevated copy will handle every future start.",
+                            why, static_cast<unsigned long>(err));
+                        g_app.add_log(FCAE_LOG_ERROR, msg);
+                        // The status string is shown next to the CONNECT button
+                        // until cleared, so the user gets persistent feedback
+                        // even if the log scrolls.
+                        snprintf(g_app.save_status, sizeof(g_app.save_status),
+                            "TUN needs Admin (error %lu) -- click CONNECT to retry UAC",
+                            static_cast<unsigned long>(err));
                         ImGui::PopStyleColor(3);  // button colors
                         ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
                         ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
@@ -1117,7 +1184,11 @@ void render_ui() {
                         return;
                     }
 #else
-                    g_app.add_log(3, "[ui] TUN mode requires root privileges. Please run with sudo.");
+                    g_app.add_log(FCAE_LOG_ERROR,
+                        "[ui] TUN mode requires root privileges on this platform. "
+                        "Restart the app with sudo (or as Administrator via pkexec/polkit) and try again.");
+                    snprintf(g_app.save_status, sizeof(g_app.save_status),
+                        "TUN needs root -- restart with sudo");
                     ImGui::PopStyleColor(3);  // button colors
                     ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
                     ImGui::PopStyleVar(2);    // window WindowPadding/WindowRounding
@@ -1379,15 +1450,72 @@ void render_ui() {
                     ImGui::Text("Download: %s", s_update_dl_url);
                     ImGui::Spacing();
                     if (ImGui::Button("Open Release Page")) {
+                        // 1.3.5.4 PATCH: defense-in-depth against shell injection.
+                        // The Rust FFI validates the URL prefix is
+                        // https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/<tag>,
+                        // but shell-quote interpolation is fragile (a future
+                        // FFI change, or a tag char we didn't enumerate, would
+                        // become RCE). Use execvp with the URL as a single argv
+                        // entry so the OS handles it as a single argument, and
+                        // add a prefix guard so a regression in the FFI side
+                        // fails closed.
+                        const std::string url = s_update_dl_url;
+                        const bool looks_safe =
+                            url.rfind("https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/", 0) == 0
+                            && url.find('\'') == std::string::npos
+                            && url.find('"') == std::string::npos
+                            && url.find('`') == std::string::npos
+                            && url.find('\\') == std::string::npos
+                            && url.find('\n') == std::string::npos
+                            && url.find('\r') == std::string::npos;
+                        if (!looks_safe) {
+                            g_app.add_log(FCAE_LOG_WARN,
+                                "[ui] refusing to open an update URL with unsafe characters");
+                        } else {
 #if defined(_WIN32)
-                        ShellExecuteA(nullptr, "open", s_update_dl_url, nullptr, nullptr, SW_SHOWNORMAL);
+                            ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 #elif defined(__APPLE__)
-                        std::string cmd = "open '" + std::string(s_update_dl_url) + "'";
-                        if (system(cmd.c_str()) != 0) { /* best-effort, ignore failure */ }
+                            // `open` is itself a binary; pass the URL as argv[1]
+                            // (no shell) so a quote in the URL is harmless.
+                            pid_t pid = fork();
+                            if (pid == 0) {
+                                execlp("open", "open", url.c_str(), static_cast<char*>(nullptr));
+                                _exit(127);
+                            } else if (pid > 0) {
+                                int status = 0;
+                                waitpid(pid, &status, 0);
+                                if (status != 0) {
+                                    g_app.add_log(FCAE_LOG_WARN,
+                                        "[ui] `open` returned a non-zero status; the browser may not have launched");
+                                }
+                            } else {
+                                g_app.add_log(FCAE_LOG_WARN,
+                                    "[ui] could not fork() for `open`; please paste the URL into a browser manually");
+                            }
 #elif !defined(ANDROID)
-                        std::string cmd = "xdg-open '" + std::string(s_update_dl_url) + "' 2>/dev/null";
-                        if (system(cmd.c_str()) != 0) { /* best-effort, ignore failure */ }
+                            pid_t pid = fork();
+                            if (pid == 0) {
+                                // stderr is suppressed so the launch is silent.
+                                int devnull = open("/dev/null", O_WRONLY);
+                                if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+                                execlp("xdg-open", "xdg-open", url.c_str(), static_cast<char*>(nullptr));
+                                _exit(127);
+                            } else if (pid > 0) {
+                                int status = 0;
+                                waitpid(pid, &status, 0);
+                                if (status != 0) {
+                                    g_app.add_log(FCAE_LOG_WARN,
+                                        "[ui] `xdg-open` returned a non-zero status; the URL is now on the clipboard -- paste it into a browser");
+                                    ImGui::SetClipboardText(url.c_str());
+                                }
+                            } else {
+                                g_app.add_log(FCAE_LOG_WARN,
+                                    "[ui] could not fork() for `xdg-open`; please paste the URL into a browser manually");
+                            }
+#else
+                            (void)url;
 #endif
+                        }
                     }
                 }
                 ImGui::SameLine();

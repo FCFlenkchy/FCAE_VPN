@@ -576,7 +576,38 @@ elseif(UNIX)
     if(NOT glfw3_FOUND AND NOT GLFW_FOUND)
         message(FATAL_ERROR "GLFW 3.3+ not found. Install glfw3-dev or set CMAKE_PREFIX_PATH")
     endif()
+    # 1.3.5.4 PATCH: prefer the concrete GL implementation (libGL.so.1)
+    # over the Khronos dispatcher (libOpenGL.so.0). On every glvnd-enabled
+    # distro libGL.so.1 is a hard dependency of libgl1, while libOpenGL.so.0
+    # only ships in the optional `libopengl0` package -- so pinning libGL.so.1
+    # makes the released binary launch on minimal / server installs where
+    # the prior build refused to start with
+    #   error while loading shared libraries: libOpenGL.so.0
+    # We still pass OpenGL::GL on macOS where libGL.so.1 is the only choice.
     find_package(OpenGL REQUIRED)
+    set(FCAE_GL_LIB OpenGL::GL)
+    if(NOT APPLE)
+        # Concrete path for libGL.so.1 (always present with libgl1); the
+        # CMake `OpenGL::GL` imported target on glvnd setups emits a DT_NEEDED
+        # for libOpenGL.so.0 instead, which is a hard failure on minimal
+        # installs. Fall back to the imported target only when we genuinely
+        # cannot locate libGL.so.1.
+        set(_fcae_gl_paths)
+        foreach(_lib_name IN ITEMS libGL.so.1 libGL.so.3 libGL.so.0)
+            find_library(_fcae_gl_lib_${_lib_name} NAMES ${_lib_name}
+                PATHS /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /lib/x86_64-linux-gnu
+                NO_DEFAULT_PATH)
+            if(_fcae_gl_lib_${_lib_name})
+                list(APPEND _fcae_gl_paths "${_fcae_gl_lib_${_lib_name}}")
+            endif()
+        endforeach()
+        if(_fcae_gl_paths)
+            list(GET _fcae_gl_paths 0 FCAE_GL_LIB)
+            message(STATUS "OpenGL library for Linux: ${FCAE_GL_LIB} (avoids libOpenGL.so.0 dep)")
+        else()
+            message(WARNING "Could not locate libGL.so.1; using OpenGL::GL (may require libopengl0 at runtime)")
+        endif()
+    endif()
     find_package(X11 REQUIRED)
 
     add_executable(fcaevpn
@@ -620,7 +651,7 @@ elseif(UNIX)
     # Compression libs link statically. X11/GL stay dynamic (driver dispatch
     # through dlopen), as do glibc and its NSS plugins.
     target_link_libraries(fcaevpn PRIVATE
-        OpenGL::GL X11::X11 X11::Xi pthread dl m
+        ${FCAE_GL_LIB} X11::X11 X11::Xi pthread dl m
         -Wl,-Bstatic z bz2 lzma -Wl,-Bdynamic
         # libresolv: the Go runtime in libfcae_ffi.a resolves names through it.
         resolv

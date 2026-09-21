@@ -74,6 +74,12 @@ pub fn is_supported() -> bool {
     engine::is_supported()
 }
 
+/// 1.3.5.4 PATCH: re-export the platform privilege probe so the FFI layer's
+/// `fcae_is_privileged()` covers hev-only builds too.
+pub fn is_privileged() -> bool {
+    platform::is_privileged()
+}
+
 /// Traffic statistics from the engine.
 ///
 /// The in-process backend reads the engine's counters directly, on every
