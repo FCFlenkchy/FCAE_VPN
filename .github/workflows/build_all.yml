@@ -1127,7 +1127,7 @@ jobs:
               else
                   cat >&2 <<'EOF'
           FCAE VPN: requires libOpenGL.so.0 (Khronos GL dispatch). It is missing on this system.
-          
+
             Debian / Ubuntu :  sudo apt-get install libopengl0
             Fedora / RHEL   :  sudo dnf install libglvnd-glx libglvnd-opengl
             Arch Linux      :  sudo pacman -S libglvnd
