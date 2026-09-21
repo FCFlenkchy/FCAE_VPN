@@ -298,6 +298,22 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
+      - name: patch hev bridge for android (platform module)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          p = "core/fcae-ffi/bridges/hev-socks5-tunnel/src/lib.rs"
+          s = open(p, encoding="utf-8").read()
+          stub = "\n#[cfg(not(windows))]\nmod platform {\n    pub fn is_privileged() -> bool {\n        true\n    }\n}\n"
+          if "#[cfg(not(windows))]\nmod platform" not in s:
+              new, n = re.subn(r"(#\[cfg\(windows\)\]\s*mod platform;)", lambda m: m.group(1) + stub, s, count=1)
+              if n != 1:
+                  raise SystemExit("pattern not found in lib.rs")
+              open(p, "w", encoding="utf-8").write(new)
+          print("patched")
+          PY
+
       - name: build rust (v7a only)
         run: |
           set -euo pipefail
