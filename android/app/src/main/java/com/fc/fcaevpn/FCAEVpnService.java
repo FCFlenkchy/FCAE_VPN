@@ -119,7 +119,6 @@ public class FCAEVpnService extends VpnService {
     private Intent lastStartIntent;
     private VpnNotification notification;
     private Handler handler;
-    private String lastNotifText = null;
 
     private final Object cmdLock = new Object();
     private volatile boolean engineOpInFlight = false;
@@ -702,8 +701,8 @@ public class FCAEVpnService extends VpnService {
                     queuedStart = lastStartIntent;
                     Log.i(TAG, "Start queued until TUN pause finishes");
                     uiConnecting = true;
-                    notification.show("FCAE VPN — Starting…", VpnNotification.BUTTONS_CONNECTING);
-                    startFg(notification.build("FCAE VPN — Starting…", VpnNotification.BUTTONS_CONNECTING));
+                    notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
+                    startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
                     notifyUi();
                     return;
                 }
@@ -719,8 +718,8 @@ public class FCAEVpnService extends VpnService {
                 queuedStart = lastStartIntent;
                 Log.i(TAG, "Start queued until current stop finishes");
                 uiConnecting = true;
-                notification.show("FCAE VPN — Starting after stop…", VpnNotification.BUTTONS_CONNECTING);
-                startFg(notification.build("FCAE VPN — Starting after stop…", VpnNotification.BUTTONS_CONNECTING));
+                notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
+                startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
                 notifyUi();
                 return;
             }
@@ -731,8 +730,8 @@ public class FCAEVpnService extends VpnService {
 
     private void showReady() {
         uiConnecting = false;
-        notification.show("FCAE VPN — Ready (tap Connect in app)", VpnNotification.BUTTONS_PAUSED);
-        startFg(notification.build("FCAE VPN — Ready (tap Connect in app)", VpnNotification.BUTTONS_PAUSED));
+        notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_PAUSED);
+        startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_PAUSED));
     }
 
     private synchronized void finishEngineOp() {
@@ -791,8 +790,8 @@ public class FCAEVpnService extends VpnService {
                 intent.getIntExtra("tunMtu", 1500)));
         pendingSessionGen = cleanupGeneration.incrementAndGet();
         earlyPsiphonTun = true;
-        notification.show("FCAE VPN — Connecting...", VpnNotification.BUTTONS_CONNECTING);
-        startFg(notification.build("FCAE VPN — Connecting...", VpnNotification.BUTTONS_CONNECTING));
+        notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
+        startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
         // No notifyUi() here on purpose: the connecting broadcast starts
         // MainActivity's engine poll, and no engine exists yet — the poll
         // would read state 0 and flash DISCONNECTED for the whole dial.
@@ -832,8 +831,8 @@ public class FCAEVpnService extends VpnService {
         }
 
         rememberStart(intent);
-        notification.show("FCAE VPN — Connecting...", VpnNotification.BUTTONS_CONNECTING);
-        startFg(notification.build("FCAE VPN — Connecting...", VpnNotification.BUTTONS_CONNECTING));
+        notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
+        startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
         notifyUi();
 
         final int protocol    = intent.getIntExtra("protocol", 0);
@@ -1043,7 +1042,6 @@ public class FCAEVpnService extends VpnService {
                         running = true;
                         uiConnecting = false;
                         synchronized (cmdLock) { engineOpInFlight = false; }
-                        lastNotifText = null;
                         updateNotification();
                         handler.post(statsRunnable);
                         notifyUi();
@@ -1282,8 +1280,8 @@ public class FCAEVpnService extends VpnService {
         shuttingDown = false;
         uiConnecting = true;
         pendingSessionGen = cleanupGeneration.get();
-        notification.show("FCAE VPN — Starting…", VpnNotification.BUTTONS_CONNECTING);
-        startFg(notification.build("FCAE VPN — Starting…", VpnNotification.BUTTONS_CONNECTING));
+        notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
+        startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
         notifyUi();
 
         final Intent fallback = lastStartIntent;
@@ -1337,7 +1335,6 @@ public class FCAEVpnService extends VpnService {
                     vpnPaused = false;
                     uiConnecting = false;
                     synchronized (cmdLock) { engineOpInFlight = false; }
-                    lastNotifText = null;
                     updateNotification();
                     handler.post(statsRunnable);
                     notifyUi();
@@ -1402,21 +1399,21 @@ public class FCAEVpnService extends VpnService {
         }
     };
 
+    // The notification text is byte flow only — no state words — so it is
+    // identical for Psiphon exits and plain Aether protocols. Re-posts every
+    // call on purpose: the :psiphon foreground service shares this
+    // notification id while its tunnel (re)dials, and the next tick must
+    // always restore the owner's content.
     private void updateNotification() {
         if (uiConnecting) {
-            lastNotifText = null;
-            notification.show("FCAE VPN — Connecting...", VpnNotification.BUTTONS_CONNECTING);
+            notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
         } else if (vpnPaused) {
-            lastNotifText = null;
-            notification.show("FCAE VPN — Stopped (tap Start to resume)", VpnNotification.BUTTONS_PAUSED);
+            notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_PAUSED);
         } else if (running) {
             if (PsiphonTunnelService.hasActiveBinding() && lastPsiphonStats != null
                     && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
-                String text = ProxyNotification.psiphonTrafficText(lastPsiphonStats);
-                if (!text.equals(lastNotifText)) {
-                    lastNotifText = text;
-                    notification.show(text, VpnNotification.BUTTONS_RUNNING);
-                }
+                notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats),
+                        VpnNotification.BUTTONS_RUNNING);
                 return;
             }
             long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
@@ -1426,17 +1423,10 @@ public class FCAEVpnService extends VpnService {
                     rx = stats[0]; tx = stats[1]; totalRx = stats[2]; totalTx = stats[3];
                 }
             } catch (Exception ignored) {}
-            String text = String.format(
-                "↓ %s  %s  |  ↑ %s  %s",
-                VpnNotification.fmtBytes(totalRx), VpnNotification.fmtRate(rx),
-                VpnNotification.fmtBytes(totalTx), VpnNotification.fmtRate(tx));
-            if (!text.equals(lastNotifText)) {
-                lastNotifText = text;
-                notification.show(text, VpnNotification.BUTTONS_RUNNING);
-            }
+            notification.show(VpnNotification.trafficText(rx, tx, totalRx, totalTx),
+                    VpnNotification.BUTTONS_RUNNING);
         } else {
-            lastNotifText = null;
-            notification.show("FCAE VPN — Disconnected", VpnNotification.BUTTONS_PAUSED);
+            notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_PAUSED);
         }
     }
 

@@ -37,7 +37,6 @@ public class ProxyNotification extends Service {
     private Notification.Action disconnectAction;
     private Notification.Action stopAction;
     private Notification.Action startAction;
-    private String lastNotifText = null;
     private volatile boolean nativeFreed = false;
     private volatile boolean proxyPaused = false;
     public static final String ACTION_PSIPHON = "com.fc.fcaevpn.PROXY_PSIPHON";
@@ -168,7 +167,7 @@ public class ProxyNotification extends Service {
             if (!externalPsiphon) return;
             if (PsiphonTunnelService.BROADCAST_READY.equals(intent.getAction())) {
                 if (!intent.getBooleanExtra("regionsOnly", false))
-                    showNotification("FCAE VPN — Proxy connected", BUTTONS_RUNNING);
+                    showNotification(VpnNotification.zeroTrafficText(), BUTTONS_RUNNING);
             } else { stopProxy(); }
         }
     };
@@ -269,7 +268,7 @@ public class ProxyNotification extends Service {
      * buildable from any process of the package: the :psiphon foreground
      * service posts it under this same id while the tunnel dials, so the
      * shared entry never differs from what this owner shows. Mirrors
-     * showNotification("FCAE VPN — Connecting…", BUTTONS_CONNECTING).
+     * showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING).
      */
     public static Notification buildConnecting(android.content.Context context) {
         PendingIntent piMain = PendingIntent.getActivity(context, 20,
@@ -277,12 +276,12 @@ public class ProxyNotification extends Service {
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder nb = new Notification.Builder(context, CHANNEL_ID)
             .setContentTitle("FCAE VPN (Proxy)")
-            .setContentText("FCAE VPN — Connecting…")
+            .setContentText(VpnNotification.zeroTrafficText())
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentIntent(piMain)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setStyle(new Notification.BigTextStyle().bigText("FCAE VPN — Connecting…"));
+            .setStyle(new Notification.BigTextStyle().bigText(VpnNotification.zeroTrafficText()));
         nb.addAction(buildAction(context, "Disconnect", ACTION_DISCONNECT_KILL, 21));
         return nb.build();
     }
@@ -313,7 +312,7 @@ public class ProxyNotification extends Service {
         if (intent != null && ACTION_PSIPHON.equals(intent.getAction())) {
             ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
             externalPsiphon = true;
-            showNotification("FCAE VPN — Connecting…", BUTTONS_CONNECTING);
+            showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
             Intent psi = new Intent(this, PsiphonTunnelService.class).setAction(PsiphonTunnelService.ACTION_START);
             if (intent.getExtras() != null) psi.putExtras(intent.getExtras());
             psi.putExtra(PsiphonTunnelService.EXTRA_OWNER, PsiphonTunnelService.OWNER_PROXY);
@@ -327,7 +326,7 @@ public class ProxyNotification extends Service {
             return START_NOT_STICKY;
         }
         if (intent != null && ACTION_DISCONNECT.equals(intent.getAction())) {
-            showNotification("FCAE VPN — Disconnecting…", BUTTONS_CONNECTING);
+            showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
             stopProxy();
             return START_NOT_STICKY;
         }
@@ -363,7 +362,7 @@ public class ProxyNotification extends Service {
         stopping = false;
         nativeFreed = false;
         proxyPaused = false;
-        showNotification("FCAE VPN — Proxy connecting...", BUTTONS_CONNECTING);
+        showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
         handler.removeCallbacks(statsRunnable);
         handler.postDelayed(statsRunnable, 2000L);
         return START_STICKY;
@@ -409,14 +408,15 @@ public class ProxyNotification extends Service {
         }
     }
 
+    // Byte-flow text only — no state words — so Psiphon exits and plain
+    // Aether protocols look identical. Re-posts every call on purpose: the
+    // :psiphon foreground service shares this notification id while its
+    // tunnel (re)dials, and the next tick must always restore the owner's
+    // content.
     private void updateNotification() {
         if (PsiphonTunnelService.hasActiveBinding() && lastPsiphonStats != null
                 && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
-            String text = psiphonTrafficText(lastPsiphonStats);
-            if (!text.equals(lastNotifText)) {
-                lastNotifText = text;
-                showNotification(text, BUTTONS_RUNNING);
-            }
+            showNotification(psiphonTrafficText(lastPsiphonStats), BUTTONS_RUNNING);
             return;
         }
         long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
@@ -430,15 +430,7 @@ public class ProxyNotification extends Service {
             }
         } catch (Exception ignored) {}
 
-        String text = String.format(
-            "↓ %s  %s  |  ↑ %s  %s",
-            VpnNotification.fmtBytes(totalRx), VpnNotification.fmtRate(rx),
-            VpnNotification.fmtBytes(totalTx), VpnNotification.fmtRate(tx));
-
-        if (!text.equals(lastNotifText)) {
-            lastNotifText = text;
-            showNotification(text, BUTTONS_RUNNING);
-        }
+        showNotification(VpnNotification.trafficText(rx, tx, totalRx, totalTx), BUTTONS_RUNNING);
     }
 
     private void broadcastState(boolean running, boolean paused, boolean connecting) {
@@ -458,16 +450,15 @@ public class ProxyNotification extends Service {
     private synchronized void pauseProxy() {
         if (stopping) return;
         if (proxyPaused) {
-            showNotification("FCAE VPN — Stopped (tap Start to resume)", BUTTONS_PAUSED);
+            showNotification(VpnNotification.zeroTrafficText(), BUTTONS_PAUSED);
             return;
         }
         proxyPaused = true;
         ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
-        lastNotifText = null;
         if (!externalPsiphon) {
             try { NativeEngine.nativePauseTun(); } catch (Exception ignored) {}
         }
-        showNotification("FCAE VPN — Stopped (tap Start to resume)", BUTTONS_PAUSED);
+        showNotification(VpnNotification.zeroTrafficText(), BUTTONS_PAUSED);
         broadcastState(false, true, false);
     }
 
@@ -475,8 +466,7 @@ public class ProxyNotification extends Service {
         if (stopping || !proxyPaused) return;
         proxyPaused = false;
         ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
-        lastNotifText = null;
-        showNotification("FCAE VPN — Starting…", BUTTONS_CONNECTING);
+        showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
         broadcastState(false, false, true);
         if (!externalPsiphon) {
             boolean ok = false;
@@ -491,7 +481,7 @@ public class ProxyNotification extends Service {
                 }
             }
         }
-        showNotification("FCAE VPN — Proxy connected", BUTTONS_RUNNING);
+        showNotification(VpnNotification.zeroTrafficText(), BUTTONS_RUNNING);
         broadcastState(true, false, false);
         handler.removeCallbacks(statsRunnable);
         handler.post(statsRunnable);

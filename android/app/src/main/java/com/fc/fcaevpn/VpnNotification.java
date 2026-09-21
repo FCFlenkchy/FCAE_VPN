@@ -98,15 +98,32 @@ public class VpnNotification {
     }
 
     /**
-     * The exact connecting-state notification, buildable from any process of
-     * the package: the :psiphon foreground service posts it under this same
-     * id while the tunnel dials, so the shared entry never differs from what
-     * this owner shows while connecting. Runs this class's own build path,
-     * channel creation included.
+     * The only text the status notifications ever show: byte flow. Shared by
+     * every state and every mode, so a Psiphon exit and a plain Aether
+     * protocol look exactly alike.
+     */
+    public static String trafficText(long rx, long tx, long totalRx, long totalTx) {
+        return String.format(
+            "↓ %s  %s  |  ↑ %s  %s",
+            fmtBytes(totalRx), fmtRate(rx),
+            fmtBytes(totalTx), fmtRate(tx));
+    }
+
+    /** Byte flow before the first sample: zeroed, same shape. */
+    public static String zeroTrafficText() {
+        return trafficText(0, 0, 0, 0);
+    }
+
+    /**
+     * The notification shown while a tunnel dials, buildable from any process
+     * of the package: the :psiphon foreground service posts it under this
+     * same id, so the shared entry never differs from what this owner shows
+     * at that moment. Runs this class's own build path, channel creation
+     * included.
      */
     public static Notification buildConnecting(Context context) {
         return new VpnNotification(context)
-                .build("FCAE VPN — Connecting...", BUTTONS_CONNECTING);
+                .build(zeroTrafficText(), BUTTONS_CONNECTING);
     }
 
     public void show(String text, int buttons) {

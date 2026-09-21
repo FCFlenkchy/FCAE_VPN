@@ -1142,6 +1142,24 @@ class MainActivity : AppCompatActivity() {
         // In TUN mode, FCAEVpnService manages its own lifecycle.
         activityAlive = false
         super.onDestroy()
+        // Task removal or finish with nothing running: no session, no UI —
+        // no process of the app has a reason to stay cached. Live sessions
+        // own their own process death at teardown; only the idle case dies
+        // here. The delayed re-check also covers a teardown that was still
+        // in flight when the UI closed (proxy stop) and a session started
+        // within the window cancels the kill.
+        if (!isChangingConfigurations) {
+            if (!FCAEVpnService.ownsSession() && !ProxyNotification.isAlive()) {
+                try { PsiphonTunnelService.killProcessOnExit(this) } catch (_: Throwable) {}
+            }
+            handler.postDelayed({
+                if (!activityAlive && !FCAEVpnService.ownsSession()
+                        && !ProxyNotification.isAlive()) {
+                    try { PsiphonTunnelService.killProcessOnExit(this@MainActivity) } catch (_: Throwable) {}
+                    FCAEVpnService.killProcessQuietly()
+                }
+            }, PROCESS_EXIT_DELAY_MS)
+        }
     }
 
     private fun isTunModeSelected(): Boolean = spinnerMode.selectedItemPosition == 1
@@ -2481,6 +2499,10 @@ class MainActivity : AppCompatActivity() {
         // Set to true while the Activity is alive.  The service checks
         // this after fullShutdown() to decide whether to kill the process.
         @JvmField @Volatile var activityAlive = false
+        /** Grace window between the UI closing idle and the process dying, so
+            a session started in that window (or a teardown still finishing)
+            cancels the kill. */
+        const val PROCESS_EXIT_DELAY_MS = 800L
 
         // Pre-computed Color constants — avoids String.parseColor() on every poll tick.
         private val COLOR_CONNECTED = Color.parseColor("#34D399")

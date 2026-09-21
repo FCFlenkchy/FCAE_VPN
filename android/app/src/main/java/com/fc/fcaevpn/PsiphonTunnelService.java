@@ -54,6 +54,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String EXTRA_OWNER = "psiOwner";
     public static final String OWNER_VPN = "vpn";
     public static final String OWNER_PROXY = "proxy";
+    // Terminal-stop signal. processMustDie is a per-process class copy: the
+    // UI process cannot set the :psiphon one directly, so a terminal stop
+    // carries the flag across the boundary as an ACTION_STOP intent extra.
+    // Session switches (stopBound) send the plain stop and never set it.
+    public static final String EXTRA_DIE = "psiphonDie";
     /**
      * This service runs in the {@code :psiphon} process, so the UI process
      * killing itself does not take the tunnel down with it. Set on the way
@@ -61,6 +66,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
      * had its teardown window.
      */
     private static volatile boolean processMustDie = false;
+    // Cancels a pending onDestroy self-kill: a fresh session starting inside
+    // the PROCESS_KILL_DELAY_MS window must not be killed mid-dial. Main
+    // thread only, :psiphon process.
+    private static int killTicket;
     private static final long PROCESS_KILL_DELAY_MS = 500L;
     public static final String BROADCAST_READY = "com.fc.fcaevpn.PSI_READY";
     public static final String BROADCAST_FAILED = "com.fc.fcaevpn.PSI_FAILED";
@@ -313,7 +322,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         // destroys the component — it cannot reach the Go tunnel running
         // in the :psiphon process, which would keep connecting (or stay
         // connected) in an empty cached process.
-        deliverStop(app, true);
+        deliverStop(app, true, false);
         bindingEpoch.incrementAndGet(); // invalidate starts not yet delivered
         final java.util.List<android.content.ServiceConnection> old =
                 new java.util.ArrayList<>(liveConnections);
@@ -458,6 +467,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public int onStartCommand(Intent intent, int flags, int startId) {
         boolean stop = intent != null && ACTION_STOP.equals(intent.getAction());
         if (stop) {
+            // The terminal stop (app exit) carries the kill flag; a session
+            // switch's plain stop must not, or the next teardown would end
+            // the process a fresh session still needs.
+            if (intent.getBooleanExtra(EXTRA_DIE, false)) processMustDie = true;
             // A stop invalidates any restart parked below.
             pendingStart = null;
             stopNow();
@@ -531,6 +544,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             lanSharing = intent.getBooleanExtra("lanSharing", false);
             attachRequestId = intent.getLongExtra("requestId", 0);
         }
+        // A fresh session outranks any stale terminal-stop flag delivered
+        // while this process was being recycled: the next teardown decides
+        // again whether the process dies — and a self-kill scheduled by the
+        // dying previous instance is cancelled before it can fire mid-dial.
+        processMustDie = false;
+        killTicket++;
         enterTunnelForeground();
         bindToUnderlyingNetwork();
         stopping = false;
@@ -630,11 +649,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
      * devices (stock Android exempts the whole package once any process
      * holds an FGS, but several OEM task managers kill per-process), which
      * tore the tunnel down mid-session. The notification posted here is the
-     * OWNER's own connecting notification under the owner's id — built by
-     * the owner classes themselves — so it is indistinguishable from the
-     * post the owner already made for this dial. The owner rewrites the
-     * entry every second once the session is running and owns the dismiss
-     * at teardown.
+     * OWNER's own dial notification under the owner's id — built by the
+     * owner classes themselves — byte-flow text and the owner's buttons, so
+     * it is indistinguishable from the post the owner already made for this
+     * dial. The owner rewrites the entry every second once the session is
+     * running and owns the dismiss at teardown.
      */
     @SuppressWarnings("deprecation")
     private void enterTunnelForeground() {
@@ -766,8 +785,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         // Delayed so stopNow()'s controller teardown gets its window instead
         // of being cut off mid-stop.
         if (processMustDie) {
-            new Handler(Looper.getMainLooper()).postDelayed(
-                    FCAEVpnService::killProcessQuietly, PROCESS_KILL_DELAY_MS);
+            final int ticket = ++killTicket;
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                if (ticket == killTicket) FCAEVpnService.killProcessQuietly();
+            }, PROCESS_KILL_DELAY_MS);
         }
     }
 
@@ -826,13 +847,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
      */
     public static void killProcessOnExit(Context context) {
         processMustDie = true;
-        // processMustDie is a static in THIS (UI) process; the :psiphon
-        // process has its own copy and never sees it. The only signal that
-        // crosses the process boundary is the explicit ACTION_STOP command,
-        // so deliver it before destroying the component. The start command
-        // is already with the system and is delivered to :psiphon even
-        // though this process exits right after.
-        deliverStop(context.getApplicationContext(), false);
+        // processMustDie is a per-process class copy: the assignment above
+        // only marks the caller's own process. What actually ends :psiphon
+        // is the ACTION_STOP command carrying EXTRA_DIE — its onStartCommand
+        // sets the flag there and its onDestroy runs the delayed self-kill.
+        // The command is already with the system and is delivered to
+        // :psiphon even though this process exits right after.
+        deliverStop(context.getApplicationContext(), false, true);
         try {
             context.getApplicationContext()
                     .stopService(new Intent(context.getApplicationContext(),
@@ -847,13 +868,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
      * not owe a startForeground call for what is only a stop. Sent while the
      * component is alive, the command reaches the live instance; if the
      * component is already gone it is briefly recreated, finds no tunnel and
-     * stops itself.
+     * stops itself — with {@code die}, it takes the process down too.
      */
-    private static void deliverStop(Context app, boolean onlyIfBound) {
+    private static void deliverStop(Context app, boolean onlyIfBound, boolean die) {
         if (onlyIfBound && liveConnections.isEmpty()) return;
         try {
             app.startService(new Intent(app, PsiphonTunnelService.class)
-                    .setAction(ACTION_STOP));
+                    .setAction(ACTION_STOP)
+                    .putExtra(EXTRA_DIE, die));
         } catch (Throwable ignored) {
             // Background-start refusal or the caller dying: stopService
             // still destroys the component, as before.
