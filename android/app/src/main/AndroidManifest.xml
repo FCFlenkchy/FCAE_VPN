@@ -52,15 +52,24 @@
                 android:value="proxy" />
         </service>
 
-        <!-- Isolated process: AAR Go runtime must not share an address space
+        <!-- Separate process: AAR Go runtime must not share an address space
              with tun2socks. The service is bound to the app-owned foreground
-             service; it deliberately has no foreground-service declaration so
-             it cannot create a second status notification. -->
+             service AND is itself a specialUse foreground service: task-removal
+             cleanup (and OEM task managers) kill the app's non-foreground
+             processes on swipe, which tore the tunnel down mid-session. It
+             posts the OWNER's notification id and content (psiOwner extra,
+             via the owners' buildConnecting helpers), so the app still shows
+             exactly one notification. -->
         <service
             android:name=".PsiphonTunnelService"
             android:exported="false"
             android:stopWithTask="false"
-            android:process=":psiphon" />
+            android:foregroundServiceType="specialUse"
+            android:process=":psiphon">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="psiphon-tunnel" />
+        </service>
 
     </application>
 </manifest>

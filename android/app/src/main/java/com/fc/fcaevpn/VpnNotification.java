@@ -97,6 +97,18 @@ public class VpnNotification {
         return nb.build();
     }
 
+    /**
+     * The exact connecting-state notification, buildable from any process of
+     * the package: the :psiphon foreground service posts it under this same
+     * id while the tunnel dials, so the shared entry never differs from what
+     * this owner shows while connecting. Runs this class's own build path,
+     * channel creation included.
+     */
+    public static Notification buildConnecting(Context context) {
+        return new VpnNotification(context)
+                .build("FCAE VPN — Connecting...", BUTTONS_CONNECTING);
+    }
+
     public void show(String text, int buttons) {
         try {
             if (manager != null) {

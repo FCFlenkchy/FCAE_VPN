@@ -33,6 +33,12 @@ import ca.psiphon.PsiphonTunnel;
  * network ({@code bindProcessToNetwork}) so a TUN raised in the UI
  * process cannot capture them. The UI process then points tun2socks at
  * the local SOCKS port this service broadcasts.
+ *
+ * The service is itself a specialUse foreground service: swiping the app
+ * from recents kills the app's non-foreground processes on many devices,
+ * which used to tear the tunnel down mid-session. While the tunnel dials
+ * it posts the owning service's own connecting notification under the
+ * owner's id, so the app still shows exactly one, identical notification.
  */
 public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostService {
 
@@ -40,6 +46,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String ACTION_START = "com.fc.fcaevpn.PSI_START";
     public static final String ACTION_STOP  = "com.fc.fcaevpn.PSI_STOP";
     public static final String ACTION_REGIONS = "com.fc.fcaevpn.PSI_REGIONS";
+    // Which app-process notification owner the tunnel belongs to. The
+    // :psiphon foreground service posts the OWNER's own connecting
+    // notification (buildConnecting) under the owner's id, so the app keeps
+    // exactly one status notification: VpnNotification (id 1) in TUN mode,
+    // ProxyNotification (id 2) in proxy mode.
+    public static final String EXTRA_OWNER = "psiOwner";
+    public static final String OWNER_VPN = "vpn";
+    public static final String OWNER_PROXY = "proxy";
     /**
      * This service runs in the {@code :psiphon} process, so the UI process
      * killing itself does not take the tunnel down with it. Set on the way
@@ -98,12 +112,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
      * MAX_REBIND_ATTEMPTS do we give up and fail the chain, which the
      * supervisor then handles with a fresh request.
      *
-     * PsiphonTunnelService deliberately does not call startForeground(). A
-     * Psiphon session always has exactly one notification owner: the existing
-     * ProxyNotification service in proxy mode, or FCAEVpnService in TUN mode.
-     * Both owners are foreground services and initiate the binding, so Android
-     * keeps this isolated process alive for the active session without posting
-     * a second notification.
+     * The rebind is now a last resort, not the norm: the service enters
+     * foreground itself (posting the owner's own connecting notification
+     * under the owner's id), which exempts the :psiphon process from the
+     * task-removal kills that OEM task managers apply per-process. Only
+     * a genuine death (low memory, crash) takes this path.
      */
     private static final int MAX_REBIND_ATTEMPTS = 5;
     private static final long REBIND_DELAY_MS = 1500L;
@@ -170,6 +183,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             if (connection != null) stopBound(app);
             clientAttachId = id;
             Intent start = new Intent(app, PsiphonTunnelService.class).setAction(ACTION_START);
+            start.putExtra(EXTRA_OWNER, context instanceof ProxyNotification ? OWNER_PROXY : OWNER_VPN);
             start.putExtra("requestId", id);
             start.putExtra("upstreamProxy", request.getString("upstreamProxy"));
             start.putExtra("psiphonRegion", request.optString("psiphonRegion", ""));
@@ -200,8 +214,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             liveConnections.add(next);
             // Keep the service both started and bound so an orphaned service
             // can be stopped explicitly. Its lifetime/priority is owned by
-            // the app's single foreground notification owner; this isolated
-            // service must not create a second foreground notification.
+            // the app's single notification owner; on real STARTs the
+            // service itself enters foreground under the owner's shared
+            // notification id (see enterTunnelForeground), so task-removal
+            // cleanup cannot kill the :psiphon process out from under a
+            // live session.
             // A region refresh is a bind-only reattachment. Starting the
             // isolated service again on Activity recreation can redeliver its
             // startup path and reset Psiphon; only real START requests need
@@ -369,6 +386,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private volatile Intent pendingStart;
     private volatile boolean destroyed;
     private String region = "";
+    // Whose notification id the :psiphon FGS posts under (EXTRA_OWNER).
+    private boolean proxyOwner;
     private volatile String lastRegions = "";
     private String upstreamProxy = "";
     private boolean lanSharing;
@@ -430,10 +449,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onCreate() {
         super.onCreate();
-        // The app-owned ProxyNotification/FCAEVpnService foreground service
-        // owns the single visible notification for this session. Do not call
-        // startForeground() here: doing so creates a second notification for
-        // the isolated Psiphon process.
+        // Foreground status is entered per tunnel start in onStartCommand()
+        // (see enterTunnelForeground), not here: a sticky restart with a null
+        // intent must not raise a foreground service nobody asked for.
     }
 
     @Override
@@ -496,6 +514,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             return START_NOT_STICKY;
         }
         {
+            proxyOwner = OWNER_PROXY.equals(intent.getStringExtra(EXTRA_OWNER));
             String r = intent.getStringExtra("psiphonRegion");
             region = r == null ? "" : r.trim();
             transport = intent.getIntExtra("psiphonTransport", 0);
@@ -512,6 +531,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             lanSharing = intent.getBooleanExtra("lanSharing", false);
             attachRequestId = intent.getLongExtra("requestId", 0);
         }
+        enterTunnelForeground();
         bindToUnderlyingNetwork();
         stopping = false;
         startInFlight = true;
@@ -604,6 +624,43 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         return START_STICKY;
     }
 
+    /**
+     * Raise this service to foreground before the tunnel dials. Swiping the
+     * app from recents kills the app's non-foreground processes on many
+     * devices (stock Android exempts the whole package once any process
+     * holds an FGS, but several OEM task managers kill per-process), which
+     * tore the tunnel down mid-session. The notification posted here is the
+     * OWNER's own connecting notification under the owner's id — built by
+     * the owner classes themselves — so it is indistinguishable from the
+     * post the owner already made for this dial. The owner rewrites the
+     * entry every second once the session is running and owns the dismiss
+     * at teardown.
+     */
+    @SuppressWarnings("deprecation")
+    private void enterTunnelForeground() {
+        try {
+            android.app.Notification n;
+            int id;
+            if (proxyOwner) {
+                ProxyNotification.ensureChannel(this);
+                n = ProxyNotification.buildConnecting(this);
+                id = ProxyNotification.NOTIFICATION_ID;
+            } else {
+                n = VpnNotification.buildConnecting(this);
+                id = VpnNotification.NOTIFICATION_ID;
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(id, n, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                startForeground(id, n);
+            }
+        } catch (Throwable t) {
+            // Notification plumbing must never kill a session start; without
+            // foreground status the rebind path still recovers from kills.
+            Log.w(TAG, "FGS promotion failed; continuing without", t);
+        }
+    }
+
     private synchronized void stopNow() {
         // Idempotent: a start failure, onExiting() and an ACTION_STOP can
         // all land within the same second; only the first may run the
@@ -611,6 +668,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         // controller and double the "stopping" noise).
         if (stopping) return;
         stopping = true;
+        // DETACH, never REMOVE: the visible notification at this id belongs
+        // to the app-process owner (it re-posts while running and dismisses
+        // at teardown); cancelling it here would flash the user's status
+        // away. Detach only drops this service's foreground status so the
+        // FGS lifecycle ends with the tunnel.
+        stopForeground(STOP_FOREGROUND_DETACH);
         logHandler.removeCallbacks(dialHeartbeat);
         Thread st = statsThread;
         if (st != null) st.interrupt();
@@ -780,10 +843,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     /**
      * Dispatch the explicit stop to the isolated service. Plain
-     * startService, never startForegroundService: this service deliberately
-     * posts no notification of its own. Sent while the component is alive,
-     * the command reaches the live instance; if the component is already
-     * gone it is briefly recreated, finds no tunnel and stops itself.
+     * startService, never startForegroundService: a recreated component must
+     * not owe a startForeground call for what is only a stop. Sent while the
+     * component is alive, the command reaches the live instance; if the
+     * component is already gone it is briefly recreated, finds no tunnel and
+     * stops itself.
      */
     private static void deliverStop(Context app, boolean onlyIfBound) {
         if (onlyIfBound && liveConnections.isEmpty()) return;

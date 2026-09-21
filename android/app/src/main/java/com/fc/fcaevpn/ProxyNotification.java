@@ -231,6 +231,23 @@ public class ProxyNotification extends Service {
                 androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED);
         handler = new Handler(Looper.getMainLooper());
 
+        ensureChannel(this);
+
+        Intent mainIntent = new Intent(this, MainActivity.class);
+        piMain = PendingIntent.getActivity(this, 20, mainIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        disconnectAction = buildAction(this, "Disconnect", ACTION_DISCONNECT_KILL, 21);
+        stopAction = buildAction(this, "Stop", ACTION_STOP, 22);
+        startAction = buildAction(this, "Start", ACTION_START, 23);
+    }
+
+    /**
+     * Idempotent channel creation, callable from any process of the package:
+     * the :psiphon foreground service must be able to raise the channel
+     * before posting this class's notification from its own process.
+     */
+    public static void ensureChannel(android.content.Context context) {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             android.app.NotificationChannel ch = new android.app.NotificationChannel(
                 CHANNEL_ID, "FCAE Proxy",
@@ -239,31 +256,47 @@ public class ProxyNotification extends Service {
             ch.enableVibration(false);
             ch.setDescription("FCAE VPN proxy mode status");
             ch.setShowBadge(false);
-            android.app.NotificationManager mgr = getSystemService(android.app.NotificationManager.class);
+            android.app.NotificationManager mgr = context.getSystemService(android.app.NotificationManager.class);
             if (mgr != null) {
                 mgr.createNotificationChannel(ch);
                 try { mgr.deleteNotificationChannel("fcaevpn_proxy"); } catch (Exception ignored) {}
             }
         }
-
-        Intent mainIntent = new Intent(this, MainActivity.class);
-        piMain = PendingIntent.getActivity(this, 20, mainIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
-        disconnectAction = buildAction("Disconnect", ACTION_DISCONNECT_KILL, 21);
-        stopAction = buildAction("Stop", ACTION_STOP, 22);
-        startAction = buildAction("Start", ACTION_START, 23);
     }
 
-    private Notification.Action buildAction(String label, String action, int requestCode) {
-        Intent intent = new Intent(this, ProxyNotification.class);
+    /**
+     * The exact connecting-state notification of an external Psiphon session,
+     * buildable from any process of the package: the :psiphon foreground
+     * service posts it under this same id while the tunnel dials, so the
+     * shared entry never differs from what this owner shows. Mirrors
+     * showNotification("FCAE VPN — Connecting…", BUTTONS_CONNECTING).
+     */
+    public static Notification buildConnecting(android.content.Context context) {
+        PendingIntent piMain = PendingIntent.getActivity(context, 20,
+            new Intent(context, MainActivity.class),
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Notification.Builder nb = new Notification.Builder(context, CHANNEL_ID)
+            .setContentTitle("FCAE VPN (Proxy)")
+            .setContentText("FCAE VPN — Connecting…")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setContentIntent(piMain)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setStyle(new Notification.BigTextStyle().bigText("FCAE VPN — Connecting…"));
+        nb.addAction(buildAction(context, "Disconnect", ACTION_DISCONNECT_KILL, 21));
+        return nb.build();
+    }
+
+    private static Notification.Action buildAction(android.content.Context context,
+            String label, String action, int requestCode) {
+        Intent intent = new Intent(context, ProxyNotification.class);
         intent.setAction(action);
         PendingIntent pi;
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            pi = PendingIntent.getForegroundService(this, requestCode,
+            pi = PendingIntent.getForegroundService(context, requestCode,
                 intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         } else {
-            pi = PendingIntent.getService(this, requestCode,
+            pi = PendingIntent.getService(context, requestCode,
                 intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         }
         return new Notification.Action.Builder(null, label, pi).build();
@@ -283,6 +316,7 @@ public class ProxyNotification extends Service {
             showNotification("FCAE VPN — Connecting…", BUTTONS_CONNECTING);
             Intent psi = new Intent(this, PsiphonTunnelService.class).setAction(PsiphonTunnelService.ACTION_START);
             if (intent.getExtras() != null) psi.putExtras(intent.getExtras());
+            psi.putExtra(PsiphonTunnelService.EXTRA_OWNER, PsiphonTunnelService.OWNER_PROXY);
             PsiphonTunnelService.startBound(this, psi);
             return START_STICKY;
         }
@@ -340,9 +374,8 @@ public class ProxyNotification extends Service {
         return null;
     }
 
-    // startForeground(int, Notification) is deprecated on API 34; this service
-    // declares no foregroundServiceType, so the two-arg form is the correct
-    // one on every API level here.
+    // startForeground(int, Notification) is deprecated on API 34; the manifest
+    // declares specialUse, which the two-arg form applies on every level.
     @SuppressWarnings("deprecation")
     private void showNotification(String text, int buttons) {
         Notification.Builder nb = new Notification.Builder(this, CHANNEL_ID)

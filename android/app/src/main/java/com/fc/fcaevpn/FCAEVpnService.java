@@ -603,7 +603,9 @@ public class FCAEVpnService extends VpnService {
                     PsiphonTunnelService.startBound(this,
                             new Intent(this, PsiphonTunnelService.class)
                                     .setAction(PsiphonTunnelService.ACTION_START)
-                                    .putExtras(intent));
+                                    .putExtras(intent)
+                                    .putExtra(PsiphonTunnelService.EXTRA_OWNER,
+                                            PsiphonTunnelService.OWNER_VPN));
                     // This owner only exists in TUN mode: the VPN goes up the
                     // moment the user hits Connect, and Psiphon connects
                     // behind it.
