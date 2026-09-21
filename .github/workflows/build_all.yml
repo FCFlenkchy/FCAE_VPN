@@ -394,7 +394,17 @@ jobs:
         run: |
           set -euo pipefail
           BT=$(ls -d /usr/local/lib/android/sdk/build-tools/*/ | sort -V | tail -1)
-          APKPATH=$(find android -path '*/build/outputs/*' -name '*.apk' | grep -v -i debug | head -1)
+          echo "build-tools: $BT"
+          echo "--- all APK files in workspace ---"
+          find . -name '*.apk' -not -path './third_party/*' || true
+          echo "----------------------------------"
+          APKPATH=$(find android -path '*/outputs/*' -name '*.apk' 2>/dev/null | grep -v -i debug | head -1 || true)
+          if [ -z "$APKPATH" ]; then
+            echo "::error::No release APK found under android/**/outputs"
+            find android -path '*/outputs/*' -type f 2>/dev/null | head -50 || true
+            exit 1
+          fi
+          echo "Using APK: $APKPATH"
           cp "$APKPATH" /tmp/in.apk
           zip -d /tmp/in.apk 'lib/arm64-v8a/*' 'lib/x86/*' 'lib/x86_64/*' || true
           zip -d /tmp/in.apk 'META-INF/*.SF' 'META-INF/*.RSA' 'META-INF/*.DSA' || true
