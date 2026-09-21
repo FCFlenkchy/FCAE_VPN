@@ -298,19 +298,36 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: patch hev bridge for android (platform module)
+      - name: patch bridges for android (platform module)
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import re
-          p = "core/fcae-ffi/bridges/hev-socks5-tunnel/src/lib.rs"
-          s = open(p, encoding="utf-8").read()
-          stub = "\n#[cfg(not(windows))]\nmod platform {\n    pub fn is_privileged() -> bool {\n        true\n    }\n}\n"
-          if "#[cfg(not(windows))]\nmod platform" not in s:
-              new, n = re.subn(r"(#\[cfg\(windows\)\]\s*mod platform;)", lambda m: m.group(1) + stub, s, count=1)
+
+          BASE = "core/fcae-ffi/bridges/"
+
+          def read(p):
+              return open(p, encoding="utf-8").read()
+
+          def write(p, s):
+              open(p, "w", encoding="utf-8").write(s)
+
+          # hev-socks5-tunnel: platform فقط برای ویندوز تعریف شده؛ برای بقیه یک نسخه ساده اضافه می‌کنیم
+          p = BASE + "hev-socks5-tunnel/src/lib.rs"
+          s = read(p)
+          stub = "\n#[cfg(not(windows))]\npub mod platform {\n    pub fn is_privileged() -> bool {\n        true\n    }\n}\n"
+          if "#[cfg(not(windows))]\npub mod platform" not in s:
+              s, n = re.subn(r"(#\[cfg\(windows\)\]\s*mod platform;)", lambda m: m.group(1) + stub, s, count=1)
               if n != 1:
-                  raise SystemExit("pattern not found in lib.rs")
-              open(p, "w", encoding="utf-8").write(new)
+                  raise SystemExit("pattern not found in hev lib.rs")
+          s = re.sub(r"(?m)^mod platform", "pub mod platform", s)
+          write(p, s)
+
+          # zeptun: ماژول platform باید public باشد چون ffi ازش استفاده می‌کند
+          p = BASE + "zeptun/src/lib.rs"
+          s = read(p)
+          s, n = re.subn(r"(?m)^mod platform", "pub mod platform", s)
+          write(p, s)
           print("patched")
           PY
 
