@@ -24,6 +24,7 @@ async-trait.workspace = true
 # dlopen/dlsym plus the RTLD_* constants for the runtime-bound Go module.
 libc.workspace = true
 log.workspace = true
+sha2 = "0.10"
 parking_lot.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

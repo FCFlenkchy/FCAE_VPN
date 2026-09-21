@@ -988,28 +988,94 @@ mod ffi {
         Ok(resolved)
     }
 
-    /// Writes the embedded library under the temp directory and returns its
-    /// path. A file already on disk at the embedded size is this build's own
-    /// copy, so a repeat start costs a stat.
+    /// Writes the embedded library under a per-user private temp directory
+    /// and returns its path. The host runs TUN elevated, so a shared,
+    /// predictable extract path is an escalation path: the directory is
+    /// created 0700 and re-verified on reuse, and a file already on disk is
+    /// trusted only when its bytes hash to the embedded digest — a stale
+    /// copy from an older version is never dlopen'd either.
     fn extract() -> Result<std::path::PathBuf> {
-        let dir = std::env::temp_dir().join("FCAE_VPN").join(EXTRACT_DIR);
+        let dir = private_dir()?.join(EXTRACT_DIR);
         std::fs::create_dir_all(&dir).map_err(|e| {
             CoreError::StartFailed(format!("cannot create {}: {e}", dir.display()))
         })?;
         let dest = dir.join(DLL_NAME);
-        if dest.metadata().map(|m| m.len()).ok() == Some(EMBEDDED.len() as u64) {
+        if matches_embedded(&dest) {
             return Ok(dest);
         }
         let staged = dir.join(format!(".{DLL_NAME}.tmp"));
         std::fs::write(&staged, EMBEDDED).map_err(|e| {
             CoreError::StartFailed(format!("cannot write {}: {e}", staged.display()))
         })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
+        }
         // Renamed into place so a concurrent load never maps a half-written
         // library.
         std::fs::rename(&staged, &dest).map_err(|e| {
             CoreError::StartFailed(format!("cannot move {} into place: {e}", dest.display()))
         })?;
         Ok(dest)
+    }
+
+    #[cfg(unix)]
+    fn private_dir() -> Result<std::path::PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        let uid = unsafe { libc::getuid() };
+        let base = std::env::temp_dir().join(format!("FCAE_VPN-{uid}"));
+        let cpath = CString::new(base.as_os_str().as_encoded_bytes()).map_err(|_| {
+            CoreError::StartFailed(format!("{} is not representable", base.display()))
+        })?;
+        // mkdir with the mode we need, atomically: create-then-chmod leaves a
+        // window where the shared default mode is live.
+        if unsafe { libc::mkdir(cpath.as_ptr(), 0o700) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(CoreError::StartFailed(format!(
+                    "cannot create {}: {error}",
+                    base.display()
+                )));
+            }
+            let meta = std::fs::metadata(&base).map_err(|e| {
+                CoreError::StartFailed(format!("cannot inspect {}: {e}", base.display()))
+            })?;
+            if meta.uid() != uid || meta.mode() & 0o022 != 0 {
+                return Err(CoreError::StartFailed(format!(
+                    "refusing to extract {DLL_NAME}: {} is not private to this user",
+                    base.display()
+                )));
+            }
+        }
+        Ok(base)
+    }
+
+    #[cfg(windows)]
+    fn private_dir() -> Result<std::path::PathBuf> {
+        // The Windows temp directory already carries per-user ACLs; that is
+        // the ownership guarantee the unix 0700 mkdir provides.
+        Ok(std::env::temp_dir().join("FCAE_VPN"))
+    }
+
+    fn embedded_digest() -> &'static [u8; 32] {
+        use sha2::Digest;
+        static DIGEST: OnceLock<[u8; 32]> = OnceLock::new();
+        DIGEST.get_or_init(|| sha2::Sha256::digest(EMBEDDED).into())
+    }
+
+    fn matches_embedded(path: &std::path::Path) -> bool {
+        use sha2::Digest;
+        let Ok(meta) = path.metadata() else {
+            return false;
+        };
+        if meta.len() != EMBEDDED.len() as u64 {
+            return false;
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+        sha2::Sha256::digest(bytes).as_slice() == embedded_digest().as_slice()
     }
 
     fn open(path: &std::path::Path) -> Result<*mut core::ffi::c_void> {

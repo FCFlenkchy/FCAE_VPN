@@ -501,7 +501,13 @@ async fn run_session(
         let handle: Box<dyn BackendHandle> = match handle {
             Ok(h) => h,
             Err(e) => {
-                if !should_retry(auto_reconnect, max_reconnects, attempt, &cancel) {
+                // A deterministic failure (missing privileges, invalid config,
+                // no such resolver binary) fails identically on every retry;
+                // looping on it is how "RECONNECTING" becomes permanent.
+                let transient = e.is_transient();
+                if !transient
+                    || !should_retry(auto_reconnect, max_reconnects, attempt, &cancel)
+                {
                     return Err(e);
                 }
                 attempt += 1;
@@ -904,6 +910,51 @@ mod tests {
             Duration::from_millis(10), false, 0,
             Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(None)))).unwrap();
         assert!(checked.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn deterministic_start_errors_are_not_retried() {
+        static TRIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        struct Fatal;
+        #[async_trait]
+        impl Backend for Fatal {
+            fn id(&self) -> BackendId {
+                BackendId::Aether
+            }
+            fn capabilities(&self) -> Capabilities {
+                Capabilities {
+                    socks: true,
+                    http_proxy: true,
+                    gateway_scanning: false,
+                    routing_rules: false,
+                    requires_privileges: false,
+                }
+            }
+            async fn start(&self, _: BackendContext) -> Result<Box<dyn BackendHandle>> {
+                TRIES.fetch_add(1, Ordering::SeqCst);
+                Err(CoreError::PermissionDenied("TUN without elevation".into()))
+            }
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(run_session(
+            Arc::new(Fatal),
+            SessionConfig::default(),
+            TelemetrySink::new(Arc::new(TelemetryCell::new())),
+            CancelToken::new(),
+            Arc::new(NullTunBridge),
+            Duration::from_millis(10),
+            true,  // auto_reconnect on
+            0,     // unlimited budget: the error class, not the budget, must stop it
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+        ));
+        assert!(result.is_err());
+        assert_eq!(TRIES.load(Ordering::SeqCst), 1);
     }
 
     fn install_fake() {

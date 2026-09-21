@@ -357,10 +357,18 @@ static std::string resolve_config_path_for_load() {
     return primary;
 }
 
+// atoi wraps out-of-range and negative values; a config line saying
+// socks_port=-1 would otherwise bind port 65535. Keep the previous value
+// instead of trusting garbage.
+static int parse_port(const std::string& v, int fallback) {
+    int p = atoi(v.c_str());
+    return (p > 0 && p < 65536) ? p : fallback;
+}
+
 static void apply_config_kv(const std::string& key, const std::string& val) {
     if (key == "protocol") g_app.protocol = atoi(val.c_str());
     else if (key == "backend") g_app.backend = atoi(val.c_str());
-    else if (key == "tor_socks_port") g_app.tor_socks_port = atoi(val.c_str());
+    else if (key == "tor_socks_port") g_app.tor_socks_port = parse_port(val, g_app.tor_socks_port);
     else if (key == "psiphon_region") snprintf(g_app.psiphon_region, sizeof(g_app.psiphon_region), "%s", val.c_str());
     else if (key == "tun_mtu") snprintf(g_app.tun_mtu, sizeof(g_app.tun_mtu), "%s", val.c_str());
     else if (key == "tun_tcp_sndbuf") snprintf(g_app.tun_tcp_sndbuf, sizeof(g_app.tun_tcp_sndbuf), "%s", val.c_str());
@@ -372,8 +380,8 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         snprintf(g_app.psiphon_region_list, sizeof(g_app.psiphon_region_list), "%s", val.c_str());
     else if (key == "psiphon_transport") g_app.psiphon_transport = atoi(val.c_str());
     else if (key == "psiphon_data_dir") snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir), "%s", val.c_str());
-    else if (key == "psiphon_socks_port") g_app.psiphon_socks_port = atoi(val.c_str());
-    else if (key == "psiphon_http_port") g_app.psiphon_http_port = atoi(val.c_str());
+    else if (key == "psiphon_socks_port") g_app.psiphon_socks_port = parse_port(val, g_app.psiphon_socks_port);
+    else if (key == "psiphon_http_port") g_app.psiphon_http_port = parse_port(val, g_app.psiphon_http_port);
     else if (key == "mode") g_app.mode = atoi(val.c_str());
     else if (key == "tun_engine") { int e = atoi(val.c_str()); g_app.tun_engine = (e > 0 && e < (int)fcae_tun_engine_count()) ? e : 0; }
     else if (key == "lan_sharing") g_app.lan_sharing = atoi(val.c_str()) != 0;
@@ -387,10 +395,10 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "frag_max_size") g_app.frag_max_size = atoi(val.c_str());
     else if (key == "frag_min_delay") g_app.frag_min_delay = atoi(val.c_str());
     else if (key == "frag_max_delay") g_app.frag_max_delay = atoi(val.c_str());
-    else if (key == "socks_port") g_app.socks_port = (uint16_t)atoi(val.c_str());
-    else if (key == "http_port") g_app.http_port = (uint16_t)atoi(val.c_str());
+    else if (key == "socks_port") g_app.socks_port = (uint16_t)parse_port(val, g_app.socks_port);
+    else if (key == "http_port") g_app.http_port = (uint16_t)parse_port(val, g_app.http_port);
     else if (key == "socks_enabled") g_app.socks_enabled = atoi(val.c_str()) != 0;
-    else if (key == "tor_http_port") g_app.tor_http_port = atoi(val.c_str());
+    else if (key == "tor_http_port") g_app.tor_http_port = parse_port(val, g_app.tor_http_port);
     else if (key == "tor_http_enabled") g_app.tor_http_enabled = atoi(val.c_str()) != 0;
     else if (key == "http_enabled") g_app.http_enabled = atoi(val.c_str()) != 0;
     else if (key == "force_peer")

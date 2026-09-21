@@ -54,6 +54,26 @@ impl CoreError {
     }
 }
 
+impl CoreError {
+    /// True when re-running the same operation can succeed without anything
+    /// external changing. The supervisor auto-reconnects on transient
+    /// failures; deterministic ones (bad config, missing privileges, a
+    /// backend not compiled in) must surface immediately, or a box without
+    /// resolvectl — or a TUN start without elevation — spins RECONNECTING
+    /// forever instead of telling the user what to fix.
+    pub fn is_transient(&self) -> bool {
+        !matches!(
+            self,
+            CoreError::NotInitialized
+                | CoreError::NullArgument(_)
+                | CoreError::AbiMismatch(_)
+                | CoreError::InvalidConfig(_)
+                | CoreError::BackendUnavailable(_)
+                | CoreError::PermissionDenied(_)
+        )
+    }
+}
+
 impl From<anyhow::Error> for CoreError {
     fn from(e: anyhow::Error) -> Self {
         CoreError::Internal(format!("{e:#}"))

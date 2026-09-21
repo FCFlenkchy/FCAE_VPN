@@ -47,45 +47,173 @@ fn run(program: &str, args: &[&str]) -> Result<String> {
     Ok(text)
 }
 
+/// True when `program` resolves to a regular file on PATH or in the standard
+/// sbin fallbacks (resolvectl/resolvconf live in /usr/bin or /usr/sbin
+/// depending on the distro, and a spawn attempt would conflate "absent" with
+/// "busy").
 #[cfg(target_os = "linux")]
-pub fn configure_linux(cfg: &SessionConfig, interface: &str) -> Result<Vec<String>> {
+fn have(program: &str) -> bool {
+    let on_path = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+        .unwrap_or(false);
+    on_path
+        || ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            .iter()
+            .any(|dir| std::path::Path::new(dir).join(program).is_file())
+}
+
+#[cfg(target_os = "linux")]
+fn run_stdin(program: &str, args: &[&str], input: &str) -> Result<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(program)
+        .args(args)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| CoreError::Internal(format!("TUN DNS: cannot run {program}: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| CoreError::Internal(format!("TUN DNS: {program}: {e}")))?;
+    if !output.status.success() {
+        return Err(CoreError::Internal(format!(
+            "TUN DNS: {program} {} failed; check permissions and resolver service",
+            args.join(" ")
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(target_os = "linux")]
+const RESOLV_CONF: &str = "/etc/resolv.conf";
+#[cfg(target_os = "linux")]
+const RESOLV_BACKUP: &str = "/run/fcae-resolv.conf.pre-fcae";
+#[cfg(target_os = "linux")]
+const RESOLV_MARKER: &str = "# written by FCAE VPN";
+
+/// Which resolver manager owns the Linux DNS override. Picked once per
+/// session so [`restore_linux`] undoes exactly what was applied; desktops
+/// without systemd-resolved (Alpine, Devuan, containers, WSL1) fall through
+/// to managing /etc/resolv.conf directly instead of refusing to run TUN.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub enum LinuxDns {
+    Resolvectl,
+    Resolvconf,
+    /// Backup of the previous /etc/resolv.conf, when there was one.
+    ResolvConf(Option<std::path::PathBuf>),
+}
+
+#[cfg(target_os = "linux")]
+fn apply_resolv_conf(servers: &[String]) -> Result<Option<std::path::PathBuf>> {
+    let backup = {
+        let old = std::fs::read(RESOLV_CONF).unwrap_or_default();
+        if old
+            .windows(RESOLV_MARKER.len())
+            .any(|w| w == RESOLV_MARKER.as_bytes())
+        {
+            None
+        } else {
+            std::fs::write(RESOLV_BACKUP, &old).map_err(|e| {
+                CoreError::Internal(format!("TUN DNS: cannot back up {RESOLV_CONF}: {e}"))
+            })?;
+            Some(std::path::PathBuf::from(RESOLV_BACKUP))
+        }
+    };
+    let mut text = String::from(RESOLV_MARKER);
+    text.push('\n');
+    for server in servers {
+        text.push_str(&format!("nameserver {server}\n"));
+    }
+    std::fs::write(RESOLV_CONF, text).map_err(|e| {
+        CoreError::Internal(format!("TUN DNS: cannot write {RESOLV_CONF}: {e}"))
+    })?;
+    Ok(backup)
+}
+
+#[cfg(target_os = "linux")]
+fn restore_resolv_conf(backup: &Option<std::path::PathBuf>) {
+    let r = match backup {
+        Some(backup) => std::fs::rename(backup, RESOLV_CONF),
+        None => std::fs::remove_file(RESOLV_CONF),
+    };
+    if let Err(e) = r {
+        log::warn!("TUN DNS: cannot restore {RESOLV_CONF}: {e}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn configure_linux(cfg: &SessionConfig, interface: &str) -> Result<(Vec<String>, LinuxDns)> {
     let servers = servers(cfg)?;
-    if servers.is_empty() { return Ok(Vec::new()); }
+    if servers.is_empty() {
+        return Ok((Vec::new(), LinuxDns::Resolvectl));
+    }
+    let dns = if have("resolvectl") {
+        let mut args = vec!["dns", interface];
+        args.extend(servers.iter().map(String::as_str));
+        run("resolvectl", &args)?;
+        run("resolvectl", &["domain", interface, "~."])?;
+        run("resolvectl", &["default-route", interface, "yes"])?;
+        LinuxDns::Resolvectl
+    } else if have("resolvconf") {
+        let mut text = String::new();
+        for server in &servers {
+            text.push_str(&format!("nameserver {server}\n"));
+        }
+        run_stdin("resolvconf", &["-a", interface], &text)?;
+        LinuxDns::Resolvconf
+    } else {
+        LinuxDns::ResolvConf(apply_resolv_conf(&servers)?)
+    };
     let mut routes = Vec::new();
-    let setup: Result<()> = (|| {
+    let added: Result<()> = (|| {
         for server in &servers {
             let family = if server.contains(':') { "-6" } else { "-4" };
             let prefix = format!("{server}/{}", if family == "-6" { 128 } else { 32 });
             run("ip", &[family, "route", "add", &prefix, "dev", interface])?;
             routes.push(prefix);
         }
-        let mut args = vec!["dns", interface];
-        args.extend(servers.iter().map(String::as_str));
-        run("resolvectl", &args)?;
-        run("resolvectl", &["domain", interface, "~."])?;
-        run("resolvectl", &["default-route", interface, "yes"])?;
         Ok(())
     })();
-    if let Err(error) = setup {
-        restore_linux(interface, &routes);
+    if let Err(error) = added {
+        restore_linux(interface, &routes, &dns);
         return Err(error);
     }
-    Ok(routes)
+    Ok((routes, dns))
 }
 
 #[cfg(target_os = "linux")]
-pub fn restore_linux(interface: &str, routes: &[String]) {
-    if let Err(e) = run("resolvectl", &["revert", interface]) { log::warn!("{e}"); }
+pub fn restore_linux(interface: &str, routes: &[String], dns: &LinuxDns) {
+    match dns {
+        LinuxDns::Resolvectl => {
+            if let Err(e) = run("resolvectl", &["revert", interface]) {
+                log::warn!("{e}");
+            }
+        }
+        LinuxDns::Resolvconf => {
+            if let Err(e) = run("resolvconf", &["-d", interface]) {
+                log::warn!("{e}");
+            }
+        }
+        LinuxDns::ResolvConf(backup) => restore_resolv_conf(backup),
+    }
     for prefix in routes {
         let family = if prefix.contains(':') { "-6" } else { "-4" };
-        if let Err(e) = run("ip", &[family, "route", "del", prefix, "dev", interface]) { log::warn!("{e}"); }
+        if let Err(e) = run("ip", &[family, "route", "del", prefix, "dev", interface]) {
+            log::warn!("{e}");
+        }
     }
 }
 
 pub enum DnsGuard {
     None,
     #[cfg(target_os = "linux")]
-    Linux(String, Vec<String>),
+    Linux(String, Vec<String>, LinuxDns),
     #[cfg(target_os = "macos")]
     MacOs(Vec<(String, Vec<String>)>),
 }
@@ -96,8 +224,8 @@ impl DnsGuard {
         if servers(cfg)?.is_empty() { return Ok(Self::None); }
         #[cfg(target_os = "linux")]
         {
-            let routes = configure_linux(cfg, interface)?;
-            return Ok(Self::Linux(interface.into(), routes));
+            let (routes, dns) = configure_linux(cfg, interface)?;
+            return Ok(Self::Linux(interface.into(), routes, dns));
         }
         #[cfg(target_os = "macos")]
         {
@@ -137,7 +265,7 @@ impl Drop for DnsGuard {
         match self {
             Self::None => {},
             #[cfg(target_os = "linux")]
-            Self::Linux(interface, routes) => restore_linux(interface, routes),
+            Self::Linux(interface, routes, dns) => restore_linux(interface, routes, dns),
             #[cfg(target_os = "macos")]
             Self::MacOs(backups) => {
                 for (name, servers) in backups {

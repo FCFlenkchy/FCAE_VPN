@@ -32,6 +32,10 @@ pub struct TunUndo {
     pub dns_backup: Vec<(String, Vec<String>)>,
     /// DNS host routes installed through the Linux TUN interface.
     pub dns_routes: Vec<String>,
+    /// Resolver manager the DNS override was applied through, so restore
+    /// undoes exactly that mechanism.
+    #[cfg(target_os = "linux")]
+    pub dns_method: Option<fcae_runtime::tun_dns::LinuxDns>,
     /// True if we installed a default route through the TUN device.
     pub default_route: bool,
     pub ipv6: bool,
@@ -411,7 +415,9 @@ fn configure_linux(cfg: &SessionConfig, peer_ip: Option<&str>, undo: &mut TunUnd
         undo.default_route = true;
     }
 
-    undo.dns_routes = fcae_runtime::tun_dns::configure_linux(cfg, name)?;
+    let (routes, method) = fcae_runtime::tun_dns::configure_linux(cfg, name)?;
+    undo.dns_routes = routes;
+    undo.dns_method = Some(method);
     Ok(())
 }
 
@@ -435,8 +441,11 @@ fn restore_linux(undo: &TunUndo) {
         run("ip", &["route", "del", &format!("{peer}/32")]);
     }
     // resolvectl reverts automatically when the link disappears, but be
-    // explicit in case the device lingers.
-    fcae_runtime::tun_dns::restore_linux(name, &undo.dns_routes);
+    // explicit in case the device lingers. Absent method means DNS was never
+    // applied (configure_linux restores its own partial state on error).
+    if let Some(method) = &undo.dns_method {
+        fcae_runtime::tun_dns::restore_linux(name, &undo.dns_routes, method);
+    }
     log::info!("[tun2socks] Linux routes/DNS restored for `{name}`");
 }
 
