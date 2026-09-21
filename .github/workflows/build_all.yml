@@ -1,4 +1,4 @@
-name: Clubapp APK (v7a)
+"name: Clubapp APK (v7a)
 
 on:
   workflow_dispatch:
@@ -185,6 +185,7 @@ jobs:
           # ------------------------------------------------------------ name + update removal + links
           PAGE = re.compile(r'https?://(?:www\.)?github\.com/FCFlenkchy[^\s"\')\\]*', re.I)
           API = re.compile(r'https?://api\.github\.com[^\s"\')\\]*', re.I)
+          VJ = re.compile(r'https?://[^\s"\')\\]*version\.json[^\s"\')\\]*', re.I)
           REL = re.compile(r'https?://(?:www\.)?github\.com/[^\s"\')\\]*(?:releases|/tags)[^\s"\')\\]*', re.I)
           TME = re.compile(r'https?://t\.me/[A-Za-z0-9_+]+')
           APPNAME = re.compile(r'(<string\s+name="app_name"[^>]*>)[^<]*(</string>)')
@@ -205,6 +206,7 @@ jobs:
                   # update check: point every GitHub API / release URL to a dead address
                   n = API.sub(DEAD, n)
                   n = REL.sub(DEAD, n)
+                  n = VJ.sub(DEAD, n)
                   # creator links -> Telegram
                   n = PAGE.sub(TG, n)
                   n = TME.sub(TG, n)
@@ -220,7 +222,7 @@ jobs:
               print("  ", p)
 
           # ------------------------------------------------------------ report (for checking the log)
-          KEY = re.compile(r"(check.?for.?update|update.?check|updater|new.?version|latest.?version|tag_name|releases|REQUEST_INSTALL)", re.I)
+          KEY = re.compile(r"(check.?for.?update|update.?check|updater|new.?version|latest.?version|tag_name|releases|version\.json|REQUEST_INSTALL)", re.I)
           hits = []
           for d, dirs, files in os.walk(ROOT):
               dirs[:] = [x for x in dirs if x not in SKIP]
@@ -540,9 +542,18 @@ jobs:
         run: |
           set -euo pipefail
           BT=$(ls -d /usr/local/lib/android/sdk/build-tools/*/ | sort -V | tail -1)
-          cd android/app/build/outputs/apk/release
-          APK=$(ls *.apk | head -1)
-          cp "$APK" /tmp/in.apk
+          echo "--- build outputs"
+          find android -path '*/build/outputs/*' -type f | head -50
+          APKPATH=$(find android -path '*/build/outputs/*' -name '*.apk' | grep -v -i -E 'debug|androidTest' | head -1 || true)
+          if [ -z "$APKPATH" ]; then
+            APKPATH=$(find android -name '*.apk' -newer android/gradlew | head -1 || true)
+          fi
+          if [ -z "$APKPATH" ]; then
+            echo "::error::no APK found after gradle build"
+            exit 1
+          fi
+          echo "using APK: $APKPATH"
+          cp "$APKPATH" /tmp/in.apk
           echo "--- native libs before cleanup"
           unzip -l /tmp/in.apk | grep -E ' lib/' || true
           zip -d /tmp/in.apk 'lib/arm64-v8a/*' 'lib/x86/*' 'lib/x86_64/*' || true
@@ -572,4 +583,5 @@ jobs:
         with:
           name: Clubapp-apk-v7a
           path: package/*
-          if-no-files-found: error
+          if-no-files-found: error"
+ content://downloads/all_downloads/1097#:~:text=name%3A%20Clubapp%20APK,files%2Dfound%3A%20error
