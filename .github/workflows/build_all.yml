@@ -1,284 +1,34 @@
-name: build
+name: Clubapp APK (v7a)
 
 on:
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'version'
-        required: true
-        default: '1.0.0'
-      prerelease:
-        description: 'pre-release'
-        required: false
-        default: 'true'
-        type: boolean
-      extra_notes:
-        description: 'notes'
-        required: false
-        default: ''
 
 permissions:
-  contents: write
-  actions: write
-
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: true
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  prepare:
-    name: resolve release/pre-release version
+  android:
+    name: Clubapp android-v7a
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      version_full: ${{ steps.version.outputs.version_full }}
-      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
-      macos_version: ${{ steps.version.outputs.macos_version }}
-    steps:
-      - name: validate version and channel
-        id: version
-        uses: actions/github-script@v8
-        env:
-          RELEASE_VERSION: ${{ inputs.release_tag }}
-          PRERELEASE: ${{ inputs.prerelease }}
-        with:
-          script: |
-            const raw = process.env.RELEASE_VERSION.trim();
-            const pre = process.env.PRERELEASE === 'true';
-            const match = /^[vV]?((?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2,3})(_pre-release(?:\.(?:0|[1-9][0-9]*))?)?$/.exec(raw);
-            if (!match) throw new Error('Use a version such as 1.4.0 or 1.4.0_pre-release');
-            if (match[1].split('.').some(n => BigInt(n) > 65535n)) {
-              throw new Error('Numeric version components must fit Windows version resources (0..65535)');
-            }
-            if (!pre && match[2]) throw new Error('Select the prerelease option for a _pre-release version');
-            const revision = match[2]?.split('.')[1];
-            if (revision && BigInt(revision) > 18446744073709551615n) {
-              throw new Error('Prerelease revision is too large');
-            }
-            const versionClean = match[1];
-            const versionFull = `${match[1]}${pre ? match[2] || '_pre-release' : ''}`;
-            core.setOutput('version', versionClean);
-            core.setOutput('version_full', versionFull);
-            core.setOutput('is_prerelease', pre ? 'true' : 'false');
-            core.setOutput('macos_version', match[1].split('.').slice(0, 3).join('.'));
-            core.info(`Release version: ${versionClean} (full: ${versionFull}, prerelease: ${pre})`);
-
-  build-hev-windows:
-    name: hev-socks5-tunnel engine DLL (windows)
-    needs: prepare
-    runs-on: windows-latest
-    steps:
-      - name: checkout
-        uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - name: ensure submodules
-        run: |
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth 1
-
-      # The engine's Windows backend is MSYS-only, so upstream's own toolchain is
-      # the only one that can build it -- the same recipe upstream's CI uses.
-      - name: setup msys2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MSYS
-          update: true
-          install: >-
-            make
-            gcc
-
-      - name: build hev-socks5-tunnel DLL (MSYS)
-        shell: msys2 {0}
-        run: |
-          set -euo pipefail
-          # Everything stays workspace-relative: inside the MSYS shell a Windows
-          # path such as $GITHUB_WORKSPACE is not a usable path.
-          echo "toolchain: $(gcc -dumpmachine) -- $(gcc --version | head -1)"
-
-          # The Makefile targets MSYS2 (MSYSTEM=MSYS); a bare POSIX environment
-          # such as Cygwin is kept working below rather than by the Makefile.
-          # The third-party libraries the engine links against (yaml, lwip,
-          # hev-task-system) are built as static archives: this ld flavor
-          # cannot resolve symbols from the raw PE .so files it finds for
-          # -lyaml -llwip -lhev-task-system, so a minted import library was
-          # the only bridge, and a missing or empty one turns every symbol
-          # the engine takes from these DLLs into an undefined reference at
-          # the final link. Real archives need no bridge: the engine's link
-          # pulls their object code in directly. The engine's own tp-shared
-          # prerequisite links the same objects into lib*.so as well; those
-          # DLLs stay beside the engine so the loader finds them if the
-          # engine records a dependency on any of them.
-          make -C core/hev-socks5-tunnel tp-static -j"$(nproc)"
-
-          # hev-task-system's IOCP reactor references get_osfhandle(), which
-          # msys-2.0.dll exports only as _get_osfhandle(); this compat object
-          # defines the plain name on top of it, so the static link resolves
-          # no matter how the MSYS <io.h> spellings line up.
-          ENG=core/hev-socks5-tunnel
-          mkdir -p "$ENG/build-compat"
-          cat > "$ENG/build-compat/fcae-msys-compat.c" <<'EOF'
-          #include <io.h>
-          #include <stdint.h>
-          #ifdef get_osfhandle
-          #undef get_osfhandle
-          #endif
-          intptr_t _get_osfhandle (int fd);
-          intptr_t get_osfhandle (int fd)
-          {
-              return _get_osfhandle (fd);
-          }
-          EOF
-          gcc -O2 -c "$ENG/build-compat/fcae-msys-compat.c" -o "$ENG/build-compat/fcae-msys-compat.o"
-
-          # The engine DLL must export its C API (main_from_str, quit, stats)
-          # for the bridge's GetProcAddress, so the export flag goes on its
-          # link. The compat object and the three archives go in by absolute
-          # path: explicit files always link, whatever -l candidate form
-          # this ld prefers. Command-line LFLAGS propagates into the tp-shared
-          # prerequisite's relinks, where the same inputs are harmless: the
-          # archives contribute nothing those DLLs do not already reference,
-          # and a DLL link tolerates the rest.
-          LDFLAGS_HEV="-Wl,--export-all-symbols \
-            $PWD/$ENG/build-compat/fcae-msys-compat.o \
-            $PWD/$ENG/third-part/yaml/bin/libyaml.a \
-            $PWD/$ENG/third-part/lwip/bin/liblwip.a \
-            $PWD/$ENG/third-part/hev-task-system/bin/libhev-task-system.a"
-          if [ -n "${MSYSTEM:-}" ]; then
-            make -C "$ENG" shared -j"$(nproc)" LFLAGS="$LDFLAGS_HEV"
-          else
-            # Outside MSYS the Makefile also skips the Windows system
-            # libraries, so supply them here (LFLAGS is appended at the end of
-            # its LDFLAGS, which is where -l flags belong).
-            make -C "$ENG" shared -j"$(nproc)" LFLAGS="$LDFLAGS_HEV -lws2_32 -lIphlpapi"
-          fi
-
-          test -s core/hev-socks5-tunnel/bin/libhev-socks5-tunnel.so
-          test -s core/hev-socks5-tunnel/third-part/yaml/bin/libyaml.so
-          test -s core/hev-socks5-tunnel/third-part/lwip/bin/liblwip.so
-          test -s core/hev-socks5-tunnel/third-part/hev-task-system/bin/libhev-task-system.so
-
-          # The engine DLL is loaded by explicit path, so it may carry a proper
-          # Windows name; its imports keep the names the linker recorded, so
-          # the third-party DLLs stay named lib*.so.
-          mkdir -p engine
-          mv core/hev-socks5-tunnel/bin/libhev-socks5-tunnel.so engine/libhev-socks5-tunnel.dll
-          cp -v core/hev-socks5-tunnel/third-part/yaml/bin/libyaml.so engine/
-          cp -v core/hev-socks5-tunnel/third-part/lwip/bin/liblwip.so engine/
-          cp -v core/hev-socks5-tunnel/third-part/hev-task-system/bin/libhev-task-system.so engine/
-
-          # Ship the runtime every DLL in the set was linked against
-          # (msys-2.0.dll on MSYS, cygwin1.dll on Cygwin); the loader resolves
-          # each import next to its own DLL, so only the POSIX prefix libraries
-          # need collecting.
-          if command -v ldd >/dev/null 2>&1; then
-            for dll in engine/libhev-socks5-tunnel.dll engine/*.so; do
-              ldd "$dll" |
-                awk '$3 ~ /^\/usr\/bin\// { print $3 }' | sort -u |
-                while read -r lib; do
-                  cp -v "$lib" engine/
-                done
-            done
-          fi
-          if [ -n "${MSYSTEM:-}" ]; then
-            test -s engine/msys-2.0.dll
-          fi
-          ls -l engine
-
-      # The windows-x64 leg runs on ubuntu, where no toolchain can produce an MSYS
-      # binary, so the engine DLL crosses runners in the run's cache (restored by
-      # that leg alone) instead of an artifact. The key carries the attempt so a
-      # re-run never collides with its own earlier entry, and cross-os archives
-      # are allowed because the cache version is otherwise salted per platform.
-      - name: hand the engine DLL to the windows-x64 leg
-        uses: actions/cache/save@v6
-        with:
-          path: engine
-          key: hev-windows-engine-${{ github.run_id }}-${{ github.run_attempt }}
-          enableCrossOsArchive: true
-
-  build:
-    needs: [prepare, build-hev-windows]
+    timeout-minutes: 120
     env:
-      FCAE_VERSION: ${{ needs.prepare.outputs.version }}
-      FCAE_VERSION_FULL: ${{ needs.prepare.outputs.version_full }}
-      FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            name: linux-x64
-            os: ubuntu-latest
-            cmake_args: >-
-              -DCMAKE_BUILD_TYPE=Release
-              -DAETHER_TARGET=LINUX_X64
-
-          - target: x86_64-pc-windows-gnu
-            name: windows-x64
-            os: ubuntu-latest
-            cmake_args: >-
-              -DCMAKE_BUILD_TYPE=Release
-              -DCMAKE_SYSTEM_NAME=Windows
-              -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++
-              -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc
-              -DAETHER_TARGET=WIN_X64
-
-          - target: aarch64-linux-android
-            name: android-arm64-v8a
-            os: ubuntu-latest
-            abi: arm64-v8a
-            cmake_args: "-DAETHER_TARGET=ANDROID_ARM64"
-
-          - target: armv7-linux-androideabi
-            name: android-armeabi-v7a
-            os: ubuntu-latest
-            abi: armeabi-v7a
-            cmake_args: "-DAETHER_TARGET=ANDROID_ARM32"
-
-          - target: x86_64-linux-android
-            name: android-x86_64
-            os: ubuntu-latest
-            abi: x86_64
-            cmake_args: "-DAETHER_TARGET=ANDROID_X86_64"
-
-          - target: x86_64-linux-android
-            name: android-universal
-            os: ubuntu-latest
-            abi: ""
-            build_type: android_universal
-            cmake_args: "-DAETHER_TARGET=ANDROID_UNIVERSAL"
-
-          - target: aarch64-apple-darwin
-            name: macos-arm64
-            os: macos-latest
-            cmake_args: >-
-              -DCMAKE_BUILD_TYPE=Release
-              -DAETHER_TARGET=MACOS_ARM64
-
-          - target: x86_64-apple-darwin
-            name: macos-x64
-            os: macos-latest
-            cmake_args: >-
-              -DCMAKE_BUILD_TYPE=Release
-              -DCMAKE_OSX_ARCHITECTURES=x86_64
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
-              -DAETHER_TARGET=MACOS_X64
-
+      FCAE_VERSION: "1.0.0"
+      FCAE_VERSION_FULL: "1.0.0"
+      FCAE_IS_PRERELEASE: "false"
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: s
+      CARGO_PROFILE_RELEASE_LTO: "true"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      CARGO_PROFILE_RELEASE_STRIP: symbols
     steps:
       - name: checkout
         uses: actions/checkout@v7
         with:
           submodules: recursive
 
-      - name: setup Java 17 for Android Gradle Plugin
-        if: startsWith(matrix.name, 'android-')
+      - name: setup Java 17
         uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -289,27 +39,136 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 
-      # The engine DLL arrives from build-hev-windows through the run's cache; the
-      # cache restores the saved layout, so it lands in $GITHUB_WORKSPACE/engine.
-      - name: restore hev engine DLL (windows)
-        if: matrix.name == 'windows-x64'
-        uses: actions/cache/restore@v6
-        with:
-          path: engine
-          key: hev-windows-engine-${{ github.run_id }}-${{ github.run_attempt }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: publish hev engine DLL (windows)
-        if: matrix.name == 'windows-x64'
+      - name: apply Clubapp branding
         run: |
           set -euo pipefail
-          ENGINE="$GITHUB_WORKSPACE/engine"
-          test -s "$ENGINE/libhev-socks5-tunnel.dll"
-          test -s "$ENGINE/msys-2.0.dll"
-          echo "FCAE_HEV_DLL=$ENGINE/libhev-socks5-tunnel.dll" >> "$GITHUB_ENV"
-          echo "FCAE_HEV_ENGINE_DIR=$ENGINE" >> "$GITHUB_ENV"
-          ls -la "$ENGINE"
+          pip install pillow numpy
+          python3 - <<'PY'
+          import os, re, io
+          from PIL import Image, ImageDraw, ImageFont
+          import numpy as np
+
+          ROOT = "android/app/src/main"
+          RES = ROOT + "/res"
+          TG = "https://t.me/Clubapp8"
+          DEAD = "http://127.0.0.1:9/disabled"
+
+          # ---- ساخت آیکون ساده شبیه لوگوی Clubapp (بنفش به آبی)
+          def make_icon(size=512):
+              img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+              draw = ImageDraw.Draw(img)
+              # گرادیان تقریبی
+              for y in range(size):
+                  r = int(88 + (30 - 88) * y / size)
+                  g = int(28 + (80 - 28) * y / size)
+                  b = int(135 + (200 - 135) * y / size)
+                  draw.line([(0, y), (size, y)], fill=(r, g, b, 255))
+              # نوشته سفید
+              try:
+                  font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size // 5)
+              except:
+                  font = ImageFont.load_default()
+              text = "Clubapp"
+              bbox = draw.textbbox((0, 0), text, font=font)
+              tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+              draw.text(((size - tw) // 2, (size - th) // 2), text, fill="white", font=font)
+              return img
+
+          src = make_icon(512)
+
+          def sized(n):
+              return src.resize((n, n), Image.LANCZOS)
+
+          def round_img(n):
+              im = sized(n)
+              m = Image.new("L", (n * 4, n * 4), 0)
+              ImageDraw.Draw(m).ellipse((0, 0, n * 4 - 1, n * 4 - 1), fill=255)
+              m = np.array(m.resize((n, n), Image.LANCZOS))
+              a = np.minimum(np.array(im)[..., 3], m)
+              im.putalpha(Image.fromarray(a.astype(np.uint8)))
+              return im
+
+          bg = "#1E3A8A"
+
+          DENS = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
+          names = {"ic_launcher", "ic_launcher_round"}
+          try:
+              man = open(ROOT + "/AndroidManifest.xml", encoding="utf-8").read()
+              names |= set(re.findall(r'android:(?:icon|roundIcon)="@mipmap/([^"]+)"', man))
+          except: pass
+
+          for d in os.listdir(RES):
+              if d.startswith("mipmap"):
+                  for n in names:
+                      for ext in (".png", ".webp", ".jpg"):
+                          p = os.path.join(RES, d, n + ext)
+                          if os.path.exists(p):
+                              os.remove(p)
+
+          for n in sorted(names):
+              for dens, px in DENS.items():
+                  dd = os.path.join(RES, "mipmap-" + dens)
+                  os.makedirs(dd, exist_ok=True)
+                  img = round_img(px) if "round" in n else sized(px)
+                  img.save(os.path.join(dd, n + ".png"), optimize=True)
+
+          os.makedirs(RES + "/drawable-nodpi", exist_ok=True)
+          sized(324).save(RES + "/drawable-nodpi/clubapp_icon_fg.png", optimize=True)
+          os.makedirs(RES + "/values", exist_ok=True)
+          open(RES + "/values/clubapp_icon.xml", "w").write(
+              f'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="clubapp_icon_bg">{bg}</color>\n</resources>\n')
+
+          ADAPTIVE = f'''<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/clubapp_icon_bg"/>
+    <foreground android:drawable="@drawable/clubapp_icon_fg"/>
+</adaptive-icon>
+'''
+          v26 = os.path.join(RES, "mipmap-anydpi-v26")
+          os.makedirs(v26, exist_ok=True)
+          for n in sorted(names):
+              open(os.path.join(v26, n + ".xml"), "w").write(ADAPTIVE)
+
+          # تغییر اسم + لینک‌ها + غیرفعال کردن آپدیت
+          APPNAME = re.compile(r'(<string\s+name="app_name"[^>]*>)[^<]*(</string>)')
+          PAGE = re.compile(r'https?://(?:www\.)?github\.com/FCFlenkchy[^\s"\')\\]*', re.I)
+          API = re.compile(r'https?://api\.github\.com[^\s"\')\\]*', re.I)
+          REL = re.compile(r'https?://(?:www\.)?github\.com/[^\s"\')\\]*(?:releases|/tags)[^\s"\')\\]*', re.I)
+          TME = re.compile(r'https?://t\.me/[A-Za-z0-9_+]+')
+
+          for d, dirs, files in os.walk(ROOT):
+              dirs[:] = [x for x in dirs if x not in {"build", ".gradle", "node_modules", ".git"}]
+              for f in files:
+                  if not f.endswith((".xml", ".kt", ".java")): continue
+                  p = os.path.join(d, f)
+                  try:
+                      t = open(p, encoding="utf-8").read()
+                  except: continue
+                  n = t.replace("FCAE VPN", "Clubapp")
+                  n = APPNAME.sub(r"\1Clubapp\2", n)
+                  n = API.sub(DEAD, n)
+                  n = REL.sub(DEAD, n)
+                  n = PAGE.sub(TG, n)
+                  n = TME.sub(TG, n)
+                  n = re.sub(r"FCFlenkchy/FCAE_VPN", "none/none", n, flags=re.I)
+                  if f == "AndroidManifest.xml":
+                      n = re.sub(r'\s*<uses-permission[^>]*REQUEST_INSTALL_PACKAGES[^>]*/>', "", n)
+                  if n != t:
+                      open(p, "w", encoding="utf-8").write(n)
+
+          # تغییر version.json
+          with open("version.json", "w", encoding="utf-8") as f:
+              f.write('''[
+  {
+    "version": "1.0.0",
+    "date": "2026-09-21",
+    "notes": "Clubapp - No updates",
+    "url": "https://t.me/Clubapp8"
+  }
+]
+''')
+          print("Branding + version.json done")
+          PY
 
       - name: setup go
         uses: actions/setup-go@v7
@@ -322,208 +181,30 @@ jobs:
         env:
           GOTOOLCHAIN: auto
         run: |
-          set -euo pipefail
           echo "GO_BIN=$(command -v go)" >> "$GITHUB_ENV"
           echo "GOTOOLCHAIN=auto" >> "$GITHUB_ENV"
           go version
-          go env GOTOOLCHAIN
-          cat core/psiphon/go.mod | grep -E "^go |^toolchain" || true
-          cat core/fcae-ffi/bridges/psiphon/go/go.mod | grep -E "^go |^toolchain" || true
-          cat core/fcae-ffi/bridges/tun2socks/go/go.mod | grep -E "^go |^toolchain" || true
-
-      - name: cleanup old caches
-        uses: actions/github-script@v8
-        continue-on-error: true
-        with:
-          script: |
-            const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
-            const prefixes = ['cmake-', 'gradle-', 'sccache-', 'glfw-', 'hev-windows-engine-'];
-
-            for (const prefix of prefixes) {
-              let page = 1;
-              let totalDeleted = 0;
-              while (true) {
-                const res = await github.rest.actions.getActionsCacheList({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  key: prefix,
-                  per_page: 100,
-                  page,
-                });
-                const caches = res.data.actions_caches || [];
-                if (caches.length === 0) break;
-
-                const old = caches.filter(c => new Date(c.created_at).getTime() < oneDayAgo);
-                const recent = caches.filter(c => new Date(c.created_at).getTime() >= oneDayAgo);
-                const excess = recent.slice(3);
-                const toDelete = [...old, ...excess];
-
-                for (const cache of toDelete) {
-                  try {
-                    await github.rest.actions.deleteActionsCacheById({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      cache_id: cache.id,
-                    });
-                    totalDeleted++;
-                    console.log(`Deleted: ${cache.key} (created ${cache.created_at})`);
-                  } catch (e) {
-                    console.log(`Skipped ${cache.key}: ${e.message}`);
-                  }
-                }
-                if (caches.length < 100) break;
-                page++;
-              }
-              console.log(`Cleaned ${totalDeleted} caches for prefix '${prefix}'`);
-            }
-
-      - name: install deps (linux)
-        if: matrix.name == 'linux-x64'
-        timeout-minutes: 15
-        run: |
-          set -euxo pipefail
-          sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-          while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
-            echo "waiting for boot-time apt processes to release locks..."
-            sleep 5
-          done
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
-            libxrandr-dev libxinerama-dev libxxf86vm-dev \
-            libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev zlib1g-dev \
-            libevent-dev protobuf-compiler nasm cmake ninja-build
-          curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
-            https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
-          tar xzf glfw.tar.gz
-          cd glfw-3.4
-          cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr/local/glfw_static \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DGLFW_BUILD_WAYLAND=OFF \
-            -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF
-          cmake --build build
-          sudo cmake --install build
-          cd ..
-
-      - name: install deps (windows cross)
-        if: matrix.name == 'windows-x64'
-        timeout-minutes: 15
-        run: |
-          set -euxo pipefail
-          sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-          while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
-            echo "waiting for boot-time apt processes to release locks..."
-            sleep 5
-          done
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 nasm \
-            cmake
-          echo "=== MinGW toolchain check ==="
-          which x86_64-w64-mingw32-gcc x86_64-w64-mingw32-g++
-          x86_64-w64-mingw32-gcc --version | head -1
-          x86_64-w64-mingw32-g++ --version | head -1
-
-      - name: cache macos glfw build
-        if: startsWith(matrix.name, 'macos-')
-        id: cache-glfw
-        uses: actions/cache@v6
-        with:
-          # Workspace-relative: caching an absolute /usr/local path made the
-          # macOS runner's gtar fail the restore step outright.
-          path: ${{ github.workspace }}/.glfw/${{ matrix.name }}
-          key: glfw-3.4-${{ matrix.name }}
-
-      - name: install deps (macOS)
-        if: startsWith(matrix.name, 'macos-')
-        run: |
-          brew_ok=0
-          for attempt in 1 2 3; do
-            brew install cmake ninja nasm protobuf && { brew_ok=1; break; }
-            echo "::warning::brew install failed (attempt $attempt/3); retrying in 15s"
-            sleep 15
-          done
-          if [ "$brew_ok" != 1 ]; then
-            echo "::error::brew install failed after 3 attempts"
-            exit 1
-          fi
-          if [ "${{ matrix.name }}" = "macos-x64" ]; then
-            ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
-          else
-            ARCH_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
-          fi
-          GLFW_PREFIX="${GITHUB_WORKSPACE}/.glfw/${{ matrix.name }}"
-          echo "GLFW_PREFIX=${GLFW_PREFIX}" >> "$GITHUB_ENV"
-          if [ -f "${GLFW_PREFIX}/lib/libglfw3.a" ]; then
-            echo "glfw restored from cache at ${GLFW_PREFIX}"
-          else
-            curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
-              https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz -o glfw.tar.gz
-            tar xzf glfw.tar.gz
-            cd glfw-3.4
-            cmake -B build -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              ${ARCH_ARGS} \
-              -DCMAKE_INSTALL_PREFIX="${GLFW_PREFIX}" \
-              -DBUILD_SHARED_LIBS=OFF \
-              -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF
-            cmake --build build
-            cmake --install build
-            cd ..
-          fi
-
-      - name: install rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu, aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, aarch64-apple-darwin, x86_64-apple-darwin
-          components: rust-src
-
-      - name: cache rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.name }}
-          workspaces: |
-            core -> target
-          cache-on-failure: true
-
-      - name: cache cmake
-        if: "!startsWith(matrix.name, 'android-')"
-        uses: actions/cache@v6
-        with:
-          path: build
-          key: cmake-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt', 'core/**', 'src_cpp/**', 'include/**') }}
-          restore-keys: cmake-${{ matrix.name }}-
-
-      - name: cache gradle
-        if: startsWith(matrix.name, 'android-')
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: gradle-
 
       - name: setup ndk
         id: setup-ndk
-        if: startsWith(matrix.name, 'android-')
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r27
           link-to-sdk: true
 
-      - name: Build Psiphon Android AAR from pinned source
-        if: startsWith(matrix.name, 'android-')
+      - name: install rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-linux-androideabi
+          components: rust-src
+
+      - name: Build Psiphon AAR (v7a only)
         shell: bash
         run: |
           set -euo pipefail
           ROOT="$PWD"
           PSIPHON_REV=$(git rev-parse HEAD:core/psiphon)
-          test "$(git -C core/psiphon rev-parse HEAD)" = "$PSIPHON_REV"
           PSIPHON_GIT_DIR=$(git -C core/psiphon rev-parse --absolute-git-dir)
-          echo "Building core/psiphon at $PSIPHON_REV"
           docker build --platform=linux/amd64 -t fcae-psiphon-android \
             -f core/psiphon/MobileLibrary/Android/Dockerfile core/psiphon/MobileLibrary
           docker run --platform=linux/amd64 --rm \
@@ -537,1125 +218,156 @@ jobs:
             fcae-psiphon-android /bin/bash -c '
               set -euo pipefail
               cd "$GIT_WORK_TREE/MobileLibrary/Android"
-              test "$(git rev-parse HEAD)" = "$PSIPHON_REV"
-              git rev-parse --short=10 HEAD
               ./make.bash
             '
           mkdir -p android/psiphon/libs
           cp core/psiphon/MobileLibrary/Android/ca.psiphon.aar android/psiphon/libs/
-          INSPECT=$(mktemp -d)
-          trap 'rm -rf "$INSPECT"' EXIT
-          unzip -q android/psiphon/libs/ca.psiphon.aar 'jni/*' -d "$INSPECT"
-          for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
-            LIB="$INSPECT/jni/$ABI/libgojni.so"
-            test -s "$LIB"
-            readelf -lW "$LIB" | awk '$1 == "LOAD" { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
-          done
+          zip -d android/psiphon/libs/ca.psiphon.aar 'jni/arm64-v8a/*' 'jni/x86/*' 'jni/x86_64/*' || true
 
       - name: fetch imgui
         run: |
           mkdir -p third_party
-          if [ ! -d "third_party/imgui" ]; then
-            git clone --depth 1 --branch v1.91.8 https://github.com/ocornut/imgui.git third_party/imgui
-          fi
-
-      - name: cache zig
-        uses: actions/cache@v6
-        with:
-          path: ${{ runner.tool_cache }}/zig-0.16.0
-          key: zig-0.16.0-${{ runner.os }}-${{ runner.arch }}
+          [ -d "third_party/imgui" ] || git clone --depth 1 --branch v1.91.8 https://github.com/ocornut/imgui.git third_party/imgui
 
       - name: setup zig
         shell: bash
         run: |
           set -euo pipefail
           ZIG_VER=0.16.0
-          case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64)  TUPLE=x86_64-linux;  SHA=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;;
-            Darwin-arm64)  TUPLE=aarch64-macos; SHA=b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489 ;;
-            Darwin-x86_64) TUPLE=x86_64-macos;  SHA=0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7 ;;
-            *) echo "::error::unsupported runner $(uname -s)-$(uname -m)"; exit 1 ;;
-          esac
-          ARCHIVE="zig-${TUPLE}-${ZIG_VER}.tar.xz"
+          ARCHIVE="zig-x86_64-linux-${ZIG_VER}.tar.xz"
           PREFIX="${RUNNER_TOOL_CACHE}/zig-${ZIG_VER}"
           mkdir -p "$PREFIX"
           if [ ! -x "${PREFIX}/zig" ]; then
-            file_sha() {
-              if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
-              else shasum -a 256 "$1" | awk '{print $1}'; fi
-            }
-            URLS=(
-              "https://ziglang.org/download/${ZIG_VER}/${ARCHIVE}"
-              "https://ziglang.freetls.fastly.net/${ARCHIVE}"
-              "https://pkg.hexops.org/zig/${ARCHIVE}"
-              "https://zig.linus.dev/zig/${ARCHIVE}"
-              "https://zig.squirl.dev/${ARCHIVE}"
-              "https://zig.mirror.mschae23.de/zig/${ARCHIVE}"
-              "https://zigmirror.com/${ARCHIVE}"
-              "https://zig.tilok.dev/${ARCHIVE}"
-              "https://zigmirror.hryx.net/zig/${ARCHIVE}"
-            )
-            if list=$(curl -fsSL --retry 2 --connect-timeout 15 --max-time 30 \
-                 https://ziglang.org/download/community-mirrors.txt 2>/dev/null); then
-              while IFS= read -r base; do
-                [ -n "$base" ] || continue
-                URLS+=("${base%/}/${ARCHIVE}")
-              done <<< "$list"
-            fi
-            TMP="${RUNNER_TEMP}/${ARCHIVE}"
-            ok=0
-            seen=
-            for url in "${URLS[@]}"; do
-              case " $seen " in *" $url "*) continue ;; esac
-              seen+=" $url"
-              echo "Trying $url"
-              rm -f "$TMP"
-              if curl -fL --retry 3 --retry-delay 2 --retry-all-errors \
-                   --connect-timeout 20 --max-time 180 -o "$TMP" "$url" \
-                   && [ "$(file_sha "$TMP")" = "$SHA" ]; then
-                ok=1
-                break
-              fi
-              echo "failed: $url"
-            done
-            if [ "$ok" != 1 ]; then
-              echo "::error::failed to download Zig ${ZIG_VER} from every mirror"
-              exit 1
-            fi
-            tar -xJf "$TMP" -C "$PREFIX" --strip-components=1
-            rm -f "$TMP"
+            curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/${ZIG_VER}/${ARCHIVE}"
+            tar -xJf /tmp/zig.tar.xz -C "$PREFIX" --strip-components=1
           fi
           echo "$PREFIX" >> "$GITHUB_PATH"
-          "${PREFIX}/zig" version
+          zig version
 
-      - name: build zeptun engine (libzeptun)
+      - name: build zeptun (v7a)
         shell: bash
         run: |
           set -euo pipefail
           cd core/zeptun
-          if [ "${{ matrix.name }}" = "windows-x64" ]; then
-            # Static and shared Windows artifacts otherwise share a basename;
-            # the DLL import library can overwrite the static archive.
-            sed -i 's/\.name = if (target\.result\.abi == \.msvc) "zeptun_static" else "zeptun"/.name = "fcae_zeptun_static"/' build.zig
-          fi
-          case "${{ matrix.name }}" in
-            linux-x64)   zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSmall ;;
-            windows-x64) zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSmall ;;
-            macos-arm64) zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall ;;
-            macos-x64)   zig build -Dtarget=x86_64-macos -Doptimize=ReleaseSmall ;;
-            android-*)
-              SYSROOT="${ANDROID_NDK_HOME:?}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-              test -d "$SYSROOT/usr/include"
-              LIBC_DIR="$(mktemp -d)"
-              trap 'rm -rf "$LIBC_DIR"' EXIT
-              for abi in arm64-v8a armeabi-v7a x86_64 x86; do
-                case "$abi" in
-                  arm64-v8a)   ZIG_TARGET=aarch64-linux-android.24; NDK_TARGET=aarch64-linux-android ;;
-                  armeabi-v7a) ZIG_TARGET=arm-linux-androideabi.24; NDK_TARGET=arm-linux-androideabi ;;
-                  x86_64)      ZIG_TARGET=x86_64-linux-android.24; NDK_TARGET=x86_64-linux-android ;;
-                  x86)         ZIG_TARGET=x86-linux-android.24; NDK_TARGET=i686-linux-android ;;
-                esac
-                test -d "$SYSROOT/usr/include/$NDK_TARGET"
-                test -f "$SYSROOT/usr/lib/$NDK_TARGET/24/libc.so"
-                test -f "$SYSROOT/usr/lib/$NDK_TARGET/24/crtbegin_so.o"
-                printf '%s\n' \
-                  "include_dir=$SYSROOT/usr/include" \
-                  "sys_include_dir=$SYSROOT/usr/include/$NDK_TARGET" \
-                  "crt_dir=$SYSROOT/usr/lib/$NDK_TARGET/24" \
-                  'msvc_lib_dir=' 'kernel32_lib_dir=' 'gcc_dir=' > "$LIBC_DIR/$abi.conf"
-                zig build -Dtarget="$ZIG_TARGET" -Doptimize=ReleaseSmall -Dstrip=true \
-                  -Dandroid-libc="$LIBC_DIR/$abi.conf" --libc "$LIBC_DIR/$abi.conf" \
-                  --prefix "$PWD/zig-out/android/$abi"
-                install -D -m 644 "zig-out/android/$abi/lib/libzeptun.a" \
-                  "zig-out/android/prebuilt/$abi/libzeptun.a"
-              done
-              ;;
-            *) echo "::error::Unsupported zeptun target: ${{ matrix.name }}"; exit 1 ;;
-          esac
-          if [ "${{ matrix.name }}" = "windows-x64" ]; then
-            STATIC_ZEPTUN=""
-            for candidate in zig-out/lib/libfcae_zeptun_static.a zig-out/lib/libfcae_zeptun_static.lib zig-out/lib/fcae_zeptun_static.lib; do
-              if [ -s "$candidate" ]; then STATIC_ZEPTUN="$candidate"; break; fi
-            done
-            if [ -z "$STATIC_ZEPTUN" ]; then
-              echo "::error::Zig did not emit the uniquely named static zeptun archive"
-              ls -la zig-out/lib
-              exit 1
-            fi
-            if strings "$STATIC_ZEPTUN" | grep -qiE '(^|[^[:alnum:]_])zeptun\.dll([^[:alnum:]_]|$)'; then
-              echo "::error::the uniquely named zeptun archive is an import library"
-              exit 1
-            fi
-            cp "$STATIC_ZEPTUN" zig-out/lib/libzeptun.a
-          fi
-
-          # `-lzeptun` must resolve to the static archive. On Windows-gnu the
-          # import library (libzeptun.dll.a) is an archive too, and the linker
-          # prefers it over libzeptun.a — the exe then imports zeptun.dll
-          # instead of linking the engine statically. Purge every shared
-          # artifact so only the static archive remains linkable.
-          rm -f zig-out/lib/*.dll zig-out/lib/*.dll.a zig-out/lib/*.so* zig-out/lib/*.dylib
-          if ls zig-out/lib/*.dll zig-out/lib/*.dll.a >/dev/null 2>&1; then
-            echo "::error::shared zeptun artifacts survived the purge:"
-            ls -la zig-out/lib
-            exit 1
-          fi
-          case "${{ matrix.name }}" in
-            android-*)
-              for abi in arm64-v8a armeabi-v7a x86_64 x86; do
-                test -s "zig-out/android/prebuilt/$abi/libzeptun.a"
-              done
-              ;;
-            *) test -s zig-out/lib/libzeptun.a ;;
-          esac
+          SYSROOT="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          LIBC_DIR=$(mktemp -d)
+          abi=armeabi-v7a
+          ZIG_TARGET=arm-linux-androideabi.24
+          NDK_TARGET=arm-linux-androideabi
+          printf '%s\n' \
+            "include_dir=$SYSROOT/usr/include" \
+            "sys_include_dir=$SYSROOT/usr/include/$NDK_TARGET" \
+            "crt_dir=$SYSROOT/usr/lib/$NDK_TARGET/24" \
+            'msvc_lib_dir=' 'kernel32_lib_dir=' 'gcc_dir=' > "$LIBC_DIR/$abi.conf"
+          zig build -Dtarget="$ZIG_TARGET" -Doptimize=ReleaseSmall -Dstrip=true \
+            -Dandroid-libc="$LIBC_DIR/$abi.conf" --libc "$LIBC_DIR/$abi.conf" \
+            --prefix "$PWD/zig-out/android/$abi"
+          install -D -m 644 "zig-out/android/$abi/lib/libzeptun.a" \
+            "zig-out/android/prebuilt/$abi/libzeptun.a"
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: build hev-socks5-tunnel engine (libhev-socks5-tunnel)
+      - name: build hev-socks5-tunnel (v7a)
         shell: bash
         run: |
           set -euo pipefail
           cd core/hev-socks5-tunnel
-          case "${{ matrix.name }}" in
-            linux-x64|macos-arm64)
-              make static
-              ;;
-            macos-x64)
-              # Both macOS legs run on an arm64 runner, so the host toolchain
-              # would hand this leg arm64 objects -- which ld silently ignores
-              # while linking x86_64, leaving every engine symbol undefined.
-              # Build for the architecture this leg actually ships, with the
-              # deployment target the Rust and CMake halves use.
-              make static CFLAGS="-arch x86_64 -mmacosx-version-min=13.0"
-              ;;
-            windows-x64)
-              # Nothing to build here: the engine's Windows backend is MSYS-only
-              # (tunnel, hev-task-system IOCP reactor, Win64 ABI assembly and the
-              # wintun session all sit behind __MSYS__), so only MSYS2 can build
-              # it. The `build-hev-windows` job builds the engine DLL and this
-              # leg loads it in-process at runtime: no exe, no child process,
-              # same adapter and GUID as the in-process engines use elsewhere.
-              echo "hev-socks5-tunnel ships as a DLL (built by build-hev-windows)"
-              ;;
-            android-*)
-              if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-                echo "::error::ANDROID_NDK_HOME not set, cannot build hev-socks5-tunnel"
-                exit 1
-              fi
-              TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
-              if [ "${{ matrix.name }}" = "android-universal" ]; then
-                ABIS="arm64-v8a armeabi-v7a x86_64"
-              else
-                ABIS="${{ matrix.abi }}"
-              fi
-              # `make clean` removes the whole bin/ tree -- including the ABIs
-              # already staged in it -- so every ABI is collected outside the
-              # build tree and copied in once the last clean has happened.
-              # (Without this a universal build kept only its last ABI, and the
-              # Rust build of the earlier ones failed on a missing archive.)
-              STAGE="$RUNNER_TEMP/hev-android"
-              rm -rf "$STAGE"
-              for abi in $ABIS; do
-                echo "  -> Building hev-socks5-tunnel for $abi"
-                make clean
-                case "$abi" in
-                  arm64-v8a)    CLANG_TARGET=aarch64-linux-android ;;
-                  armeabi-v7a)  CLANG_TARGET=armv7a-linux-androideabi ;;
-                  x86_64)       CLANG_TARGET=x86_64-linux-android ;;
-                  *) echo "::error::Unsupported Android ABI: $abi"; exit 1 ;;
-                esac
-                # `make static` archives only the engine's own objects, so the
-                # lwip/yaml/hev-task-system archives are staged next to it per
-                # ABI (the bridge links all four). The flags mirror upstream's
-                # Android.mk: bionic already types fd_set and socklen_t (lwip's
-                # unix port redefines both otherwise), the third-party sources
-                # are not warning-clean under the Makefile's -Werror with a
-                # current NDK clang, and the archive ends up in a shared object,
-                # so it must be PIC.
-                ANDROID_CFLAGS="-fPIC -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -Wno-error"
-                if [ "$abi" = "armeabi-v7a" ]; then
-                  ANDROID_CFLAGS="$ANDROID_CFLAGS -mfpu=neon"
-                fi
-                make static \
-                  CC="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang" \
-                  AR="$TOOLCHAIN/bin/llvm-ar" \
-                  STRIP="$TOOLCHAIN/bin/llvm-strip" \
-                  PP="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang -E" \
-                  CFLAGS="$ANDROID_CFLAGS"
-                mkdir -p "$STAGE/$abi"
-                cp bin/libhev-socks5-tunnel.a \
-                   third-part/lwip/bin/liblwip.a \
-                   third-part/yaml/bin/libyaml.a \
-                   third-part/hev-task-system/bin/libhev-task-system.a \
-                   "$STAGE/$abi/"
-              done
-              for abi in $ABIS; do
-                mkdir -p "bin/android/$abi"
-                cp "$STAGE/$abi/"*.a "bin/android/$abi/"
-                test -s "bin/android/$abi/libhev-socks5-tunnel.a"
-              done
-              if [ "${{ matrix.name }}" != "android-universal" ]; then
-                cp "bin/android/${{ matrix.abi }}/libhev-socks5-tunnel.a" bin/libhev-socks5-tunnel.a
-              fi
-              ;;
-            *) echo "::error::Unsupported hev target: ${{ matrix.name }}"; exit 1 ;;
-          esac
-          case "${{ matrix.name }}" in
-            windows-x64) ls -lh "$GITHUB_WORKSPACE/engine" ;;
-            android-universal) ls -lh bin/android/*/lib*.a ;;
-            *) ls -lh bin/libhev-socks5-tunnel.a ;;
-          esac
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          make clean
+          make static \
+            CC="$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang" \
+            AR="$TOOLCHAIN/bin/llvm-ar" \
+            STRIP="$TOOLCHAIN/bin/llvm-strip" \
+            PP="$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang -E" \
+            CFLAGS="-fPIC -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -Wno-error -mfpu=neon"
+          mkdir -p bin/android/armeabi-v7a
+          cp bin/libhev-socks5-tunnel.a third-part/lwip/bin/liblwip.a \
+             third-part/yaml/bin/libyaml.a third-part/hev-task-system/bin/libhev-task-system.a \
+             bin/android/armeabi-v7a/
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: build rust (engine + ffi, in-process)
+      - name: build rust (v7a only)
         run: |
           set -euo pipefail
-
-          rm -rf target/release/build/aether-engine-* target/debug/build/aether-engine-* 2>/dev/null || true
-
-          if [ "${{ matrix.name }}" = "macos-x64" ]; then
-            export MACOSX_DEPLOYMENT_TARGET=13.0
-          fi
-
-          if [[ "${{ matrix.name }}" == android-* ]]; then
-            NDK="${ANDROID_NDK_HOME:-${{ steps.setup-ndk.outputs.ndk-path }}}"
-            if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
-              echo "ANDROID_NDK_HOME not set or missing: $NDK"
-              exit 1
-            fi
-            HOST_TAG=linux-x86_64
-            PREBUILT="$NDK/toolchains/llvm/prebuilt/$HOST_TAG"
-            BIN="$PREBUILT/bin"
-            export PATH="$BIN:$PATH"
-            export ANDROID_NDK_HOME="$NDK"
-            export ANDROID_NDK_ROOT="$NDK"
-
-            if [ "${{ matrix.name }}" = "android-universal" ]; then
-              echo "Building Rust for all Android ABIs (universal)..."
-
-              for TARGET_TRIPLE in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
-                echo "  -> Building for $TARGET_TRIPLE"
-
-                if [ "$TARGET_TRIPLE" = "aarch64-linux-android" ]; then
-                  NDK_CLANG_PREFIX=aarch64-linux-android
-                  RUST_ENV_LOWER=aarch64_linux_android
-                  RUST_ENV_UPPER=AARCH64_LINUX_ANDROID
-                elif [ "$TARGET_TRIPLE" = "x86_64-linux-android" ]; then
-                  NDK_CLANG_PREFIX=x86_64-linux-android
-                  RUST_ENV_LOWER=x86_64_linux_android
-                  RUST_ENV_UPPER=X86_64_LINUX_ANDROID
-                else
-                  NDK_CLANG_PREFIX=armv7a-linux-androideabi
-                  RUST_ENV_LOWER=armv7_linux_androideabi
-                  RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
-                fi
-
-                CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
-                CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
-
-                export "CC_${RUST_ENV_LOWER}"="$CLANG"
-                export "CXX_${RUST_ENV_LOWER}"="$CLANGXX"
-                export "AR_${RUST_ENV_LOWER}"="$BIN/llvm-ar"
-                export "CARGO_TARGET_${RUST_ENV_UPPER}_LINKER"="$CLANG"
-                export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
-                ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
-                ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
-                export CC="${NDK_CLANG_PREFIX}24-clang"
-                export CXX="${NDK_CLANG_PREFIX}24-clang++"
-                export AR=llvm-ar
-
-                export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-                export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-                export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-
-                case "$TARGET_TRIPLE" in
-                  aarch64-linux-android)   HEV_ABI=arm64-v8a ;;
-                  armv7-linux-androideabi) HEV_ABI=armeabi-v7a ;;
-                  x86_64-linux-android)    HEV_ABI=x86_64 ;;
-                esac
-                export FCAE_HEV_LIBDIR="$(pwd)/core/hev-socks5-tunnel/bin/android/$HEV_ABI"
-                export FCAE_ZEPTUN_LIBDIR="$(pwd)/core/zeptun/zig-out/android/prebuilt/$HEV_ABI"
-
-                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
-
-                DEST="$(pwd)/target/$TARGET_TRIPLE/release/libfcae_ffi.a"
-                ls -lh "$DEST"
-                test -f "$DEST"
-              done
-              echo "All Android Rust targets built successfully"
-            else
-              if [ "${{ matrix.name }}" = "android-arm64-v8a" ]; then
-                NDK_CLANG_PREFIX=aarch64-linux-android
-                RUST_ENV_LOWER=aarch64_linux_android
-                RUST_ENV_UPPER=AARCH64_LINUX_ANDROID
-              elif [ "${{ matrix.name }}" = "android-x86_64" ]; then
-                NDK_CLANG_PREFIX=x86_64-linux-android
-                RUST_ENV_LOWER=x86_64_linux_android
-                RUST_ENV_UPPER=X86_64_LINUX_ANDROID
-              else
-                NDK_CLANG_PREFIX=armv7a-linux-androideabi
-                RUST_ENV_LOWER=armv7_linux_androideabi
-                RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
-              fi
-
-              CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
-              CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
-
-              export "CC_${RUST_ENV_LOWER}"="$CLANG"
-              export "CXX_${RUST_ENV_LOWER}"="$CLANGXX"
-              export "AR_${RUST_ENV_LOWER}"="$BIN/llvm-ar"
-              export "CARGO_TARGET_${RUST_ENV_UPPER}_LINKER"="$CLANG"
-              export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
-              ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
-              ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
-              export CC="${NDK_CLANG_PREFIX}24-clang"
-              export CXX="${NDK_CLANG_PREFIX}24-clang++"
-              export AR=llvm-ar
-
-              export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-              export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-              export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-
-              echo "Using NDK: $NDK"
-              "$CLANG" --version | head -1
-
-              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
-
-              DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
-              ls -lh "$DEST"
-              test -f "$DEST"
-            fi
-          else
-            case "${{ matrix.name }}" in
-              # Windows runs hev-socks5-tunnel in-process through the DLL that
-              # build-hev-windows stages; FCAE_HEV_DLL says it is part of the
-              # install, which switches the crate to the dynamic backend.
-              windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,zeptun,hev ;;
-              *) echo "::error::Unsupported desktop target: ${{ matrix.name }}"; exit 1 ;;
-            esac
-            cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features "$FEATURES"
-
-            DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
-            ls -lh "$DEST"
-            test -f "$DEST"
-          fi
+          NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
+          PREBUILT="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          BIN="$PREBUILT/bin"
+          export PATH="$BIN:$PATH"
+          export ANDROID_NDK_HOME="$NDK"
+          TARGET_TRIPLE=armv7-linux-androideabi
+          CLANG="$BIN/armv7a-linux-androideabi24-clang"
+          export CC_armv7_linux_androideabi="$CLANG"
+          export CXX_armv7_linux_androideabi="$BIN/armv7a-linux-androideabi24-clang++"
+          export AR_armv7_linux_androideabi="$BIN/llvm-ar"
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$CLANG"
+          export FCAE_HEV_LIBDIR="$(pwd)/core/hev-socks5-tunnel/bin/android/armeabi-v7a"
+          export FCAE_ZEPTUN_LIBDIR="$(pwd)/core/zeptun/zig-out/android/prebuilt/armeabi-v7a"
+          cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" \
+            -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          RUSTFLAGS: ${{ matrix.name == 'windows-x64' && '-C target-feature=+crt-static -C link-args=-static-libgcc -C link-args=-static-libstdc++ -C link-args=-Wl,-Bstatic -C link-args=-lpthread -C link-args=-lwinpthread -C link-args=-Wl,-Bdynamic' || '' }}
 
-      - name: build frontend (linux)
-        if: matrix.name == 'linux-x64'
-        run: |
-          mkdir -p build && cd build
-          cmake .. -G Ninja -DCMAKE_CXX_COMPILER=g++ \
-            -DCMAKE_PREFIX_PATH=/usr/local/glfw_static \
-            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION" \
-            -DFCAE_IS_PRERELEASE="$FCAE_IS_PRERELEASE"
-          cmake --build . --config Release
-
-      - name: build frontend (windows)
-        if: matrix.name == 'windows-x64'
-        run: |
-          mkdir -p build && cd build
-          cmake .. -G Ninja \
-            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION" \
-            -DFCAE_IS_PRERELEASE="$FCAE_IS_PRERELEASE"
-          cmake --build . --config Release
-
-      - name: build frontend (macOS)
-        if: startsWith(matrix.name, 'macos-')
-        run: |
-          mkdir -p build && cd build
-          export CMAKE_PREFIX_PATH="${GLFW_PREFIX:?glfw prefix not published by the install step}"
-          cmake .. -G Ninja \
-            ${{ matrix.cmake_args }} -DRUST_TARGET=${{ matrix.target }} \
-            -DFCAE_VERSION_OVERRIDE="$FCAE_VERSION" \
-            -DFCAE_IS_PRERELEASE="$FCAE_IS_PRERELEASE"
-          cmake --build . --config Release
-
-      - name: build apk
-        if: startsWith(matrix.name, 'android-')
+      - name: build apk (v7a only)
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_HOME: /usr/local/lib/android/sdk
         run: |
+          set -euo pipefail
           if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
             mkdir -p "$ANDROID_HOME/cmdline-tools"
             cd "$ANDROID_HOME/cmdline-tools"
-            wget -q --tries=3 --timeout=60 https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
-            unzip -q tools.zip
-            mv cmdline-tools latest
+            wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
+            unzip -q tools.zip && mv cmdline-tools latest
           fi
-          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses || true
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
+          cat > /tmp/v7a.init.gradle <<'GRADLE'
+          allprojects {
+              plugins.withId('com.android.application') {
+                  androidComponents.finalizeDsl { dsl ->
+                      try {
+                          dsl.defaultConfig.ndk.abiFilters.clear()
+                          dsl.defaultConfig.ndk.abiFilters.add('armeabi-v7a')
+                          dsl.packaging.jniLibs.useLegacyPackaging = true
+                      } catch (t) {}
+                  }
+              }
+          }
+          GRADLE
+
           cd android
           gradle wrapper --gradle-version 9.6.0
-          if [ "${{ matrix.name }}" = "android-universal" ]; then
-            ./gradlew assembleRelease -PUNIVERSAL=true -PBUILD_TYPE=android_universal
-          else
-            ./gradlew assembleRelease -PNDK_ABI=${{ matrix.abi }}
-          fi
+          ./gradlew -I /tmp/v7a.init.gradle assembleRelease \
+            -PUNIVERSAL=true -PBUILD_TYPE=android_universal \
+            -Pandroid.injected.build.abi=armeabi-v7a
 
-      - name: sign apk
-        if: startsWith(matrix.name, 'android-')
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      - name: strip other ABIs + sign
         run: |
           set -euo pipefail
-          echo "$KEYSTORE_BASE64" | base64 -d > /tmp/release.keystore
-
           BT=$(ls -d /usr/local/lib/android/sdk/build-tools/*/ | sort -V | tail -1)
+          APKPATH=$(find android -path '*/build/outputs/*' -name '*.apk' | grep -v -i debug | head -1)
+          cp "$APKPATH" /tmp/in.apk
+          zip -d /tmp/in.apk 'lib/arm64-v8a/*' 'lib/x86/*' 'lib/x86_64/*' || true
+          zip -d /tmp/in.apk 'META-INF/*.SF' 'META-INF/*.RSA' 'META-INF/*.DSA' || true
+          "${BT}zipalign" -f -p 4 /tmp/in.apk /tmp/aligned.apk
+          keytool -genkeypair -keystore /tmp/clubapp.keystore -alias clubapp \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass clubapp-pass -keypass clubapp-pass -dname "CN=Clubapp"
           "${BT}apksigner" sign \
-            --ks /tmp/release.keystore \
-            --ks-pass "pass:${KEYSTORE_PASSWORD}" \
-            --key-pass "pass:${KEY_PASSWORD}" \
-            --ks-key-alias "${KEY_ALIAS}" \
-            android/app/build/outputs/apk/release/*.apk
-
-          "${BT}apksigner" verify --verbose \
-            android/app/build/outputs/apk/release/*.apk || true
-          echo "APK signed successfully"
-          rm -f /tmp/release.keystore
-
-      - name: import macos codesigning cert
-        if: startsWith(matrix.name, 'macos-')
-        env:
-          MACOS_CERT_BASE64: ${{ secrets.MACOS_CERT_BASE64 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-        run: |
-          set -euo pipefail
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-
-          echo "$MACOS_CERT_BASE64" | base64 -d > "$RUNNER_TEMP/macoscert.p12"
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          security import "$RUNNER_TEMP/macoscert.p12" -P "$MACOS_CERT_PASSWORD" \
-            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-
-          security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
-
-          rm -f "$RUNNER_TEMP/macoscert.p12"
-
-      - name: package
-        if: "!startsWith(matrix.name, 'android-') && !startsWith(matrix.name, 'macos-')"
-        run: |
-          set -euo pipefail
+            --ks /tmp/clubapp.keystore --ks-pass pass:clubapp-pass \
+            --key-pass pass:clubapp-pass --ks-key-alias clubapp \
+            --out /tmp/Clubapp-v7a.apk /tmp/aligned.apk
           mkdir -p package
-          # Named, never a glob: build/ is a restored cache and may still hold
-          # artifacts from an older run. zeptun is linked into the executable,
-          # so there is no zeptun binary or DLL to ship on any platform.
-          ARTIFACT="FCAE_VPN-${{ matrix.name }}"
-          case "${{ matrix.name }}" in
-            windows-x64) cp build/fcaevpn.exe "package/$ARTIFACT.exe" ;;
-            *)           cp build/fcaevpn     "package/$ARTIFACT" ;;
-          esac
-          chmod +x package/* 2>/dev/null || true
-
-          if [ "${{ matrix.name }}" = "windows-x64" ]; then
-            # The released app is the exe alone, and that is now literally
-            # true: the hev engine set, wintun.dll and the second Go runtime
-            # (libfcae_psiphon) are all embedded and extracted to temp at
-            # runtime, and zeptun links statically. Nothing is copied beside
-            # it.
-            echo "Windows package:"
-            ls -la package/
-          fi
-
-          if [ "${{ matrix.name }}" = "linux-x64" ]; then
-            mkdir -p package/lib
-            BIN=build/fcaevpn
-            if [ -f "$BIN" ]; then
-              echo "Checking dynamic dependencies:"
-              ldd "$BIN" 2>/dev/null | grep -v -E 'linux-vdso|ld-linux|libc\.|libm\.|libdl\.|librt\.|libpthread\.|libstdc\+\+\.|libgcc_s\.|libX11\.|libXi\.|libGL\.|libGLX\.|libGLdispatch\.|libxcb\.|libXau\.|libXdmcp\.|libbsd\.|libmd\.' || true
-              # 1.3.5.4 PATCH: the launcher used to be a four-line wrapper that
-              # trusted the user to have libopengl0 installed. The shipped
-              # binary is built against glvnd and pulls libOpenGL.so.0 by
-              # default; on a minimal install that package is missing and
-              # the binary refuses to start with
-              #   error while loading shared libraries: libOpenGL.so.0
-              # The launcher now probes the loader, falls back to libGL.so.1
-              # (always present alongside libgl1), and prints an actionable
-              # error when even that is missing. CMakeLists.txt picks up the
-              # build-side counterpart that links libGL.so.1 first.
-              cat > "package/$ARTIFACT.sh" <<'FCAE_LAUNCHER_EOF'
-          #!/bin/sh
-          # FCAE VPN -- Linux launcher (auto-detects missing GLVND dispatch lib).
-          set -eu
-          DIR="$(cd "$(dirname "$0")" && pwd)"
-          BIN="$DIR/FCAE_VPN-linux-x64"
-          if [ ! -x "$BIN" ]; then
-              echo "FCAE VPN: launcher could not find executable at $BIN" >&2
-              exit 127
-          fi
-          need_libopengl=0
-          if LD_TRACE_LOADED_OBJECTS=1 "$BIN" 2>&1 | grep -q 'libOpenGL\.so\.0 => not found'; then
-              need_libopengl=1
-          elif command -v ldd >/dev/null 2>&1; then
-              if ldd "$BIN" 2>&1 | grep -q 'libOpenGL\.so\.0 => not found'; then
-                  need_libopengl=1
-              fi
-          fi
-          if [ "$need_libopengl" = "1" ]; then
-              found=""
-              for c in \
-                  /usr/lib/x86_64-linux-gnu/libGL.so.1 \
-                  /usr/lib64/libGL.so.1 \
-                  /usr/lib/libGL.so.1 \
-                  /usr/lib/x86_64-linux-gnu/libGL.so.3 \
-                  /usr/lib/x86_64-linux-gnu/libGL.so.0 \
-                  /usr/lib/libGL.so.0 \
-                  /lib/x86_64-linux-gnu/libGL.so.1; do
-                  if [ -f "$c" ]; then found="$c"; break; fi
-              done
-              if [ -n "$found" ]; then
-                  export LD_PRELOAD="${found}${LD_PRELOAD:+:$LD_PRELOAD}"
-              else
-                  cat >&2 <<'EOF'
-          FCAE VPN: requires libOpenGL.so.0 (Khronos GL dispatch). It is missing on this system.
-
-            Debian / Ubuntu :  sudo apt-get install libopengl0
-            Fedora / RHEL   :  sudo dnf install libglvnd-glx libglvnd-opengl
-            Arch Linux      :  sudo pacman -S libglvnd
-            Alpine          :  sudo apk add libglvnd
-          EOF
-                  exit 127
-              fi
-          fi
-          export LD_LIBRARY_PATH="$DIR/lib:$DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          exec "$BIN" "$@"
-          FCAE_LAUNCHER_EOF
-              chmod +x "package/$ARTIFACT.sh"
-            fi
-          fi
-
-          cd package
-          ls -la
-          case "${{ matrix.name }}" in
-            windows-x64) SHIPPED="$ARTIFACT.exe" ;;
-            *)           SHIPPED="$ARTIFACT" ;;
-          esac
-          test -f "$SHIPPED" || { echo "::error::$SHIPPED missing from the package"; exit 1; }
-
-          # Inspect the released artifact, never a path inside build/: that
-          # directory is a cache hit and can hold leftovers from an older run.
-          if [ "${{ matrix.name }}" = "windows-x64" ]; then
-            EXE="$ARTIFACT.exe"
-
-            # The app exe was copied straight to its released name, so it is
-            # the only .exe allowed to be here. Anything else is a leftover
-            # from the restored build/ cache.
-            STRAY="$(find . -maxdepth 1 -name '*.exe' ! -name "$EXE" -printf '%f\n')"
-            if [ -n "$STRAY" ]; then
-              echo "::error::unexpected executable in the package:"
-              printf '%s\n' "$STRAY" | sed 's/^/  /'
-              exit 1
-            fi
-            test -f "$EXE" || { echo "::error::$EXE missing from the package"; exit 1; }
-
-            # No PE import may name a file that is embedded in the exe or
-            # linked into it statically, or a user with the exe alone fails at
-            # process start instead of at engine load.
-            OBJDUMP=""
-            for candidate in objdump x86_64-w64-mingw32-objdump; do
-              if command -v "$candidate" >/dev/null 2>&1; then
-                OBJDUMP="$candidate"
-                break
-              fi
-            done
-            if [ -z "$OBJDUMP" ]; then
-              echo "::warning::no objdump on PATH; skipping the $EXE import check"
-            else
-              IMPORTS="$("$OBJDUMP" -p "$EXE" | awk '/DLL Name:/ { print $3 }' | sort -u)"
-              echo "$EXE imports:"
-              echo "$IMPORTS" | sed 's/^/  /'
-              if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|libyaml\.so|liblwip\.so|libhev-task-system\.so|msys-2\.0\.dll|wintun\.dll|zeptun\.dll|libfcae_psiphon\.dll|libgcc_s_seh-1\.dll|libstdc\+\+-6\.dll|libwinpthread-1\.dll)$'; then
-                echo "::error::$EXE imports a DLL that is supposed to be embedded or statically linked"
-                exit 1
-              fi
-            fi
-
-            # There is deliberately no "are the engine bytes really in here"
-            # check. The engine set is embedded with include_bytes!, which is a
-            # compile-time copy into the binary: if the dir is empty, stale or
-            # absent, cargo fails and this step never runs. The import check
-            # above already catches the one failure that would survive a
-            # successful build - a link that names one of those files.
-            #
-            # The engine dir is still asserted: it is exported by a different
-            # job through the workflow environment, and if that link broke the
-            # failure would otherwise surface as a confusing rustc error.
-            : "${FCAE_HEV_ENGINE_DIR:?the hev engine dir was not exported}"
-          fi
-
-          if [ "${{ matrix.name }}" = "linux-x64" ]; then
-            # Direct DT_NEEDED entries only: ldd shows transitive deps too
-            # (libGL pulls libz), which must not fail this check.
-            NEEDED="$(readelf -d "$SHIPPED" | awk -F'[][]' '/NEEDED/ { print $2 }' | sort -u)"
-            echo "$SHIPPED DT_NEEDED:"
-            echo "$NEEDED" | sed 's/^/  /'
-            # 1.3.5.4 PATCH: libOpenGL.so.0 was implicitly allowed here
-            # before; with the launcher fallback in place, the build can
-            # still ship with it but the operator-friendly path is to link
-            # against libGL.so.1 directly so minimal installs do not need
-            # libopengl0. Reject any regression that brings libOpenGL.so.0
-            # back into the DT_NEEDED list (CMakeLists.txt chooses the
-            # link target explicitly).
-            if echo "$NEEDED" | grep -qiE 'libzeptun|libfcae_psiphon|libhev|libfcae_go_bridge|libglfw|libstdc\+\+|libgcc_s|libz\.so|libbz2|liblzma|libssl|libcrypto'; then
-              echo "::error::$SHIPPED links a library that is supposed to be statically linked"
-              exit 1
-            fi
-            if echo "$NEEDED" | grep -q 'libOpenGL\.so'; then
-              echo "::error::$SHIPPED still pulls libOpenGL.so.0; CMakeLists.txt should link libGL.so.1 instead"
-              exit 1
-            fi
-          fi
-
-      - name: install osslsigncode (windows signing)
-        if: matrix.name == 'windows-x64'
-        timeout-minutes: 10
-        run: |
-          set -euxo pipefail
-          sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-          while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
-            echo "waiting for boot-time apt processes to release locks..."
-            sleep 5
-          done
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends osslsigncode
-
-      - name: sign windows exe
-        if: matrix.name == 'windows-x64'
-        env:
-          WIN_CERT_BASE64: ${{ secrets.WIN_CERT_BASE64 }}
-          WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
-        run: |
-          set -euo pipefail
-          if [ -z "${WIN_CERT_BASE64:-}" ]; then
-            echo "WIN_CERT_BASE64 secret not set, skipping windows signing"
-            exit 0
-          fi
-          echo "$WIN_CERT_BASE64" | base64 -d > "$RUNNER_TEMP/wincert.pfx"
-
-          for f in package/*.exe; do
-            [ -f "$f" ] || continue
-            osslsigncode sign \
-              -pkcs12 "$RUNNER_TEMP/wincert.pfx" \
-              -pass "$WIN_CERT_PASSWORD" \
-              -n "FCAE VPN" \
-              -i "https://github.com/${{ github.repository }}" \
-              -t http://timestamp.digicert.com \
-              -in "$f" \
-              -out "${f}.signed"
-            mv -f "${f}.signed" "$f"
-            osslsigncode verify -in "$f" || true
-          done
-
-          rm -f "$RUNNER_TEMP/wincert.pfx"
-          echo "Windows exe signed successfully"
-
-      - name: sign linux binaries (gpg)
-        if: matrix.name == 'linux-x64'
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
-            echo "GPG_PRIVATE_KEY secret not set, skipping linux signing"
-            exit 0
-          fi
-
-          export GNUPGHOME="$RUNNER_TEMP/gnupg"
-          mkdir -p "$GNUPGHOME"
-          chmod 700 "$GNUPGHOME"
-
-          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
-          KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5; exit}')
-          echo "Signing with key: $KEY_ID"
-
-          for f in package/*; do
-            [ -f "$f" ] || continue
-            gpg --batch --yes --local-user "$KEY_ID" --detach-sign --armor "$f"
-          done
-
-          gpg --batch --armor --export "$KEY_ID" > package/FCAE_VPN-public-key.asc
-
-          rm -rf "$GNUPGHOME"
-          ls -la package/
-          echo "Linux binaries signed successfully"
-
-      - name: package (android)
-        if: startsWith(matrix.name, 'android-')
-        run: |
-          set -euo pipefail
-          mkdir -p package
-          cp android/app/build/outputs/apk/release/*.apk "package/FCAE_VPN-${{ matrix.name }}.apk" 2>/dev/null || true
-          test -f "package/FCAE_VPN-${{ matrix.name }}.apk"
+          cp /tmp/Clubapp-v7a.apk package/
           ls -lah package/
-
-      - name: package (macOS)
-        if: startsWith(matrix.name, 'macos-')
-        run: |
-          set -euo pipefail
-          mkdir -p package
-
-          APP="package/FCAE VPN.app"
-          mkdir -p "$APP/Contents/MacOS"
-          mkdir -p "$APP/Contents/Frameworks"
-          mkdir -p "$APP/Contents/Resources"
-
-          cp build/fcaevpn "$APP/Contents/MacOS/fcaevpn"
-          chmod +x "$APP/Contents/MacOS/fcaevpn"
-          # No libfcae_psiphon.dylib: the second Go runtime is embedded in
-          # fcaevpn and dlopen'd from the temp directory at first start, so
-          # there is no framework for the bundle to carry.
-
-          ICONSET="$RUNNER_TEMP/AppIcon.iconset"
-          rm -rf "$ICONSET"
-          mkdir -p "$ICONSET"
-
-          gen() { sips -s format png -z "$1" "$1" src_cpp/icon_48.png --out "$ICONSET/$2" >/dev/null; }
-          gen 16  icon_16x16.png
-          gen 32  icon_16x16@2x.png
-          gen 32  icon_32x32.png
-          gen 64  icon_32x32@2x.png
-          gen 128 icon_128x128.png
-          gen 256 icon_128x128@2x.png
-
-          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
-          cp src_cpp/icon_48.png "$APP/Contents/Resources/AppIcon.png"
-          ls -la "$APP/Contents/Resources/"
-
-          echo "Binary dynamic dependencies:"
-          otool -L "$APP/Contents/MacOS/fcaevpn" || true
-          # Every load must resolve from the OS: an engine library or a
-          # Homebrew prefix here means it linked dynamically instead of
-          # statically, and breaks on machines without that path.
-          if otool -L "$APP/Contents/MacOS/fcaevpn" | tail -n +2 | grep -qiE 'libzeptun|libfcae_psiphon|libhev|libfcae_go_bridge|/usr/local/|/opt/homebrew|/opt/local/'; then
-            echo "::error::fcaevpn links a library that is supposed to be statically linked or embedded"
-            exit 1
-          fi
-
-          MACOS_VER="${{ needs.prepare.outputs.macos_version }}"
-          printf '%s\n' \
-            '<?xml version="1.0" encoding="UTF-8"?>' \
-            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
-            '<plist version="1.0">' \
-            '<dict>' \
-            '    <key>CFBundleExecutable</key>' \
-            '    <string>fcaevpn</string>' \
-            '    <key>CFBundleIdentifier</key>' \
-            '    <string>com.fc.fcaevpn</string>' \
-            '    <key>CFBundleName</key>' \
-            '    <string>FCAE VPN</string>' \
-            '    <key>CFBundleVersion</key>' \
-            '    <string>'"${MACOS_VER}"'</string>' \
-            '    <key>CFBundleShortVersionString</key>' \
-            '    <string>'"${MACOS_VER}"'</string>' \
-            '    <key>CFBundlePackageType</key>' \
-            '    <string>APPL</string>' \
-            '    <key>CFBundleIconFile</key>' \
-            '    <string>AppIcon.icns</string>' \
-            '    <key>CFBundleIconName</key>' \
-            '    <string>AppIcon</string>' \
-            '    <key>CFBundleDisplayName</key>' \
-            '    <string>FCAE VPN</string>' \
-            '    <key>CFBundleInfoDictionaryVersion</key>' \
-            '    <string>6.0</string>' \
-            '    <key>CFBundleSignature</key>' \
-            '    <string>????</string>' \
-            '    <key>LSApplicationCategoryType</key>' \
-            '    <string>public.app-category.utilities</string>' \
-            '    <key>NSPrincipalClass</key>' \
-            '    <string>NSApplication</string>' \
-            '    <key>NSHighResolutionCapable</key>' \
-            '    <true/>' \
-            '    <key>LSMinimumSystemVersion</key>' \
-            '    <string>13.0</string>' \
-            '</dict>' \
-            '</plist>' > "$APP/Contents/Info.plist"
-
-          touch "$APP"
-
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-          if [ -f "$KEYCHAIN_PATH" ]; then
-            codesign --force --deep --sign "FC" --keychain "$KEYCHAIN_PATH" --timestamp "$APP" || \
-              codesign --force --deep --sign "FC" --keychain "$KEYCHAIN_PATH" "$APP"
-          else
-            echo "No signing keychain found, falling back to ad-hoc signing"
-            codesign --force --deep --sign - "$APP"
-          fi
-          codesign --verify --deep --strict --verbose=2 "$APP" || true
-
-          DMG_ROOT="$RUNNER_TEMP/dmgroot"
-          rm -rf "$DMG_ROOT"
-          mkdir -p "$DMG_ROOT"
-          cp -R "$APP" "$DMG_ROOT/"
-          ln -s /Applications "$DMG_ROOT/Applications"
-
-          DMG_NAME="FCAE_VPN-${{ matrix.name }}.dmg"
-          hdiutil create -volname "FCAE VPN" -srcfolder "$DMG_ROOT" -ov -format UDZO "package/${DMG_NAME}"
-
-          ls -lah package/
-          test -f "package/${DMG_NAME}"
-
-      - name: cleanup macos keychain
-        if: always() && startsWith(matrix.name, 'macos-')
-        run: |
-          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
 
       - name: upload
         uses: actions/upload-artifact@v7
         with:
-          name: FCAE_VPN-${{ matrix.name }}
-          path: ${{ startsWith(matrix.name, 'macos-') && 'package/*.dmg' || 'package/*' }}
+          name: Clubapp-apk-v7a
+          path: package/*
           if-no-files-found: error
-
-  release:
-    name: release/pre-release
-    needs: [prepare, build]
-    env:
-      FCAE_VERSION: ${{ needs.prepare.outputs.version }}
-      FCAE_VERSION_FULL: ${{ needs.prepare.outputs.version_full }}
-      FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
-    runs-on: ubuntu-latest
-    if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch'
-    permissions:
-      contents: write
-    steps:
-      - name: checkout
-        uses: actions/checkout@v7
-        with:
-          ref: main
-
-      - name: delete existing release and tag
-        uses: actions/github-script@v8
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-        with:
-          script: |
-            const tag = process.env.VERSION;
-            const releases = await github.paginate(github.rest.repos.listReleases, {
-              owner: context.repo.owner, repo: context.repo.repo, per_page: 100,
-            });
-            for (const release of releases) {
-              if (release.tag_name === tag || release.tag_name === `v${tag}`) {
-                console.log(`Deleting existing release ${release.id} for tag ${release.tag_name}`);
-                await github.rest.repos.deleteRelease({
-                  owner: context.repo.owner, repo: context.repo.repo, release_id: release.id,
-                });
-              }
-            }
-            for (const ref of [`tags/${tag}`, `tags/v${tag}`]) {
-              try {
-                await github.rest.git.deleteRef({
-                  owner: context.repo.owner, repo: context.repo.repo, ref,
-                });
-                console.log(`Deleted ref ${ref}`);
-              } catch (error) {
-                if (error.status !== 404 && error.status !== 422) throw error;
-              }
-            }
-
-      - name: download app package artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: FCAE_VPN-*
-          path: artifacts/
-          merge-multiple: false
-
-      - name: zip for GitHub Release
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-          while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
-            echo "waiting for boot-time apt processes to release locks..."
-            sleep 5
-          done
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y zip
-          mkdir -p release-zips
-          for dir in artifacts/*/; do
-            [ -d "$dir" ] || continue
-            name=$(basename "$dir")
-            if ls "$dir"/*.dmg 1>/dev/null 2>&1; then
-              for dmg in "$dir"/*.dmg; do
-                dmg_base=$(basename "$dmg" .dmg)
-                cp "$dmg" "release-zips/${dmg_base}-${FCAE_VERSION}.dmg"
-                echo "Copied release-zips/${dmg_base}-${FCAE_VERSION}.dmg"
-              done
-            else
-              zip_name="${name}-${FCAE_VERSION}.zip"
-              (
-                cd "$dir"
-                zip -9 -j "../../release-zips/${zip_name}" ./*
-              )
-              echo "Created release-zips/${zip_name}"
-              unzip -l "release-zips/${zip_name}" | head -20
-            fi
-          done
-          ls -lah release-zips/
-          test $(ls -1 release-zips/* 2>/dev/null | wc -l) -ge 1
-
-      - name: release/pre-release
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-
-            const tag = ${{ toJSON(needs.prepare.outputs.version) }};
-            const versionFull = ${{ toJSON(needs.prepare.outputs.version_full) }};
-            const isPrerelease = ${{ needs.prepare.outputs.is_prerelease }} === 'true';
-            const extraNotes = ${{ toJSON(inputs.extra_notes) }};
-
-            const parseVersion = (version) => {
-              const match = /^((?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2,3})(_pre-release(?:\.(?:0|[1-9][0-9]*))?)?$/.exec(version);
-              if (!match) throw new Error(`Invalid release version: ${version}`);
-              const nums = match[1].split('.').map(BigInt);
-              while (nums.length < 4) nums.push(0n);
-              const revision = match[2]?.split('.')[1];
-              if (nums.some(n => n > 18446744073709551615n) || revision && BigInt(revision) > 18446744073709551615n) {
-                throw new Error(`Invalid numeric version component: ${version}`);
-              }
-              return { nums, pre: Boolean(match[2]), revision: revision === undefined ? -1n : BigInt(revision) };
-            };
-            const compareVersion = (a, b) => {
-              const x = parseVersion(a), y = parseVersion(b);
-              const cmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
-              for (let i = 0; i < 4; i++) {
-                const d = cmp(x.nums[i], y.nums[i]);
-                if (d) return d;
-              }
-              if (x.pre !== y.pre) return x.pre ? -1 : 1;
-              return cmp(x.revision, y.revision);
-            };
-
-            let changelog = '';
-            try {
-              const notes = await github.rest.repos.generateReleaseNotes({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag_name: tag,
-                target_commitish: context.sha,
-              });
-              changelog = notes.data.body;
-            } catch (e) {
-              console.log(`Could not generate release notes: ${e.message}`);
-            }
-
-            const body = (extraNotes || '').trim() ? extraNotes.trim() : changelog;
-
-            const release = await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: tag,
-              target_commitish: context.sha,
-              name: `FCAE VPN ${tag}`,
-              body,
-              prerelease: isPrerelease,
-              draft: true,
-            });
-            console.log(`Created release ${release.data.id} for tag ${tag} (prerelease=${isPrerelease})`);
-
-            const dir = 'release-zips';
-            for (const file of fs.readdirSync(dir)) {
-              const filePath = path.join(dir, file);
-              const data = fs.readFileSync(filePath);
-              const ext = path.extname(file).toLowerCase();
-              const contentType = ext === '.dmg' ? 'application/x-apple-diskimage'
-                                : ext === '.zip' ? 'application/zip'
-                                : 'application/octet-stream';
-              console.log(`Uploading ${file} (${data.length} bytes, type=${contentType})...`);
-              await github.rest.repos.uploadReleaseAsset({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                release_id: release.data.id,
-                name: file,
-                data,
-                headers: {
-                  'content-type': contentType,
-                  'content-length': data.length,
-                },
-              });
-            }
-            console.log('All assets uploaded.');
-
-            const published = await github.rest.repos.updateRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: release.data.id,
-              draft: false,
-              make_latest: isPrerelease ? 'false' : 'legacy',
-            });
-            const entry = {
-              version: versionFull,
-              date: published.data.published_at.slice(0, 10),
-              notes: body,
-              url: published.data.html_url,
-            };
-
-            const current = await github.rest.repos.getContent({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              path: 'version.json',
-              ref: 'main',
-            });
-            if (Array.isArray(current.data) || current.data.type !== 'file') {
-              throw new Error('Expected version.json to be a file on main');
-            }
-            const previous = JSON.parse(Buffer.from(current.data.content, 'base64').toString('utf8'));
-            if (!Array.isArray(previous) || !previous.length) {
-              throw new Error('version.json must be a nonempty release array');
-            }
-            for (const release of previous) {
-              parseVersion(release.version);
-              if (typeof release.date !== 'string' || typeof release.notes !== 'string' || typeof release.url !== 'string') {
-                throw new Error('Each release requires version, date, notes and url');
-              }
-            }
-            const merged = previous.filter(release => compareVersion(release.version, entry.version) !== 0);
-            merged.push(entry);
-            const stable = [];
-            const prerelease = [];
-            for (const r of merged) {
-              const v = parseVersion(r.version);
-              if (v.pre) prerelease.push(r); else stable.push(r);
-            }
-            stable.sort((a, b) => compareVersion(b.version, a.version));
-            prerelease.sort((a, b) => compareVersion(b.version, a.version));
-            const next = [];
-            if (stable.length) next.push(stable[0]);
-            if (prerelease.length) next.push(prerelease[0]);
-            next.sort((a, b) => Number(parseVersion(a.version).pre) - Number(parseVersion(b.version).pre)
-              || compareVersion(b.version, a.version));
-            const content = `${JSON.stringify(next, null, 2)}\n`;
-            if (content !== Buffer.from(current.data.content, 'base64').toString('utf8')) {
-              await github.rest.repos.createOrUpdateFileContents({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                path: 'version.json',
-                branch: 'main',
-                sha: current.data.sha,
-                message: `chore: bump version.json ${isPrerelease ? 'pre-release to' : 'to'} ${entry.version}`,
-                content: Buffer.from(content, 'utf8').toString('base64'),
-              });
-              console.log(`Committed version.json for ${entry.version} after release uploads`);
-            } else {
-              console.log('version.json already matches this release');
-            }
