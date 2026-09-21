@@ -1543,9 +1543,14 @@ class MainActivity : AppCompatActivity() {
         val owner = if (isTunModeSelected()) {
             Intent(this, FCAEVpnService::class.java)
                 .setAction(FCAEVpnService.ACTION_PSIPHON_START)
-        } else {
+        } else if (upstream.isNullOrBlank()) {
             Intent(this, ProxyNotification::class.java)
                 .setAction(ProxyNotification.ACTION_PSIPHON)
+        } else {
+            // Chained proxy mode must keep the normal Aether owner so its
+            // attach-request polling remains active.
+            Intent(this, ProxyNotification::class.java)
+                .setAction(ProxyNotification.ACTION_START)
         }
         i.extras?.let { owner.putExtras(it) }
         startForegroundService(owner)
