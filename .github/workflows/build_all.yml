@@ -43,17 +43,16 @@ jobs:
         run: |
           set -euo pipefail
           pip install pillow numpy
-          python3 - <<'PY'
+          python3 << 'EOF'
           import os, re
           from PIL import Image, ImageDraw, ImageFont
           import numpy as np
 
           ROOT = "android/app/src/main"
-          RES = ROOT + "/res"
+          RES = os.path.join(ROOT, "res")
           TG = "https://t.me/Clubapp8"
           DEAD = "http://127.0.0.1:9/disabled"
 
-          # ساخت آیکون ساده شبیه لوگوی Clubapp
           def make_icon(size=512):
               img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
               draw = ImageDraw.Draw(img)
@@ -80,19 +79,21 @@ jobs:
 
           def round_img(n):
               im = sized(n)
-              m = Image.new("L", (n * 4, n * 4), 0)
-              ImageDraw.Draw(m).ellipse((0, 0, n * 4 - 1, n * 4 - 1), fill=255)
-              m = np.array(m.resize((n, n), Image.LANCZOS))
-              a = np.minimum(np.array(im)[..., 3], m)
-              im.putalpha(Image.fromarray(a.astype(np.uint8)))
+              mask = Image.new("L", (n * 4, n * 4), 0)
+              ImageDraw.Draw(mask).ellipse((0, 0, n * 4 - 1, n * 4 - 1), fill=255)
+              mask = np.array(mask.resize((n, n), Image.LANCZOS))
+              arr = np.array(im)
+              arr[..., 3] = np.minimum(arr[..., 3], mask)
+              im = Image.fromarray(arr)
               return im
 
           bg = "#1E3A8A"
-
           DENS = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
           names = {"ic_launcher", "ic_launcher_round"}
+
           try:
-              man = open(ROOT + "/AndroidManifest.xml", encoding="utf-8").read()
+              with open(os.path.join(ROOT, "AndroidManifest.xml"), encoding="utf-8") as f:
+                  man = f.read()
               names |= set(re.findall(r'android:(?:icon|roundIcon)="@mipmap/([^"]+)"', man))
           except:
               pass
@@ -100,7 +101,7 @@ jobs:
           for d in os.listdir(RES):
               if d.startswith("mipmap"):
                   for n in names:
-                      for ext in (".png", ".webp", ".jpg"):
+                      for ext in [".png", ".webp", ".jpg"]:
                           p = os.path.join(RES, d, n + ext)
                           if os.path.exists(p):
                               os.remove(p)
@@ -112,57 +113,55 @@ jobs:
                   img = round_img(px) if "round" in n else sized(px)
                   img.save(os.path.join(dd, n + ".png"), optimize=True)
 
-          os.makedirs(RES + "/drawable-nodpi", exist_ok=True)
-          sized(324).save(RES + "/drawable-nodpi/clubapp_icon_fg.png", optimize=True)
-          os.makedirs(RES + "/values", exist_ok=True)
-          open(RES + "/values/clubapp_icon.xml", "w").write(
-              '<?xml version="1.0" encoding="utf-8"?>\n'
-              '<resources>\n'
-              '    <color name="clubapp_icon_bg">' + bg + '</color>\n'
-              '</resources>\n'
-          )
+          os.makedirs(os.path.join(RES, "drawable-nodpi"), exist_ok=True)
+          sized(324).save(os.path.join(RES, "drawable-nodpi", "clubapp_icon_fg.png"), optimize=True)
 
-          ADAPTIVE = (
-              '<?xml version="1.0" encoding="utf-8"?>\n'
-              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
-              '    <background android:drawable="@color/clubapp_icon_bg"/>\n'
-              '    <foreground android:drawable="@drawable/clubapp_icon_fg"/>\n'
-              '</adaptive-icon>\n'
-          )
+          os.makedirs(os.path.join(RES, "values"), exist_ok=True)
+          with open(os.path.join(RES, "values", "clubapp_icon.xml"), "w") as f:
+              f.write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="clubapp_icon_bg">' + bg + '</color>\n</resources>\n')
 
+          adaptive = '''<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/clubapp_icon_bg"/>
+    <foreground android:drawable="@drawable/clubapp_icon_fg"/>
+</adaptive-icon>
+'''
           v26 = os.path.join(RES, "mipmap-anydpi-v26")
           os.makedirs(v26, exist_ok=True)
           for n in sorted(names):
-              open(os.path.join(v26, n + ".xml"), "w").write(ADAPTIVE)
+              with open(os.path.join(v26, n + ".xml"), "w") as f:
+                  f.write(adaptive)
 
-          # تغییر اسم + لینک‌ها + غیرفعال کردن آپدیت
-          APPNAME = re.compile(r'(<string\s+name="app_name"[^>]*>)[^<]*(</string>)')
-          PAGE = re.compile(r'https?://(?:www\.)?github\.com/FCFlenkchy[^\s"\')\\]*', re.I)
-          API = re.compile(r'https?://api\.github\.com[^\s"\')\\]*', re.I)
-          REL = re.compile(r'https?://(?:www\.)?github\.com/[^\s"\')\\]*(?:releases|/tags)[^\s"\')\\]*', re.I)
-          TME = re.compile(r'https?://t\.me/[A-Za-z0-9_+]+')
+          # تغییر اسم و لینک‌ها
+          appname_re = re.compile(r'(<string\s+name="app_name"[^>]*>)[^<]*(</string>)')
+          page_re = re.compile(r'https?://(?:www\.)?github\.com/FCFlenkchy[^\s"\')\\]*', re.I)
+          api_re = re.compile(r'https?://api\.github\.com[^\s"\')\\]*', re.I)
+          rel_re = re.compile(r'https?://(?:www\.)?github\.com/[^\s"\')\\]*(?:releases|/tags)[^\s"\')\\]*', re.I)
+          tme_re = re.compile(r'https?://t\.me/[A-Za-z0-9_+]+')
 
-          for d, dirs, files in os.walk(ROOT):
-              dirs[:] = [x for x in dirs if x not in {"build", ".gradle", "node_modules", ".git"}]
+          for root, dirs, files in os.walk(ROOT):
+              dirs[:] = [d for d in dirs if d not in {"build", ".gradle", "node_modules", ".git"}]
               for f in files:
                   if not f.endswith((".xml", ".kt", ".java")):
                       continue
-                  p = os.path.join(d, f)
+                  p = os.path.join(root, f)
                   try:
-                      t = open(p, encoding="utf-8").read()
+                      with open(p, encoding="utf-8") as file:
+                          t = file.read()
                   except:
                       continue
                   n = t.replace("FCAE VPN", "Clubapp")
-                  n = APPNAME.sub(r"\1Clubapp\2", n)
-                  n = API.sub(DEAD, n)
-                  n = REL.sub(DEAD, n)
-                  n = PAGE.sub(TG, n)
-                  n = TME.sub(TG, n)
+                  n = appname_re.sub(r"\1Clubapp\2", n)
+                  n = api_re.sub(DEAD, n)
+                  n = rel_re.sub(DEAD, n)
+                  n = page_re.sub(TG, n)
+                  n = tme_re.sub(TG, n)
                   n = re.sub(r"FCFlenkchy/FCAE_VPN", "none/none", n, flags=re.I)
                   if f == "AndroidManifest.xml":
                       n = re.sub(r'\s*<uses-permission[^>]*REQUEST_INSTALL_PACKAGES[^>]*/>', "", n)
                   if n != t:
-                      open(p, "w", encoding="utf-8").write(n)
+                      with open(p, "w", encoding="utf-8") as file:
+                          file.write(n)
 
           # تغییر version.json
           with open("version.json", "w", encoding="utf-8") as f:
@@ -175,8 +174,8 @@ jobs:
   }
 ]
 ''')
-          print("Branding finished successfully")
-          PY
+          print("Branding done successfully")
+          EOF
 
       - name: setup go
         uses: actions/setup-go@v7
@@ -213,21 +212,8 @@ jobs:
           ROOT="$PWD"
           PSIPHON_REV=$(git rev-parse HEAD:core/psiphon)
           PSIPHON_GIT_DIR=$(git -C core/psiphon rev-parse --absolute-git-dir)
-          docker build --platform=linux/amd64 -t fcae-psiphon-android \
-            -f core/psiphon/MobileLibrary/Android/Dockerfile core/psiphon/MobileLibrary
-          docker run --platform=linux/amd64 --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp -e GOCACHE=/tmp/go-cache \
-            -e GIT_DIR=/psiphon-git \
-            -e GIT_WORK_TREE=/go/src/github.com/Psiphon-Labs/psiphon-tunnel-core \
-            -e PSIPHON_REV="$PSIPHON_REV" \
-            -v "$PSIPHON_GIT_DIR:/psiphon-git:ro" \
-            -v "$ROOT/core/psiphon:/go/src/github.com/Psiphon-Labs/psiphon-tunnel-core" \
-            fcae-psiphon-android /bin/bash -c '
-              set -euo pipefail
-              cd "$GIT_WORK_TREE/MobileLibrary/Android"
-              ./make.bash
-            '
+          docker build --platform=linux/amd64 -t fcae-psiphon-android -f core/psiphon/MobileLibrary/Android/Dockerfile core/psiphon/MobileLibrary
+          docker run --platform=linux/amd64 --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e GOCACHE=/tmp/go-cache -e GIT_DIR=/psiphon-git -e GIT_WORK_TREE=/go/src/github.com/Psiphon-Labs/psiphon-tunnel-core -e PSIPHON_REV="$PSIPHON_REV" -v "$PSIPHON_GIT_DIR:/psiphon-git:ro" -v "$ROOT/core/psiphon:/go/src/github.com/Psiphon-Labs/psiphon-tunnel-core" fcae-psiphon-android /bin/bash -c 'set -euo pipefail; cd "$GIT_WORK_TREE/MobileLibrary/Android"; ./make.bash'
           mkdir -p android/psiphon/libs
           cp core/psiphon/MobileLibrary/Android/ca.psiphon.aar android/psiphon/libs/
           zip -d android/psiphon/libs/ca.psiphon.aar 'jni/arm64-v8a/*' 'jni/x86/*' 'jni/x86_64/*' || true
@@ -262,18 +248,9 @@ jobs:
           SYSROOT="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           LIBC_DIR=$(mktemp -d)
           abi=armeabi-v7a
-          ZIG_TARGET=arm-linux-androideabi.24
-          NDK_TARGET=arm-linux-androideabi
-          printf '%s\n' \
-            "include_dir=$SYSROOT/usr/include" \
-            "sys_include_dir=$SYSROOT/usr/include/$NDK_TARGET" \
-            "crt_dir=$SYSROOT/usr/lib/$NDK_TARGET/24" \
-            'msvc_lib_dir=' 'kernel32_lib_dir=' 'gcc_dir=' > "$LIBC_DIR/$abi.conf"
-          zig build -Dtarget="$ZIG_TARGET" -Doptimize=ReleaseSmall -Dstrip=true \
-            -Dandroid-libc="$LIBC_DIR/$abi.conf" --libc "$LIBC_DIR/$abi.conf" \
-            --prefix "$PWD/zig-out/android/$abi"
-          install -D -m 644 "zig-out/android/$abi/lib/libzeptun.a" \
-            "zig-out/android/prebuilt/$abi/libzeptun.a"
+          printf '%s\n' "include_dir=$SYSROOT/usr/include" "sys_include_dir=$SYSROOT/usr/include/arm-linux-androideabi" "crt_dir=$SYSROOT/usr/lib/arm-linux-androideabi/24" 'msvc_lib_dir=' 'kernel32_lib_dir=' 'gcc_dir=' > "$LIBC_DIR/$abi.conf"
+          zig build -Dtarget=arm-linux-androideabi.24 -Doptimize=ReleaseSmall -Dstrip=true -Dandroid-libc="$LIBC_DIR/$abi.conf" --libc "$LIBC_DIR/$abi.conf" --prefix "$PWD/zig-out/android/$abi"
+          install -D -m 644 "zig-out/android/$abi/lib/libzeptun.a" "zig-out/android/prebuilt/$abi/libzeptun.a"
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
@@ -284,18 +261,9 @@ jobs:
           cd core/hev-socks5-tunnel
           TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
           make clean
-          make static \
-            CC="$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang" \
-            AR="$TOOLCHAIN/bin/llvm-ar" \
-            STRIP="$TOOLCHAIN/bin/llvm-strip" \
-            PP="$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang -E" \
-            CFLAGS="-fPIC -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -Wno-error -mfpu=neon"
+          make static CC="$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang" AR="$TOOLCHAIN/bin/llvm-ar" STRIP="$TOOLCHAIN/bin/llvm-strip" PP="$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang -E" CFLAGS="-fPIC -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -Wno-error -mfpu=neon"
           mkdir -p bin/android/armeabi-v7a
-          cp bin/libhev-socks5-tunnel.a \
-             third-part/lwip/bin/liblwip.a \
-             third-part/yaml/bin/libyaml.a \
-             third-part/hev-task-system/bin/libhev-task-system.a \
-             bin/android/armeabi-v7a/
+          cp bin/libhev-socks5-tunnel.a third-part/lwip/bin/liblwip.a third-part/yaml/bin/libyaml.a third-part/hev-task-system/bin/libhev-task-system.a bin/android/armeabi-v7a/
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
@@ -315,8 +283,7 @@ jobs:
           export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$CLANG"
           export FCAE_HEV_LIBDIR="$(pwd)/core/hev-socks5-tunnel/bin/android/armeabi-v7a"
           export FCAE_ZEPTUN_LIBDIR="$(pwd)/core/zeptun/zig-out/android/prebuilt/armeabi-v7a"
-          cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" \
-            -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
+          cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -337,8 +304,7 @@ jobs:
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses || true
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
-
-          cat > /tmp/v7a.init.gradle <<'GRADLE'
+          cat > /tmp/v7a.init.gradle << 'GRADLE'
           allprojects {
               plugins.withId('com.android.application') {
                   androidComponents.finalizeDsl { dsl ->
@@ -351,12 +317,9 @@ jobs:
               }
           }
           GRADLE
-
           cd android
           gradle wrapper --gradle-version 9.6.0
-          ./gradlew -I /tmp/v7a.init.gradle assembleRelease \
-            -PUNIVERSAL=true -PBUILD_TYPE=android_universal \
-            -Pandroid.injected.build.abi=armeabi-v7a
+          ./gradlew -I /tmp/v7a.init.gradle assembleRelease -PUNIVERSAL=true -PBUILD_TYPE=android_universal -Pandroid.injected.build.abi=armeabi-v7a
 
       - name: strip other ABIs + sign
         run: |
@@ -367,15 +330,8 @@ jobs:
           zip -d /tmp/in.apk 'lib/arm64-v8a/*' 'lib/x86/*' 'lib/x86_64/*' || true
           zip -d /tmp/in.apk 'META-INF/*.SF' 'META-INF/*.RSA' 'META-INF/*.DSA' || true
           "${BT}zipalign" -f -p 4 /tmp/in.apk /tmp/aligned.apk
-          keytool -genkeypair -keystore /tmp/clubapp.keystore -alias clubapp \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass clubapp-pass -keypass clubapp-pass -dname "CN=Clubapp"
-          "${BT}apksigner" sign \
-            --ks /tmp/clubapp.keystore \
-            --ks-pass pass:clubapp-pass \
-            --key-pass pass:clubapp-pass \
-            --ks-key-alias clubapp \
-            --out /tmp/Clubapp-v7a.apk /tmp/aligned.apk
+          keytool -genkeypair -keystore /tmp/clubapp.keystore -alias clubapp -keyalg RSA -keysize 2048 -validity 10000 -storepass clubapp-pass -keypass clubapp-pass -dname "CN=Clubapp"
+          "${BT}apksigner" sign --ks /tmp/clubapp.keystore --ks-pass pass:clubapp-pass --key-pass pass:clubapp-pass --ks-key-alias clubapp --out /tmp/Clubapp-v7a.apk /tmp/aligned.apk
           mkdir -p package
           cp /tmp/Clubapp-v7a.apk package/
           ls -lah package/
