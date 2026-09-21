@@ -597,9 +597,12 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     // user's pick — the transport option appeared to do nothing.
     // DisableTactics skips tactics requests, payload handling and parameter
     // application, pinning the choice. Auto (no LimitTunnelProtocols) keeps
-    // tactics fully enabled.
+    // tactics fully enabled. Exception: in-proxy dials receive their broker
+    // parameters through the broker's tactics, so an in-proxy-only pick must
+    // leave tactics running or its handshake can never start.
     if config_json.contains("\"LimitTunnelProtocols\"")
         && !config_json.contains("\"DisableTactics\"")
+        && !config_json.contains("INPROXY-WEBRTC")
     {
         config_json = inject_bool_field(&config_json, "DisableTactics", true)?;
     }
@@ -1556,6 +1559,21 @@ mod tests {
             serde_json::from_str(&validate(&cfg).unwrap().config_json).unwrap();
         assert!(local.get("DisableTactics").is_none());
         assert!(local.get("LimitTunnelProtocols").is_none());
+    }
+
+    /// In-proxy-only picks keep tactics enabled: the broker parameters the
+    /// first WebRTC hop dials with arrive via tactics, so pinning the
+    /// protocol set must not kill them.
+    #[test]
+    fn inproxy_only_transport_keeps_tactics_enabled() {
+        let cfg = make_config(
+            Some(r#"{"LimitTunnelProtocols":["INPROXY-WEBRTC-OSSH"]}"#),
+            Some("/tmp/psi"),
+        );
+        let local: serde_json::Value =
+            serde_json::from_str(&validate(&cfg).unwrap().config_json).unwrap();
+        assert!(local.get("DisableTactics").is_none());
+        assert_eq!(local["LimitTunnelProtocols"][0], "INPROXY-WEBRTC-OSSH");
     }
 
     /// A caller that deliberately sets DisableTactics (even to false) wins

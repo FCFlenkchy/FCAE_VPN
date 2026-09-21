@@ -1918,7 +1918,8 @@ void render_ui() {
             // variants that only differ in handshake details).
             {
                 static const char* kTransports[] = {
-                    "Auto", "SSH (OSSH)", "QUIC", "Unfronted meek", "Fronted meek",
+                    "Auto", "SSH", "QUIC", "Unfronted meek", "Fronted meek",
+                    "TLS", "Shadowsocks", "Conjure", "In-proxy",
                 };
                 ImGui::Combo("Psiphon transport", &g_app.psiphon_transport,
                              kTransports, IM_ARRAYSIZE(kTransports));

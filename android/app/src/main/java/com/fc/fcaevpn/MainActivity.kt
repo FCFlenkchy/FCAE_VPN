@@ -623,9 +623,13 @@ class MainActivity : AppCompatActivity() {
         // Psiphon transport families. Index maps 1:1 onto
         // PsiphonTunnelService.transportProtocols(); 0 = Auto leaves
         // LimitTunnelProtocols unset (tunnel-core tries its full set).
+        // Covers every protocol tunnel-core accepts: TapDance is the only
+        // supported protocol left out -- it is client-disabled upstream and
+        // naming it fails config validation.
         spinnerPsiphonTransport.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
-            listOf("Auto", "SSH (OSSH)", "QUIC", "Unfronted meek", "Fronted meek"),
+            listOf("Auto", "SSH", "QUIC", "Unfronted meek", "Fronted meek",
+                   "TLS", "Shadowsocks", "Conjure", "In-proxy"),
         )
         // Verbosity of the aether ENGINE. Positions map 1:1 onto
         // FcaeEngineLog; index 3 = info is the default.
@@ -1402,7 +1406,7 @@ class MainActivity : AppCompatActivity() {
         editPsiphonHttpPort.setText(prefs.getString("psiphonHttpPort", PsiphonTunnelService.DEFAULT_HTTP_PORT.toString()))
         savedPsiphonRegion = prefs.getString("psiphonRegion", "") ?: ""
         refreshPsiphonRegions()
-        spinnerPsiphonTransport.setSelection(prefs.getInt("psiphonTransport", 0).coerceIn(0, 4))
+        spinnerPsiphonTransport.setSelection(prefs.getInt("psiphonTransport", 0).coerceIn(0, 8))
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", false)
         switchLan.isChecked = prefs.getBoolean("lan", false)
@@ -2290,8 +2294,9 @@ class MainActivity : AppCompatActivity() {
         return psiphonRegionCodes.getOrElse(i) { savedPsiphonRegion }
     }
 
-    /** Transport spinner position: 0 = Auto, 1 = SSH/OSSH, 2 = QUIC,
-     *  3 = unfronted meek, 4 = fronted meek (matches the XML entries and
+    /** Transport spinner position: 0 = Auto, 1 = SSH, 2 = QUIC,
+     *  3 = unfronted meek, 4 = fronted meek, 5 = TLS, 6 = Shadowsocks,
+     *  7 = Conjure, 8 = in-proxy (matches the programmatic adapter and
      *  PsiphonTunnelService.transportProtocols). */
     private fun selectedPsiphonTransportIndex(): Int =
         if (!::spinnerPsiphonTransport.isInitialized)

@@ -1021,7 +1021,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 // spinner's pick — the option appeared to do nothing.
                 // DisableTactics skips tactics requests and parameter
                 // application; Auto leaves tactics fully enabled.
-                o.put("DisableTactics", true);
+                // Exception: in-proxy dials get their broker parameters
+                // through the broker's tactics, so pinning an in-proxy-only
+                // set must leave tactics running or the handshake never
+                // starts.
+                if (!protocols[0].startsWith("INPROXY-")) o.put("DisableTactics", true);
             }
             File root = new File(getFilesDir(), "psiphon");
             if (!root.exists() && !root.mkdirs()) {
@@ -1065,8 +1069,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     /**
      * Map a transport spinner index to tunnel-core LimitTunnelProtocols
      * values. Index 0 (Auto) returns an empty array: omit the field so the
-     * full default protocol set is used. Names are the exact strings from
-     * tunnel-core's config.go.
+     * full default protocol set is used. Names are the exact constants from
+     * tunnel-core's protocol.go SupportedTunnelProtocols -- an unsupported
+     * name (or the client-disabled TAPDANCE-OSSH) fails config validation
+     * and the whole start. Index order is stable across versions so
+     * persisted selections never remap; new families append.
      */
     static String[] transportProtocols(int selection) {
         switch (selection) {
@@ -1075,7 +1082,24 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             case 3: return new String[]{
                     "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH",
                     "UNFRONTED-MEEK-SESSION-TICKET-OSSH"};
-            case 4: return new String[]{"FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH"};
+            case 4: return new String[]{
+                    "FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH",
+                    "FRONTED-MEEK-QUIC-OSSH"};
+            case 5: return new String[]{"TLS-OSSH"};
+            case 6: return new String[]{"SHADOWSOCKS-OSSH"};
+            case 7: return new String[]{"CONJURE-OSSH"};
+            case 8: return new String[]{
+                    // WebRTC first hop in front of every compatible base
+                    // protocol (all except the refraction-networking ones).
+                    "INPROXY-WEBRTC-SSH", "INPROXY-WEBRTC-OSSH",
+                    "INPROXY-WEBRTC-TLS-OSSH", "INPROXY-WEBRTC-SHADOWSOCKS-OSSH",
+                    "INPROXY-WEBRTC-QUIC-OSSH",
+                    "INPROXY-WEBRTC-UNFRONTED-MEEK-OSSH",
+                    "INPROXY-WEBRTC-UNFRONTED-MEEK-HTTPS-OSSH",
+                    "INPROXY-WEBRTC-UNFRONTED-MEEK-SESSION-TICKET-OSSH",
+                    "INPROXY-WEBRTC-FRONTED-MEEK-OSSH",
+                    "INPROXY-WEBRTC-FRONTED-MEEK-HTTP-OSSH",
+                    "INPROXY-WEBRTC-FRONTED-MEEK-QUIC-OSSH"};
             default: return new String[0];
         }
     }

@@ -341,15 +341,34 @@ struct AppState {
 
     /// Splice "LimitTunnelProtocols" for the selected transport family.
     /// 0 = Auto: omit the field entirely so tunnel-core uses its full
-    /// default protocol set.
+    /// default protocol set. Names are the exact constants from
+    /// tunnel-core's protocol.go SupportedTunnelProtocols — an unsupported
+    /// name (or the client-disabled TAPDANCE-OSSH) fails config validation
+    /// and the whole start. Index order is stable: 1-4 keep their meaning
+    /// across versions so saved configs never remap; new families append.
     static std::string merge_psiphon_transport(const std::string& json, int selection) {
-        static const char* const kGroups[][4] = {
+        static const char* const kGroups[][12] = {
             {nullptr},
-            {"SSH", "OSSH", nullptr},                                  // obfuscated SSH
+            {"SSH", "OSSH", nullptr},                                  // SSH family
             {"QUIC-OSSH", nullptr},                                    // QUIC
             {"UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH",
              "UNFRONTED-MEEK-SESSION-TICKET-OSSH", nullptr},
-            {"FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH", nullptr},
+            {"FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH",
+             "FRONTED-MEEK-QUIC-OSSH", nullptr},
+            {"TLS-OSSH", nullptr},                                     // TLS
+            {"SHADOWSOCKS-OSSH", nullptr},                             // Shadowsocks
+            {"CONJURE-OSSH", nullptr},                                 // Conjure
+            // In-proxy: WebRTC first hop in front of every compatible base
+            // protocol (all except the refraction-networking ones).
+            {"INPROXY-WEBRTC-SSH", "INPROXY-WEBRTC-OSSH",
+             "INPROXY-WEBRTC-TLS-OSSH", "INPROXY-WEBRTC-SHADOWSOCKS-OSSH",
+             "INPROXY-WEBRTC-QUIC-OSSH",
+             "INPROXY-WEBRTC-UNFRONTED-MEEK-OSSH",
+             "INPROXY-WEBRTC-UNFRONTED-MEEK-HTTPS-OSSH",
+             "INPROXY-WEBRTC-UNFRONTED-MEEK-SESSION-TICKET-OSSH",
+             "INPROXY-WEBRTC-FRONTED-MEEK-OSSH",
+             "INPROXY-WEBRTC-FRONTED-MEEK-HTTP-OSSH",
+             "INPROXY-WEBRTC-FRONTED-MEEK-QUIC-OSSH", nullptr},
         };
         if (selection <= 0 || selection >= (int)(sizeof(kGroups) / sizeof(kGroups[0])))
             return json;
