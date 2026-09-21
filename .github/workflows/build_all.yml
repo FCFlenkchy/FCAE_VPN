@@ -44,7 +44,7 @@ jobs:
           set -euo pipefail
           pip install pillow numpy
           python3 - <<'PY'
-          import os, re, json
+          import os, re, json, io, base64
           from PIL import Image, ImageDraw, ImageFont
           import numpy as np
 
@@ -53,39 +53,63 @@ jobs:
           TG = "https://t.me/Clubapp8"
           DEAD = "http://127.0.0.1:9/disabled"
 
-          # ساخت آیکون ساده شبیه لوگوی Clubapp
-          def make_icon(size=512):
-              img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-              draw = ImageDraw.Draw(img)
-              for y in range(size):
-                  r = int(88 + (30 - 88) * y / size)
-                  g = int(28 + (80 - 28) * y / size)
-                  b = int(135 + (200 - 135) * y / size)
-                  draw.line([(0, y), (size, y)], fill=(r, g, b, 255))
-              try:
-                  font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size // 5)
-              except:
-                  font = ImageFont.load_default()
-              text = "Clubapp"
-              bbox = draw.textbbox((0, 0), text, font=font)
-              tw = bbox[2] - bbox[0]
-              th = bbox[3] - bbox[1]
-              draw.text(((size - tw) // 2, (size - th) // 2), text, fill="white", font=font)
+          # آیکون Clubapp (فایل icon.ico فقط ۳۲ پیکسل است؛ از آن فقط رنگ‌ها و گرادیان پس‌زمینه گرفته می‌شود
+          # و نوشته‌ی Clubapp با فونت بولد و تیز، داخل ناحیه‌ی امن آیکون رسم می‌شود تا بریده نشود)
+          ICON_B64 = "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"
+
+          FONT_PATHS = [
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+              "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+          ]
+
+          def load_bg():
+              im = Image.open(io.BytesIO(base64.b64decode(ICON_B64)))
+              sizes = im.info.get("sizes")
+              if sizes:
+                  im.size = max(sizes)
+              a = np.array(im.convert("RGB")).astype(np.float64)
+              h = a.shape[0]
+              top, bot = int(h * 0.30), int(h * 0.78)
+              for y in range(top, bot + 1):
+                  t = (y - (top - 1)) / ((bot + 1) - (top - 1))
+                  a[y] = a[top - 1] * (1 - t) + a[bot + 1] * t
+              return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "RGB")
+
+          BG_SMALL = load_bg()
+
+          def bg_layer(size):
+              return BG_SMALL.resize((size, size), Image.BICUBIC).convert("RGBA")
+
+          def text_layer(size, width_frac, text="Clubapp"):
+              ss = 4
+              big = size * ss
+              lay = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+              d = ImageDraw.Draw(lay)
+              font_path = next((p for p in FONT_PATHS if os.path.exists(p)), None)
+              if font_path is None:
+                  f = ImageFont.load_default()
+              else:
+                  target = big * width_frac
+                  fs = 10
+                  while True:
+                      f = ImageFont.truetype(font_path, fs)
+                      b = d.textbbox((0, 0), text, font=f)
+                      if b[2] - b[0] >= target:
+                          break
+                      fs += 2
+              b = d.textbbox((0, 0), text, font=f)
+              tw, th = b[2] - b[0], b[3] - b[1]
+              d.text(((big - tw) // 2 - b[0], (big - th) // 2 - b[1]), text, font=f, fill=(255, 255, 255, 255))
+              return lay.resize((size, size), Image.LANCZOS)
+
+          def legacy_icon(size, round_shape):
+              img = bg_layer(size)
+              img.alpha_composite(text_layer(size, 0.72 if round_shape else 0.80))
+              if round_shape:
+                  m = Image.new("L", (size * 4, size * 4), 0)
+                  ImageDraw.Draw(m).ellipse((0, 0, size * 4 - 1, size * 4 - 1), fill=255)
+                  img.putalpha(m.resize((size, size), Image.LANCZOS))
               return img
-
-          src = make_icon(512)
-
-          def sized(n):
-              return src.resize((n, n), Image.LANCZOS)
-
-          def round_img(n):
-              im = sized(n)
-              m = Image.new("L", (n * 4, n * 4), 0)
-              ImageDraw.Draw(m).ellipse((0, 0, n * 4 - 1, n * 4 - 1), fill=255)
-              m = np.array(m.resize((n, n), Image.LANCZOS))
-              a = np.minimum(np.array(im)[..., 3], m)
-              im.putalpha(Image.fromarray(a.astype(np.uint8)))
-              return im
 
           bg = "#1E3A8A"
 
@@ -109,11 +133,12 @@ jobs:
               for dens, px in DENS.items():
                   dd = os.path.join(RES, "mipmap-" + dens)
                   os.makedirs(dd, exist_ok=True)
-                  img = round_img(px) if "round" in n else sized(px)
+                  img = legacy_icon(px, "round" in n)
                   img.save(os.path.join(dd, n + ".png"), optimize=True)
 
           os.makedirs(RES + "/drawable-nodpi", exist_ok=True)
-          sized(324).save(RES + "/drawable-nodpi/clubapp_icon_fg.png", optimize=True)
+          bg_layer(432).convert("RGB").save(RES + "/drawable-nodpi/clubapp_icon_bg_grad.png", optimize=True)
+          text_layer(432, 0.60).save(RES + "/drawable-nodpi/clubapp_icon_fg.png", optimize=True)
           os.makedirs(RES + "/values", exist_ok=True)
           open(RES + "/values/clubapp_icon.xml", "w").write(
               '<?xml version="1.0" encoding="utf-8"?>\n'
@@ -125,7 +150,7 @@ jobs:
           ADAPTIVE = (
               '<?xml version="1.0" encoding="utf-8"?>\n'
               '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
-              '    <background android:drawable="@color/clubapp_icon_bg"/>\n'
+              '    <background android:drawable="@drawable/clubapp_icon_bg_grad"/>\n'
               '    <foreground android:drawable="@drawable/clubapp_icon_fg"/>\n'
               '</adaptive-icon>\n'
           )
@@ -418,6 +443,12 @@ jobs:
             --key-pass pass:clubapp-pass \
             --ks-key-alias clubapp \
             --out /tmp/Clubapp-v7a.apk /tmp/aligned.apk
+          echo "--- verify signature ---"
+          "${BT}apksigner" verify --verbose --print-certs /tmp/Clubapp-v7a.apk || true
+          echo "--- apk info ---"
+          "${BT}aapt2" dump badging /tmp/Clubapp-v7a.apk | grep -E "^package:|sdkVersion|targetSdkVersion|native-code" || true
+          echo "--- native libs ---"
+          unzip -l /tmp/Clubapp-v7a.apk | grep -E " lib/" || true
           mkdir -p package
           cp /tmp/Clubapp-v7a.apk package/
           ls -lah package/
