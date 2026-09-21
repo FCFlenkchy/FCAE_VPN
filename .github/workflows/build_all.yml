@@ -44,7 +44,7 @@ jobs:
           set -euo pipefail
           pip install pillow numpy
           python3 - <<'PY'
-          import os, re, io
+          import os, re
           from PIL import Image, ImageDraw, ImageFont
           import numpy as np
 
@@ -53,24 +53,23 @@ jobs:
           TG = "https://t.me/Clubapp8"
           DEAD = "http://127.0.0.1:9/disabled"
 
-          # ---- ساخت آیکون ساده شبیه لوگوی Clubapp (بنفش به آبی)
+          # ساخت آیکون ساده شبیه لوگوی Clubapp
           def make_icon(size=512):
               img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
               draw = ImageDraw.Draw(img)
-              # گرادیان تقریبی
               for y in range(size):
                   r = int(88 + (30 - 88) * y / size)
                   g = int(28 + (80 - 28) * y / size)
                   b = int(135 + (200 - 135) * y / size)
                   draw.line([(0, y), (size, y)], fill=(r, g, b, 255))
-              # نوشته سفید
               try:
                   font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size // 5)
               except:
                   font = ImageFont.load_default()
               text = "Clubapp"
               bbox = draw.textbbox((0, 0), text, font=font)
-              tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+              tw = bbox[2] - bbox[0]
+              th = bbox[3] - bbox[1]
               draw.text(((size - tw) // 2, (size - th) // 2), text, fill="white", font=font)
               return img
 
@@ -95,7 +94,8 @@ jobs:
           try:
               man = open(ROOT + "/AndroidManifest.xml", encoding="utf-8").read()
               names |= set(re.findall(r'android:(?:icon|roundIcon)="@mipmap/([^"]+)"', man))
-          except: pass
+          except:
+              pass
 
           for d in os.listdir(RES):
               if d.startswith("mipmap"):
@@ -116,14 +116,20 @@ jobs:
           sized(324).save(RES + "/drawable-nodpi/clubapp_icon_fg.png", optimize=True)
           os.makedirs(RES + "/values", exist_ok=True)
           open(RES + "/values/clubapp_icon.xml", "w").write(
-              f'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="clubapp_icon_bg">{bg}</color>\n</resources>\n')
+              '<?xml version="1.0" encoding="utf-8"?>\n'
+              '<resources>\n'
+              '    <color name="clubapp_icon_bg">' + bg + '</color>\n'
+              '</resources>\n'
+          )
 
-          ADAPTIVE = f'''<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/clubapp_icon_bg"/>
-    <foreground android:drawable="@drawable/clubapp_icon_fg"/>
-</adaptive-icon>
-'''
+          ADAPTIVE = (
+              '<?xml version="1.0" encoding="utf-8"?>\n'
+              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+              '    <background android:drawable="@color/clubapp_icon_bg"/>\n'
+              '    <foreground android:drawable="@drawable/clubapp_icon_fg"/>\n'
+              '</adaptive-icon>\n'
+          )
+
           v26 = os.path.join(RES, "mipmap-anydpi-v26")
           os.makedirs(v26, exist_ok=True)
           for n in sorted(names):
@@ -139,11 +145,13 @@ jobs:
           for d, dirs, files in os.walk(ROOT):
               dirs[:] = [x for x in dirs if x not in {"build", ".gradle", "node_modules", ".git"}]
               for f in files:
-                  if not f.endswith((".xml", ".kt", ".java")): continue
+                  if not f.endswith((".xml", ".kt", ".java")):
+                      continue
                   p = os.path.join(d, f)
                   try:
                       t = open(p, encoding="utf-8").read()
-                  except: continue
+                  except:
+                      continue
                   n = t.replace("FCAE VPN", "Clubapp")
                   n = APPNAME.sub(r"\1Clubapp\2", n)
                   n = API.sub(DEAD, n)
@@ -167,7 +175,7 @@ jobs:
   }
 ]
 ''')
-          print("Branding + version.json done")
+          print("Branding finished successfully")
           PY
 
       - name: setup go
@@ -227,7 +235,9 @@ jobs:
       - name: fetch imgui
         run: |
           mkdir -p third_party
-          [ -d "third_party/imgui" ] || git clone --depth 1 --branch v1.91.8 https://github.com/ocornut/imgui.git third_party/imgui
+          if [ ! -d "third_party/imgui" ]; then
+            git clone --depth 1 --branch v1.91.8 https://github.com/ocornut/imgui.git third_party/imgui
+          fi
 
       - name: setup zig
         shell: bash
@@ -281,8 +291,10 @@ jobs:
             PP="$TOOLCHAIN/bin/armv7a-linux-androideabi24-clang -E" \
             CFLAGS="-fPIC -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -Wno-error -mfpu=neon"
           mkdir -p bin/android/armeabi-v7a
-          cp bin/libhev-socks5-tunnel.a third-part/lwip/bin/liblwip.a \
-             third-part/yaml/bin/libyaml.a third-part/hev-task-system/bin/libhev-task-system.a \
+          cp bin/libhev-socks5-tunnel.a \
+             third-part/lwip/bin/liblwip.a \
+             third-part/yaml/bin/libyaml.a \
+             third-part/hev-task-system/bin/libhev-task-system.a \
              bin/android/armeabi-v7a/
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -319,7 +331,8 @@ jobs:
             mkdir -p "$ANDROID_HOME/cmdline-tools"
             cd "$ANDROID_HOME/cmdline-tools"
             wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
-            unzip -q tools.zip && mv cmdline-tools latest
+            unzip -q tools.zip
+            mv cmdline-tools latest
           fi
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses || true
@@ -333,7 +346,7 @@ jobs:
                           dsl.defaultConfig.ndk.abiFilters.clear()
                           dsl.defaultConfig.ndk.abiFilters.add('armeabi-v7a')
                           dsl.packaging.jniLibs.useLegacyPackaging = true
-                      } catch (t) {}
+                      } catch (Throwable t) {}
                   }
               }
           }
@@ -358,8 +371,10 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass clubapp-pass -keypass clubapp-pass -dname "CN=Clubapp"
           "${BT}apksigner" sign \
-            --ks /tmp/clubapp.keystore --ks-pass pass:clubapp-pass \
-            --key-pass pass:clubapp-pass --ks-key-alias clubapp \
+            --ks /tmp/clubapp.keystore \
+            --ks-pass pass:clubapp-pass \
+            --key-pass pass:clubapp-pass \
+            --ks-key-alias clubapp \
             --out /tmp/Clubapp-v7a.apk /tmp/aligned.apk
           mkdir -p package
           cp /tmp/Clubapp-v7a.apk package/
