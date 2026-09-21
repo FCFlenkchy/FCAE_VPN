@@ -1,4 +1,4 @@
-name: Clubapp APK (universal)
+name: Clubapp APK (v7a)
 
 on:
   workflow_dispatch:
@@ -11,13 +11,18 @@ env:
 
 jobs:
   android:
-    name: Clubapp android-universal
+    name: Clubapp android-v7a
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       FCAE_VERSION: "1.0.0"
       FCAE_VERSION_FULL: "1.0.0"
       FCAE_IS_PRERELEASE: "false"
+      # ---- size knobs for the Rust engine (remove a line if it ever breaks the build)
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: s
+      CARGO_PROFILE_RELEASE_LTO: "true"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      CARGO_PROFILE_RELEASE_STRIP: symbols
     steps:
       - name: checkout
         uses: actions/checkout@v7
@@ -35,54 +40,158 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 
-      # ---- Clubapp branding: name, Telegram link, update removal, and Base64 custom icon ----
-      - name: apply Clubapp branding and Base64 icon
+      # ---- Clubapp branding: name, icon (embedded as base64), no in-app update ----
+      - name: apply Clubapp branding
         env:
-          REPO_SLUG: ${{ github.repository }}
+          # Put the base64 of the icon here (one line or many lines, both work).
+          # If it is left as-is, icon.png from the Clubapp repo is downloaded instead.
+          ICON_B64: |
+            PASTE_ICON_BASE64_HERE
         run: |
           set -euo pipefail
-          python3 -m pip install Pillow
+          pip install pillow numpy
+          if [ -z "$(printf '%s' "$ICON_B64" | tr -d '[:space:]')" ] || printf '%s' "$ICON_B64" | grep -q PASTE_ICON; then
+            curl -fsSL -o /tmp/clubapp_icon.png \
+              "https://raw.githubusercontent.com/Mrmmd2004/Clubapp/main/icon.png"
+          fi
           python3 - <<'PY'
-          import os, re, base64, io
-          from PIL import Image
+          import base64, io, os, re
+          import numpy as np
+          from PIL import Image, ImageDraw
 
           ROOT = "android/app/src/main"
           RES = ROOT + "/res"
+          TG = "https://t.me/Clubapp8"
+          DEAD = "http://127.0.0.1:9/disabled"
 
-          # ------------------------------------------------------ custom icon from Base64
-          # کد Base64 تصویر آیکون خود را بین دابل‌کوت‌های زیر قرار دهید
-          icon_base64 = "YOUR_BASE64_STRING_HERE"
-
-          if icon_base64 and icon_base64 != "YOUR_BASE64_STRING_HERE":
-              try:
-                  if "," in icon_base64:
-                      icon_base64 = icon_base64.split(",")[1]
-                  
-                  img_data = base64.b64decode(icon_base64)
-                  img = Image.open(io.BytesIO(img_data)).convert("RGBA")
-                  
-                  sizes = {
-                      "mipmap-mdpi": 48,
-                      "mipmap-hdpi": 72,
-                      "mipmap-xhdpi": 96,
-                      "mipmap-xxhdpi": 144,
-                      "mipmap-xxxhdpi": 192
-                  }
-                  for folder, size in sizes.items():
-                      dir_path = os.path.join(RES, folder)
-                      os.makedirs(dir_path, exist_ok=True)
-                      resized = img.resize((size, size), Image.Resampling.LANCZOS)
-                      resized.save(os.path.join(dir_path, "ic_launcher.png"), "PNG")
-                      resized.save(os.path.join(dir_path, "ic_launcher_round.png"), "PNG")
-                  print("App icons successfully generated and applied from Base64 code!")
-              except Exception as e:
-                  print("Error processing base64 icon:", e)
+          # ------------------------------------------------------------ icon source
+          raw = re.sub(r"\s+", "", os.environ.get("ICON_B64", ""))
+          if raw and not raw.startswith("PASTE"):
+              src = Image.open(io.BytesIO(base64.b64decode(raw)))
+              print("icon: embedded base64")
           else:
-              print("Skipping custom icon: Base64 string not provided.")
+              src = Image.open("/tmp/clubapp_icon.png")
+              print("icon: downloaded from repo")
+          src = src.convert("RGBA")
+          w, h = src.size
+          s = min(w, h)
+          x0, y0 = (w - s) // 2, (h - s) // 2
+          src = src.crop((x0, y0, x0 + s, y0 + s)).resize((512, 512), Image.LANCZOS)
 
-          # ------------------------------------------------------ name + Telegram link
-          tme, edited = set(), []
-          for d, _, files in os.walk(ROOT):
+          def sized(n):
+              return src.resize((n, n), Image.LANCZOS)
+
+          def round_img(n):
+              im = sized(n)
+              m = Image.new("L", (n * 4, n * 4), 0)
+              ImageDraw.Draw(m).ellipse((0, 0, n * 4 - 1, n * 4 - 1), fill=255)
+              m = np.array(m.resize((n, n), Image.LANCZOS))
+              a = np.minimum(np.array(im)[..., 3], m)
+              im.putalpha(Image.fromarray(a.astype(np.uint8)))
+              return im
+
+          def fg_img(n=324):
+              c = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+              k = int(n * 72 / 108)
+              ic = sized(k)
+              c.paste(ic, ((n - k) // 2, (n - k) // 2), ic)
+              return c
+
+          a = np.array(src)
+          ring = np.concatenate([a[:8].reshape(-1, 4), a[-8:].reshape(-1, 4),
+                                 a[:, :8].reshape(-1, 4), a[:, -8:].reshape(-1, 4)])
+          ring = ring[ring[:, 3] > 200]
+          if len(ring) < 50:
+              bg = "#FFFFFF"
+          else:
+              bg = "#%02X%02X%02X" % tuple(int(v) for v in np.median(ring[:, :3], axis=0))
+          print("adaptive icon background:", bg)
+
+          # ------------------------------------------------------------ launcher icons
+          DENS = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
+          names = {"ic_launcher", "ic_launcher_round"}
+          man_path = ROOT + "/AndroidManifest.xml"
+          man = open(man_path, encoding="utf-8").read()
+          names |= set(re.findall(r'android:(?:icon|roundIcon)="@mipmap/([^"]+)"', man))
+
+          for d in os.listdir(RES):
+              if not d.startswith("mipmap"):
+                  continue
+              for n in names:
+                  for ext in (".png", ".webp", ".jpg"):
+                      p = os.path.join(RES, d, n + ext)
+                      if os.path.exists(p):
+                          os.remove(p)
+          for n in sorted(names):
+              for dens, px in DENS.items():
+                  dd = os.path.join(RES, "mipmap-" + dens)
+                  os.makedirs(dd, exist_ok=True)
+                  img = round_img(px) if "round" in n else sized(px)
+                  img.save(os.path.join(dd, n + ".png"), optimize=True)
+
+          os.makedirs(RES + "/drawable-nodpi", exist_ok=True)
+          fg_img().save(RES + "/drawable-nodpi/clubapp_icon_fg.png", optimize=True)
+          os.makedirs(RES + "/values", exist_ok=True)
+          open(RES + "/values/clubapp_icon.xml", "w").write(
+              '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n'
+              '    <color name="clubapp_icon_bg">%s</color>\n</resources>\n' % bg)
+
+          ADAPTIVE = (
+              '<?xml version="1.0" encoding="utf-8"?>\n'
+              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+              '    <background android:drawable="@color/clubapp_icon_bg"/>\n'
+              '    <foreground android:drawable="@drawable/clubapp_icon_fg"/>\n'
+              '</adaptive-icon>\n')
+          v26 = os.path.join(RES, "mipmap-anydpi-v26")
+          os.makedirs(v26, exist_ok=True)
+          for n in sorted(names):
+              open(os.path.join(v26, n + ".xml"), "w").write(ADAPTIVE)
+          for d in os.listdir(RES):
+              if d.startswith("mipmap-anydpi") and d != "mipmap-anydpi-v26":
+                  for f in os.listdir(os.path.join(RES, d)):
+                      p = os.path.join(RES, d, f)
+                      if f.endswith(".xml") and "adaptive-icon" in open(p, encoding="utf-8").read():
+                          open(p, "w").write(ADAPTIVE)
+
+          # ------------------------------------------------------------ other logo images
+          LOGO = re.compile(r"(^|_)(logo|splash|app_icon|mountain)(_|\.|$)")
+          replaced = []
+          for d, _, files in os.walk(RES):
+              if "anydpi" in d or "drawable-nodpi" in d:
+                  continue
+              for f in files:
+                  low = f.lower()
+                  if not low.endswith((".png", ".webp")) or "launcher" in low:
+                      continue
+                  if not LOGO.search(low):
+                      continue
+                  p = os.path.join(d, f)
+                  try:
+                      iw, ih = Image.open(p).size
+                  except Exception:
+                      continue
+                  side = min(iw, ih)
+                  canvas = Image.new("RGBA", (iw, ih), (0, 0, 0, 0))
+                  canvas.paste(sized(side), ((iw - side) // 2, (ih - side) // 2))
+                  if low.endswith(".webp"):
+                      canvas.save(p, "WEBP", lossless=True)
+                  else:
+                      canvas.save(p, optimize=True)
+                  replaced.append(p)
+          print("logo images replaced:", len(replaced))
+          for p in replaced:
+              print("  ", p)
+
+          # ------------------------------------------------------------ name + update removal + links
+          PAGE = re.compile(r'https?://(?:www\.)?github\.com/FCFlenkchy[^\s"\')\\]*', re.I)
+          API = re.compile(r'https?://api\.github\.com[^\s"\')\\]*', re.I)
+          REL = re.compile(r'https?://(?:www\.)?github\.com/[^\s"\')\\]*(?:releases|/tags)[^\s"\')\\]*', re.I)
+          TME = re.compile(r'https?://t\.me/[A-Za-z0-9_+]+')
+          APPNAME = re.compile(r'(<string\s+name="app_name"[^>]*>)[^<]*(</string>)')
+          SKIP = {"build", ".gradle", "node_modules", ".git"}
+          edited = []
+          for d, dirs, files in os.walk(ROOT):
+              dirs[:] = [x for x in dirs if x not in SKIP]
               for f in files:
                   if not f.endswith((".xml", ".kt", ".java")):
                       continue
@@ -92,48 +201,42 @@ jobs:
                   except Exception:
                       continue
                   n = t.replace("FCAE VPN", "Clubapp")
-                  n = re.sub(r'(<string name="app_name"[^>]*>)[^<]*(</string>)', r'\1Clubapp\2', n)
-                  
-                  # حذف قابلیت‌های بررسی آپدیت درون‌برنامه‌ای
-                  n = re.sub(r'(?i)<string name="[^"]*update[^"]*">[^<]*</string>', '', n)
-                  
-                  tme.update(re.findall(r'https?://t\.me/[A-Za-z0-9_+]+', n))
-                  n = re.sub(r'https?://t\.me/[A-Za-z0-9_+]+', 'https://t.me/Clubapp8', n)
+                  n = APPNAME.sub(r"\1Clubapp\2", n)
+                  # update check: point every GitHub API / release URL to a dead address
+                  n = API.sub(DEAD, n)
+                  n = REL.sub(DEAD, n)
+                  # creator links -> Telegram
+                  n = PAGE.sub(TG, n)
+                  n = TME.sub(TG, n)
+                  # any leftover "FCFlenkchy/FCAE_VPN" (e.g. repo slug used to build an update URL)
+                  n = re.sub(r"FCFlenkchy/FCAE_VPN", "none/none", n, flags=re.I)
+                  if f == "AndroidManifest.xml":
+                      n = re.sub(r'\s*<uses-permission[^>]*REQUEST_INSTALL_PACKAGES[^>]*/>', "", n)
                   if n != t:
                       open(p, "w", encoding="utf-8").write(n)
                       edited.append(p)
-          print("Files edited for branding:", len(edited))
+          print("files edited:", len(edited))
           for p in edited:
               print("  ", p)
-          print("Telegram links found and replaced:", sorted(tme))
 
-          # --------------------- creator links -> Telegram, update source -> this fork
-          REPO = os.environ.get("REPO_SLUG", "Mrmmd2004/FCAE_VPN")
-          PAGE = re.compile(r'https?://(?:www\.)?github\.com/FCFlenkchy[^\s"\'<>)\\]*', re.I)
-          SKIP = {"target", "build", ".gradle", "third_party", "node_modules", ".git"}
-          EXT = (".kt", ".java", ".xml", ".rs", ".cpp", ".cc", ".c", ".h", ".hpp", ".mm", ".kts")
-          link_edits, left = [], []
-          for base in ("android/app/src/main", "src_cpp", "include", "core/fcae-ffi"):
-              for d, dirs, files in os.walk(base):
-                  dirs[:] = [x for x in dirs if x not in SKIP]
-                  for f in files:
-                      if not f.endswith(EXT):
-                          continue
-                      p = os.path.join(d, f)
-                      try:
-                          t = open(p, encoding="utf-8").read()
-                      except Exception:
-                          continue
-                      n = PAGE.sub("https://t.me/Clubapp8", t)
-                      n = re.sub(r"FCFlenkchy/FCAE_VPN", REPO, n, flags=re.I)
-                      
-                      # پاکسازی کدهای مرتبط با چک کردن آپدیت در سورس‌کدها
-                      n = re.sub(r'(?i)(checkUpdate|checkForUpdates|updateUrl|update_url)[^\n]*', '', n)
-
-                      if n != t:
-                        open(p, "w", encoding="utf-8").write(n)
-                        link_edits.append(p)
-          print("Creator-link files changed:", len(link_edits))
+          # ------------------------------------------------------------ report (for checking the log)
+          KEY = re.compile(r"(check.?for.?update|update.?check|updater|new.?version|latest.?version|tag_name|releases|REQUEST_INSTALL)", re.I)
+          hits = []
+          for d, dirs, files in os.walk(ROOT):
+              dirs[:] = [x for x in dirs if x not in SKIP]
+              for f in files:
+                  if not f.endswith((".kt", ".java", ".xml")):
+                      continue
+                  p = os.path.join(d, f)
+                  try:
+                      for i, line in enumerate(open(p, encoding="utf-8").read().splitlines(), 1):
+                          if KEY.search(line):
+                              hits.append("%s:%d: %s" % (p, i, line.strip()[:120]))
+                  except Exception:
+                      pass
+          print("UPDATE-RELATED LINES STILL IN SOURCE:", len(hits))
+          for l in hits[:80]:
+              print("  ", l)
           PY
 
       - name: setup go
@@ -163,7 +266,7 @@ jobs:
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+          targets: armv7-linux-androideabi
           components: rust-src
 
       - name: Build Psiphon Android AAR from pinned source
@@ -197,11 +300,12 @@ jobs:
           INSPECT=$(mktemp -d)
           trap 'rm -rf "$INSPECT"' EXIT
           unzip -q android/psiphon/libs/ca.psiphon.aar 'jni/*' -d "$INSPECT"
-          for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
-            LIB="$INSPECT/jni/$ABI/libgojni.so"
-            test -s "$LIB"
-            readelf -lW "$LIB" | awk '$1 == "LOAD" { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
-          done
+          LIB="$INSPECT/jni/armeabi-v7a/libgojni.so"
+          test -s "$LIB"
+          readelf -lW "$LIB" | awk '$1 == "LOAD" { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
+          # keep only v7a inside the AAR (the other ABIs are the biggest part of the 160 MB)
+          zip -d android/psiphon/libs/ca.psiphon.aar 'jni/arm64-v8a/*' 'jni/x86/*' 'jni/x86_64/*' || true
+          unzip -l android/psiphon/libs/ca.psiphon.aar | grep 'jni/' || true
 
       - name: fetch imgui
         run: |
@@ -234,39 +338,33 @@ jobs:
               "https://zigmirror.hryx.net/zig/${ARCHIVE}"
             )
             if list=$(curl -fsSL --retry 2 --connect-timeout 15 --max-time 30 \
-                 https://ziglang.org/download/community-mirrors.txt 2>/dev/null); then
+                  https://ziglang.org/download/community-mirrors.txt 2>/dev/null); then
               while IFS= read -r base; do
                 [ -n "$base" ] || continue
                 URLS+=("${base%/}/${ARCHIVE}")
               done <<< "$list"
             fi
-            TMP="${RUNNER_TEMP}/${ARCHIVE}"
+            TMP="$(mktemp -d)"
             ok=0
-            seen=
             for url in "${URLS[@]}"; do
-              case " $seen " in *" $url "*) continue ;; esac
-              seen+=" $url"
-              echo "Trying $url"
-              rm -f "$TMP"
-              if curl -fL --retry 3 --retry-delay 2 --retry-all-errors \
-                   --connect-timeout 20 --max-time 180 -o "$TMP" "$url" \
-                   && [ "$(file_sha "$TMP")" = "$SHA" ]; then
+              echo "trying $url"
+              if curl -fsSL --retry 2 --connect-timeout 20 --max-time 300 -o "$TMP/$ARCHIVE" "$url" \
+                 && [ "$(file_sha "$TMP/$ARCHIVE")" = "$SHA" ]; then
                 ok=1
                 break
               fi
-              echo "failed: $url"
             done
             if [ "$ok" != 1 ]; then
-              echo "::error::failed to download Zig ${ZIG_VER} from every mirror"
+              echo "::error::could not download a verified zig archive"
               exit 1
             fi
-            tar -xJf "$TMP" -C "$PREFIX" --strip-components=1
-            rm -f "$TMP"
+            tar -xJf "$TMP/$ARCHIVE" -C "$PREFIX" --strip-components=1
+            rm -rf "$TMP"
           fi
           echo "$PREFIX" >> "$GITHUB_PATH"
           "${PREFIX}/zig" version
 
-      - name: build zeptun engine (libzeptun)
+      - name: build zeptun engine (libzeptun, v7a only)
         shell: bash
         run: |
           set -euo pipefail
@@ -275,38 +373,31 @@ jobs:
           test -d "$SYSROOT/usr/include"
           LIBC_DIR="$(mktemp -d)"
           trap 'rm -rf "$LIBC_DIR"' EXIT
-          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
-            case "$abi" in
-              arm64-v8a)   ZIG_TARGET=aarch64-linux-android.24; NDK_TARGET=aarch64-linux-android ;;
-              armeabi-v7a) ZIG_TARGET=arm-linux-androideabi.24; NDK_TARGET=arm-linux-androideabi ;;
-              x86_64)      ZIG_TARGET=x86_64-linux-android.24; NDK_TARGET=x86_64-linux-android ;;
-              x86)         ZIG_TARGET=x86-linux-android.24; NDK_TARGET=i686-linux-android ;;
-            esac
-            test -d "$SYSROOT/usr/include/$NDK_TARGET"
-            test -f "$SYSROOT/usr/lib/$NDK_TARGET/24/libc.so"
-            test -f "$SYSROOT/usr/lib/$NDK_TARGET/24/crtbegin_so.o"
-            printf '%s\n' \
-              "include_dir=$SYSROOT/usr/include" \
-              "sys_include_dir=$SYSROOT/usr/include/$NDK_TARGET" \
-              "crt_dir=$SYSROOT/usr/lib/$NDK_TARGET/24" \
-              'msvc_lib_dir=' 'kernel32_lib_dir=' 'gcc_dir=' > "$LIBC_DIR/$abi.conf"
-            zig build -Dtarget="$ZIG_TARGET" -Doptimize=ReleaseSmall -Dstrip=true \
-              -Dandroid-libc="$LIBC_DIR/$abi.conf" --libc "$LIBC_DIR/$abi.conf" \
-              --prefix "$PWD/zig-out/android/$abi"
-            install -D -m 644 "zig-out/android/$abi/lib/libzeptun.a" \
-              "zig-out/android/prebuilt/$abi/libzeptun.a"
-          done
+          abi=armeabi-v7a
+          ZIG_TARGET=arm-linux-androideabi.24
+          NDK_TARGET=arm-linux-androideabi
+          test -d "$SYSROOT/usr/include/$NDK_TARGET"
+          test -f "$SYSROOT/usr/lib/$NDK_TARGET/24/libc.so"
+          test -f "$SYSROOT/usr/lib/$NDK_TARGET/24/crtbegin_so.o"
+          printf '%s\n' \
+            "include_dir=$SYSROOT/usr/include" \
+            "sys_include_dir=$SYSROOT/usr/include/$NDK_TARGET" \
+            "crt_dir=$SYSROOT/usr/lib/$NDK_TARGET/24" \
+            'msvc_lib_dir=' 'kernel32_lib_dir=' 'gcc_dir=' > "$LIBC_DIR/$abi.conf"
+          zig build -Dtarget="$ZIG_TARGET" -Doptimize=ReleaseSmall -Dstrip=true \
+            -Dandroid-libc="$LIBC_DIR/$abi.conf" --libc "$LIBC_DIR/$abi.conf" \
+            --prefix "$PWD/zig-out/android/$abi"
+          install -D -m 644 "zig-out/android/$abi/lib/libzeptun.a" \
+            "zig-out/android/prebuilt/$abi/libzeptun.a"
           if [[ -f zig-out/lib/zeptun.lib ]]; then
             mv zig-out/lib/zeptun.lib zig-out/lib/libzeptun.a
           fi
           rm -f zig-out/lib/*.dll zig-out/lib/*.dll.a zig-out/lib/*.so* zig-out/lib/*.dylib
-          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
-            test -s "zig-out/android/prebuilt/$abi/libzeptun.a"
-          done
+          test -s "zig-out/android/prebuilt/$abi/libzeptun.a"
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: build hev-socks5-tunnel engine (libhev-socks5-tunnel)
+      - name: build hev-socks5-tunnel engine (v7a only)
         shell: bash
         run: |
           set -euo pipefail
@@ -316,49 +407,31 @@ jobs:
             exit 1
           fi
           TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
-          ABIS="arm64-v8a armeabi-v7a x86_64"
-          STAGE="$RUNNER_TEMP/hev-android"
-          rm -rf "$STAGE"
-          for abi in $ABIS; do
-            echo "  -> Building hev-socks5-tunnel for $abi"
-            make clean
-            case "$abi" in
-              arm64-v8a)    CLANG_TARGET=aarch64-linux-android ;;
-              armeabi-v7a)  CLANG_TARGET=armv7a-linux-androideabi ;;
-              x86_64)       CLANG_TARGET=x86_64-linux-android ;;
-              *) echo "::error::Unsupported Android ABI: $abi"; exit 1 ;;
-            esac
-            ANDROID_CFLAGS="-fPIC -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -Wno-error"
-            if [ "$abi" = "armeabi-v7a" ]; then
-              ANDROID_CFLAGS="$ANDROID_CFLAGS -mfpu=neon"
-            fi
-            make static \
-              CC="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang" \
-              AR="$TOOLCHAIN/bin/llvm-ar" \
-              STRIP="$TOOLCHAIN/bin/llvm-strip" \
-              PP="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang -E" \
-              CFLAGS="$ANDROID_CFLAGS"
-            mkdir -p "$STAGE/$abi"
-            cp bin/libhev-socks5-tunnel.a \
-               third-part/lwip/bin/liblwip.a \
-               third-part/yaml/bin/libyaml.a \
-               third-part/hev-task-system/bin/libhev-task-system.a \
-               "$STAGE/$abi/"
-          done
-          for abi in $ABIS; do
-            mkdir -p "bin/android/$abi"
-            cp "$STAGE/$abi/"*.a "bin/android/$abi/"
-            test -s "bin/android/$abi/libhev-socks5-tunnel.a"
-          done
+          abi=armeabi-v7a
+          make clean
+          CLANG_TARGET=armv7a-linux-androideabi
+          ANDROID_CFLAGS="-fPIC -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -Wno-error -mfpu=neon"
+          make static \
+            CC="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang" \
+            AR="$TOOLCHAIN/bin/llvm-ar" \
+            STRIP="$TOOLCHAIN/bin/llvm-strip" \
+            PP="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang -E" \
+            CFLAGS="$ANDROID_CFLAGS"
+          mkdir -p "bin/android/$abi"
+          cp bin/libhev-socks5-tunnel.a \
+             third-part/lwip/bin/liblwip.a \
+             third-part/yaml/bin/libyaml.a \
+             third-part/hev-task-system/bin/libhev-task-system.a \
+             "bin/android/$abi/"
+          test -s "bin/android/$abi/libhev-socks5-tunnel.a"
           ls -lh bin/android/*/lib*.a
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: build rust (engine + ffi, in-process)
+      - name: build rust (engine + ffi, v7a only)
         run: |
           set -euo pipefail
           rm -rf target/release/build/aether-engine-* target/debug/build/aether-engine-* 2>/dev/null || true
-
           NDK="${ANDROID_NDK_HOME:-${{ steps.setup-ndk.outputs.ndk-path }}}"
           if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
             echo "ANDROID_NDK_HOME not set or missing: $NDK"
@@ -370,103 +443,133 @@ jobs:
           export ANDROID_NDK_HOME="$NDK"
           export ANDROID_NDK_ROOT="$NDK"
 
-          for TARGET_TRIPLE in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
-            echo "  -> Building for $TARGET_TRIPLE"
+          TARGET_TRIPLE=armv7-linux-androideabi
+          NDK_CLANG_PREFIX=armv7a-linux-androideabi
+          RUST_ENV_LOWER=armv7_linux_androideabi
+          RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
+          HEV_ABI=armeabi-v7a
 
-            if [ "$TARGET_TRIPLE" = "aarch64-linux-android" ]; then
-              NDK_CLANG_PREFIX=aarch64-linux-android
-              RUST_ENV_LOWER=aarch64_linux_android
-              RUST_ENV_UPPER=AARCH64_LINUX_ANDROID
-              HEV_ABI=arm64-v8a
-            elif [ "$TARGET_TRIPLE" = "x86_64-linux-android" ]; then
-              NDK_CLANG_PREFIX=x86_64-linux-android
-              RUST_ENV_LOWER=x86_64_linux_android
-              RUST_ENV_UPPER=X86_64_LINUX_ANDROID
-              HEV_ABI=x86_64
-            else
-              NDK_CLANG_PREFIX=armv7a-linux-androideabi
-              RUST_ENV_LOWER=armv7_linux_androideabi
-              RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
-              HEV_ABI=armeabi-v7a
-            fi
+          CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
+          CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
+          export "CC_${RUST_ENV_LOWER}"="$CLANG"
+          export "CXX_${RUST_ENV_LOWER}"="$CLANGXX"
+          export "AR_${RUST_ENV_LOWER}"="$BIN/llvm-ar"
+          export "CARGO_TARGET_${RUST_ENV_UPPER}_LINKER"="$CLANG"
+          export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
+          ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
+          ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
+          export CC="${NDK_CLANG_PREFIX}24-clang"
+          export CXX="${NDK_CLANG_PREFIX}24-clang++"
+          export AR=llvm-ar
+          export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+          export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+          export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+          export FCAE_HEV_LIBDIR="$(pwd)/core/hev-socks5-tunnel/bin/android/$HEV_ABI"
+          export FCAE_ZEPTUN_LIBDIR="$(pwd)/core/zeptun/zig-out/android/prebuilt/$HEV_ABI"
 
-            CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
-            CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
-
-            export "CC_${RUST_ENV_LOWER}"="$CLANG"
-            export "CXX_${RUST_ENV_LOWER}"="$CLANGXX"
-            export "AR_${RUST_ENV_LOWER}"="$BIN/llvm-ar"
-            export "CARGO_TARGET_${RUST_ENV_UPPER}_LINKER"="$CLANG"
-            export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
-            ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
-            ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
-            export CC="${NDK_CLANG_PREFIX}24-clang"
-            export CXX="${NDK_CLANG_PREFIX}24-clang++"
-            export AR=llvm-ar
-
-            export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-            export "CFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-            export "CXXFLAGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-
-            export FCAE_HEV_LIBDIR="$(pwd)/core/hev-socks5-tunnel/bin/android/$HEV_ABI"
-            export FCAE_ZEPTUN_LIBDIR="$(pwd)/core/zeptun/zig-out/android/prebuilt/$HEV_ABI"
-
-            cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
-
-            DEST="$(pwd)/target/$TARGET_TRIPLE/release/libfcae_ffi.a"
-            ls -lh "$DEST"
-            test -f "$DEST"
-          done
-          echo "All Android Rust targets built successfully"
+          cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
+          DEST="$(pwd)/target/$TARGET_TRIPLE/release/libfcae_ffi.a"
+          ls -lh "$DEST"
+          test -f "$DEST"
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: build apk
+      - name: build apk (v7a only)
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_HOME: /usr/local/lib/android/sdk
         run: |
+          set -euo pipefail
           if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
             mkdir -p "$ANDROID_HOME/cmdline-tools"
             cd "$ANDROID_HOME/cmdline-tools"
             wget -q --tries=3 --timeout=60 https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
             unzip -q tools.zip
             mv cmdline-tools latest
+            cd "$GITHUB_WORKSPACE"
           fi
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           yes | sdkmanager --licenses || true
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
+          # Gradle init script: force armeabi-v7a only + compress native libs inside the APK
+          cat > "$RUNNER_TEMP/v7a.init.gradle" <<'GRADLE'
+          import org.gradle.api.Action
+
+          allprojects {
+              plugins.withId('com.android.application') {
+                  def ABI = 'armeabi-v7a'
+                  def safe = { String what, Closure c ->
+                      try { c() } catch (Throwable t) { println "[v7a] skipped ${what}: ${t.message}" }
+                  }
+                  def cfg = { dsl ->
+                      safe('ndk abiFilters') {
+                          dsl.defaultConfig.ndk.abiFilters.clear()
+                          dsl.defaultConfig.ndk.abiFilters.add(ABI)
+                      }
+                      safe('cmake abiFilters') {
+                          def c = dsl.defaultConfig.externalNativeBuild.cmake
+                          c.abiFilters.clear()
+                          c.abiFilters.add(ABI)
+                      }
+                      safe('flavors') {
+                          dsl.productFlavors.each { f ->
+                              f.ndk.abiFilters.clear()
+                              f.ndk.abiFilters.add(ABI)
+                          }
+                      }
+                      safe('splits') { dsl.splits.abi.enable = false }
+                      safe('compress jni libs') { dsl.packaging.jniLibs.useLegacyPackaging = true }
+                      println "[v7a] ABI forced to ${ABI}"
+                  } as Action
+                  extensions.getByName('androidComponents').finalizeDsl(cfg)
+              }
+          }
+          GRADLE
+
           cd android
           gradle wrapper --gradle-version 9.6.0
-          ./gradlew assembleRelease -PUNIVERSAL=true -PBUILD_TYPE=android_universal
+          ./gradlew -I "$RUNNER_TEMP/v7a.init.gradle" assembleRelease \
+            -PUNIVERSAL=true -PBUILD_TYPE=android_universal \
+            -Pandroid.injected.build.abi=armeabi-v7a
 
-      - name: sign apk
+      # No upstream secrets here: the APK is signed with a throw-away key made
+      # on the spot, which is enough for a normal sideload install.
+      - name: strip other ABIs, align, sign
         run: |
           set -euo pipefail
+          BT=$(ls -d /usr/local/lib/android/sdk/build-tools/*/ | sort -V | tail -1)
+          cd android/app/build/outputs/apk/release
+          APK=$(ls *.apk | head -1)
+          cp "$APK" /tmp/in.apk
+          echo "--- native libs before cleanup"
+          unzip -l /tmp/in.apk | grep -E ' lib/' || true
+          zip -d /tmp/in.apk 'lib/arm64-v8a/*' 'lib/x86/*' 'lib/x86_64/*' || true
+          zip -d /tmp/in.apk 'META-INF/*.SF' 'META-INF/*.RSA' 'META-INF/*.DSA' 'META-INF/*.EC' || true
+          "${BT}zipalign" -f -P 16 4 /tmp/in.apk /tmp/aligned.apk || "${BT}zipalign" -f -p 4 /tmp/in.apk /tmp/aligned.apk
           keytool -genkeypair -keystore /tmp/clubapp.keystore -alias clubapp \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass clubapp-pass -keypass clubapp-pass -dname "CN=Clubapp"
-          BT=$(ls -d /usr/local/lib/android/sdk/build-tools/*/ | sort -V | tail -1)
           "${BT}apksigner" sign \
             --ks /tmp/clubapp.keystore \
             --ks-pass "pass:clubapp-pass" \
             --key-pass "pass:clubapp-pass" \
             --ks-key-alias clubapp \
-            android/app/build/outputs/apk/release/*.apk
-          "${BT}apksigner" verify --verbose android/app/build/outputs/apk/release/*.apk || true
-
-      - name: package
-        run: |
-          set -euo pipefail
+            --out /tmp/Clubapp-v7a.apk /tmp/aligned.apk
+          "${BT}apksigner" verify --verbose /tmp/Clubapp-v7a.apk || true
+          echo "--- native libs in final APK"
+          unzip -l /tmp/Clubapp-v7a.apk | grep -E ' lib/' || true
+          echo "--- biggest entries"
+          unzip -l /tmp/Clubapp-v7a.apk | sort -k1 -n -r | head -15
+          cd "$GITHUB_WORKSPACE"
           mkdir -p package
-          cp android/app/build/outputs/apk/release/*.apk package/Clubapp-universal.apk
+          cp /tmp/Clubapp-v7a.apk package/Clubapp-v7a.apk
           ls -lah package/
 
       - name: upload
         uses: actions/upload-artifact@v7
         with:
-          name: Clubapp-apk-universal
+          name: Clubapp-apk-v7a
           path: package/*
           if-no-files-found: error
