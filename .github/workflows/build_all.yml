@@ -1093,52 +1093,52 @@ jobs:
               # error when even that is missing. CMakeLists.txt picks up the
               # build-side counterpart that links libGL.so.1 first.
               cat > "package/$ARTIFACT.sh" <<'FCAE_LAUNCHER_EOF'
-#!/bin/sh
-# FCAE VPN -- Linux launcher (auto-detects missing GLVND dispatch lib).
-set -eu
-DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN="$DIR/FCAE_VPN-linux-x64"
-if [ ! -x "$BIN" ]; then
-    echo "FCAE VPN: launcher could not find executable at $BIN" >&2
-    exit 127
-fi
-need_libopengl=0
-if LD_TRACE_LOADED_OBJECTS=1 "$BIN" 2>&1 | grep -q 'libOpenGL\.so\.0 => not found'; then
-    need_libopengl=1
-elif command -v ldd >/dev/null 2>&1; then
-    if ldd "$BIN" 2>&1 | grep -q 'libOpenGL\.so\.0 => not found'; then
-        need_libopengl=1
-    fi
-fi
-if [ "$need_libopengl" = "1" ]; then
-    found=""
-    for c in \
-        /usr/lib/x86_64-linux-gnu/libGL.so.1 \
-        /usr/lib64/libGL.so.1 \
-        /usr/lib/libGL.so.1 \
-        /usr/lib/x86_64-linux-gnu/libGL.so.3 \
-        /usr/lib/x86_64-linux-gnu/libGL.so.0 \
-        /usr/lib/libGL.so.0 \
-        /lib/x86_64-linux-gnu/libGL.so.1; do
-        if [ -f "$c" ]; then found="$c"; break; fi
-    done
-    if [ -n "$found" ]; then
-        export LD_PRELOAD="${found}${LD_PRELOAD:+:$LD_PRELOAD}"
-    else
-        cat >&2 <<'EOF'
-FCAE VPN: requires libOpenGL.so.0 (Khronos GL dispatch). It is missing on this system.
-
-  Debian / Ubuntu :  sudo apt-get install libopengl0
-  Fedora / RHEL   :  sudo dnf install libglvnd-glx libglvnd-opengl
-  Arch Linux      :  sudo pacman -S libglvnd
-  Alpine          :  sudo apk add libglvnd
-EOF
-        exit 127
-    fi
-fi
-export LD_LIBRARY_PATH="$DIR/lib:$DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$BIN" "$@"
-FCAE_LAUNCHER_EOF
+          #!/bin/sh
+          # FCAE VPN -- Linux launcher (auto-detects missing GLVND dispatch lib).
+          set -eu
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          BIN="$DIR/FCAE_VPN-linux-x64"
+          if [ ! -x "$BIN" ]; then
+              echo "FCAE VPN: launcher could not find executable at $BIN" >&2
+              exit 127
+          fi
+          need_libopengl=0
+          if LD_TRACE_LOADED_OBJECTS=1 "$BIN" 2>&1 | grep -q 'libOpenGL\.so\.0 => not found'; then
+              need_libopengl=1
+          elif command -v ldd >/dev/null 2>&1; then
+              if ldd "$BIN" 2>&1 | grep -q 'libOpenGL\.so\.0 => not found'; then
+                  need_libopengl=1
+              fi
+          fi
+          if [ "$need_libopengl" = "1" ]; then
+              found=""
+              for c in \
+                  /usr/lib/x86_64-linux-gnu/libGL.so.1 \
+                  /usr/lib64/libGL.so.1 \
+                  /usr/lib/libGL.so.1 \
+                  /usr/lib/x86_64-linux-gnu/libGL.so.3 \
+                  /usr/lib/x86_64-linux-gnu/libGL.so.0 \
+                  /usr/lib/libGL.so.0 \
+                  /lib/x86_64-linux-gnu/libGL.so.1; do
+                  if [ -f "$c" ]; then found="$c"; break; fi
+              done
+              if [ -n "$found" ]; then
+                  export LD_PRELOAD="${found}${LD_PRELOAD:+:$LD_PRELOAD}"
+              else
+                  cat >&2 <<'EOF'
+          FCAE VPN: requires libOpenGL.so.0 (Khronos GL dispatch). It is missing on this system.
+          
+            Debian / Ubuntu :  sudo apt-get install libopengl0
+            Fedora / RHEL   :  sudo dnf install libglvnd-glx libglvnd-opengl
+            Arch Linux      :  sudo pacman -S libglvnd
+            Alpine          :  sudo apk add libglvnd
+          EOF
+                  exit 127
+              fi
+          fi
+          export LD_LIBRARY_PATH="$DIR/lib:$DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec "$BIN" "$@"
+          FCAE_LAUNCHER_EOF
               chmod +x "package/$ARTIFACT.sh"
             fi
           fi
