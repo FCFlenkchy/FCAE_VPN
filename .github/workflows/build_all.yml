@@ -398,9 +398,9 @@ jobs:
           echo "--- all APK files in workspace ---"
           find . -name '*.apk' -not -path './third_party/*' || true
           echo "----------------------------------"
-          APKPATH=$(find android -path '*/outputs/*' -name '*.apk' 2>/dev/null | grep -v -i debug | head -1 || true)
+          APKPATH=$(find android -name '*.apk' 2>/dev/null | grep -v -i debug | grep -i release | head -1 || true)
           if [ -z "$APKPATH" ]; then
-            echo "::error::No release APK found under android/**/outputs"
+            echo "::error::No release APK found under android/"
             find android -path '*/outputs/*' -type f 2>/dev/null | head -50 || true
             exit 1
           fi
