@@ -461,6 +461,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             }
             return START_NOT_STICKY;
         }
+        if (!ACTION_START.equals(intent.getAction())) {
+            // Not a start command: most notably the task-removal redelivery,
+            // which replays the launcher's base intent to every started
+            // service when the user swipes the app from recents. Its blank
+            // extras would dial a tunnel nobody asked for. Stop and Regions
+            // are handled above; real starts come from ACTION_START only.
+            return (psiphonUp || startInFlight) ? START_STICKY : START_NOT_STICKY;
+        }
         if (stopping) {
             // A teardown is in flight (user disconnect or session switch).
             // Dropping a START here would hang the new session: nothing ever
@@ -636,7 +644,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 // not a terminal stop: the notification owner must not be
                 // told "stopped" for a session it is already handing to
                 // the next request.
-                if (pendingStart == null) broadcastStopped();
+                if (pendingStart == null) {
+                    broadcastStopped();
+                    // The datastore is closed now, so this is the one safe
+                    // moment to reclaim disk from tunnel-core's never-pruned
+                    // caches.
+                    pruneDataRoot(PsiphonTunnelService.this);
+                }
                 scheduleRestartReplay();
             }, "FCAE-PsiStop").start();
             new Thread(() -> {
@@ -692,6 +706,50 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             new Handler(Looper.getMainLooper()).postDelayed(
                     FCAEVpnService::killProcessQuietly, PROCESS_KILL_DELAY_MS);
         }
+    }
+
+    /**
+     * Hard cap for tunnel-core's data root. Its bolt datastore only grows
+     * (freed pages are reused, never returned), server entries accumulate
+     * with no upstream cap, and the remote-list/OSL download caches are never
+     * pruned — months of reconnects leave an ever-growing directory.
+     * tunnel-core documents that the host may delete everything under
+     * DataRootDirectory; the next start rebuilds it from the embedded and
+     * remote server lists exactly like a fresh install. Called only after a
+     * clean stop, when the datastore is closed.
+     */
+    private static final long DATA_ROOT_MAX_BYTES = 16L * 1024 * 1024;
+
+    private static void pruneDataRoot(Context app) {
+        try {
+            File core = new File(new File(app.getFilesDir(), "psiphon"),
+                    "ca.psiphon.PsiphonTunnel.tunnel-core");
+            if (!core.isDirectory() || dirSize(core) <= DATA_ROOT_MAX_BYTES) return;
+            Log.i(TAG, "Psiphon data root over " + (DATA_ROOT_MAX_BYTES / (1024 * 1024))
+                    + " MB; resetting " + core.getAbsolutePath());
+            deleteTree(core);
+        } catch (Throwable ignored) {}
+    }
+
+    private static long dirSize(File dir) {
+        File[] files = dir.listFiles();
+        if (files == null) return 0;
+        long total = 0;
+        for (File f : files) {
+            total += f.isDirectory() ? dirSize(f) : f.length();
+        }
+        return total;
+    }
+
+    private static void deleteTree(File dir) {
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                if (f.isDirectory()) deleteTree(f);
+                else f.delete();
+            }
+        }
+        dir.delete();
     }
 
     /**

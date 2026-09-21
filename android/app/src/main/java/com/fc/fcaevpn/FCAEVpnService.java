@@ -61,6 +61,14 @@ public class FCAEVpnService extends VpnService {
      * re-creating it, so READY does not blip the interface down/up.
      */
     private volatile boolean earlyPsiphonTun = false;
+    /**
+     * Full session config parked by ACTION_PSIPHON_START (TUN mode, Psiphon
+     * protocol). This service — not MainActivity — starts the session when
+     * Psiphon's READY lands, so a connect survives the activity being swiped
+     * away mid-dial; the READY arm patches the live AAR ports in and hands
+     * it to requestStart(). Cleared on pause, teardown and consumption.
+     */
+    private volatile Intent pendingPsiphonStart;
     private static final String TAG = "FCAE_VPN";
 
     public static final String ACTION_STOP       = "com.fc.fcaevpn.STOP";
@@ -571,6 +579,7 @@ public class FCAEVpnService extends VpnService {
         handler = new Handler(Looper.getMainLooper());
         notification = new VpnNotification(this);
         android.content.IntentFilter psiphonFilter = new android.content.IntentFilter();
+        psiphonFilter.addAction(PsiphonTunnelService.BROADCAST_READY);
         psiphonFilter.addAction(PsiphonTunnelService.BROADCAST_STATS);
         psiphonFilter.addAction(PsiphonTunnelService.BROADCAST_FAILED);
         androidx.core.content.ContextCompat.registerReceiver(this, psiphonStatsReceiver,
@@ -590,6 +599,7 @@ public class FCAEVpnService extends VpnService {
                     return START_NOT_STICKY;
 
                 case ACTION_PSIPHON_START:
+                    pendingPsiphonStart = new Intent(intent);
                     PsiphonTunnelService.startBound(this,
                             new Intent(this, PsiphonTunnelService.class)
                                     .setAction(PsiphonTunnelService.ACTION_START)
@@ -610,6 +620,15 @@ public class FCAEVpnService extends VpnService {
                     requestStart(intent);
                     return START_STICKY;
             }
+        }
+
+        // An unknown action is never a command. Removing the app from
+        // recents redelivers the launcher's base intent (action MAIN) to
+        // every started service of the package; that must not flip a live,
+        // paused or connecting session to "Ready".
+        if (running || uiConnecting || vpnThread != null || engineOpInFlight || vpnPaused) {
+            updateNotification();
+            return START_STICKY;
         }
 
         showReady();
@@ -749,9 +768,9 @@ public class FCAEVpnService extends VpnService {
      * pinned to the physical network, so Psiphon's dials cannot loop back
      * through the interface; the data plane still attaches only when the
      * core's on-demand fd provider asks for it (or, for the pure-Psiphon
-     * protocol, when the READY-derived session start arrives). A Psiphon
-     * failure in this window is torn down by the BROADCAST_FAILED arm of
-     * {@link #psiphonStatsReceiver}.
+     * protocol, when this service's READY handler starts the parked
+     * session). A Psiphon failure in this window is torn down by the
+     * BROADCAST_FAILED arm of {@link #psiphonStatsReceiver}.
      */
     private void raiseTunForPsiphonConnect(Intent intent) {
         synchronized (tunLock) {
@@ -1105,6 +1124,7 @@ public class FCAEVpnService extends VpnService {
 
         vpnThread = null;
         earlyPsiphonTun = false;
+        pendingPsiphonStart = null;
         final ParcelFileDescriptor pfd;
         synchronized (tunLock) {
             pfd = vpnInterface;
@@ -1200,6 +1220,7 @@ public class FCAEVpnService extends VpnService {
 
         vpnThread = null;
         earlyPsiphonTun = false;
+        pendingPsiphonStart = null;
         final ParcelFileDescriptor pfd;
         synchronized (tunLock) {
             pfd = vpnInterface;
@@ -1336,6 +1357,27 @@ public class FCAEVpnService extends VpnService {
     private Intent lastPsiphonStats;
     private final android.content.BroadcastReceiver psiphonStatsReceiver = new android.content.BroadcastReceiver() {
         @Override public void onReceive(android.content.Context context, Intent intent) {
+            if (PsiphonTunnelService.BROADCAST_READY.equals(intent.getAction())) {
+                // The parked Psiphon connect: the tunnel is up and its ports
+                // are live, so the session starts here — without MainActivity,
+                // which may be swiped away. The stash carries the full config
+                // sent at the connect click; the live AAR ports replace the
+                // UI-field values the activity could not know yet.
+                Intent start = pendingPsiphonStart;
+                if (start != null && !intent.getBooleanExtra("regionsOnly", false)
+                        && vpnThread == null && !running && !shuttingDown
+                        && !engineOpInFlight && !vpnPaused
+                        && PsiphonTunnelService.isCurrentBroadcast(intent)
+                        && intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, 0) > 0) {
+                    pendingPsiphonStart = null;
+                    start.putExtra("psiphonSocksPort",
+                            intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, 0));
+                    start.putExtra("psiphonHttpPort",
+                            intent.getIntExtra(PsiphonTunnelService.EXTRA_HTTP, 0));
+                    requestStart(start);
+                }
+                return;
+            }
             if (PsiphonTunnelService.BROADCAST_FAILED.equals(intent.getAction())) {
                 // A failure while the TUN was raised ahead of the session
                 // (raiseTunForPsiphonConnect) and no start worker exists:

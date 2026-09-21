@@ -313,6 +313,15 @@ public class ProxyNotification extends Service {
             return START_STICKY;
         }
 
+        // Anything but ACTION_START reaching this point is the task-removal
+        // redelivery (the launcher base intent replayed to every started
+        // service on swipe) or another stray delivery — not a session
+        // request. Starting a "fresh" session for it would bump the
+        // generation and reset a live session's notification to connecting.
+        if (!ACTION_START.equals(intent.getAction())) {
+            return START_STICKY;
+        }
+
         // A fresh proxy session: bump the shared generation counter so this
         // session's later disconnect broadcast is never mistaken for a stale
         // one from a previous connect/disconnect cycle.

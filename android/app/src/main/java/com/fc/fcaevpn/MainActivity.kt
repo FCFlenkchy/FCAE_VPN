@@ -292,13 +292,10 @@ class MainActivity : AppCompatActivity() {
                         if (!isTunModeSelected() && socks > 0) {
                             peerText.text = psiphonEndpointText(nativeLanFallback(lastNativeLan))
                         }
-                        if (isPsiphonSelected() && isTunModeSelected() && socks > 0) {
-                            // READY: the AAR's tunnel is up and its proxies
-                            // are listening. The interface went up at the
-                            // connect click; this start attaches the data
-                            // plane (the service reuses that interface).
-                            startTunServiceWithConfig()
-                        }
+                        // TUN mode adds nothing here: FCAEVpnService starts
+                        // the session from its own READY arm (the config went
+                        // out with the connect click), so the start survives
+                        // this activity being swiped away mid-dial.
                     }
                 }
                 PsiphonTunnelService.BROADCAST_FAILED -> {
@@ -1558,9 +1555,15 @@ class MainActivity : AppCompatActivity() {
                 .setAction(ProxyNotification.ACTION_START)
         }
         i.extras?.let { owner.putExtras(it) }
-        // The TUN-mode owner raises the interface before the AAR connects
-        // (TUN first); it needs the session's MTU for that first Builder.
-        if (isTunModeSelected()) owner.putExtra("tunMtu", tunMtuBytes())
+        if (isTunModeSelected()) {
+            // Full session config rides on the owner: FCAEVpnService starts
+            // the engine session itself when Psiphon reports READY, so the
+            // connect survives this activity being swiped away mid-dial.
+            owner.putExtras(buildStartIntent())
+            // The TUN-mode owner raises the interface before the AAR connects
+            // (TUN first); it needs the session's MTU for that first Builder.
+            owner.putExtra("tunMtu", tunMtuBytes())
+        }
         startForegroundService(owner)
     }
 
@@ -1578,6 +1581,19 @@ class MainActivity : AppCompatActivity() {
         vpnActive = true
         updateButton()
         saveSettings()
+        startForegroundService(buildStartIntent())
+        // Poll is started by the VPN_STATE_CHANGED broadcast from the service
+        // AFTER nativeStart() succeeds — NOT here, to avoid calling native
+        // methods while the previous engine is still tearing down.
+    }
+
+    /**
+     * ACTION_START intent carrying every session extra. Also stashed on the
+     * Psiphon owner intent in TUN mode, so FCAEVpnService can start the
+     * session itself when Psiphon reports READY — the activity may already
+     * be swiped away by then.
+     */
+    private fun buildStartIntent(): Intent {
         val i = Intent(this, FCAEVpnService::class.java)
         i.action = FCAEVpnService.ACTION_START
         i.putExtra("protocol", coreProtocolFromSelection())
@@ -1626,10 +1642,7 @@ class MainActivity : AppCompatActivity() {
         // tunnel looked dead even though Psiphon was up.
         i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
-        startForegroundService(i)
-        // Poll is started by the VPN_STATE_CHANGED broadcast from the service
-        // AFTER nativeStart() succeeds — NOT here, to avoid calling native
-        // methods while the previous engine is still tearing down.
+        return i
     }
 
     private fun startEngine() {
