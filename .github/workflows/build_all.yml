@@ -1471,7 +1471,7 @@ jobs:
 
             const tag = ${{ toJSON(needs.prepare.outputs.version) }};
             const versionFull = ${{ toJSON(needs.prepare.outputs.version_full) }};
-            const isPrerelease = ${{ needs.prepare.outputs.is_prerelease }} === 'true';
+            const isPrerelease = ${{ toJSON(needs.prepare.outputs.is_prerelease) }} === 'true';
             const extraNotes = ${{ toJSON(inputs.extra_notes) }};
 
             const parseVersion = (version) => {
