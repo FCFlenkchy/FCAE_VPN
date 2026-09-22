@@ -47,7 +47,7 @@ pub struct TunUndo {
 ///
 /// Unused on Android: the VpnService owns addressing, routing and DNS, so the
 /// desktop `ip`/`netsh`/`route` paths below are all compiled out there.
-#[cfg_attr(target_os = "android", allow(dead_code))]
+#[cfg_attr(any(target_os = "android", target_os = "windows"), allow(dead_code))]
 fn run(program: &str, args: &[&str]) -> bool {
     let mut cmd = Command::new(program);
     cmd.args(args).stdout(Stdio::null()).stderr(Stdio::null());
@@ -128,6 +128,7 @@ fn dns_host_of(entry: &str) -> &str {
 /// escalates 5→10→20→…→100 ms instead of a flat 100 ms — the flat poll added
 /// up to ~100 ms of dead time to *every* connect even on a healthy machine.
 #[cfg(any(windows, target_os = "linux"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn wait_until(mut probe: impl FnMut() -> bool, budget: Duration) -> bool {
     const MAX_SLICE: Duration = Duration::from_millis(100);
     let deadline = std::time::Instant::now() + budget;

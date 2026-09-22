@@ -1,5 +1,4 @@
 use std::ffi::{c_int, c_uchar, c_uint};
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
