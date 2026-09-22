@@ -780,7 +780,7 @@ pub(crate) async fn serve_connector<F, Fut, S>(
 ) -> Result<()>
 where
     F: Fn(String, u16) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = std::io::Result<S>> + Send,
+    Fut: Future<Output = std::io::Result<S>> + Send + 'static,
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     let listen = listener.local_addr()?;
@@ -800,8 +800,8 @@ where
 
 async fn serve_one_through<F, Fut, S>(mut sock: TcpStream, connect: F) -> Result<()>
 where
-    F: Fn(String, u16) -> Fut + Clone,
-    Fut: Future<Output = std::io::Result<S>>,
+    F: Fn(String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = std::io::Result<S>> + Send + 'static,
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     let (cmd, target, port) = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_request(&mut sock))
@@ -810,21 +810,18 @@ where
             AetherError::Other("the client did not finish the socks5 handshake in time".into())
         })??;
 
-    match cmd {
-        CMD_CONNECT => {}
-        CMD_UDP_ASSOCIATE => return serve_udp_dns_over_tcp(sock, connect).await,
-        _ => {
-            let _ = reply(&mut sock, REP_NOT_SUPPORTED).await;
-            return Err(AetherError::Other(
-                "only connect (and dns-over-tcp udp/53) is carried on this listener".into(),
-            ));
-        }
+    if cmd == CMD_UDP_ASSOCIATE {
+        return handle_udp_over_connector(sock, connect, target).await;
     }
 
-    let host = match &target {
-        Target::Domain(name) => name.clone(),
-        Target::Ip(ip) => ip.to_string(),
-    };
+    if cmd != CMD_CONNECT {
+        let _ = reply(&mut sock, REP_NOT_SUPPORTED).await;
+        return Err(AetherError::Other(
+            "only connect and udp associate are carried on this listener".into(),
+        ));
+    }
+
+    let host = connector_host(&target, port);
 
     match connect(host.clone(), port).await {
         Ok(remote) => {
@@ -839,23 +836,98 @@ where
     }
 }
 
-/// Tor is TCP-only. tun2socks still sends UDP ASSOCIATE (DNS/53, QUIC, …);
-/// carry DNS as DNS-over-TCP CONNECT :53 and drop every other datagram.
-async fn serve_udp_dns_over_tcp<F, Fut, S>(mut sock: TcpStream, connect: F) -> Result<()>
+const DNS_PORT: u16 = 53;
+const DNS_OVER_TCP_TIMEOUT: Duration = Duration::from_secs(20);
+const DNS_MAX_IN_FLIGHT: usize = 32;
+
+fn connector_host(target: &Target, port: u16) -> String {
+    match target {
+        Target::Ip(ip) if port == DNS_PORT && ip.is_unspecified() => "1.1.1.1".into(),
+        _ => target.to_string(),
+    }
+}
+
+fn dns_servfail(query: &[u8]) -> Vec<u8> {
+    let mut answer = query.to_vec();
+    answer[2] = (answer[2] & 0x79) | 0x80;
+    answer[3] = (answer[3] & 0x10) | 0x82;
+    answer
+}
+
+async fn dns_over_connector<F, Fut, S>(connect: F, target: &Target, query: &[u8]) -> Vec<u8>
 where
-    F: Fn(String, u16) -> Fut + Clone,
+    F: Fn(String, u16) -> Fut,
     Fut: Future<Output = std::io::Result<S>>,
+    S: AsyncRead + AsyncWrite + Send + Unpin,
+{
+    let exchange = async {
+        let stream = connect(connector_host(target, DNS_PORT), DNS_PORT).await?;
+        let answer = dns_over_stream(stream, query).await?;
+        if answer.len() < 12 || answer[..2] != query[..2] || answer[2] & 0x80 == 0 {
+            return Err(std::io::Error::other("invalid DNS response"));
+        }
+        Ok::<_, std::io::Error>(answer)
+    };
+    match tokio::time::timeout(DNS_OVER_TCP_TIMEOUT, exchange).await {
+        Ok(Ok(answer)) => answer,
+        failure => {
+            log::debug!("dns over tcp to {target} failed: {failure:?}");
+            dns_servfail(query)
+        }
+    }
+}
+
+async fn dns_over_stream<S>(mut stream: S, query: &[u8]) -> std::io::Result<Vec<u8>>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin,
+{
+    if query.len() > u16::MAX as usize {
+        return Err(std::io::Error::other("dns query is too long to frame"));
+    }
+
+    let mut framed = Vec::with_capacity(query.len() + 2);
+    framed.extend_from_slice(&(query.len() as u16).to_be_bytes());
+    framed.extend_from_slice(query);
+    stream.write_all(&framed).await?;
+    stream.flush().await?;
+
+    let mut len = [0u8; 2];
+    stream.read_exact(&mut len).await?;
+    let len = u16::from_be_bytes(len) as usize;
+    if len == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "empty dns-over-tcp answer",
+        ));
+    }
+    let mut answer = vec![0u8; len];
+    stream.read_exact(&mut answer).await?;
+    Ok(answer)
+}
+
+async fn handle_udp_over_connector<F, Fut, S>(
+    mut sock: TcpStream,
+    connect: F,
+    requested: Target,
+) -> Result<()>
+where
+    F: Fn(String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = std::io::Result<S>> + Send + 'static,
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    let bind_ip = sock
-        .local_addr()
-        .map(|a| a.ip())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let control_peer = sock.peer_addr()?;
+    let expected_ip = expected_udp_source(control_peer, &requested);
+    let bind_ip = sock.local_addr()?.ip();
+
     let relay = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
     let relay_addr = relay.local_addr()?;
     reply_bound(&mut sock, relay_addr).await?;
 
+    let mut queries = tokio::task::JoinSet::new();
+
     let mut client: Option<SocketAddr> = None;
+    let mut refused: u64 = 0;
+    let mut dropped_udp: u64 = 0;
     let mut cbuf = vec![0u8; 65535];
     let mut ctrl = [0u8; 256];
 
@@ -863,102 +935,81 @@ where
         tokio::select! {
             r = relay.recv_from(&mut cbuf) => {
                 let (n, from) = match r { Ok(v) => v, Err(_) => break };
+                if !udp_source_allowed(expected_ip, client, from) {
+                    refused += 1;
+                    if refused == 1 || refused.is_multiple_of(64) {
+                        log::warn!(
+                            "[-] udp relay {relay_addr} dropped a datagram from {from}; \
+                             this association only serves {expected_ip} (refused={refused})"
+                        );
+                    }
+                    continue;
+                }
                 if client.is_none() {
+                    log::debug!("udp relay {relay_addr} latched to client {from}");
                     client = Some(from);
-                } else if client != Some(from) {
-                    continue;
                 }
-                let Some((dst, (dst_port, query))) = parse_udp_request(&cbuf[..n]) else {
+
+                let Some((dst, (dst_port, payload))) = parse_udp_request(&cbuf[..n]) else {
                     continue;
                 };
-                if dst_port != 53 {
-                    log::debug!(
-                        "[tor] dropping udp {dst}:{dst_port} (tor is tcp-only; dns/53 uses dns-over-tcp)"
-                    );
+
+                if dst_port != DNS_PORT {
+                    dropped_udp += 1;
+                    if dropped_udp == 1 || dropped_udp.is_multiple_of(64) {
+                        log::debug!(
+                            "[-] udp to {dst}:{dst_port} cannot be carried: this listener \
+                             reaches the internet over tcp only (dropped={dropped_udp})"
+                        );
+                    }
                     continue;
                 }
-                let host = match &dst {
-                    Target::Domain(name) => name.clone(),
-                    Target::Ip(ip) => ip.to_string(),
-                };
+
+                if payload.len() < 12 || payload[2] & 0x80 != 0 {
+                    continue;
+                }
+
+                if queries.len() >= DNS_MAX_IN_FLIGHT {
+                    log::debug!("[-] too many dns lookups are already in flight; dropping one");
+                    continue;
+                }
+
                 let connect = connect.clone();
-                let answer = match tokio::time::timeout(
-                    Duration::from_secs(8),
-                    dns_query_over_tcp(connect, host, &query),
-                )
-                .await
-                {
-                    Ok(Ok(body)) => body,
-                    _ => continue,
-                };
-                let pkt = build_udp_reply_target(&dst, dst_port, &answer);
-                let _ = relay.send_to(&pkt, from).await;
+                queries.spawn(async move {
+                    let answer = dns_over_connector(connect, &dst, &payload).await;
+                    (dst, answer)
+                });
             }
+
+            result = queries.join_next(), if !queries.is_empty() => {
+                if let (Some(Ok((src, answer))), Some(client)) = (result, client) {
+                    let pkt = build_udp_reply_target(&src, DNS_PORT, &answer);
+                    let _ = relay.send_to(&pkt, client).await;
+                }
+            }
+
             r = sock.read(&mut ctrl) => {
                 match r { Ok(0) | Err(_) => break, Ok(_) => {} }
             }
         }
     }
+
     Ok(())
 }
 
-async fn dns_query_over_tcp<F, Fut, S>(
-    connect: F,
-    host: String,
-    query: &[u8],
-) -> std::io::Result<Vec<u8>>
-where
-    F: Fn(String, u16) -> Fut,
-    Fut: Future<Output = std::io::Result<S>>,
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    if query.len() > u16::MAX as usize {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "dns query too large",
-        ));
-    }
-    let mut remote = connect(host, 53).await?;
-    let len = (query.len() as u16).to_be_bytes();
-    remote.write_all(&len).await?;
-    remote.write_all(query).await?;
-    remote.flush().await?;
-    let mut hdr = [0u8; 2];
-    remote.read_exact(&mut hdr).await?;
-    let n = u16::from_be_bytes(hdr) as usize;
-    if n == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "empty dns-over-tcp answer",
-        ));
-    }
-    let mut body = vec![0u8; n];
-    remote.read_exact(&mut body).await?;
-    Ok(body)
-}
-
 fn build_udp_reply_target(dst: &Target, port: u16, data: &[u8]) -> Vec<u8> {
-    let mut pkt = vec![0x00, 0x00, 0x00];
     match dst {
-        Target::Ip(IpAddr::V4(v4)) => {
-            pkt.push(ATYP_V4);
-            pkt.extend_from_slice(&v4.octets());
-        }
-        Target::Ip(IpAddr::V6(v6)) => {
-            pkt.push(ATYP_V6);
-            pkt.extend_from_slice(&v6.octets());
-        }
+        Target::Ip(ip) => build_udp_reply(SocketAddr::new(*ip, port), data),
         Target::Domain(name) => {
-            let bytes = name.as_bytes();
-            let n = bytes.len().min(255);
-            pkt.push(ATYP_DOMAIN);
-            pkt.push(n as u8);
-            pkt.extend_from_slice(&bytes[..n]);
+            let len = name.len().min(u8::MAX as usize);
+            let mut packet = Vec::with_capacity(7 + len + data.len());
+            packet.extend_from_slice(&[0, 0, 0, ATYP_DOMAIN, len as u8]);
+            packet.extend_from_slice(&name.as_bytes()[..len]);
+            packet.extend_from_slice(&port.to_be_bytes());
+            packet.extend_from_slice(data);
+            packet
         }
     }
-    pkt.extend_from_slice(&port.to_be_bytes());
-    pkt.extend_from_slice(data);
-    pkt
 }
 
 pub(crate) async fn relay_generic<A, B>(client: A, remote: B, linger: Duration)
@@ -1336,7 +1387,7 @@ async fn handle_udp_associate(
                 let (n, from) = match r { Ok(v) => v, Err(_) => break };
                 if !udp_source_allowed(expected_ip, client, from) {
                     refused += 1;
-                    if refused == 1 || refused % 64 == 0 {
+                    if refused == 1 || refused.is_multiple_of(64) {
                         log::warn!(
                             "[-] udp relay {relay_addr} dropped a datagram from {from}; \
                              this association only serves {expected_ip} (refused={refused})"
@@ -1950,52 +2001,6 @@ mod tests {
 
 const HTTP_HEAD_LIMIT: usize = 16 * 1024;
 
-/// HTTP CONNECT/absolute-form requests carried by a supplied connector.
-/// Pass hostnames intact: Tor must resolve them remotely (including .onion).
-pub(crate) async fn serve_http_connector<F, Fut, S>(listener: TcpListener, connect: F) -> Result<()>
-where
-    F: Fn(String, u16) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = std::io::Result<S>> + Send,
-    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-{
-    let listen = listener.local_addr()?;
-    log::info!("[+] tor http proxy listening on {listen}");
-    warn_if_world_reachable("tor http proxy", listen);
-    accept_clients(listener, "tor http proxy", client_limit(), move |mut sock, peer| {
-        let connect = connect.clone();
-        async move {
-            let result: Result<()> = async {
-                let (head, early) = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_head(&mut sock))
-                    .await.map_err(|_| AetherError::Other("http handshake timeout".into()))??;
-                let text = String::from_utf8_lossy(&head);
-                let Some(request) = parse_request_line(text.lines().next().unwrap_or_default()) else {
-                    sock.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n").await?;
-                    return Ok(());
-                };
-                let remote = tokio::time::timeout(Duration::from_secs(60),
-                    connect(request.authority, request.port)).await;
-                let mut remote = match remote {
-                    Ok(Ok(remote)) => remote,
-                    _ => {
-                        sock.write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n").await?;
-                        return Ok(());
-                    }
-                };
-                if let Some(line) = request.rewritten {
-                    let rest = text.split_once("\r\n").map(|(_, tail)| tail).unwrap_or("");
-                    remote.write_all(format!("{line}{rest}").as_bytes()).await?;
-                } else {
-                    sock.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await?;
-                }
-                remote.write_all(&early).await?;
-                relay_generic(sock, remote, half_close_linger()).await;
-                Ok(())
-            }.await;
-            if let Err(e) = result { log::debug!("tor http client {peer} ended: {e}"); }
-        }
-    }).await
-}
-
 pub async fn serve_http(listener: TcpListener, stack: StackHandle) -> Result<()> {
     let listen = listener.local_addr()?;
     log::info!("[+] http proxy listening on {listen}");
@@ -2010,6 +2015,98 @@ pub async fn serve_http(listener: TcpListener, stack: StackHandle) -> Result<()>
         }
     })
     .await
+}
+
+pub(crate) async fn serve_http_connector<F, Fut, S>(
+    listener: TcpListener,
+    kind: &'static str,
+    connect: F,
+) -> Result<()>
+where
+    F: Fn(String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = std::io::Result<S>> + Send + 'static,
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let listen = listener.local_addr()?;
+    log::info!("[+] {kind} listening on {listen}");
+    warn_if_world_reachable(kind, listen);
+
+    accept_clients(listener, kind, client_limit(), move |sock, peer| {
+        let connect = connect.clone();
+        async move {
+            if let Err(e) = handle_http_through(sock, connect).await {
+                log::debug!("{kind} client {peer} ended: {e}");
+            }
+        }
+    })
+    .await
+}
+
+async fn handle_http_through<F, Fut, S>(mut sock: TcpStream, connect: F) -> Result<()>
+where
+    F: Fn(String, u16) -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let (head, early) = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_head(&mut sock))
+        .await
+        .map_err(|_| {
+            AetherError::Other("the client did not send a request head in time".into())
+        })??;
+    let text = String::from_utf8_lossy(&head).to_string();
+    let first_line = text.lines().next().unwrap_or_default();
+
+    let request = match parse_request_line(first_line) {
+        Some(value) => value,
+        None => {
+            let _ = sock
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                .await;
+            return Err(AetherError::Other(format!(
+                "unsupported http proxy request: {first_line}"
+            )));
+        }
+    };
+
+    let connected = tokio::time::timeout(
+        Duration::from_secs(60),
+        connect(request.authority.clone(), request.port),
+    ).await.unwrap_or_else(|_| Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut, "proxy connection timed out",
+    )));
+    let remote = match connected {
+        Ok(remote) => remote,
+        Err(error) => {
+            let _ = sock
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+                .await;
+            return Err(AetherError::Other(format!(
+                "{}:{}: {error}",
+                request.authority, request.port
+            )));
+        }
+    };
+
+    let mut remote = remote;
+
+    match &request.rewritten {
+        Some(line) => {
+            let rest = text.split_once("\r\n").map(|(_, tail)| tail).unwrap_or("");
+            remote.write_all(format!("{line}{rest}").as_bytes()).await?;
+        }
+        None => {
+            sock.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .await?;
+        }
+    }
+
+    if !early.is_empty() {
+        remote.write_all(&early).await?;
+    }
+    remote.flush().await?;
+
+    relay_generic(sock, remote, half_close_linger()).await;
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2273,7 +2370,7 @@ mod http_proxy_tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(super::serve_http_connector(listener, |host, port| async move {
+        let server = tokio::spawn(super::serve_http_connector(listener, "test http proxy", |host, port| async move {
             assert_eq!(host, "example.onion");
             assert_eq!(port, 443);
             let (client, mut remote) = tokio::io::duplex(1024);
@@ -2526,5 +2623,166 @@ mod sniff_route_tests {
         std::env::set_var("AETHER_ROUTE_SNIFF", "1");
         assert!(sniff_enabled());
         std::env::remove_var("AETHER_ROUTE_SNIFF");
+    }
+}
+
+#[cfg(test)]
+mod connector_dns_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dns_queries_and_answers_use_tcp_length_prefixes() {
+        let (stream, mut resolver) = tokio::io::duplex(64);
+        let exchange = dns_over_stream(stream, &[1, 2, 3]);
+        let respond = async {
+            let mut request = [0; 5];
+            resolver.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, [0, 3, 1, 2, 3]);
+            resolver.write_all(&[0, 4, 4, 5, 6, 7]).await.unwrap();
+        };
+        let (answer, ()) = tokio::join!(exchange, respond);
+        assert_eq!(answer.unwrap(), [4, 5, 6, 7]);
+    }
+
+    #[tokio::test]
+    async fn oversized_dns_queries_are_rejected_before_writing() {
+        let (stream, _resolver) = tokio::io::duplex(1);
+        assert!(dns_over_stream(stream, &vec![0; u16::MAX as usize + 1]).await.is_err());
+    }
+
+    #[test]
+    fn domain_resolvers_keep_their_name_in_udp_replies() {
+        let dst = Target::Domain("resolver.example".into());
+        let packet = build_udp_reply_target(&dst, DNS_PORT, &[1, 2, 3]);
+        let (returned, (port, payload)) = parse_udp_request(&packet).unwrap();
+        assert!(matches!(returned, Target::Domain(name) if name == "resolver.example"));
+        assert_eq!(port, DNS_PORT);
+        assert_eq!(payload, [1, 2, 3]);
+    }
+}
+
+#[cfg(test)]
+mod tor_dns_integration_tests {
+    use super::*;
+
+    async fn associate(address: SocketAddr) -> (TcpStream, SocketAddr) {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(&[5, 1, 0, 5, 3, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+        let mut method = [0; 2];
+        stream.read_exact(&mut method).await.unwrap();
+        assert_eq!(method, [5, 0]);
+        let mut reply = [0; 10];
+        stream.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+        let ip = Ipv4Addr::new(reply[4], reply[5], reply[6], reply[7]);
+        (stream, SocketAddr::new(ip.into(), u16::from_be_bytes([reply[8], reply[9]])))
+    }
+
+    fn request() -> Vec<u8> {
+        let mut query = vec![0; 12];
+        query[..3].copy_from_slice(&[0x12, 0x34, 1]);
+        build_udp_reply("0.0.0.0:53".parse().unwrap(), &query)
+    }
+
+    #[tokio::test]
+    async fn tor_endpoint_serves_udp_dns_without_a_tun_adapter() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (resolver, mut remote) = tokio::io::duplex(128);
+            let resolver = Arc::new(std::sync::Mutex::new(Some(resolver)));
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                serve_one_through(socket, move |host, port| {
+                    assert_eq!(host, "1.1.1.1");
+                    assert_eq!(port, DNS_PORT);
+                    std::future::ready(Ok(resolver.lock().unwrap().take().unwrap()))
+                }).await.unwrap();
+            });
+            let dns = tokio::spawn(async move {
+                let len = remote.read_u16().await.unwrap() as usize;
+                let mut answer = vec![0; len];
+                remote.read_exact(&mut answer).await.unwrap();
+                assert_eq!(&answer[..3], &[0x12, 0x34, 1]);
+                answer[2] |= 0x80;
+                remote.write_u16(len as u16).await.unwrap();
+                remote.write_all(&answer).await.unwrap();
+            });
+            let (control, relay) = associate(address).await;
+            let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let packet = request();
+            client.send_to(&packet, relay).await.unwrap();
+            let mut answer = [0; 512];
+            let (len, from) = client.recv_from(&mut answer).await.unwrap();
+            assert_eq!(from, relay);
+            assert_eq!(len, packet.len());
+            assert_eq!(&answer[..12], &packet[..12]);
+            assert_eq!(answer[12] & 0x80, 0x80);
+            dns.await.unwrap();
+            drop(control);
+            server.await.unwrap();
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_tor_dns_returns_servfail_without_a_direct_fallback() {
+        let query = [0x12, 0x34, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let target = Target::Ip("::".parse().unwrap());
+        let answer = dns_over_connector(|host, port| {
+            assert_eq!(host, "1.1.1.1");
+            assert_eq!(port, DNS_PORT);
+            std::future::ready(Err::<tokio::io::DuplexStream, _>(std::io::Error::other("blocked")))
+        }, &target, &query).await;
+        assert_eq!(&answer[..2], &query[..2]);
+        assert_eq!(answer[2] & 0x80, 0x80);
+        assert_eq!(answer[3] & 0x0f, 2);
+    }
+
+    #[tokio::test]
+    async fn closing_the_association_cancels_pending_dns() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (cancelled, stopped) = tokio::sync::oneshot::channel();
+            let signals = Arc::new(std::sync::Mutex::new(Some((started, cancelled))));
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                serve_one_through(socket, move |_, _| {
+                    let (started, cancelled) = signals.lock().unwrap().take().unwrap();
+                    async move {
+                        struct OnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+                        impl Drop for OnDrop {
+                            fn drop(&mut self) {
+                                if let Some(signal) = self.0.take() {
+                                    let _ = signal.send(());
+                                }
+                            }
+                        }
+                        let _guard = OnDrop(Some(cancelled));
+                        let _ = started.send(());
+                        std::future::pending::<std::io::Result<tokio::io::DuplexStream>>().await
+                    }
+                }).await.unwrap();
+            });
+            let (control, relay) = associate(address).await;
+            let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            client.send_to(&request(), relay).await.unwrap();
+            ready.await.unwrap();
+            drop(control);
+            server.await.unwrap();
+            stopped.await.unwrap();
+        }).await.unwrap();
+    }
+
+    #[test]
+    fn only_unspecified_dns_targets_are_rewritten() {
+        for ip in ["0.0.0.0", "::"] {
+            let target = Target::Ip(ip.parse().unwrap());
+            assert_eq!(connector_host(&target, 53), "1.1.1.1");
+            assert_eq!(connector_host(&target, 443), ip);
+        }
+        assert_eq!(connector_host(&Target::Domain("resolver.onion".into()), 53), "resolver.onion");
+        assert_eq!(connector_host(&Target::Ip("9.9.9.9".parse().unwrap()), 53), "9.9.9.9");
     }
 }

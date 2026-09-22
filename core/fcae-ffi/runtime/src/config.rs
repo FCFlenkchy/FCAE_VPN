@@ -345,6 +345,9 @@ impl SessionConfig {
 
     /// How long to let a backend reach a usable state before giving up.
     pub fn start_timeout(&self) -> Duration {
+        if self.backend == FcaeBackend::Aether && self.scan_mode == FcaeScanMode::Ironclad {
+            return Duration::from_secs(240);
+        }
         match self.scan_mode {
             FcaeScanMode::Turbo => Duration::from_secs(30),
             FcaeScanMode::Balanced => Duration::from_secs(60),
@@ -493,9 +496,9 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // ── Obfuscation ─────────────────────────────────────────────────────
     let o = &raw.obfuscation;
     let noize = cstr_opt(o.noize_profile).unwrap_or_else(|| "balanced".into());
-    if !matches!(noize.as_str(), "off" | "light" | "balanced" | "aggressive") {
+    if !matches!(noize.as_str(), "off" | "light" | "balanced" | "aggressive" | "firewall" | "gfw") {
         return Err(CoreError::InvalidConfig(format!(
-            "noize_profile={noize:?} (expected off|light|balanced|aggressive)"
+            "noize_profile={noize:?} (expected off|light|balanced|aggressive|firewall|gfw)"
         )));
     }
     if o.fragment_enabled {
@@ -864,10 +867,9 @@ pub mod env_compat {
         let scan = match cfg.scan_mode {
             FcaeScanMode::Turbo => "turbo",
             FcaeScanMode::Balanced => "balanced",
-            // Ironclad is a *validation* depth, not a scan speed: scan
-            // thoroughly and flag validation separately.
-            FcaeScanMode::Thorough | FcaeScanMode::Ironclad => "thorough",
-            FcaeScanMode::Stealth => "stealth",
+            FcaeScanMode::Thorough => "thorough",
+            FcaeScanMode::Ironclad => "ironclad",
+            FcaeScanMode::Stealth => "verified",
         };
         let ip = match cfg.ip_version {
             6 => "v6",
@@ -921,7 +923,8 @@ pub mod env_compat {
             set("AETHER_HTTP_PROXY", None::<&str>);
         }
 
-        set("AETHER_TOR_HTTP_PROXY", if cfg.tor.is_enabled() && cfg.tor.http_port != 0 {
+        set("AETHER_TOR_HTTP_PROXY", None::<&str>);
+        set("AETHER_TOR_HTTP", if cfg.tor.is_enabled() && cfg.tor.http_port != 0 {
             Some(format!("{host}:{}", cfg.tor.http_port))
         } else { None });
 
@@ -1089,6 +1092,32 @@ mod tests {
     }
 
     #[test]
+    fn ironclad_has_time_to_finish_its_aether_scan() {
+        let mut cfg = SessionConfig {
+            scan_mode: FcaeScanMode::Ironclad,
+            ..Default::default()
+        };
+        assert_eq!(cfg.start_timeout(), Duration::from_secs(240));
+        cfg.backend = FcaeBackend::Psiphon;
+        assert_eq!(cfg.start_timeout(), Duration::from_secs(150));
+    }
+
+    #[test]
+    fn all_aether_21_noize_profiles_pass_ffi_validation() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        for profile in ["off", "light", "balanced", "aggressive", "firewall", "gfw"] {
+            let name = std::ffi::CString::new(profile).unwrap();
+            raw.obfuscation.noize_profile = name.as_ptr();
+            assert_eq!(unsafe { parse(&raw) }.unwrap().obfuscation.noize_profile, profile);
+        }
+        let invalid = std::ffi::CString::new("unknown").unwrap();
+        raw.obfuscation.noize_profile = invalid.as_ptr();
+        assert!(unsafe { parse(&raw) }.is_err());
+    }
+
+    #[test]
     fn tun_engine_selection_is_validated() {
         let mut raw = raw_test_config();
         raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
@@ -1237,7 +1266,7 @@ mod tests {
         cfg.tor.http_port = 1822;
         env_compat::apply(&cfg);
         assert!(std::env::var("AETHER_HTTP_PROXY").is_err());
-        assert_eq!(std::env::var("AETHER_TOR_HTTP_PROXY").unwrap(), "127.0.0.1:1822");
+        assert_eq!(std::env::var("AETHER_TOR_HTTP").unwrap(), "127.0.0.1:1822");
         cfg.tor.mode = FcaeTorMode::Chain;
         env_compat::apply(&cfg);
         assert_eq!(
@@ -1251,11 +1280,26 @@ mod tests {
             "http_port = 0 must clear the variable, not bind an ephemeral port"
         );
 
+        for (mode, expected) in [
+            (FcaeScanMode::Turbo, "turbo"),
+            (FcaeScanMode::Balanced, "balanced"),
+            (FcaeScanMode::Thorough, "thorough"),
+            (FcaeScanMode::Stealth, "verified"),
+            (FcaeScanMode::Ironclad, "ironclad"),
+        ] {
+            cfg.scan_mode = mode;
+            env_compat::apply(&cfg);
+            assert_eq!(std::env::var("AETHER_SCAN").unwrap(), expected);
+        }
+        assert_eq!(FcaeScanMode::Stealth as u32, 3);
+        assert!(std::env::var("AETHER_TOR_HTTP_PROXY").is_err());
+
         // Regression: turning tor off must clear every variable, or a later
         // non-tor session inherits them.
         cfg.tor = TorConfig::default();
         env_compat::apply(&cfg);
         assert_eq!(std::env::var("AETHER_TOR").unwrap(), "off");
+        assert!(std::env::var("AETHER_TOR_HTTP").is_err());
         assert!(std::env::var("AETHER_TOR_HTTP_PROXY").is_err());
         assert!(std::env::var("AETHER_TOR_BRIDGES").is_err());
         assert!(std::env::var("AETHER_TOR_BIND").is_err());

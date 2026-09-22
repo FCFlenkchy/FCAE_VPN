@@ -584,21 +584,15 @@ class MainActivity : AppCompatActivity() {
         )
         spinnerScan.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
-            listOf("Turbo", "Balanced", "Thorough", "Stealth", "Ironclad"),
+            listOf("Turbo", "Balanced", "Thorough", "Verified", "Ironclad"),
         )
         spinnerIpVersion.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
             listOf("IPv4", "IPv6", "Dual Stack (IPv4+IPv6)"),
         )
-        // Obfuscation/noize types must match the Aether engine/core profiles
-        // (aethernoize::from_profile). "firewall"/"gfw" are legacy aliases that
-        // the core collapses into "balanced"/"aggressive"; expose the four
-        // distinct types the core actually distinguishes. Index 2 = "balanced"
-        // keeps the saved default (prefs.getInt("noize", 2)) aligned with the
-        // core's default of "balanced".
         spinnerNoize.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
-            listOf("off", "light", "balanced", "aggressive"),
+            listOf("off", "light", "balanced", "aggressive", "firewall", "gfw"),
         )
         spinnerSysprofile.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,

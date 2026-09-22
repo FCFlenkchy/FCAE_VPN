@@ -12,7 +12,6 @@ use fcae_runtime::windows_dll::{EmbeddedFiles, Library};
 use parking_lot::Mutex;
 
 use crate::socks5p;
-use crate::socks5t;
 use crate::{generate_config, HevStats};
 
 const RESTART_GRACE: Duration = Duration::from_secs(2);
@@ -131,7 +130,6 @@ struct Engine {
 struct Active {
     thread: std::thread::JoinHandle<()>,
     _psiphon: Option<socks5p::Adapter>,
-    _tor: Option<socks5t::Adapter>,
     undo: Option<fcae_runtime::windows_tun::TunGuard>,
 }
 
@@ -239,13 +237,12 @@ impl TunBridge for HevSocks5TunnelBridge {
         crate::platform::ensure_wintun(crate::platform::wintun_bytes())?;
         let base_socks = endpoints.socks.ok_or_else(|| CoreError::Internal("TUN needs SOCKS endpoint".into()))?;
         let psiphon = if endpoints.psiphon_dns { Some(socks5p::Adapter::start(base_socks).map_err(|e| CoreError::Internal(format!("hev socks5p: {e}")))?) } else { None };
-        let tor = if psiphon.is_none() && cfg.tor.is_exit() { Some(socks5t::Adapter::start(base_socks).map_err(|e| CoreError::Internal(format!("hev socks5t: {e}")))?) } else { None };
-        let socks = psiphon.as_ref().map(|a| a.endpoint()).or_else(|| tor.as_ref().map(|a| a.endpoint())).unwrap_or(base_socks);
+        let socks = psiphon.as_ref().map(|a| a.endpoint()).unwrap_or(base_socks);
         let fd = cfg.tun.fd.or_else(|| self.android_fd()).unwrap_or(-1);
         let (_, yaml) = generate_config(cfg, socks)?;
         let engine = self.spawn_engine(&yaml, fd)?;
         let exit_code = engine.rc.clone();
-        *self.active.lock() = Some(Active { thread: engine.thread, _psiphon: psiphon, _tor: tor, undo: None });
+        *self.active.lock() = Some(Active { thread: engine.thread, _psiphon: psiphon, undo: None });
         let configured = (|| -> Result<()> {
             let undo = fcae_runtime::windows_tun::TunGuard::configure(cfg, endpoints.peer_ip.as_deref())?;
             self.active.lock().as_mut().ok_or_else(|| CoreError::Internal("HEV startup cancelled".into()))?.undo = Some(undo);

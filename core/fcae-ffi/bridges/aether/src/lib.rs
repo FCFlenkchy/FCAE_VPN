@@ -32,6 +32,8 @@
 // attribute is per-crate, not inherited).
 #![recursion_limit = "512"]
 
+mod rates;
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -108,7 +110,8 @@ impl Backend for AetherBackend {
         reap_previous_engine().await;
 
         env_compat::apply(&cfg);
-        aether_engine::reset_stats();
+        aether_engine::stats::reset();
+        aether_engine::telemetry::reset();
 
         // Clear the flag the last stop() left behind. Without this, the
         // guard below sees the PREVIOUS stop's request and the new engine
@@ -352,6 +355,7 @@ impl Backend for AetherBackend {
         *LAST_ENGINE.lock() = Some(engine_task);
 
         Ok(Box::new(AetherHandle {
+            rates: Mutex::new(rates::RateMeter::new(aether_engine::stats::snapshot())),
             cfg,
             socks_addr,
             sink: cx.telemetry.clone(),
@@ -529,6 +533,7 @@ async fn addrs_free(addrs: &[SocketAddr], timeout: Duration) -> bool {
 }
 
 struct AetherHandle {
+    rates: Mutex<rates::RateMeter>,
     cfg: SessionConfig,
     socks_addr: SocketAddr,
     /// Used to publish reconnects the engine performs internally.
@@ -596,10 +601,7 @@ impl BackendHandle for AetherHandle {
             http: (http_port != 0)
                 .then(|| format!("127.0.0.1:{}", http_port).parse().ok())
                 .flatten(),
-            peer_ip: aether_engine::stats::peer().map(|peer| peer.ip().to_string()),
-            // Aether owns its Tor/WARP DNS handling and its SOCKS endpoint
-            // accepts the full UDP path. Keep the standard SOCKS5 behavior;
-            // only the Psiphon backend needs the native-DNS query flag.
+            peer_ip: aether_engine::telemetry::peer().map(|peer| peer.ip().to_string()),
             udp: true,
             psiphon_dns: false,
         }
@@ -721,14 +723,15 @@ impl BackendHandle for AetherHandle {
 
 
     fn counters(&self) -> Counters {
-        self.sink.set_peer(aether_engine::stats::peer().map(|p| p.to_string()).unwrap_or_default());
-        let (rx, tx) = aether_engine::rates();
+        self.sink.set_peer(aether_engine::telemetry::peer().map(|p| p.to_string()).unwrap_or_default());
+        let snapshot = aether_engine::stats::snapshot();
+        let (rx, tx) = self.rates.lock().sample(&snapshot);
         Counters {
-            total_rx: aether_engine::total_rx(),
-            total_tx: aether_engine::total_tx(),
+            total_rx: snapshot.down,
+            total_tx: snapshot.up,
             rx_bytes_sec: rx,
             tx_bytes_sec: tx,
-            rtt_ms: aether_engine::rtt_ms() as u32,
+            rtt_ms: aether_engine::telemetry::rtt_ms() as u32,
         }
     }
 }

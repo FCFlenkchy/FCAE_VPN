@@ -2054,13 +2054,8 @@ void render_ui() {
             ImGui::BeginChild("##obf_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Noize Profile");
-            // Obfuscation/noize types must match the Aether engine/core profiles
-            // (aethernoize::from_profile). "firewall"/"gfw" are legacy aliases the
-            // core collapses into "balanced"/"aggressive", so we expose only the
-            // four distinct types the core distinguishes. Default index 2 =
-            // "balanced" keeps saved legacy configs from silently dropping to off.
-            const char* profiles[] = { "off", "light", "balanced", "aggressive" };
-            const int kNoizeCount = 4;
+            const char* profiles[] = { "off", "light", "balanced", "aggressive", "firewall", "gfw" };
+            const int kNoizeCount = IM_ARRAYSIZE(profiles);
             int idx = 2; // balanced
             for (int i = 0; i < kNoizeCount; i++)
                 if (strcmp(g_app.noize_profile, profiles[i]) == 0) { idx = i; break; }
@@ -2085,7 +2080,7 @@ void render_ui() {
             ImGui::BeginChild("##scan_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Scan Mode");
-            const char* modes[] = { "Turbo", "Balanced", "Thorough", "Stealth", "Ironclad" };
+            const char* modes[] = { "Turbo", "Balanced", "Thorough", "Verified", "Ironclad" };
             if (g_app.scan_mode > 4) g_app.scan_mode = 1;
             ImGui::Combo("Mode", &g_app.scan_mode, modes, 5);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();

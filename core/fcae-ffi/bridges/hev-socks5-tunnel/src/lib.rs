@@ -44,7 +44,6 @@
 //! Do not ship a stub build: it reports the engine as unavailable in the UI.
 
 mod socks5p;
-mod socks5t;
 
 #[cfg(not(windows))]
 mod engine;

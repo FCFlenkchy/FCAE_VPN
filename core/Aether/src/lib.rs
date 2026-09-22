@@ -13,6 +13,7 @@ pub mod consts;
 pub mod dns;
 pub mod egress;
 pub mod error;
+pub mod exitloc;
 pub mod fragment;
 pub mod lastconn;
 pub mod masque;
@@ -26,6 +27,7 @@ pub mod sniff;
 pub mod socks;
 pub mod stats;
 pub mod sysprofile;
+pub mod telemetry;
 pub mod tls;
 pub mod tor;
 pub mod tunnelping;
@@ -33,12 +35,6 @@ pub mod upstream;
 pub mod wg_prober;
 pub mod wireguard;
 pub mod zerotrust;
-
-// Re-exported for core/fcae-ffi, which reads the live counters for telemetry.
-pub use stats::{
-    add_rx, add_tx, cached_rates, rates, reset as reset_stats, rtt_ms, set_rtt_ms, total_rx,
-    total_tx,
-};
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -179,6 +175,9 @@ async fn run_inner() -> Result<()> {
     sysprofile::log_summary();
     sysprofile::raise_fd_limit();
     egress::init()?;
+    exitloc::Policy::from_env()?;
+    stats::init();
+    let _stats_reporter = stats::spawn_reporter();
 
     install_netstack_panic_guard();
 
@@ -610,6 +609,11 @@ async fn run_gool(
                         continue;
                     }
                 };
+
+                let mut found = found;
+                if verified_scan_selected(&scan_settings) {
+                    spread_hops(&mut found);
+                }
 
                 let mut found = found.into_iter();
                 let outer = known_outer.or_else(|| found.next());
@@ -1198,6 +1202,14 @@ async fn hunt_masque_peer(
     Ok(SocketAddr::new(best.ip, best.port))
 }
 
+fn masque_carrier() -> &'static str {
+    if masque_h2::enabled() {
+        lastconn::CARRIER_MASQUE_H2
+    } else {
+        lastconn::CARRIER_MASQUE_H3
+    }
+}
+
 fn lastconn_path(config_path: &str) -> String {
     derive_sibling_path(config_path, "lastconn")
 }
@@ -1282,15 +1294,19 @@ async fn run_masque(
 
     if forced.is_none() && quick_peer.is_none() {
         if let Some(cached) = lastconn::load(&lastconn_path) {
-            if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
-                if want_quick_reconnect(&cached).await {
+            let ring = lastconn::usable_peers(&cached, masque_carrier());
+            if !ring.is_empty() && want_quick_reconnect(&cached).await {
+                for peer in ring {
                     log::info!("[*] verifying cached gateway {peer} before reuse");
                     if quick_verify_masque_peer(&identity, peer).await {
                         log::info!("[+] cached gateway {peer} still works; skipping scan");
                         quick_peer = Some(peer);
-                    } else {
-                        log::warn!("[-] cached gateway {peer} no longer works; scanning fresh");
+                        break;
                     }
+                    log::warn!("[-] cached gateway {peer} no longer answers; trying the next one");
+                }
+                if quick_peer.is_none() {
+                    log::warn!("[-] no remembered gateway answers; scanning fresh");
                 }
             }
         }
@@ -1353,7 +1369,12 @@ async fn run_masque(
 
         if forced.is_none() {
             let profile = std::env::var("AETHER_NOIZE").unwrap_or_else(|_| "firewall".to_string());
-            lastconn::save(&lastconn_path, &peer.to_string(), &profile);
+            lastconn::save(
+                &lastconn_path,
+                &peer.to_string(),
+                &profile,
+                masque_carrier(),
+            );
         }
 
         last_good_peer = Some(peer);
@@ -1384,6 +1405,7 @@ async fn establish_masque(
     datagram: usize,
     version_bait: bool,
     startup: std::time::Duration,
+    metered: bool,
     label: &str,
 ) -> Result<MasqueHop> {
     let (chans, internals) = quic::channels();
@@ -1393,7 +1415,8 @@ async fn establish_masque(
         ctrl_tx,
     } = chans;
 
-    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
+    let spawn_stack = if metered { netstack::spawn } else { netstack::spawn_unmetered };
+    let stack = spawn_stack(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
 
     let mut guard = TaskGuard::new();
 
@@ -1486,6 +1509,16 @@ async fn establish_masque(
     })
 }
 
+async fn exit_policy_guard(
+    stack: &netstack::StackHandle,
+    policy: &Option<exitloc::Policy>,
+) -> AetherError {
+    match policy {
+        Some(policy) => exitloc::watch(stack, policy).await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn run_masque_tunnel(
     identity: &account::Identity,
     peer: SocketAddr,
@@ -1504,11 +1537,15 @@ async fn run_masque_tunnel(
         quic::MAX_DATAGRAM_SIZE,
         true,
         masque_startup_timeout(),
+        true,
         "masque",
     )
     .await?;
 
-    let _peer_guard = stats::connected_peer(dial);
+    let policy = exitloc::Policy::from_env()?;
+    let _exit_report = exitloc::settle(&hop.stack, &policy, "masque").await?;
+
+    let _peer_guard = telemetry::connected_peer(dial);
     let socks_listener = socks::bind_listener("socks5", listen).await?;
     let http_listener = bind_http_proxy().await?;
 
@@ -1539,6 +1576,7 @@ async fn run_masque_tunnel(
             return Ok(());
         }
         result = &mut hop.exit => result,
+        reason = exit_policy_guard(&hop.stack, &policy) => return Err(reason),
     };
 
     if let Some(task) = &http_task {
@@ -1579,7 +1617,108 @@ fn mim_inner_startup() -> std::time::Duration {
     masque_startup_timeout().min(std::time::Duration::from_secs(12))
 }
 
-fn inner_masque_candidates(outer: SocketAddr, count: usize) -> Vec<SocketAddr> {
+fn edge_network(ip: IpAddr) -> Option<[u8; 3]> {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            Some([octets[0], octets[1], octets[2]])
+        }
+        IpAddr::V6(_) => None,
+    }
+}
+
+fn verified_scan_selected(settings: &Option<(String, prober::IpScan)>) -> bool {
+    let mode = match settings {
+        Some((mode, _)) => prober::ScanMode::parse(mode),
+        None => prober::ScanMode::parse(&std::env::var("AETHER_SCAN").unwrap_or_default()),
+    };
+    mode == prober::ScanMode::Verified
+}
+
+fn spread_hops(found: &mut [SocketAddr]) {
+    if found.len() < 2 {
+        return;
+    }
+    let first = found[0];
+    let network = edge_network(first.ip());
+    if let Some(other) = found
+        .iter()
+        .position(|peer| edge_network(peer.ip()) != network)
+    {
+        if other >= 1 {
+            found.swap(1, other);
+        }
+    }
+}
+
+fn masque_verified_ladder(outer: SocketAddr, count: usize) -> Vec<SocketAddr> {
+    if outer.is_ipv6() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<SocketAddr> = Vec::new();
+    let mut seen: HashSet<SocketAddr> = HashSet::new();
+    let outer_network = edge_network(outer.ip());
+
+    let verified: Vec<IpAddr> = prober::MASQUE_VERIFIED_GATEWAYS
+        .iter()
+        .filter_map(|entry| entry.parse().ok())
+        .collect();
+
+    let push =
+        |out: &mut Vec<SocketAddr>, seen: &mut HashSet<SocketAddr>, ip: IpAddr, port: u16| {
+            let peer = SocketAddr::new(ip, port);
+            if ip != outer.ip() && seen.insert(peer) {
+                out.push(peer);
+            }
+        };
+
+    for ip in verified
+        .iter()
+        .filter(|ip| edge_network(**ip) != outer_network)
+    {
+        push(&mut out, &mut seen, *ip, MASQUE_INNER_PORT);
+    }
+    for ip in &verified {
+        push(&mut out, &mut seen, *ip, MASQUE_INNER_PORT);
+    }
+    for &port in prober::MASQUE_ALT_PORTS {
+        for ip in &verified {
+            push(&mut out, &mut seen, *ip, port);
+        }
+    }
+
+    out.truncate(count.max(1));
+    out
+}
+
+fn inner_masque_candidates(outer: SocketAddr, count: usize, verified: bool) -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = Vec::new();
+    let mut seen: HashSet<SocketAddr> = HashSet::new();
+
+    if verified {
+        let room = count.saturating_sub(2).max(1);
+        for peer in masque_verified_ladder(outer, room) {
+            if seen.insert(peer) {
+                out.push(peer);
+            }
+        }
+    }
+
+    for peer in sibling_candidates(outer, count) {
+        if out.len() >= count {
+            break;
+        }
+        if seen.insert(peer) {
+            out.push(peer);
+        }
+    }
+
+    out.truncate(count.max(1));
+    out
+}
+
+fn sibling_candidates(outer: SocketAddr, count: usize) -> Vec<SocketAddr> {
     use rand::RngExt;
 
     let mut rng = rand::rng();
@@ -1681,6 +1820,7 @@ async fn run_masque_in_masque(
         quic::MAX_DATAGRAM_SIZE,
         true,
         masque_startup_timeout(),
+        false,
         "outer",
     )
     .await?;
@@ -1719,6 +1859,7 @@ async fn run_masque_in_masque(
             inner_datagram,
             false,
             mim_inner_startup(),
+            true,
             "inner",
         )
         .await
@@ -1740,7 +1881,10 @@ async fn run_masque_in_masque(
         ));
     };
 
-    let _peer_guard = stats::connected_peer(peer);
+    let policy = exitloc::Policy::from_env()?;
+    let _exit_report = exitloc::settle(&inner.stack, &policy, "masque-in-masque").await?;
+
+    let _peer_guard = telemetry::connected_peer(peer);
     let socks_listener = socks::bind_listener("socks5", listen).await?;
     let http_listener = bind_http_proxy().await?;
 
@@ -1765,6 +1909,7 @@ async fn run_masque_in_masque(
         Socks,
         /// Nothing finished; a stop was requested.
         None,
+        Policy,
     }
 
     let (outcome, winner) = tokio::select! {
@@ -1773,6 +1918,7 @@ async fn run_masque_in_masque(
         result = &mut outer.exit => (join_outcome("outer masque tunnel", result), Winner::Outer),
         result = &mut inner.exit => (join_outcome("inner masque tunnel", result), Winner::Inner),
         result = &mut socks_task => (join_outcome("socks5 server", result), Winner::Socks),
+        reason = exit_policy_guard(&inner.stack, &policy) => (Err(reason), Winner::Policy),
     };
 
     if winner != Winner::Outer {
@@ -1862,7 +2008,11 @@ async fn run_mim(
 
         let candidates = match inner_peer {
             Some(peer) => vec![peer],
-            None => inner_masque_candidates(outer, MIM_INNER_TRIES),
+            None => inner_masque_candidates(
+                outer,
+                MIM_INNER_TRIES,
+                verified_scan_selected(&scan_settings),
+            ),
         };
 
         if candidates.is_empty() {
@@ -2065,9 +2215,10 @@ async fn run_wireguard(
 
     if forced.is_none() && quick.is_none() {
         if let Some(cached) = lastconn::load(&lastconn_path) {
-            if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
-                if want_quick_reconnect(&cached).await {
-                    let profile = aethernoize::from_profile(&cached.profile);
+            let ring = lastconn::usable_peers(&cached, lastconn::CARRIER_WIREGUARD);
+            if !ring.is_empty() && want_quick_reconnect(&cached).await {
+                let profile = aethernoize::from_profile(&cached.profile);
+                for peer in ring {
                     log::info!("[*] verifying cached WireGuard endpoint {peer} before reuse");
                     match wireguard::verify_endpoint(
                         peer,
@@ -2086,14 +2237,18 @@ async fn run_wireguard(
                                 "[+] cached endpoint {peer} still works (rtt {:?}); skipping scan",
                                 rtt
                             );
-                            quick = Some((peer, profile, cached.profile.clone()));
+                            quick = Some((peer, profile.clone(), cached.profile.clone()));
+                            break;
                         }
                         Err(e) => {
                             log::warn!(
-                                "[-] cached endpoint {peer} no longer works ({e}); scanning fresh"
+                                "[-] cached endpoint {peer} no longer answers ({e}); trying the next one"
                             );
                         }
                     }
+                }
+                if quick.is_none() {
+                    log::warn!("[-] no remembered endpoint answers; scanning fresh");
                 }
             }
         }
@@ -2226,7 +2381,12 @@ async fn run_wireguard(
         log::info!("[+] using cloudflare edge {peer}");
 
         if forced.is_none() {
-            lastconn::save(&lastconn_path, &peer.to_string(), &profile_name);
+            lastconn::save(
+                &lastconn_path,
+                &peer.to_string(),
+                &profile_name,
+                lastconn::CARRIER_WIREGUARD,
+            );
         }
 
         let is_same_peer_as_before = last_good.as_ref().map(|(p, _, _)| *p) == Some(peer);
@@ -2307,8 +2467,13 @@ async fn run_wireguard_tunnel(
     )?;
 
     let mut tasks = TaskGuard::new();
+    let mut tunnel_exit = tokio::spawn(tunnel.run(outbound_rx));
+    tasks.push(tunnel_exit.abort_handle());
 
-    let _peer_guard = stats::connected_peer(peer);
+    let policy = exitloc::Policy::from_env()?;
+    let _exit_report = exitloc::settle(&stack, &policy, "wireguard").await?;
+
+    let _peer_guard = telemetry::connected_peer(peer);
     let socks_listener = socks::bind_listener("socks5", listen).await?;
     let http_listener = bind_http_proxy().await?;
 
@@ -2325,7 +2490,8 @@ async fn run_wireguard_tunnel(
     let tunnel_result = tokio::select! {
         biased;
         _ = shutdown::cancelled() => Ok(()),
-        result = tunnel.run(outbound_rx) => result,
+        result = &mut tunnel_exit => join_outcome("wireguard tunnel", result),
+        reason = exit_policy_guard(&stack, &policy) => Err(reason),
     };
 
     if let Some(task) = &http_task {
@@ -2388,7 +2554,7 @@ fn spawn_session_rtt(
     // and then overwrite it with a different (HTTP) measurement seconds later.
     // MASQUE/MIM has no validation RTT, so it publishes only its first successful
     // HTTP probe. A reconnect calls this again for the new live connection.
-    set_rtt_ms(session_rtt_millis(validation_rtt));
+    telemetry::set_rtt_ms(session_rtt_millis(validation_rtt));
     if validation_rtt.is_some() {
         return;
     }
@@ -2399,7 +2565,7 @@ fn spawn_session_rtt(
             let started = std::time::Instant::now();
             if matches!(tokio::time::timeout(Duration::from_secs(10),
                 tunnelping::http_probe(&stack)).await, Ok(Ok(()))) {
-                set_rtt_ms(session_rtt_millis(Some(started.elapsed())));
+                telemetry::set_rtt_ms(session_rtt_millis(Some(started.elapsed())));
                 break;
             }
         }
@@ -2424,6 +2590,7 @@ async fn establish_wg(
     mtu: usize,
     obfuscate: bool,
     keepalive: u16,
+    metered: bool,
     label: &'static str,
 ) -> Result<(netstack::StackHandle, TunnelExit, Duration)> {
     let private_key = identity.private_key_bytes()?;
@@ -2464,7 +2631,8 @@ async fn establish_wg(
         inbound_tx,
         ipv4,
     );
-    let stack = netstack::spawn(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
+    let spawn_stack = if metered { netstack::spawn } else { netstack::spawn_unmetered };
+    let stack = spawn_stack(&identity.ipv4, &identity.ipv6, mtu, inbound_rx, outbound_tx)?;
 
     let exit = tokio::spawn(async move {
         match tunnel.run(outbound_rx).await {
@@ -2519,22 +2687,18 @@ async fn spawn_udp_forwarder(
     let up_peer = inner_peer.clone();
     let up_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
-        loop {
-            match up_sock.recv_from(&mut buf).await {
-                Ok((n, from)) => {
-                    {
-                        let mut known = up_peer.lock().await;
-                        match *known {
-                            Some(peer) if peer != from => continue,
-                            Some(_) => {}
-                            None => *known = Some(from),
-                        }
+        while let Ok((n, from)) = up_sock.recv_from(&mut buf).await {
+            {
+                let mut known = up_peer.lock().await;
+                if *known != Some(from) {
+                    if let Some(previous) = *known {
+                        log::debug!("inner udp forwarder follows {from} now, was {previous}");
                     }
-                    if udp_tx.send_to(remote, buf[..n].to_vec()).await.is_err() {
-                        break;
-                    }
+                    *known = Some(from);
                 }
-                Err(_) => break,
+            }
+            if udp_tx.send_to(remote, buf[..n].to_vec()).await.is_err() {
+                break;
             }
         }
     });
@@ -2573,7 +2737,7 @@ async fn run_warp_in_warp(
 
     log::info!("[*] establishing outer WARP tunnel to {peer}...");
     let (outer_stack, mut outer_exit, _outer_rtt) =
-        establish_wg(&primary, peer, TUNNEL_MTU, true, 5, "outer").await?;
+        establish_wg(&primary, peer, TUNNEL_MTU, true, 5, false, "outer").await?;
     tasks.push(outer_exit.abort_handle());
 
     let (forwarder, _forwarder_guard) = spawn_udp_forwarder(&outer_stack, inner_peer).await?;
@@ -2581,10 +2745,14 @@ async fn run_warp_in_warp(
 
     log::info!("[*] establishing inner WARP tunnel (warp-in-warp)...");
     let (inner_stack, mut inner_exit, inner_rtt) =
-        establish_wg(&secondary, forwarder, INNER_MTU, false, 20, "inner").await?;
+        establish_wg(&secondary, forwarder, INNER_MTU, false, 20, true, "inner").await?;
     tasks.push(inner_exit.abort_handle());
 
-    let _peer_guard = stats::connected_peer(peer);
+    let policy = exitloc::Policy::from_env()?;
+    let _exit_report = exitloc::settle(&inner_stack, &policy, "warp-in-warp").await?;
+    let policy_stack = inner_stack.clone();
+
+    let _peer_guard = telemetry::connected_peer(peer);
     let socks_listener = socks::bind_listener("socks5", listen).await?;
     let http_listener = bind_http_proxy().await?;
 
@@ -2604,6 +2772,7 @@ async fn run_warp_in_warp(
         Socks,
         /// Nothing finished; a stop was requested.
         None,
+        Policy,
     }
 
     let (outcome, winner) = tokio::select! {
@@ -2612,6 +2781,7 @@ async fn run_warp_in_warp(
         result = &mut outer_exit => (join_outcome("outer wireguard tunnel", result), Winner::Outer),
         result = &mut inner_exit => (join_outcome("inner wireguard tunnel", result), Winner::Inner),
         result = &mut socks_task => (join_outcome("socks5 server", result), Winner::Socks),
+        reason = exit_policy_guard(&policy_stack, &policy) => (Err(reason), Winner::Policy),
     };
 
     if let Some(task) = &http_task {
@@ -2671,7 +2841,7 @@ async fn prompt_line(prompt: &str) -> Option<String> {
     }
 }
 
-const SCAN_MODE_PROMPT: &str = "\nScan mode:\n  [1] turbo     (fast, first hit)\n  [2] balanced  (default)\n  [3] thorough  (deep, best ping)\n  [4] stealth   (quiet, patient)\n  [5] ironclad  (real tunnel + real HTTP check per candidate, guaranteed working)\nChoose [1-5] (default 2): ";
+const SCAN_MODE_PROMPT: &str = "\nScan mode:\n  [1] turbo     (fast, first hit)\n  [2] balanced  (default)\n  [3] thorough  (deep, best ping)\n  [4] verified  (tuned scan; prefers measured inner MASQUE edges and\n                 separate IPv4 ranges for nested tunnels)\n  [5] ironclad  (real tunnel + real HTTP check per candidate, guaranteed working)\nChoose [1-5] (default 2): ";
 
 /// Shown above the scan mode question on warp-in-warp, where the addresses can
 /// be handed over instead of hunted for.
@@ -2689,7 +2859,7 @@ async fn select_scan_mode() -> prober::ScanMode {
     match answer.as_deref() {
         Some("1") => prober::ScanMode::Turbo,
         Some("3") => prober::ScanMode::Thorough,
-        Some("4") => prober::ScanMode::Stealth,
+        Some("4") => prober::ScanMode::Verified,
         Some("5") => prober::ScanMode::Ironclad,
         _ => prober::ScanMode::Balanced,
     }
@@ -2707,7 +2877,7 @@ async fn select_scan_mode_str(tip: &str) -> String {
     match answer.as_deref() {
         Some("1") => "turbo".to_string(),
         Some("3") => "thorough".to_string(),
-        Some("4") => "stealth".to_string(),
+        Some("4") => "verified".to_string(),
         Some("5") => "ironclad".to_string(),
         _ => "balanced".to_string(),
     }
@@ -2981,7 +3151,7 @@ mod tests {
     #[test]
     fn the_inner_edges_come_from_the_range_that_answered() {
         let outer: SocketAddr = "162.159.198.104:8443".parse().unwrap();
-        let candidates = inner_masque_candidates(outer, MIM_INNER_TRIES);
+        let candidates = inner_masque_candidates(outer, MIM_INNER_TRIES, false);
 
         assert_eq!(candidates.len(), MIM_INNER_TRIES);
         for candidate in &candidates {
@@ -3012,9 +3182,65 @@ mod tests {
     }
 
     #[test]
+    fn the_verified_ladder_leaves_the_outer_range_first() {
+        let outer: SocketAddr = "162.159.198.1:443".parse().unwrap();
+        let candidates = inner_masque_candidates(outer, MIM_INNER_TRIES, true);
+
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(|peer| peer.ip() != outer.ip()));
+
+        let first = candidates[0];
+        assert_ne!(
+            edge_network(first.ip()),
+            edge_network(outer.ip()),
+            "the first inner candidate must leave the outer range"
+        );
+
+        let verified: HashSet<IpAddr> = prober::MASQUE_VERIFIED_GATEWAYS
+            .iter()
+            .filter_map(|entry| entry.parse().ok())
+            .collect();
+        let measured = candidates
+            .iter()
+            .take_while(|peer| verified.contains(&peer.ip()))
+            .count();
+        assert!(measured > 0, "the measured edges must come first");
+        assert!(
+            candidates.len() > measured,
+            "a guessed neighbour must stay on the end: a verified address is only \
+             verified for the path it was measured on"
+        );
+    }
+
+    #[test]
+    fn a_verified_ladder_is_not_used_for_an_ipv6_outer() {
+        let outer: SocketAddr = "[2606:4700:d0::a29f:c601]:443".parse().unwrap();
+        let candidates = inner_masque_candidates(outer, 4, true);
+
+        assert!(candidates.iter().all(|candidate| candidate.is_ipv6()));
+    }
+
+    #[test]
+    fn spreading_hops_puts_a_different_range_second() {
+        let mut found: Vec<SocketAddr> = vec![
+            "162.159.192.1:2408".parse().unwrap(),
+            "162.159.192.9:2408".parse().unwrap(),
+            "188.114.96.1:2408".parse().unwrap(),
+        ];
+        spread_hops(&mut found);
+
+        assert_eq!(edge_network(found[0].ip()), Some([162, 159, 192]));
+        assert_ne!(
+            edge_network(found[1].ip()),
+            edge_network(found[0].ip()),
+            "the second hop must sit in another range"
+        );
+    }
+
+    #[test]
     fn an_ipv6_outer_edge_yields_ipv6_inner_candidates() {
         let outer: SocketAddr = "[2606:4700:d0::a29f:c601]:443".parse().unwrap();
-        let candidates = inner_masque_candidates(outer, 4);
+        let candidates = inner_masque_candidates(outer, 4, false);
 
         assert_eq!(candidates.len(), 4);
         assert!(candidates.iter().all(|candidate| candidate.is_ipv6()));

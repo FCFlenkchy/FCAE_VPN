@@ -641,14 +641,14 @@ async fn run(
                 match maybe {
                     Some(pkt) => {
                         if s.count_stats {
-                            stats::add_rx(pkt.len() as u64);
+                            stats::add_down(pkt.len());
                         }
                         s.device.rx.push_back(pkt);
                         let mut n = 0;
                         while n < MAX_INGEST_PER_TICK {
                             match inbound_rx.try_recv() {
                                 Ok(p) => {
-                                    if s.count_stats { stats::add_rx(p.len() as u64); }
+                                    if s.count_stats { stats::add_down(p.len()); }
                                     s.device.rx.push_back(p);
                                     n += 1;
                                 }
@@ -1029,11 +1029,13 @@ fn service_udp(s: &mut NetStack) -> bool {
 fn flush_tx(s: &mut NetStack, outbound_tx: &mpsc::Sender<Vec<u8>>) -> usize {
     let mut dropped = 0;
     while let Some(pkt) = s.device.tx.pop_front() {
-        if s.count_stats {
-            stats::add_tx(pkt.len() as u64);
-        }
+        let len = pkt.len();
         match outbound_tx.try_send(pkt) {
-            Ok(()) => {}
+            Ok(()) => {
+                if s.count_stats {
+                    stats::add_up(len);
+                }
+            }
             Err(mpsc::error::TrySendError::Full(_)) => dropped += 1,
             Err(mpsc::error::TrySendError::Closed(_)) => break,
         }

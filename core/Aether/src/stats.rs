@@ -1,125 +1,160 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-static TOTAL_RX: AtomicU64 = AtomicU64::new(0);
-static TOTAL_TX: AtomicU64 = AtomicU64::new(0);
-static WINDOW_RX: AtomicU64 = AtomicU64::new(0);
-static WINDOW_TX: AtomicU64 = AtomicU64::new(0);
-static PEER: Mutex<Option<std::net::SocketAddr>> = Mutex::new(None);
+static UP: AtomicU64 = AtomicU64::new(0);
+static DOWN: AtomicU64 = AtomicU64::new(0);
+static ENABLED: AtomicBool = AtomicBool::new(false);
+static START: Mutex<Option<Instant>> = Mutex::new(None);
 
-static RTT_MS: AtomicU64 = AtomicU64::new(0);
+const DEFAULT_REPORT_SECS: u64 = 60;
 
-struct RateState {
-    last: Instant,
-    rx_bps: u64,
-    tx_bps: u64,
+pub struct Counters {
+    pub up: u64,
+    pub down: u64,
+    pub uptime: Duration,
 }
 
-static RATE: Mutex<Option<RateState>> = Mutex::new(None);
+pub fn init() {
+    let on = std::env::var("AETHER_STATS")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+
+    ENABLED.store(on, Ordering::Relaxed);
+    START
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(Instant::now);
+}
+
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
 
 #[inline]
-pub fn add_rx(n: u64) {
-    if n == 0 {
-        return;
-    }
-    TOTAL_RX.fetch_add(n, Ordering::Relaxed);
-    WINDOW_RX.fetch_add(n, Ordering::Relaxed);
+pub fn add_up(bytes: usize) {
+    UP.fetch_add(bytes as u64, Ordering::Relaxed);
 }
 
 #[inline]
-pub fn add_tx(n: u64) {
-    if n == 0 {
-        return;
-    }
-    TOTAL_TX.fetch_add(n, Ordering::Relaxed);
-    WINDOW_TX.fetch_add(n, Ordering::Relaxed);
-}
-
-pub fn total_rx() -> u64 {
-    TOTAL_RX.load(Ordering::Relaxed)
-}
-
-pub fn total_tx() -> u64 {
-    TOTAL_TX.load(Ordering::Relaxed)
-}
-
-pub fn set_rtt_ms(ms: u64) {
-    RTT_MS.store(ms, Ordering::Relaxed);
-}
-
-pub fn rtt_ms() -> u64 {
-    RTT_MS.load(Ordering::Relaxed)
-}
-
-pub fn rates() -> (u64, u64) {
-    let now = Instant::now();
-    let mut guard = RATE.lock().unwrap_or_else(|e| e.into_inner());
-    let win_rx = WINDOW_RX.swap(0, Ordering::Relaxed);
-    let win_tx = WINDOW_TX.swap(0, Ordering::Relaxed);
-
-    match guard.as_mut() {
-        None => {
-            // First call: initialize the timer. Put window data back so
-            // it's picked up on the next call.
-            *guard = Some(RateState {
-                last: now,
-                rx_bps: 0,
-                tx_bps: 0,
-            });
-            WINDOW_RX.fetch_add(win_rx, Ordering::Relaxed);
-            WINDOW_TX.fetch_add(win_tx, Ordering::Relaxed);
-            (0, 0)
-        }
-        Some(s) => {
-            let dt = now.duration_since(s.last).as_secs_f64().max(0.001);
-            // Direct rate: bytes in window / elapsed time. No EMA —
-            // the 1-second poll interval already provides smooth updates.
-            s.rx_bps = (win_rx as f64 / dt) as u64;
-            s.tx_bps = (win_tx as f64 / dt) as u64;
-            s.last = now;
-            (s.rx_bps, s.tx_bps)
-        }
-    }
-}
-
-/// Return the last computed rates without consuming the window.
-/// Used by secondary callers (e.g. notification stats) so they don't
-/// steal window data from the primary caller (UI poll).
-pub fn cached_rates() -> (u64, u64) {
-    let guard = RATE.lock().unwrap_or_else(|e| e.into_inner());
-    match guard.as_ref() {
-        Some(s) => (s.rx_bps, s.tx_bps),
-        None => (0, 0),
-    }
+pub fn add_down(bytes: usize) {
+    DOWN.fetch_add(bytes as u64, Ordering::Relaxed);
 }
 
 pub fn reset() {
-    *PEER.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    TOTAL_RX.store(0, Ordering::Relaxed);
-    TOTAL_TX.store(0, Ordering::Relaxed);
-    WINDOW_RX.store(0, Ordering::Relaxed);
-    WINDOW_TX.store(0, Ordering::Relaxed);
-    RTT_MS.store(0, Ordering::Relaxed);
-    if let Ok(mut g) = RATE.lock() {
-        *g = None;
+    UP.store(0, Ordering::Relaxed);
+    DOWN.store(0, Ordering::Relaxed);
+    *START.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+}
+
+pub fn snapshot() -> Counters {
+    Counters {
+        up: UP.load(Ordering::Relaxed),
+        down: DOWN.load(Ordering::Relaxed),
+        uptime: START
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(Instant::elapsed)
+            .unwrap_or_default(),
     }
 }
 
-
-pub fn peer() -> Option<std::net::SocketAddr> {
-    *PEER.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-pub struct PeerGuard;
-impl Drop for PeerGuard {
-    fn drop(&mut self) {
-        *PEER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
-/// Publish only established gateways; clear on failure, reconnect or abort.
-pub fn connected_peer(peer: std::net::SocketAddr) -> PeerGuard {
-    *PEER.lock().unwrap_or_else(|e| e.into_inner()) = Some(peer);
-    PeerGuard
+pub fn format_uptime(uptime: Duration) -> String {
+    let total = uptime.as_secs();
+    let (days, hours, minutes, seconds) = (
+        total / 86_400,
+        (total % 86_400) / 3600,
+        (total % 3600) / 60,
+        total % 60,
+    );
+
+    if days > 0 {
+        format!("{days}d {hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    }
+}
+
+fn report_interval() -> Duration {
+    let secs = std::env::var("AETHER_STATS_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .map(|v| v.min(86_400))
+        .unwrap_or(DEFAULT_REPORT_SECS);
+    Duration::from_secs(secs)
+}
+
+pub(crate) fn spawn_reporter() -> crate::TaskGuard {
+    let mut tasks = crate::TaskGuard::new();
+    if !enabled() {
+        return tasks;
+    }
+
+    let every = report_interval();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = crate::shutdown::cancelled() => return,
+                _ = tokio::time::sleep(every) => {},
+            }
+            let counters = snapshot();
+            log::info!(
+                "[=] up {} down {} uptime {}",
+                format_bytes(counters.up),
+                format_bytes(counters.down),
+                format_uptime(counters.uptime)
+            );
+        }
+    });
+    tasks.push(task.abort_handle());
+    tasks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_counts_stay_in_plain_bytes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn larger_counts_climb_the_units() {
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_bytes(5 * 1024 * 1024 * 1024), "5.0 GiB");
+    }
+
+    #[test]
+    fn uptime_grows_a_day_field_only_when_it_needs_one() {
+        assert_eq!(format_uptime(Duration::from_secs(0)), "00:00:00");
+        assert_eq!(format_uptime(Duration::from_secs(3661)), "01:01:01");
+        assert_eq!(format_uptime(Duration::from_secs(90_061)), "1d 01:01:01");
+    }
+
 }

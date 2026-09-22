@@ -43,6 +43,14 @@ pub fn listen_address() -> SocketAddr {
         .unwrap_or_else(|| "127.0.0.1:1821".parse().expect("a literal address"))
 }
 
+pub fn http_listen_address() -> Option<SocketAddr> {
+    if std::env::var_os("AETHER_TOR_HTTP").is_some() {
+        crate::http_proxy_listen_env("AETHER_TOR_HTTP")
+    } else {
+        crate::http_proxy_listen_env("AETHER_TOR_HTTP_PROXY")
+    }
+}
+
 pub fn state_dir(base_config: &str) -> PathBuf {
     if let Some(dir) = std::env::var("AETHER_TOR_DIR")
         .ok()
@@ -70,9 +78,69 @@ pub enum Bridges {
     Auto { forced: bool },
 }
 
+pub fn bridges_from_file() -> Vec<String> {
+    let path = match std::env::var("AETHER_TOR_BRIDGE_FILE") {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => return Vec::new(),
+    };
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => {
+            log::warn!("[-] cannot read the bridge file {path}: {e}");
+            return Vec::new();
+        }
+    };
+
+    let lines = read_bridge_lines(&text);
+    if lines.is_empty() {
+        log::warn!("[-] the bridge file {path} held no bridge line");
+    } else {
+        log::info!("[+] {} bridge(s) read from {path}", lines.len());
+    }
+    lines
+}
+
+pub fn read_bridge_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            line.strip_prefix("Bridge ")
+                .or_else(|| line.strip_prefix("bridge "))
+                .unwrap_or(line)
+                .trim()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
 pub fn bridges() -> Bridges {
+    let from_file = bridges_from_file();
     let raw = std::env::var("AETHER_TOR_BRIDGES").unwrap_or_default();
     let trimmed = raw.trim();
+
+    if !from_file.is_empty() {
+        let mut lines = from_file;
+        if !matches!(
+            trimmed.to_lowercase().as_str(),
+            "" | "off"
+                | "no"
+                | "0"
+                | "false"
+                | "none"
+                | "auto"
+                | "on"
+                | "1"
+                | "yes"
+                | "true"
+                | "force"
+        ) {
+            lines.extend(read_bridge_lines(&trimmed.replace(';', "\n")));
+        }
+        return Bridges::Manual(lines);
+    }
 
     match trimmed.to_lowercase().as_str() {
         "" => Bridges::Auto { forced: false },
@@ -271,9 +339,9 @@ mod with_tor {
         }
     }
 
-    async fn auto_plan(state: &Path) -> Plan {
-        let (lines, source) = crate::bridges::fetch(state).await;
-        let lines = crate::bridges::keep_reachable(lines).await;
+    async fn auto_plan(state: &Path, through: Option<SocketAddr>) -> Plan {
+        let (lines, source) = crate::bridges::fetch(state, through).await;
+        let lines = crate::bridges::keep_reachable(lines, through).await;
         let plan = crate::bridges::plan(lines, source, manual_transports());
         announce(&plan);
         plan
@@ -593,10 +661,13 @@ mod with_tor {
         }
 
         if through.is_some() {
-            log::warn!("[-] a pluggable transport dials for itself, outside the tunnel");
+            log::warn!(
+                "[-] a pluggable transport dials for itself, outside the tunnel; plain bridges go \
+                 through it, so they are the ones that work on a network which blocks tor outright"
+            );
         }
 
-        let plan = auto_plan(state).await;
+        let plan = auto_plan(state, through).await;
         if plan.is_empty() {
             return Err(AetherError::Other(format!(
                 "tor is blocked on this network and no pluggable transport is installed, so no \
@@ -703,11 +774,9 @@ mod with_tor {
         Ok(None)
     }
 
-    /// Counts payload bytes on the tor stream so Tor-only sessions feed
-    /// stats::add_rx/add_tx. Chain/reverse already count in netstack;
-    /// wrapping those streams would double-count.
     struct Metered<S> {
         inner: S,
+        enabled: bool,
     }
 
     impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Metered<S> {
@@ -719,7 +788,9 @@ mod with_tor {
             let filled = buf.filled().len();
             match std::pin::Pin::new(&mut self.inner).poll_read(cx, buf) {
                 std::task::Poll::Ready(Ok(())) => {
-                    crate::stats::add_rx((buf.filled().len() - filled) as u64);
+                    if self.enabled {
+                        crate::stats::add_down(buf.filled().len() - filled);
+                    }
                     std::task::Poll::Ready(Ok(()))
                 }
                 other => other,
@@ -735,7 +806,9 @@ mod with_tor {
         ) -> std::task::Poll<std::io::Result<usize>> {
             match std::pin::Pin::new(&mut self.inner).poll_write(cx, buf) {
                 std::task::Poll::Ready(Ok(n)) => {
-                    crate::stats::add_tx(n as u64);
+                    if self.enabled {
+                        crate::stats::add_up(n);
+                    }
                     std::task::Poll::Ready(Ok(n))
                 }
                 other => other,
@@ -757,66 +830,51 @@ mod with_tor {
         }
     }
 
-    async fn serve_metered(listener: TcpListener, client: Client, kind: &'static str) -> Result<()> {
-        crate::socks::serve_connector(listener, kind, move |host, port| {
-            let client = client.clone();
-            async move {
-                client
-                    .connect((host.as_str(), port))
-                    .await
-                    .map(|stream| {
-                        use tokio_util::compat::FuturesAsyncReadCompatExt;
-                        Metered {
-                            inner: stream.compat(),
-                        }
-                    })
-                    .map_err(std::io::Error::other)
+    fn announce_exit(proxy: SocketAddr, what: &'static str) {
+        super::retain_task(tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = crate::shutdown::cancelled() => {},
+                _ = crate::exitloc::report_through_socks(proxy, what) => {},
             }
-        })
-        .await
-    }
-
-    async fn serve(listener: TcpListener, client: Client, kind: &'static str) -> Result<()> {
-        crate::socks::serve_connector(listener, kind, move |host, port| {
-            let client = client.clone();
-            async move {
-                client
-                    .connect((host.as_str(), port))
-                    .await
-                    .map(|stream| {
-                        use tokio_util::compat::FuturesAsyncReadCompatExt;
-                        stream.compat()
-                    })
-                    .map_err(std::io::Error::other)
-            }
-        })
-        .await
+        }));
     }
 
     async fn bind_http() -> Result<Option<TcpListener>> {
-        match crate::http_proxy_listen_env("AETHER_TOR_HTTP_PROXY") {
+        match http_listen_address() {
             Some(address) => Ok(Some(crate::socks::bind_listener("tor http proxy", address).await?)),
             None => Ok(None),
         }
     }
 
-    async fn serve_with_http(listener: TcpListener, http: Option<TcpListener>, client: Client, metered: bool) -> Result<()> {
-        let socks_client = client.clone();
-        let socks = async move {
-            if metered { serve_metered(listener, socks_client.clone(), "tor socks5").await }
-            else { serve(listener, socks_client, "tor socks5").await }
+    async fn serve_with_http(
+        listener: TcpListener,
+        http: Option<TcpListener>,
+        client: Client,
+        metered: bool,
+    ) -> Result<()> {
+        let connect = move |host: String, port: u16| {
+            let client = client.clone();
+            async move {
+                use tokio_util::compat::FuturesAsyncReadCompatExt;
+                client
+                    .connect((host.as_str(), port))
+                    .await
+                    .map(|stream| Metered {
+                        inner: stream.compat(),
+                        enabled: metered,
+                    })
+                    .map_err(std::io::Error::other)
+            }
         };
-        let http = async {
-            let Some(http) = http else { return std::future::pending::<Result<()>>().await; };
-            crate::socks::serve_http_connector(http, move |host, port| {
-                let client = client.clone();
-                async move {
-                    use tokio_util::compat::FuturesAsyncReadCompatExt;
-                    client.connect((host.as_str(), port)).await
-                        .map(|stream| Metered { inner: stream.compat() })
-                        .map_err(std::io::Error::other)
+        let socks = crate::socks::serve_connector(listener, "tor socks5", connect.clone());
+        let http = async move {
+            match http {
+                Some(listener) => {
+                    crate::socks::serve_http_connector(listener, "tor http proxy", connect).await
                 }
-            }).await
+                None => std::future::pending::<Result<()>>().await,
+            }
         };
         tokio::select! {
             result = socks => result,
@@ -848,6 +906,7 @@ mod with_tor {
 
         let client = establish(&state, Some(through), FOREVER).await?;
         log::info!("[+] tor is ready; {listen} leaves through tor, carried by the tunnel");
+        announce_exit(listen, "tor through the tunnel");
 
         serve_with_http(listener, bind_http().await?, client, false).await
     }
@@ -860,6 +919,7 @@ mod with_tor {
 
         let client = establish(&state, None, FOREVER).await?;
         log::info!("[+] tor is ready; {listen} leaves through tor");
+        announce_exit(listen, "tor");
 
         serve_with_http(listener, bind_http().await?, client, true).await
     }
@@ -873,6 +933,7 @@ mod with_tor {
 
         let client = establish(&state, None, REVERSE_ATTEMPTS).await?;
         log::info!("[+] tor is ready; the tunnel goes out through {listen}");
+        announce_exit(listen, "tor");
 
         // Bind before returning success so a collision fails the connection,
         // rather than silently losing a listener the UI advertises as active.
@@ -1004,5 +1065,31 @@ mod tests {
             ]
         );
         clear();
+    }
+}
+
+#[cfg(test)]
+mod bridge_file_tests {
+    use super::*;
+
+    #[test]
+    fn a_torrc_shaped_file_reads_line_by_line() {
+        let text = "\
+# my bridges
+Bridge obfs4 1.2.3.4:443 ABCD cert=xx iat-mode=0
+
+bridge obfs4 5.6.7.8:80 EF01 cert=yy iat-mode=0
+9.9.9.9:443 0123456789012345678901234567890123456789
+";
+        let lines = read_bridge_lines(text);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("obfs4 1.2.3.4:443"));
+        assert!(lines[1].starts_with("obfs4 5.6.7.8:80"));
+        assert!(lines[2].starts_with("9.9.9.9:443"));
+    }
+
+    #[test]
+    fn comments_and_blank_lines_carry_nothing() {
+        assert!(read_bridge_lines("\n  \n# only a comment\n").is_empty());
     }
 }
