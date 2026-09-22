@@ -130,6 +130,7 @@ pub struct Supervisor {
     /// TUN data plane is down while the session/backend stay up (Android
     /// notification Stop). Resume re-raises TUN on the stored endpoints.
     tun_paused: Arc<AtomicBool>,
+    tun_control: Arc<Mutex<()>>,
     live_tun: Arc<Mutex<Option<LiveTun>>>,
 }
 
@@ -141,6 +142,7 @@ impl Supervisor {
             running: Mutex::new(None),
             stopping: Arc::new(AtomicBool::new(false)),
             tun_paused: Arc::new(AtomicBool::new(false)),
+            tun_control: Arc::new(Mutex::new(())),
             live_tun: Arc::new(Mutex::new(None)),
         }
     }
@@ -170,10 +172,12 @@ impl Supervisor {
         // stop() returns before native cleanup finishes. Reconnect must wait
         // for the background reaper rather than racing that cleanup.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let mut slot = loop {
+        let (_control, mut slot) = loop {
+            let control = self.tun_control.lock();
             let slot = self.running.lock();
-            if !self.stopping.load(Ordering::SeqCst) { break slot; }
+            if !self.stopping.load(Ordering::SeqCst) { break (control, slot); }
             drop(slot);
+            drop(control);
             if std::time::Instant::now() >= deadline {
                 return Err(CoreError::Timeout(Duration::from_secs(2)));
             }
@@ -251,6 +255,7 @@ impl Supervisor {
         let max_reconnects = self.cfg.max_reconnects;
         let cancel_for_thread = cancel.clone();
         let tun_paused = self.tun_paused.clone();
+        let tun_control = self.tun_control.clone();
         let live_tun = self.live_tun.clone();
 
         let thread = std::thread::Builder::new()
@@ -282,6 +287,7 @@ impl Supervisor {
                         auto_reconnect,
                         max_reconnects,
                         tun_paused,
+                        tun_control,
                         live_tun,
                     ))
                 }));
@@ -400,29 +406,38 @@ impl Supervisor {
     /// closes its own VPN descriptor; [`Self::resume_tun`] re-raises TUN on a
     /// fresh fd. No-op when no session is alive.
     pub fn pause_tun(&self) {
-        if !self.is_running() {
+        let _control = self.tun_control.lock();
+        if !self.is_running() || self.stopping.load(Ordering::SeqCst) {
             return;
         }
-        self.tun_paused.store(true, Ordering::SeqCst);
+        if self.tun_paused.swap(true, Ordering::SeqCst) {
+            return;
+        }
         self.cfg.tun_bridge.stop(self.cfg.stop_timeout);
     }
 
     /// Re-raise TUN on a live paused session. The host must publish a fresh
     /// descriptor first (`fcae_set_tun_fd` or the fd provider).
     pub fn resume_tun(&self) -> Result<()> {
-        if !self.is_running() {
+        let _control = self.tun_control.lock();
+        if !self.is_running() || self.stopping.load(Ordering::SeqCst) {
             return Err(CoreError::Internal(
                 "no session to resume TUN for".into(),
             ));
         }
-        self.tun_paused.store(false, Ordering::SeqCst);
-        let live = self.live_tun.lock().clone();
-        match live {
-            Some(live) if live.config.is_tun() => {
-                self.cfg.tun_bridge.start(&live.config, &live.endpoints)
-            }
-            _ => Ok(()),
+        if !self.tun_paused.load(Ordering::SeqCst) {
+            return Ok(());
         }
+        let live = self.live_tun.lock().clone();
+        if let Some(live) = live.filter(|live| live.config.is_tun()) {
+            self.cfg.tun_bridge.start(&live.config, &live.endpoints)?;
+        }
+        if self.stopping.load(Ordering::SeqCst) || !self.is_running() {
+            self.cfg.tun_bridge.stop(self.cfg.stop_timeout);
+            return Err(CoreError::Internal("session stopped during TUN resume".into()));
+        }
+        self.tun_paused.store(false, Ordering::SeqCst);
+        Ok(())
     }
 
     /// True while a session is alive and its TUN data plane is paused.
@@ -434,10 +449,12 @@ impl Supervisor {
 struct LiveGuard {
     live: Arc<Mutex<Option<LiveTun>>>,
     paused: Arc<AtomicBool>,
+    control: Arc<Mutex<()>>,
 }
 
 impl Drop for LiveGuard {
     fn drop(&mut self) {
+        let _control = self.control.lock();
         *self.live.lock() = None;
         self.paused.store(false, Ordering::SeqCst);
     }
@@ -454,11 +471,13 @@ async fn run_session(
     auto_reconnect: bool,
     max_reconnects: u32,
     tun_paused: Arc<AtomicBool>,
+    tun_control: Arc<Mutex<()>>,
     live_tun: Arc<Mutex<Option<LiveTun>>>,
 ) -> Result<()> {
     let _live_guard = LiveGuard {
         live: live_tun.clone(),
         paused: tun_paused.clone(),
+        control: tun_control.clone(),
     };
     let mut attempt: u32 = 0;
 
@@ -562,40 +581,28 @@ async fn run_session(
             }
         }
 
-        // Published before TUN so a pause/resume that lands in this window
-        // can still re-raise the data plane on these endpoints.
-        *live_tun.lock() = Some(LiveTun {
-            config: config.clone(),
-            endpoints: endpoints.clone(),
-        });
-
-        // Raise TUN once the backend's SOCKS endpoint is actually live.
-        //
-        // Proxy mode deliberately falls through: the backend's own SOCKS/HTTP
-        // listeners are the entire product there, and tun2socks must never be
-        // started -- no device, no routes, no Go stack.
-        if config.mode == FcaeMode::Tun {
-            if cancel.is_cancelled() {
-                stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
-                return Ok(());
+        let tun_start = {
+            let _control = tun_control.lock();
+            *live_tun.lock() = Some(LiveTun {
+                config: config.clone(),
+                endpoints: endpoints.clone(),
+            });
+            if config.is_tun() && !cancel.is_cancelled() && !tun_paused.load(Ordering::SeqCst) {
+                tun_bridge.start(&config, &endpoints)
+            } else {
+                Ok(())
             }
-            if !tun_paused.load(Ordering::SeqCst) {
-                if let Err(e) = tun_bridge.start(&config, &endpoints) {
-                    stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
-                    return Err(e);
-                }
-                // Pause landed during start(): drop the device and keep the
-                // backend. Resume re-raises from the snapshot above.
-                if tun_paused.load(Ordering::SeqCst) {
-                    tun_bridge.stop(stop_timeout);
-                }
-            }
-            if cancel.is_cancelled() {
-                tun_bridge.stop(stop_timeout);
-                stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
-                return Ok(());
-            }
-        } else {
+        };
+        if let Err(e) = tun_start {
+            stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
+            return Err(e);
+        }
+        if cancel.is_cancelled() {
+            tun_bridge.stop(stop_timeout);
+            stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
+            return Ok(());
+        }
+        if !config.is_tun() {
             debug_assert!(
                 !tun_bridge.is_running(),
                 "proxy mode must never leave a TUN device up"
@@ -621,7 +628,7 @@ async fn run_session(
                     tokio::select! { r = handle.wait() => r, r = psi.wait() => r }
                 } else { handle.wait().await }
             } => r,
-            result = pump_counters(&*handle, &sink, &config, &*tun_bridge, &tun_paused, &endpoints) => result,
+            result = pump_counters(&*handle, &sink, &config, &*tun_bridge, &tun_paused, &tun_control, &endpoints) => result,
         };
 
         // Tunnel ended. Set reconnecting state immediately so the UI doesn't
@@ -632,7 +639,11 @@ async fn run_session(
         if should_retry(auto_reconnect, max_reconnects, attempt, &cancel) {
             sink.set_state(FcaeState::Reconnecting, "Tunnel dropped; reconnecting…".into());
         }
-        tun_bridge.stop(stop_timeout);
+        {
+            let _control = tun_control.lock();
+            *live_tun.lock() = None;
+            tun_bridge.stop(stop_timeout);
+        }
         stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
 
         match outcome {
@@ -729,12 +740,14 @@ async fn pump_counters(
     cfg: &SessionConfig,
     tun: &dyn TunBridge,
     paused: &AtomicBool,
+    control: &Mutex<()>,
     endpoints: &Endpoints,
 ) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tick.tick().await;
         sink.set_counters(handle.counters());
+        let Some(_control) = control.try_lock() else { continue; };
         if cfg.is_tun() && !paused.load(Ordering::SeqCst) {
             let health = tun.check_health(cfg);
             if !paused.load(Ordering::SeqCst) { health?; }
@@ -876,7 +889,7 @@ mod tests {
         let result = runtime.block_on(run_session(Arc::new(FakeBackend), cfg,
             TelemetrySink::new(cell.clone()), CancelToken::new(), Arc::new(NoTun),
             Duration::from_millis(10), false, 0,
-            Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(None))));
+            Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(())), Arc::new(Mutex::new(None))));
         assert!(result.is_err());
         assert_ne!(cell.snapshot().state, FcaeState::Connected);
 
@@ -926,7 +939,7 @@ mod tests {
         runtime.block_on(run_session(Arc::new(FakeBackend), cfg, TelemetrySink::new(cell),
             cancel.clone(), Arc::new(CheckTun { cancel, checked: checked.clone() }),
             Duration::from_millis(10), false, 0,
-            Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(None)))).unwrap();
+            Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(())), Arc::new(Mutex::new(None)))).unwrap();
         assert!(checked.load(Ordering::SeqCst));
     }
 
@@ -969,6 +982,7 @@ mod tests {
             true,  // auto_reconnect on
             0,     // unlimited budget: the error class, not the budget, must stop it
             Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(())),
             Arc::new(Mutex::new(None)),
         ));
         assert!(result.is_err());
@@ -1002,24 +1016,34 @@ mod tests {
     }
 
     #[test]
-    fn pause_tun_keeps_the_session_and_resume_restarts_the_bridge() {
+    fn pause_preserves_session_and_resume_unpauses_only_after_success() {
         use std::sync::atomic::AtomicUsize;
 
         #[derive(Default)]
         struct CountingBridge {
             starts: AtomicUsize,
             stops: AtomicUsize,
+            running: AtomicBool,
+            fail_resume: AtomicBool,
+            paused: Mutex<Option<Arc<AtomicBool>>>,
         }
         impl TunBridge for CountingBridge {
             fn start(&self, _: &SessionConfig, _: &Endpoints) -> Result<()> {
-                self.starts.fetch_add(1, Ordering::SeqCst);
+                if self.starts.fetch_add(1, Ordering::SeqCst) > 0 {
+                    assert!(self.paused.lock().as_ref().unwrap().load(Ordering::SeqCst));
+                    if self.fail_resume.load(Ordering::SeqCst) {
+                        return Err(CoreError::Internal("resume failed".into()));
+                    }
+                }
+                self.running.store(true, Ordering::SeqCst);
                 Ok(())
             }
             fn stop(&self, _: Duration) {
                 self.stops.fetch_add(1, Ordering::SeqCst);
+                self.running.store(false, Ordering::SeqCst);
             }
             fn is_running(&self) -> bool {
-                self.starts.load(Ordering::SeqCst) > self.stops.load(Ordering::SeqCst)
+                self.running.load(Ordering::SeqCst)
             }
         }
 
@@ -1031,6 +1055,7 @@ mod tests {
             auto_reconnect: false,
             ..Default::default()
         });
+        *bridge.paused.lock() = Some(sup.tun_paused.clone());
         let mut cfg = SessionConfig::default();
         cfg.mode = FcaeMode::Tun;
         cfg.tun.fd = Some(3);
@@ -1045,17 +1070,74 @@ mod tests {
         assert!(sup.is_running());
 
         sup.pause_tun();
+        sup.pause_tun();
         assert!(sup.tun_is_paused());
         assert_eq!(cell.snapshot().state, FcaeState::Connected);
         assert!(sup.is_running());
         assert_eq!(bridge.stops.load(Ordering::SeqCst), 1);
 
+        bridge.fail_resume.store(true, Ordering::SeqCst);
+        assert!(sup.resume_tun().is_err());
+        assert!(sup.tun_is_paused());
+        assert!(!bridge.is_running());
+        assert!(sup.is_running());
+        assert_eq!(cell.snapshot().state, FcaeState::Connected);
+
+        bridge.fail_resume.store(false, Ordering::SeqCst);
         sup.resume_tun().expect("resume");
+        sup.resume_tun().expect("duplicate resume");
         assert!(!sup.tun_is_paused());
-        assert_eq!(bridge.starts.load(Ordering::SeqCst), 2);
+        assert!(bridge.is_running());
+        assert_eq!(bridge.starts.load(Ordering::SeqCst), 3);
         assert_eq!(cell.snapshot().state, FcaeState::Connected);
 
         sup.stop().expect("stop");
+    }
+
+    #[test]
+    fn health_checks_skip_tun_transitions_but_detect_real_failures() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct UnhealthyBridge(AtomicUsize);
+        impl TunBridge for UnhealthyBridge {
+            fn start(&self, _: &SessionConfig, _: &Endpoints) -> Result<()> { Ok(()) }
+            fn stop(&self, _: Duration) {}
+            fn is_running(&self) -> bool { false }
+            fn check_health(&self, _: &SessionConfig) -> Result<()> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(CoreError::Internal("TUN is down".into()))
+            }
+        }
+
+        let bridge = UnhealthyBridge(AtomicUsize::new(0));
+        let handle = FakeHandle;
+        let endpoints = handle.endpoints();
+        let sink = TelemetrySink::new(Arc::new(TelemetryCell::new()));
+        let mut cfg = SessionConfig::default();
+        cfg.mode = FcaeMode::Tun;
+        let paused = AtomicBool::new(false);
+        let control = Mutex::new(());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        {
+            let _transition = control.lock();
+            let result = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_millis(10), pump_counters(
+                    &handle, &sink, &cfg, &bridge, &paused, &control, &endpoints,
+                )).await
+            });
+            assert!(result.is_err());
+            assert_eq!(bridge.0.load(Ordering::SeqCst), 0);
+        }
+
+        let result = runtime.block_on(pump_counters(
+            &handle, &sink, &cfg, &bridge, &paused, &control, &endpoints,
+        ));
+        assert!(result.is_err());
+        assert_eq!(bridge.0.load(Ordering::SeqCst), 1);
     }
 
     #[test]

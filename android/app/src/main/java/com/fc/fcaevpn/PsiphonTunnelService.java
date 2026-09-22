@@ -3,22 +3,23 @@ package com.fc.fcaevpn;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
 import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
-import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import ca.psiphon.PsiphonTunnel;
@@ -389,6 +390,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // stopService) must still be able to stop the tunnel the dead instance
     // left behind.
     private static volatile PsiphonTunnel liveTunnel;
+    private static PsiphonNetworkBinding liveNetworkBinding;
     // A START that arrived while a teardown was in flight (session switch:
     // stopBound() for the old request, then startBound() for the next).
     // Replayed once the library is quiet; cleared by a later ACTION_STOP.
@@ -454,10 +456,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // background stats publisher started from onConnected().
     private volatile int lastRttMs = 0;
     private Thread statsThread;
+    private PsiphonNetworkBinding networkBinding;
 
     @Override
     public void onCreate() {
         super.onCreate();
+        networkBinding = new PsiphonNetworkBinding(this);
         // Foreground status is entered per tunnel start in onStartCommand()
         // (see enterTunnelForeground), not here: a sticky restart with a null
         // intent must not raise a foreground service nobody asked for.
@@ -551,7 +555,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         processMustDie = false;
         killTicket++;
         enterTunnelForeground();
-        bindToUnderlyingNetwork();
         stopping = false;
         startInFlight = true;
         psiphonUp = false;
@@ -563,6 +566,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         broadcastStage(1, "CONNECTING");
         libraryWorker.execute(() -> {
             try {
+                synchronized (LIBRARY_LOCK) {
+                    if (stopping) return;
+                    if (liveNetworkBinding != null && liveNetworkBinding != networkBinding) {
+                        liveNetworkBinding.close();
+                    }
+                    liveNetworkBinding = networkBinding;
+                    networkBinding.start();
+                }
                 if (stopping) return;
                 // Asset I/O must not delay the main-thread start/stop buttons.
                 final String embeddedList = readEmbeddedServerList();
@@ -591,20 +602,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                     liveTunnel = t;
                 }
                 try {
-                    // Plain proxy mode, by design: FCAEVpnService +
-                    // tun2socks is the ONLY VPN/TUN interface on the
-                    // device (Android and desktop alike); this library
-                    // instance is just the SOCKS/HTTP backend that
-                    // tun2socks dials. It must never run in the
-                    // library's VPN mode, which re-keys its network
-                    // monitoring, network ID and DNS getters as if the
-                    // library itself were the device VPN. Plain mode's
-                    // one network-change event (fired when our TUN is
-                    // validated) is harmless here: FCAEVpnService raises
-                    // the TUN BEFORE this tunnel starts, so the event
-                    // lands with no active tunnel; a late one is
-                    // absorbed by the controller's automatic reconnect.
-                    t.setVpnMode(false);
+                    t.setVpnMode(true);
                     t.startTunneling(embeddedList);
                 } finally {
                     // A stop that landed mid-dial swapped liveTunnel out and
@@ -631,6 +629,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 broadcastFailed(what);
                 stopNow();
             } finally {
+                if (stopping) networkBinding.close();
                 startInFlight = false;
             }
         });
@@ -687,6 +686,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         // controller and double the "stopping" noise).
         if (stopping) return;
         stopping = true;
+        networkBinding.close();
         // DETACH, never REMOVE: the visible notification at this id belongs
         // to the app-process owner (it re-posts while running and dismisses
         // at teardown); cancelling it here would flash the user's status
@@ -735,6 +735,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         synchronized (LIBRARY_LOCK) {
             t = liveTunnel;
             liveTunnel = null;
+            if (liveNetworkBinding != null) {
+                liveNetworkBinding.close();
+                liveNetworkBinding = null;
+            }
         }
         if (t != null) {
             final java.util.concurrent.CountDownLatch stopDone =
@@ -867,61 +871,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         onStartCommand(intent, 0, 0);
         return new android.os.Binder();
     }
-
-    /** Keep this process off the VPN so Psiphon can reach the internet. */
-    private void bindToUnderlyingNetwork() {
-        lanAddress = "";
-        try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-            if (cm == null) return;
-            Network chosen = null;
-            Network active = cm.getActiveNetwork();
-            if (active != null) {
-                android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(active);
-                if (caps != null
-                        && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                        && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                        && !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
-                    chosen = active;
-                }
-            }
-            if (chosen == null) {
-                final Network[] physical = new Network[1];
-                final CountDownLatch delivered = new CountDownLatch(1);
-                final ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
-                    @Override public void onAvailable(Network network) {
-                        android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(network);
-                        if (caps != null
-                                && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                                && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                                && !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
-                                && physical[0] == null) {
-                            physical[0] = network;
-                            delivered.countDown();
-                        }
-                    }
-                };
-                NetworkRequest request = new NetworkRequest.Builder()
-                        .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                        .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                        .build();
-                cm.registerNetworkCallback(request, callback);
-                try { delivered.await(250, TimeUnit.MILLISECONDS); }
-                finally { cm.unregisterNetworkCallback(callback); }
-                chosen = physical[0];
-            }
-            // LAN sharing changes the listener address only; Psiphon must still
-            // bind its sockets to the physical network, never the VPN/TUN.
-            if (chosen == null) {
-                Log.w(TAG, "No physical network available; leaving Psiphon unstarted");
-                return;
-            }
-            cm.bindProcessToNetwork(chosen);
-            lanAddress = "";
-            Log.i(TAG, "Psiphon LAN=" + lanSharing + ", address=" + lanAddress + ", underlying=" + chosen);
-        } catch (Exception e) { Log.w(TAG, "bindToUnderlyingNetwork", e); }
-    }
-
 
     /** Local-proxy bind host, derived from the same flag as ListenInterface. */
     private String proxyBindHost() {
@@ -1317,14 +1266,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     @Override
     public void bindToDevice(long fileDescriptor) throws PsiphonTunnel.Exception {
-        // HostService hook for the library's VPN-mode device binding. We
-        // run in plain proxy mode (setVpnMode(false)), so the library
-        // never installs this service as its DeviceBinder and this is
-        // never called; kept because the interface requires it. Had a
-        // binding ever arrived, closing would recycle the fd out from
-        // under Go -- leave it.
-        if (fileDescriptor <= 0) {
-            throw new PsiphonTunnel.Exception("bindToDevice: invalid fd");
+        try {
+            networkBinding.bindSocket(fileDescriptor);
+        } catch (java.io.IOException | RuntimeException error) {
+            throw new PsiphonTunnel.Exception("bindToDevice failed", error);
         }
     }
 
@@ -1610,4 +1555,89 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         sendBroadcast(i);
     }
 
+    private static final class PsiphonNetworkBinding implements AutoCloseable {
+        private final ConnectivityManager manager;
+        private final Object lock = new Object();
+        private ConnectivityManager.NetworkCallback callback;
+        private Network network;
+
+        PsiphonNetworkBinding(Context context) {
+            manager = context.getSystemService(ConnectivityManager.class);
+        }
+
+        void start() throws IOException {
+            synchronized (lock) {
+                if (callback != null) return;
+                if (manager == null) throw new IOException("ConnectivityManager unavailable");
+                ConnectivityManager.NetworkCallback next = new ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(Network available) {
+                        synchronized (lock) {
+                            if (callback != this) return;
+                            try {
+                                if (!available.equals(manager.getBoundNetworkForProcess())
+                                        && !manager.bindProcessToNetwork(available)) {
+                                    network = null;
+                                    Log.w(TAG, "Unable to bind Psiphon to the physical network");
+                                    return;
+                                }
+                                network = available;
+                            } catch (RuntimeException error) {
+                                network = null;
+                                Log.w(TAG, "Physical network binding failed", error);
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void onLost(Network lost) {
+                        synchronized (lock) {
+                            if (callback == this && lost.equals(network)) network = null;
+                        }
+                    }
+                };
+                callback = next;
+                try {
+                    manager.requestNetwork(new NetworkRequest.Builder()
+                            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                            .build(), next);
+                } catch (RuntimeException error) {
+                    callback = null;
+                    throw new IOException("Cannot monitor the physical network", error);
+                }
+            }
+        }
+
+        void bindSocket(long fileDescriptor) throws IOException {
+            if (fileDescriptor < 0 || fileDescriptor > Integer.MAX_VALUE) {
+                throw new IOException("Invalid socket descriptor");
+            }
+            final Network selected;
+            synchronized (lock) {
+                selected = network;
+            }
+            if (selected == null) throw new IOException("No physical network available");
+            try (ParcelFileDescriptor borrowed = ParcelFileDescriptor.fromFd((int) fileDescriptor)) {
+                selected.bindSocket(borrowed.getFileDescriptor());
+            }
+        }
+
+        @Override
+        public void close() {
+            final ConnectivityManager.NetworkCallback previous;
+            synchronized (lock) {
+                previous = callback;
+                callback = null;
+                network = null;
+            }
+            if (previous != null && manager != null) {
+                try {
+                    manager.unregisterNetworkCallback(previous);
+                } catch (RuntimeException error) {
+                    Log.w(TAG, "Physical network callback cleanup failed", error);
+                }
+            }
+        }
+    }
 }
