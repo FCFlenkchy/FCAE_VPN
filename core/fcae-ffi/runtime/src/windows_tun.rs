@@ -185,7 +185,7 @@ impl TunGuard {
             }
         }
         guard.dns = Some(DnsGuard::apply_to(guid, &servers)?);
-        log::info!("[tun] Windows routing ready: interface {index}, outer endpoint {peer} via interface {}", physical.InterfaceIndex);
+        log::info!("[tun] Windows routing ready: interface {index}, outer endpoint {parsed_peer:?}");
         Ok(guard)
     }
 
