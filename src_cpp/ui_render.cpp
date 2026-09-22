@@ -1910,24 +1910,26 @@ void render_ui() {
             }
 
             // Transport picker. Auto lets tunnel-core try its full default
-            // set; every other entry restricts it to exactly one protocol,
-            // labeled with the verbatim tunnel-core name. Indexes match
-            // merge_psiphon_transport in ui_render.h.
+            // set; every other entry restricts it to exactly one protocol.
+            // Labels are display forms (-OSSH dropped from the meek/conjure
+            // names, INPROXY-WEBRTC- shortened to INPROXY-) so nothing
+            // ellipsizes; the config carries the verbatim constants.
+            // Indexes match merge_psiphon_transport in ui_render.h.
             {
                 static const char* kTransports[] = {
                     "Auto", "SSH", "OSSH", "TLS-OSSH", "SHADOWSOCKS-OSSH",
-                    "QUIC-OSSH", "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH",
-                    "UNFRONTED-MEEK-SESSION-TICKET-OSSH", "FRONTED-MEEK-OSSH",
-                    "FRONTED-MEEK-HTTP-OSSH", "FRONTED-MEEK-QUIC-OSSH",
-                    "CONJURE-OSSH", "INPROXY-WEBRTC-SSH", "INPROXY-WEBRTC-OSSH",
-                    "INPROXY-WEBRTC-TLS-OSSH", "INPROXY-WEBRTC-SHADOWSOCKS-OSSH",
-                    "INPROXY-WEBRTC-QUIC-OSSH",
-                    "INPROXY-WEBRTC-UNFRONTED-MEEK-OSSH",
-                    "INPROXY-WEBRTC-UNFRONTED-MEEK-HTTPS-OSSH",
-                    "INPROXY-WEBRTC-UNFRONTED-MEEK-SESSION-TICKET-OSSH",
-                    "INPROXY-WEBRTC-FRONTED-MEEK-OSSH",
-                    "INPROXY-WEBRTC-FRONTED-MEEK-HTTP-OSSH",
-                    "INPROXY-WEBRTC-FRONTED-MEEK-QUIC-OSSH",
+                    "QUIC-OSSH", "UNFRONTED-MEEK", "UNFRONTED-MEEK-HTTPS",
+                    "UNFRONTED-MEEK-TICKET", "FRONTED-MEEK",
+                    "FRONTED-MEEK-HTTP", "FRONTED-MEEK-QUIC",
+                    "CONJURE", "INPROXY-SSH", "INPROXY-OSSH",
+                    "INPROXY-TLS-OSSH", "INPROXY-SHADOWSOCKS",
+                    "INPROXY-QUIC-OSSH",
+                    "INPROXY-UNFRONTED-MEEK",
+                    "INPROXY-UNFRONTED-HTTPS",
+                    "INPROXY-UNFRONTED-TICKET",
+                    "INPROXY-FRONTED-MEEK",
+                    "INPROXY-FRONTED-HTTP",
+                    "INPROXY-FRONTED-QUIC",
                 };
                 ImGui::Combo("Psiphon transport", &g_app.psiphon_transport,
                              kTransports, IM_ARRAYSIZE(kTransports));

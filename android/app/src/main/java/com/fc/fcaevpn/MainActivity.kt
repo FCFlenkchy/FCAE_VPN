@@ -622,28 +622,31 @@ class MainActivity : AppCompatActivity() {
             this, R.layout.spinner_dark_item,
             listOf("No bridges", "obfs4", "snowflake", "Custom lines"),
         )
-        // One entry per tunnel-core protocol, labeled with the verbatim
-        // protocol name. Index maps 1:1 onto
-        // PsiphonTunnelService.transportProtocols(); 0 = Auto leaves
-        // LimitTunnelProtocols unset (tunnel-core tries its full set).
-        // Covers every protocol tunnel-core accepts: TapDance is the only
-        // supported protocol left out -- it is client-disabled upstream and
-        // naming it fails config validation.
+        // One entry per tunnel-core protocol. Labels are display forms:
+        // the redundant -OSSH suffix is dropped from the meek/conjure
+        // names and INPROXY-WEBRTC- shortens to INPROXY- so entries fit
+        // the spinner without ellipsizing; the config always carries the
+        // verbatim protocol constants (PsiphonTunnelService
+        // .TRANSPORT_PROTOCOLS). Index maps 1:1 onto that table; 0 = Auto
+        // leaves LimitTunnelProtocols unset (tunnel-core tries its full
+        // set). Covers every protocol tunnel-core accepts: TapDance is
+        // the only supported protocol left out -- it is client-disabled
+        // upstream and naming it fails config validation.
         spinnerPsiphonTransport.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
             listOf("Auto", "SSH", "OSSH", "TLS-OSSH", "SHADOWSOCKS-OSSH",
-                   "QUIC-OSSH", "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH",
-                   "UNFRONTED-MEEK-SESSION-TICKET-OSSH", "FRONTED-MEEK-OSSH",
-                   "FRONTED-MEEK-HTTP-OSSH", "FRONTED-MEEK-QUIC-OSSH",
-                   "CONJURE-OSSH", "INPROXY-WEBRTC-SSH", "INPROXY-WEBRTC-OSSH",
-                   "INPROXY-WEBRTC-TLS-OSSH", "INPROXY-WEBRTC-SHADOWSOCKS-OSSH",
-                   "INPROXY-WEBRTC-QUIC-OSSH",
-                   "INPROXY-WEBRTC-UNFRONTED-MEEK-OSSH",
-                   "INPROXY-WEBRTC-UNFRONTED-MEEK-HTTPS-OSSH",
-                   "INPROXY-WEBRTC-UNFRONTED-MEEK-SESSION-TICKET-OSSH",
-                   "INPROXY-WEBRTC-FRONTED-MEEK-OSSH",
-                   "INPROXY-WEBRTC-FRONTED-MEEK-HTTP-OSSH",
-                   "INPROXY-WEBRTC-FRONTED-MEEK-QUIC-OSSH"),
+                   "QUIC-OSSH", "UNFRONTED-MEEK", "UNFRONTED-MEEK-HTTPS",
+                   "UNFRONTED-MEEK-TICKET", "FRONTED-MEEK",
+                   "FRONTED-MEEK-HTTP", "FRONTED-MEEK-QUIC",
+                   "CONJURE", "INPROXY-SSH", "INPROXY-OSSH",
+                   "INPROXY-TLS-OSSH", "INPROXY-SHADOWSOCKS",
+                   "INPROXY-QUIC-OSSH",
+                   "INPROXY-UNFRONTED-MEEK",
+                   "INPROXY-UNFRONTED-HTTPS",
+                   "INPROXY-UNFRONTED-TICKET",
+                   "INPROXY-FRONTED-MEEK",
+                   "INPROXY-FRONTED-HTTP",
+                   "INPROXY-FRONTED-QUIC"),
         )
         // Verbosity of the aether ENGINE. Positions map 1:1 onto
         // FcaeEngineLog; index 3 = info is the default.

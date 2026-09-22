@@ -1411,7 +1411,13 @@ public class FCAEVpnService extends VpnService {
                 }
                 return;
             }
-            if (shuttingDown || !running || !PsiphonTunnelService.isCurrentBroadcast(intent)) return;
+            // Accept while paused too: Stop only turns the TUN off — the
+            // Psiphon exit stays up and keeps broadcasting every second.
+            // Dropping the broadcasts here froze lastPsiphonStats at the
+            // last pre-stop sample, so the notification kept re-rendering
+            // the old rate until Start (the stuck psiphon-exit stats).
+            if (shuttingDown || (!running && !vpnPaused)
+                    || !PsiphonTunnelService.isCurrentBroadcast(intent)) return;
             lastPsiphonStats = new Intent(intent);
             ProxyNotification.cachePsiphonStats(context, lastPsiphonStats);
             updateNotification();
