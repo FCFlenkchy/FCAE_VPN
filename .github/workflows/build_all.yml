@@ -204,7 +204,7 @@ jobs:
   build:
     needs: [prepare, build-hev-windows]
     env:
-      FCAE_VERSION: ${{ needs.prepare.outputs.version }}
+      FCAE_VERSION: ${{ needs.prepare.outputs.version_full }}
       FCAE_VERSION_FULL: ${{ needs.prepare.outputs.version_full }}
       FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
     name: ${{ matrix.name }}

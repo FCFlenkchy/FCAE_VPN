@@ -41,7 +41,7 @@ fun parseReleaseVersion(value: String): ReleaseVersion {
     return ReleaseVersion(value, components, match.groupValues[2].isNotEmpty(), revision)
 }
 
-val appVersion = System.getenv("FCAE_VERSION")?.let { parseReleaseVersion(it).text } ?: run {
+val selectedVersion = System.getenv("FCAE_VERSION")?.let { parseReleaseVersion(it) } ?: run {
     val releases = groovy.json.JsonSlurper().parse(
         file("${rootProject.projectDir}/../version.json")
     ) as? List<*> ?: error("version.json must be a release array")
@@ -49,10 +49,15 @@ val appVersion = System.getenv("FCAE_VERSION")?.let { parseReleaseVersion(it).te
         val release = entry as? Map<*, *> ?: error("Each release must be an object")
         val version = release["version"] as? String ?: error("Release version must be a string")
         parseReleaseVersion(version)
-    }.maxOrNull()?.text ?: error("version.json must contain a release")
+    }.maxOrNull() ?: error("version.json must contain a release")
 }
 
-val isPrerelease = System.getenv("FCAE_IS_PRERELEASE")?.toBoolean() ?: false
+val isPrerelease = System.getenv("FCAE_IS_PRERELEASE")?.toBoolean() ?: selectedVersion.prerelease
+val appVersion = when {
+    !isPrerelease -> selectedVersion.text.substringBefore("_pre-release")
+    selectedVersion.prerelease -> selectedVersion.text
+    else -> "${selectedVersion.text}_pre-release"
+}
 
 android {
     namespace = "com.fc.fcaevpn"
@@ -109,6 +114,7 @@ android {
                 arguments += listOf(
                     "-DCMAKE_BUILD_TYPE=Release",
                     "-DFCAE_VERSION_OVERRIDE=$appVersion",
+                    "-DFCAE_IS_PRERELEASE=$isPrerelease",
                     "-DANDROID_STL=c++_shared",
                     // Android 15 uses 16 KB memory pages on new devices and
                     // its loader rejects shared objects laid out for 4 KB

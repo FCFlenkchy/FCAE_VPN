@@ -120,7 +120,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var outerScroll: ScrollView
 
     private val buildIsPrerelease = BuildConfig.IS_PRERELEASE
-    private val displayVersion = BuildConfig.APP_VERSION.substringBefore("_pre-release")
+    private val displayVersion = BuildConfig.APP_VERSION
 
     private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         val t = Thread(r, "bgExecutor")

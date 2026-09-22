@@ -89,15 +89,20 @@ else()
   endforeach()
 endif()
 
-# Determine prerelease status
 if(NOT DEFINED FCAE_IS_PRERELEASE)
-  # Try to read from version.json
-  if(NOT DEFINED FCAE_VERSION_OVERRIDE)
-    string(JSON _selected_pre GET "${_ver_json}" ${_release_last} prerelease)
-    set(FCAE_IS_PRERELEASE "${_selected_pre}")
+  if(DEFINED ENV{FCAE_IS_PRERELEASE})
+    set(FCAE_IS_PRERELEASE "$ENV{FCAE_IS_PRERELEASE}")
   else()
-    set(FCAE_IS_PRERELEASE "false")
+    set(FCAE_IS_PRERELEASE "${_selected_pre}")
   endif()
+endif()
+
+if(FCAE_IS_PRERELEASE)
+  if(NOT _selected_pre)
+    string(APPEND FCAE_VERSION "_pre-release")
+  endif()
+else()
+  set(FCAE_VERSION "${_selected_base}")
 endif()
 
 message(STATUS "FCAE_VERSION = ${FCAE_VERSION}")
