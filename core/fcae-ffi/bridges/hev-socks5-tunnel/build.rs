@@ -22,8 +22,7 @@ use std::path::{Path, PathBuf};
 /// the POSIX-prefix libraries it imports, and the MSYS runtime. The bridge
 /// embeds the whole set in the binary and extracts it as one directory before
 /// loading, so the released app is a single self-contained executable.
-const ENGINE_FILES: [&str; 6] = [
-    "fcae-hev-host.exe",
+const ENGINE_FILES: [&str; 5] = [
     "libhev-socks5-tunnel.dll",
     "libyaml.so",
     "liblwip.so",

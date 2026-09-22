@@ -297,6 +297,11 @@ impl Drop for TunGuard {
     }
 }
 
+
+pub fn restore_wrapper(guard: TunGuard) {
+    drop(guard);
+}
+
 type SetDns = unsafe extern "system" fn(GUID, *const DNS_INTERFACE_SETTINGS) -> u32;
 
 struct DnsApi {
