@@ -1299,8 +1299,17 @@ public class FCAEVpnService extends VpnService {
         shuttingDown = false;
         uiConnecting = true;
         pendingSessionGen = cleanupGeneration.get();
-        notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
-        startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
+        // Root cause: resume showed zero for 0.1s then old totals – show last totals immediately
+        if (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
+            notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats), VpnNotification.BUTTONS_CONNECTING);
+            startFg(notification.build(ProxyNotification.psiphonTrafficText(lastPsiphonStats), VpnNotification.BUTTONS_CONNECTING));
+        } else if (lastTotalRx > 0 || lastTotalTx > 0) {
+            notification.show(VpnNotification.trafficText(lastRx, lastTx, lastTotalRx, lastTotalTx), VpnNotification.BUTTONS_CONNECTING);
+            startFg(notification.build(VpnNotification.trafficText(lastRx, lastTx, lastTotalRx, lastTotalTx), VpnNotification.BUTTONS_CONNECTING));
+        } else {
+            notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
+            startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
+        }
         notifyUi();
 
         final Intent fallback = lastStartIntent;
@@ -1373,6 +1382,8 @@ public class FCAEVpnService extends VpnService {
     }
 
     private Intent lastPsiphonStats;
+    // Cache for smooth pause/resume – rates 0 when paused, totals stay, never 0 flicker
+    private long lastRx = 0, lastTx = 0, lastTotalRx = 0, lastTotalTx = 0;
     private final android.content.BroadcastReceiver psiphonStatsReceiver = new android.content.BroadcastReceiver() {
         @Override public void onReceive(android.content.Context context, Intent intent) {
             if (PsiphonTunnelService.BROADCAST_READY.equals(intent.getAction())) {
@@ -1431,19 +1442,24 @@ public class FCAEVpnService extends VpnService {
     // always restore the owner's content.
     private void updateNotification() {
         if (uiConnecting) {
-            notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
+            // Avoid 0.1s zero flinch: show last known totals (Psiphon or Rust) during resume
+            if (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
+                notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats), VpnNotification.BUTTONS_CONNECTING);
+            } else if (lastTotalRx > 0 || lastTotalTx > 0) {
+                notification.show(VpnNotification.trafficText(lastRx, lastTx, lastTotalRx, lastTotalTx),
+                        VpnNotification.BUTTONS_CONNECTING);
+            } else {
+                notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
+            }
         } else if (vpnPaused || running) {
-            // Stop only turns the TUN interface off; the notification keeps
-            // flowing exactly like a live session -- the rates fall to zero
-            // on their own because no traffic flows, the totals stay as
-            // they are -- and the only difference is Start replacing Stop.
             final int buttons = vpnPaused
                     ? VpnNotification.BUTTONS_PAUSED
                     : VpnNotification.BUTTONS_RUNNING;
-            if (PsiphonTunnelService.hasActiveBinding() && lastPsiphonStats != null
-                    && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
-                notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats),
-                        buttons);
+            // Root cause fix: Psiphon exit was double-polled – hasActiveBinding flips during rebind (1.5s gap)
+            // causing Rust 0 then Psiphon old totals -> reset/back/flinch.
+            // Show Psiphon stats if current, regardless of binding (covers rebind), else Rust with cache fallback
+            if (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
+                notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats), buttons);
                 return;
             }
             long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
@@ -1453,9 +1469,17 @@ public class FCAEVpnService extends VpnService {
                     rx = stats[0]; tx = stats[1]; totalRx = stats[2]; totalTx = stats[3];
                 }
             } catch (Exception ignored) {}
-            notification.show(VpnNotification.trafficText(rx, tx, totalRx, totalTx),
-                    buttons);
+            // When paused, rates go 0 but totals must stay – never pin to 0
+            if (totalRx > 0 || totalTx > 0 || rx > 0 || tx > 0) {
+                lastRx = rx; lastTx = tx; lastTotalRx = totalRx; lastTotalTx = totalTx;
+            } else if (lastTotalRx > 0 || lastTotalTx > 0) {
+                totalRx = lastTotalRx; totalTx = lastTotalTx; rx = 0; tx = 0;
+            }
+            notification.show(VpnNotification.trafficText(rx, tx, totalRx, totalTx), buttons);
         } else {
+            // Fully disconnected – clear caches so fresh connect starts at 0
+            lastPsiphonStats = null;
+            lastRx = 0; lastTx = 0; lastTotalRx = 0; lastTotalTx = 0;
             notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_PAUSED);
         }
     }

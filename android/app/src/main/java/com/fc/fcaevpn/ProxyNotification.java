@@ -390,8 +390,9 @@ public class ProxyNotification extends Service {
     // tunnel (re)dials, and the next tick must always restore the owner's
     // content.
     private void updateNotification() {
-        if (PsiphonTunnelService.hasActiveBinding() && lastPsiphonStats != null
-                && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
+        // Root cause: hasActiveBinding flips during rebind -> Rust 0 then Psiphon totals -> flinch
+        // Show Psiphon stats if current regardless of binding, else Rust
+        if (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
             showNotification(psiphonTrafficText(lastPsiphonStats), BUTTONS_RUNNING);
             return;
         }
@@ -418,6 +419,7 @@ public class ProxyNotification extends Service {
      */
     private synchronized boolean stopProxy() {
         if (stopping || ownerGeneration != FCAEVpnService.sGeneration.get()) return false;
+        lastPsiphonStats = null;
         stopping = true;
         handler.removeCallbacks(statsRunnable);
         PsiphonTunnelService.stopBound(this);
