@@ -22,7 +22,8 @@ use std::path::{Path, PathBuf};
 /// the POSIX-prefix libraries it imports, and the MSYS runtime. The bridge
 /// embeds the whole set in the binary and extracts it as one directory before
 /// loading, so the released app is a single self-contained executable.
-const ENGINE_FILES: [&str; 5] = [
+const ENGINE_FILES: [&str; 6] = [
+    "fcae-hev-host.exe",
     "libhev-socks5-tunnel.dll",
     "libyaml.so",
     "liblwip.so",
@@ -50,6 +51,15 @@ fn main() {
 
     let target = fcae_build::target::Target::from_cargo_env();
 
+    // Windows still needs wintun.dll at runtime for the TUN device itself
+    // (that is a driver, not a process), so stage it next to the library.
+    // hev-socks5-tunnel dynamically LoadLibraryExW's the stock "wintun.dll"
+    // (pool "Wintun") from the application directory or System32.
+    if let Some(dll) = fcae_build::wintun::stage(target) {
+        println!("cargo:rustc-cfg=wintun_staged");
+        println!("cargo:rustc-env=FCAE_HEV_WINTUN_DLL={}", dll.display());
+    }
+
     // Windows: the engine cannot be linked (MSYS-only runtime), so it is
     // loaded as a DLL at runtime. Nothing ships beside the app — the whole
     // engine set is embedded here and the bridge extracts it before loading.
@@ -69,7 +79,7 @@ fn main() {
                 if !file.is_file() {
                     panic!(
                         "the staged engine set is incomplete: {name} is missing next to \
-                         {staged} (the build-hev-windows job ships all five files)"
+                         {staged} (the build-hev-windows job ships the complete engine set)"
                     );
                 }
                 fcae_build::rerun_if_changed(&file);
@@ -92,15 +102,6 @@ fn main() {
              build with `--features fcae-bridge-hev-socks5-tunnel/stub`; the engine then \
              reports itself unavailable in the UI."
         );
-    }
-
-    // Windows still needs wintun.dll at runtime for the TUN device itself
-    // (that is a driver, not a process), so stage it next to the library.
-    // hev-socks5-tunnel dynamically LoadLibraryExW's the stock "wintun.dll"
-    // (pool "Wintun") from the application directory or System32.
-    if let Some(dll) = fcae_build::wintun::stage(target) {
-        println!("cargo:rustc-cfg=wintun_staged");
-        println!("cargo:rustc-env=FCAE_HEV_WINTUN_DLL={}", dll.display());
     }
 
     let submodule = fcae_build::repo_root().join("core/hev-socks5-tunnel");

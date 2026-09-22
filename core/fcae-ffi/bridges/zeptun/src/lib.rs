@@ -338,6 +338,8 @@ struct Handle {
     _psiphon_adapter: Option<socks5p::Adapter>,
     _tor_adapter: Option<socks5t::Adapter>,
     dns: Option<fcae_runtime::tun_dns::DnsGuard>,
+    #[cfg(windows)]
+    network: Option<fcae_runtime::windows_tun::TunGuard>,
 }
 unsafe impl Send for Handle {}
 
@@ -352,6 +354,8 @@ impl Drop for Handle {
         // 'stop' before 'destroy' per the C API contract; both are
         // idempotent in zeptun, and stop here only runs if stop() raced and
         // abandoned the handle.
+        #[cfg(windows)]
+        drop(self.network.take());
         drop(self.dns.take());
         unsafe {
             zeptun_stop(self.engine.as_ptr());
@@ -421,6 +425,8 @@ impl ZeptunBridge {
 
 impl TunBridge for ZeptunBridge {
     fn start(&self, cfg: &SessionConfig, endpoints: &fcae_runtime::backend::Endpoints) -> Result<()> {
+        #[cfg(windows)]
+        fcae_runtime::windows_tun::validate_backend(cfg, endpoints.peer_ip.as_deref())?;
         if !platform_enabled() {
             return Err(CoreError::Internal(
                 "this build was compiled without the zeptun bridge (feature `stub`); \
@@ -504,6 +510,7 @@ impl TunBridge for ZeptunBridge {
             ));
         }
 
+        config.address6.fill(0);
         match fd {
             // Android: VpnService pre-created and pre-configured the device;
             // the engine only owns the data plane.
@@ -526,8 +533,8 @@ impl TunBridge for ZeptunBridge {
                 config.device_kind = ZEPTUN_DEVICE_TUN;
                 set_c_str(&mut config.tun_name, adapter_name(cfg))?;
                 config.mtu = cfg.tun.mtu;
-                config.configure = 1;
-                config.auto_route = 1;
+                config.configure = u8::from(!cfg!(windows));
+                config.auto_route = u8::from(!cfg!(windows));
                 set_c_str(&mut config.address4, &cfg.tun.ipv4)?;
                 if let Some(v6) = &cfg.tun.ipv6 {
                     set_c_str(&mut config.address6, v6)?;
@@ -578,6 +585,8 @@ impl TunBridge for ZeptunBridge {
             _psiphon_adapter: psiphon_adapter,
             _tor_adapter: tor_adapter,
             dns: None,
+            #[cfg(windows)]
+            network: None,
         };
 
         #[cfg(windows)]
@@ -600,7 +609,14 @@ impl TunBridge for ZeptunBridge {
             if rc < 0 { return Err(zeptun_err("interface_name", rc)); }
             let name = unsafe { CStr::from_ptr(name.as_ptr()) }.to_str()
                 .map_err(|_| CoreError::Internal("zeptun returned an invalid interface name".into()))?;
-            handle.dns = Some(fcae_runtime::tun_dns::DnsGuard::apply(cfg, name)?);
+            #[cfg(windows)]
+            {
+                let mut network_cfg = cfg.clone();
+                network_cfg.tun.name = name.to_owned();
+                handle.network = Some(fcae_runtime::windows_tun::TunGuard::configure(&network_cfg, endpoints.peer_ip.as_deref())?);
+            }
+            #[cfg(not(windows))]
+            { handle.dns = Some(fcae_runtime::tun_dns::DnsGuard::apply(cfg, name)?); }
         }
 
         self.running.store(true, Ordering::SeqCst);
@@ -619,16 +635,20 @@ impl TunBridge for ZeptunBridge {
         // design (its own worker pool joins under its control).
         self.closing.store(true, Ordering::SeqCst);
         let handle = self.active.lock().take();
-        if let Some(h) = handle {
-            unsafe {
-                let _ = zeptun_stop(h.as_ptr());
-            }
-            // drop(h) → zeptun_destroy via Handle::drop
-        }
+        drop(handle);
         if self.running.swap(false, Ordering::SeqCst) {
             log::info!("[tun] down (zeptun)");
         }
         self.external_fd.store(-1, Ordering::SeqCst);
+    }
+
+    fn check_health(&self, _cfg: &SessionConfig) -> Result<()> {
+        if !self.is_running() {
+            return Err(CoreError::Internal("TUN engine stopped unexpectedly".into()));
+        }
+        #[cfg(windows)]
+        { self.active.lock().as_ref().and_then(|a| a.network.as_ref()).map(|g| g.check_health()).transpose()?; }
+        Ok(())
     }
 
     fn is_running(&self) -> bool {
@@ -660,6 +680,9 @@ mod tests {
         // an accidental field reorder fails loudly at build time.
         let mut c: ZeptunConfig = unsafe { std::mem::zeroed() };
         c.struct_size = std::mem::size_of::<ZeptunConfig>() as u32;
-        assert!(c.struct_size > 0);
+        assert_eq!(c.struct_size, 848);
+        assert_eq!(std::mem::offset_of!(ZeptunConfig, memory_budget_bytes), 800);
+        assert_eq!(std::mem::offset_of!(ZeptunConfig, reserved), 816);
+        assert_eq!(std::mem::size_of::<ZeptunStats>(), 312);
     }
 }

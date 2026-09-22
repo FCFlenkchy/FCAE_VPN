@@ -23,8 +23,10 @@ use fcae_runtime::config::SessionConfig;
 use fcae_runtime::error::{CoreError, Result};
 
 /// Record of the system changes made when the device came up.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct TunUndo {
+    #[cfg(windows)]
+    pub windows: Option<fcae_runtime::windows_tun::TunGuard>,
     pub device_name: String,
     /// Host route we added for the tunnel endpoint, to be deleted.
     pub peer_route: Option<String>,
@@ -208,7 +210,7 @@ pub fn restore(undo: TunUndo, _timeout: Duration) {
         return;
     }
     #[cfg(target_os = "windows")]
-    restore_windows(&undo);
+    drop(undo);
     #[cfg(target_os = "linux")]
     restore_linux(&undo);
     #[cfg(target_os = "macos")]
@@ -221,161 +223,15 @@ pub fn restore(undo: TunUndo, _timeout: Duration) {
 
 // ── Windows ─────────────────────────────────────────────────────────────
 
-/// Make `wintun.dll` available to the in-process driver loader.
-///
-/// Previously it was dropped next to an extracted `tun2socks.exe` and found
-/// via the child's working directory. With no child process, it must sit
-/// beside our own module (or in the data dir) instead.
 #[cfg(windows)]
 pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {
-    use std::io::Write;
-
-    let dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(std::env::temp_dir);
-    let dest = dir.join("wintun.dll");
-
-    if dest.is_file() {
-        return Ok(());
-    }
-
-    if let Some(bytes) = bytes {
-        if let Ok(mut f) = std::fs::File::create(&dest) {
-            if f.write_all(bytes).is_ok() {
-                log::info!("[tun2socks] wintun.dll written to {}", dest.display());
-                return Ok(());
-            }
-        }
-        // Executable directory may be read-only (Program Files); fall back.
-        let alt = std::env::temp_dir().join("fcaevpn");
-        let _ = std::fs::create_dir_all(&alt);
-        let alt_dll = alt.join("wintun.dll");
-        if !alt_dll.is_file() {
-            std::fs::write(&alt_dll, bytes).map_err(|e| {
-                CoreError::Internal(format!("cannot write wintun.dll to {}: {e}", alt.display()))
-            })?;
-        }
-        // Prepend to the DLL search path so the loader finds it.
-        let path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{};{path}", alt.display()));
-        log::info!("[tun2socks] wintun.dll staged in {}", alt.display());
-        return Ok(());
-    }
-
-    if std::path::Path::new("C:\\Windows\\System32\\wintun.dll").is_file() {
-        return Ok(());
-    }
-
-    Err(CoreError::Internal(
-        "wintun.dll is missing. Download it from https://www.wintun.net/ and place it \
-         next to the executable."
-            .into(),
-    ))
+    fcae_runtime::windows_dll::ensure_wintun(bytes)
 }
 
-#[cfg(not(windows))]
-pub fn ensure_wintun(_bytes: Option<&'static [u8]>) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn configure_windows(cfg: &SessionConfig, peer_ip: Option<&str>, undo: &mut TunUndo) -> Result<()> {
-    let name = &cfg.tun.name;
-    let ip = addr_of(&cfg.tun.ipv4);
-
-    // Wait for the adapter to appear; wintun creation is asynchronous.
-    // First probe is immediate, so a promptly-created adapter costs nothing.
-    let show = format!("name={name}");
-    if !wait_until(
-        || capture("netsh", &["interface", "ip", "show", "config", &show]).is_some(),
-        Duration::from_secs(4),
-    ) {
-        return Err(CoreError::Internal(format!(
-            "TUN adapter `{name}` did not appear within 4s"
-        )));
-    }
-
-    run(
-        "netsh",
-        &[
-            "interface", "ip", "set", "address",
-            &format!("name={name}"), "static", ip, "255.255.255.0",
-        ],
-    );
-    run("netsh", &["interface", "ipv4", "set", "subinterface",
-        &format!("{name}"), &format!("mtu={}", cfg.tun.mtu), "store=active"]);
-
-    // Keep tunnel traffic off the tunnel.
-    if let Some(peer) = peer_ip {
-        if run("route", &["add", peer, "mask", "255.255.255.255", "0.0.0.0", "metric", "1"]) {
-            undo.peer_route = Some(peer.to_string());
-        }
-    }
-
-    // Default route through the TUN device with a low metric.
-    if run("route", &["add", "0.0.0.0", "mask", "0.0.0.0", ip, "metric", "1"]) {
-        undo.default_route = true;
-    }
-
-    // DNS: back up the current servers before overriding.
-    let servers = dns_server_list(cfg.dns.server.as_deref());
-    if !servers.is_empty() {
-        if let Some(prev) = capture("netsh", &["interface", "ip", "show", "dnsservers"]) {
-            undo.dns_backup.push((name.clone(), parse_windows_dns(&prev)));
-        }
-        let mut v4_primary = false;
-        for entry in &servers {
-            let addr = dns_host_of(entry);
-            if addr.contains(':') {
-                // IPv6 resolvers go through the ipv6 stack's dnsserver list.
-                run("netsh", &["interface", "ipv6", "add", "dnsservers",
-                    &format!("name={name}"), addr]);
-            } else if !v4_primary {
-                run("netsh", &["interface", "ip", "set", "dns",
-                    &format!("name={name}"), "static", addr, "primary"]);
-                v4_primary = true;
-            } else {
-                run("netsh", &["interface", "ip", "add", "dns",
-                    &format!("name={name}"), addr]);
-            }
-        }
-    }
-
+    undo.windows = Some(fcae_runtime::windows_tun::TunGuard::configure(cfg, peer_ip)?);
     Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn parse_windows_dns(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|l| {
-            let t = l.trim();
-            t.split_whitespace()
-                .last()
-                .filter(|s| s.parse::<std::net::IpAddr>().is_ok())
-                .map(|s| s.to_string())
-        })
-        .collect()
-}
-
-#[cfg(target_os = "windows")]
-fn restore_windows(undo: &TunUndo) {
-    let name = &undo.device_name;
-
-    if undo.default_route {
-        run("route", &["delete", "0.0.0.0"]);
-    }
-    if let Some(peer) = &undo.peer_route {
-        run("route", &["delete", peer]);
-    }
-    if !undo.dns_backup.is_empty() {
-        // Back to DHCP-provided DNS, which is what "restore" meant before.
-        run("netsh", &["interface", "ip", "set", "dns",
-            &format!("name={name}"), "dhcp"]);
-    }
-    run("ipconfig", &["/flushdns"]);
-    log::info!("[tun2socks] Windows routes/DNS restored for `{name}`");
 }
 
 // ── Linux ───────────────────────────────────────────────────────────────

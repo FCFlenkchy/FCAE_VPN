@@ -407,6 +407,8 @@ impl Tun2SocksBridge {
 
 impl TunBridge for Tun2SocksBridge {
     fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
+        #[cfg(windows)]
+        fcae_runtime::windows_tun::validate_backend(cfg, endpoints.peer_ip.as_deref())?;
         if !is_supported() {
             return Err(CoreError::Internal(
                 "this build was compiled without the tun2socks bridge (feature `stub`); \
@@ -588,6 +590,15 @@ impl TunBridge for Tun2SocksBridge {
         }
         // -1 is never dup'd: device_spec calls the provider for the real one.
         self.fd_provider().map(|_| -1)
+    }
+
+    fn check_health(&self, _cfg: &SessionConfig) -> Result<()> {
+        if !self.is_running() {
+            return Err(CoreError::Internal("TUN engine stopped unexpectedly".into()));
+        }
+        #[cfg(windows)]
+        { self.active.lock().as_ref().and_then(|a| a.undo.windows.as_ref()).map(|g| g.check_health()).transpose()?; }
+        Ok(())
     }
 
     fn is_running(&self) -> bool {

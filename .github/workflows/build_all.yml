@@ -171,12 +171,21 @@ jobs:
           cp -v core/hev-socks5-tunnel/third-part/lwip/bin/liblwip.so engine/
           cp -v core/hev-socks5-tunnel/third-part/hev-task-system/bin/libhev-task-system.so engine/
 
+          printf '%s\n' 'EXPORTS' 'hev_socks5_tunnel_main_from_str' \
+            'hev_socks5_tunnel_quit' 'hev_socks5_tunnel_stats' > "$ENG/build-compat/host.def"
+          dlltool --dllname libhev-socks5-tunnel.dll \
+            --def "$ENG/build-compat/host.def" --output-lib "$ENG/build-compat/host.a"
+          gcc -O2 -Wall -Wextra -Werror -o engine/fcae-hev-host.exe \
+            core/fcae-ffi/bridges/hev-socks5-tunnel/windows/host.c \
+            "$ENG/build-compat/host.a" -pthread
+          test -s engine/fcae-hev-host.exe
+
           # Ship the runtime every DLL in the set was linked against
           # (msys-2.0.dll on MSYS, cygwin1.dll on Cygwin); the loader resolves
           # each import next to its own DLL, so only the POSIX prefix libraries
           # need collecting.
           if command -v ldd >/dev/null 2>&1; then
-            for dll in engine/libhev-socks5-tunnel.dll engine/*.so; do
+            for dll in engine/fcae-hev-host.exe engine/libhev-socks5-tunnel.dll engine/*.so; do
               ldd "$dll" |
                 awk '$3 ~ /^\/usr\/bin\// { print $3 }' | sort -u |
                 while read -r lib; do

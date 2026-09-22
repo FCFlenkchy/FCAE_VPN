@@ -210,6 +210,19 @@ impl TunBridge for TunEngines {
         self.hev.abort();
     }
 
+    fn check_health(&self, cfg: &config::SessionConfig) -> Result<(), CoreError> {
+        match cfg.tun.engine {
+            #[cfg(feature = "tun")]
+            config::TunEngine::Tun2socks => self.t2s.check_health(cfg),
+            #[cfg(feature = "zeptun")]
+            config::TunEngine::Zeptun => self.zeptun.check_health(cfg),
+            #[cfg(feature = "hev")]
+            config::TunEngine::Hev => self.hev.check_health(cfg),
+            #[allow(unreachable_patterns)]
+            _ => Err(CoreError::Internal("selected TUN engine is unavailable".into())),
+        }
+    }
+
     fn is_running(&self) -> bool {
         #[cfg(feature = "tun")]
         {
@@ -898,14 +911,8 @@ fn hev_info_fields() -> (u64, &'static str, &'static str, bool, &'static str) {
     if fcae_bridge_hev_socks5_tunnel::is_supported() {
         (FCAE_TUN_ENGINE_HEV, "hev-socks5-tunnel", "hev-socks5-tunnel", true, "")
     } else {
-        // Windows runs the engine as a sidecar executable (its Windows backend
-        // is MSYS-only, so it cannot be linked in), which makes "stub build"
-        // the wrong explanation there: what is missing is the executable.
-        let reason = if cfg!(windows) {
-            "hev-socks5-tunnel.exe is missing from this installation (Windows runs the engine as a sidecar)"
-        } else {
-            "hev-socks5-tunnel not linked (stub build)"
-        };
+        let reason = fcae_bridge_hev_socks5_tunnel::unavailable_reason()
+            .unwrap_or("hev-socks5-tunnel unavailable");
         (
             FCAE_TUN_ENGINE_HEV,
             "hev-socks5-tunnel",

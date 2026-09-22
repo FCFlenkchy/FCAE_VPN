@@ -40,8 +40,8 @@ pub fn stage(target: Target) -> Option<PathBuf> {
         }
     }
 
-    let tmp = std::env::temp_dir().join("fcae_wintun.zip");
-    let extract = std::env::temp_dir().join("fcae_wintun_extract");
+    let tmp = out_dir.join("wintun-download.zip");
+    let extract = out_dir.join("wintun-extract");
     let _ = std::fs::remove_file(&tmp);
     let _ = std::fs::remove_dir_all(&extract);
 

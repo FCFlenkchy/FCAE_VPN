@@ -47,6 +47,8 @@ pub trait TunBridge: Send + Sync {
     /// True if a device is currently up.
     fn is_running(&self) -> bool;
 
+    fn check_health(&self, _cfg: &SessionConfig) -> Result<()> { Ok(()) }
+
     /// A TUN fd the platform already created and handed to us, if any.
     ///
     /// Android's VpnService creates the interface in the JVM and passes the
@@ -619,7 +621,7 @@ async fn run_session(
                     tokio::select! { r = handle.wait() => r, r = psi.wait() => r }
                 } else { handle.wait().await }
             } => r,
-            _ = pump_counters(&*handle, &sink) => Ok(()),
+            result = pump_counters(&*handle, &sink, &config, &*tun_bridge, &tun_paused, &endpoints) => result,
         };
 
         // Tunnel ended. Set reconnecting state immediately so the UI doesn't
@@ -721,17 +723,28 @@ async fn backoff(cancel: &CancelToken, attempt: u32) -> std::ops::ControlFlow<()
     }
 }
 
-/// Never returns; sampled by the `select!` above. The 1 s cadence is the
-/// rate window: both the Aether window-swap and the Psiphon delta sampler
-/// divide accumulated bytes by the real elapsed time, so this tick is what
-/// makes the published rates a true bytes-per-second — and it matches the
-/// 1 s refresh of every UI surface (desktop window, Android UI, and both
-/// notification tickers).
-async fn pump_counters(handle: &dyn BackendHandle, sink: &TelemetrySink) {
+async fn pump_counters(
+    handle: &dyn BackendHandle,
+    sink: &TelemetrySink,
+    cfg: &SessionConfig,
+    tun: &dyn TunBridge,
+    paused: &AtomicBool,
+    endpoints: &Endpoints,
+) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tick.tick().await;
         sink.set_counters(handle.counters());
+        if cfg.is_tun() && !paused.load(Ordering::SeqCst) {
+            let health = tun.check_health(cfg);
+            if !paused.load(Ordering::SeqCst) { health?; }
+            #[cfg(windows)]
+            if handle.endpoints().peer_ip != endpoints.peer_ip {
+                return Err(CoreError::Internal("outer endpoint changed; reconnecting TUN with fresh routes".into()));
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = endpoints;
     }
 }
 

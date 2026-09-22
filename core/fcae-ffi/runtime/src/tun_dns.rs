@@ -212,6 +212,8 @@ pub fn restore_linux(interface: &str, routes: &[String], dns: &LinuxDns) {
 
 pub enum DnsGuard {
     None,
+    #[cfg(windows)]
+    Windows(crate::windows_tun::DnsGuard),
     #[cfg(target_os = "linux")]
     Linux(String, Vec<String>, LinuxDns),
     #[cfg(target_os = "macos")]
@@ -255,7 +257,9 @@ impl DnsGuard {
             }
             return Ok(guard);
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(windows)]
+        { crate::windows_tun::DnsGuard::apply(cfg, interface).map(Self::Windows) }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         { let _ = (cfg, interface); Ok(Self::None) }
     }
 }
@@ -264,6 +268,8 @@ impl Drop for DnsGuard {
     fn drop(&mut self) {
         match self {
             Self::None => {},
+            #[cfg(windows)]
+            Self::Windows(_) => {},
             #[cfg(target_os = "linux")]
             Self::Linux(interface, routes, dns) => restore_linux(interface, routes, dns),
             #[cfg(target_os = "macos")]

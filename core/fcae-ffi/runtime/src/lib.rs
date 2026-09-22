@@ -25,3 +25,8 @@ pub mod tun_dns;
 pub mod update;
 
 pub use error::{CoreError, Result};
+
+#[cfg(windows)]
+pub mod windows_dll;
+#[cfg(windows)]
+pub mod windows_tun;
