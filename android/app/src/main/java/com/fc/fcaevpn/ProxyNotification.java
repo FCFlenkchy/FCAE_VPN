@@ -18,7 +18,6 @@ public class ProxyNotification extends Service {
     private static final long PROCESS_KILL_DELAY_MS = 600L;
 
     public static final String ACTION_START = "com.fc.fcaevpn.PROXY_START";
-    public static final String ACTION_STOP  = "com.fc.fcaevpn.PROXY_STOP";
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.PROXY_DISCONNECT";
     /**
      * Same teardown as {@link #ACTION_DISCONNECT}, but the process goes too.
@@ -30,15 +29,11 @@ public class ProxyNotification extends Service {
 
     private static final int BUTTONS_CONNECTING = 0;
     private static final int BUTTONS_RUNNING = 1;
-    private static final int BUTTONS_PAUSED = 2;
 
     private Handler handler;
     private PendingIntent piMain;
     private Notification.Action disconnectAction;
-    private Notification.Action stopAction;
-    private Notification.Action startAction;
     private volatile boolean nativeFreed = false;
-    private volatile boolean proxyPaused = false;
     public static final String ACTION_PSIPHON = "com.fc.fcaevpn.PROXY_PSIPHON";
     public static final String ACTION_PSIPHON_REGIONS = "com.fc.fcaevpn.PROXY_PSIPHON_REGIONS";
     private static ProxyNotification instance;
@@ -204,10 +199,6 @@ public class ProxyNotification extends Service {
                     return;
                 }
             }
-            if (proxyPaused) {
-                handler.postDelayed(this, 1000);
-                return;
-            }
             if (!stopping && !externalPsiphon) PsiphonTunnelService.pollChainedRequest(ProxyNotification.this);
             updateNotification();
             handler.postDelayed(this, 1000);
@@ -237,8 +228,6 @@ public class ProxyNotification extends Service {
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         disconnectAction = buildAction(this, "Disconnect", ACTION_DISCONNECT_KILL, 21);
-        stopAction = buildAction(this, "Stop", ACTION_STOP, 22);
-        startAction = buildAction(this, "Start", ACTION_START, 23);
     }
 
     /**
@@ -330,15 +319,6 @@ public class ProxyNotification extends Service {
             stopProxy();
             return START_NOT_STICKY;
         }
-        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
-            pauseProxy();
-            return START_STICKY;
-        }
-        if (intent != null && ACTION_START.equals(intent.getAction()) && proxyPaused) {
-            resumeProxy();
-            return START_STICKY;
-        }
-
         if (intent == null) {
             // A task removal or service recreation is not a user disconnect.
             // Do not call stopProxy(): that detaches Psiphon and causes the
@@ -361,7 +341,6 @@ public class ProxyNotification extends Service {
         ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
         stopping = false;
         nativeFreed = false;
-        proxyPaused = false;
         showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
         handler.removeCallbacks(statsRunnable);
         handler.postDelayed(statsRunnable, 2000L);
@@ -386,18 +365,15 @@ public class ProxyNotification extends Service {
             .setOnlyAlertOnce(true)
             .setStyle(new Notification.BigTextStyle().bigText(text));
 
+        // Disconnect only, in every state: Stop/Start are TUN-mode
+        // controls (the data plane can be halted and resumed there); a
+        // proxy session has nothing to pause, so the button must never
+        // appear here.
         switch (buttons) {
-            case BUTTONS_PAUSED:
-                nb.addAction(disconnectAction);
-                nb.addAction(startAction);
-                break;
-            // Connecting shows the same controls as running, so the button
-            // set never appears incomplete while a dial is in flight.
             case BUTTONS_CONNECTING:
             case BUTTONS_RUNNING:
             default:
                 nb.addAction(disconnectAction);
-                nb.addAction(stopAction);
                 break;
         }
 
@@ -433,59 +409,6 @@ public class ProxyNotification extends Service {
         showNotification(VpnNotification.trafficText(rx, tx, totalRx, totalTx), BUTTONS_RUNNING);
     }
 
-    private void broadcastState(boolean running, boolean paused, boolean connecting) {
-        try {
-            Intent i = new Intent(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED);
-            i.putExtra("running", running);
-            i.putExtra("paused", paused);
-            i.putExtra("connecting", connecting);
-            i.putExtra("generation", FCAEVpnService.sGeneration.get());
-            i.setPackage(getPackageName());
-            sendBroadcast(i);
-        } catch (Exception e) {
-            Log.w(TAG, "state broadcast failed: " + e.getMessage());
-        }
-    }
-
-    private synchronized void pauseProxy() {
-        if (stopping) return;
-        if (proxyPaused) {
-            showNotification(VpnNotification.zeroTrafficText(), BUTTONS_PAUSED);
-            return;
-        }
-        proxyPaused = true;
-        ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
-        if (!externalPsiphon) {
-            try { NativeEngine.nativePauseTun(); } catch (Exception ignored) {}
-        }
-        showNotification(VpnNotification.zeroTrafficText(), BUTTONS_PAUSED);
-        broadcastState(false, true, false);
-    }
-
-    private synchronized void resumeProxy() {
-        if (stopping || !proxyPaused) return;
-        proxyPaused = false;
-        ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
-        showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
-        broadcastState(false, false, true);
-        if (!externalPsiphon) {
-            boolean ok = false;
-            try { ok = NativeEngine.nativeResumeTun(); } catch (Exception ignored) {}
-            if (!ok) {
-                int state = 0;
-                try { state = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
-                if (state == 0 || state == 5) {
-                    Log.w(TAG, "resumeProxy: session gone; tearing down");
-                    stopProxy();
-                    return;
-                }
-            }
-        }
-        showNotification(VpnNotification.zeroTrafficText(), BUTTONS_RUNNING);
-        broadcastState(true, false, false);
-        handler.removeCallbacks(statsRunnable);
-        handler.post(statsRunnable);
-    }
 
     /**
      * @return true when this call performed the teardown, false when it was
@@ -496,7 +419,6 @@ public class ProxyNotification extends Service {
     private synchronized boolean stopProxy() {
         if (stopping || ownerGeneration != FCAEVpnService.sGeneration.get()) return false;
         stopping = true;
-        proxyPaused = false;
         handler.removeCallbacks(statsRunnable);
         PsiphonTunnelService.stopBound(this);
         // Proxy mode has no VpnService, so nothing else broadcasts state. The

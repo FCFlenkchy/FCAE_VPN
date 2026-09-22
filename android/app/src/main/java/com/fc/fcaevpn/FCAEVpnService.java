@@ -155,7 +155,9 @@ public class FCAEVpnService extends VpnService {
             }
             if (running && !shuttingDown && !vpnPaused) PsiphonTunnelService.pollChainedRequest(FCAEVpnService.this);
             updateNotification();
-            if (running) handler.postDelayed(this, 1000);
+            // Keep ticking while paused: Stop only turns the TUN off, so
+            // the notification flows on like a live session's.
+            if (running || vpnPaused) handler.postDelayed(this, 1000);
         }
     };
 
@@ -1249,7 +1251,6 @@ public class FCAEVpnService extends VpnService {
 
         Runnable uiCleanup = () -> {
             notifyUi();
-            handler.removeCallbacks(statsRunnable);
             updateNotification();
         };
 
@@ -1425,31 +1426,18 @@ public class FCAEVpnService extends VpnService {
     private void updateNotification() {
         if (uiConnecting) {
             notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
-        } else if (vpnPaused) {
-            // STOP halts the TUN data flow, not the counters: keep the
-            // session's byte totals on the notification with the rates at
-            // zero instead of zeroing the display. A live Psiphon exit keeps
-            // its own counters (that tunnel stays up underneath the pause).
+        } else if (vpnPaused || running) {
+            // Stop only turns the TUN interface off; the notification keeps
+            // flowing exactly like a live session -- the rates fall to zero
+            // on their own because no traffic flows, the totals stay as
+            // they are -- and the only difference is Start replacing Stop.
+            final int buttons = vpnPaused
+                    ? VpnNotification.BUTTONS_PAUSED
+                    : VpnNotification.BUTTONS_RUNNING;
             if (PsiphonTunnelService.hasActiveBinding() && lastPsiphonStats != null
                     && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
                 notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats),
-                        VpnNotification.BUTTONS_PAUSED);
-            } else {
-                long totalRx = 0, totalTx = 0;
-                try {
-                    long[] stats = nativeGetTrafficStats();
-                    if (stats != null && stats.length >= 4) {
-                        totalRx = stats[2]; totalTx = stats[3];
-                    }
-                } catch (Exception ignored) {}
-                notification.show(VpnNotification.trafficText(0, 0, totalRx, totalTx),
-                        VpnNotification.BUTTONS_PAUSED);
-            }
-        } else if (running) {
-            if (PsiphonTunnelService.hasActiveBinding() && lastPsiphonStats != null
-                    && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
-                notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats),
-                        VpnNotification.BUTTONS_RUNNING);
+                        buttons);
                 return;
             }
             long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
@@ -1460,7 +1448,7 @@ public class FCAEVpnService extends VpnService {
                 }
             } catch (Exception ignored) {}
             notification.show(VpnNotification.trafficText(rx, tx, totalRx, totalTx),
-                    VpnNotification.BUTTONS_RUNNING);
+                    buttons);
         } else {
             notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_PAUSED);
         }

@@ -1073,12 +1073,9 @@ void render_ui() {
         // If errored and we have an error message, show it instead of just "ERROR"
         if (errored && telem.last_error[0]) {
             ImGui::Text("ERROR: %s", telem.last_error);
-        } else if (tun_paused) {
-            // Parity with Android's STOPPED: the STOP button halts the TUN
-            // data flow, not the session — the traffic counters below keep
-            // showing this session's totals while stopped.
-            ImGui::TextColored(ImVec4(0.54f, 0.58f, 0.65f, 1.0f), "STOPPED");
         } else {
+            // Stop only turns the TUN interface off; the status keeps
+            // showing the live session state while paused.
             ImGui::Text("%s", state_label(cur));
         }
         ImGui::PopStyleColor();
@@ -1912,14 +1909,25 @@ void render_ui() {
                 }
             }
 
-            // Transport family. Auto lets tunnel-core try its full default
-            // set; the other entries restrict it to one family (each maps
-            // to tunnel-core's LimitTunnelProtocols values, including the
-            // variants that only differ in handshake details).
+            // Transport picker. Auto lets tunnel-core try its full default
+            // set; every other entry restricts it to exactly one protocol,
+            // labeled with the verbatim tunnel-core name. Indexes match
+            // merge_psiphon_transport in ui_render.h.
             {
                 static const char* kTransports[] = {
-                    "Auto", "SSH", "QUIC", "Unfronted meek", "Fronted meek",
-                    "TLS", "Shadowsocks", "Conjure", "In-proxy",
+                    "Auto", "SSH", "OSSH", "TLS-OSSH", "SHADOWSOCKS-OSSH",
+                    "QUIC-OSSH", "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH",
+                    "UNFRONTED-MEEK-SESSION-TICKET-OSSH", "FRONTED-MEEK-OSSH",
+                    "FRONTED-MEEK-HTTP-OSSH", "FRONTED-MEEK-QUIC-OSSH",
+                    "CONJURE-OSSH", "INPROXY-WEBRTC-SSH", "INPROXY-WEBRTC-OSSH",
+                    "INPROXY-WEBRTC-TLS-OSSH", "INPROXY-WEBRTC-SHADOWSOCKS-OSSH",
+                    "INPROXY-WEBRTC-QUIC-OSSH",
+                    "INPROXY-WEBRTC-UNFRONTED-MEEK-OSSH",
+                    "INPROXY-WEBRTC-UNFRONTED-MEEK-HTTPS-OSSH",
+                    "INPROXY-WEBRTC-UNFRONTED-MEEK-SESSION-TICKET-OSSH",
+                    "INPROXY-WEBRTC-FRONTED-MEEK-OSSH",
+                    "INPROXY-WEBRTC-FRONTED-MEEK-HTTP-OSSH",
+                    "INPROXY-WEBRTC-FRONTED-MEEK-QUIC-OSSH",
                 };
                 ImGui::Combo("Psiphon transport", &g_app.psiphon_transport,
                              kTransports, IM_ARRAYSIZE(kTransports));

@@ -695,8 +695,35 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         stopForeground(STOP_FOREGROUND_DETACH);
         logHandler.removeCallbacks(dialHeartbeat);
         Thread st = statsThread;
-        if (st != null) st.interrupt();
         psiphonUp = false;
+        if (st != null) {
+            st.interrupt();
+            // Let the loop finish any in-flight broadcast before the final
+            // sample below, so the zero-rate sample is provably the last
+            // one any consumer caches. It sleeps 1 s per iteration and
+            // exits on interrupt, so this returns in milliseconds.
+            try { st.join(250); } catch (InterruptedException ignored) {}
+        }
+        // Final stats sample with the rates at zero. Without it the last
+        // broadcast -- taken mid-flow -- stays the cached "latest" in the
+        // notification and the UI and keeps showing a live speed after the
+        // tunnel is gone. Totals are kept, so the session's byte count is
+        // not lost.
+        try {
+            Intent fin = new Intent(BROADCAST_STATS);
+            fin.setPackage(getPackageName());
+            fin.putExtra("psiSession", session);
+            fin.putExtra("requestId", attachRequestId);
+            fin.putExtra(EXTRA_LAN, lanSharing ? lanAddress : "");
+            fin.putExtra(EXTRA_SOCKS, socksPort.get());
+            fin.putExtra(EXTRA_HTTP, httpPort.get());
+            fin.putExtra(EXTRA_RTT, lastRttMs);
+            fin.putExtra(EXTRA_UP_BPS, 0L);
+            fin.putExtra(EXTRA_DOWN_BPS, 0L);
+            fin.putExtra(EXTRA_TOTAL_UP, bytesUp.get());
+            fin.putExtra(EXTRA_TOTAL_DOWN, bytesDown.get());
+            sendBroadcast(fin);
+        } catch (Exception ignored) {}
         emitLog("stopping");
         flushLogs();
         // Swap the tunnel out under the lock. The start task holds the lock
@@ -1066,42 +1093,44 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         }
     }
 
-    /**
-     * Map a transport spinner index to tunnel-core LimitTunnelProtocols
-     * values. Index 0 (Auto) returns an empty array: omit the field so the
-     * full default protocol set is used. Names are the exact constants from
-     * tunnel-core's protocol.go SupportedTunnelProtocols -- an unsupported
-     * name (or the client-disabled TAPDANCE-OSSH) fails config validation
-     * and the whole start. Index order is stable across versions so
-     * persisted selections never remap; new families append.
-     */
+    /** Spinner index -> protocol name; index 0 = Auto (no restriction).
+     *  One entry is exactly one protocol, named with the verbatim constant
+     *  from tunnel-core's protocol.go SupportedTunnelProtocols -- an
+     *  unsupported name (or the client-disabled TAPDANCE-OSSH) fails config
+     *  validation and the whole start. Index order is stable across
+     *  versions so persisted selections never remap; new protocols append.
+     *  Keep in step with the spinner adapter in MainActivity and with
+     *  merge_psiphon_transport in src_cpp/ui_render.h. */
+    private static final String[] TRANSPORT_PROTOCOLS = {
+            "",                                    // 0: Auto
+            "SSH",
+            "OSSH",
+            "TLS-OSSH",
+            "SHADOWSOCKS-OSSH",
+            "QUIC-OSSH",
+            "UNFRONTED-MEEK-OSSH",
+            "UNFRONTED-MEEK-HTTPS-OSSH",
+            "UNFRONTED-MEEK-SESSION-TICKET-OSSH",
+            "FRONTED-MEEK-OSSH",
+            "FRONTED-MEEK-HTTP-OSSH",
+            "FRONTED-MEEK-QUIC-OSSH",
+            "CONJURE-OSSH",
+            "INPROXY-WEBRTC-SSH",
+            "INPROXY-WEBRTC-OSSH",
+            "INPROXY-WEBRTC-TLS-OSSH",
+            "INPROXY-WEBRTC-SHADOWSOCKS-OSSH",
+            "INPROXY-WEBRTC-QUIC-OSSH",
+            "INPROXY-WEBRTC-UNFRONTED-MEEK-OSSH",
+            "INPROXY-WEBRTC-UNFRONTED-MEEK-HTTPS-OSSH",
+            "INPROXY-WEBRTC-UNFRONTED-MEEK-SESSION-TICKET-OSSH",
+            "INPROXY-WEBRTC-FRONTED-MEEK-OSSH",
+            "INPROXY-WEBRTC-FRONTED-MEEK-HTTP-OSSH",
+            "INPROXY-WEBRTC-FRONTED-MEEK-QUIC-OSSH",
+    };
+
     static String[] transportProtocols(int selection) {
-        switch (selection) {
-            case 1: return new String[]{"SSH", "OSSH"};
-            case 2: return new String[]{"QUIC-OSSH"};
-            case 3: return new String[]{
-                    "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH",
-                    "UNFRONTED-MEEK-SESSION-TICKET-OSSH"};
-            case 4: return new String[]{
-                    "FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH",
-                    "FRONTED-MEEK-QUIC-OSSH"};
-            case 5: return new String[]{"TLS-OSSH"};
-            case 6: return new String[]{"SHADOWSOCKS-OSSH"};
-            case 7: return new String[]{"CONJURE-OSSH"};
-            case 8: return new String[]{
-                    // WebRTC first hop in front of every compatible base
-                    // protocol (all except the refraction-networking ones).
-                    "INPROXY-WEBRTC-SSH", "INPROXY-WEBRTC-OSSH",
-                    "INPROXY-WEBRTC-TLS-OSSH", "INPROXY-WEBRTC-SHADOWSOCKS-OSSH",
-                    "INPROXY-WEBRTC-QUIC-OSSH",
-                    "INPROXY-WEBRTC-UNFRONTED-MEEK-OSSH",
-                    "INPROXY-WEBRTC-UNFRONTED-MEEK-HTTPS-OSSH",
-                    "INPROXY-WEBRTC-UNFRONTED-MEEK-SESSION-TICKET-OSSH",
-                    "INPROXY-WEBRTC-FRONTED-MEEK-OSSH",
-                    "INPROXY-WEBRTC-FRONTED-MEEK-HTTP-OSSH",
-                    "INPROXY-WEBRTC-FRONTED-MEEK-QUIC-OSSH"};
-            default: return new String[0];
-        }
+        if (selection <= 0 || selection >= TRANSPORT_PROTOCOLS.length) return new String[0];
+        return new String[]{TRANSPORT_PROTOCOLS[selection]};
     }
 
     /** tunnel-core dropped the bare "socks" scheme; map it to socks5. */

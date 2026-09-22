@@ -384,12 +384,14 @@ class MainActivity : AppCompatActivity() {
                             commandConnecting = false
                             lastBroadcastGeneration = gen
                             connecting = false
-                            engineRunning = false
-                            vpnActive = false
+                            // Stop only turns the TUN interface off: the
+                            // session keeps flowing through the UI exactly
+                            // as it is -- the status stays whatever the
+                            // engine renders, polling and stats continue,
+                            // and the rates fall to zero on their own
+                            // because no traffic flows. The Start button is
+                            // the only visible difference.
                             updateButton()
-                            statusText.text = "STOPPED"
-                            statusText.setTextColor(Color.parseColor("#8A93A6"))
-                            handler.removeCallbacks(poll)
                         } else if (!isRunning && !isPaused) {
 
                             lastBroadcastGeneration = gen
@@ -620,7 +622,8 @@ class MainActivity : AppCompatActivity() {
             this, R.layout.spinner_dark_item,
             listOf("No bridges", "obfs4", "snowflake", "Custom lines"),
         )
-        // Psiphon transport families. Index maps 1:1 onto
+        // One entry per tunnel-core protocol, labeled with the verbatim
+        // protocol name. Index maps 1:1 onto
         // PsiphonTunnelService.transportProtocols(); 0 = Auto leaves
         // LimitTunnelProtocols unset (tunnel-core tries its full set).
         // Covers every protocol tunnel-core accepts: TapDance is the only
@@ -628,8 +631,19 @@ class MainActivity : AppCompatActivity() {
         // naming it fails config validation.
         spinnerPsiphonTransport.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
-            listOf("Auto", "SSH", "QUIC", "Unfronted meek", "Fronted meek",
-                   "TLS", "Shadowsocks", "Conjure", "In-proxy"),
+            listOf("Auto", "SSH", "OSSH", "TLS-OSSH", "SHADOWSOCKS-OSSH",
+                   "QUIC-OSSH", "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH",
+                   "UNFRONTED-MEEK-SESSION-TICKET-OSSH", "FRONTED-MEEK-OSSH",
+                   "FRONTED-MEEK-HTTP-OSSH", "FRONTED-MEEK-QUIC-OSSH",
+                   "CONJURE-OSSH", "INPROXY-WEBRTC-SSH", "INPROXY-WEBRTC-OSSH",
+                   "INPROXY-WEBRTC-TLS-OSSH", "INPROXY-WEBRTC-SHADOWSOCKS-OSSH",
+                   "INPROXY-WEBRTC-QUIC-OSSH",
+                   "INPROXY-WEBRTC-UNFRONTED-MEEK-OSSH",
+                   "INPROXY-WEBRTC-UNFRONTED-MEEK-HTTPS-OSSH",
+                   "INPROXY-WEBRTC-UNFRONTED-MEEK-SESSION-TICKET-OSSH",
+                   "INPROXY-WEBRTC-FRONTED-MEEK-OSSH",
+                   "INPROXY-WEBRTC-FRONTED-MEEK-HTTP-OSSH",
+                   "INPROXY-WEBRTC-FRONTED-MEEK-QUIC-OSSH"),
         )
         // Verbosity of the aether ENGINE. Positions map 1:1 onto
         // FcaeEngineLog; index 3 = info is the default.
@@ -907,7 +921,7 @@ class MainActivity : AppCompatActivity() {
                         renderPsiStats()
                     }
                 } else if (try { NativeEngine.nativeTunPaused() } catch (_: Throwable) { false }) {
-                    handler.post { showStoppedFromPause() }
+                    handler.post { restorePausedSession() }
                 } else {
                     val state = NativeEngine.nativeGetState()
                     // 1..4 = running, 6 = Reconnecting (session alive, the engine
@@ -985,16 +999,19 @@ class MainActivity : AppCompatActivity() {
         saveSettings()
     }
 
-    private fun showStoppedFromPause() {
+    /** Restore the UI for a session whose TUN is turned off by Stop: it
+     *  renders exactly like a live one -- status and stats keep flowing
+     *  from the engine state -- with the Start button as the only
+     *  difference. */
+    private fun restorePausedSession() {
         commandPaused = true
         commandConnecting = false
         connecting = false
-        engineRunning = false
-        vpnActive = false
+        vpnActive = true
+        engineRunning = true
         updateButton()
-        statusText.text = "STOPPED"
-        statusText.setTextColor(Color.parseColor("#8A93A6"))
         handler.removeCallbacks(poll)
+        handler.post(poll)
     }
 
     override fun onResume() {
@@ -1009,7 +1026,7 @@ class MainActivity : AppCompatActivity() {
         }
         val tunPaused = try { NativeEngine.nativeTunPaused() } catch (_: Throwable) { false }
         if (commandPaused || tunPaused) {
-            showStoppedFromPause()
+            restorePausedSession()
             return
         }
         // Pure Psiphon proxy mode is owned by PsiphonTunnelService and its
@@ -1406,7 +1423,7 @@ class MainActivity : AppCompatActivity() {
         editPsiphonHttpPort.setText(prefs.getString("psiphonHttpPort", PsiphonTunnelService.DEFAULT_HTTP_PORT.toString()))
         savedPsiphonRegion = prefs.getString("psiphonRegion", "") ?: ""
         refreshPsiphonRegions()
-        spinnerPsiphonTransport.setSelection(prefs.getInt("psiphonTransport", 0).coerceIn(0, 8))
+        spinnerPsiphonTransport.setSelection(prefs.getInt("psiphonTransport", 0).coerceIn(0, 23))
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", false)
         switchLan.isChecked = prefs.getBoolean("lan", false)
@@ -2033,16 +2050,6 @@ class MainActivity : AppCompatActivity() {
             // In proxy mode, this is the ONLY source of truth — there are no
             // service broadcasts. In TUN mode, broadcasts may also update
             // these, but the poll always has the freshest data.
-            if (commandPaused) {
-                // Notification Stop owns the UI until Start/Disconnect.
-                engineRunning = false
-                connecting = false
-                vpnActive = false
-                statusText.text = "STOPPED"
-                statusText.setTextColor(Color.parseColor("#8A93A6"))
-                updateButton()
-                return
-            }
             if (vpnActive) {
                 // State 6 = Reconnecting: the session is still alive and the
                 // engine is recovering the tunnel on its own. Treat it as an
@@ -2294,10 +2301,9 @@ class MainActivity : AppCompatActivity() {
         return psiphonRegionCodes.getOrElse(i) { savedPsiphonRegion }
     }
 
-    /** Transport spinner position: 0 = Auto, 1 = SSH, 2 = QUIC,
-     *  3 = unfronted meek, 4 = fronted meek, 5 = TLS, 6 = Shadowsocks,
-     *  7 = Conjure, 8 = in-proxy (matches the programmatic adapter and
-     *  PsiphonTunnelService.transportProtocols). */
+    /** Transport spinner position: 0 = Auto; 1-12 the base protocols;
+     *  13-23 their INPROXY-WEBRTC variants (matches the programmatic
+     *  adapter and PsiphonTunnelService.transportProtocols). */
     private fun selectedPsiphonTransportIndex(): Int =
         if (!::spinnerPsiphonTransport.isInitialized)
             prefs.getInt("psiphonTransport", 0)

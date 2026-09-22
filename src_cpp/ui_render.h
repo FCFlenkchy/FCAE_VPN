@@ -339,47 +339,35 @@ struct AppState {
         return c;
     }
 
-    /// Splice "LimitTunnelProtocols" for the selected transport family.
+    /// Splice "LimitTunnelProtocols" for the selected transport.
     /// 0 = Auto: omit the field entirely so tunnel-core uses its full
-    /// default protocol set. Names are the exact constants from
-    /// tunnel-core's protocol.go SupportedTunnelProtocols — an unsupported
-    /// name (or the client-disabled TAPDANCE-OSSH) fails config validation
-    /// and the whole start. Index order is stable: 1-4 keep their meaning
-    /// across versions so saved configs never remap; new families append.
+    /// default protocol set. Every other entry is exactly one protocol,
+    /// named with the verbatim constant from tunnel-core's protocol.go
+    /// SupportedTunnelProtocols — an unsupported name (or the
+    /// client-disabled TAPDANCE-OSSH) fails config validation and the whole
+    /// start. Index order is stable across versions so saved configs never
+    /// remap; new protocols append. Keep in step with the combo labels in
+    /// ui_render.cpp and with PsiphonTunnelService.TRANSPORT_PROTOCOLS.
     static std::string merge_psiphon_transport(const std::string& json, int selection) {
-        static const char* const kGroups[][12] = {
-            {nullptr},
-            {"SSH", "OSSH", nullptr},                                  // SSH family
-            {"QUIC-OSSH", nullptr},                                    // QUIC
-            {"UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH",
-             "UNFRONTED-MEEK-SESSION-TICKET-OSSH", nullptr},
-            {"FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH",
-             "FRONTED-MEEK-QUIC-OSSH", nullptr},
-            {"TLS-OSSH", nullptr},                                     // TLS
-            {"SHADOWSOCKS-OSSH", nullptr},                             // Shadowsocks
-            {"CONJURE-OSSH", nullptr},                                 // Conjure
-            // In-proxy: WebRTC first hop in front of every compatible base
-            // protocol (all except the refraction-networking ones).
-            {"INPROXY-WEBRTC-SSH", "INPROXY-WEBRTC-OSSH",
-             "INPROXY-WEBRTC-TLS-OSSH", "INPROXY-WEBRTC-SHADOWSOCKS-OSSH",
-             "INPROXY-WEBRTC-QUIC-OSSH",
-             "INPROXY-WEBRTC-UNFRONTED-MEEK-OSSH",
-             "INPROXY-WEBRTC-UNFRONTED-MEEK-HTTPS-OSSH",
-             "INPROXY-WEBRTC-UNFRONTED-MEEK-SESSION-TICKET-OSSH",
-             "INPROXY-WEBRTC-FRONTED-MEEK-OSSH",
-             "INPROXY-WEBRTC-FRONTED-MEEK-HTTP-OSSH",
-             "INPROXY-WEBRTC-FRONTED-MEEK-QUIC-OSSH", nullptr},
+        static const char* const kProtocols[] = {
+            nullptr,                                                   // 0: Auto
+            "SSH", "OSSH", "TLS-OSSH", "SHADOWSOCKS-OSSH", "QUIC-OSSH",
+            "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH",
+            "UNFRONTED-MEEK-SESSION-TICKET-OSSH",
+            "FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH",
+            "FRONTED-MEEK-QUIC-OSSH", "CONJURE-OSSH",
+            "INPROXY-WEBRTC-SSH", "INPROXY-WEBRTC-OSSH",
+            "INPROXY-WEBRTC-TLS-OSSH", "INPROXY-WEBRTC-SHADOWSOCKS-OSSH",
+            "INPROXY-WEBRTC-QUIC-OSSH",
+            "INPROXY-WEBRTC-UNFRONTED-MEEK-OSSH",
+            "INPROXY-WEBRTC-UNFRONTED-MEEK-HTTPS-OSSH",
+            "INPROXY-WEBRTC-UNFRONTED-MEEK-SESSION-TICKET-OSSH",
+            "INPROXY-WEBRTC-FRONTED-MEEK-OSSH",
+            "INPROXY-WEBRTC-FRONTED-MEEK-HTTP-OSSH",
+            "INPROXY-WEBRTC-FRONTED-MEEK-QUIC-OSSH",
         };
-        if (selection <= 0 || selection >= (int)(sizeof(kGroups) / sizeof(kGroups[0])))
+        if (selection <= 0 || selection >= (int)(sizeof(kProtocols) / sizeof(kProtocols[0])))
             return json;
-        std::string arr = "\"LimitTunnelProtocols\":[";
-        bool first = true;
-        for (int i = 0; kGroups[selection][i]; ++i) {
-            if (!first) arr += ",";
-            arr += std::string("\"") + kGroups[selection][i] + "\"";
-            first = false;
-        }
-        arr += "]";
         if (json.find("\"LimitTunnelProtocols\"") != std::string::npos) return json;
         size_t close = json.find_last_of('}');
         if (close == std::string::npos) return json;
@@ -387,7 +375,7 @@ struct AppState {
         while (!out.empty() && (out.back() == ' ' || out.back() == '\n' ||
                                 out.back() == '\r' || out.back() == '\t')) out.pop_back();
         if (!out.empty() && out.back() == ',') out.pop_back();
-        return out + "," + arr + "}";
+        return out + ",\"LimitTunnelProtocols\":[\"" + kProtocols[selection] + "\"]}";
     }
 
     /// Splice "key": "value" into a flat Psiphon config JSON object.
