@@ -2135,7 +2135,7 @@ class MainActivity : AppCompatActivity() {
             }
             // Show only listeners belonging to the active backend. Tor-only
             // has its own SOCKS port; Psiphon has ports assigned by its service.
-            if (state == 4 && !isPsiphonSelected()) {
+            if ((state == 4 || state == 6) && !isPsiphonSelected()) {
                 fun endpoints(backend: String, socks: String?, http: String?) {
                     val local = mutableListOf<String>()
                     val shared = mutableListOf<String>()
@@ -2156,7 +2156,7 @@ class MainActivity : AppCompatActivity() {
                     editTorSocksPort.text.toString().trim().ifEmpty { "1821" },
                     if (switchTorHttp.isChecked) editTorHttpPort.text.toString() else null)
             }
-            if (state == 4 && (isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0)
+            if ((state == 4 || state == 6) && (isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0)
                 peerLine.append("\n" + psiphonEndpointText(nativeLanFallback(lan)))
             // Only append error here if not already shown in statusText (state 5 = ERROR)
             if (errMsg.isNotEmpty() && state != 5) peerLine.append("\nError: $errMsg")

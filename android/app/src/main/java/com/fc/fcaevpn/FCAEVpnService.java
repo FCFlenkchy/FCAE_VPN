@@ -1299,17 +1299,10 @@ public class FCAEVpnService extends VpnService {
         shuttingDown = false;
         uiConnecting = true;
         pendingSessionGen = cleanupGeneration.get();
-        // Root cause: resume showed zero for 0.1s then old totals – show last totals immediately
-        if (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
-            notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats), VpnNotification.BUTTONS_CONNECTING);
-            startFg(notification.build(ProxyNotification.psiphonTrafficText(lastPsiphonStats), VpnNotification.BUTTONS_CONNECTING));
-        } else if (lastTotalRx > 0 || lastTotalTx > 0) {
-            notification.show(VpnNotification.trafficText(lastRx, lastTx, lastTotalRx, lastTotalTx), VpnNotification.BUTTONS_CONNECTING);
-            startFg(notification.build(VpnNotification.trafficText(lastRx, lastTx, lastTotalRx, lastTotalTx), VpnNotification.BUTTONS_CONNECTING));
-        } else {
-            notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
+        updateNotification();
+        try {
             startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
-        }
+        } catch (Exception ignored) {}
         notifyUi();
 
         final Intent fallback = lastStartIntent;
@@ -1382,8 +1375,6 @@ public class FCAEVpnService extends VpnService {
     }
 
     private Intent lastPsiphonStats;
-    // Cache for smooth pause/resume – rates 0 when paused, totals stay, never 0 flicker
-    private long lastRx = 0, lastTx = 0, lastTotalRx = 0, lastTotalTx = 0;
     private final android.content.BroadcastReceiver psiphonStatsReceiver = new android.content.BroadcastReceiver() {
         @Override public void onReceive(android.content.Context context, Intent intent) {
             if (PsiphonTunnelService.BROADCAST_READY.equals(intent.getAction())) {
@@ -1441,25 +1432,38 @@ public class FCAEVpnService extends VpnService {
     // notification id while its tunnel (re)dials, and the next tick must
     // always restore the owner's content.
     private void updateNotification() {
+        boolean psiphonExpected = PsiphonTunnelService.hasActiveBinding() ||
+                (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) ||
+                (lastStartIntent != null && lastStartIntent.getBooleanExtra("psiphonThroughTunnel", false));
+
         if (uiConnecting) {
-            // Avoid 0.1s zero flinch: show last known totals (Psiphon or Rust) during resume
-            if (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
-                notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats), VpnNotification.BUTTONS_CONNECTING);
-            } else if (lastTotalRx > 0 || lastTotalTx > 0) {
-                notification.show(VpnNotification.trafficText(lastRx, lastTx, lastTotalRx, lastTotalTx),
-                        VpnNotification.BUTTONS_CONNECTING);
-            } else {
-                notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
-            }
-        } else if (vpnPaused || running) {
-            final int buttons = vpnPaused
-                    ? VpnNotification.BUTTONS_PAUSED
-                    : VpnNotification.BUTTONS_RUNNING;
-            // Root cause fix: Psiphon exit was double-polled – hasActiveBinding flips during rebind (1.5s gap)
-            // causing Rust 0 then Psiphon old totals -> reset/back/flinch.
-            // Show Psiphon stats if current, regardless of binding (covers rebind), else Rust with cache fallback
+            int buttons = VpnNotification.BUTTONS_CONNECTING;
             if (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
                 notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats), buttons);
+            } else if (psiphonExpected) {
+                notification.show(VpnNotification.zeroTrafficText(), buttons);
+            } else {
+                long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
+                try {
+                    long[] stats = nativeGetTrafficStats();
+                    if (stats != null && stats.length >= 4) {
+                        rx = stats[0]; tx = stats[1]; totalRx = stats[2]; totalTx = stats[3];
+                    }
+                } catch (Exception ignored) {}
+                if (totalRx > 0 || totalTx > 0 || rx > 0 || tx > 0) {
+                    notification.show(VpnNotification.trafficText(rx, tx, totalRx, totalTx), buttons);
+                } else {
+                    notification.show(VpnNotification.zeroTrafficText(), buttons);
+                }
+            }
+        } else if (vpnPaused || running) {
+            int buttons = vpnPaused ? VpnNotification.BUTTONS_PAUSED : VpnNotification.BUTTONS_RUNNING;
+            if (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
+                notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats), buttons);
+                return;
+            }
+            if (psiphonExpected) {
+                notification.show(VpnNotification.zeroTrafficText(), buttons);
                 return;
             }
             long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
@@ -1469,17 +1473,9 @@ public class FCAEVpnService extends VpnService {
                     rx = stats[0]; tx = stats[1]; totalRx = stats[2]; totalTx = stats[3];
                 }
             } catch (Exception ignored) {}
-            // When paused, rates go 0 but totals must stay – never pin to 0
-            if (totalRx > 0 || totalTx > 0 || rx > 0 || tx > 0) {
-                lastRx = rx; lastTx = tx; lastTotalRx = totalRx; lastTotalTx = totalTx;
-            } else if (lastTotalRx > 0 || lastTotalTx > 0) {
-                totalRx = lastTotalRx; totalTx = lastTotalTx; rx = 0; tx = 0;
-            }
             notification.show(VpnNotification.trafficText(rx, tx, totalRx, totalTx), buttons);
         } else {
-            // Fully disconnected – clear caches so fresh connect starts at 0
             lastPsiphonStats = null;
-            lastRx = 0; lastTx = 0; lastTotalRx = 0; lastTotalTx = 0;
             notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_PAUSED);
         }
     }

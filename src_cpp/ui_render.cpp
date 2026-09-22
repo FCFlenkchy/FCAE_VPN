@@ -1032,7 +1032,7 @@ void render_ui() {
     const FcaeTelemetry& telem = g_app.telem;
 
     FcaeState cur = (FcaeState)telem.state;
-    bool connected  = (cur == FCAE_STATE_CONNECTED);
+    bool connected  = (cur == FCAE_STATE_CONNECTED || cur == FCAE_STATE_RECONNECTING);
     bool busy       = (cur == FCAE_STATE_PROVISIONING || cur == FCAE_STATE_SCANNING
                        || cur == FCAE_STATE_CONNECTING || cur == FCAE_STATE_RECONNECTING)
                       || g_app.start_busy.load();
