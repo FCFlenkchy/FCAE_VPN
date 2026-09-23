@@ -6,6 +6,12 @@
 
 **[English](README.md)** | **[فارسی](READMEFA.md)** | **中文**
 
+<p align="center">
+  <a href="https://t.me/FCAE_VPN">
+    <img src="https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="Telegram channel @FCAE_VPN">
+  </a>
+</p>
+
 一款为高度受限网络设计的审查绕过客户端。它会自动发现可达路由，建立加密隧道，并为您的应用程序暴露本地 SOCKS5/HTTP 代理。
 
 基于 **[Aether](https://github.com/CluvexStudio/aether)** 构建，提供 Windows、Linux、macOS 和 Android 的原生 GUI 前端。
@@ -171,11 +177,29 @@ cmake --build build --config Release
 - **[tun2socks](https://github.com/xjasonlyu/tun2socks)** — 一个 Go 库，可透明地将 TUN 设备流量通过 SOCKS5 代理路由。为所有支持的平台（Linux、Windows、macOS 和 Android）上的系统级 VPN TUN 模式提供支持。
 - **[zeptun](https://github.com/Noisemux/zeptun)** — 使用 Zig 编写的 TUN 引擎，通过静态链接在应用进程内运行。在 Linux、macOS 和 Android 上提供 tun2socks 之外的另一种选择。
 
+## Telegram 频道
+
+欢迎加入我们的官方 Telegram 频道，第一时间获取版本发布、连接状态与配置技巧，并与开发者和其他用户交流：
+
+<p align="center">
+  <a href="https://t.me/FCAE_VPN">
+    <img src="https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram channel @FCAE_VPN">
+  </a>
+</p>
+
+- **版本发布** — 新版本发布、更新日志以及各平台的注意事项。
+- **连接状态** — 端点被封锁或线路变更时的及时通知。
+- **支持与交流** — 配置帮助、故障排查，以及来自开发者和其他用户的解答。
+
+Bug 反馈与功能建议请提交到 **[GitHub Issues](https://github.com/FCFlenkchy/FCAE_VPN/issues)**，以便跟踪与检索；Telegram 频道适合日常交流与提问。
+
 ## 贡献
 
 欢迎贡献！无论是错误报告、功能请求、文档改进还是代码贡献 — 都可以提交 Issue 或 Pull Request。
 
 ### 如何贡献
+
+日常提问与交流请加入 [Telegram 频道](https://t.me/FCAE_VPN)。
 
 1. Fork 本仓库
 2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
@@ -195,6 +219,6 @@ cmake --build build --config Release
 
 如果这个项目帮助您绕过了审查，或者为您节省了时间，请考虑给一个 **Star** — 这能帮助更多人发现这个工具，也是持续开发的动力。
 
-[![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN)
+[![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN) &nbsp; [![Telegram](https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?logo=telegram&logoColor=white)](https://t.me/FCAE_VPN)
 
 </div>

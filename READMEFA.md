@@ -6,6 +6,12 @@
 
 **[English](README.md)** | **فارسی** | **[中文](READMECH.md)**
 
+<p align="center">
+  <a href="https://t.me/FCAE_VPN">
+    <img src="https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="Telegram channel @FCAE_VPN">
+  </a>
+</p>
+
 یک فیلترشکنی که برای دور زدن سانسور طراحی‌شده، حتی برای شبکه‌های به‌شدت محدود! این ابزار به‌طور خودکار مسیرهای قابل‌دسترس را کشف می‌کند، و یک تونل رمزگذاری‌شده برقرار می‌کند و یک پروکسی محلی SOCKS5/HTTP برای برنامه‌های شما فراهم می‌کند.
 
 ساخته‌شده بر پایه **[Aether](https://github.com/CluvexStudio/aether)** با رابط گرافیکی بومی برای ویندوز، لینوکس، مک و اندروید.
@@ -171,11 +177,29 @@ cmake --build build --config Release
 - **[tun2socks](https://github.com/xjasonlyu/tun2socks)** — یک کتابخانه Go که ترافیک دستگاه TUN را به‌صورت شفاف از طریق پروکسی SOCKS5 مسیریابی می‌کند. قدرت‌دهنده حالت TUN VPN در سطح سیستم در تمام پلتفرم‌های پشتیبانی‌شده (لینوکس، ویندوز، مک و اندروید).
 - **[zeptun](https://github.com/Noisemux/zeptun)** — موتور TUN نوشته‌شده با Zig که به‌صورت ایستا پیوند داده می‌شود و داخل فرایند برنامه اجرا می‌شود. گزینه‌ای جایگزین برای tun2socks در لینوکس، مک و اندروید فراهم می‌کند.
 
+## کانال تلگرام
+
+برای اطلاع از انتشار نسخه‌های جدید، وضعیت اتصال و نکات پیکربندی — و همچنین دریافت پشتیبانی و پاسخ پرسش‌ها — به کانال رسمی ما در تلگرام بپیوندید:
+
+<p align="center">
+  <a href="https://t.me/FCAE_VPN">
+    <img src="https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram channel @FCAE_VPN">
+  </a>
+</p>
+
+- **اطلاعیه نسخه‌ها** — انتشار نسخه‌های جدید، فهرست تغییرات و نکات مربوط به هر پلتفرم.
+- **وضعیت اتصال** — اطلاع‌رسانی زودهنگام درباره مسدود شدن نقاط اتصال و تغییر مسیرها.
+- **پشتیبانی و راهنمایی** — کمک در راه‌اندازی و رفع اشکال، از سوی توسعه‌دهنده و سایر کاربران.
+
+برای گزارش باگ و درخواست ویژگی از **[GitHub Issues](https://github.com/FCFlenkchy/FCAE_VPN/issues)** استفاده کنید تا پیگیری و جست‌وجو ساده بماند؛ کانال تلگرام برای گفتگو، پرسش و اطلاع‌رسانی است.
+
 ## مشارکت
 
 مشارکت‌ها خوش‌آمد هستند! چه گزارش باگ، درخواست ویژگی، بهبود مستندات یا مشارکت کد — می‌توانید یک Issue یا Pull Request باز کنید.
 
 ### نحوه مشارکت
+
+برای پرسش‌ها و گفتگوی عمومی به [کانال تلگرام](https://t.me/FCAE_VPN) بپیوندید.
 
 1. مخزن را Fork کنید
 2. یک شاخه ویژگی بسازید (`git checkout -b feature/amazing-feature`)
@@ -195,6 +219,6 @@ cmake --build build --config Release
 
 اگر این پروژه به شما در دور زدن سانسور کمک کرد یا وقتتان را ذخیره کرد، لطفاً یک **ستاره** بدهید، این کار به دیگران کمک می‌کند ابزار را پیدا کنند و انگیزه‌ای برای ادامه توسعه است...
 
-[![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN)
+[![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN) &nbsp; [![Telegram](https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?logo=telegram&logoColor=white)](https://t.me/FCAE_VPN)
 
 </div>
