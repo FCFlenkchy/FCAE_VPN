@@ -2165,7 +2165,7 @@ class MainActivity : AppCompatActivity() {
                     val labelView = android.widget.TextView(this@MainActivity).apply {
                         setTextColor(Color.parseColor("#FFE8ECF4"))
                         textSize = 14f
-                        singleLine = true
+                        isSingleLine = true
                         ellipsize = android.text.TextUtils.TruncateAt.END
                     }
                     textCol.addView(labelView)
@@ -2173,7 +2173,7 @@ class MainActivity : AppCompatActivity() {
                     val pkgView = android.widget.TextView(this@MainActivity).apply {
                         setTextColor(Color.parseColor("#FF6B7280"))
                         textSize = 11f
-                        singleLine = true
+                        isSingleLine = true
                         ellipsize = android.text.TextUtils.TruncateAt.END
                     }
                     textCol.addView(pkgView)
