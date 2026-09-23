@@ -586,7 +586,7 @@ macro_rules! impl_try_from_enum {
         impl TryFrom<u32> for $ty {
             type Error = ();
             #[inline]
-            fn try_from(v: u32) -> Result<Self, Self::Error> {
+            fn try_from(v: u32) -> Result<Self, ()> {
                 match v {
                     $($val => Ok($ty::$var),)+
                     _ => Err(()),
@@ -596,7 +596,7 @@ macro_rules! impl_try_from_enum {
         impl TryFrom<i32> for $ty {
             type Error = ();
             #[inline]
-            fn try_from(v: i32) -> Result<Self, Self::Error> {
+            fn try_from(v: i32) -> Result<Self, ()> {
                 if v < 0 {
                     Err(())
                 } else {
