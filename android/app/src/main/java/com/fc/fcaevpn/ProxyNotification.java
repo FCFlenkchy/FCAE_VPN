@@ -259,6 +259,7 @@ public class ProxyNotification extends Service {
      * shared entry never differs from what this owner shows. Mirrors
      * showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING).
      */
+    @SuppressWarnings("deprecation")
     public static Notification buildConnecting(android.content.Context context) {
         PendingIntent piMain = PendingIntent.getActivity(context, 20,
             new Intent(context, MainActivity.class),
