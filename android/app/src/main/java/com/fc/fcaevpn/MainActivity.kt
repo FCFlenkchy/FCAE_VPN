@@ -2122,6 +2122,13 @@ class MainActivity : AppCompatActivity() {
         }
         rootLayout.addView(listView, listParams)
 
+        class AppItemViewHolder(
+            val iconView: android.widget.ImageView,
+            val labelView: android.widget.TextView,
+            val pkgView: android.widget.TextView,
+            val checkBox: android.widget.CheckBox
+        )
+
         class AppListAdapter : android.widget.BaseAdapter() {
             override fun getCount(): Int = filteredList.size
             override fun getItem(position: Int): AppEntry = filteredList[position]
@@ -2129,15 +2136,12 @@ class MainActivity : AppCompatActivity() {
 
             override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup?): android.view.View {
                 val row: android.widget.LinearLayout
-                val iconView: android.widget.ImageView
-                val labelView: android.widget.TextView
-                val checkBox: android.widget.CheckBox
+                val holder: AppItemViewHolder
 
-                if (convertView is android.widget.LinearLayout) {
+                val tag = convertView?.tag
+                if (convertView is android.widget.LinearLayout && tag is AppItemViewHolder) {
                     row = convertView
-                    iconView = row.getChildAt(0) as android.widget.ImageView
-                    labelView = row.getChildAt(1) as android.widget.TextView
-                    checkBox = row.getChildAt(2) as android.widget.CheckBox
+                    holder = tag
                 } else {
                     row = android.widget.LinearLayout(this@MainActivity).apply {
                         orientation = android.widget.LinearLayout.HORIZONTAL
@@ -2146,7 +2150,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     val iconSize = (36 * density).toInt()
-                    iconView = android.widget.ImageView(this@MainActivity).apply {
+                    val iconView = android.widget.ImageView(this@MainActivity).apply {
                         layoutParams = android.widget.LinearLayout.LayoutParams(iconSize, iconSize).apply {
                             rightMargin = pad12
                         }
@@ -2158,33 +2162,39 @@ class MainActivity : AppCompatActivity() {
                         layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                     }
 
-                    labelView = android.widget.TextView(this@MainActivity).apply {
+                    val labelView = android.widget.TextView(this@MainActivity).apply {
                         setTextColor(Color.parseColor("#FFE8ECF4"))
                         textSize = 14f
+                        singleLine = true
+                        ellipsize = android.text.TextUtils.TruncateAt.END
                     }
                     textCol.addView(labelView)
 
                     val pkgView = android.widget.TextView(this@MainActivity).apply {
                         setTextColor(Color.parseColor("#FF6B7280"))
                         textSize = 11f
+                        singleLine = true
+                        ellipsize = android.text.TextUtils.TruncateAt.END
                     }
                     textCol.addView(pkgView)
 
                     row.addView(textCol)
 
-                    checkBox = android.widget.CheckBox(this@MainActivity).apply {
+                    val checkBox = android.widget.CheckBox(this@MainActivity).apply {
                         isClickable = false
                         isFocusable = false
                     }
                     row.addView(checkBox)
+
+                    holder = AppItemViewHolder(iconView, labelView, pkgView, checkBox)
+                    row.tag = holder
                 }
 
                 val entry = getItem(position)
-                iconView.setImageDrawable(entry.icon)
-                val textCol = row.getChildAt(1) as android.widget.LinearLayout
-                (textCol.getChildAt(0) as android.widget.TextView).text = entry.label
-                (textCol.getChildAt(1) as android.widget.TextView).text = entry.packageName
-                checkBox.isChecked = tempSelected.contains(entry.packageName)
+                holder.iconView.setImageDrawable(entry.icon)
+                holder.labelView.text = entry.label
+                holder.pkgView.text = entry.packageName
+                holder.checkBox.isChecked = tempSelected.contains(entry.packageName)
 
                 return row
             }

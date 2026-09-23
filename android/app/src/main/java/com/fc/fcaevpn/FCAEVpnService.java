@@ -148,6 +148,7 @@ public class FCAEVpnService extends VpnService {
             }
             if (running && !shuttingDown && !vpnPaused) PsiphonTunnelService.pollChainedRequest(FCAEVpnService.this);
             updateNotification();
+            notifyUi();
             // Keep ticking while paused: Stop only turns the TUN off, so
             // the notification flows on like a live session's.
             if (running || vpnPaused) handler.postDelayed(this, 1000);
@@ -1309,6 +1310,17 @@ public class FCAEVpnService extends VpnService {
         intent.putExtra("paused", vpnPaused && !uiConnecting);
         intent.putExtra("connecting", uiConnecting);
         intent.putExtra("generation", sGeneration.get());
+        try {
+            long[] stats = nativeGetTrafficStats();
+            if (stats != null && stats.length >= 4) {
+                intent.putExtra("rx", stats[0]);
+                intent.putExtra("tx", stats[1]);
+                intent.putExtra("totalRx", stats[2]);
+                intent.putExtra("totalTx", stats[3]);
+            }
+            int rtt = NativeEngine.nativeGetRttMs();
+            intent.putExtra("rtt", rtt);
+        } catch (Exception ignored) {}
         sendBroadcast(intent);
     }
 

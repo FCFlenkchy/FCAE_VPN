@@ -72,5 +72,23 @@
                 android:value="psiphon-tunnel" />
         </service>
 
+        <receiver
+            android:name=".VpnWidgetProvider"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.fc.fcaevpn.VPN_STATE_CHANGED" />
+                <action android:name="com.fc.fcaevpn.VPN_DISCONNECTED" />
+                <action android:name="com.fc.fcaevpn.PSI_READY" />
+                <action android:name="com.fc.fcaevpn.PSI_FAILED" />
+                <action android:name="com.fc.fcaevpn.PSI_STOPPED" />
+                <action android:name="com.fc.fcaevpn.PSI_STATS" />
+                <action android:name="com.fc.fcaevpn.WIDGET_TOGGLE" />
+                <action android:name="com.fc.fcaevpn.WIDGET_PAUSE_RESUME" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_vpn_info" />
+        </receiver>
     </application>
 </manifest>
