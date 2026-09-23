@@ -43,6 +43,7 @@ static char s_update_latest[32] = {};
 static char s_update_notes[1024] = {};
 static char s_update_dl_url[512] = {};
 static bool s_update_popup_open = false;
+static bool s_about_popup_open = false;
 static char s_update_date[32] = {};
 static std::chrono::steady_clock::time_point s_check_start_time = std::chrono::steady_clock::now();
 static bool s_update_in_progress = false;
@@ -163,6 +164,7 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, s_update_available);
     h = fnv_value(h, s_update_in_progress);
     h = fnv_value(h, s_update_popup_open);
+    h = fnv_value(h, s_about_popup_open);
     h = fnv_cstr(h, s_update_status);
     h = fnv_cstr(h, s_update_latest);
     h = fnv_cstr(h, s_update_notes);
@@ -1001,6 +1003,68 @@ static std::string psiphon_region_label(const std::string& code) {
     return code;
 }
 
+// ── External links ───────────────────────────────────────────────────────
+// https only, host-allowlisted, exec'd as one argv entry (never shell text).
+static bool open_external_url(const char* url) {
+    if (!url || strncmp(url, "https://", 8) != 0) return false;
+
+    static const char* const kAllowedHosts[] = { "github.com", "t.me" };
+    const char* host = url + 8;
+    bool host_ok = false;
+    for (const char* allowed : kAllowedHosts) {
+        const size_t n = strlen(allowed);
+        if (strncmp(host, allowed, n) == 0 && (host[n] == '/' || host[n] == '\0')) {
+            host_ok = true;
+            break;
+        }
+    }
+    if (!host_ok) return false;
+
+    for (const char* c = url; *c; ++c) {
+        if (*c == '\'' || *c == '"' || *c == '`' || *c == '\\' ||
+            *c == '\n' || *c == '\r') return false;
+    }
+
+#if defined(_WIN32)
+    return (INT_PTR)ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL) > 32;
+#elif defined(ANDROID)
+    return false;
+#else
+    pid_t pid = fork();
+    if (pid == 0) {
+#if defined(__APPLE__)
+        execlp("open", "open", url, static_cast<char*>(nullptr));
+#else
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+        execlp("xdg-open", "xdg-open", url, static_cast<char*>(nullptr));
+#endif
+        _exit(127);
+    }
+    if (pid < 0) return false;
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return status == 0;
+#endif
+}
+
+static void open_link(const char* url) {
+    if (open_external_url(url)) return;
+    ImGui::SetClipboardText(url);
+    g_app.add_log(FCAE_LOG_WARN, "[ui] could not open the link in a browser; it is on the clipboard");
+}
+
+static ImVec2 viewport_center() {
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    return ImVec2(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y * 0.5f);
+}
+
+struct CommunityLink { const char* label; const char* url; const char* shown; };
+static const CommunityLink kCommunityLinks[] = {
+    { "Telegram", "https://t.me/FCAE_VPN",                  "t.me/FCAE_VPN" },
+    { "GitHub",   "https://github.com/FCFlenkchy/FCAE_VPN", "github.com/FCFlenkchy/FCAE_VPN" },
+};
+
 void render_ui() {
     const ImGuiIO& io = ImGui::GetIO();
     const bool narrow = io.DisplaySize.x < 720.0f;
@@ -1035,22 +1099,28 @@ void render_ui() {
         ImVec4 sc = state_color(cur);
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
         ImGui::Text("FCAE VPN");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip("About");
+        }
+        if (ImGui::IsItemClicked()) s_about_popup_open = true;
         ImGui::PopStyleColor();
 
         ImGui::SameLine(0, 10);
-        ImGui::TextColored(ImVec4(0.62f, 0.66f, 0.74f, 1.0f), "%s", FCAE_VERSION);
-        ImGui::SameLine(0, 8);
-        if (build_is_prerelease()) {
-            ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.20f, 1.0f), "PRE-RELEASE");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("This build is a pre-release (%s).\n"
+        ImGui::TextColored(build_is_prerelease() ? ImVec4(1.0f, 0.72f, 0.20f, 1.0f)
+                                                : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
+                           "%s  |  %s", FCAE_VERSION,
+                           build_is_prerelease() ? "pre-release" : "release");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (build_is_prerelease())
+                ImGui::SetTooltip("About\nThis build is a pre-release (%s).\n"
                                   "Update checks offer only newer versions, respecting\n"
                                   "your pre-releases setting.", FCAE_VERSION);
-        } else {
-            ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.52f, 1.0f), "RELEASE");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("This build is a release (%s).", FCAE_VERSION);
+            else
+                ImGui::SetTooltip("About\nThis build is a release (%s).", FCAE_VERSION);
         }
+        if (ImGui::IsItemClicked()) s_about_popup_open = true;
         ImGui::SameLine(0, 10);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.75f, 0.80f, 1.0f));
         ImGui::Text("|");
@@ -1325,6 +1395,7 @@ void render_ui() {
             save_config();
         }
 
+
         if (g_app.save_status[0]) {
             ImGui::SameLine(0, 6);
             ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", g_app.save_status);
@@ -1422,6 +1493,7 @@ void render_ui() {
                 ImGui::OpenPopup("##update_popup");
                 s_update_popup_open = false;
             }
+            ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
             if (ImGui::BeginPopupModal("##update_popup", nullptr,
                     ImGuiWindowFlags_AlwaysAutoResize)) {
                 ImGui::Text("Update Available");
@@ -1439,77 +1511,76 @@ void render_ui() {
                 }
                 ImGui::Spacing();
                 if (s_update_dl_url[0]) {
-                    ImGui::Text("Download: %s", s_update_dl_url);
+                    // Defense-in-depth on top of the FFI-side prefix check.
+                    const std::string url = s_update_dl_url;
+                    const bool looks_safe =
+                        url.rfind("https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/", 0) == 0
+                        && url.find('\'') == std::string::npos
+                        && url.find('"') == std::string::npos
+                        && url.find('`') == std::string::npos
+                        && url.find('\\') == std::string::npos
+                        && url.find('\n') == std::string::npos
+                        && url.find('\r') == std::string::npos;
+                    if (looks_safe) {
+                        ImGui::Text("Download:");
+                        ImGui::SameLine(0, 6);
+                        if (ImGui::TextLink(url.c_str()))
+                            open_link(url.c_str());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", url.c_str());
+                    } else {
+                        ImGui::Text("Download: %s", s_update_dl_url);
+                    }
                     ImGui::Spacing();
-                    if (ImGui::Button("Open Release Page")) {
-                        // 1.3.5.4 PATCH: defense-in-depth against shell injection.
-                        // The Rust FFI validates the URL prefix is
-                        // https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/<tag>,
-                        // but shell-quote interpolation is fragile (a future
-                        // FFI change, or a tag char we didn't enumerate, would
-                        // become RCE). Use execvp with the URL as a single argv
-                        // entry so the OS handles it as a single argument, and
-                        // add a prefix guard so a regression in the FFI side
-                        // fails closed.
-                        const std::string url = s_update_dl_url;
-                        const bool looks_safe =
-                            url.rfind("https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/", 0) == 0
-                            && url.find('\'') == std::string::npos
-                            && url.find('"') == std::string::npos
-                            && url.find('`') == std::string::npos
-                            && url.find('\\') == std::string::npos
-                            && url.find('\n') == std::string::npos
-                            && url.find('\r') == std::string::npos;
-                        if (!looks_safe) {
+                    if (ImGui::Button("Open")) {
+                        if (!looks_safe)
                             g_app.add_log(FCAE_LOG_WARN,
                                 "[ui] refusing to open an update URL with unsafe characters");
-                        } else {
-#if defined(_WIN32)
-                            ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-#elif defined(__APPLE__)
-                            // `open` is itself a binary; pass the URL as argv[1]
-                            // (no shell) so a quote in the URL is harmless.
-                            pid_t pid = fork();
-                            if (pid == 0) {
-                                execlp("open", "open", url.c_str(), static_cast<char*>(nullptr));
-                                _exit(127);
-                            } else if (pid > 0) {
-                                int status = 0;
-                                waitpid(pid, &status, 0);
-                                if (status != 0) {
-                                    g_app.add_log(FCAE_LOG_WARN,
-                                        "[ui] `open` returned a non-zero status; the browser may not have launched");
-                                }
-                            } else {
-                                g_app.add_log(FCAE_LOG_WARN,
-                                    "[ui] could not fork() for `open`; please paste the URL into a browser manually");
-                            }
-#elif !defined(ANDROID)
-                            pid_t pid = fork();
-                            if (pid == 0) {
-                                // stderr is suppressed so the launch is silent.
-                                int devnull = open("/dev/null", O_WRONLY);
-                                if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
-                                execlp("xdg-open", "xdg-open", url.c_str(), static_cast<char*>(nullptr));
-                                _exit(127);
-                            } else if (pid > 0) {
-                                int status = 0;
-                                waitpid(pid, &status, 0);
-                                if (status != 0) {
-                                    g_app.add_log(FCAE_LOG_WARN,
-                                        "[ui] `xdg-open` returned a non-zero status; the URL is now on the clipboard -- paste it into a browser");
-                                    ImGui::SetClipboardText(url.c_str());
-                                }
-                            } else {
-                                g_app.add_log(FCAE_LOG_WARN,
-                                    "[ui] could not fork() for `xdg-open`; please paste the URL into a browser manually");
-                            }
-#else
-                            (void)url;
-#endif
-                        }
+                        else
+                            open_link(url.c_str());
                     }
                 }
+                ImGui::SameLine();
+                if (ImGui::Button("Close"))
+                    ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+            }
+
+            if (s_about_popup_open) {
+                ImGui::OpenPopup("##about_popup");
+                s_about_popup_open = false;
+            }
+            ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            if (ImGui::BeginPopupModal("##about_popup", nullptr,
+                    ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextUnformatted("FCAE VPN");
+                ImGui::TextColored(build_is_prerelease() ? ImVec4(1.0f, 0.72f, 0.20f, 1.0f)
+                                                         : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
+                                   "%s  |  %s", FCAE_VERSION,
+                                   build_is_prerelease() ? "pre-release" : "release");
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                for (const CommunityLink& link : kCommunityLinks) {
+                    if (ImGui::TextLink(link.label))
+                        open_link(link.url);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", link.url);
+                    ImGui::SameLine(96.0f);
+                    ImGui::TextDisabled("%s", link.shown);
+                }
+                ImGui::Spacing();
+                ImGui::TextDisabled("Released under the MIT License.");
+                ImGui::TextDisabled("Credits are listed in the");
+                ImGui::SameLine(0, 4);
+                if (ImGui::TextLink("GitHub repository"))
+                    open_link(kCommunityLinks[1].url);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", kCommunityLinks[1].url);
+                ImGui::Spacing();
+                if (ImGui::Button("Telegram")) open_link(kCommunityLinks[0].url);
+                ImGui::SameLine();
+                if (ImGui::Button("GitHub")) open_link(kCommunityLinks[1].url);
                 ImGui::SameLine();
                 if (ImGui::Button("Close"))
                     ImGui::CloseCurrentPopup();

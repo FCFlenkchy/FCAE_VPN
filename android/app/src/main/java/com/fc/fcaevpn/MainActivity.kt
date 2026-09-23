@@ -537,6 +537,7 @@ class MainActivity : AppCompatActivity() {
         editRoutesInline = findViewById(R.id.editRoutesInline)
         outerScroll = findViewById(R.id.outerScroll)
 
+
         // Tapping anywhere outside an EditText clears its focus and moves
         // focus to the decor view, preventing the system from immediately
         // re-assigning focus back to the same field.
@@ -728,9 +729,11 @@ class MainActivity : AppCompatActivity() {
         applyTorLock()
 
         findViewById<TextView>(R.id.versionText).apply {
-            text = "$displayVersion  \u00b7  ${if (buildIsPrerelease) "pre-release" else "release"}"
+            text = "$displayVersion  |  ${if (buildIsPrerelease) "pre-release" else "release"}"
             setTextColor(Color.parseColor(if (buildIsPrerelease) "#FFF0B429" else "#FF8A93A6"))
+            setOnClickListener { showAboutDialog() }
         }
+        findViewById<TextView>(R.id.title).setOnClickListener { showAboutDialog() }
 
         // Mode changes re-evaluate the tor hint (and nothing else: no control
         // is ever locked or re-pointed; TUN simply ignores the SOCKS switch,
@@ -1930,31 +1933,89 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    private fun addLink(s: android.text.SpannableString, label: String, url: String) {
+        var i = s.indexOf(label)
+        while (i >= 0) {
+            s.setSpan(object : android.text.style.ClickableSpan() {
+                override fun onClick(widget: android.view.View) {
+                    openExternal(url)
+                }
+
+                override fun updateDrawState(ds: android.text.TextPaint) {
+                    ds.color = COLOR_LINK
+                    ds.isUnderlineText = true
+                }
+            }, i, i + label.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            i = s.indexOf(label, i + label.length)
+        }
+    }
+
+    private fun showDialogMessage(dialog: androidx.appcompat.app.AlertDialog, msg: CharSequence) {
+        val view = dialog.findViewById<TextView>(android.R.id.message) ?: return
+        view.apply {
+            text = msg
+            setTextColor(Color.WHITE)
+            movementMethod = android.text.method.LinkMovementMethod.getInstance()
+        }
+    }
+
+    private fun openExternal(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+        } catch (_: Throwable) {
+            Toast.makeText(this, "Cannot open URL", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showAboutDialog() {
+        val status = if (buildIsPrerelease) "pre-release" else "release"
+        val name = "FCAE VPN"
+        val verLine = "$displayVersion  |  $status"
+        val msg = android.text.SpannableString(
+            name + "\n" + verLine + "\n\n" +
+            "Telegram: t.me/FCAE_VPN\n" +
+            "GitHub: github.com/FCFlenkchy/FCAE_VPN\n\n" +
+            "Released under the MIT License.\n" +
+            "Credits are listed in the GitHub repository."
+        )
+        msg.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+            0, name.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        val verStart = name.length + 1
+        msg.setSpan(android.text.style.ForegroundColorSpan(
+            Color.parseColor(if (buildIsPrerelease) "#F0B429" else "#8A93A6")),
+            verStart, verStart + verLine.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        addLink(msg, "t.me/FCAE_VPN", COMMUNITY_TELEGRAM)
+        addLink(msg, "github.com/FCFlenkchy/FCAE_VPN", COMMUNITY_GITHUB)
+        addLink(msg, "GitHub repository", COMMUNITY_GITHUB)
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("About")
+            .setMessage(msg)
+            .setNeutralButton("Telegram") { _, _ -> openExternal(COMMUNITY_TELEGRAM) }
+            .setPositiveButton("GitHub") { _, _ -> openExternal(COMMUNITY_GITHUB) }
+            .setNegativeButton("Close", null)
+            .create()
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.show()
+        showDialogMessage(dialog, msg)
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)?.setTextColor(Color.CYAN)
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.CYAN)
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
+    }
+
     private fun showUpdateDialog(info: FcaeUpdateInfo) {
-        val msg = buildString {
-            append("Current: $displayVersion  (${if (buildIsPrerelease) "pre-release" else "release"})\n")
+        val msg = android.text.SpannableString(buildString {
+            append("Current: $displayVersion  |  ${if (buildIsPrerelease) "pre-release" else "release"}\n")
             append("Latest: ${info.latestVersion}\n")
             if (info.releaseDate.isNotEmpty()) append("Date: ${info.releaseDate}\n")
-            append("\n")
-            if (info.releaseNotes.isNotEmpty()) {
-                append("Notes:\n${info.releaseNotes}\n\n")
-            }
-            if (info.downloadUrl.isNotEmpty()) {
-                append("Download: ${info.downloadUrl}")
-            }
-        }
+            if (info.releaseNotes.isNotEmpty()) append("\nNotes:\n${info.releaseNotes}\n")
+            if (info.downloadUrl.isNotEmpty()) append("\nDownload: ${info.downloadUrl}")
+        })
+        if (info.downloadUrl.isNotEmpty()) addLink(msg, info.downloadUrl, info.downloadUrl)
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Update Available")
             .setMessage(msg)
-            .setPositiveButton("Open Release Page") { _, _ ->
-                if (info.downloadUrl.isNotEmpty()) {
-                    try {
-                        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(info.downloadUrl))
-                        startActivity(intent)
-                    } catch (_: Throwable) {
-                        Toast.makeText(this, "Cannot open URL", Toast.LENGTH_SHORT).show()
-                    }
-                }
+            .setPositiveButton("Open") { _, _ ->
+                if (info.downloadUrl.isNotEmpty()) openExternal(info.downloadUrl)
             }
             .setNegativeButton("Close", null)
             .create()
@@ -1962,7 +2023,7 @@ class MainActivity : AppCompatActivity() {
         dialog.setCanceledOnTouchOutside(true)
         dialog.show()
         // Force the message and button text to white (theme default was dark blue)
-        dialog.findViewById<TextView>(android.R.id.message)?.setTextColor(Color.WHITE)
+        showDialogMessage(dialog, msg)
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.CYAN)
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
     }
@@ -2479,6 +2540,9 @@ class MainActivity : AppCompatActivity() {
         // holding this value defers to the engine (see deferredTorSocksPort).
         private const val TOR_SOCKS_ENGINE_DEFAULT = 1821
 
+        private const val COMMUNITY_TELEGRAM = "https://t.me/FCAE_VPN"
+        private const val COMMUNITY_GITHUB = "https://github.com/FCFlenkchy/FCAE_VPN"
+
         // Set to true while the Activity is alive.  The service checks
         // this after fullShutdown() to decide whether to kill the process.
         @JvmField @Volatile var activityAlive = false
@@ -2496,5 +2560,6 @@ class MainActivity : AppCompatActivity() {
         private val COLOR_CONNECT_BTN = Color.parseColor("#15803D")
         private val COLOR_UPDATE_AVAILABLE = Color.parseColor("#FF8C00")  // orange
         private val COLOR_UPDATE_IDLE = Color.parseColor("#60A5FA")        // blue theme
+        private val COLOR_LINK = Color.parseColor("#60A5FA")
     }
 }

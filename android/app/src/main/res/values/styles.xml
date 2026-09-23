@@ -27,6 +27,8 @@
         <!-- Active controls (switch thumb/track, checkboxes): app accent
              blue instead of the theme default. -->
         <item name="android:colorControlActivated">#FF60A5FA</item>
+        <!-- Links inside dialog message text (LinkMovementMethod). -->
+        <item name="android:textColorLink">#FF60A5FA</item>
         <!-- System bars stay dark with light icons (API 23+, minSdk 24). -->
         <item name="android:windowLightStatusBar">false</item>
     </style>
