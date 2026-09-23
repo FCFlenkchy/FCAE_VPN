@@ -162,7 +162,6 @@ pub fn is_privileged() -> bool {
             .write(true)
             .open("\\\\.\\PHYSICALDRIVE0")
             .is_ok()
-            || capture("net", &["session"]).is_some()
     }
     #[cfg(not(any(unix, windows)))]
     {

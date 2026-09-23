@@ -580,3 +580,128 @@ impl FcaeStatus {
         matches!(self, FcaeStatus::Ok)
     }
 }
+
+macro_rules! impl_try_from_enum {
+    ($ty:ident, { $($var:ident = $val:literal),+ $(,)? }) => {
+        impl TryFrom<u32> for $ty {
+            type Error = ();
+            #[inline]
+            fn try_from(v: u32) -> Result<Self, Self::Error> {
+                match v {
+                    $($val => Ok($ty::$var),)+
+                    _ => Err(()),
+                }
+            }
+        }
+        impl TryFrom<i32> for $ty {
+            type Error = ();
+            #[inline]
+            fn try_from(v: i32) -> Result<Self, Self::Error> {
+                if v < 0 {
+                    Err(())
+                } else {
+                    Self::try_from(v as u32)
+                }
+            }
+        }
+    };
+}
+
+impl_try_from_enum!(FcaeState, {
+    Disconnected = 0,
+    Provisioning = 1,
+    Scanning = 2,
+    Connecting = 3,
+    Connected = 4,
+    Error = 5,
+    Reconnecting = 6,
+});
+
+impl_try_from_enum!(FcaeBackend, {
+    Aether = 0,
+    Psiphon = 1,
+});
+
+impl_try_from_enum!(FcaeProtocol, {
+    Masque = 0,
+    WireGuard = 1,
+    Gool = 2,
+    Auto = 3,
+    Tor = 4,
+    MasqueInMasque = 5,
+});
+
+impl_try_from_enum!(FcaeMode, {
+    Proxy = 0,
+    Tun = 1,
+});
+
+impl_try_from_enum!(FcaeEngineLog, {
+    Off = 0,
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+    Debug = 4,
+    Trace = 5,
+});
+
+impl_try_from_enum!(FcaeTorMode, {
+    Off = 0,
+    Chain = 1,
+    Reverse = 2,
+    Only = 3,
+});
+
+impl_try_from_enum!(FcaeTorBridges, {
+    None = 0,
+    Obfs4 = 1,
+    Snowflake = 2,
+    Custom = 3,
+});
+
+impl_try_from_enum!(FcaeScanMode, {
+    Turbo = 0,
+    Balanced = 1,
+    Thorough = 2,
+    Stealth = 3,
+    Ironclad = 4,
+});
+
+impl_try_from_enum!(FcaeIpVersion, {
+    V4 = 4,
+    V6 = 6,
+    Dual = 10,
+});
+
+impl_try_from_enum!(FcaeDnsMode, {
+    Udp = 0,
+    Doh = 1,
+});
+
+impl_try_from_enum!(FcaeSysProfile, {
+    Auto = 0,
+    Low = 1,
+    Medium = 2,
+    High = 3,
+});
+
+impl_try_from_enum!(FcaeLogLevel, {
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+    Debug = 4,
+});
+
+impl_try_from_enum!(FcaeStatus, {
+    Ok = 0,
+    NotInitialized = 1,
+    AlreadyRunning = 2,
+    NullArgument = 3,
+    AbiMismatch = 4,
+    InvalidConfig = 5,
+    BackendUnavailable = 6,
+    PermissionDenied = 7,
+    StartFailed = 8,
+    Timeout = 9,
+    Internal = 10,
+});

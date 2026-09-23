@@ -76,6 +76,7 @@ lto = "fat"
 codegen-units = 1
 panic = "unwind"
 strip = true
+overflow-checks = true
 
 # Standalone package, deliberately not a member of any workspace.
 #

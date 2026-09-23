@@ -16,10 +16,12 @@
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #elif !defined(ANDROID)
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -327,6 +329,12 @@ static FILE* open_cfg(const std::string& path, const char* mode) {
     MultiByteToWideChar(CP_UTF8, 0, mode, -1, &wmode[0], mlen);
     return _wfopen(wpath.c_str(), wmode.c_str());
 #else
+    if (mode && mode[0] == 'w') {
+        int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0) return nullptr;
+        fchmod(fd, 0600);
+        return fdopen(fd, mode);
+    }
     return fopen(path.c_str(), mode);
 #endif
 }
@@ -510,7 +518,7 @@ static bool load_config_from(const std::string& path) {
     FILE* f = open_cfg(path, "rb");
     if (!f) return false;
 
-    char line[512];
+    static char line[8192];
     int applied = 0;
     while (fgets(line, sizeof(line), f)) {
         // strip CR/LF and trailing spaces
@@ -1191,7 +1199,7 @@ void render_ui() {
                     sei.lpFile = exe_path;
                     sei.lpParameters = L"";
                     sei.nShow = SW_NORMAL;
-                    sei.fMask = SEE_MASK_NOASYNC;
+                    sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS;
                     if (ShellExecuteExW(&sei)) {
                         // Successfully launched elevated copy — give it a moment
                         // to take over the launcher slot and surface any UAC
@@ -1203,11 +1211,13 @@ void render_ui() {
                         // see in the Logs tab which elevated PID is being
                         // handed off to (and so we leave a breadcrumb when
                         // the elevated child later fails to bind).
+                        DWORD child_pid = sei.hProcess ? GetProcessId(sei.hProcess) : 0;
                         char msg[160];
                         snprintf(msg, sizeof(msg),
                             "[ui] TUN mode needs elevation -- relaunching elevated (PID %lu). "
                             "The non-elevated copy will exit in ~700ms.",
-                            GetProcessId(sei.hProcess));
+                            static_cast<unsigned long>(child_pid));
+                        if (sei.hProcess) CloseHandle(sei.hProcess);
                         g_app.add_log(FCAE_LOG_INFO, msg);
                         snprintf(g_app.save_status, sizeof(g_app.save_status),
                             "Restarting elevated -- current copy will close");

@@ -447,13 +447,54 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         "FcaeConfig",
     )?;
 
+    // Validate enum discriminants crossing FFI before relying on them
+    let backend_val = raw.backend as u32;
+    let backend = FcaeBackend::try_from(backend_val)
+        .map_err(|_| CoreError::InvalidConfig(format!("backend={backend_val} is invalid")))?;
+
+    let protocol_val = raw.protocol as u32;
+    let protocol = FcaeProtocol::try_from(protocol_val)
+        .map_err(|_| CoreError::InvalidConfig(format!("protocol={protocol_val} is invalid")))?;
+
+    let mode_val = raw.mode as u32;
+    let mode = FcaeMode::try_from(mode_val)
+        .map_err(|_| CoreError::InvalidConfig(format!("mode={mode_val} is invalid")))?;
+
+    let scan_mode_val = raw.scan_mode as u32;
+    let scan_mode = FcaeScanMode::try_from(scan_mode_val)
+        .map_err(|_| CoreError::InvalidConfig(format!("scan_mode={scan_mode_val} is invalid")))?;
+
+    let ip_version_val = raw.ip_version as u32;
+    let ip_version = FcaeIpVersion::try_from(ip_version_val)
+        .map_err(|_| CoreError::InvalidConfig(format!("ip_version={ip_version_val} is invalid")))?;
+
+    let sys_profile_val = raw.sys_profile as u32;
+    let sys_profile = FcaeSysProfile::try_from(sys_profile_val)
+        .map_err(|_| CoreError::InvalidConfig(format!("sys_profile={sys_profile_val} is invalid")))?;
+
+    let engine_log_val = raw.engine_log as u32;
+    let engine_log = FcaeEngineLog::try_from(engine_log_val)
+        .map_err(|_| CoreError::InvalidConfig(format!("engine_log={engine_log_val} is invalid")))?;
+
+    let _ = FcaeDnsMode::try_from(raw.dns.mode as u32)
+        .map_err(|_| CoreError::InvalidConfig(format!("dns.mode={} is invalid", raw.dns.mode as u32)))?;
+
+    let _ = FcaeIpVersion::try_from(raw.dns.ip_prefer as u32)
+        .map_err(|_| CoreError::InvalidConfig(format!("dns.ip_prefer={} is invalid", raw.dns.ip_prefer as u32)))?;
+
+    let _ = FcaeTorMode::try_from(raw.tor.mode as u32)
+        .map_err(|_| CoreError::InvalidConfig(format!("tor.mode={} is invalid", raw.tor.mode as u32)))?;
+
+    let _ = FcaeTorBridges::try_from(raw.tor.bridges as u32)
+        .map_err(|_| CoreError::InvalidConfig(format!("tor.bridges={} is invalid", raw.tor.bridges as u32)))?;
+
     let mut cfg = SessionConfig {
-        backend: raw.backend,
-        protocol: raw.protocol,
-        mode: raw.mode,
-        scan_mode: raw.scan_mode,
-        ip_version: raw.ip_version as i32,
-        sys_profile: raw.sys_profile,
+        backend,
+        protocol,
+        mode,
+        scan_mode,
+        ip_version: ip_version as i32,
+        sys_profile,
         lan_sharing: raw.lan_sharing,
         quick_reconnect: raw.quick_reconnect,
         socks_port: raw.socks_port,
@@ -462,7 +503,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         config_path: cstr_opt(raw.config_path).unwrap_or_else(|| "aether.toml".into()),
         data_dir: cstr_opt(raw.data_dir),
         udp_buf_kb: None,
-        engine_log: raw.engine_log,
+        engine_log,
         ..SessionConfig::default()
     };
 

@@ -65,7 +65,9 @@ public class VpnNotification {
     // minSdk. Kept deliberately for those two levels; ignored elsewhere.
     @SuppressWarnings("deprecation")
     public Notification build(String text, int buttons) {
-        Notification.Builder nb = new Notification.Builder(context, CHANNEL_ID);
+        Notification.Builder nb = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
+                ? new Notification.Builder(context, CHANNEL_ID)
+                : new Notification.Builder(context);
 
         nb.setContentTitle("FCAE VPN")
           .setContentText(text)

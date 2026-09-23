@@ -80,7 +80,7 @@ struct AppState {
     char tun_dns6[112] = "2606:4700:4700::1111,2606:4700:4700::1001";
     // Zero Trust (Cloudflare Teams)
     char team_name[128] = {};
-    char access_token[256] = {};
+    char access_token[4096] = {};
     char access_client_id[128] = {};
     char access_client_secret[128] = {};
     char access_email[128] = {};
@@ -201,6 +201,7 @@ struct AppState {
         bool mtu_valid = tun_mtu[0] != '\0';
         for (const char* p = tun_mtu; *p; ++p) {
             if (*p < '0' || *p > '9') { mtu_valid = false; break; }
+            if (mtu > 9000) { mtu_valid = false; break; }
             mtu = mtu * 10 + static_cast<unsigned>(*p - '0');
         }
         return mtu_valid && mtu >= 1280 && mtu <= 9000 ? mtu : 0xffffffffu;
@@ -210,14 +211,14 @@ struct AppState {
         FcaeConfig c;
         fcae_config_default(&c);
 
-        c.backend          = (FcaeBackend)backend;
-        c.protocol         = (FcaeProtocol)protocol;
+        c.backend          = (backend >= 0 && backend <= 1) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
+        c.protocol         = (protocol >= 0 && protocol <= 5) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
         // Mode is shared by every protocol/backend: once the UI selects TUN,
         // never let a Psiphon/Tor mapping silently turn it back into Proxy.
         c.mode             = mode == 1 ? FCAE_MODE_TUN : FCAE_MODE_PROXY;
-        c.scan_mode        = (FcaeScanMode)scan_mode;
-        c.ip_version       = (FcaeIpVersion)ip_version;
-        c.sys_profile      = (FcaeSysProfile)sys_profile;
+        c.scan_mode        = (scan_mode >= 0 && scan_mode <= 4) ? (FcaeScanMode)scan_mode : FCAE_SCAN_BALANCED;
+        c.ip_version       = (ip_version == 4 || ip_version == 6 || ip_version == 10) ? (FcaeIpVersion)ip_version : FCAE_IP_V4;
+        c.sys_profile      = (sys_profile >= 0 && sys_profile <= 3) ? (FcaeSysProfile)sys_profile : FCAE_PROFILE_AUTO;
         c.lan_sharing      = lan_sharing;
         c.quick_reconnect  = quick_reconnect;
         c.tun_mtu = mode == 1 ? parsed_tun_mtu() : 1500;
@@ -281,7 +282,7 @@ struct AppState {
         c.zero_trust.access_token = access_token[0] ? access_token : nullptr;
         c.zero_trust.access_email = access_email[0] ? access_email : nullptr;
 
-        c.engine_log       = (FcaeEngineLog)engine_log;
+        c.engine_log       = (engine_log >= 0 && engine_log <= 5) ? (FcaeEngineLog)engine_log : FCAE_ENGINE_LOG_INFO;
 
         // Protocol Psiphon does not apply the egress combo (value kept in
         // the UI for when the user switches back). Protocol Tor DOES combine
@@ -295,7 +296,7 @@ struct AppState {
         // stale Chain value would only produce a normalization warning).
         if (proto_tor) tm = 0;
         c.tor.mode         = (FcaeTorMode)tm;
-        c.tor.bridges      = (FcaeTorBridges)tor_bridges;
+        c.tor.bridges      = (tor_bridges >= 0 && tor_bridges <= 3) ? (FcaeTorBridges)tor_bridges : FCAE_TOR_BRIDGES_NONE;
         c.tor.bridge_lines = tor_bridge_lines[0] ? tor_bridge_lines : nullptr;
         // Field == engine default -> send 0 (defer); explicit edit -> verbatim.
         c.tor.socks_port   = (uint16_t)(tor_socks_port == kEngineDefaultTorSocksPort

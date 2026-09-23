@@ -271,12 +271,20 @@ impl TunBridge for TunEngines {
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
+thread_local! {
+    static TLS_LAST_ERROR: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
+}
+
 fn runtime() -> Result<&'static Runtime, CoreError> {
     RUNTIME.get().ok_or(CoreError::NotInitialized)
 }
 
 fn set_last_error(msg: &str) {
-    *LAST_ERROR.lock() = CString::new(msg).ok();
+    let cs = CString::new(msg).ok();
+    *LAST_ERROR.lock() = cs.clone();
+    TLS_LAST_ERROR.with(|cell| {
+        *cell.borrow_mut() = cs;
+    });
 }
 
 /// Run `f`, converting errors and panics into an [`FcaeStatus`].
@@ -734,17 +742,51 @@ pub extern "C" fn fcae_is_privileged() -> bool {
     }
 }
 
-/// Message for the most recent failing call on any thread.
+/// Message for the most recent failing call on this thread.
 ///
 /// The returned pointer is owned by the library and stays valid until the
-/// next failing call.
+/// calling thread issues its next failing call.
 #[no_mangle]
 pub extern "C" fn fcae_last_error() -> *const c_char {
     static EMPTY: &CStr = c"";
-    match LAST_ERROR.lock().as_ref() {
-        Some(s) => s.as_ptr(),
-        None => EMPTY.as_ptr(),
+    TLS_LAST_ERROR.with(|cell| {
+        let borrow = cell.borrow();
+        match borrow.as_ref() {
+            Some(s) => s.as_ptr(),
+            None => {
+                drop(borrow);
+                match LAST_ERROR.lock().as_ref() {
+                    Some(s) => {
+                        let clone = s.clone();
+                        let ptr = clone.as_ptr();
+                        *cell.borrow_mut() = Some(clone);
+                        ptr
+                    }
+                    None => EMPTY.as_ptr(),
+                }
+            }
+        }
+    })
+}
+
+/// Safely copy the last error message into caller-provided buffer `buf` of size `buf_len`.
+/// Returns the number of bytes copied (including terminating NUL byte) or 0 if empty / invalid.
+#[no_mangle]
+pub extern "C" fn fcae_last_error_copy(buf: *mut c_char, buf_len: usize) -> usize {
+    if buf.is_null() || buf_len == 0 {
+        return 0;
     }
+    let guard = LAST_ERROR.lock();
+    let src_bytes = match guard.as_ref() {
+        Some(s) => s.as_bytes_with_nul(),
+        None => b"\0",
+    };
+    let copy_len = std::cmp::min(src_bytes.len(), buf_len);
+    unsafe {
+        std::ptr::copy_nonoverlapping(src_bytes.as_ptr() as *const c_char, buf, copy_len);
+        *buf.add(copy_len - 1) = 0;
+    }
+    copy_len
 }
 
 /// ABI version this library was built with; compare against

@@ -263,7 +263,9 @@ public class ProxyNotification extends Service {
         PendingIntent piMain = PendingIntent.getActivity(context, 20,
             new Intent(context, MainActivity.class),
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Notification.Builder nb = new Notification.Builder(context, CHANNEL_ID)
+        Notification.Builder nb = (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
+            ? new Notification.Builder(context, CHANNEL_ID)
+            : new Notification.Builder(context))
             .setContentTitle("FCAE VPN (Proxy)")
             .setContentText(VpnNotification.zeroTrafficText())
             .setSmallIcon(android.R.drawable.ic_lock_lock)
@@ -356,7 +358,9 @@ public class ProxyNotification extends Service {
     // declares specialUse, which the two-arg form applies on every level.
     @SuppressWarnings("deprecation")
     private void showNotification(String text, int buttons) {
-        Notification.Builder nb = new Notification.Builder(this, CHANNEL_ID)
+        Notification.Builder nb = (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
+            ? new Notification.Builder(this, CHANNEL_ID)
+            : new Notification.Builder(this))
             .setContentTitle("FCAE VPN (Proxy)")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_lock_lock)

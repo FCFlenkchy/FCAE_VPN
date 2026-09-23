@@ -459,23 +459,27 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     std::string psiCfgOwned = jstr(env, psiphonConfig);
     std::string psiRegionOwned = jstr(env, psiphonRegion);
 
+    auto clamp_port = [](jint p) -> uint16_t {
+        return (p > 0 && p < 65536) ? (uint16_t)p : 0;
+    };
+
     FcaeConfig cfg;
     fcae_config_default(&cfg);
 
-    cfg.backend = (FcaeBackend)backend;
-    cfg.protocol = (FcaeProtocol)protocol;
+    cfg.backend = (backend >= 0 && backend <= 1) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
+    cfg.protocol = (protocol >= 0 && protocol <= 5) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
     // Mode is independent of protocol/backend. The Android UI passes 1 for
     // TUN, and no protocol-specific path may silently turn that into Proxy.
     cfg.mode = mode == 1 ? FCAE_MODE_TUN : FCAE_MODE_PROXY;
     cfg.lan_sharing = lanSharing == JNI_TRUE;
-    cfg.scan_mode = (FcaeScanMode)scanMode;
-    cfg.ip_version = (FcaeIpVersion)ipVersion;
+    cfg.scan_mode = (scanMode >= 0 && scanMode <= 4) ? (FcaeScanMode)scanMode : FCAE_SCAN_BALANCED;
+    cfg.ip_version = (ipVersion == 4 || ipVersion == 6 || ipVersion == 10) ? (FcaeIpVersion)ipVersion : FCAE_IP_V4;
     cfg.quick_reconnect = quickReconnect == JNI_TRUE;
-    cfg.socks_port = (uint16_t)socksPort;
-    cfg.http_port = (uint16_t)httpPort;
+    cfg.socks_port = clamp_port(socksPort);
+    cfg.http_port = clamp_port(httpPort);
     cfg.force_peer = peerOwned.empty() ? nullptr : peerOwned.c_str();
     cfg.config_path = cfgOwned.c_str();
-    cfg.sys_profile = (FcaeSysProfile)sysProfile;
+    cfg.sys_profile = (sysProfile >= 0 && sysProfile <= 3) ? (FcaeSysProfile)sysProfile : FCAE_PROFILE_AUTO;
 
     cfg.obfuscation.noize_profile     = noizeOwned.c_str();
     cfg.obfuscation.fragment_enabled  = fragmentEnabled == JNI_TRUE;
@@ -501,27 +505,27 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     // Protocol Tor is Tor-only; ignore a leftover Chain/Reverse so the combo
     // cannot deadlock the engine.
     if (protocol == 4) torMode = 0;
-    cfg.tor.mode         = (FcaeTorMode)torMode;
-    cfg.tor.bridges      = (FcaeTorBridges)torBridges;
+    cfg.tor.mode         = (torMode >= 0 && torMode <= 3) ? (FcaeTorMode)torMode : FCAE_TOR_OFF;
+    cfg.tor.bridges      = (torBridges >= 0 && torBridges <= 3) ? (FcaeTorBridges)torBridges : FCAE_TOR_BRIDGES_NONE;
     cfg.tor.bridge_lines = torLinesOwned.empty() ? nullptr : torLinesOwned.c_str();
 
     // Verbosity of the aether engine itself. The FFI's own log callback stays
     // at info regardless -- this only changes how much the engine emits.
-    cfg.engine_log = (FcaeEngineLog)engineLog;
+    cfg.engine_log = (engineLog >= 0 && engineLog <= 5) ? (FcaeEngineLog)engineLog : FCAE_ENGINE_LOG_INFO;
 
     // Tor's own listener, kept off the engine's and Psiphon's ports.
     // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
     // passed through verbatim — do NOT substitute a literal here.
-    cfg.tor.socks_port = (uint16_t)torSocksPort;
-    cfg.tor_http_port = (uint64_t)torHttpPort;
+    cfg.tor.socks_port = clamp_port(torSocksPort);
+    cfg.tor_http_port = torHttpPort > 0 && torHttpPort < 65536 ? (uint64_t)torHttpPort : 0;
 
     // Psiphon. Its datastore must be writable and app-private; the Kotlin
     // side passes filesDir, which is exactly that.
     if (!psiCfgOwned.empty()) cfg.psiphon.config_json = psiCfgOwned.c_str();
     if (!psiRegionOwned.empty()) cfg.psiphon.egress_region = psiRegionOwned.c_str();
     cfg._reserved[0] = psiphonThroughTunnel == JNI_TRUE ? 1 : 0;
-    cfg.psiphon.socks_port = (uint16_t)psiphonSocksPort;
-    cfg.psiphon.http_port = (uint16_t)psiphonHttpPort;
+    cfg.psiphon.socks_port = clamp_port(psiphonSocksPort);
+    cfg.psiphon.http_port = clamp_port(psiphonHttpPort);
     cfg.tun_tcp_sndbuf = (uint32_t)tunTcpSndbuf;
     cfg.tun_tcp_rcvbuf = (uint32_t)tunTcpRcvbuf;
     cfg.tun_tcp_auto_tuning = tunTcpAutoTuning == JNI_TRUE ? 1 : 2;
@@ -822,11 +826,10 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeGetTrafficStats(JNIEnv* env, jclass) {
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeCheckForUpdates(JNIEnv* env, jclass, jstring currentVersion, jboolean includePrereleases) {
     ensure_init();
-    const char* ver = env->GetStringUTFChars(currentVersion, nullptr);
-    fcae_check_update_async(ver, includePrereleases == JNI_TRUE);
-    LOGI("Version check started (current=%s, prereleases=%s)", ver,
+    std::string ver = jstr(env, currentVersion);
+    fcae_check_update_async(ver.c_str(), includePrereleases == JNI_TRUE);
+    LOGI("Version check started (current=%s, prereleases=%s)", ver.c_str(),
          includePrereleases == JNI_TRUE ? "on" : "off");
-    env->ReleaseStringUTFChars(currentVersion, ver);
 }
 
 extern "C" JNIEXPORT jobject JNICALL
@@ -847,6 +850,10 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
     jfieldID fid_date = env->GetFieldID(cls, "releaseDate", "Ljava/lang/String;");
 
     jobject obj = env->AllocObject(cls);
+    if (!obj) {
+        env->DeleteLocalRef(cls);
+        return nullptr;
+    }
 
     FcaeUpdateInfo info = {};
     info.struct_size = sizeof(info);
@@ -870,13 +877,10 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeCheckUpdateFromJson(JNIEnv* env, jclass, jstring currentVersion, jstring json, jboolean includePrereleases) {
     ensure_init();
-    const char* ver = env->GetStringUTFChars(currentVersion, nullptr);
-    const char* js = env->GetStringUTFChars(json, nullptr);
+    std::string ver = jstr(env, currentVersion);
+    std::string js = jstr(env, json);
 
-    bool ok = (fcae_check_update_from_json(ver, js, includePrereleases == JNI_TRUE) == FCAE_OK);
-
-    env->ReleaseStringUTFChars(currentVersion, ver);
-    env->ReleaseStringUTFChars(json, js);
+    bool ok = (fcae_check_update_from_json(ver.c_str(), js.c_str(), includePrereleases == JNI_TRUE) == FCAE_OK);
 
     LOGI("Version check from JSON: %s", ok ? "OK" : "FAIL");
     return ok ? JNI_TRUE : JNI_FALSE;

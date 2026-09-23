@@ -439,6 +439,11 @@ bool       fcae_is_privileged(void);
  * the next failing call. Never NULL. */
 const char *fcae_last_error(void);
 
+/* Safely copy the last error message into caller-provided buffer.
+ * Returns the number of bytes copied (including terminating NUL byte)
+ * or 0 if empty / invalid. */
+size_t      fcae_last_error_copy(char *buf, size_t buf_len);
+
 /* ABI version this binary was built with. */
 uint32_t   fcae_abi_version(void);
 

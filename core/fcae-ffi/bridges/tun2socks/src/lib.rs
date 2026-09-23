@@ -151,13 +151,15 @@ unsafe extern "C" fn go_log_trampoline(level: c_int, msg: *const c_char) {
     if msg.is_null() {
         return;
     }
-    let text = CStr::from_ptr(msg).to_string_lossy();
-    match level {
-        1 => log::error!("[tun2socks] {text}"),
-        2 => log::warn!("[tun2socks] {text}"),
-        4 => log::debug!("[tun2socks] {text}"),
-        _ => log::info!("[tun2socks] {text}"),
-    }
+    let _ = std::panic::catch_unwind(|| {
+        let text = CStr::from_ptr(msg).to_string_lossy();
+        match level {
+            1 => log::error!("[tun2socks] {text}"),
+            2 => log::warn!("[tun2socks] {text}"),
+            4 => log::debug!("[tun2socks] {text}"),
+            _ => log::info!("[tun2socks] {text}"),
+        }
+    });
 }
 
 /// Bridge ABI version string reported by the Go side.

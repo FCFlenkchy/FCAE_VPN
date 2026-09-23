@@ -39,6 +39,5 @@ third_party/
 
 # Rust
 core/*/target/
-Cargo.lock
 
 target/

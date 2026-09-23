@@ -9,7 +9,7 @@
 
     <application
         android:name=".FCAEApplication"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:label="FCAE VPN"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
