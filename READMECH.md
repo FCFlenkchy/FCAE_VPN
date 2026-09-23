@@ -6,12 +6,6 @@
 
 **[English](README.md)** | **[فارسی](READMEFA.md)** | **中文**
 
-<p align="center">
-  <a href="https://t.me/FCAE_VPN">
-    <img src="https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="Telegram channel @FCAE_VPN">
-  </a>
-</p>
-
 一款为高度受限网络设计的审查绕过客户端。它会自动发现可达路由，建立加密隧道，并为您的应用程序暴露本地 SOCKS5/HTTP 代理。
 
 基于 **[Aether](https://github.com/CluvexStudio/aether)** 构建，提供 Windows、Linux、macOS 和 Android 的原生 GUI 前端。
@@ -199,7 +193,7 @@ Bug 反馈与功能建议请提交到 **[GitHub Issues](https://github.com/FCFle
 
 ### 如何贡献
 
-日常提问与交流请加入 [Telegram 频道](https://t.me/FCAE_VPN)。
+日常提问与交流请参阅本页的「Telegram 频道」部分。
 
 1. Fork 本仓库
 2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
@@ -219,6 +213,6 @@ Bug 反馈与功能建议请提交到 **[GitHub Issues](https://github.com/FCFle
 
 如果这个项目帮助您绕过了审查，或者为您节省了时间，请考虑给一个 **Star** — 这能帮助更多人发现这个工具，也是持续开发的动力。
 
-[![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN) &nbsp; [![Telegram](https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?logo=telegram&logoColor=white)](https://t.me/FCAE_VPN)
+[![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN)
 
 </div>

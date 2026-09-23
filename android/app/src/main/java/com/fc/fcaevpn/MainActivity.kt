@@ -1987,18 +1987,45 @@ class MainActivity : AppCompatActivity() {
         addLink(msg, "t.me/FCAE_VPN", COMMUNITY_TELEGRAM)
         addLink(msg, "github.com/FCFlenkchy/FCAE_VPN", COMMUNITY_GITHUB)
         addLink(msg, "GitHub repository", COMMUNITY_GITHUB)
+        val density = resources.displayMetrics.density
+        val content = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding((24 * density).toInt(), (8 * density).toInt(), (24 * density).toInt(), 0)
+        }
+        content.addView(TextView(this).apply {
+            text = msg
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            movementMethod = android.text.method.LinkMovementMethod.getInstance()
+        })
+        val row = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            setPadding(0, (16 * density).toInt(), 0, (8 * density).toInt())
+        }
+        arrayOf(
+            Triple("Telegram", COMMUNITY_TELEGRAM, "#FF229ED9"),
+            Triple("GitHub", COMMUNITY_GITHUB, "#FF34344A")
+        ).forEachIndexed { i, (label, url, tint) ->
+            val params = android.widget.LinearLayout.LayoutParams(
+                0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            if (i == 0) params.marginEnd = (4 * density).toInt()
+            else params.marginStart = (4 * density).toInt()
+            row.addView(MaterialButton(this).apply {
+                text = label
+                isAllCaps = false
+                backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor(tint))
+                setTextColor(Color.WHITE)
+                setOnClickListener { openExternal(url) }
+            }, params)
+        }
+        content.addView(row)
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("About")
-            .setMessage(msg)
-            .setNeutralButton("Telegram") { _, _ -> openExternal(COMMUNITY_TELEGRAM) }
-            .setPositiveButton("GitHub") { _, _ -> openExternal(COMMUNITY_GITHUB) }
+            .setView(content)
             .setNegativeButton("Close", null)
             .create()
         dialog.setCanceledOnTouchOutside(true)
         dialog.show()
-        showDialogMessage(dialog, msg)
-        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)?.setTextColor(Color.CYAN)
-        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.CYAN)
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
     }
 

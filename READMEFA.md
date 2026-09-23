@@ -6,12 +6,6 @@
 
 **[English](README.md)** | **فارسی** | **[中文](READMECH.md)**
 
-<p align="center">
-  <a href="https://t.me/FCAE_VPN">
-    <img src="https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="Telegram channel @FCAE_VPN">
-  </a>
-</p>
-
 یک فیلترشکنی که برای دور زدن سانسور طراحی‌شده، حتی برای شبکه‌های به‌شدت محدود! این ابزار به‌طور خودکار مسیرهای قابل‌دسترس را کشف می‌کند، و یک تونل رمزگذاری‌شده برقرار می‌کند و یک پروکسی محلی SOCKS5/HTTP برای برنامه‌های شما فراهم می‌کند.
 
 ساخته‌شده بر پایه **[Aether](https://github.com/CluvexStudio/aether)** با رابط گرافیکی بومی برای ویندوز، لینوکس، مک و اندروید.
@@ -199,7 +193,7 @@ cmake --build build --config Release
 
 ### نحوه مشارکت
 
-برای پرسش‌ها و گفتگوی عمومی به [کانال تلگرام](https://t.me/FCAE_VPN) بپیوندید.
+برای پرسش‌ها و گفتگوی عمومی به بخش «کانال تلگرام» در همین صفحه مراجعه کنید.
 
 1. مخزن را Fork کنید
 2. یک شاخه ویژگی بسازید (`git checkout -b feature/amazing-feature`)
@@ -219,6 +213,6 @@ cmake --build build --config Release
 
 اگر این پروژه به شما در دور زدن سانسور کمک کرد یا وقتتان را ذخیره کرد، لطفاً یک **ستاره** بدهید، این کار به دیگران کمک می‌کند ابزار را پیدا کنند و انگیزه‌ای برای ادامه توسعه است...
 
-[![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN) &nbsp; [![Telegram](https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?logo=telegram&logoColor=white)](https://t.me/FCAE_VPN)
+[![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN)
 
 </div>

@@ -4,12 +4,6 @@
   <img src="mountain.png" alt="FCAE VPN" width="100%">
 </p>
 
-<p align="center">
-  <a href="https://t.me/FCAE_VPN">
-    <img src="https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="Telegram channel @FCAE_VPN">
-  </a>
-</p>
-
 A censorship circumvention client designed for heavily restricted networks. It automatically discovers reachable routes, establishes an encrypted tunnel, and exposes a local SOCKS5/HTTP proxy for your applications.
 
 Built on top of **[Aether](https://github.com/CluvexStudio/aether)** with native GUI frontends for Windows, Linux, macOS, and Android.
@@ -197,7 +191,7 @@ Contributions are welcome! Whether it's bug reports, feature requests, documenta
 
 ### How to Contribute
 
-For questions and general discussion, join the [Telegram channel](https://t.me/FCAE_VPN).
+For questions and general discussion, see the [Community](#community) section.
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
@@ -217,7 +211,7 @@ See the individual components for their respective licenses.
 
 If this project helped you bypass censorship or just saved you some time, consider giving it a **star** — it helps others discover the tool and motivates continued development.
 
-[![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN) &nbsp; [![Telegram](https://img.shields.io/badge/Telegram-@FCAE__VPN-26A5E4?logo=telegram&logoColor=white)](https://t.me/FCAE_VPN)
+[![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN)
 
 **Other languages:** [فارسی](READMEFA.md) | [中文](READMECH.md)
 

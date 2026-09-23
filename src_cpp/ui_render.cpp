@@ -2200,7 +2200,6 @@ void render_ui() {
             }
             ImGui::Spacing();
 
-            // Selectable multi-line log view (click lines to select; Ctrl+C via ImGui input).
             // Reserve a real footer below the log rows so the Latest control
             // never covers the newest lines, including on short desktop windows.
             const float log_footer_h = ImGui::GetFrameHeightWithSpacing()
@@ -2213,10 +2212,6 @@ void render_ui() {
             uint64_t revision = 0;
             auto logs_snapshot = g_app.copy_logs(revision);
 
-            // Only deliberate scrolling changes follow state. Selectable-line
-            // focus/navigation can move the viewport after a click; that is
-            // not a request to stop following. Sample the next frame too,
-            // since ImGui applies wheel/scrollbar targets on the next frame.
             const bool manual_scroll =
                 (ImGui::IsWindowHovered() &&
                     (ImGui::GetIO().MouseWheel != 0.0f || ImGui::IsMouseDragging(0))) ||
@@ -2254,11 +2249,10 @@ void render_ui() {
                     }
                     ImGui::PushStyleColor(ImGuiCol_Text, c);
                     ImGui::PushID(i);
-                    if (ImGui::Selectable(msg.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick)) {
-                        if (ImGui::IsMouseDoubleClicked(0)) {
-                            ImGui::SetClipboardText(msg.c_str());
-                            snprintf(g_app.copy_status, sizeof(g_app.copy_status), "Line copied");
-                        }
+                    ImGui::TextUnformatted(msg.empty() ? " " : msg.c_str());
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                        ImGui::SetClipboardText(msg.c_str());
+                        snprintf(g_app.copy_status, sizeof(g_app.copy_status), "Line copied");
                     }
                     if (ImGui::BeginPopupContextItem("log_ctx")) {
                         if (ImGui::MenuItem("Copy line")) {
