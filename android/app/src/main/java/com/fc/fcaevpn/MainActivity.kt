@@ -130,7 +130,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tabLogsIndicator: android.view.View
 
     private val buildIsPrerelease = BuildConfig.IS_PRERELEASE
-    private val displayVersion = BuildConfig.APP_VERSION
+    private val displayVersion = BuildConfig.APP_VERSION.substringBefore("_pre-release")
 
     private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         val t = Thread(r, "bgExecutor")
@@ -2029,15 +2029,34 @@ class MainActivity : AppCompatActivity() {
 
     private fun showSplitTunnelAppPicker() {
         val pm = packageManager
-        data class AppEntry(val label: String, val packageName: String, val icon: android.graphics.drawable.Drawable?)
+        data class AppEntry(val label: String, val packageName: String, val isSystem: Boolean, val icon: android.graphics.drawable.Drawable?)
 
         val allApps = pm.getInstalledApplications(android.content.pm.PackageManager.GET_META_DATA)
             .filter { it.packageName != packageName }
-            .map { AppEntry(pm.getApplicationLabel(it).toString(), it.packageName, pm.getApplicationIcon(it)) }
+            .map {
+                val isSys = (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+                AppEntry(pm.getApplicationLabel(it).toString(), it.packageName, isSys, pm.getApplicationIcon(it))
+            }
             .sortedBy { it.label.lowercase() }
 
         val tempSelected = HashSet(splitTunnelSelectedApps)
-        val filteredList = ArrayList(allApps)
+        var showSystemApps = false
+        var currentQuery = ""
+        val filteredList = ArrayList<AppEntry>()
+
+        fun refilter() {
+            filteredList.clear()
+            for (app in allApps) {
+                if (!showSystemApps && app.isSystem && !tempSelected.contains(app.packageName)) continue
+                if (currentQuery.isNotEmpty()) {
+                    if (!app.label.lowercase().contains(currentQuery) && !app.packageName.lowercase().contains(currentQuery)) {
+                        continue
+                    }
+                }
+                filteredList.add(app)
+            }
+        }
+        refilter()
 
         val density = resources.displayMetrics.density
         val pad16 = (16 * density).toInt()
@@ -2059,6 +2078,15 @@ class MainActivity : AppCompatActivity() {
             isSingleLine = true
         }
         rootLayout.addView(searchEdit)
+
+        val checkSystemApps = android.widget.CheckBox(this).apply {
+            text = "Show system apps"
+            setTextColor(Color.parseColor("#FF9AA3B5"))
+            textSize = 13f
+            isChecked = false
+            setPadding(pad8, (4 * density).toInt(), pad8, (4 * density).toInt())
+        }
+        rootLayout.addView(checkSystemApps)
 
         val listView = android.widget.ListView(this).apply {
             divider = android.graphics.drawable.ColorDrawable(Color.parseColor("#FF2A2D3D"))
@@ -2141,20 +2169,17 @@ class MainActivity : AppCompatActivity() {
             adapter.notifyDataSetChanged()
         }
 
+        checkSystemApps.setOnCheckedChangeListener { _, isChecked ->
+            showSystemApps = isChecked
+            refilter()
+            adapter.notifyDataSetChanged()
+        }
+
         searchEdit.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                val q = s?.toString()?.trim()?.lowercase() ?: ""
-                filteredList.clear()
-                if (q.isEmpty()) {
-                    filteredList.addAll(allApps)
-                } else {
-                    for (app in allApps) {
-                        if (app.label.lowercase().contains(q) || app.packageName.lowercase().contains(q)) {
-                            filteredList.add(app)
-                        }
-                    }
-                }
+                currentQuery = s?.toString()?.trim()?.lowercase() ?: ""
+                refilter()
                 adapter.notifyDataSetChanged()
             }
             override fun afterTextChanged(s: android.text.Editable?) {}
@@ -2181,11 +2206,12 @@ class MainActivity : AppCompatActivity() {
         val status = if (buildIsPrerelease) "pre-release" else "release"
         val name = "FCAE VPN"
         val verLine = "$displayVersion  |  $status"
+        val licenseLine = if (buildIsPrerelease) "Pre-released under the MIT License." else "Released under the MIT License."
         val msg = android.text.SpannableString(
             name + "\n" + verLine + "\n\n" +
             "Telegram: t.me/FCAE_VPN\n" +
             "GitHub: github.com/FCFlenkchy/FCAE_VPN\n\n" +
-            "Released under the MIT License.\n" +
+            licenseLine + "\n" +
             "Credits are listed in the GitHub repository."
         )
         msg.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD),

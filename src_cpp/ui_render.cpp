@@ -68,6 +68,16 @@ bool build_is_prerelease() {
 #endif
 }
 
+static const char* fcae_display_version() {
+    static char buf[64] = {};
+    if (buf[0] == '\0') {
+        snprintf(buf, sizeof(buf), "%s", FCAE_VERSION);
+        char* pre = strstr(buf, "_pre-release");
+        if (pre) *pre = '\0';
+    }
+    return buf;
+}
+
 double ui_now_seconds() {
     using clock = std::chrono::steady_clock;
     return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
@@ -1120,16 +1130,16 @@ void render_ui() {
         ImGui::SameLine(0, 10);
         ImGui::TextColored(build_is_prerelease() ? ImVec4(1.0f, 0.72f, 0.20f, 1.0f)
                                                 : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
-                           "%s  |  %s", FCAE_VERSION,
+                           "%s  |  %s", fcae_display_version(),
                            build_is_prerelease() ? "pre-release" : "release");
         if (ImGui::IsItemHovered()) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             if (build_is_prerelease())
                 ImGui::SetTooltip("About\nThis build is a pre-release (%s).\n"
                                   "Update checks offer only newer versions, respecting\n"
-                                  "your pre-releases setting.", FCAE_VERSION);
+                                  "your pre-releases setting.", fcae_display_version());
             else
-                ImGui::SetTooltip("About\nThis build is a release (%s).", FCAE_VERSION);
+                ImGui::SetTooltip("About\nThis build is a release (%s).", fcae_display_version());
         }
         if (ImGui::IsItemClicked()) s_about_popup_open = true;
         ImGui::SameLine(0, 10);
@@ -1511,7 +1521,7 @@ void render_ui() {
                     ImGuiWindowFlags_AlwaysAutoResize)) {
                 ImGui::Text("Update Available");
                 ImGui::Spacing();
-                ImGui::Text("Current: %s  (%s)", FCAE_VERSION,
+                ImGui::Text("Current: %s  (%s)", fcae_display_version(),
                             build_is_prerelease() ? "pre-release" : "release");
                 ImGui::Text("Latest:  %s", s_update_latest);
                 if (s_update_date[0]) {
@@ -1569,7 +1579,7 @@ void render_ui() {
                 ImGui::TextUnformatted("FCAE VPN");
                 ImGui::TextColored(build_is_prerelease() ? ImVec4(1.0f, 0.72f, 0.20f, 1.0f)
                                                          : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
-                                   "%s  |  %s", FCAE_VERSION,
+                                   "%s  |  %s", fcae_display_version(),
                                    build_is_prerelease() ? "pre-release" : "release");
                 ImGui::Spacing();
                 ImGui::Separator();
@@ -1583,7 +1593,7 @@ void render_ui() {
                     ImGui::TextDisabled("%s", link.shown);
                 }
                 ImGui::Spacing();
-                ImGui::TextDisabled("Released under the MIT License.");
+                ImGui::TextDisabled(build_is_prerelease() ? "Pre-released under the MIT License." : "Released under the MIT License.");
                 ImGui::TextDisabled("Credits are listed in the");
                 ImGui::SameLine(0, 4);
                 if (ImGui::TextLink("GitHub repository"))
