@@ -2040,19 +2040,12 @@ class MainActivity : AppCompatActivity() {
             .sortedBy { it.label.lowercase() }
 
         val tempSelected = HashSet(splitTunnelSelectedApps)
-        var showUserApps = true
-        var showSystemApps = false
         var currentQuery = ""
         val filteredList = ArrayList<AppEntry>()
 
         fun refilter() {
             filteredList.clear()
             for (app in allApps) {
-                val isSelected = tempSelected.contains(app.packageName)
-                if (!isSelected) {
-                    if (app.isSystem && !showSystemApps) continue
-                    if (!app.isSystem && !showUserApps) continue
-                }
                 if (currentQuery.isNotEmpty()) {
                     val labelMatch = app.label.lowercase().contains(currentQuery)
                     val pkgMatch = app.packageName.lowercase().contains(currentQuery)
@@ -2083,30 +2076,6 @@ class MainActivity : AppCompatActivity() {
             isSingleLine = true
         }
         rootLayout.addView(searchEdit)
-
-        val filterRow = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.HORIZONTAL
-            setPadding(0, (4 * density).toInt(), 0, (4 * density).toInt())
-        }
-
-        val checkUserApps = android.widget.CheckBox(this).apply {
-            text = "User apps"
-            setTextColor(Color.parseColor("#FFE8ECF4"))
-            textSize = 13f
-            isChecked = true
-        }
-        filterRow.addView(checkUserApps)
-
-        val checkSystemApps = android.widget.CheckBox(this).apply {
-            text = "System apps"
-            setTextColor(Color.parseColor("#FF9AA3B5"))
-            textSize = 13f
-            isChecked = false
-            setPadding(pad16, 0, 0, 0)
-        }
-        filterRow.addView(checkSystemApps)
-
-        rootLayout.addView(filterRow)
 
         val listView = android.widget.ListView(this).apply {
             divider = android.graphics.drawable.ColorDrawable(Color.parseColor("#FF2A2D3D"))
@@ -2210,18 +2179,6 @@ class MainActivity : AppCompatActivity() {
             } else {
                 tempSelected.add(entry.packageName)
             }
-            adapter.notifyDataSetChanged()
-        }
-
-        checkUserApps.setOnCheckedChangeListener { _, isChecked ->
-            showUserApps = isChecked
-            refilter()
-            adapter.notifyDataSetChanged()
-        }
-
-        checkSystemApps.setOnCheckedChangeListener { _, isChecked ->
-            showSystemApps = isChecked
-            refilter()
             adapter.notifyDataSetChanged()
         }
 
@@ -2493,6 +2450,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 statsText.text =
                     "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "—"}"
+                VpnWidgetProvider.updateStats(this@MainActivity, rx, tx, totalRx, totalTx, rtt)
             }
 
             // Psiphon direct and Tor-only sessions do not expose an Aether peer.

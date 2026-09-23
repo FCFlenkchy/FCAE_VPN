@@ -378,20 +378,22 @@ public class FCAEVpnService extends VpnService {
         try {
             SharedPreferences p = getSharedPreferences(PREFS_MAIN, MODE_PRIVATE);
             int mode = p.getInt("splitTunnelMode", 0);
-            if (mode == 0) return;
-
             Set<String> pkgs = p.getStringSet("splitTunnelApps", null);
-            if (pkgs == null || pkgs.isEmpty()) return;
 
-            if (mode == 1) {
+            if (mode == 1 && pkgs != null && !pkgs.isEmpty()) {
+                // Whitelist: ONLY selected apps use the VPN.
+                // Do NOT call addDisallowedApplication() because VpnService allows either allowed OR disallowed, not both.
                 for (String pkg : pkgs) {
+                    if (pkg.equals(getPackageName())) continue;
                     try {
                         builder.addAllowedApplication(pkg);
                     } catch (Exception e) {
                         Log.w(TAG, "Failed to allow app in split tunnel: " + pkg, e);
                     }
                 }
-            } else if (mode == 2) {
+            } else if (mode == 2 && pkgs != null && !pkgs.isEmpty()) {
+                // Blacklist: All apps EXCEPT selected apps use the VPN.
+                try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
                 for (String pkg : pkgs) {
                     if (pkg.equals(getPackageName())) continue;
                     try {
@@ -400,9 +402,13 @@ public class FCAEVpnService extends VpnService {
                         Log.w(TAG, "Failed to disallow app in split tunnel: " + pkg, e);
                     }
                 }
+            } else {
+                // Off / Default: All apps routed through VPN except the VPN app itself
+                try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
             }
         } catch (Exception e) {
             Log.w(TAG, "configureSplitTunnel error", e);
+            try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
         }
     }
 
@@ -505,7 +511,6 @@ public class FCAEVpnService extends VpnService {
                 builder.addAddress("fd00::2", 128);
                 builder.addRoute("::", 0);
             }
-            try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
             configureSplitTunnel(builder);
             configureTunDns(builder);
 

@@ -54,34 +54,32 @@
                 android:textStyle="bold" />
         </LinearLayout>
 
-        <Button
+        <TextView
             android:id="@+id/widget_btn_pause_resume"
             android:layout_width="wrap_content"
-            android:layout_height="32dp"
-            android:layout_marginEnd="4dp"
-            android:minWidth="54dp"
+            android:layout_height="30dp"
+            android:layout_marginEnd="5dp"
+            android:minWidth="52dp"
             android:paddingStart="8dp"
             android:paddingEnd="8dp"
-            android:paddingTop="0dp"
-            android:paddingBottom="0dp"
-            android:backgroundTint="#FFB45309"
+            android:gravity="center"
+            android:background="@drawable/widget_btn_tun_stop"
             android:text="STOP"
             android:textColor="#FFFFFFFF"
             android:textSize="11sp"
             android:textStyle="bold"
             android:visibility="gone" />
 
-        <Button
+        <TextView
             android:id="@+id/widget_btn_action"
             android:layout_width="wrap_content"
-            android:layout_height="32dp"
-            android:layout_marginEnd="2dp"
-            android:minWidth="70dp"
+            android:layout_height="30dp"
+            android:layout_marginEnd="4dp"
+            android:minWidth="68dp"
             android:paddingStart="10dp"
             android:paddingEnd="10dp"
-            android:paddingTop="0dp"
-            android:paddingBottom="0dp"
-            android:backgroundTint="#FF15803D"
+            android:gravity="center"
+            android:background="@drawable/widget_btn_connect"
             android:text="CONNECT"
             android:textColor="#FFFFFFFF"
             android:textSize="11sp"
@@ -89,11 +87,11 @@
 
         <ImageButton
             android:id="@+id/widget_btn_settings"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
             android:background="@android:color/transparent"
             android:contentDescription="Settings"
-            android:padding="6dp"
+            android:padding="5dp"
             android:scaleType="fitCenter"
             android:src="@android:drawable/ic_menu_preferences"
             android:tint="#FF8A93A6" />

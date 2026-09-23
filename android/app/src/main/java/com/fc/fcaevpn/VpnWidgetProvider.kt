@@ -177,6 +177,12 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private var lastConnecting = false
         private var lastStatsLine = ""
 
+        fun updateStats(context: Context, rx: Long, tx: Long, totalRx: Long, totalTx: Long, rtt: Int) {
+            if (!lastRunning && !lastPaused) return
+            lastStatsLine = "↓ ${fmtBytes(rx)}/s (${fmtBytes(totalRx)})  |  ↑ ${fmtBytes(tx)}/s (${fmtBytes(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "—"}"
+            updateAllWidgets(context)
+        }
+
         fun updateAllWidgets(context: Context) {
             val appWidgetManager = AppWidgetManager.getInstance(context) ?: return
             val ids = appWidgetManager.getAppWidgetIds(ComponentName(context, VpnWidgetProvider::class.java))
@@ -236,19 +242,21 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 }
             }
 
+            val actionBgRes = if (btnText == "CONNECT") R.drawable.widget_btn_connect else R.drawable.widget_btn_disconnect
+
             views.setTextViewText(R.id.widget_status, statusText)
             views.setTextColor(R.id.widget_status, statusColor)
             views.setTextViewText(R.id.widget_btn_action, btnText)
-            views.setInt(R.id.widget_btn_action, "setBackgroundColor", btnColor)
+            views.setInt(R.id.widget_btn_action, "setBackgroundResource", actionBgRes)
 
             if (isTun && (lastRunning || lastPaused)) {
                 views.setViewVisibility(R.id.widget_btn_pause_resume, View.VISIBLE)
                 if (lastPaused) {
                     views.setTextViewText(R.id.widget_btn_pause_resume, "START")
-                    views.setInt(R.id.widget_btn_pause_resume, "setBackgroundColor", COLOR_TUN_START_BTN)
+                    views.setInt(R.id.widget_btn_pause_resume, "setBackgroundResource", R.drawable.widget_btn_tun_start)
                 } else {
                     views.setTextViewText(R.id.widget_btn_pause_resume, "STOP")
-                    views.setInt(R.id.widget_btn_pause_resume, "setBackgroundColor", COLOR_TUN_STOP_BTN)
+                    views.setInt(R.id.widget_btn_pause_resume, "setBackgroundResource", R.drawable.widget_btn_tun_stop)
                 }
 
                 val prIntent = Intent(context, VpnWidgetProvider::class.java).apply {
