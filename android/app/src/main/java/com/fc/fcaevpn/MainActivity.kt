@@ -1984,9 +1984,9 @@ class MainActivity : AppCompatActivity() {
         msg.setSpan(android.text.style.ForegroundColorSpan(
             Color.parseColor(if (buildIsPrerelease) "#F0B429" else "#8A93A6")),
             verStart, verStart + verLine.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        addLink(msg, "t.me/FCAE_VPN", COMMUNITY_TELEGRAM)
-        addLink(msg, "github.com/FCFlenkchy/FCAE_VPN", COMMUNITY_GITHUB)
-        addLink(msg, "GitHub repository", COMMUNITY_GITHUB)
+        addLink(msg, "t.me/FCAE_VPN", LINK_TELEGRAM)
+        addLink(msg, "github.com/FCFlenkchy/FCAE_VPN", LINK_GITHUB)
+        addLink(msg, "GitHub repository", LINK_CREDITS)
         val density = resources.displayMetrics.density
         val content = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -2003,8 +2003,8 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, (16 * density).toInt(), 0, (8 * density).toInt())
         }
         arrayOf(
-            Triple("Telegram", COMMUNITY_TELEGRAM, "#FF229ED9"),
-            Triple("GitHub", COMMUNITY_GITHUB, "#FF34344A")
+            Triple("Telegram", LINK_TELEGRAM, "#FF229ED9"),
+            Triple("GitHub", LINK_GITHUB, "#FF34344A")
         ).forEachIndexed { i, (label, url, tint) ->
             val params = android.widget.LinearLayout.LayoutParams(
                 0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -2567,8 +2567,9 @@ class MainActivity : AppCompatActivity() {
         // holding this value defers to the engine (see deferredTorSocksPort).
         private const val TOR_SOCKS_ENGINE_DEFAULT = 1821
 
-        private const val COMMUNITY_TELEGRAM = "https://t.me/FCAE_VPN"
-        private const val COMMUNITY_GITHUB = "https://github.com/FCFlenkchy/FCAE_VPN"
+        private const val LINK_TELEGRAM = "https://t.me/FCAE_VPN"
+        private const val LINK_GITHUB = "https://github.com/FCFlenkchy/FCAE_VPN"
+        private const val LINK_CREDITS = LINK_GITHUB + "#credits"
 
         // Set to true while the Activity is alive.  The service checks
         // this after fullShutdown() to decide whether to kill the process.

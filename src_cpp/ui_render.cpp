@@ -1059,10 +1059,13 @@ static ImVec2 viewport_center() {
     return ImVec2(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y * 0.5f);
 }
 
+static const char* const kLinkTelegram = "https://t.me/FCAE_VPN";
+static const char* const kLinkGithub = "https://github.com/FCFlenkchy/FCAE_VPN";
+static const std::string kLinkCredits = std::string(kLinkGithub) + "#credits";
 struct CommunityLink { const char* label; const char* url; const char* shown; };
 static const CommunityLink kCommunityLinks[] = {
-    { "Telegram", "https://t.me/FCAE_VPN",                  "t.me/FCAE_VPN" },
-    { "GitHub",   "https://github.com/FCFlenkchy/FCAE_VPN", "github.com/FCFlenkchy/FCAE_VPN" },
+    { "Telegram", kLinkTelegram, "t.me/FCAE_VPN" },
+    { "GitHub",   kLinkGithub,   "github.com/FCFlenkchy/FCAE_VPN" },
 };
 
 void render_ui() {
@@ -1574,9 +1577,9 @@ void render_ui() {
                 ImGui::TextDisabled("Credits are listed in the");
                 ImGui::SameLine(0, 4);
                 if (ImGui::TextLink("GitHub repository"))
-                    open_link(kCommunityLinks[1].url);
+                    open_link(kLinkCredits.c_str());
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", kCommunityLinks[1].url);
+                    ImGui::SetTooltip("%s", kLinkCredits.c_str());
                 ImGui::Spacing();
                 if (ImGui::Button("Telegram")) open_link(kCommunityLinks[0].url);
                 ImGui::SameLine();
