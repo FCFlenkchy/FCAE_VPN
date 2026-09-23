@@ -862,7 +862,8 @@ mod tests {
     }
 
     #[test]
-    fn failed_psiphon_chain_never_raises_tun() {
+    fn psiphon_exits_raise_tun_only_after_connection() {
+        static EXIT_READY: AtomicBool = AtomicBool::new(false);
         struct FailedExit;
         #[async_trait]
         impl Backend for FailedExit {
@@ -912,17 +913,23 @@ mod tests {
             fn id(&self) -> BackendId { BackendId::Psiphon }
             fn capabilities(&self) -> Capabilities { FakeBackend.capabilities() }
             async fn start(&self, cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
-                assert!(cx.config.psiphon.config_json.unwrap().contains("socks5://127.0.0.1:1819"));
+                if let Some(json) = cx.config.psiphon.config_json {
+                    assert!(json.contains("socks5://127.0.0.1:1819"));
+                }
+                assert!(!EXIT_READY.load(Ordering::SeqCst));
+                tokio::task::yield_now().await;
+                EXIT_READY.store(true, Ordering::SeqCst);
                 Ok(Box::new(ExitHandle))
             }
         }
-        struct CheckTun { cancel: CancelToken, checked: Arc<AtomicBool> }
+        struct CheckTun { cancel: CancelToken, checked: Arc<AtomicBool>, chained: bool }
         impl TunBridge for CheckTun {
             fn start(&self, _: &SessionConfig, ep: &Endpoints) -> Result<()> {
+                assert!(EXIT_READY.load(Ordering::SeqCst), "TUN started before the exit connected");
                 assert_eq!(ep.socks.unwrap().port(), 1080);
                 assert!(ep.psiphon_dns);
                 assert!(!ep.udp);
-                assert_eq!(ep.peer_ip.as_deref(), Some("203.0.113.7"));
+                assert_eq!(ep.peer_ip.as_deref(), if self.chained { Some("203.0.113.7") } else { None });
                 self.checked.store(true, Ordering::SeqCst);
                 self.cancel.cancel();
                 Ok(())
@@ -931,16 +938,25 @@ mod tests {
             fn is_running(&self) -> bool { false }
         }
         registry::register(FcaeBackend::Psiphon, || Arc::new(ReadyExit));
-        let mut cfg = SessionConfig::default();
-        cfg.mode = FcaeMode::Tun;
-        cfg.psiphon.through_tunnel = true;
-        let cancel = CancelToken::new();
-        let checked = Arc::new(AtomicBool::new(false));
-        runtime.block_on(run_session(Arc::new(FakeBackend), cfg, TelemetrySink::new(cell),
-            cancel.clone(), Arc::new(CheckTun { cancel, checked: checked.clone() }),
-            Duration::from_millis(10), false, 0,
-            Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(())), Arc::new(Mutex::new(None)))).unwrap();
-        assert!(checked.load(Ordering::SeqCst));
+        for chained in [true, false] {
+            EXIT_READY.store(false, Ordering::SeqCst);
+            let mut cfg = SessionConfig::default();
+            cfg.mode = FcaeMode::Tun;
+            cfg.backend = if chained { FcaeBackend::Aether } else { FcaeBackend::Psiphon };
+            cfg.psiphon.through_tunnel = chained;
+            let backend: Arc<dyn Backend> = if chained {
+                Arc::new(FakeBackend)
+            } else {
+                Arc::new(ReadyExit)
+            };
+            let cancel = CancelToken::new();
+            let checked = Arc::new(AtomicBool::new(false));
+            runtime.block_on(run_session(backend, cfg, TelemetrySink::new(cell.clone()),
+                cancel.clone(), Arc::new(CheckTun { cancel, checked: checked.clone(), chained }),
+                Duration::from_millis(10), false, 0,
+                Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(())), Arc::new(Mutex::new(None)))).unwrap();
+            assert!(checked.load(Ordering::SeqCst));
+        }
     }
 
     #[test]

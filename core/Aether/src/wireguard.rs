@@ -183,27 +183,38 @@ impl WgTunnel {
                     Ok(n) => {
                         transient_errors = 0;
                         strip_client_id(&mut buf[..n]);
-                        let mut tunn = tunn_r.lock().await;
-                        match tunn.decapsulate(None, &buf[..n], &mut tmp) {
-                            TunnResult::Done => {
-                                *last_valid_rx_r.lock() = Instant::now();
-                            }
-                            TunnResult::Err(e) => {
-                                log::trace!("decapsulate error: {e:?}");
-                            }
-                            TunnResult::WriteToNetwork(pkt) => {
-                                *last_valid_rx_r.lock() = Instant::now();
-                                let mut pkt_vec = pkt.to_vec();
-                                inject_client_id(&mut pkt_vec, &client_id);
-                                drop(tunn);
-                                let _ = sock_r.send(&pkt_vec).await;
-                            }
-                            TunnResult::WriteToTunnelV4(pkt, _)
-                            | TunnResult::WriteToTunnelV6(pkt, _) => {
-                                *last_valid_rx_r.lock() = Instant::now();
-                                let pkt_vec = pkt.to_vec();
-                                drop(tunn);
-                                let _ = inbound_tx.send(pkt_vec).await;
+                        let mut datagram = &buf[..n];
+                        loop {
+                            let mut tunn = tunn_r.lock().await;
+                            match tunn.decapsulate(None, datagram, &mut tmp) {
+                                TunnResult::Done => {
+                                    if !datagram.is_empty() {
+                                        *last_valid_rx_r.lock() = Instant::now();
+                                    }
+                                    break;
+                                }
+                                TunnResult::Err(e) => {
+                                    log::trace!("decapsulate error: {e:?}");
+                                    break;
+                                }
+                                TunnResult::WriteToNetwork(pkt) => {
+                                    if !datagram.is_empty() {
+                                        *last_valid_rx_r.lock() = Instant::now();
+                                    }
+                                    let mut pkt_vec = pkt.to_vec();
+                                    inject_client_id(&mut pkt_vec, &client_id);
+                                    drop(tunn);
+                                    let _ = sock_r.send(&pkt_vec).await;
+                                    datagram = &[];
+                                }
+                                TunnResult::WriteToTunnelV4(pkt, _)
+                                | TunnResult::WriteToTunnelV6(pkt, _) => {
+                                    *last_valid_rx_r.lock() = Instant::now();
+                                    let pkt_vec = pkt.to_vec();
+                                    drop(tunn);
+                                    let _ = inbound_tx.send(pkt_vec).await;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -274,15 +285,22 @@ impl WgTunnel {
             loop {
                 interval.tick().await;
                 let mut tunn = tunn_t.lock().await;
-                if let TunnResult::WriteToNetwork(pkt) = tunn.update_timers(&mut tmp) {
-                    let mut pkt_vec = pkt.to_vec();
-                    inject_client_id(&mut pkt_vec, &client_id);
-                    drop(tunn);
-
-                    if aethernoize_t.is_enabled() {
-                        aethernoize::send_keepalive_junk(&sock_t, &aethernoize_t).await;
+                match tunn.update_timers(&mut tmp) {
+                    TunnResult::WriteToNetwork(pkt) => {
+                        let mut pkt_vec = pkt.to_vec();
+                        inject_client_id(&mut pkt_vec, &client_id);
+                        drop(tunn);
+                        if aethernoize_t.is_enabled() {
+                            aethernoize::send_keepalive_junk(&sock_t, &aethernoize_t).await;
+                        }
+                        let _ = sock_t.send(&pkt_vec).await;
                     }
-                    let _ = sock_t.send(&pkt_vec).await;
+                    TunnResult::Err(e) => {
+                        return Err::<(), AetherError>(AetherError::Other(
+                            format!("wireguard timer: {e:?}"),
+                        ));
+                    }
+                    _ => {}
                 }
             }
         });
@@ -290,19 +308,47 @@ impl WgTunnel {
         let stale_timeout = wg_stale_timeout();
         let health_task = tokio::spawn(async move {
             let mut out_buf = vec![0u8; MAX_PACKET];
+            let mut health = PeerHealth::default();
             loop {
                 tokio::time::sleep(health_check_pause()).await;
 
-                let idle = last_valid_rx_h.lock().elapsed();
-                if idle >= stale_timeout {
-                    log::warn!(
-                        "[wg] no valid data from peer {} in {:?}; tunnel considered dead",
-                        peer,
-                        idle
-                    );
-                    return Err::<(), AetherError>(AetherError::Other(
-                        "wireguard tunnel stale: no valid data from peer".into(),
-                    ));
+                let last_rx = *last_valid_rx_h.lock();
+                let now = Instant::now();
+                match health.check(now, last_rx, stale_timeout) {
+                    HealthAction::Recover => {
+                        log::warn!(
+                            "[wg] peer {} silent for {:?}; attempting in-place handshake recovery",
+                            peer, now.saturating_duration_since(last_rx)
+                        );
+                        let mut tunn = tunn_h.lock().await;
+                        match tunn.format_handshake_initiation(&mut out_buf, false) {
+                            TunnResult::WriteToNetwork(pkt) => {
+                                let mut packet = pkt.to_vec();
+                                inject_client_id(&mut packet, &client_id_h);
+                                drop(tunn);
+                                if let Err(e) = sock_h.send(&packet).await {
+                                    log::debug!("[wg] recovery handshake send failed: {e}");
+                                }
+                            }
+                            TunnResult::Err(e) => {
+                                log::debug!("[wg] recovery handshake failed: {e:?}");
+                            }
+                            _ => {}
+                        }
+                    }
+                    HealthAction::Failed => {
+                        if *last_valid_rx_h.lock() != last_rx {
+                            continue;
+                        }
+                        log::warn!(
+                            "[wg] no valid data from peer {} in {:?} after handshake recovery; reconnecting",
+                            peer, now.saturating_duration_since(last_rx)
+                        );
+                        return Err::<(), AetherError>(AetherError::Other(
+                            "wireguard tunnel stale after handshake recovery".into(),
+                        ));
+                    }
+                    HealthAction::Healthy | HealthAction::Waiting => {}
                 }
 
                 let probe = build_dataplane_probe(local_ipv4);
@@ -332,9 +378,11 @@ impl WgTunnel {
                 log::info!("wireguard send task ended");
                 Ok(())
             }
-            _ = timer_task => {
-                log::info!("wireguard timer task ended");
-                Ok(())
+            r = timer_task => {
+                match r {
+                    Ok(result) => result,
+                    Err(e) => Err(AetherError::Other(format!("wireguard timer task failed: {e}"))),
+                }
             }
             r = health_task => {
                 match r {
@@ -346,6 +394,42 @@ impl WgTunnel {
         };
 
         result
+    }
+}
+
+// Allow the initial handshake and two five-second retransmission intervals.
+const WG_HANDSHAKE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, PartialEq, Eq)]
+enum HealthAction {
+    Healthy,
+    Recover,
+    Waiting,
+    Failed,
+}
+
+#[derive(Default)]
+struct PeerHealth {
+    recovery: Option<(Instant, Instant)>,
+}
+
+impl PeerHealth {
+    fn check(&mut self, now: Instant, last_rx: Instant, stale_timeout: Duration) -> HealthAction {
+        if now.saturating_duration_since(last_rx) < stale_timeout {
+            self.recovery = None;
+            return HealthAction::Healthy;
+        }
+        if let Some((started, observed_rx)) = self.recovery {
+            if last_rx == observed_rx {
+                return if now.saturating_duration_since(started) >= WG_HANDSHAKE_RECOVERY_TIMEOUT {
+                    HealthAction::Failed
+                } else {
+                    HealthAction::Waiting
+                };
+            }
+        }
+        self.recovery = Some((now, last_rx));
+        HealthAction::Recover
     }
 }
 
@@ -868,6 +952,75 @@ mod tests {
             assert!(pause >= WG_HEALTHCHECK_INTERVAL - WG_HEALTHCHECK_JITTER);
             assert!(pause <= WG_HEALTHCHECK_INTERVAL + WG_HEALTHCHECK_JITTER);
         }
+    }
+
+    #[test]
+    fn handshake_completion_drains_pending_data() {
+        fn network_packet(result: TunnResult<'_>) -> Vec<u8> {
+            match result {
+                TunnResult::WriteToNetwork(packet) => packet.to_vec(),
+                other => panic!("expected a WireGuard packet, got {other:?}"),
+            }
+        }
+        let client_secret = StaticSecret::from([7u8; 32]);
+        let server_secret = StaticSecret::from([9u8; 32]);
+        let client_public = PublicKey::from(&client_secret);
+        let server_public = PublicKey::from(&server_secret);
+        let mut client = Tunn::new(client_secret, server_public, None, None, 1, None);
+        let mut server = Tunn::new(server_secret, client_public, None, None, 2, None);
+        let mut client_buf = vec![0u8; MAX_PACKET];
+        let mut server_buf = vec![0u8; MAX_PACKET];
+        let probe = build_dataplane_probe(Ipv4Addr::new(172, 16, 0, 2));
+        let initiation = network_packet(client.encapsulate(&probe, &mut client_buf));
+        let response = network_packet(server.decapsulate(None, &initiation, &mut server_buf));
+        let keepalive = network_packet(client.decapsulate(None, &response, &mut client_buf));
+        assert!(matches!(server.decapsulate(None, &keepalive, &mut server_buf), TunnResult::Done));
+        let data = network_packet(client.decapsulate(None, &[], &mut client_buf));
+        match server.decapsulate(None, &data, &mut server_buf) {
+            TunnResult::WriteToTunnelV4(packet, _) => assert_eq!(packet, probe.as_slice()),
+            other => panic!("queued data was not delivered: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn silent_peer_gets_one_recovery_window_before_teardown() {
+        let start = Instant::now();
+        let stale = Duration::from_secs(10);
+        let mut health = PeerHealth::default();
+        assert_eq!(health.check(start, start, stale), HealthAction::Healthy);
+        let recovery = start + stale;
+        assert_eq!(health.check(recovery, start, stale), HealthAction::Recover);
+        assert_eq!(
+            health.check(recovery + Duration::from_secs(5), start, stale),
+            HealthAction::Waiting,
+        );
+        assert_eq!(
+            health.check(recovery + WG_HANDSHAKE_RECOVERY_TIMEOUT, start, stale),
+            HealthAction::Failed,
+        );
+    }
+
+    #[test]
+    fn authenticated_receive_cancels_recovery_and_allows_a_later_attempt() {
+        let start = Instant::now();
+        let stale = Duration::from_secs(10);
+        let mut health = PeerHealth::default();
+        assert_eq!(health.check(start + stale, start, stale), HealthAction::Recover);
+        let received = start + stale + Duration::from_secs(5);
+        assert_eq!(health.check(received, received, stale), HealthAction::Healthy);
+        assert_eq!(health.check(received + stale, received, stale), HealthAction::Recover);
+    }
+
+    #[test]
+    fn delayed_health_task_does_not_discard_new_receive_activity() {
+        let start = Instant::now();
+        let stale = Duration::from_secs(10);
+        let mut health = PeerHealth::default();
+        assert_eq!(health.check(start + stale, start, stale), HealthAction::Recover);
+        let received = start + Duration::from_secs(14);
+        let resumed = start + Duration::from_secs(40);
+        assert_eq!(health.check(resumed, received, stale), HealthAction::Recover);
+        assert_eq!(health.check(resumed, received, stale), HealthAction::Waiting);
     }
 
     #[test]

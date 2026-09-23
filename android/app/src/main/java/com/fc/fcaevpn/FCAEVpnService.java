@@ -54,14 +54,6 @@ public class FCAEVpnService extends VpnService {
      *  core asks for the interface. */
     private volatile boolean sessionPsiphonExit = false;
     /**
-     * True while the current interface was raised by
-     * {@link #raiseTunForPsiphonConnect()} ahead of the session start (TUN
-     * first, Psiphon connecting behind it). The start worker hands it to
-     * establishTunNow()'s reuse path instead of tearing it down and
-     * re-creating it, so READY does not blip the interface down/up.
-     */
-    private volatile boolean earlyPsiphonTun = false;
-    /**
      * Full session config parked by ACTION_PSIPHON_START (TUN mode, Psiphon
      * protocol). This service — not MainActivity — starts the session when
      * Psiphon's READY lands, so a connect survives the activity being swiped
@@ -429,22 +421,13 @@ public class FCAEVpnService extends VpnService {
         return added;
     }
 
-    /**
-     * Create the session's TUN interface and hand its fd to the caller.
-     *
-     * Reached from three threads by design: the startup worker (early
-     * establish, Psiphon sessions), raiseTunForPsiphonConnect's posted task
-     * (TUN ahead of the Psiphon connect), and the core's on-demand fd
-     * provider (JNI). tunEstablishLock serialises the creations; the
-     * double-check under tunLock makes every later call a no-op that
-     * reuses the interface the first one created.
-     */
+    /** Create or reuse the connected session's TUN interface. */
     @SuppressWarnings("unused")
     public int establishTunNow() {
         synchronized (tunEstablishLock) {
             synchronized (tunLock) {
                 if (vpnInterface != null) {
-                    // Already up (early establish won the race): reuse it.
+                    // Reuse the interface already owned by this session.
                     return vpnInterface.getFd();
                 }
             }
@@ -609,16 +592,13 @@ public class FCAEVpnService extends VpnService {
 
                 case ACTION_PSIPHON_START:
                     pendingPsiphonStart = new Intent(intent);
+                    preparePsiphonConnect(intent);
                     PsiphonTunnelService.startBound(this,
                             new Intent(this, PsiphonTunnelService.class)
                                     .setAction(PsiphonTunnelService.ACTION_START)
                                     .putExtras(intent)
                                     .putExtra(PsiphonTunnelService.EXTRA_OWNER,
                                             PsiphonTunnelService.OWNER_VPN));
-                    // This owner only exists in TUN mode: the VPN goes up the
-                    // moment the user hits Connect, and Psiphon connects
-                    // behind it.
-                    raiseTunForPsiphonConnect(intent);
                     return START_STICKY;
 
                 case ACTION_PSIPHON_REGIONS:
@@ -778,26 +758,7 @@ public class FCAEVpnService extends VpnService {
         }
     }
 
-    /**
-     * TUN first for a Psiphon exit: raise the interface the moment the user
-     * hits Connect instead of after the tunnel's READY broadcast, so the key
-     * icon, the protected-network state and this service's foreground
-     * notification are all live while Psiphon is still connecting.
-     *
-     * Safe by construction: this package is excluded from the TUN by
-     * {@code addDisallowedApplication()} and the {@code :psiphon} process is
-     * pinned to the physical network, so Psiphon's dials cannot loop back
-     * through the interface; the data plane still attaches only when the
-     * core's on-demand fd provider asks for it (or, for the pure-Psiphon
-     * protocol, when this service's READY handler starts the parked
-     * session). A Psiphon failure in this window is torn down by the
-     * BROADCAST_FAILED arm of {@link #psiphonStatsReceiver}.
-     */
-    private void raiseTunForPsiphonConnect(Intent intent) {
-        synchronized (tunLock) {
-            // A live session (or a previous raise) already owns the device.
-            if (vpnInterface != null) return;
-        }
+    private void preparePsiphonConnect(Intent intent) {
         if (running || vpnThread != null) return;
         // Same connect-window reset startVpn() performs: invalidate anything
         // still tearing down from a previous session and claim this one.
@@ -809,7 +770,6 @@ public class FCAEVpnService extends VpnService {
         sessionTunMtu = Math.max(1280, Math.min(9000,
                 intent.getIntExtra("tunMtu", 1500)));
         pendingSessionGen = cleanupGeneration.incrementAndGet();
-        earlyPsiphonTun = true;
         notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
         startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
         // No notifyUi() here on purpose: the connecting broadcast starts
@@ -817,9 +777,6 @@ public class FCAEVpnService extends VpnService {
         // would read state 0 and flash DISCONNECTED for the whole dial.
         // The activity already shows CONNECTING from the click; READY and
         // the start worker's own broadcasts take it from there.
-        // Serialized with engine cleanup on the single lifecycle thread; the
-        // staleness check inside refuses a raise that a disconnect raced out.
-        NativeEngine.lifecycleExecutor.execute(this::establishTunNow);
     }
 
     private synchronized void startVpn(Intent intent) {
@@ -932,61 +889,10 @@ public class FCAEVpnService extends VpnService {
                 // overlap and the system briefly routes through a TUN whose
                 // backend has already been cancelled.
                 try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
-                // An interface raised by raiseTunForPsiphonConnect() for
-                // exactly this session (same TUN mode, same Psiphon exit, MTU
-                // carried on the owner intent) is handed back to
-                // establishTunNow()'s reuse path instead of being closed and
-                // re-created — no down/up blip and no route flap at READY.
-                // A disconnect that already invalidated this session closes
-                // it instead: nothing may re-attach a dead session's device.
-                final boolean reuseEarlyTun;
-                synchronized (tunLock) {
-                    reuseEarlyTun = earlyPsiphonTun && mode == 1
-                            && sessionPsiphonExit && vpnInterface == null
-                            && oldPfd != null
-                            && sessionGen == cleanupGeneration.get()
-                            && !shuttingDown;
-                    if (reuseEarlyTun) {
-                        vpnInterface = oldPfd;
-                        earlyPsiphonTun = false;
-                    }
-                }
-                if (oldPfd != null && !reuseEarlyTun) {
-                    try { oldPfd.close(); } catch (Exception ignored) {}
-                }
+                closeQuiet(oldPfd);
                 try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
 
                 pendingSessionGen = sessionGen;
-
-                // TUN FIRST on every Psiphon exit (protocol Psiphon, or
-                // Psiphon chained behind Aether): the interface goes up the
-                // moment the session starts and the tunnel connects behind
-                // it. The pure-Psiphon connect has usually raised it already
-                // (raiseTunForPsiphonConnect, before the AAR even started
-                // dialling) and this call takes the reuse path; a chained or
-                // recalled start raises it here — still before nativeStart(),
-                // so the NetworkMonitor event from the interface appearing
-                // lands at connect start, where the controller's automatic
-                // reconnect absorbs it, not on top of a live session.
-                //
-                // The data plane still waits for the exit: the core's fd
-                // provider only asks for the descriptor once the whole chain
-                // (Aether up, Psiphon chained, exit SOCKS live) has
-                // connected, so nothing dials into a tunnel that is not
-                // there yet — the device is simply "connecting", like any
-                // VPN mid-handshake.
-                //
-                // No packet can loop back: every process in this package is
-                // excluded from the TUN by addDisallowedApplication(), and
-                // :psiphon is additionally pinned to the physical network.
-                //
-                // Every other protocol keeps the connected-first order: the
-                // fd provider calls establishTunNow() once the backend
-                // reports a live SOCKS endpoint. Proxy mode never establishes
-                // an interface at all.
-                if (mode == 1 && sessionPsiphonExit) {
-                    establishTunNow();
-                }
 
                 NativeEngine.nativeInit();
                 try {
@@ -1143,7 +1049,6 @@ public class FCAEVpnService extends VpnService {
         forgetStart();
 
         vpnThread = null;
-        earlyPsiphonTun = false;
         pendingPsiphonStart = null;
         final ParcelFileDescriptor pfd;
         synchronized (tunLock) {
@@ -1239,7 +1144,6 @@ public class FCAEVpnService extends VpnService {
         }
 
         vpnThread = null;
-        earlyPsiphonTun = false;
         pendingPsiphonStart = null;
         final ParcelFileDescriptor pfd;
         synchronized (tunLock) {
@@ -1399,16 +1303,9 @@ public class FCAEVpnService extends VpnService {
                 return;
             }
             if (PsiphonTunnelService.BROADCAST_FAILED.equals(intent.getAction())) {
-                // A failure while the TUN was raised ahead of the session
-                // (raiseTunForPsiphonConnect) and no start worker exists:
-                // nothing else owns the teardown — no engine is up for the
-                // statsRunnable watchdog to see — so drop the interface
-                // instead of leaving the device routing into a VPN with no
-                // tunnel behind it. With a start in flight or a session
-                // running, the engine's own failure paths own it.
                 if (!shuttingDown && !running && !vpnPaused && vpnThread == null
                         && PsiphonTunnelService.isCurrentBroadcast(intent)
-                        && hasTunInterface()) {
+                        && pendingPsiphonStart != null) {
                     fullShutdown();
                 }
                 return;
