@@ -2040,6 +2040,7 @@ class MainActivity : AppCompatActivity() {
             .sortedBy { it.label.lowercase() }
 
         val tempSelected = HashSet(splitTunnelSelectedApps)
+        var showUserApps = true
         var showSystemApps = false
         var currentQuery = ""
         val filteredList = ArrayList<AppEntry>()
@@ -2047,11 +2048,15 @@ class MainActivity : AppCompatActivity() {
         fun refilter() {
             filteredList.clear()
             for (app in allApps) {
-                if (!showSystemApps && app.isSystem && !tempSelected.contains(app.packageName)) continue
+                val isSelected = tempSelected.contains(app.packageName)
+                if (!isSelected) {
+                    if (app.isSystem && !showSystemApps) continue
+                    if (!app.isSystem && !showUserApps) continue
+                }
                 if (currentQuery.isNotEmpty()) {
-                    if (!app.label.lowercase().contains(currentQuery) && !app.packageName.lowercase().contains(currentQuery)) {
-                        continue
-                    }
+                    val labelMatch = app.label.lowercase().contains(currentQuery)
+                    val pkgMatch = app.packageName.lowercase().contains(currentQuery)
+                    if (!labelMatch && !pkgMatch) continue
                 }
                 filteredList.add(app)
             }
@@ -2069,7 +2074,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val searchEdit = android.widget.EditText(this).apply {
-            hint = "Search apps…"
+            hint = "Search by app or package name…"
             setTextColor(Color.parseColor("#FFE8ECF4"))
             setHintTextColor(Color.parseColor("#FF6B7280"))
             background = android.graphics.drawable.ColorDrawable(Color.parseColor("#FF1E1E2C"))
@@ -2079,14 +2084,29 @@ class MainActivity : AppCompatActivity() {
         }
         rootLayout.addView(searchEdit)
 
+        val filterRow = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            setPadding(0, (4 * density).toInt(), 0, (4 * density).toInt())
+        }
+
+        val checkUserApps = android.widget.CheckBox(this).apply {
+            text = "User apps"
+            setTextColor(Color.parseColor("#FFE8ECF4"))
+            textSize = 13f
+            isChecked = true
+        }
+        filterRow.addView(checkUserApps)
+
         val checkSystemApps = android.widget.CheckBox(this).apply {
-            text = "Show system apps"
+            text = "System apps"
             setTextColor(Color.parseColor("#FF9AA3B5"))
             textSize = 13f
             isChecked = false
-            setPadding(pad8, (4 * density).toInt(), pad8, (4 * density).toInt())
+            setPadding(pad16, 0, 0, 0)
         }
-        rootLayout.addView(checkSystemApps)
+        filterRow.addView(checkSystemApps)
+
+        rootLayout.addView(filterRow)
 
         val listView = android.widget.ListView(this).apply {
             divider = android.graphics.drawable.ColorDrawable(Color.parseColor("#FF2A2D3D"))
@@ -2133,12 +2153,24 @@ class MainActivity : AppCompatActivity() {
                     }
                     row.addView(iconView)
 
-                    labelView = android.widget.TextView(this@MainActivity).apply {
+                    val textCol = android.widget.LinearLayout(this@MainActivity).apply {
+                        orientation = android.widget.LinearLayout.VERTICAL
                         layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    }
+
+                    labelView = android.widget.TextView(this@MainActivity).apply {
                         setTextColor(Color.parseColor("#FFE8ECF4"))
                         textSize = 14f
                     }
-                    row.addView(labelView)
+                    textCol.addView(labelView)
+
+                    val pkgView = android.widget.TextView(this@MainActivity).apply {
+                        setTextColor(Color.parseColor("#FF6B7280"))
+                        textSize = 11f
+                    }
+                    textCol.addView(pkgView)
+
+                    row.addView(textCol)
 
                     checkBox = android.widget.CheckBox(this@MainActivity).apply {
                         isClickable = false
@@ -2149,7 +2181,9 @@ class MainActivity : AppCompatActivity() {
 
                 val entry = getItem(position)
                 iconView.setImageDrawable(entry.icon)
-                labelView.text = entry.label
+                val textCol = row.getChildAt(1) as android.widget.LinearLayout
+                (textCol.getChildAt(0) as android.widget.TextView).text = entry.label
+                (textCol.getChildAt(1) as android.widget.TextView).text = entry.packageName
                 checkBox.isChecked = tempSelected.contains(entry.packageName)
 
                 return row
@@ -2166,6 +2200,12 @@ class MainActivity : AppCompatActivity() {
             } else {
                 tempSelected.add(entry.packageName)
             }
+            adapter.notifyDataSetChanged()
+        }
+
+        checkUserApps.setOnCheckedChangeListener { _, isChecked ->
+            showUserApps = isChecked
+            refilter()
             adapter.notifyDataSetChanged()
         }
 
