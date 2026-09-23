@@ -292,6 +292,34 @@
                     android:layout_height="wrap_content" android:layout_marginTop="8dp"
                     android:textColor="#FF9AA3B5" android:textSize="12sp"
                     android:text="DNS queries stay inside the selected tunnel." />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:text="Split Tunneling"
+                    android:textColor="#FF60A5FA"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <Spinner
+                    android:id="@+id/spinnerSplitTunnel"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="4dp"
+                    android:background="#FF1E1E2C"
+                    android:popupBackground="#FF1E1E2C" />
+
+                <Button
+                    android:id="@+id/btnSplitTunnelApps"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:layout_marginTop="6dp"
+                    android:backgroundTint="#FF2A2D3D"
+                    android:text="Select Apps (0)"
+                    android:textColor="#FFE8ECF4"
+                    android:textSize="13sp"
+                    android:visibility="gone" />
                 <LinearLayout android:id="@+id/layoutTun2socksSettings" android:layout_width="match_parent"
                     android:layout_height="wrap_content" android:orientation="vertical">
                     <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
@@ -859,92 +887,177 @@
         </LinearLayout>
     </ScrollView>
 
-    <TextView
+    <LinearLayout
+        android:id="@+id/layoutLogsContainer"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingStart="20dp"
-        android:paddingEnd="20dp"
-        android:paddingTop="12dp"
-        android:paddingBottom="6dp"
-        android:text="Logs"
-        android:textColor="#FF9AA3B5"
-        android:textSize="13sp" />
-
-    <FrameLayout
-        android:layout_width="match_parent"
-        android:layout_height="220dp">
-    <ScrollView
-        android:id="@+id/logScroll"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:background="#FF0C0C14"
-        android:scrollbars="vertical"
-        android:fadeScrollbars="false"
-        android:scrollbarAlwaysDrawVerticalTrack="true"
-        android:scrollbarStyle="insideInset"
-        android:scrollbarTrackVertical="@android:color/darker_gray"
-        android:scrollbarThumbVertical="@android:color/holo_blue_light"
-        android:padding="10dp">
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:visibility="gone">
 
         <TextView
-            android:id="@+id/logText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:fontFamily="monospace"
-            android:textColor="#FFA0A8B8"
-            android:textSize="11sp"
-            android:textIsSelectable="true" />
-    </ScrollView>
-    </FrameLayout>
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
+            android:paddingTop="12dp"
+            android:paddingBottom="6dp"
+            android:text="Logs"
+            android:textColor="#FF9AA3B5"
+            android:textSize="13sp" />
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1">
+            <ScrollView
+                android:id="@+id/logScroll"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="#FF0C0C14"
+                android:scrollbars="vertical"
+                android:fadeScrollbars="false"
+                android:scrollbarAlwaysDrawVerticalTrack="true"
+                android:scrollbarStyle="insideInset"
+                android:scrollbarTrackVertical="@android:color/darker_gray"
+                android:scrollbarThumbVertical="@android:color/holo_blue_light"
+                android:padding="10dp">
+
+                <TextView
+                    android:id="@+id/logText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:textColor="#FFA0A8B8"
+                    android:textSize="11sp"
+                    android:textIsSelectable="true" />
+            </ScrollView>
+        </FrameLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="20dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnCopyLogs"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:insetLeft="0dp"
+                android:insetRight="0dp"
+                android:backgroundTint="#FF1A3A5C"
+                android:textColor="#FFFFFFFF"
+                android:text="Copy logs"
+                android:textAllCaps="false" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnClearLogs"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:insetLeft="0dp"
+                android:insetRight="0dp"
+                android:backgroundTint="#FF1A3A5C"
+                android:textColor="#FFFFFFFF"
+                android:text="Clear logs"
+                android:textAllCaps="false" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnLatestLogs"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:insetLeft="0dp"
+                android:insetRight="0dp"
+                android:backgroundTint="#FF1A3A5C"
+                android:textColor="#FFFFFFFF"
+                android:text="Latest"
+                android:textAllCaps="false"
+                android:contentDescription="Jump to latest log and resume following" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#FF2A2D3D" />
 
     <LinearLayout
+        android:id="@+id/bottomNavBar"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="52dp"
         android:orientation="horizontal"
-        android:paddingStart="12dp"
-        android:paddingEnd="20dp"
-        android:paddingTop="4dp"
-        android:paddingBottom="8dp">
+        android:background="#FF141420">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnCopyLogs"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:backgroundTint="#FF1A3A5C"
-            android:textColor="#FFFFFFFF"
-            android:text="Copy logs"
-            android:textAllCaps="false" />
+        <LinearLayout
+            android:id="@+id/tabMain"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:clickable="true"
+            android:focusable="true"
+            android:background="?attr/selectableItemBackground"
+            android:orientation="vertical">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnClearLogs"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:backgroundTint="#FF1A3A5C"
-            android:textColor="#FFFFFFFF"
-            android:text="Clear logs"
-            android:textAllCaps="false" />
+            <TextView
+                android:id="@+id/tabMainText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Home"
+                android:textColor="#FF60A5FA"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <View
+                android:id="@+id/tabMainIndicator"
+                android:layout_width="32dp"
+                android:layout_height="3dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF60A5FA" />
+        </LinearLayout>
 
         <View
-            android:layout_width="0dp"
-            android:layout_height="1dp"
-            android:layout_weight="1" />
+            android:layout_width="1dp"
+            android:layout_height="match_parent"
+            android:layout_marginTop="12dp"
+            android:layout_marginBottom="12dp"
+            android:background="#FF2A2D3D" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnLatestLogs"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:backgroundTint="#FF1A3A5C"
-            android:textColor="#FFFFFFFF"
-            android:text="Latest"
-            android:textAllCaps="false"
-            android:contentDescription="Jump to latest log and resume following" />
+        <LinearLayout
+            android:id="@+id/tabLogs"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:clickable="true"
+            android:focusable="true"
+            android:background="?attr/selectableItemBackground"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tabLogsText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Logs"
+                android:textColor="#FF8A93A6"
+                android:textSize="14sp" />
+
+            <View
+                android:id="@+id/tabLogsIndicator"
+                android:layout_width="32dp"
+                android:layout_height="3dp"
+                android:layout_marginTop="4dp"
+                android:background="#00000000" />
+        </LinearLayout>
     </LinearLayout>
 
 </LinearLayout>

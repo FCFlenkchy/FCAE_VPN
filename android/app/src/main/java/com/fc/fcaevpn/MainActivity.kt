@@ -108,6 +108,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editTunTcpRcvbuf: android.widget.EditText
     private lateinit var switchTunTcpAutoTuning: SwitchMaterial
     private lateinit var layoutTunSettings: android.view.View
+    private lateinit var spinnerSplitTunnel: Spinner
+    private lateinit var btnSplitTunnelApps: android.widget.Button
+    private var splitTunnelSelectedApps = mutableSetOf<String>()
     private lateinit var layoutTun2socksSettings: android.view.View
     private lateinit var textTunDnsHint: android.widget.TextView
     private lateinit var editTunDnsV4: android.widget.EditText
@@ -118,6 +121,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editRoutesFile: android.widget.EditText
     private lateinit var editRoutesInline: android.widget.EditText
     private lateinit var outerScroll: ScrollView
+    private lateinit var layoutLogsContainer: android.view.View
+    private lateinit var tabMain: android.view.View
+    private lateinit var tabLogs: android.view.View
+    private lateinit var tabMainText: TextView
+    private lateinit var tabLogsText: TextView
+    private lateinit var tabMainIndicator: android.view.View
+    private lateinit var tabLogsIndicator: android.view.View
 
     private val buildIsPrerelease = BuildConfig.IS_PRERELEASE
     private val displayVersion = BuildConfig.APP_VERSION
@@ -526,6 +536,8 @@ class MainActivity : AppCompatActivity() {
         editTunTcpRcvbuf = findViewById(R.id.editTunTcpRcvbuf)
         switchTunTcpAutoTuning = findViewById(R.id.switchTunTcpAutoTuning)
         layoutTunSettings = findViewById(R.id.layoutTunSettings)
+        spinnerSplitTunnel = findViewById(R.id.spinnerSplitTunnel)
+        btnSplitTunnelApps = findViewById(R.id.btnSplitTunnelApps)
         layoutTun2socksSettings = findViewById(R.id.layoutTun2socksSettings)
         textTunDnsHint = findViewById(R.id.textTunDnsHint)
         editTunDnsV4 = findViewById(R.id.editTunDnsV4)
@@ -536,6 +548,29 @@ class MainActivity : AppCompatActivity() {
         editRoutesFile = findViewById(R.id.editRoutesFile)
         editRoutesInline = findViewById(R.id.editRoutesInline)
         outerScroll = findViewById(R.id.outerScroll)
+        layoutLogsContainer = findViewById(R.id.layoutLogsContainer)
+        tabMain = findViewById(R.id.tabMain)
+        tabLogs = findViewById(R.id.tabLogs)
+        tabMainText = findViewById(R.id.tabMainText)
+        tabLogsText = findViewById(R.id.tabLogsText)
+        tabMainIndicator = findViewById(R.id.tabMainIndicator)
+        tabLogsIndicator = findViewById(R.id.tabLogsIndicator)
+
+        fun switchTab(isMain: Boolean) {
+            outerScroll.visibility = if (isMain) android.view.View.VISIBLE else android.view.View.GONE
+            layoutLogsContainer.visibility = if (isMain) android.view.View.GONE else android.view.View.VISIBLE
+
+            tabMainText.setTextColor(Color.parseColor(if (isMain) "#FF60A5FA" else "#FF8A93A6"))
+            tabMainText.setTypeface(null, if (isMain) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            tabMainIndicator.setBackgroundColor(Color.parseColor(if (isMain) "#FF60A5FA" else "#00000000"))
+
+            tabLogsText.setTextColor(Color.parseColor(if (!isMain) "#FF60A5FA" else "#FF8A93A6"))
+            tabLogsText.setTypeface(null, if (!isMain) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            tabLogsIndicator.setBackgroundColor(Color.parseColor(if (!isMain) "#FF60A5FA" else "#00000000"))
+        }
+
+        tabMain.setOnClickListener { switchTab(true) }
+        tabLogs.setOnClickListener { switchTab(false) }
 
 
         // Tapping anywhere outside an EditText clears its focus and moves
@@ -583,6 +618,19 @@ class MainActivity : AppCompatActivity() {
             this, R.layout.spinner_dark_item,
             listOf("Proxy (SOCKS/HTTP)", "TUN (system VPN)"),
         )
+        spinnerSplitTunnel.adapter = ArrayAdapter(
+            this, R.layout.spinner_dark_item,
+            listOf("Off", "Only Selected Apps (Whitelist)", "Bypass Selected Apps (Blacklist)"),
+        )
+        spinnerSplitTunnel.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: android.widget.AdapterView<*>?, v: android.view.View?, pos: Int, id: Long) {
+                btnSplitTunnelApps.visibility = if (pos == 0) android.view.View.GONE else android.view.View.VISIBLE
+            }
+            override fun onNothingSelected(p: android.widget.AdapterView<*>?) {}
+        }
+        btnSplitTunnelApps.setOnClickListener {
+            showSplitTunnelAppPicker()
+        }
         spinnerScan.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
             listOf("Turbo", "Balanced", "Thorough", "Verified", "Ironclad"),
@@ -1360,6 +1408,8 @@ class MainActivity : AppCompatActivity() {
             putString("socksPort", editSocksPort.text.toString())
             putString("httpPort", editHttpPort.text.toString())
             putString("tunMtu", editTunMtu.text.toString())
+            putInt("splitTunnelMode", spinnerSplitTunnel.selectedItemPosition)
+            putStringSet("splitTunnelApps", HashSet(splitTunnelSelectedApps))
             putString("tunTcpSndbuf", editTunTcpSndbuf.text.toString().trim())
             putString("tunTcpRcvbuf", editTunTcpRcvbuf.text.toString().trim())
             putBoolean("tunTcpAutoTuning", switchTunTcpAutoTuning.isChecked)
@@ -1393,6 +1443,11 @@ class MainActivity : AppCompatActivity() {
         spinnerTunEngine.setSelection(
             prefs.getInt("tunEngine", 0).coerceIn(0, (tunEngineEntries.size - 1).coerceAtLeast(0)),
         )
+        val splitMode = prefs.getInt("splitTunnelMode", 0).coerceIn(0, 2)
+        spinnerSplitTunnel.setSelection(splitMode)
+        btnSplitTunnelApps.visibility = if (splitMode == 0) android.view.View.GONE else android.view.View.VISIBLE
+        splitTunnelSelectedApps = prefs.getStringSet("splitTunnelApps", emptySet())?.toMutableSet() ?: mutableSetOf()
+        updateSplitTunnelButtonText()
         spinnerScan.setSelection(prefs.getInt("scan", 0))
         spinnerIpVersion.setSelection(prefs.getInt("ipVersion", 0))
         spinnerNoize.setSelection(prefs.getInt("noize", 2))
@@ -1965,6 +2020,161 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) {
             Toast.makeText(this, "Cannot open URL", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun updateSplitTunnelButtonText() {
+        if (!::btnSplitTunnelApps.isInitialized) return
+        btnSplitTunnelApps.text = "Select Apps (${splitTunnelSelectedApps.size})"
+    }
+
+    private fun showSplitTunnelAppPicker() {
+        val pm = packageManager
+        data class AppEntry(val label: String, val packageName: String, val icon: android.graphics.drawable.Drawable?)
+
+        val allApps = pm.getInstalledApplications(android.content.pm.PackageManager.GET_META_DATA)
+            .filter { it.packageName != packageName }
+            .map { AppEntry(pm.getApplicationLabel(it).toString(), it.packageName, pm.getApplicationIcon(it)) }
+            .sortedBy { it.label.lowercase() }
+
+        val tempSelected = HashSet(splitTunnelSelectedApps)
+        val filteredList = ArrayList(allApps)
+
+        val density = resources.displayMetrics.density
+        val pad16 = (16 * density).toInt()
+        val pad12 = (12 * density).toInt()
+        val pad8 = (8 * density).toInt()
+
+        val rootLayout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(pad16, pad12, pad16, pad8)
+        }
+
+        val searchEdit = android.widget.EditText(this).apply {
+            hint = "Search apps…"
+            setTextColor(Color.parseColor("#FFE8ECF4"))
+            setHintTextColor(Color.parseColor("#FF6B7280"))
+            background = android.graphics.drawable.ColorDrawable(Color.parseColor("#FF1E1E2C"))
+            setPadding(pad16, pad12, pad16, pad12)
+            textSize = 14f
+            isSingleLine = true
+        }
+        rootLayout.addView(searchEdit)
+
+        val listView = android.widget.ListView(this).apply {
+            divider = android.graphics.drawable.ColorDrawable(Color.parseColor("#FF2A2D3D"))
+            dividerHeight = (1 * density).toInt().coerceAtLeast(1)
+        }
+
+        val listParams = android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ).apply {
+            topMargin = pad8
+        }
+        rootLayout.addView(listView, listParams)
+
+        class AppListAdapter : android.widget.BaseAdapter() {
+            override fun getCount(): Int = filteredList.size
+            override fun getItem(position: Int): AppEntry = filteredList[position]
+            override fun getItemId(position: Int): Long = position.toLong()
+
+            override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup?): android.view.View {
+                val row: android.widget.LinearLayout
+                val iconView: android.widget.ImageView
+                val labelView: android.widget.TextView
+                val checkBox: android.widget.CheckBox
+
+                if (convertView is android.widget.LinearLayout) {
+                    row = convertView
+                    iconView = row.getChildAt(0) as android.widget.ImageView
+                    labelView = row.getChildAt(1) as android.widget.TextView
+                    checkBox = row.getChildAt(2) as android.widget.CheckBox
+                } else {
+                    row = android.widget.LinearLayout(this@MainActivity).apply {
+                        orientation = android.widget.LinearLayout.HORIZONTAL
+                        gravity = android.view.Gravity.CENTER_VERTICAL
+                        setPadding(pad8, pad8, pad8, pad8)
+                    }
+
+                    val iconSize = (36 * density).toInt()
+                    iconView = android.widget.ImageView(this@MainActivity).apply {
+                        layoutParams = android.widget.LinearLayout.LayoutParams(iconSize, iconSize).apply {
+                            rightMargin = pad12
+                        }
+                    }
+                    row.addView(iconView)
+
+                    labelView = android.widget.TextView(this@MainActivity).apply {
+                        layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                        setTextColor(Color.parseColor("#FFE8ECF4"))
+                        textSize = 14f
+                    }
+                    row.addView(labelView)
+
+                    checkBox = android.widget.CheckBox(this@MainActivity).apply {
+                        isClickable = false
+                        isFocusable = false
+                    }
+                    row.addView(checkBox)
+                }
+
+                val entry = getItem(position)
+                iconView.setImageDrawable(entry.icon)
+                labelView.text = entry.label
+                checkBox.isChecked = tempSelected.contains(entry.packageName)
+
+                return row
+            }
+        }
+
+        val adapter = AppListAdapter()
+        listView.adapter = adapter
+
+        listView.setOnItemClickListener { _, _, position, _ ->
+            val entry = filteredList[position]
+            if (tempSelected.contains(entry.packageName)) {
+                tempSelected.remove(entry.packageName)
+            } else {
+                tempSelected.add(entry.packageName)
+            }
+            adapter.notifyDataSetChanged()
+        }
+
+        searchEdit.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                val q = s?.toString()?.trim()?.lowercase() ?: ""
+                filteredList.clear()
+                if (q.isEmpty()) {
+                    filteredList.addAll(allApps)
+                } else {
+                    for (app in allApps) {
+                        if (app.label.lowercase().contains(q) || app.packageName.lowercase().contains(q)) {
+                            filteredList.add(app)
+                        }
+                    }
+                }
+                adapter.notifyDataSetChanged()
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Select Applications")
+            .setView(rootLayout)
+            .setPositiveButton("Done") { _, _ ->
+                splitTunnelSelectedApps.clear()
+                splitTunnelSelectedApps.addAll(tempSelected)
+                updateSplitTunnelButtonText()
+                saveSettings()
+            }
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        dialog.show()
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.CYAN)
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
     }
 
     private fun showAboutDialog() {

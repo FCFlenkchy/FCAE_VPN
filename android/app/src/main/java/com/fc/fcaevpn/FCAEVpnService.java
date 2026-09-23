@@ -20,6 +20,7 @@ import android.util.Log;
 import java.net.InetAddress;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class FCAEVpnService extends VpnService {
@@ -372,6 +373,38 @@ public class FCAEVpnService extends VpnService {
      * addDnsServer() and skipped; if nothing valid remains the hardcoded
      * defaults go in so the interface never ends up resolver-less.
      */
+    private void configureSplitTunnel(Builder builder) {
+        try {
+            SharedPreferences p = getSharedPreferences(PREFS_MAIN, MODE_PRIVATE);
+            int mode = p.getInt("splitTunnelMode", 0);
+            if (mode == 0) return;
+
+            Set<String> pkgs = p.getStringSet("splitTunnelApps", null);
+            if (pkgs == null || pkgs.isEmpty()) return;
+
+            if (mode == 1) {
+                for (String pkg : pkgs) {
+                    try {
+                        builder.addAllowedApplication(pkg);
+                    } catch (Exception e) {
+                        Log.w(TAG, "Failed to allow app in split tunnel: " + pkg, e);
+                    }
+                }
+            } else if (mode == 2) {
+                for (String pkg : pkgs) {
+                    if (pkg.equals(getPackageName())) continue;
+                    try {
+                        builder.addDisallowedApplication(pkg);
+                    } catch (Exception e) {
+                        Log.w(TAG, "Failed to disallow app in split tunnel: " + pkg, e);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "configureSplitTunnel error", e);
+        }
+    }
+
     private void configureTunDns(Builder builder) {
         SharedPreferences p = getSharedPreferences(PREFS_MAIN, MODE_PRIVATE);
         String v4 = p.getString("tunDnsV4", DEFAULT_TUN_DNS_V4);
@@ -472,6 +505,7 @@ public class FCAEVpnService extends VpnService {
                 builder.addRoute("::", 0);
             }
             try { builder.addDisallowedApplication(getPackageName()); } catch (Exception ignored) {}
+            configureSplitTunnel(builder);
             configureTunDns(builder);
 
             ParcelFileDescriptor pfd = builder.establish();
