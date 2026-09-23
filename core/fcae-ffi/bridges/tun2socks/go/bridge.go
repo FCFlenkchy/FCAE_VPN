@@ -48,6 +48,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"net"
@@ -454,6 +455,11 @@ type udpgwGateway struct {
 	ctx   context.Context
 	inner proxy.Proxy
 
+	// resolvers are the TUN DNS IPv4 addresses the exit relays to; empty
+	// means the exit answers with its own resolver (udpgwFlagDNS).
+	resolvers    []netip.Addr
+	nextResolver uint32
+
 	dialMu sync.Mutex // single-flight channel (re)connects
 	mu     sync.Mutex
 	conn   net.Conn
@@ -480,10 +486,10 @@ type gwReply struct {
 	err     error
 }
 
-func newUdpgwGateway(parent context.Context, inner proxy.Proxy) *udpgwGateway {
+func newUdpgwGateway(parent context.Context, inner proxy.Proxy, resolvers []netip.Addr) *udpgwGateway {
 	ctx, cancel := context.WithCancel(parent)
 	g := &udpgwGateway{
-		ctx: ctx, inner: inner,
+		ctx: ctx, inner: inner, resolvers: resolvers,
 		pending: make(map[uint16]chan gwReply),
 	}
 	// Session teardown (or a new t2s_start retiring this context) must not
@@ -655,12 +661,16 @@ func (g *udpgwGateway) retire(txID uint16) {
 // Wire layout mirrors the official server/udp.go: LE length excluding the
 // length field, flags, LE connection ID, raw IP, BE port, UDP payload.
 func (g *udpgwGateway) send(conn net.Conn, slot, txID uint16, query []byte) error {
-	ip := net.IPv4zero.To4()
 	frame := make([]byte, 11+len(query))
 	binary.LittleEndian.PutUint16(frame[0:2], uint16(len(frame)-2))
-	frame[2] = udpgwFlagDNS
 	binary.LittleEndian.PutUint16(frame[3:5], slot)
-	copy(frame[5:9], ip)
+	if len(g.resolvers) == 0 {
+		frame[2] = udpgwFlagDNS
+	} else {
+		next := atomic.AddUint32(&g.nextResolver, 1) - 1
+		ip := g.resolvers[int(next%uint32(len(g.resolvers)))].As4()
+		copy(frame[5:9], ip[:])
+	}
 	binary.BigEndian.PutUint16(frame[9:11], 53)
 	copy(frame[11:], query)
 	binary.BigEndian.PutUint16(frame[11:13], txID)
@@ -835,16 +845,40 @@ func stopDNSContext() {
 // standard "socks5" scheme) and adds only the Psiphon UDP/DNS adaptation.
 // Using an explicit scheme makes the CONNECT-only behavior unambiguous: no
 // query flag can be dropped or misinterpreted by a generic URL parser.
+// parseSocks5pResolvers reads the optional ?dns= IPv4 list the bridge appends
+// when the UI configured TUN DNS servers for a Psiphon exit.
+func parseSocks5pResolvers(raw string) ([]netip.Addr, error) {
+	var resolvers []netip.Addr
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		addr, err := netip.ParseAddr(item)
+		if err != nil || !addr.Is4() || addr.IsUnspecified() || addr.IsLoopback() || addr.IsMulticast() {
+			return nil, fmt.Errorf("socks5p: invalid IPv4 DNS resolver %q", item)
+		}
+		resolvers = append(resolvers, addr)
+	}
+	return resolvers, nil
+}
+
 func parseSocks5p(u *url.URL) (proxy.Proxy, error) {
-	u.Scheme = schemeSocks5
-	inner, err := proxy.Parse(u)
+	resolvers, err := parseSocks5pResolvers(u.Query().Get("dns"))
 	if err != nil {
 		return nil, err
 	}
-	p := udpDroppingProxy{Proxy: inner, psiphonDNS: true, ctx: currentDNSContext()}
+	inner := *u
+	inner.Scheme = schemeSocks5
+	inner.RawQuery = ""
+	base, err := proxy.Parse(&inner)
+	if err != nil {
+		return nil, err
+	}
+	p := udpDroppingProxy{Proxy: base, psiphonDNS: true, ctx: currentDNSContext()}
 	// One gateway per tun2socks session: every copy of the proxy value
 	// tun2socks dials through shares this single UDPGW channel.
-	p.gw = newUdpgwGateway(p.ctx, inner)
+	p.gw = newUdpgwGateway(p.ctx, base, resolvers)
 	return p, nil
 }
 

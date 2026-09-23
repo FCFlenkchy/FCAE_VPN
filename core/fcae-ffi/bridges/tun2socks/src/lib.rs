@@ -448,8 +448,15 @@ impl TunBridge for Tun2SocksBridge {
         // socks5p adapter so its CONNECT-only listener never receives UDP
         // ASSOCIATE (0x03); DNS is sent through the native UDP gateway.
         let proxy = if endpoints.psiphon_dns {
-            log::info!("[tun2socks] Psiphon DNS: native UDP gateway through the selected exit (no fallback)");
-            format!("socks5p://{socks}")
+            let resolvers = fcae_runtime::tun_dns::psiphon_resolvers(cfg)?;
+            if resolvers.is_empty() {
+                log::info!("[tun2socks] Psiphon DNS: exit resolver through the UDP gateway");
+                format!("socks5p://{socks}")
+            } else {
+                log::info!("[tun2socks] Psiphon DNS: TUN DNS {:?} through the UDP gateway", resolvers);
+                let list = resolvers.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+                format!("socks5p://{socks}?dns={list}")
+            }
         } else {
             format!("socks5://{socks}")
         };

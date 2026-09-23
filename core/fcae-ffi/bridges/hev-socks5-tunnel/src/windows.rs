@@ -236,7 +236,10 @@ impl TunBridge for HevSocks5TunnelBridge {
         self.closing.store(false, Ordering::SeqCst);
         crate::platform::ensure_wintun(crate::platform::wintun_bytes())?;
         let base_socks = endpoints.socks.ok_or_else(|| CoreError::Internal("TUN needs SOCKS endpoint".into()))?;
-        let psiphon = if endpoints.psiphon_dns { Some(socks5p::Adapter::start(base_socks).map_err(|e| CoreError::Internal(format!("hev socks5p: {e}")))?) } else { None };
+        let psiphon = if endpoints.psiphon_dns {
+            let resolvers = fcae_runtime::tun_dns::psiphon_resolvers(cfg)?;
+            Some(socks5p::Adapter::start(base_socks, resolvers).map_err(|e| CoreError::Internal(format!("hev socks5p: {e}")))?)
+        } else { None };
         let socks = psiphon.as_ref().map(|a| a.endpoint()).unwrap_or(base_socks);
         let fd = cfg.tun.fd.or_else(|| self.android_fd()).unwrap_or(-1);
         let (_, yaml) = generate_config(cfg, socks)?;

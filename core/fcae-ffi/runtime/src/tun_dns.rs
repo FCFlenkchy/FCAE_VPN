@@ -4,6 +4,23 @@ use std::net::{IpAddr, SocketAddr};
 use crate::config::SessionConfig;
 use crate::error::{CoreError, Result};
 
+/// IPv4 resolvers a Psiphon exit relays to through its UDP gateway. Empty
+/// means the exit answers with its own resolver.
+pub fn psiphon_resolvers(cfg: &SessionConfig) -> Result<Vec<std::net::Ipv4Addr>> {
+    let mut result = Vec::new();
+    for entry in cfg.dns.server.as_deref().unwrap_or("").split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let ip = entry.parse::<IpAddr>().ok().or_else(|| {
+            entry.parse::<SocketAddr>().ok().filter(|a| a.port() == 53).map(|a| a.ip())
+        }).ok_or_else(|| CoreError::InvalidConfig(format!("TUN DNS must be an IP address on port 53: {entry}")))?;
+        let IpAddr::V4(v4) = ip else { continue };
+        if v4.is_unspecified() || v4.is_multicast() || v4.is_loopback() || v4.is_broadcast() {
+            return Err(CoreError::InvalidConfig(format!("invalid TUN DNS address: {entry}")));
+        }
+        if !result.contains(&v4) { result.push(v4); }
+    }
+    Ok(result)
+}
+
 pub fn servers(cfg: &SessionConfig) -> Result<Vec<String>> {
     let mut result = Vec::new();
     for entry in cfg.dns.server.as_deref().unwrap_or("").split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -298,6 +315,22 @@ mod tests {
         for invalid in ["dns.example", "1.1.1.1:853", "0.0.0.0", "224.0.0.1", "127.0.0.53", "::1"] {
             cfg.dns.server = Some(invalid.into());
             assert!(servers(&cfg).is_err());
+        }
+    }
+
+    #[test]
+    fn psiphon_resolvers_keep_only_valid_ipv4_addresses() {
+        let mut cfg = SessionConfig::default();
+        cfg.dns.server = Some("1.1.1.1, 1.0.0.1:53, 1.1.1.1, 2606:4700:4700::1111".into());
+        assert_eq!(psiphon_resolvers(&cfg).unwrap(), vec![
+            std::net::Ipv4Addr::new(1, 1, 1, 1), std::net::Ipv4Addr::new(1, 0, 0, 1)]);
+        cfg.dns.server = Some("2606:4700:4700::1111".into());
+        assert!(psiphon_resolvers(&cfg).unwrap().is_empty());
+        cfg.dns.server = None;
+        assert!(psiphon_resolvers(&cfg).unwrap().is_empty());
+        for invalid in ["dns.example", "1.1.1.1:853", "0.0.0.0", "224.0.0.1", "127.0.0.53", "255.255.255.255"] {
+            cfg.dns.server = Some(invalid.into());
+            assert!(psiphon_resolvers(&cfg).is_err(), "{invalid}");
         }
     }
 }

@@ -172,7 +172,8 @@ impl TunBridge for HevSocks5TunnelBridge {
         self.closing.store(false, Ordering::SeqCst);
         let base_socks = endpoints.socks.ok_or_else(|| CoreError::Internal("TUN requested but the backend exposed no SOCKS endpoint".into()))?;
         let psiphon_adapter = if endpoints.psiphon_dns {
-            Some(socks5p::Adapter::start(base_socks).map_err(|e| CoreError::Internal(format!("hev socks5p adapter: {e}")))?)
+            let resolvers = fcae_runtime::tun_dns::psiphon_resolvers(cfg)?;
+            Some(socks5p::Adapter::start(base_socks, resolvers).map_err(|e| CoreError::Internal(format!("hev socks5p adapter: {e}")))?)
         } else { None };
         let effective_socks = psiphon_adapter.as_ref().map(|a| a.endpoint()).unwrap_or(base_socks);
         let fd = cfg.tun.fd.or_else(|| self.android_fd()).unwrap_or(-1);

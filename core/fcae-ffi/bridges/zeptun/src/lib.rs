@@ -450,16 +450,19 @@ impl TunBridge for ZeptunBridge {
         })?;
 
         let psiphon_adapter = if endpoints.psiphon_dns {
-            Some(socks5p::Adapter::start(socks).map_err(|e| {
+            let resolvers = fcae_runtime::tun_dns::psiphon_resolvers(cfg)?;
+            if resolvers.is_empty() {
+                log::info!("[zeptun] socks5p: Psiphon exit resolver through the UDP gateway");
+            } else {
+                log::info!("[zeptun] socks5p: TUN DNS {:?} through the Psiphon UDP gateway", resolvers);
+            }
+            Some(socks5p::Adapter::start(socks, resolvers).map_err(|e| {
                 CoreError::Internal(format!("zeptun socks5p adapter: {e}"))
             })?)
         } else {
             None
         };
         let socks = psiphon_adapter.as_ref().map(|adapter| adapter.endpoint()).unwrap_or(socks);
-        if psiphon_adapter.is_some() {
-            log::info!("[zeptun] socks5p: native Psiphon DNS gateway, no direct DNS fallback");
-        }
 
         // Windows needs wintun.dll discoverable before the device is created:
         // zeptun loads it from the application directory or System32.

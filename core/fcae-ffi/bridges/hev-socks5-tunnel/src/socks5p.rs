@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,7 +38,7 @@ pub(crate) struct Adapter {
 }
 
 impl Adapter {
-    pub(crate) fn start(upstream: SocketAddr) -> io::Result<Self> {
+    pub(crate) fn start(upstream: SocketAddr, resolvers: Vec<Ipv4Addr>) -> io::Result<Self> {
         if !upstream.ip().is_loopback() || upstream.port() == 0 {
             return Err(error("socks5p requires a loopback Psiphon endpoint"));
         }
@@ -53,7 +53,7 @@ impl Adapter {
         };
         let (shutdown, stopped) = oneshot::channel();
         let thread = std::thread::Builder::new().name("hev-socks5p".into()).spawn(move || {
-            runtime.block_on(serve(listener, upstream, stopped));
+            runtime.block_on(serve(listener, upstream, resolvers, stopped));
         })?;
         Ok(Self { endpoint, shutdown: Some(shutdown), thread: Some(thread) })
     }
@@ -68,8 +68,8 @@ impl Drop for Adapter {
     }
 }
 
-async fn serve(listener: TcpListener, upstream: SocketAddr, mut stopped: oneshot::Receiver<()>) {
-    let gateway = Arc::new(Gateway { upstream, state: AsyncMutex::new(GatewayState::default()), limit: Semaphore::new(MAX_PENDING) });
+async fn serve(listener: TcpListener, upstream: SocketAddr, resolvers: Vec<Ipv4Addr>, mut stopped: oneshot::Receiver<()>) {
+    let gateway = Arc::new(Gateway::new(upstream, resolvers));
     let mut clients = JoinSet::new();
     loop {
         tokio::select! {
@@ -260,6 +260,8 @@ async fn serve_udp(mut control: TcpStream, gateway: Arc<Gateway>) -> io::Result<
 
 struct Gateway {
     upstream: SocketAddr,
+    resolvers: Vec<Ipv4Addr>,
+    next_resolver: AtomicUsize,
     state: AsyncMutex<GatewayState>,
     limit: Semaphore,
 }
@@ -271,6 +273,16 @@ struct GatewayState {
 }
 
 impl Gateway {
+    fn new(upstream: SocketAddr, resolvers: Vec<Ipv4Addr>) -> Self {
+        Self { upstream, resolvers, next_resolver: AtomicUsize::new(0), state: AsyncMutex::new(GatewayState::default()), limit: Semaphore::new(MAX_PENDING) }
+    }
+
+    fn resolver(&self) -> Option<Ipv4Addr> {
+        if self.resolvers.is_empty() { return None; }
+        let index = self.next_resolver.fetch_add(1, Ordering::Relaxed) % self.resolvers.len();
+        Some(self.resolvers[index])
+    }
+
     async fn channel(&self) -> io::Result<Arc<Channel>> {
         // Hold the lock through the dial: Psiphon replaces the old UDPGW
         // channel if a second one opens for this tunnel.
@@ -306,10 +318,11 @@ impl Gateway {
         if !valid_query(query) { return Err(error("invalid Psiphon DNS query")); }
         let _permit = self.limit.try_acquire().map_err(|_| error("Psiphon DNS query table full"))?;
         let mut last_error = error("Psiphon UDPGW unavailable");
+        let resolver = self.resolver();
         for attempt in 0..2 {
             if attempt != 0 { sleep(DIAL_COOLDOWN).await; }
             match self.channel().await {
-                Ok(channel) => match channel.exchange(query).await {
+                Ok(channel) => match channel.exchange(query, resolver).await {
                     Ok(answer) => return Ok(answer),
                     Err(e) => last_error = e,
                 },
@@ -346,13 +359,17 @@ impl Drop for Ticket {
 }
 
 // BadVPN UDPGW: LE length, flags, LE connection ID, raw IP, BE port, DNS.
-// 0.0.0.0 is a flow label; DNS_FLAG asks the exit to use its own resolver.
-fn dns_frame(slot: u16, id: u16, query: &[u8]) -> Vec<u8> {
+// A resolver address makes the exit relay to it; 0.0.0.0 plus DNS_FLAG asks
+// the exit to use its own resolver.
+fn dns_frame(slot: u16, id: u16, query: &[u8], resolver: Option<Ipv4Addr>) -> Vec<u8> {
     let mut frame = vec![0; 11 + query.len()];
     let length = (frame.len() - 2) as u16;
     frame[..2].copy_from_slice(&length.to_le_bytes());
-    frame[2] = DNS_FLAG;
     frame[3..5].copy_from_slice(&slot.to_le_bytes());
+    match resolver {
+        Some(ip) => frame[5..9].copy_from_slice(&ip.octets()),
+        None => frame[2] = DNS_FLAG,
+    }
     frame[9..11].copy_from_slice(&53u16.to_be_bytes());
     frame[11..].copy_from_slice(query);
     frame[11..13].copy_from_slice(&id.to_be_bytes());
@@ -406,7 +423,7 @@ impl Channel {
         }
     }
 
-    async fn exchange(self: &Arc<Self>, query: &[u8]) -> io::Result<Vec<u8>> {
+    async fn exchange(self: &Arc<Self>, query: &[u8], resolver: Option<Ipv4Addr>) -> io::Result<Vec<u8>> {
         let (sender, receiver) = oneshot::channel();
         let (id, slot) = {
             let mut pending = self.pending.lock();
@@ -422,7 +439,7 @@ impl Channel {
             (id, slot)
         };
         let _ticket = Ticket { channel: Arc::clone(self), id };
-        self.write(&dns_frame(slot, id, query)).await?;
+        self.write(&dns_frame(slot, id, query, resolver)).await?;
         let mut answer = timeout(DNS_TIMEOUT, receiver).await
             .map_err(|_| error("Psiphon DNS reply timeout"))?
             .map_err(|_| error("Psiphon DNS query cancelled"))??;
@@ -476,8 +493,10 @@ mod tests {
     #[test]
     fn gateway_wire_format_matches_socks5p() {
         let query = query(7);
-        let frame = dns_frame(3, 0xabcd, &query);
+        let frame = dns_frame(3, 0xabcd, &query, None);
         assert_eq!(&frame[..11], &[21, 0, DNS_FLAG, 3, 0, 0, 0, 0, 0, 0, 53]);
+        let addressed = dns_frame(3, 0xabcd, &query, Some(Ipv4Addr::new(1, 1, 1, 1)));
+        assert_eq!(&addressed[..11], &[21, 0, 0, 3, 0, 1, 1, 1, 1, 0, 53]);
         assert_eq!(&frame[11..13], &[0xab, 0xcd]);
         assert_eq!(&query[..2], &[0x12, 0x34]);
         let mut body = frame[2..].to_vec();
@@ -526,7 +545,7 @@ mod tests {
     async fn facade_accepts_pipeline_but_psiphon_receives_strict_handshake() {
         timeout(Duration::from_secs(3), async {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-            let adapter = Adapter::start(listener.local_addr().unwrap()).unwrap();
+            let adapter = Adapter::start(listener.local_addr().unwrap(), Vec::new()).unwrap();
             let server = tokio::spawn(async move {
                 let mut stream = strict_accept(&listener, "192.0.2.1:443".parse().unwrap()).await;
                 let mut data = [0; 4];
@@ -552,7 +571,7 @@ mod tests {
     async fn gateway_multiplexes_identical_dns_ids_on_one_channel() {
         timeout(Duration::from_secs(3), async {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-            let gateway = Gateway { upstream: listener.local_addr().unwrap(), state: AsyncMutex::new(GatewayState::default()), limit: Semaphore::new(MAX_PENDING) };
+            let gateway = Gateway::new(listener.local_addr().unwrap(), Vec::new());
             let server = tokio::spawn(async move {
                 let mut stream = strict_accept(&listener, "127.0.0.1:7300".parse().unwrap()).await;
                 let first = read_gateway_frame(&mut stream).await.unwrap();
@@ -601,7 +620,7 @@ mod dns_transport_tests {
     async fn udp_and_tcp_dns_share_the_native_gateway_and_keep_query_ids() {
         timeout(Duration::from_secs(3), async {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-            let adapter = Adapter::start(listener.local_addr().unwrap()).unwrap();
+            let adapter = Adapter::start(listener.local_addr().unwrap(), Vec::new()).unwrap();
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut greeting = [0; 3];
