@@ -4,6 +4,13 @@
   readings — live rates and session totals — each split into its own down arrow
   and up arrow half, separated by a hairline. Right: the controls, stacked, with
   STOP/START only present for a TUN session.
+
+  The launcher inflates this layout in ITS process through RemoteViews, which
+  only accepts a whitelist of classes: FrameLayout, LinearLayout, RelativeLayout,
+  GridLayout, and the widget classes (TextView, ImageView, ImageButton, Button,
+  ProgressBar, Chronometer, ...). Anything else (a bare View, an androidx view, a
+  custom view) throws "Class not allowed to be inflated" and the home screen
+  reports the widget as unloadable. The hairlines are TextViews for that reason.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
@@ -67,7 +74,7 @@
                 android:textColor="#FFE8ECF4"
                 android:textSize="10sp" />
 
-            <View
+            <TextView
                 android:layout_width="1dp"
                 android:layout_height="12dp"
                 android:layout_marginStart="4dp"
@@ -104,7 +111,7 @@
                 android:textColor="#FF9AA3B5"
                 android:textSize="10sp" />
 
-            <View
+            <TextView
                 android:layout_width="1dp"
                 android:layout_height="12dp"
                 android:layout_marginStart="4dp"
