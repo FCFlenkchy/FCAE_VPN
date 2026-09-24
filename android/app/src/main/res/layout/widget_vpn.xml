@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  3x1 home screen strip. Left: state with the session's RTT, then the two
-  readings — live rates and session totals — each split into its own down arrow
-  and up arrow half, separated by a hairline. Right: the controls, stacked, with
-  STOP/START only present for a TUN session.
+  3x2 home screen widget, fixed size (widget_vpn_info.xml).
+
+  Rows: title with the app's settings entry, the connection state with the
+  session's RTT on its own line (it needs the width — "CONNECTED - PROXY"
+  clipped when it shared a line), the live rates, the session totals, and the
+  controls.
 
   The launcher inflates this layout in ITS process through RemoteViews, which
   only accepts a whitelist of classes: FrameLayout, LinearLayout, RelativeLayout,
@@ -17,153 +19,183 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/widget_bg"
-    android:orientation="horizontal"
+    android:orientation="vertical"
     android:padding="8dp">
 
+    <!-- Row 1: the app's name, and the way into the app. -->
     <LinearLayout
         android:id="@+id/widget_header"
-        android:layout_width="0dp"
-        android:layout_height="match_parent"
-        android:layout_weight="1"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
         android:gravity="center_vertical"
-        android:orientation="vertical">
+        android:orientation="horizontal">
 
-        <LinearLayout
-            android:layout_width="match_parent"
+        <TextView
+            android:id="@+id/widget_title"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:text="FCAE VPN"
+            android:textColor="#FFE8ECF4"
+            android:textSize="12sp"
+            android:textStyle="bold" />
 
-            <TextView
-                android:id="@+id/widget_status"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:singleLine="true"
-                android:text="DISCONNECTED"
-                android:textColor="#FF8A93A6"
-                android:textSize="10sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_rtt"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="4dp"
-                android:singleLine="true"
-                android:text="—"
-                android:textColor="#FF9AA3B5"
-                android:textSize="10sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
-            <TextView
-                android:id="@+id/widget_rx_rate"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:singleLine="true"
-                android:text="↓ 0 B/s"
-                android:textColor="#FFE8ECF4"
-                android:textSize="10sp" />
-
-            <TextView
-                android:layout_width="1dp"
-                android:layout_height="12dp"
-                android:layout_marginStart="4dp"
-                android:layout_marginEnd="4dp"
-                android:background="#FF242B38" />
-
-            <TextView
-                android:id="@+id/widget_tx_rate"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:gravity="end"
-                android:singleLine="true"
-                android:text="↑ 0 B/s"
-                android:textColor="#FFE8ECF4"
-                android:textSize="10sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
-            <TextView
-                android:id="@+id/widget_rx_total"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:singleLine="true"
-                android:text="↓ 0 B"
-                android:textColor="#FF9AA3B5"
-                android:textSize="10sp" />
-
-            <TextView
-                android:layout_width="1dp"
-                android:layout_height="12dp"
-                android:layout_marginStart="4dp"
-                android:layout_marginEnd="4dp"
-                android:background="#FF242B38" />
-
-            <TextView
-                android:id="@+id/widget_tx_total"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:gravity="end"
-                android:singleLine="true"
-                android:text="↑ 0 B"
-                android:textColor="#FF9AA3B5"
-                android:textSize="10sp" />
-        </LinearLayout>
+        <ImageButton
+            android:id="@+id/widget_btn_settings"
+            android:layout_width="26dp"
+            android:layout_height="26dp"
+            android:background="@android:color/transparent"
+            android:contentDescription="Settings"
+            android:padding="5dp"
+            android:scaleType="fitCenter"
+            android:src="@android:drawable/ic_menu_preferences"
+            android:tint="#FF8A93A6" />
     </LinearLayout>
 
+    <!-- Row 2: connection state, and the RTT of the session measuring it. -->
     <LinearLayout
-        android:layout_width="66dp"
-        android:layout_height="match_parent"
-        android:layout_marginStart="6dp"
-        android:orientation="vertical">
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/widget_status"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:text="DISCONNECTED"
+            android:textColor="#FF8A93A6"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_rtt"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:singleLine="true"
+            android:text="—"
+            android:textColor="#FF9AA3B5"
+            android:textSize="10sp" />
+    </LinearLayout>
+
+    <!-- Row 3: live throughput, down and up separated. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="3dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/widget_rx_rate"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:text="↓ 0 B/s"
+            android:textColor="#FFE8ECF4"
+            android:textSize="10sp" />
+
+        <TextView
+            android:layout_width="1dp"
+            android:layout_height="12dp"
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="4dp"
+            android:background="#FF242B38" />
+
+        <TextView
+            android:id="@+id/widget_tx_rate"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:gravity="end"
+            android:singleLine="true"
+            android:text="↑ 0 B/s"
+            android:textColor="#FFE8ECF4"
+            android:textSize="10sp" />
+    </LinearLayout>
+
+    <!-- Row 4: session totals, same split. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/widget_rx_total"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:text="↓ 0 B"
+            android:textColor="#FF9AA3B5"
+            android:textSize="10sp" />
+
+        <TextView
+            android:layout_width="1dp"
+            android:layout_height="12dp"
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="4dp"
+            android:background="#FF242B38" />
+
+        <TextView
+            android:id="@+id/widget_tx_total"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:gravity="end"
+            android:singleLine="true"
+            android:text="↑ 0 B"
+            android:textColor="#FF9AA3B5"
+            android:textSize="10sp" />
+    </LinearLayout>
+
+    <!-- Row 5: controls. STOP/START exists for a TUN session only. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="6dp"
+        android:layout_weight="1"
+        android:gravity="bottom"
+        android:orientation="horizontal">
 
         <TextView
             android:id="@+id/widget_btn_pause_resume"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_marginBottom="3dp"
+            android:layout_width="0dp"
+            android:layout_height="32dp"
+            android:layout_marginEnd="6dp"
             android:layout_weight="1"
             android:background="@drawable/widget_btn_tun_stop"
             android:gravity="center"
             android:singleLine="true"
             android:text="STOP"
             android:textColor="#FFFFFFFF"
-            android:textSize="9sp"
+            android:textSize="10sp"
             android:textStyle="bold"
             android:visibility="gone" />
 
         <TextView
             android:id="@+id/widget_btn_action"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
+            android:layout_width="0dp"
+            android:layout_height="32dp"
+            android:layout_weight="2"
             android:background="@drawable/widget_btn_connect"
             android:gravity="center"
             android:singleLine="true"
             android:text="CONNECT"
             android:textColor="#FFFFFFFF"
-            android:textSize="9sp"
+            android:textSize="10sp"
             android:textStyle="bold" />
     </LinearLayout>
 

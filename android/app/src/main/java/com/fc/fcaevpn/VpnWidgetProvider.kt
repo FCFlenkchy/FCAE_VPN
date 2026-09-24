@@ -14,8 +14,8 @@ import android.widget.RemoteViews
 import java.util.Locale
 
 /**
- * Home screen control surface, sized as a 3x1 strip (widget_vpn_info.xml):
- * state and RTT, the live rates, the session totals, and the controls.
+ * Home screen control surface, a fixed 3x2 (widget_vpn_info.xml): name, state
+ * with the session's RTT, the live rates, the session totals, and the controls.
  *
  * It renders [SessionState] and sends the commands the app's own notification
  * sends, to the same owner service: CONNECT is the notification's Start, so a
@@ -42,10 +42,16 @@ class VpnWidgetProvider : AppWidgetProvider() {
             }
 
             ACTION_WIDGET_PAUSE_RESUME -> {
-                val session = SessionState.snapshot(context)
-                val action = if (session.paused) FCAEVpnService.ACTION_START
-                else FCAEVpnService.ACTION_STOP
-                dispatch(context, Intent(context, FCAEVpnService::class.java).setAction(action))
+                // The flag is what the button read when it was drawn, so a tap
+                // always flips the state it was shown for: a second tap on a
+                // stale button cannot re-issue Stop on a session already paused.
+                val paused = intent.getBooleanExtra(EXTRA_TAP_ACTIVE, false)
+                dispatch(
+                    context,
+                    Intent(context, FCAEVpnService::class.java).setAction(
+                        if (paused) FCAEVpnService.ACTION_START else FCAEVpnService.ACTION_STOP
+                    )
+                )
                 refresh(context)
             }
 
@@ -166,10 +172,12 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private val COLOR_CONNECTED = Color.parseColor("#34D399")
         private val COLOR_DISCONNECTED = Color.parseColor("#8A93A6")
         private val COLOR_PROGRESS = Color.parseColor("#60A5FA")
-        private val COLOR_PAUSED = Color.parseColor("#F59E0B")
 
         /** Last rendered content; identical content is not worth a repaint. */
         private var lastRendered: String? = null
+
+        /** Last reading published while the session was live, for the pause hold. */
+        private var lastLive: SessionState.Snapshot? = null
 
         /**
          * Repaint now, from wherever a session ended.
@@ -208,6 +216,15 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val tun = context.getSharedPreferences(PREFS_MAIN, Context.MODE_PRIVATE)
                 .getInt("mode", 1) == 1
 
+            // Stop is a data-plane pause, not an end of the session: the app's
+            // own rule for it (MainActivity) is that nothing on screen changes
+            // except the button. So there is no PAUSED state here — the status
+            // stays CONNECTED, and the readings stay the last live ones instead
+            // of decaying to zero and crawling back up on Start, which is what
+            // made a Stop look like a start/stop flinch.
+            if (session.running && !session.paused) lastLive = session
+            val shown = if (session.paused) lastLive ?: session else session
+
             val status: String
             val statusColor: Int
             val action: String
@@ -215,10 +232,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 session.connecting -> {
                     status = "CONNECTING"; statusColor = COLOR_PROGRESS; action = "DISCONNECT"
                 }
-                session.paused -> {
-                    status = "PAUSED"; statusColor = COLOR_PAUSED; action = "DISCONNECT"
-                }
-                session.running -> {
+                session.running || session.paused -> {
                     status = "CONNECTED - ${if (tun) "TUN" else "PROXY"}"
                     statusColor = COLOR_CONNECTED
                     action = "DISCONNECT"
@@ -232,11 +246,11 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val pauseLabel = if (session.paused) "START" else "STOP"
             // Down and up are separate readings, each with its own arrow: rates
             // and totals each get a row, split into the two directions.
-            val ratesDown = "↓ " + fmtRate(session.rx)
-            val ratesUp = "↑ " + fmtRate(session.tx)
-            val totalDown = "↓ " + fmtBytes(session.totalRx)
-            val totalUp = "↑ " + fmtBytes(session.totalTx)
-            val rtt = if (session.rtt > 0) "${session.rtt} ms" else "—"
+            val ratesDown = "↓ " + fmtRate(shown.rx)
+            val ratesUp = "↑ " + fmtRate(shown.tx)
+            val totalDown = "↓ " + fmtBytes(shown.totalRx)
+            val totalUp = "↑ " + fmtBytes(shown.totalTx)
+            val rtt = if (shown.rtt > 0) "${shown.rtt} ms" else "—"
 
             // Every repaint is a round trip to the launcher: identical content
             // is not worth one.
@@ -275,24 +289,28 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 )
                 views.setOnClickPendingIntent(
                     R.id.widget_btn_pause_resume,
-                    pending(context, ACTION_WIDGET_PAUSE_RESUME, 102, false)
+                    pending(context, ACTION_WIDGET_PAUSE_RESUME, 102, session.paused)
                 )
             }
 
-            // The whole reading area opens the app; the strip has no room for a
-            // settings button of its own.
             val open = PendingIntent.getActivity(
                 context, 100,
                 Intent(context, MainActivity::class.java)
                     .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PENDING_FLAGS
             )
+            views.setOnClickPendingIntent(R.id.widget_btn_settings, open)
             views.setOnClickPendingIntent(R.id.widget_header, open)
 
             for (id in ids) manager.updateAppWidget(id, views)
         }
 
-        /** A command broadcast, tagged with what the button read when drawn. */
+        /**
+         * A command broadcast, tagged with what the button read when drawn: the
+         * toggle carries "the session looked active", the pause button "the
+         * session looked paused". One extra, one meaning: never act on a
+         * snapshot that may have moved since the user saw that button.
+         */
         private fun pending(context: Context, action: String, code: Int, active: Boolean) =
             PendingIntent.getBroadcast(
                 context, code,
