@@ -457,10 +457,13 @@ class MainActivity : AppCompatActivity() {
                     // Use structured getters instead of JSON round-trip.
                     // Saves ~1 KB alloc per poll tick.
                     val state = NativeEngine.nativeGetState()
-                    // Psiphon paths: the exit's tunnel probe is the real
-                    // latency, already held for its session. Everything else
-                    // goes through the same hold -> one value per session.
-                    val rtt = if (psiRttMs > 0 && (isPsiphonSelected() || isEgressPsiphon())) psiRttMs
+                    // A Psiphon session is measured by the exit, its latency
+                    // included: the engine's RTT belongs to the carrier hop.
+                    // Taking it while the exit's own probe was still pending
+                    // both showed the wrong number and latched it as the
+                    // session's (first wins), so the widget kept the carrier's
+                    // value for the rest of the session.
+                    val rtt = if (isPsiphonSelected() || isEgressPsiphon()) psiRttMs
                         else SessionState.holdRtt(NativeEngine.nativeGetRttMs())
                     val rx = NativeEngine.nativeGetRxBps()
                     val tx = NativeEngine.nativeGetTxBps()
@@ -1793,6 +1796,9 @@ class MainActivity : AppCompatActivity() {
         // Start proxy notification foreground service for bandwidth stats
         val proxyIntent = Intent(this, ProxyNotification::class.java)
         proxyIntent.action = ProxyNotification.ACTION_START
+        // One extra, one meaning: whoever hosts the session's notification and
+        // reads its telemetry for the widget has to know which hop measures it.
+        proxyIntent.putExtra("psiphonThroughTunnel", isEgressPsiphon())
         startForegroundService(proxyIntent)
 
         val protocol = coreProtocolFromSelection()

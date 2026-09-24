@@ -403,6 +403,11 @@ public class ProxyNotification extends Service {
         sessionRequested = true;
         stopping = false;
         nativeFreed = false;
+        // Which hop measures this session, told by whoever asked for it: the
+        // Activity passes it for an egress session (the engine carries it, the
+        // exit measures it), and a headless start carries it in its own
+        // description. An exit-measured session has no engine numbers to show.
+        psiTelemetry = intent.getBooleanExtra("psiphonThroughTunnel", false);
 
         // A description on the intent means a surface without an Activity is
         // asking for this session (the widget). MainActivity's own ACTION_START
@@ -435,9 +440,8 @@ public class ProxyNotification extends Service {
             return START_STICKY;
         }
         externalPsiphon = false;
-        // A chained session (Aether through Psiphon) is still measured by the
-        // AAR on its outside; a plain one is measured by the engine.
-        psiTelemetry = described && intent.getBooleanExtra("psiphonThroughTunnel", false);
+        psiTelemetry = psiTelemetry ||
+                (described && intent.getBooleanExtra("psiphonThroughTunnel", false));
         psiLive = false;
         if (described) startEngineFromSession(intent);
         return START_STICKY;
@@ -540,15 +544,21 @@ public class ProxyNotification extends Service {
     }
 
     /**
-     * The phase of this session, decided here: this owner knows whether a pure
-     * AAR tunnel is up (its own engine is idle on that path) and it is the only
-     * party that does.
+     * The phase of this session, decided here: an exit-measured session is the
+     * exit's to describe (the engine is idle on that path, or is only the
+     * carrier), and this owner is the party that hears from it.
      */
     private SessionState.Phase phase() {
-        if (externalPsiphon) {
-            // Protocol=Psiphon in proxy mode IS the AAR: dialing until it says
-            // the tunnel is up, connected until it says otherwise.
-            return psiLive ? SessionState.Phase.CONNECTED : SessionState.Phase.CONNECTING;
+        if (psiTelemetry) {
+            // An exit-measured session is described by the exit: it is the only
+            // party that knows whether the final hop is up, and the carrier's
+            // own state says nothing about it (it is CONNECTED as soon as the
+            // first hop is, which is how a chained session used to read
+            // CONNECTED while the exit was still dialing).
+            if (psiLive) return SessionState.Phase.CONNECTED;
+            int carrier = 0;
+            try { carrier = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
+            return carrier == 6 ? SessionState.Phase.RECONNECTING : SessionState.Phase.CONNECTING;
         }
         int state = 5;
         try { state = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
@@ -566,13 +576,16 @@ public class ProxyNotification extends Service {
     // tunnel (re)dials, and the next tick must always restore the owner's
     // content.
     private void updateNotification() {
-        // Root cause: hasActiveBinding flips during rebind -> Rust 0 then Psiphon totals -> flinch
-        // Show Psiphon stats if current regardless of binding, else Rust
-        // This session's numbers, whoever last moved them: the AAR's reading
-        // stays the reading while the AAR owns the session, even across the
-        // ticks where a rebind has not produced a new sample yet.
-        if (psiTelemetry && lastPsiphonStats != null) {
-            showNotification(psiphonTrafficText(lastPsiphonStats), BUTTONS_RUNNING);
+        // This session's numbers, whoever last moved them: the exit's reading
+        // stays the reading while the exit owns the session, even across the
+        // ticks where a rebind has not produced a new sample yet — and before
+        // its first sample there is nothing to show but zeros. Falling back to
+        // the engine's counters for those ticks is how the carrier's rates
+        // appeared first and were then replaced by the exit's.
+        if (psiTelemetry) {
+            showNotification(lastPsiphonStats != null
+                    ? psiphonTrafficText(lastPsiphonStats)
+                    : VpnNotification.zeroTrafficText(), BUTTONS_RUNNING);
             return;
         }
         long rx = 0, tx = 0, totalRx = 0, totalTx = 0;

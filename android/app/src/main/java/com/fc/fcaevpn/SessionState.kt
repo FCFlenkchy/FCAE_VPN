@@ -266,7 +266,13 @@ object SessionState {
      */
     @JvmStatic
     fun stats(psiStats: Intent?, ownAar: Boolean): LongArray {
-        if (ownAar && psiStats != null) {
+        if (ownAar) {
+            // The exit's numbers, or none at all. Borrowing the engine's in the
+            // window before the AAR's first sample is what put the carrier's
+            // rates, totals and RTT on screen first and then swapped them for
+            // the exit's — the very flinch the single-source rule exists to
+            // prevent. No reading yet means no reading, not another meter's.
+            if (psiStats == null) return LongArray(5)
             return longArrayOf(
                 psiStats.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, 0L),
                 psiStats.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, 0L),

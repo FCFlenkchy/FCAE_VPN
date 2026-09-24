@@ -997,7 +997,11 @@ public class FCAEVpnService extends VpnService {
         final String psiphonRegionV = (psiphonRegion == null) ? "" : psiphonRegion;
         final int psiphonSocks = intent.getIntExtra("psiphonSocksPort", 0);
         final int psiphonHttp  = intent.getIntExtra("psiphonHttpPort", 0);
-        sessionPsiphonExit = (backend == 1) || throughPsiphon;
+        // Sticky within a session: the "raise the TUN over a live exit" start
+        // carries the same extras, but a resume or a recalled start may not,
+        // and a session that is measured by the exit must never be described as
+        // engine-measured halfway through it.
+        sessionPsiphonExit = sessionPsiphonExit || backend == 1 || throughPsiphon;
         final String teamVal   = (teamName == null) ? "" : teamName;
         final String tokenVal  = (accessTok == null) ? "" : accessTok;
         final String emailVal  = (accessEm == null) ? "" : accessEm;
@@ -1165,6 +1169,7 @@ public class FCAEVpnService extends VpnService {
         // sample of this one can be published under it.
         sessionEpoch.incrementAndGet();
         lastPsiphonStats = null;
+        sessionPsiphonExit = false;
         // Idempotent teardown. Disconnect (UI or notification), onRevoke
         // and onDestroy can ALL fire for the same session, and the first
         // call's cleanup thread may already be past its generation check
@@ -1574,7 +1579,10 @@ public class FCAEVpnService extends VpnService {
         // and the broadcast id both churn during a rebind while the numbers
         // below stay the same numbers.
         final boolean aarStats = sessionPsiphonExit && lastPsiphonStats != null;
-        boolean psiphonExpected = PsiphonTunnelService.hasActiveBinding() || aarStats ||
+        // Exit-measured sessions never fall back to the engine's numbers: with
+        // no sample yet they show zeros, not the carrier's counters.
+        boolean psiphonExpected = sessionPsiphonExit ||
+                PsiphonTunnelService.hasActiveBinding() ||
                 (lastStartIntent != null && lastStartIntent.getBooleanExtra("psiphonThroughTunnel", false));
 
         if (uiConnecting) {
