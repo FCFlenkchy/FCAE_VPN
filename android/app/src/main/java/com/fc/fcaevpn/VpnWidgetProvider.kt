@@ -10,6 +10,7 @@ import android.graphics.Color
 import android.net.VpnService
 import android.view.View
 import android.widget.RemoteViews
+import org.json.JSONObject
 
 class VpnWidgetProvider : AppWidgetProvider() {
 
@@ -34,15 +35,14 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 lastRunning = intent.getBooleanExtra("running", false)
                 lastPaused = intent.getBooleanExtra("paused", false)
                 lastConnecting = intent.getBooleanExtra("connecting", false)
-                if (lastRunning) {
+                if (lastRunning || lastPaused) {
                     val rx = intent.getLongExtra("rx", 0L)
                     val tx = intent.getLongExtra("tx", 0L)
                     val totalRx = intent.getLongExtra("totalRx", 0L)
                     val totalTx = intent.getLongExtra("totalTx", 0L)
                     val rtt = intent.getIntExtra("rtt", 0)
-                    if (totalRx > 0 || totalTx > 0 || rx > 0 || tx > 0 || rtt > 0) {
-                        lastStatsLine = "↓ ${fmtBytes(rx)}/s (${fmtBytes(totalRx)})  |  ↑ ${fmtBytes(tx)}/s (${fmtBytes(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "—"}"
-                    }
+                    lastSpeedLine = "↓ ${fmtBytes(rx)}/s (${fmtBytes(totalRx)})  |  ↑ ${fmtBytes(tx)}/s (${fmtBytes(totalTx)})"
+                    lastRttLine = if (rtt > 0) "RTT: ${rtt}ms" else "RTT: —"
                 }
                 updateAllWidgets(context)
             }
@@ -51,7 +51,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 lastRunning = false
                 lastPaused = false
                 lastConnecting = false
-                lastStatsLine = ""
+                lastSpeedLine = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)"
+                lastRttLine = "RTT: —"
                 updateAllWidgets(context)
             }
             PsiphonTunnelService.BROADCAST_READY -> {
@@ -64,7 +65,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 lastRunning = false
                 lastPaused = false
                 lastConnecting = false
-                lastStatsLine = ""
+                lastSpeedLine = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)"
+                lastRttLine = "RTT: —"
                 updateAllWidgets(context)
             }
             PsiphonTunnelService.BROADCAST_STATS -> {
@@ -73,7 +75,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 val totalRx = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, 0L)
                 val totalTx = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, 0L)
                 val rtt = intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, 0)
-                lastStatsLine = "↓ ${fmtBytes(rxBps)}/s (${fmtBytes(totalRx)})  |  ↑ ${fmtBytes(txBps)}/s (${fmtBytes(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "—"}"
+                lastSpeedLine = "↓ ${fmtBytes(rxBps)}/s (${fmtBytes(totalRx)})  |  ↑ ${fmtBytes(txBps)}/s (${fmtBytes(totalTx)})"
+                lastRttLine = if (rtt > 0) "RTT: ${rtt}ms" else "RTT: —"
                 updateAllWidgets(context)
             }
         }
@@ -81,7 +84,10 @@ class VpnWidgetProvider : AppWidgetProvider() {
 
     private fun handleToggle(context: Context) {
         val prefs = context.getSharedPreferences("aether_vpn", Context.MODE_PRIVATE)
-        val isTun = prefs.getInt("mode", 1) == 1
+        val mode = prefs.getInt("mode", 1)
+        val isTun = mode == 1
+        val proto = prefs.getInt("protocol", 0)
+        val isPsiphon = proto == 5
 
         if (lastRunning || lastPaused || lastConnecting) {
             if (isTun) {
@@ -95,12 +101,14 @@ class VpnWidgetProvider : AppWidgetProvider() {
                         context.startService(i)
                     }
                 } catch (_: Throwable) {}
+                try { NativeEngine.nativeStop() } catch (_: Throwable) {}
             }
             try { PsiphonTunnelService.stopBound(context) } catch (_: Throwable) {}
             lastRunning = false
             lastPaused = false
             lastConnecting = false
-            lastStatsLine = ""
+            lastSpeedLine = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)"
+            lastRttLine = "RTT: —"
             updateAllWidgets(context)
         } else {
             if (isTun) {
@@ -113,9 +121,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
                     return
                 }
 
-                val startIntent = Intent(context, FCAEVpnService::class.java).apply {
-                    this.action = FCAEVpnService.ACTION_START
-                }
+                val startIntent = buildStartIntentFromPrefs(context)
                 try {
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                         context.startForegroundService(startIntent)
@@ -126,19 +132,132 @@ class VpnWidgetProvider : AppWidgetProvider() {
                     updateAllWidgets(context)
                 } catch (_: Throwable) {}
             } else {
-                val proxyIntent = Intent(context, ProxyNotification::class.java).apply {
-                    this.action = ProxyNotification.ACTION_START
-                }
-                try {
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        context.startForegroundService(proxyIntent)
-                    } else {
-                        context.startService(proxyIntent)
+                if (isPsiphon) {
+                    val psiIntent = Intent(context, ProxyNotification::class.java).apply {
+                        action = ProxyNotification.ACTION_PSIPHON
+                        putExtras(buildStartIntentFromPrefs(context))
                     }
+                    try {
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                            context.startForegroundService(psiIntent)
+                        } else {
+                            context.startService(psiIntent)
+                        }
+                        lastConnecting = true
+                        updateAllWidgets(context)
+                    } catch (_: Throwable) {}
+                } else {
+                    val proxyIntent = Intent(context, ProxyNotification::class.java).apply {
+                        action = ProxyNotification.ACTION_START
+                    }
+                    try {
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                            context.startForegroundService(proxyIntent)
+                        } else {
+                            context.startService(proxyIntent)
+                        }
+                    } catch (_: Throwable) {}
+                    startEngineNative(context, prefs)
                     lastConnecting = true
                     updateAllWidgets(context)
-                } catch (_: Throwable) {}
+                }
             }
+        }
+    }
+
+    private fun startEngineNative(context: Context, prefs: android.content.SharedPreferences) {
+        val proto = prefs.getInt("protocol", 0)
+        val scanMode = prefs.getInt("scan", 0)
+        val ipPos = prefs.getInt("ipVersion", 0)
+        val ipVer = when (ipPos) { 0 -> 4; 1 -> 6; 2 -> 10; else -> 4 }
+        val quick = prefs.getBoolean("quick", false)
+        val h2 = prefs.getBoolean("h2", true)
+        val ech = prefs.getBoolean("ech", true)
+        val lan = prefs.getBoolean("lan", false)
+        val sni = prefs.getString("sni", "")?.trim() ?: ""
+        val cfgPath = context.filesDir.resolve("aether.toml").absolutePath
+        val noizeArray = arrayOf("off", "light", "balanced", "aggressive", "firewall", "gfw")
+        val noizePos = prefs.getInt("noize", 2).coerceIn(0, noizeArray.size - 1)
+        val noizeProfile = noizeArray[noizePos]
+        val socksPort = if (prefs.getBoolean("socks", false) || proto in 4..5) prefs.getString("socksPort", "1819")?.toIntOrNull() ?: 1819 else 0
+        val httpPort = if (prefs.getBoolean("http", false)) prefs.getString("httpPort", "1820")?.toIntOrNull() ?: 1820 else 0
+        val forcePeer = prefs.getString("forcePeer", "")?.trim() ?: ""
+        val sysProfile = prefs.getInt("sysprofile", 0)
+        val teamName = prefs.getString("team", "")?.trim() ?: ""
+        val accessToken = prefs.getString("accessToken", "")?.trim() ?: ""
+        val accessEmail = prefs.getString("accessEmail", "")?.trim() ?: ""
+        val routesFile = prefs.getString("routesFile", "")?.trim() ?: ""
+        val routesInline = prefs.getString("routesInline", "")?.trim() ?: ""
+        val torPos = prefs.getInt("tor", 0)
+        val torMode = if (proto in 4..5) 0 else if (torPos in 0..2) torPos else 0
+        val torBridges = prefs.getInt("torBridges", 0)
+        val torBridgeLines = prefs.getString("torBridgeLines", "")?.trim() ?: ""
+        val engineLog = prefs.getInt("engineLog", 3)
+        val backend = prefs.getInt("backend", 0)
+        val torSocksDef = prefs.getString("torSocksPort", "1821")?.toIntOrNull() ?: 0
+        val torSocksPort = if (torSocksDef == 1821) 0 else torSocksDef
+        val torHttpPort = if (prefs.getBoolean("torHttp", false)) prefs.getString("torHttpPort", "1822")?.toIntOrNull() ?: 1822 else 0
+        val throughPsiphon = proto == 5
+        val psiTransport = prefs.getInt("psiphonTransport", 0)
+        val psiphonConfig = JSONObject().put("FCAETransport", psiTransport).toString()
+        val psiphonRegion = prefs.getString("psiphonRegion", "ANY") ?: "ANY"
+        val psiphonSocksPort = prefs.getString("psiphonSocksPort", "0")?.toIntOrNull() ?: 0
+        val psiphonHttpPort = prefs.getString("psiphonHttpPort", "0")?.toIntOrNull() ?: 0
+        val sndbuf = (prefs.getString("tunTcpSndbuf", "256")?.toIntOrNull() ?: 256) * 1000
+        val rcvbuf = (prefs.getString("tunTcpRcvbuf", "256")?.toIntOrNull() ?: 256) * 1000
+        val tunTcpAutoTuning = prefs.getBoolean("tunTcpAutoTuning", false)
+        val tunDnsServers = listOf(prefs.getString("tunDnsV4", "")?.trim() ?: "", prefs.getString("tunDnsV6", "")?.trim() ?: "")
+            .filter { it.isNotEmpty() }
+            .joinToString(",")
+
+        NativeEngine.lifecycleExecutor.execute {
+            try { NativeEngine.nativeInit() } catch (_: Throwable) {}
+            try { NativeEngine.nativeStop() } catch (_: Throwable) {}
+            try {
+                NativeEngine.nativeStart(
+                    protocol = proto,
+                    mode = 0,
+                    lanSharing = lan,
+                    scanMode = scanMode,
+                    ipVersion = ipVer,
+                    quickReconnect = quick,
+                    noizeProfile = noizeProfile,
+                    fragmentEnabled = false,
+                    fragMinSize = 16,
+                    fragMaxSize = 32,
+                    fragMinDelay = 2,
+                    fragMaxDelay = 10,
+                    socksPort = socksPort,
+                    httpPort = httpPort,
+                    forcePeer = forcePeer,
+                    configPath = cfgPath,
+                    h2Enabled = h2,
+                    echEnabled = ech,
+                    sni = sni,
+                    sysProfile = sysProfile,
+                    teamName = teamName,
+                    accessToken = accessToken,
+                    accessEmail = accessEmail,
+                    routesFile = routesFile,
+                    routesInline = routesInline,
+                    torMode = torMode,
+                    torBridges = torBridges,
+                    torBridgeLines = torBridgeLines,
+                    engineLog = engineLog,
+                    backend = backend,
+                    torSocksPort = torSocksPort,
+                    torHttpPort = torHttpPort,
+                    psiphonThroughTunnel = throughPsiphon,
+                    psiphonConfig = psiphonConfig,
+                    psiphonRegion = psiphonRegion,
+                    psiphonSocksPort = psiphonSocksPort,
+                    psiphonHttpPort = psiphonHttpPort,
+                    tunTcpSndbuf = sndbuf,
+                    tunTcpRcvbuf = rcvbuf,
+                    tunTcpAutoTuning = tunTcpAutoTuning,
+                    tunDnsServers = tunDnsServers,
+                )
+            } catch (_: Throwable) {}
         }
     }
 
@@ -167,19 +286,17 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private val COLOR_DISCONNECTED = Color.parseColor("#8A93A6")
         private val COLOR_PROGRESS = Color.parseColor("#60A5FA")
         private val COLOR_PAUSED = Color.parseColor("#F59E0B")
-        private val COLOR_DISCONNECT_BTN = Color.parseColor("#B91C1C")
-        private val COLOR_CONNECT_BTN = Color.parseColor("#15803D")
-        private val COLOR_TUN_STOP_BTN = Color.parseColor("#B45309")
-        private val COLOR_TUN_START_BTN = Color.parseColor("#1D4ED8")
 
         private var lastRunning = false
         private var lastPaused = false
         private var lastConnecting = false
-        private var lastStatsLine = ""
+        private var lastSpeedLine = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)"
+        private var lastRttLine = "RTT: —"
 
         fun updateStats(context: Context, rx: Long, tx: Long, totalRx: Long, totalTx: Long, rtt: Int) {
             if (!lastRunning && !lastPaused) return
-            lastStatsLine = "↓ ${fmtBytes(rx)}/s (${fmtBytes(totalRx)})  |  ↑ ${fmtBytes(tx)}/s (${fmtBytes(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "—"}"
+            lastSpeedLine = "↓ ${fmtBytes(rx)}/s (${fmtBytes(totalRx)})  |  ↑ ${fmtBytes(tx)}/s (${fmtBytes(totalTx)})"
+            lastRttLine = if (rtt > 0) "RTT: ${rtt}ms" else "RTT: —"
             updateAllWidgets(context)
         }
 
@@ -189,6 +306,73 @@ class VpnWidgetProvider : AppWidgetProvider() {
             for (id in ids) {
                 updateWidget(context, appWidgetManager, id)
             }
+        }
+
+        fun buildStartIntentFromPrefs(context: Context): Intent {
+            val prefs = context.getSharedPreferences("aether_vpn", Context.MODE_PRIVATE)
+            val i = Intent(context, FCAEVpnService::class.java)
+            i.action = FCAEVpnService.ACTION_START
+            val proto = prefs.getInt("protocol", 0)
+            i.putExtra("protocol", proto)
+            val mode = prefs.getInt("mode", 1)
+            i.putExtra("mode", mode)
+            i.putExtra("tunEngine", prefs.getInt("tunEngine", 0))
+            val mtu = prefs.getString("tunMtu", "1500")?.toIntOrNull()?.coerceIn(1280, 9000) ?: 1500
+            i.putExtra("tunMtu", mtu)
+            val sndbuf = (prefs.getString("tunTcpSndbuf", "256")?.toIntOrNull() ?: 256) * 1000
+            val rcvbuf = (prefs.getString("tunTcpRcvbuf", "256")?.toIntOrNull() ?: 256) * 1000
+            i.putExtra("tunTcpSndbuf", sndbuf)
+            i.putExtra("tunTcpRcvbuf", rcvbuf)
+            i.putExtra("tunTcpAutoTuning", prefs.getBoolean("tunTcpAutoTuning", false))
+            i.putExtra("scanMode", prefs.getInt("scan", 0))
+            val ipPos = prefs.getInt("ipVersion", 0)
+            val ipVer = when (ipPos) { 0 -> 4; 1 -> 6; 2 -> 10; else -> 4 }
+            i.putExtra("ipVersion", ipVer)
+            i.putExtra("quickReconnect", prefs.getBoolean("quick", false))
+            i.putExtra("h2Enabled", prefs.getBoolean("h2", true))
+            i.putExtra("echEnabled", prefs.getBoolean("ech", true))
+            i.putExtra("lanSharing", prefs.getBoolean("lan", false))
+            i.putExtra("configPath", context.filesDir.resolve("aether.toml").absolutePath)
+            i.putExtra("sni", prefs.getString("sni", "")?.trim() ?: "")
+            val socksChecked = prefs.getBoolean("socks", false)
+            val socksPortVal = prefs.getString("socksPort", "1819")?.toIntOrNull() ?: 1819
+            i.putExtra("socksPort", if (socksChecked || proto in 4..5) socksPortVal else 0)
+            val httpChecked = prefs.getBoolean("http", false)
+            val httpPortVal = prefs.getString("httpPort", "1820")?.toIntOrNull() ?: 1820
+            i.putExtra("httpPort", if (httpChecked) httpPortVal else 0)
+            val noizeArray = arrayOf("off", "light", "balanced", "aggressive", "firewall", "gfw")
+            val noizePos = prefs.getInt("noize", 2).coerceIn(0, noizeArray.size - 1)
+            i.putExtra("noizeProfile", noizeArray[noizePos])
+            i.putExtra("forcePeer", prefs.getString("forcePeer", "")?.trim() ?: "")
+            i.putExtra("sysProfile", prefs.getInt("sysprofile", 0))
+            i.putExtra("teamName", prefs.getString("team", "")?.trim() ?: "")
+            i.putExtra("accessToken", prefs.getString("accessToken", "")?.trim() ?: "")
+            i.putExtra("accessEmail", prefs.getString("accessEmail", "")?.trim() ?: "")
+            i.putExtra("routesFile", prefs.getString("routesFile", "")?.trim() ?: "")
+            i.putExtra("routesInline", prefs.getString("routesInline", "")?.trim() ?: "")
+            val torPos = prefs.getInt("tor", 0)
+            val effectiveTor = if (proto in 4..5) 0 else if (torPos in 0..2) torPos else 0
+            i.putExtra("torMode", effectiveTor)
+            i.putExtra("torBridges", prefs.getInt("torBridges", 0))
+            i.putExtra("torBridgeLines", prefs.getString("torBridgeLines", "")?.trim() ?: "")
+            i.putExtra("engineLog", prefs.getInt("engineLog", 3))
+            i.putExtra("t2sLog", prefs.getInt("t2sLog", 0))
+            i.putExtra("backend", prefs.getInt("backend", 0))
+            val torSocksDef = prefs.getString("torSocksPort", "1821")?.toIntOrNull() ?: 0
+            i.putExtra("torSocksPort", if (torSocksDef == 1821) 0 else torSocksDef)
+            val torHttpChecked = prefs.getBoolean("torHttp", false)
+            val torHttpVal = prefs.getString("torHttpPort", "1822")?.toIntOrNull() ?: 1822
+            i.putExtra("torHttpPort", if (torHttpChecked) torHttpVal else 0)
+            i.putExtra("psiphonThroughTunnel", proto == 5)
+            val psiTransport = prefs.getInt("psiphonTransport", 0)
+            val psiJson = JSONObject().put("FCAETransport", psiTransport).toString()
+            i.putExtra("psiphonConfig", psiJson)
+            i.putExtra("psiphonRegion", prefs.getString("psiphonRegion", "ANY") ?: "ANY")
+            val psiSocks = prefs.getString("psiphonSocksPort", "0")?.toIntOrNull() ?: 0
+            val psiHttp = prefs.getString("psiphonHttpPort", "0")?.toIntOrNull() ?: 0
+            i.putExtra("psiphonSocksPort", psiSocks)
+            i.putExtra("psiphonHttpPort", psiHttp)
+            return i
         }
 
         private fun fmtBytes(bytes: Long): String {
@@ -213,40 +397,35 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val statusText: String
             val statusColor: Int
             val btnText: String
-            val btnColor: Int
 
             when {
                 lastConnecting -> {
                     statusText = "CONNECTING"
                     statusColor = COLOR_PROGRESS
                     btnText = "DISCONNECT"
-                    btnColor = COLOR_DISCONNECT_BTN
                 }
                 lastPaused -> {
                     statusText = "PAUSED"
                     statusColor = COLOR_PAUSED
                     btnText = "DISCONNECT"
-                    btnColor = COLOR_DISCONNECT_BTN
                 }
                 lastRunning -> {
                     statusText = "CONNECTED - $modeLabel"
                     statusColor = COLOR_CONNECTED
                     btnText = "DISCONNECT"
-                    btnColor = COLOR_DISCONNECT_BTN
                 }
                 else -> {
                     statusText = "DISCONNECTED"
                     statusColor = COLOR_DISCONNECTED
                     btnText = "CONNECT"
-                    btnColor = COLOR_CONNECT_BTN
                 }
             }
-
-            val actionBgRes = if (btnText == "CONNECT") R.drawable.widget_btn_connect else R.drawable.widget_btn_disconnect
 
             views.setTextViewText(R.id.widget_status, statusText)
             views.setTextColor(R.id.widget_status, statusColor)
             views.setTextViewText(R.id.widget_btn_action, btnText)
+
+            val actionBgRes = if (btnText == "CONNECT") R.drawable.widget_btn_connect else R.drawable.widget_btn_disconnect
             views.setInt(R.id.widget_btn_action, "setBackgroundResource", actionBgRes)
 
             if (isTun && (lastRunning || lastPaused)) {
@@ -271,12 +450,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 views.setViewVisibility(R.id.widget_btn_pause_resume, View.GONE)
             }
 
-            if (lastRunning && lastStatsLine.isNotEmpty()) {
-                views.setViewVisibility(R.id.widget_stats, View.VISIBLE)
-                views.setTextViewText(R.id.widget_stats, lastStatsLine)
-            } else {
-                views.setViewVisibility(R.id.widget_stats, View.GONE)
-            }
+            views.setTextViewText(R.id.widget_stats, lastSpeedLine)
+            views.setTextViewText(R.id.widget_rtt, lastRttLine)
 
             val toggleIntent = Intent(context, VpnWidgetProvider::class.java).apply {
                 action = ACTION_WIDGET_TOGGLE
@@ -295,7 +470,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             views.setOnClickPendingIntent(R.id.widget_btn_settings, settingsPi)
-            views.setOnClickPendingIntent(R.id.widget_info_layout, settingsPi)
+            views.setOnClickPendingIntent(R.id.widget_header, settingsPi)
 
             appWidgetManager.updateAppWidget(appWidgetId, views)
         }
