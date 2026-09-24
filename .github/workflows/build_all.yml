@@ -205,7 +205,6 @@ jobs:
     needs: [prepare, build-hev-windows]
     env:
       FCAE_VERSION: ${{ needs.prepare.outputs.version_full }}
-      FCAE_VERSION_FULL: ${{ needs.prepare.outputs.version_full }}
       FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -1374,8 +1373,7 @@ jobs:
     name: release/pre-release
     needs: [prepare, build]
     env:
-      FCAE_VERSION: ${{ needs.prepare.outputs.version }}
-      FCAE_VERSION_FULL: ${{ needs.prepare.outputs.version_full }}
+      FCAE_VERSION: ${{ needs.prepare.outputs.version_full }}
       FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
     runs-on: ubuntu-latest
     if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch'
@@ -1390,7 +1388,7 @@ jobs:
       - name: delete existing release and tag
         uses: actions/github-script@v8
         env:
-          VERSION: ${{ needs.prepare.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version_full }}
         with:
           script: |
             const tag = process.env.VERSION;
@@ -1467,8 +1465,7 @@ jobs:
             const fs = require('fs');
             const path = require('path');
 
-            const tag = ${{ toJSON(needs.prepare.outputs.version) }};
-            const versionFull = ${{ toJSON(needs.prepare.outputs.version_full) }};
+            const tag = ${{ toJSON(needs.prepare.outputs.version_full) }};
             const isPrerelease = ${{ toJSON(needs.prepare.outputs.is_prerelease) }} === 'true';
             const extraNotes = ${{ toJSON(inputs.extra_notes) }};
 
@@ -1552,7 +1549,7 @@ jobs:
               make_latest: isPrerelease ? 'false' : 'legacy',
             });
             const entry = {
-              version: versionFull,
+              version: tag,
               date: published.data.published_at.slice(0, 10),
               notes: body,
               url: published.data.html_url,
