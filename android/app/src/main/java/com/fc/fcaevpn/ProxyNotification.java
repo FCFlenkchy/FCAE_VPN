@@ -48,6 +48,15 @@ public class ProxyNotification extends Service {
     private static volatile Intent latestPsiphonStats;
     private static final String PSI_SNAPSHOT_PREFS = "psiphon_ui_snapshot";
     private boolean externalPsiphon;
+
+    /**
+     * A session was asked of this owner. The service is also started for
+     * one-shot commands — the Psiphon region refresh — and an instance that was
+     * never asked for a session must not answer "a session is up" to the
+     * widget, to the app's own exit check or to any other consumer. That false
+     * yes is what kept answering for a process with nothing behind it.
+     */
+    private volatile boolean sessionRequested;
     private boolean handingOff;
     private long ownerGeneration;
     private Intent lastPsiphonStats;
@@ -304,10 +313,20 @@ public class ProxyNotification extends Service {
             PsiphonTunnelService.startBound(this,
                     new Intent(this, PsiphonTunnelService.class)
                             .setAction(PsiphonTunnelService.ACTION_REGIONS));
+            // A region refresh is a one-shot command, and the binding above
+            // outlives it (the AAR answers later). It is not a session, so this
+            // instance must not hold the foreground state — or the zeroed
+            // notification that goes with it — and the post below is only what
+            // startForegroundService obliges this start to answer.
+            if (!sessionRequested) {
+                showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
+                stopForeground(STOP_FOREGROUND_REMOVE);
+            }
             return START_STICKY;
         }
         if (intent != null && ACTION_PSIPHON.equals(intent.getAction())) {
             ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
+            sessionRequested = true;
             externalPsiphon = true;
             showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
             Intent psi = new Intent(this, PsiphonTunnelService.class).setAction(PsiphonTunnelService.ACTION_START);
@@ -349,6 +368,7 @@ public class ProxyNotification extends Service {
         // session's later disconnect broadcast is never mistaken for a stale
         // one from a previous connect/disconnect cycle.
         ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
+        sessionRequested = true;
         stopping = false;
         nativeFreed = false;
 
@@ -539,6 +559,7 @@ public class ProxyNotification extends Service {
         if (stopping || ownerGeneration != FCAEVpnService.sGeneration.get()) return false;
         lastPsiphonStats = null;
         stopping = true;
+        sessionRequested = false;
         handler.removeCallbacks(statsRunnable);
         PsiphonTunnelService.stopBound(this);
         // Proxy mode has no VpnService, so nothing else broadcasts state. The
@@ -563,6 +584,14 @@ public class ProxyNotification extends Service {
         Log.i(TAG, "ProxyNotification stopped");
 
         freeNativeOnce();
+
+        // The same rule the TUN owner applies: with no UI on screen, ending
+        // this session was the last thing the process had to do. Queued, not
+        // fired here — the stop broadcast above is already on the main looper
+        // and has to land before the process goes.
+        if (!FCAEApplication.hasVisibleUi() && handler != null) {
+            handler.postDelayed(this::killOwnProcess, PROCESS_KILL_DELAY_MS);
+        }
 
         return true;
     }
@@ -610,7 +639,7 @@ public class ProxyNotification extends Service {
     /** Whether this owner has a session up, dialing or held open. */
     public static boolean sessionActive() {
         ProxyNotification current = instance;
-        return current != null && !current.stopping;
+        return current != null && !current.stopping && current.sessionRequested;
     }
 
     /** Mirrors FCAEVpnService's disconnect broadcast so MainActivity resets. */

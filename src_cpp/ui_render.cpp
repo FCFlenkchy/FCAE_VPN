@@ -1651,21 +1651,19 @@ void render_ui() {
         }
 
         ImGui::Spacing();
-        // Only show a live measurement: outside CONNECTED the last value is
-        // stale (the engine keeps rtt_ms from the previous session), and on
-        // backends without a prober it is 0 regardless.
+        // The reading itself, bare, in the same shape the Android surfaces use:
+        // no label and no placeholder, just the number and its unit. Outside
+        // CONNECTED there is no live measurement (the engine keeps the previous
+        // session's rtt_ms, and a stale number must not pass for a live one), so
+        // the slot reads 0ms.
         char rtt_buf[24];
-        if (telem.state == FCAE_STATE_CONNECTED && telem.rtt_ms > 0) {
-            snprintf(rtt_buf, sizeof(rtt_buf), "%u ms", telem.rtt_ms);
-        } else {
-            rtt_buf[0] = '-';
-            rtt_buf[1] = '\0';
-        }
+        snprintf(rtt_buf, sizeof(rtt_buf), "%ums",
+                 telem.state == FCAE_STATE_CONNECTED ? telem.rtt_ms : 0u);
         if (telem.backend == FCAE_BACKEND_PSIPHON || g_app.protocol == 4) {
-            ImGui::TextWrapped("RTT: %s  |  Mode: %s", rtt_buf,
+            ImGui::TextWrapped("%s  |  Mode: %s", rtt_buf,
                               g_app.mode == 0 ? "Proxy" : "TUN");
         } else {
-            ImGui::TextWrapped("Peer: %s  |  RTT: %s  |  Mode: %s",
+            ImGui::TextWrapped("Peer: %s  |  %s  |  Mode: %s",
                 telem.connected_peer[0] ? telem.connected_peer : "-",
                 rtt_buf,
                 g_app.mode == 0 ? "Proxy" : "TUN");

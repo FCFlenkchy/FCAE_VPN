@@ -315,14 +315,35 @@ object SessionState {
     fun isLive(): Boolean {
         if (FCAEVpnService.sessionActive()) return true
         if (ProxyNotification.sessionActive()) return true
-        if (PsiphonTunnelService.hasActiveBinding()) return true
-        // Reconnecting counts: the engine is recovering on its own, and a second
-        // session on top of it must stay off the table.
+        // The AAR binding is deliberately not asked here: a binding is an
+        // attachment, and the region refresh holds one — a session always has
+        // one of the two owners above, and those are the parties that know.
+        // The engine's own state, read through the same test the service uses:
+        // ERROR (5) is a session that ended and left its last state behind, and
+        // counting it kept a dead session — and the process behind it — alive.
         return try {
-            NativeEngine.nativeGetState() in 1..6
+            FCAEVpnService.engineSessionLive(NativeEngine.nativeGetState())
         } catch (_: Throwable) {
             false
         }
+    }
+
+    /**
+     * Whether a command the user just gave is still being carried out.
+     *
+     * Timed out on the same rule as the frame latch: a command nothing answers
+     * must stop holding anything back, or a refused connect would keep the
+     * process alive for as long as it likes.
+     */
+    @JvmStatic
+    @Synchronized
+    fun commandInFlight(): Boolean {
+        if (pending == Command.NONE) return false
+        if (SystemClock.elapsedRealtime() - pendingAt > COMMAND_TIMEOUT_MS) {
+            pending = Command.NONE
+            return false
+        }
+        return true
     }
 
     /** Whether `snapshot` may be shown while a command is in flight. */

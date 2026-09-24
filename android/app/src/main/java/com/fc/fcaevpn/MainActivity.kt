@@ -183,7 +183,7 @@ class MainActivity : AppCompatActivity() {
     private fun resetStats() {
         resetPsiStats()
         if (::statsText.isInitialized) {
-            statsText.text = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)  |  RTT —"
+            statsText.text = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)  |  0ms"
         }
     }
 
@@ -201,7 +201,7 @@ class MainActivity : AppCompatActivity() {
             else "$current\n${psiphonEndpointText(nativeLanFallback(lastNativeLan))}"
         }
         statsText.text =
-            "↓ ${fmt(psiDownBps)}/s (${fmt(psiTotalDown)})  |  ↑ ${fmt(psiUpBps)}/s (${fmt(psiTotalUp)})  |  RTT ${if (psiRttMs > 0) "${psiRttMs}ms" else "—"}"
+            "↓ ${fmt(psiDownBps)}/s (${fmt(psiTotalDown)})  |  ↑ ${fmt(psiUpBps)}/s (${fmt(psiTotalUp)})  |  ${psiRttMs}ms"
     }
 
     private fun acceptPsiStats(intent: Intent) {
@@ -1223,17 +1223,37 @@ class MainActivity : AppCompatActivity() {
         // in flight when the UI closed (proxy stop) and a session started
         // within the window cancels the kill.
         if (!isChangingConfigurations) {
-            // The question is "is there a session?", not "is a service object
-            // still alive?": an owner can outlive its session (a failed dial, a
-            // killed AAR, a completed teardown), and asking the wrong one kept
-            // this process cached with no VPN behind it, which is exactly what
-            // the user sees as "the app never gets killed".
-            if (!SessionState.reconciled(this).active) endIdleProcess()
-            handler.postDelayed({
-                if (!activityAlive && !SessionState.reconciled(this@MainActivity).active) {
-                    endIdleProcess()
-                }
-            }, PROCESS_EXIT_DELAY_MS)
+            handler.post(idleExit)
+            // A teardown can still be in flight when the UI closes (a Stop being
+            // carried out, a disconnect an owner has not finished, an engine
+            // reap): give it its window instead of deciding once, and never
+            // longer than this.
+            for (delay in EXIT_RECHECK_DELAYS_MS) handler.postDelayed(idleExit, delay)
+        }
+    }
+
+    /**
+     * The UI is gone: if no session is left either, this process has no reason
+     * to stay cached, and that is what it looked like — a disconnected app that
+     * only ever left when it was force-stopped.
+     *
+     * The question is asked of the owners themselves, never of the last
+     * published frame: a frame outlives its session (a killed AAR, a failed
+     * dial, a teardown that had not finished), and a stale one is exactly the
+     * answer that must not keep a process alive. A command still being carried
+     * out is a session by the user's own account, so it postpones the exit —
+     * and every pass asks again, so a session that comes up in the meantime
+     * cancels it for good.
+     */
+    private val idleExit = object : Runnable {
+        override fun run() {
+            if (activityAlive || isChangingConfigurations) return
+            if (SessionState.isLive()) {
+                handler.removeCallbacks(this)
+                return
+            }
+            if (SessionState.commandInFlight()) return
+            endIdleProcess()
         }
     }
 
@@ -1962,6 +1982,11 @@ class MainActivity : AppCompatActivity() {
      * we are about to end — so the owners are stopped first.
      */
     private fun endIdleProcess() {
+        // The record is committed before the kill: this process is about to
+        // stop existing, and the widget the launcher keeps must not outlive it
+        // claiming a session.
+        SessionState.markIdle(this)
+        VpnWidgetProvider.refresh(this)
         try { stopService(Intent(this, FCAEVpnService::class.java)) } catch (_: Throwable) {}
         try { stopService(Intent(this, ProxyNotification::class.java)) } catch (_: Throwable) {}
         try { PsiphonTunnelService.killProcessOnExit(this) } catch (_: Throwable) {}
@@ -2491,7 +2516,7 @@ class MainActivity : AppCompatActivity() {
                 resetStats()
             } else {
                 statsText.text =
-                    "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "—"}"
+                    "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  ${rtt}ms"
             }
 
             // Psiphon direct and Tor-only sessions do not expose an Aether peer.
@@ -2862,10 +2887,11 @@ class MainActivity : AppCompatActivity() {
         // Set to true while the Activity is alive.  The service checks
         // this after fullShutdown() to decide whether to kill the process.
         @JvmField @Volatile var activityAlive = false
-        /** Grace window between the UI closing idle and the process dying, so
-            a session started in that window (or a teardown still finishing)
-            cancels the kill. */
-        const val PROCESS_EXIT_DELAY_MS = 800L
+        /**
+         * Windows, measured from the UI closing: a teardown still finishing gets
+         * its time, and a session started in the window cancels the exit.
+         */
+        private val EXIT_RECHECK_DELAYS_MS = longArrayOf(800L, 3_000L, 8_000L)
 
         // Pre-computed Color constants — avoids String.parseColor() on every poll tick.
         private val COLOR_CONNECTED = Color.parseColor("#34D399")

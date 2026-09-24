@@ -13,7 +13,6 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.widget.RemoteViews
-import java.util.Locale
 
 /**
  * Home screen control surface, a fixed 3x2 (widget_vpn_info.xml): name, state
@@ -168,9 +167,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private const val PENDING_FLAGS =
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         private const val RECHECK_DELAY_MS = 2500L
-        private const val KIB = 1024L
-        private const val MIB = KIB * 1024
-        private const val GIB = MIB * 1024
 
         private val COLOR_CONNECTED = Color.parseColor("#34D399")
         private val COLOR_DISCONNECTED = Color.parseColor("#8A93A6")
@@ -280,11 +276,15 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val pauseLabel = if (session.paused) "START" else "STOP"
             // Down and up are separate readings, each with its own arrow: rates
             // and totals each get a row, split into the two directions.
-            val ratesDown = "↓ " + fmtRate(shown.rx)
-            val ratesUp = "↑ " + fmtRate(shown.tx)
-            val totalDown = "↓ " + fmtBytes(shown.totalRx)
-            val totalUp = "↑ " + fmtBytes(shown.totalTx)
-            val rtt = if (shown.rtt > 0) "${shown.rtt} ms" else "—"
+            // The notification's formatter, not a copy of it: KB/MB/GB text in
+            // the widget has to read exactly like the notification and the app.
+            val ratesDown = "↓ " + VpnNotification.fmtRate(shown.rx)
+            val ratesUp = "↑ " + VpnNotification.fmtRate(shown.tx)
+            val totalDown = "↓ " + VpnNotification.fmtBytes(shown.totalRx)
+            val totalUp = "↑ " + VpnNotification.fmtBytes(shown.totalTx)
+            // The reading, bare, with its unit — the shape the app's own line
+            // and the desktop's use. No label: this slot is the RTT's.
+            val rtt = "${shown.rtt}ms"
 
             // Every repaint is a round trip to the launcher: identical content
             // is not worth one.
@@ -353,15 +353,5 @@ class VpnWidgetProvider : AppWidgetProvider() {
                     .putExtra(EXTRA_TAP_ACTIVE, active),
                 PENDING_FLAGS
             )
-
-        private fun fmtBytes(bytes: Long): String = when {
-            bytes >= GIB -> String.format(Locale.US, "%.1f GB", bytes / GIB.toDouble())
-            bytes >= MIB -> String.format(Locale.US, "%.1f MB", bytes / MIB.toDouble())
-            bytes >= KIB -> String.format(Locale.US, "%.1f KB", bytes / KIB.toDouble())
-            else -> "$bytes B"
-        }
-
-        private fun fmtRate(bytesPerSecond: Long): String =
-            fmtBytes(if (bytesPerSecond < 0L) 0L else bytesPerSecond) + "/s"
     }
 }

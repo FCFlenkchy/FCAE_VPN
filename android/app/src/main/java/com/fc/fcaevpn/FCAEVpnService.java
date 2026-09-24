@@ -1124,9 +1124,23 @@ public class FCAEVpnService extends VpnService {
     }
 
     /**
-     * @param killProcess end the process once the engine has stopped. Only the
-     *                    terminal paths ask for it — the UI's own Disconnect
-     *                    keeps the process so the user can reconnect.
+     * Whether an engine state means a session exists.
+     *
+     * 1..4 are provisioning/scanning/connecting/connected and 6 is a tunnel
+     * being recovered — a session by any measure. 0 is nothing having run and 5
+     * is ERROR, which is where a session that ENDED leaves the engine parked:
+     * counting that one as a session is what kept promising owners, a widget and
+     * a whole process that a tunnel was still there.
+     */
+    static boolean engineSessionLive(int state) {
+        return state >= 1 && state <= 4 || state == 6;
+    }
+
+    /**
+     * @param killProcess end the process once the engine has stopped. The
+     *                    terminal paths ask for it, and so does a teardown with
+     *                    no UI behind it: with the screen closed, ending the
+     *                    session was the last thing this process had to do.
      */
     private synchronized void fullShutdown(boolean killProcess) {
         // Idempotent teardown. Disconnect (UI or notification), onRevoke
@@ -1137,6 +1151,11 @@ public class FCAEVpnService extends VpnService {
         // twice ("tun2socks 2 times torn down"). All fields below are
         // already cleared/poisoned by the first pass, so a repeat call has
         // nothing to do.
+        // The UI's own Disconnect keeps the process so the user can reconnect
+        // from the screen in front of them. A teardown with no UI on screen has
+        // no such reason: the session is what the process existed for, and the
+        // owners' teardown is the only moment left to notice that it ended.
+        if (!FCAEApplication.hasVisibleUi()) killProcess = true;
         if (killProcess) killProcessOnCleanup = true;
         if (shuttingDown && !running && vpnThread == null
                 && vpnInterface == null) {
@@ -1253,17 +1272,27 @@ public class FCAEVpnService extends VpnService {
         synchronized (FCAEVpnService.this) {
             if (!uiConnecting || running || vpnPaused) return;
             if (PsiphonTunnelService.hasActiveBinding()) return;
-            int state = 5;
+            int state = 0;
             try { state = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
-            if (state >= 1 && state <= 4 || state == 6) return;
+            if (engineSessionLive(state)) return;
             Log.w(TAG, "connect never resolved (engine state " + state
                     + ") — tearing the session down");
             fullShutdown();
         }
     };
 
+    /**
+     * End the process — unless a new session has claimed it since.
+     *
+     * The kill is posted, and a connect can arrive on the main thread before it
+     * runs (a widget Connect right after a Disconnect, a retry): the session
+     * generation says whether this process is still the one being torn down.
+     */
     private void scheduleProcessKill() {
-        handler.post(this::killEverything);
+        final long gen = cleanupGeneration.get();
+        handler.post(() -> {
+            if (gen == cleanupGeneration.get()) killEverything();
+        });
     }
 
     /**
