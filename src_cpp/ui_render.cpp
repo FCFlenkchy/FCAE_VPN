@@ -1828,11 +1828,6 @@ void render_ui() {
 
                 ImGui::Spacing();
                 ImGui::Text("TUN DNS (comma-separated IP addresses)");
-                const bool psiphon_exit = g_app.backend == 1 || g_app.tor_mode == 3;
-                if (psiphon_exit)
-                    ImGui::TextWrapped("Psiphon resolves DNS at the exit. These IPv4 addresses identify TUN DNS destinations; IPv6 entries are saved for other exits.");
-                else
-                    ImGui::TextWrapped("DNS queries use these servers through the selected tunnel.");
                 ImGui::PushItemWidth(-1);
                 ImGui::InputTextWithHint("##tun_dns4", "IPv4 DNS — e.g. 1.1.1.1,1.0.0.1", g_app.tun_dns4, sizeof(g_app.tun_dns4));
                 ImGui::InputTextWithHint("##tun_dns6", "IPv6 DNS — e.g. 2606:4700:4700::1111", g_app.tun_dns6, sizeof(g_app.tun_dns6));

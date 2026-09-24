@@ -288,11 +288,6 @@
                     android:text="2606:4700:4700::1111,2606:4700:4700::1001"
                     android:textColor="#FFE8ECF4"
                     android:textSize="14sp" />
-                <TextView android:id="@+id/textTunDnsHint" android:layout_width="match_parent"
-                    android:layout_height="wrap_content" android:layout_marginTop="8dp"
-                    android:textColor="#FF9AA3B5" android:textSize="12sp"
-                    android:text="DNS queries stay inside the selected tunnel." />
-
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"

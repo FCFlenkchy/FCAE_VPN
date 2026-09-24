@@ -111,8 +111,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerSplitTunnel: Spinner
     private lateinit var btnSplitTunnelApps: android.widget.Button
     private var splitTunnelSelectedApps = mutableSetOf<String>()
+
+    /**
+     * Installed-app inventory for the split-tunnel picker, built off the main
+     * thread and kept: the picker opens from it instantly, and its background
+     * refresh replaces it only when the installed set actually changed.
+     */
+    @Volatile private var splitTunnelApps: List<AppEntry>? = null
     private lateinit var layoutTun2socksSettings: android.view.View
-    private lateinit var textTunDnsHint: android.widget.TextView
     private lateinit var editTunDnsV4: android.widget.EditText
     private lateinit var editTunDnsV6: android.widget.EditText
     private lateinit var editTeam: android.widget.EditText
@@ -557,7 +563,6 @@ class MainActivity : AppCompatActivity() {
         spinnerSplitTunnel = findViewById(R.id.spinnerSplitTunnel)
         btnSplitTunnelApps = findViewById(R.id.btnSplitTunnelApps)
         layoutTun2socksSettings = findViewById(R.id.layoutTun2socksSettings)
-        textTunDnsHint = findViewById(R.id.textTunDnsHint)
         editTunDnsV4 = findViewById(R.id.editTunDnsV4)
         editTunDnsV6 = findViewById(R.id.editTunDnsV6)
         editTeam = findViewById(R.id.editTeam)
@@ -1369,15 +1374,6 @@ class MainActivity : AppCompatActivity() {
         if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
         ensureEgressAdapter()
         updateTorHint()
-        updateTunDnsHint()
-    }
-
-    private fun updateTunDnsHint() {
-        if (!::textTunDnsHint.isInitialized) return
-        val psiphonExit = isPsiphonSelected() || isEgressPsiphon()
-        textTunDnsHint.text = if (psiphonExit)
-            "Psiphon resolves DNS at the exit. These IPv4 addresses identify TUN DNS destinations; IPv6 entries are saved for other exits."
-        else "DNS queries use these servers through the selected tunnel."
     }
 
     /**
@@ -2111,30 +2107,82 @@ class MainActivity : AppCompatActivity() {
         btnSplitTunnelApps.text = "Select Apps (${splitTunnelSelectedApps.size})"
     }
 
-    private fun showSplitTunnelAppPicker() {
+    /**
+     * One row of the picker.
+     *
+     * The label and its lowercase form are resolved once, at inventory time:
+     * the search compares against them on every keystroke, and resolving a
+     * label means a resource lookup in another package. The icon is left null
+     * on purpose — it is the one genuinely expensive part, and it is only ever
+     * needed for a row that is on screen.
+     */
+    private class AppEntry(
+        val info: android.content.pm.ApplicationInfo,
+        val label: String,
+        val labelLower: String,
+        val packageName: String,
+        val packageLower: String
+    ) {
+        @Volatile
+        var icon: android.graphics.drawable.Drawable? = null
+    }
+
+    /**
+     * The picker's inventory: every installed app, label-first.
+     *
+     * Meant to be called off the main thread. Two things made this the slow
+     * call it was, and neither is needed to build a list:
+     *  - `GET_META_DATA` asks the framework to parse every package's meta-data
+     *    bundle, for a screen that never reads one;
+     *  - every icon was decoded up front, for apps the user may never scroll
+     *    to. A few hundred icons is a few hundred bitmap decodes.
+     */
+    private fun loadSplitTunnelApps(): List<AppEntry> {
         val pm = packageManager
-        data class AppEntry(val label: String, val packageName: String, val isSystem: Boolean, val icon: android.graphics.drawable.Drawable?)
-
-        val allApps = pm.getInstalledApplications(android.content.pm.PackageManager.GET_META_DATA)
+        return pm.getInstalledApplications(0)
+            .asSequence()
             .filter { it.packageName != packageName }
-            .map {
-                val isSys = (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
-                AppEntry(pm.getApplicationLabel(it).toString(), it.packageName, isSys, pm.getApplicationIcon(it))
+            .map { info ->
+                val label = try {
+                    pm.getApplicationLabel(info).toString()
+                } catch (_: Throwable) {
+                    info.packageName
+                }
+                AppEntry(
+                    info, label, label.lowercase(), info.packageName,
+                    info.packageName.lowercase()
+                )
             }
-            .sortedBy { it.label.lowercase() }
+            .sortedBy { it.labelLower }
+            .toList()
+    }
 
+    /** The icon of one row, loaded the first time that row is drawn. */
+    private fun appIcon(entry: AppEntry): android.graphics.drawable.Drawable {
+        entry.icon?.let { return it }
+        val icon = try {
+            packageManager.getApplicationIcon(entry.info)
+        } catch (_: Throwable) {
+            packageManager.defaultActivityIcon
+        }
+        entry.icon = icon
+        return icon
+    }
+
+    private fun showSplitTunnelAppPicker() {
         val tempSelected = HashSet(splitTunnelSelectedApps)
         var currentQuery = ""
+        var allApps: List<AppEntry> = splitTunnelApps ?: emptyList()
         val filteredList = ArrayList<AppEntry>()
 
+        // Both sides are pre-lowercased, so a keystroke is a scan of already
+        // comparable strings: no per-item allocation, no resource lookups.
         fun refilter() {
             filteredList.clear()
             for (app in allApps) {
-                if (currentQuery.isNotEmpty()) {
-                    val labelMatch = app.label.lowercase().contains(currentQuery)
-                    val pkgMatch = app.packageName.lowercase().contains(currentQuery)
-                    if (!labelMatch && !pkgMatch) continue
-                }
+                if (currentQuery.isNotEmpty() &&
+                    !app.labelLower.contains(currentQuery) &&
+                    !app.packageLower.contains(currentQuery)) continue
                 filteredList.add(app)
             }
         }
@@ -2160,6 +2208,14 @@ class MainActivity : AppCompatActivity() {
             isSingleLine = true
         }
         rootLayout.addView(searchEdit)
+
+        val statusView = android.widget.TextView(this).apply {
+            setTextColor(Color.parseColor("#FF8A93A6"))
+            textSize = 13f
+            setPadding(0, pad8, 0, 0)
+            visibility = android.view.View.GONE
+        }
+        rootLayout.addView(statusView)
 
         val listView = android.widget.ListView(this).apply {
             divider = android.graphics.drawable.ColorDrawable(Color.parseColor("#FF2A2D3D"))
@@ -2244,7 +2300,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val entry = getItem(position)
-                holder.iconView.setImageDrawable(entry.icon)
+                holder.iconView.setImageDrawable(appIcon(entry))
                 holder.labelView.text = entry.label
                 holder.pkgView.text = entry.packageName
                 holder.checkBox.isChecked = tempSelected.contains(entry.packageName)
@@ -2277,7 +2333,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Select Applications")
+            .setTitle("Select Apps")
             .setView(rootLayout)
             .setPositiveButton("Done") { _, _ ->
                 splitTunnelSelectedApps.clear()
@@ -2291,6 +2347,29 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.CYAN)
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
+
+        // Already-listed open: the dialog is usable in this frame. The refresh
+        // still runs (apps get installed while the process lives), but it only
+        // touches the list when the installed set actually differs.
+        if (allApps.isEmpty()) {
+            statusView.text = "Loading apps…"
+            statusView.visibility = android.view.View.VISIBLE
+        }
+        bgExecutor.execute {
+            val fresh = loadSplitTunnelApps()
+            splitTunnelApps = fresh
+            handler.post {
+                if (!dialog.isShowing) return@post
+                statusView.visibility = android.view.View.GONE
+                val changed = fresh.size != allApps.size ||
+                    fresh.zip(allApps).any { (a, b) -> a.packageName != b.packageName }
+                if (changed) {
+                    allApps = fresh
+                    refilter()
+                    adapter.notifyDataSetChanged()
+                }
+            }
+        }
     }
 
     private fun showAboutDialog() {
