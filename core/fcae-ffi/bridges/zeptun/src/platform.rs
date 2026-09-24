@@ -9,13 +9,12 @@ pub const fn is_android() -> bool {
     cfg!(target_os = "android")
 }
 
-/// 1.3.5.4 PATCH: zeptun creates its TUN device in-process via Wintun /
-/// the Linux/Android kernel TUN driver; both require admin / root. Mirror
-/// the tun2socks check so `fcae_is_privileged()` reports admin status for
-/// every TUN engine that is actually linked into this build. The simpler
-/// `geteuid` / `net session` probes are good enough: this only decides
-/// whether the C++ frontend shows the UAC elevation prompt, and the
-/// engine will surface a precise error if the answer is wrong.
+/// zeptun creates its TUN device in-process through Wintun / the kernel TUN
+/// driver; both need admin / root. Mirrors the tun2socks check so
+/// `fcae_is_privileged()` answers for every TUN engine linked into the build.
+/// The coarse `geteuid` / `net session` probes are enough: this only decides
+/// whether the frontend shows its elevation prompt, and the engine reports a
+/// precise error when the answer is wrong.
 pub fn is_privileged() -> bool {
     #[cfg(unix)]
     {

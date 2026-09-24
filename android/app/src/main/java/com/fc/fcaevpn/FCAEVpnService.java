@@ -33,23 +33,14 @@ public class FCAEVpnService extends VpnService {
     /** MainActivity's settings store. */
     private static final String PREFS_MAIN = "aether_vpn";
 
-    /**
-     * MTU of the VpnService interface.
-     *
-     * The native side must configure tun2socks with exactly this value --
-     * see cfg.tun_mtu in android_jni.cpp. If the two disagree the tunnel
-     * establishes and then silently drops oversized packets.
-     *
-     * This is the MTU of the LOCAL tun device only; it is not the tunnel MTU.
-     * tun2socks terminates TCP on this interface and re-dials through SOCKS,
-     * so apps' segments are rebuilt by the engine to fit whatever the tunnel
-     * carries (TUNNEL_MTU 1280, H2_TUNNEL_MTU 1500, INNER_MTU 1200 for
-     * warp-in-warp). A larger local MTU therefore means fewer, bigger reads
-     * across the JNI/gVisor boundary rather than oversized wire packets.
-     *
-     * Do NOT go below 1280: this interface carries an IPv6 address (fd00::2)
-     * and Android/Linux reject IPv6 on links with MTU < 1280.
-     */
+        /**
+         * MTU of the VpnService interface; the native side configures tun2socks
+         * with exactly this value (cfg.tun_mtu in android_jni.cpp) or the tunnel
+         * comes up and silently drops oversized packets.
+         *
+         * Never below 1280: this interface carries an IPv6 address, and
+         * Android/Linux reject IPv6 on links with MTU < 1280.
+         */
     private volatile int sessionTunMtu = 1500;
     /** True when Psiphon is this session's exit (protocol Psiphon, or
      *  Psiphon-through-tunnel egress). Set from the start intent before the
@@ -94,16 +85,13 @@ public class FCAEVpnService extends VpnService {
         return sGeneration.get();
     }
 
-    /**
-     * Identity of the session, for everything that is measured once and shown
-     * for as long as it lasts (the RTT, the counters' source).
-     *
-     * Deliberately not {@link #stateGeneration()}: that counter also invalidates
-     * in-flight engine work, so a Stop — which pauses a session's data plane
-     * without ending the session — bumps it. Keying the readings to it made a
-     * Stop-and-Start start the RTT over and re-identify the counters, which is
-     * the flinch the pause was not supposed to cause.
-     */
+        /**
+         * Identity of the session, for everything measured once and shown for as
+         * long as it lasts (the RTT, the counters' source).
+         *
+         * Not {@link #stateGeneration()}: that one also invalidates in-flight
+         * engine work, so a Stop bumps it — and a Stop is not a new session.
+         */
     public static long sessionEpoch() {
         return sessionEpoch.get();
     }
@@ -150,19 +138,11 @@ public class FCAEVpnService extends VpnService {
     private final Runnable statsRunnable = new Runnable() {
         @Override
         public void run() {
-            // ── Engine-death watchdog ─────────────────────────────────────
-            // nativeStart() returns as soon as the engine thread is
-            // launched; the engine can still die LATER on its own (no
-            // endpoint found, tunnel failed permanently, etc.). This
-            // service would then keep the established TUN fd open forever:
-            // the kernel keeps routing every packet into a dead VPN
-            // (zombie interface, blackholed traffic, stale notification)
-            // until the user manually disconnects. Poll the engine state
-            // and tear down when it reaches a terminal state:
-            //   0 = DISCONNECTED (engine idle/finished on its own)
-            //   5 = ERROR
-            // Transient states (1 provisioning, 2 scanning/reconnecting,
-            // 3 connecting, 4 connected) never trigger a teardown.
+                    // Engine-death watchdog: the engine can die on its own (no endpoint,
+                    // permanent tunnel failure) and nativeStart() has long returned, so
+                    // without this the TUN fd stays open with every packet routed into a
+                    // dead interface and the notification still up. Terminal states are
+                    // 0 (idle) and 5 (error); 1..4 and 6 never tear down.
             if (running && !shuttingDown && !vpnPaused) {
                 int engineState = 5; // pessimistic default if the JNI call throws
                 try {
@@ -194,22 +174,15 @@ public class FCAEVpnService extends VpnService {
     // names and signatures in sync with the GetMethodID calls there, and keep
     // them out of ProGuard's reach (proguard-rules.pro keeps this package).
 
-    /**
-     * Resolvers tunnel-core may use for its OWN lookups (fronting domains,
-     * server-list hosts, tactics), comma delimited, IP:port.
-     *
-     * Mandatory: once the protect hook is installed, Psiphon stops using the
-     * platform resolver, so this list is its only source of DNS servers.
-     *
-     * This deliberately does NOT report the carrier's resolvers. tunnel-core
-     * appends whatever this returns behind its preferred alternate list, so
-     * reporting the underlying network's servers left a path back to a
-     * resolver the operator controls -- the one that answers UDP/53 with a
-     * bogon on hijacking networks. Returning the same alternate-port public
-     * resolvers here means every entry in tunnel-core's list is one we chose.
-     * These are reached over protected sockets on the underlying network,
-     * exactly like every other Psiphon dial.
-     */
+        /**
+         * Resolvers tunnel-core may use for its OWN lookups (fronting domains,
+         * server-list hosts, tactics), comma delimited, IP:port. Mandatory: with
+         * the protect hook installed, Psiphon stops using the platform resolver.
+         *
+         * Never the carrier's resolvers: tunnel-core appends this list behind its
+         * own, so reporting the underlying network's servers left a path back to
+         * one the operator controls.
+         */
     @SuppressWarnings("unused")
     public String psiphonDnsServers() {
         return PSIPHON_BOOTSTRAP_DNS;
@@ -386,23 +359,7 @@ public class FCAEVpnService extends VpnService {
         ProxyNotification.handoffToVpn();
     }
 
-    /**
-     * Create the VPN interface and return its descriptor, or -1 on failure.
-     *
-     * Called from the core (via the fd provider registered in
-     * android_jni.cpp) once a backend has reported a live SOCKS endpoint, so
-     * the system routes only start pointing at us after there is something on
-     * the other end to receive the traffic.
-     *
-     * The descriptor stays owned by this service: the native side dups it.
-     * Resolved reflectively by name/signature in android_jni.cpp.
-     */
-    /**
-     * TUN DNS servers from the user's settings (comma separated per family).
-     * Blank entries are skipped; invalid addresses are rejected by
-     * addDnsServer() and skipped; if nothing valid remains the hardcoded
-     * defaults go in so the interface never ends up resolver-less.
-     */
+    /** Whitelist or blacklist of apps from the user's split-tunnel settings. */
     private void configureSplitTunnel(Builder builder) {
         try {
             SharedPreferences p = getSharedPreferences(PREFS_MAIN, MODE_PRIVATE);
@@ -441,19 +398,20 @@ public class FCAEVpnService extends VpnService {
         }
     }
 
+    /**
+     * TUN DNS servers from the user's settings (comma separated per family):
+     * blanks skipped, invalid addresses rejected by addDnsServer() and
+     * skipped, and the hardcoded defaults when nothing valid remains, so the
+     * interface is never left resolver-less.
+     */
     private void configureTunDns(Builder builder) {
         SharedPreferences p = getSharedPreferences(PREFS_MAIN, MODE_PRIVATE);
         String v4 = p.getString("tunDnsV4", DEFAULT_TUN_DNS_V4);
-        // Psiphon exits are IPv4-only, and this session's TUN is v4-only
-        // with them (see establishTunNow: no fd00::2, no ::/0 route).
-        // Advertising a v6 DNS server here is not just dead weight: on
-        // Android versions that route the query over the physical network
-        // it LEAKS plain DNS outside the tunnel, and on the rest the
-        // platform resolver stalls on the unreachable entry before falling
-        // back to v4 (slow/broken DNS, version dependent). So in
-        // Psiphon-exit sessions the v4 list is the whole DNS config; the
-        // v6 field is ignored downstream (same policy as the other
-        // Psiphon-incompatible fields).
+                // A Psiphon exit is IPv4-only and this session's TUN is v4-only with
+                // it (no fd00::2, no ::/0 route). Advertising a v6 resolver here is not
+                // dead weight but a leak: on some Android versions the query leaves
+                // over the physical network, on the rest the platform stalls on the
+                // unreachable entry before falling back.
         String v6 = sessionPsiphonExit
             ? null
             : p.getString("tunDnsV6", DEFAULT_TUN_DNS_V6);
@@ -490,7 +448,15 @@ public class FCAEVpnService extends VpnService {
         return added;
     }
 
-    /** Create or reuse the connected session's TUN interface. */
+    /**
+     * Create or reuse the connected session's TUN interface; -1 on failure.
+     *
+     * Called from the core through the fd provider registered in
+     * android_jni.cpp (reflectively, by name and signature) once a backend has
+     * reported a live SOCKS endpoint, so routes never point at a VPN with
+     * nothing behind it. The descriptor stays owned by this service — the
+     * native side dups it.
+     */
     @SuppressWarnings("unused")
     public int establishTunNow() {
         synchronized (tunEstablishLock) {
@@ -506,8 +472,8 @@ public class FCAEVpnService extends VpnService {
 
     private int establishTunLocked() {
         // A disconnect may have arrived while the backend was still dialling.
-        // Building an interface for a session nobody wants any more is what
-        // used to strand a live TUN behind a disconnected UI.
+        // Building an interface for a session nobody wants any more would
+        // strand a live TUN behind a disconnected UI.
         synchronized (tunLock) {
             if (shuttingDown || pendingSessionGen != cleanupGeneration.get()) {
                 Log.w(TAG, "establishTunNow: session is stale, refusing");
@@ -524,18 +490,11 @@ public class FCAEVpnService extends VpnService {
             builder.setMtu(sessionTunMtu);
             builder.addAddress("10.0.0.2", 32);
             builder.addRoute("0.0.0.0", 0);
-            // IPv6 on the interface ONLY when the exit can carry it. Psiphon
-            // exits are IPv4-only (the official client's VPN is v4-only for
-            // the same reason). Declaring fd00::2 + ::/0 here told Android
-            // the VPN had IPv6, so every app lookup asked for AAAA, the exit
-            // resolver answered it, and the app connected to the IPv6
-            // literal FIRST: a CONNECT to [2a00:...]:443 which the exit
-            // cannot dial and rejects as "administratively prohibited".
-            // Result: apps using hostnames stalled/failed, apps with IPv4
-            // literals worked, and every such attempt was one more "port
-            // forward failure". With no v6 address/route Android marks the
-            // VPN v4-only, AI_ADDRCONFIG suppresses AAAA, and every
-            // connection goes straight to the v4 answer.
+                        // IPv6 on the interface only when the exit can carry it. With
+                        // fd00::2 + ::/0 advertised, every app lookup asked for AAAA and
+                        // connected to the v6 literal first — which a v4-only exit rejects
+                        // as "administratively prohibited". No v6 address or route makes
+                        // Android treat the VPN as v4-only and AI_ADDRCONFIG suppress AAAA.
             if (!sessionPsiphonExit) {
                 builder.addAddress("fd00::2", 128);
                 builder.addRoute("::", 0);
@@ -549,10 +508,9 @@ public class FCAEVpnService extends VpnService {
                 return -1;
             }
 
-            // Re-check under the same lock as teardown. establish() can block;
-            // a notification Disconnect that lands in that window used to
-            // snapshot vpnInterface==null and then we assigned the new PFD
-            // afterwards — live TUN, UI already DISCONNECTED.
+            // Re-check under the same lock as teardown: establish() can block,
+            // and a Disconnect landing in that window would otherwise leave a
+            // live PFD behind a session that is already over.
             synchronized (tunLock) {
                 if (shuttingDown || pendingSessionGen != cleanupGeneration.get()) {
                     closeQuiet(pfd);
@@ -629,18 +587,12 @@ public class FCAEVpnService extends VpnService {
         startFg(notification.build(VpnNotification.zeroTrafficText(),
                 VpnNotification.BUTTONS_RUNNING));
 
-        // Force the native libraries to load before calling ANY native method
-        // on this class.
-        //
-        // The JNI entry points live in libfcaevpn_native.so, but only
-        // NativeEngine's static initialiser loads it. This service never
-        // referenced NativeEngine before its first native call, so
-        // nativeRegisterVpnService() below could be the very first one --
-        // throwing UnsatisfiedLinkError and killing the process on launch.
-        // Touching NativeEngine first runs that initialiser.
-        //
-        // Wrapped because a build/ABI without the libraries must degrade to a
-        // broken tunnel, never a crash on startup.
+                // Load the native libraries before any native call on this class: the
+                // JNI entry points live in libfcaevpn_native.so, and only
+                // NativeEngine's static initialiser loads it. Without this touch,
+                // nativeRegisterVpnService() could be the first native call and throw
+                // UnsatisfiedLinkError on launch. Wrapped, so a build without the
+                // libraries degrades to no tunnel instead of crashing.
         try {
             NativeEngine.ensureLoaded();
             // Register before any tunnel starts: Psiphon may call protect()
@@ -664,9 +616,8 @@ public class FCAEVpnService extends VpnService {
         if (intent != null && intent.getAction() != null) {
             switch (intent.getAction()) {
                 case ACTION_STOP:
-                    // Latch here as well as at the caller: the notification, the
-                    // widget and the app all send these, and every one of them
-                    // deserves the same flinch-free display.
+                    // Latched here as well as at the caller: all three surfaces
+                    // send this and each deserves the same flinch-free display.
                     handler.removeCallbacks(connectWatchdog);
                     SessionState.command(SessionState.Command.PAUSE);
                     requestPause();
@@ -745,9 +696,8 @@ public class FCAEVpnService extends VpnService {
     }
 
     /**
-     * Notification / UI command: Disconnect. Kills the session, the service
-     * and — from the notification, where there is no UI left to reconnect
-     * from — the process.
+     * Notification / widget / UI command: Disconnect. Ends the session and the
+     * service; the process follows only when the app is not on screen.
      */
     private void requestDisconnect() {
         synchronized (cmdLock) {
@@ -769,10 +719,12 @@ public class FCAEVpnService extends VpnService {
             SessionState.command(SessionState.Command.NONE);
             SessionState.markIdle(this);
             stopSelf();
-            scheduleProcessKill();
+            // Same rule: the session is over either way, and the process only
+            // goes when the user is not on this screen.
+            if (!FCAEApplication.uiOnScreen()) scheduleProcessKill();
             return;
         }
-        fullShutdown(true);
+        fullShutdown();
     }
 
     /**
@@ -1141,10 +1093,6 @@ public class FCAEVpnService extends VpnService {
         closeQuiet(pfd);
     }
 
-    private void fullShutdown() {
-        fullShutdown(false);
-    }
-
     /**
      * Whether an engine state means a session exists.
      *
@@ -1158,37 +1106,28 @@ public class FCAEVpnService extends VpnService {
         return state >= 1 && state <= 4 || state == 6;
     }
 
-    /**
-     * @param killProcess end the process once the engine has stopped. The
-     *                    terminal paths ask for it, and so does a teardown with
-     *                    no UI behind it: with the screen closed, ending the
-     *                    session was the last thing this process had to do.
-     */
-    private synchronized void fullShutdown(boolean killProcess) {
+        /**
+         * End the session, and the process with it when nobody is looking at it.
+         * One rule, one place, every caller (notification, widget, UI, revoke):
+         * app on screen -> session ends, process stays; nothing on screen ->
+         * process goes with the session.
+         */
+    private synchronized void fullShutdown() {
         // The session is over: the next one starts its own measurements, and no
         // sample of this one can be published under it.
         sessionEpoch.incrementAndGet();
         lastPsiphonStats = null;
         sessionPsiphonExit = false;
-        // Idempotent teardown. Disconnect (UI or notification), onRevoke
-        // and onDestroy can ALL fire for the same session, and the first
-        // call's cleanup thread may already be past its generation check
-        // when the second call lands — the second run then repeated
-        // nativeStopBegin/nativeStop, i.e. the tun2socks teardown ran
-        // twice ("tun2socks 2 times torn down"). All fields below are
-        // already cleared/poisoned by the first pass, so a repeat call has
-        // nothing to do.
-        // The UI's own Disconnect keeps the process so the user can reconnect
-        // from the screen in front of them. A teardown with no UI on screen has
-        // no such reason: the session is what the process existed for, and the
-        // owners' teardown is the only moment left to notice that it ended.
-        if (!FCAEApplication.hasVisibleUi()) killProcess = true;
-        if (killProcess) killProcessOnCleanup = true;
+                // Idempotent: Disconnect, onRevoke and onDestroy can all land for one
+                // session, and a second pass would repeat nativeStopBegin/nativeStop
+                // ("tun2socks 2 times torn down"). Every field below is cleared by the
+                // first pass, so a repeat call has nothing to do.
+        if (!FCAEApplication.uiOnScreen()) killProcessOnCleanup = true;
         if (shuttingDown && !running && vpnThread == null
                 && vpnInterface == null) {
             // Nothing left to tear down, so the async completion that normally
             // carries the kill will never run. Do it here or not at all.
-            if (killProcess) scheduleProcessKill();
+            if (killProcessOnCleanup) scheduleProcessKill();
             return;
         }
         PsiphonTunnelService.stopBound(this);
@@ -1245,9 +1184,8 @@ public class FCAEVpnService extends VpnService {
             if (myGen != cleanupGeneration.get()) return;
             if (killProcessOnCleanup) {
                 // Dying on purpose: the kernel closes whatever is left behind,
-                // so the kill must not queue behind the engine's own reaper —
-                // that wait was the slow part of every Disconnect. The reap is
-                // still queued, for the case where the kill never lands.
+                // so the kill must not queue behind the engine's reaper. The
+                // reap is still queued, in case the kill never lands.
                 finishTeardown(myGen);
                 NativeEngine.lifecycleExecutor.execute(() -> {
                     try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
@@ -1284,16 +1222,12 @@ public class FCAEVpnService extends VpnService {
         // decided by the caller, never by teardown itself.
     }
 
-    /**
-     * A connect that never resolves.
-     *
-     * A dial can die without ever publishing a terminal state — the AAR's
-     * process is killed, a broadcast is lost — and then nothing clears
-     * uiConnecting. The service would claim it owns a session forever, which
-     * also means the app's own process is never allowed to end when the user
-     * closes it. Bounded: if no engine session, no Psiphon binding and no
-     * engine activity exist by the deadline, the session is declared dead.
-     */
+        /**
+         * A connect that never resolves: a dial can die without publishing a
+         * terminal state (killed AAR, lost broadcast), leaving uiConnecting set
+         * and the service claiming a session forever. Declares it dead when no
+         * engine session, binding or activity exists by the deadline.
+         */
     private final Runnable connectWatchdog = () -> {
         synchronized (FCAEVpnService.this) {
             if (!uiConnecting || running || vpnPaused) return;
@@ -1482,11 +1416,8 @@ public class FCAEVpnService extends VpnService {
     }
 
     private void notifyUi() {
-        // Whether the AAR owns this session's telemetry was decided when the
-        // session started (sessionPsiphonExit), not by asking whether the last
-        // sample is still the newest: a rebind makes it briefly not-newest, and
-        // reading that as "the engine measures this now" is what flipped the
-        // numbers between two meters mid-session.
+        // The source is the session's own decision, taken at start — never a
+        // freshness test on the last sample. See SessionState.stats().
         final boolean aar = sessionPsiphonExit;
         final long[] stats = SessionState.stats(lastPsiphonStats, aar);
         SessionState.publish(this, phase(), 1,
@@ -1574,13 +1505,10 @@ public class FCAEVpnService extends VpnService {
     // notification id while its tunnel (re)dials, and the next tick must
     // always restore the owner's content.
     private void updateNotification() {
-        // The AAR's last sample is this session's reading for as long as the
-        // session lasts, and the session is the one that says so — the binding
-        // and the broadcast id both churn during a rebind while the numbers
-        // below stay the same numbers.
+        // aarStats: the session has an exit sample to show (readings and their
+        // source are SessionState.stats). psiphonExpected: an exit may still be
+        // dialling, so its controls stay up.
         final boolean aarStats = sessionPsiphonExit && lastPsiphonStats != null;
-        // Exit-measured sessions never fall back to the engine's numbers: with
-        // no sample yet they show zeros, not the carrier's counters.
         boolean psiphonExpected = sessionPsiphonExit ||
                 PsiphonTunnelService.hasActiveBinding() ||
                 (lastStartIntent != null && lastStartIntent.getBooleanExtra("psiphonThroughTunnel", false));
@@ -1810,8 +1738,9 @@ public class FCAEVpnService extends VpnService {
     @Override
     public void onRevoke() {
         // The user revoked the VPN from system settings: there is nothing left
-        // to run for, so the process goes with the session.
-        fullShutdown(true);
+        // to run for. The process follows the session unless the app is open —
+        // then it stays, so the screen in front of the user can say so.
+        fullShutdown();
         super.onRevoke();
     }
 }

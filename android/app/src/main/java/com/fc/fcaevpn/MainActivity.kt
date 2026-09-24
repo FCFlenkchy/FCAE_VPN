@@ -272,18 +272,8 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 PsiphonTunnelService.BROADCAST_STATS -> {
-                    // Tunnel telemetry from :psiphon — owns the stats line on
-                    // every psiphon path (the engine getters are empty there).
-                    //
-                    // Only while a session is the user's current intent: the
-                    // AAR keeps reporting for a beat after an explicit
-                    // disconnect, and accepting those samples painted the
-                    // disconnecting session's totals and RTT back over the
-                    // zeroed line — the flinch the disconnect must not have.
-                    // The local flag is the airtight half (a disconnect from
-                    // this UI clears the state before any broadcast can land);
-                    // the record is the half that covers a disconnect from the
-                    // notification or the widget.
+                    // The AAR keeps reporting for a beat after an explicit
+                    // disconnect; those samples would repaint the zeroed line.
                     if (userInitiatedDisconnect) return
                     if (!connecting && !commandConnecting
                             && !SessionState.reconciled(this@MainActivity).active) return
@@ -460,15 +450,13 @@ class MainActivity : AppCompatActivity() {
                         handler.post { pollBusy.set(false) }
                         return@execute
                     }
-                    // Use structured getters instead of JSON round-trip.
-                    // Saves ~1 KB alloc per poll tick.
+                    // Structured getters, not a JSON round-trip: ~1 KB less
+                    // garbage per poll tick.
                     val state = NativeEngine.nativeGetState()
                     // A Psiphon session is measured by the exit, its latency
-                    // included: the engine's RTT belongs to the carrier hop.
-                    // Taking it while the exit's own probe was still pending
-                    // both showed the wrong number and latched it as the
-                    // session's (first wins), so the widget kept the carrier's
-                    // value for the rest of the session.
+                    // included: the engine's RTT belongs to the carrier hop, and
+                    // holdRtt is first-wins — taking it while the exit's probe
+                    // was pending would freeze the wrong number for the session.
                     val rtt = if (isPsiphonSelected() || isEgressPsiphon()) psiRttMs
                         else SessionState.holdRtt(NativeEngine.nativeGetRttMs())
                     val rx = NativeEngine.nativeGetRxBps()
@@ -623,10 +611,9 @@ class MainActivity : AppCompatActivity() {
         }
         spinnerProtocol.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
-            // H2 is folded into the MASQUE entries (used to be the separate
-            // "HTTP/2 fallback" switch). Positions map to core protocol +
-            // h2Enabled via the helpers below — the FFI/start intents keep
-            // taking exactly the same fields as before.
+            // H2 is folded into the MASQUE entries. Positions map to core
+            // protocol + h2Enabled via the helpers below; the FFI keeps taking
+            // the same fields.
             // 4 = Tor and 5 = Psiphon are peers of the WARP transports from
             // the user's point of view ("how do I get out?"), even though
             // internally Tor is an engine egress and Psiphon is a separate
@@ -688,16 +675,10 @@ class MainActivity : AppCompatActivity() {
             this, R.layout.spinner_dark_item,
             listOf("No bridges", "obfs4", "snowflake", "Custom lines"),
         )
-        // One entry per tunnel-core protocol. Labels are display forms:
-        // the redundant -OSSH suffix is dropped from the meek/conjure
-        // names and INPROXY-WEBRTC- shortens to INPROXY- so entries fit
-        // the spinner without ellipsizing; the config always carries the
-        // verbatim protocol constants (PsiphonTunnelService
-        // .TRANSPORT_PROTOCOLS). Index maps 1:1 onto that table; 0 = Auto
-        // leaves LimitTunnelProtocols unset (tunnel-core tries its full
-        // set). Covers every protocol tunnel-core accepts: TapDance is
-        // the only supported protocol left out -- it is client-disabled
-        // upstream and naming it fails config validation.
+                // One entry per tunnel-core protocol, index 1:1 with
+                // PsiphonTunnelService.TRANSPORT_PROTOCOLS; labels shorten the
+                // -OSSH/-WEBRTC suffixes so they fit the spinner. 0 = Auto leaves
+                // LimitTunnelProtocols unset. TapDance is client-disabled upstream.
         spinnerPsiphonTransport.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
             listOf("Auto", "SSH", "OSSH", "TLS-OSSH", "SHADOWSOCKS-OSSH",
@@ -1058,14 +1039,11 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
         inForeground = false
         logTouchActive = false
-        // Clear any EditText focus so the blinking cursor doesn't stay
-        // visible after the keyboard is dismissed.
+        // Keyboard gone, cursor gone with it.
         clearEditTextFocus()
-        // Stop the JNI status/log poll while the UI is invisible — it was
-        // previously only gated on vpnActive, so it kept firing every 5s
-        // (JNI calls + TextView updates) even when the app was backgrounded.
-        // The foreground service notification already covers the
-        // "still connected" signal while we're not visible.
+        // Stop the JNI status/log poll while the UI is invisible: JNI calls and
+        // TextView updates have nothing to draw into, and the notification
+        // already carries the "still connected" signal.
         handler.removeCallbacks(poll)
         saveSettings()
     }
@@ -1253,19 +1231,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * The UI is gone: if no session is left either, this process has no reason
-     * to stay cached, and that is what it looked like — a disconnected app that
-     * only ever left when it was force-stopped.
-     *
-     * The question is asked of the owners themselves, never of the last
-     * published frame: a frame outlives its session (a killed AAR, a failed
-     * dial, a teardown that had not finished), and a stale one is exactly the
-     * answer that must not keep a process alive. A command still being carried
-     * out is a session by the user's own account, so it postpones the exit —
-     * and every pass asks again, so a session that comes up in the meantime
-     * cancels it for good.
-     */
+        /**
+         * The UI is gone: with no session left either, this process has no reason
+         * to stay cached. Asks the owners, never the last published frame — a
+         * stale frame is exactly the answer that must not keep a process alive.
+         * A command still in flight postpones the exit; every pass re-asks, so a
+         * session that comes up meanwhile cancels it.
+         */
     private val idleExit = object : Runnable {
         override fun run() {
             if (activityAlive || isChangingConfigurations) return
@@ -1298,14 +1270,6 @@ class MainActivity : AppCompatActivity() {
         updateTorHint()
     }
 
-    /**
-     * The egress combo and every Tor knob (bridges, bridge lines) stay fully
-     * interactive in every combo: values the current mode/protocol cannot
-     * use are simply ignored downstream, never grayed and never re-pointed
-     * (round-12 policy, same as desktop).
-     */
-    /** FcaeT2sLog value for the current tun2socks-log spinner position
-     *  (0 = Silent .. 4 = Debug -> ABI 1 = SILENT .. 5 = DEBUG). */
     private fun t2sLogValue(): Int = spinnerT2sLog.selectedItemPosition + 1
 
     /** Inverse of t2sLogValue; a stored 0 (old "default" entry) is Silent. */
@@ -1514,7 +1478,7 @@ class MainActivity : AppCompatActivity() {
         // -- the egress entry just resets to Off.
         val savedTor = prefs.getInt("tor", 0)
         if (savedTor > 3) {
-            // Pre-Psiphon-egress: 3+ was the old "Tor only" egress entry.
+            // Saved 3+ values are the pre-Psiphon-egress "Tor only" entry.
             if (prefs.getInt("backend", 0) != 1) {
                 spinnerProtocol.setSelection(4)
             }
@@ -2042,8 +2006,7 @@ class MainActivity : AppCompatActivity() {
                         btnCheckUpdates.text = "Update Available!"
                         btnCheckUpdates.setTextColor(COLOR_UPDATE_AVAILABLE)
                         updateStatus.text = info.statusMessage
-                        // Don't auto-show dialog — just update the button.
-                        // User clicks the button to open the dialog.
+                        // The button is the only prompt; the dialog is a tap.
                         updateAvailableInfo = info
                     } else if (info.checkDone) {
                         btnCheckUpdates.text = "Check for Updates"
@@ -2127,16 +2090,10 @@ class MainActivity : AppCompatActivity() {
         var icon: android.graphics.drawable.Drawable? = null
     }
 
-    /**
-     * The picker's inventory: every installed app, label-first.
-     *
-     * Meant to be called off the main thread. Two things made this the slow
-     * call it was, and neither is needed to build a list:
-     *  - `GET_META_DATA` asks the framework to parse every package's meta-data
-     *    bundle, for a screen that never reads one;
-     *  - every icon was decoded up front, for apps the user may never scroll
-     *    to. A few hundred icons is a few hundred bitmap decodes.
-     */
+        /**
+         * Every installed app, label-first; call off the main thread. Without
+         * GET_META_DATA (which makes the framework parse every package's bundle)
+         * and without decoding icons up front, this is one cheap call.
     private fun loadSplitTunnelApps(): List<AppEntry> {
         val pm = packageManager
         return pm.getInstalledApplications(0)
@@ -2722,10 +2679,8 @@ class MainActivity : AppCompatActivity() {
         else -> 4
     }
 
-    // ── Protocol spinner mapping (H2 folded into the list) ────────────────
     // Spinner: 0 = MASQUE (HTTP/3), 1 = MASQUE (HTTP/2), 2 = WireGuard,
-    //          3 = WARP-in-WARP. The core/FFI still takes the same two
-    //  fields it always did: protocol (0=masque, 1=wg, 2=gool) + h2Enabled.
+    // 3 = WARP-in-WARP -> the core's protocol (0=masque, 1=wg, 2=gool) + h2.
     private fun coreProtocolFromSelection(): Int = when (spinnerProtocol.selectedItemPosition) {
         2 -> 1    // WireGuard
         3 -> 2    // WARP-in-WARP

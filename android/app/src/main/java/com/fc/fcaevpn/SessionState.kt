@@ -8,15 +8,9 @@ import android.os.SystemClock
  * The one status feed for surfaces without an Activity.
  *
  * [FCAEVpnService] (TUN) and [ProxyNotification] (proxy) publish the session's
- * *phase* here on every tick of the loops they already run, plus the byte
- * telemetry that goes with it; the home screen widget renders [reconciled].
- * The broadcast is the app's own state channel (same action, same extras), so
- * the Activity and the widget read one story.
- *
- * The phase is decided by the owner — which is the only party that knows the
- * state machine — and never re-derived by a consumer from a handful of
- * booleans. That is deliberate: re-deriving is how the widget ended up showing
- * CONNECTED for a dead tunnel, with no RECONNECTING and no CONNECTING at all.
+ * phase and telemetry on every tick of the loops they already run; the widget
+ * renders [reconciled]. The phase is the owner's to decide — it is the only
+ * party that knows the state machine — and is never re-derived by a consumer.
  */
 object SessionState {
 
@@ -38,15 +32,11 @@ object SessionState {
     /** The engine measures the session itself. */
     const val SOURCE_ENGINE = 0
 
-    /**
-     * The Psiphon AAR owns the session's exit, and therefore its counters.
-     *
-     * A chained session has two meters — the engine's tunnel and the AAR's
-     * tunnel — and they are different numbers for the same traffic. Which one
-     * is the session's is a property of the session, so it is decided once and
-     * then held: switching between them per tick is what made the totals and
-     * the RTT flip between two readings while a Psiphon session ran.
-     */
+        /**
+         * The exit owns the session's counters: a chained session has two meters
+         * (engine and AAR) reporting different numbers for one traffic, so which
+         * one is the session's is decided once and held, never swapped per tick.
+         */
     const val SOURCE_AAR = 1
 
     /**
@@ -114,15 +104,11 @@ object SessionState {
     private var stable: Snapshot? = null
     private var regressions = 0
 
-    /**
-     * The RTT of the session, fixed by its first successful probe.
-     *
-     * One value, one session, one place: every surface reads this, so the app,
-     * the notification and the widget cannot show two different latencies for
-     * one tunnel. Latency does not change while a tunnel is up, so re-probing
-     * it would only make the number under the user's eyes jump; a new session
-     * starts the measurement over.
-     */
+        /**
+         * The RTT of the session, fixed by its first successful probe — one value,
+         * one session, one place, so no two surfaces can show different latencies
+         * for one tunnel. A new session starts the measurement over.
+         */
     @JvmStatic
     @Synchronized
     fun holdRtt(sampleMs: Int): Int {
@@ -137,16 +123,12 @@ object SessionState {
         rttHeld = 0
     }
 
-    /**
-     * A command was just sent to an owner: from here until the state it asks
-     * for arrives, frames that contradict it are held back.
-     *
-     * Without this the surfaces flinch: a Disconnect takes a moment to tear the
-     * session down and the owner's ticks keep publishing the live phase in that
-     * window, so the widget flipped back to CONNECTED right after the user had
-     * disconnected. The latch ends at the first confirming frame, or after a
-     * timeout, so a command that is never carried out cannot wedge the display.
-     */
+        /**
+         * A command was just sent: until the state it asks for arrives, frames
+         * that contradict it are held back, so a disconnect cannot be undone on
+         * screen by the owner's ticks during teardown. Ends at the first
+         * confirming frame, or at the timeout.
+         */
     @JvmStatic
     @Synchronized
     fun command(command: Command) {
@@ -229,15 +211,11 @@ object SessionState {
         write(context, Snapshot(Phase.CONNECTING, mode, 0L, 0L, 0L, 0L, holdRtt(0)))
     }
 
-    /**
-     * The pause button was tapped: flip the phase now, keep everything else.
-     *
-     * Stop only halts the TUN data plane, so the reading is held exactly as it
-     * was — the status, the rates and the totals do not move. Waiting for the
-     * owner to confirm instead made the button look dead for a beat, and
-     * rendering the owner's zeroed rates made Stop look like a start-stop
-     * flinch.
-     */
+        /**
+         * Pause tapped: flip the phase now, hold the reading exactly as it was.
+         * Stop only halts the TUN data plane, so status, rates and totals must not
+         * move, and the button must not look dead for a beat.
+         */
     @JvmStatic
     fun markPause(context: Context, paused: Boolean) {
         val current = latest?.takeIf { it.active } ?: return
@@ -254,24 +232,19 @@ object SessionState {
         write(context, Snapshot.IDLE)
     }
 
-    /**
-     * Byte telemetry of the session: the AAR's when it owns the exit, the
-     * engine's otherwise. `[rx, tx, totalRx, totalTx, rtt]`.
-     *
-     * `ownAar` is the owner's session-long answer, never a freshness test: a
-     * sample that has stopped being the newest one (a rebind between
-     * broadcasts, a paused session) is still this session's reading, and
-     * falling back to the other meter for those ticks is what made the numbers
-     * flip.
-     */
+        /**
+         * Telemetry of the session: the AAR's when it owns the exit, the engine's
+         * otherwise. `[rx, tx, totalRx, totalTx, rtt]`. `ownAar` is the owner's
+         * session-long answer, never a freshness test — a sample that stopped
+         * being the newest one is still this session's reading.
+         */
     @JvmStatic
     fun stats(psiStats: Intent?, ownAar: Boolean): LongArray {
         if (ownAar) {
-            // The exit's numbers, or none at all. Borrowing the engine's in the
-            // window before the AAR's first sample is what put the carrier's
-            // rates, totals and RTT on screen first and then swapped them for
-            // the exit's — the very flinch the single-source rule exists to
-            // prevent. No reading yet means no reading, not another meter's.
+            // The exit's numbers, or none at all: borrowing the engine's until
+            // the first exit sample lands puts the carrier's rates, totals and
+            // RTT on screen and then swaps them — the flinch this rule exists
+            // to prevent. No reading yet means no reading, not another meter's.
             if (psiStats == null) return LongArray(5)
             return longArrayOf(
                 psiStats.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, 0L),
@@ -313,17 +286,12 @@ object SessionState {
         )
     }
 
-    /**
-     * The snapshot a consumer may act on: [snapshot] minus any session that no
-     * longer exists.
-     *
-     * A stored frame can outlive the session it describes — the process is
-     * killed, the app is force-stopped, an OEM task manager takes the tunnel —
-     * and then nothing will ever publish again, so the widget would keep
-     * offering DISCONNECT for a tunnel that is gone. The owners are the only
-     * authority on whether a session exists, so ask them: if none is live and
-     * no fresh frame is arriving, the session is over and the record says so.
-     */
+        /**
+         * [snapshot] minus any session that no longer exists: a stored frame can
+         * outlive its session (killed process, force-stop, an OEM task manager),
+         * and the widget must not keep offering DISCONNECT for a tunnel that is
+         * gone. The owners are the authority, so ask them.
+         */
     @JvmStatic
     fun reconciled(context: Context): Snapshot {
         val current = snapshot(context)

@@ -147,16 +147,11 @@ object NativeEngine {
     @JvmStatic external fun nativeGetStatusMsg(): String
     @JvmStatic external fun nativeGetLastError(): String
 
-    /**
-     * Start a session described by a canonical session intent — the extras the
-     * UI writes on every connect and [FCAEVpnService] persists.
-     *
-     * This is the argument list of MainActivity's connect worker, sourced from
-     * the persisted description instead of live views, so a session started by
-     * a headless command (the widget) hands the engine exactly what a session
-     * started from the app does. Callers run it on [lifecycleExecutor], after
-     * cancelling the previous session.
-     */
+        /**
+         * Start a session from a canonical session intent (the extras the UI writes
+         * and [FCAEVpnService] persists), so a headless start hands the engine
+         * exactly what an app start does. Runs on [lifecycleExecutor].
+         */
     @JvmStatic
     fun startSession(context: Context, session: Intent): Boolean {
         val mode = if (session.getIntExtra("mode", 1) == 1) 1 else 0

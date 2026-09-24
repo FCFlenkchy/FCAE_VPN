@@ -1155,13 +1155,11 @@ jobs:
             NEEDED="$(readelf -d "$SHIPPED" | awk -F'[][]' '/NEEDED/ { print $2 }' | sort -u)"
             echo "$SHIPPED DT_NEEDED:"
             echo "$NEEDED" | sed 's/^/  /'
-            # 1.3.5.4 PATCH: libOpenGL.so.0 was implicitly allowed here
-            # before; with the launcher fallback in place, the build can
-            # still ship with it but the operator-friendly path is to link
-            # against libGL.so.1 directly so minimal installs do not need
-            # libopengl0. Reject any regression that brings libOpenGL.so.0
-            # back into the DT_NEEDED list (CMakeLists.txt chooses the
-            # link target explicitly).
+            # libOpenGL.so.0 must not reach the DT_NEEDED list: it ships only
+            # in the optional `libopengl0` package, so a build that names it
+            # fails to start on minimal installs. CMakeLists.txt links
+            # libGL.so.1 instead; reject any link that brings the dispatcher
+            # back.
             if echo "$NEEDED" | grep -qiE 'libzeptun|libfcae_psiphon|libhev|libfcae_go_bridge|libglfw|libstdc\+\+|libgcc_s|libz\.so|libbz2|liblzma|libssl|libcrypto'; then
               echo "::error::$SHIPPED links a library that is supposed to be statically linked"
               exit 1

@@ -66,15 +66,12 @@ public class ProxyNotification extends Service {
      */
     private boolean psiTelemetry;
 
-    /**
-     * The AAR has reported a live tunnel for this session.
-     *
-     * Set by its own signals (READY, a stats sample) and cleared by its own
-     * signals (STOPPED, FAILED) — never by the absence of a sample for one
-     * tick. That absence is what a rebind looks like, and reading it as
-     * "dialing" made the status flip CONNECTED -> CONNECTING -> CONNECTED on
-     * every rebind.
-     */
+        /**
+         * The AAR reported a live tunnel for this session. Set by its own signals
+         * (READY, a stats sample), cleared by them (STOPPED, FAILED) — never by
+         * one missing tick, which is what a rebind looks like and is exactly what
+         * made the status flip CONNECTED -> CONNECTING -> CONNECTED.
+         */
     private volatile boolean psiLive;
     private boolean handingOff;
     private long ownerGeneration;
@@ -215,21 +212,11 @@ public class ProxyNotification extends Service {
     private final Runnable statsRunnable = new Runnable() {
         @Override
         public void run() {
-            // ── Engine-death watchdog ─────────────────────────
-            // nativeStart() returns as soon as the engine thread is launched;
-            // the engine can still die LATER on its own (no endpoint found,
-            // tunnel failed permanently, connectivity lost). Without this
-            // check the proxy notification kept claiming "connected" forever,
-            // complete with a Disconnect button, while nothing was listening
-            // on the SOCKS port -- and the UI never learned either, because
-            // only FCAEVpnService broadcasts state.
-            //
-            // Terminal states: 0 = DISCONNECTED, 5 = ERROR. Transient states
-            // (1 provisioning, 2 scanning/reconnecting, 3 connecting,
-            // 4 connected) must NOT tear down.
-            // NativeEngine owns ordinary Aether proxy mode only. Pure
-            // Psiphon proxy mode is owned by PsiphonTunnelService, so an idle
-            // native state there must not stop its foreground owner.
+                        // Engine-death watchdog: the engine can die after nativeStart()
+                        // returned, and then nothing is listening on the SOCKS port while
+                        // this notification still claims "connected". Terminal states are
+                        // 0 and 5; 1..4 and 6 are transient. Pure Psiphon proxy mode is
+                        // owned by the AAR, so an idle native state there means nothing.
             if (!stopping && !externalPsiphon) {
                 int engineState = 5; // pessimistic if the JNI call throws
                 try {
@@ -371,7 +358,7 @@ public class ProxyNotification extends Service {
             // Notification Disconnect has no UI left to reconnect from, so the
             // process goes with the session — same contract as TUN mode.
             SessionState.command(SessionState.Command.DISCONNECT);
-            tearDownAndKillProcess("Notification Disconnect");
+            terminalTeardown("Notification Disconnect");
             return START_NOT_STICKY;
         }
         if (intent != null && ACTION_DISCONNECT.equals(intent.getAction())) {
@@ -452,8 +439,8 @@ public class ProxyNotification extends Service {
         return null;
     }
 
-    // startForeground(int, Notification) is deprecated on API 34; the manifest
-    // declares specialUse, which the two-arg form applies on every level.
+    // startForeground(int, Notification) is deprecated on API 34; the
+    // manifest's specialUse covers it.
     @SuppressWarnings("deprecation")
     private void showNotification(String text, int buttons) {
         Notification.Builder nb = (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
@@ -522,15 +509,11 @@ public class ProxyNotification extends Service {
         }
     }
 
-    /**
-     * Publish this owner's state where Activity-less consumers read it (the
-     * widget). The engine state decides, not "the owner is alive": a session
-     * that is still dialing must not render as connected.
-     *
-     * A pure Psiphon exit is skipped: there the engine is idle and the AAR owns
-     * the session, and its own PSI_STATS broadcasts already carry running and
-     * the rates.
-     */
+        /**
+         * Publish this owner's state for Activity-less consumers. The engine state
+         * decides, not "the owner is alive": a session still dialing must not
+         * render as connected.
+         */
     private void publishState() {
         if (stopping) return;
         // A pure Psiphon exit lives entirely in the AAR, so this owner is the
@@ -551,10 +534,9 @@ public class ProxyNotification extends Service {
     private SessionState.Phase phase() {
         if (psiTelemetry) {
             // An exit-measured session is described by the exit: it is the only
-            // party that knows whether the final hop is up, and the carrier's
-            // own state says nothing about it (it is CONNECTED as soon as the
-            // first hop is, which is how a chained session used to read
-            // CONNECTED while the exit was still dialing).
+            // party that knows whether the final hop is up. The carrier's state
+            // says nothing about it — it reads CONNECTED as soon as the first
+            // hop is, while the exit may still be dialing.
             if (psiLive) return SessionState.Phase.CONNECTED;
             int carrier = 0;
             try { carrier = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
@@ -576,12 +558,9 @@ public class ProxyNotification extends Service {
     // tunnel (re)dials, and the next tick must always restore the owner's
     // content.
     private void updateNotification() {
-        // This session's numbers, whoever last moved them: the exit's reading
-        // stays the reading while the exit owns the session, even across the
-        // ticks where a rebind has not produced a new sample yet — and before
-        // its first sample there is nothing to show but zeros. Falling back to
-        // the engine's counters for those ticks is how the carrier's rates
-        // appeared first and were then replaced by the exit's.
+        // This session's numbers: while the exit owns the session its last
+        // sample is the reading, rebind or not, and before the first one there
+        // is nothing to show but zeros (see SessionState.stats).
         if (psiTelemetry) {
             showNotification(lastPsiphonStats != null
                     ? psiphonTrafficText(lastPsiphonStats)
@@ -640,25 +619,23 @@ public class ProxyNotification extends Service {
 
         freeNativeOnce();
 
-        // The same rule the TUN owner applies: with no UI on screen, ending
-        // this session was the last thing the process had to do. Queued, not
-        // fired here — the stop broadcast above is already on the main looper
+        // Same rule as the TUN owner (see FCAEVpnService.fullShutdown). Queued,
+        // not fired here: the stop broadcast above is already on the main looper
         // and has to land before the process goes.
-        if (!FCAEApplication.hasVisibleUi() && handler != null) {
+        if (!FCAEApplication.uiOnScreen() && handler != null) {
             handler.postDelayed(this::killOwnProcess, PROCESS_KILL_DELAY_MS);
         }
 
         return true;
     }
 
-    /**
-     * Tear the proxy down and end the process, so nothing of the app keeps
-     * running in the background. The kill is queued on the main looper rather
-     * than fired here: nativeStop and the disconnect broadcast both have to
-     * land first, and both are already on their way by the time this runs.
-     */
-    private void tearDownAndKillProcess(String reason) {
-        Log.i(TAG, reason + " — tearing down and ending the process");
+        /**
+         * A disconnect from outside the UI (notification button, widget): end
+         * the session, and this process only if the app is not on screen. The
+         * {@code :psiphon} process holds the exit, has no UI, and always goes.
+         */
+    private void terminalTeardown(String reason) {
+        Log.i(TAG, reason + " — ending the session");
         boolean tornDown = false;
         try {
             tornDown = stopProxy();
@@ -666,20 +643,25 @@ public class ProxyNotification extends Service {
             Log.w(TAG, "teardown failed: " + t);
         }
         if (!tornDown) {
+            // Already stopping (another teardown got here first), so stopProxy
+            // made no decision of its own about the process — this command still
+            // owes the session one.
             try {
                 stopForeground(STOP_FOREGROUND_REMOVE);
             } catch (Throwable ignored) {
             }
             stopSelf();
+            if (!FCAEApplication.uiOnScreen()) {
+                if (handler != null) {
+                    handler.postDelayed(this::killOwnProcess, PROCESS_KILL_DELAY_MS);
+                } else {
+                    killOwnProcess();
+                }
+            }
         }
         try {
             PsiphonTunnelService.killProcessOnExit(this);
         } catch (Throwable ignored) {
-        }
-        if (handler != null) {
-            handler.postDelayed(this::killOwnProcess, PROCESS_KILL_DELAY_MS);
-        } else {
-            killOwnProcess();
         }
     }
 

@@ -734,12 +734,11 @@ void ui_shutdown() {
     // anyway, and the kernel cleans that up.
     FcaeStatus s = fcae_shutdown();
     if (s != FCAE_OK) {
-        // 1.3.5.4 PATCH: log the failure before forcing termination, otherwise
-        // a misbehaving session worker (e.g. a stuck route restore) hides
-        // the cause entirely -- "FCAE VPN closes and the OS DNS stays broken"
-        // is the resulting support ticket. Not a stderr printf (this runs on
-        // every platform, including GUI subsystem on Windows where no console
-        // is attached); the in-process log is the only thing still alive here.
+        // Log the failure before forcing termination: a stuck session worker
+        // (e.g. a route restore that never returns) otherwise hides its cause
+        // behind an "app closed and the system DNS stayed broken" report. Not a
+        // stderr printf -- this runs on GUI-subsystem Windows too, where the
+        // in-process log is the only record still alive at this point.
         const char* why = fcae_last_error();
         g_app.add_log(FCAE_LOG_ERROR,
             why && why[0]
@@ -1217,10 +1216,9 @@ void render_ui() {
                         // elevated process can race the parent teardown and
                         // produce an orphaned elevated instance plus the
                         // confusing "the app just quit" support report.
-                        // 1.3.5.4 PATCH: also log the relaunch so the user can
-                        // see in the Logs tab which elevated PID is being
-                        // handed off to (and so we leave a breadcrumb when
-                        // the elevated child later fails to bind).
+                        // Log the relaunch too: the Logs tab then names the
+                        // elevated PID the session was handed to, and a later
+                        // bind failure has a breadcrumb.
                         DWORD child_pid = sei.hProcess ? GetProcessId(sei.hProcess) : 0;
                         char msg[160];
                         snprintf(msg, sizeof(msg),
@@ -1245,10 +1243,9 @@ void render_ui() {
                         ImGui::End();
                         return;
                     } else {
-                        // 1.3.5.4 PATCH: tell the user what happened instead of
-                // leaving them wondering why TUN "doesn't work". The
-                // common cause is the UAC consent dialog being declined,
-                // in which case GetLastError() returns ERROR_CANCELLED.
+                        // Say what happened rather than leaving TUN silently
+                        // "not working": the usual cause is a declined UAC
+                        // prompt, where GetLastError() is ERROR_CANCELLED.
                         DWORD err = GetLastError();
                         const char* why =
                             err == ERROR_CANCELLED ? "UAC consent was cancelled"

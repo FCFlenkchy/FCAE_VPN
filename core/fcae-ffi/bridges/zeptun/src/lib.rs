@@ -265,10 +265,8 @@ pub fn platform_enabled() -> bool {
     is_supported()
 }
 
-/// 1.3.5.4 PATCH: zeptun creates its Wintun adapter in-engine, which is the
-/// same admin-gated operation as tun2socks. Re-export the platform check so
-/// `fcae_is_privileged()` covers both engines and the C++ UAC prompt fires
-/// for zeptun selections too.
+/// Re-exported so `fcae_is_privileged()` covers zeptun too: it raises its
+/// Wintun adapter in-engine, the same admin-gated step as tun2socks.
 pub fn is_privileged() -> bool {
     platform::is_privileged()
 }

@@ -25,21 +25,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import ca.psiphon.PsiphonTunnel;
 
 /**
- * Official Psiphon AAR ({@code ca.psiphon:psiphontunnel}) in an isolated
- * process ({@code :psiphon}) so its Go runtime ({@code libgojni.so}) never
- * shares an address space with tun2socks ({@code libfcae_go_bridge.so}).
- * Two Go runtimes in one process SIGSEGV at {@code dlopen}.
- *
- * Sockets in this process are bound to the underlying Wi‑Fi/cellular
- * network ({@code bindProcessToNetwork}) so a TUN raised in the UI
- * process cannot capture them. The UI process then points tun2socks at
- * the local SOCKS port this service broadcasts.
- *
- * The service is itself a specialUse foreground service: swiping the app
- * from recents kills the app's non-foreground processes on many devices,
- * which used to tear the tunnel down mid-session. While the tunnel dials
- * it posts the owning service's own connecting notification under the
- * owner's id, so the app still shows exactly one, identical notification.
+ * Official Psiphon AAR ({@code ca.psiphon:psiphontunnel}) in its own process
+ * ({@code :psiphon}): its Go runtime SIGSEGVs at dlopen if it shares an
+ * address space with tun2socks' own. Its sockets are bound to the underlying
+ * network so a TUN in the UI process cannot capture them, and the UI process
+ * points tun2socks at the SOCKS port this service broadcasts.
  */
 public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostService {
 
@@ -112,45 +102,27 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private static final java.util.Set<android.content.ServiceConnection> liveConnections =
             java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 
-    /**
-     * Rebind safety net for an isolated-process service that is bound to the
-     * app-owned foreground service. The binder dropping must NOT fail the
-     * session: the Rust lease stays pending (no 0-port completion is sent),
-     * so the TUN keeps running while we rebind with the SAME intent (same
-     * requestId + psiSession). The restarted service replays the tunnel
-     * config and its READY refreshes the lease ports in place. Only after
-     * MAX_REBIND_ATTEMPTS do we give up and fail the chain, which the
-     * supervisor then handles with a fresh request.
-     *
-     * The rebind is now a last resort, not the norm: the service enters
-     * foreground itself (posting the owner's own connecting notification
-     * under the owner's id), which exempts the :psiphon process from the
-     * task-removal kills that OEM task managers apply per-process. Only
-     * a genuine death (low memory, crash) takes this path.
-     */
+        /**
+         * Rebind safety net. The binder dropping must not fail the session: the
+         * Rust lease stays pending, so the TUN keeps running while we rebind with
+         * the SAME intent (requestId + psiSession) and the restarted service
+         * replays its config. Last resort only — the service enters foreground
+         * itself, which is what actually survives OEM task-removal kills.
+         */
     private static final int MAX_REBIND_ATTEMPTS = 5;
     private static final long REBIND_DELAY_MS = 1500L;
     private static volatile int rebindAttempts;
 
-    /**
-     * Hard deadline for the AAR's tunnel.stop().
-     *
-     * Upstream's Stop() joins the ENTIRE controller (controllerWaitGroup
-     * -> runWaitGroup.Wait()): every in-flight dial, handshake and fetch has
-     * to notice the context cancellation and finish first. On a healthy
-     * egress that is tens of milliseconds; mid-handshake on a slow or
-     * filtered one it runs to seconds — long after the user was told the
-     * session is over, with the tunnel still connected and this process
-     * still alive the whole time. That is the visible "Psiphon teardown is
-     * slow".
-     *
-     * Anything slower is killed instead of joined: the kernel closes every
-     * socket on process death, so the tunnel is gone the instant we kill.
-     * The on-disk datastore is left in exactly the state an OOM kill would
-     * leave — bolt's on-disk structure is crash-safe, tunnel-core has a
-     * recovery path for it, and the system already OOM-kills this process
-     * in production, so a hard kill is not a new failure mode.
-     */
+        /**
+         * Hard deadline for the AAR's tunnel.stop(). Upstream joins the whole
+         * controller — every in-flight dial and fetch — which is tens of ms when
+         * healthy and seconds mid-handshake on a filtered link, long after the
+         * user was told the session is over.
+         *
+         * Slower than this and the process is killed instead: the kernel closes
+         * every socket, so the tunnel is gone at once. Bolt's datastore is
+         * crash-safe and the system OOM-kills this process in production anyway.
+         */
     private static final long HARD_STOP_TIMEOUT_MS = 500L;
     private long session;
     private long attachRequestId;
@@ -222,17 +194,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             android.content.ServiceConnection next = makeConnection(app, intent);
             connection = next;
             liveConnections.add(next);
-            // Keep the service both started and bound so an orphaned service
-            // can be stopped explicitly. Its lifetime/priority is owned by
-            // the app's single notification owner; on real STARTs the
-            // service itself enters foreground under the owner's shared
-            // notification id (see enterTunnelForeground), so task-removal
-            // cleanup cannot kill the :psiphon process out from under a
-            // live session.
-            // A region refresh is a bind-only reattachment. Starting the
-            // isolated service again on Activity recreation can redeliver its
-            // startup path and reset Psiphon; only real START requests need
-            // startService().
+                        // Kept both started and bound so an orphaned service can be
+                        // stopped explicitly; its lifetime belongs to the owner, which is
+                        // also the party whose notification it posts. A region refresh is
+                        // bind-only: starting the component again would reset Psiphon.
             if (!ACTION_REGIONS.equals(intent.getAction())) {
                 try { app.startService(intent); } catch (Throwable ignored) {}
             }
@@ -420,11 +385,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private volatile boolean stopping;
     // True while a start thread is inside startTunneling(); true alone
     // (psiphonUp) once the library reported itself started. Together they
-    // serialize duplicate ACTION_PSIPHON_START deliveries: the library
-    // wrapper begins EVERY start by stopping the previous instance
-    // ("stopping Psiphon library" is logged unconditionally), so re-entering
-    // while a controller is mid-boot kills it — that was the tight
-    // "starting tunnel → stopping Psiphon library" crash loop.
+    // Serialises duplicate ACTION_PSIPHON_START deliveries: the library wrapper
+    // begins every start by stopping the previous instance, so re-entering
+    // while a controller is mid-boot kills it (a tight
+    // "starting tunnel -> stopping Psiphon library" loop).
     private volatile boolean startInFlight;
     private volatile boolean psiphonUp;
     private volatile boolean handshakeConnected;
@@ -535,8 +499,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             String r = intent.getStringExtra("psiphonRegion");
             region = r == null ? "" : r.trim();
             transport = intent.getIntExtra("psiphonTransport", 0);
-            // 0 used to mean "let Psiphon pick", which moved the listener on
-            // every connect. Pin the defaults (mirrors config.rs
+            // 0 means "let Psiphon pick", which moves the listener on every
+            // connect. Pin the defaults (mirrors config.rs
             // DEFAULT_PSIPHON_*_PORT) so anything pointed at the proxy keeps
             // working across reconnects.
             wantSocks = intent.getIntExtra("psiphonSocksPort", 0);
@@ -642,18 +606,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         return START_STICKY;
     }
 
-    /**
-     * Raise this service to foreground before the tunnel dials. Swiping the
-     * app from recents kills the app's non-foreground processes on many
-     * devices (stock Android exempts the whole package once any process
-     * holds an FGS, but several OEM task managers kill per-process), which
-     * tore the tunnel down mid-session. The notification posted here is the
-     * OWNER's own dial notification under the owner's id — built by the
-     * owner classes themselves — byte-flow text and the owner's buttons, so
-     * it is indistinguishable from the post the owner already made for this
-     * dial. The owner rewrites the entry every second once the session is
-     * running and owns the dismiss at teardown.
-     */
+        /**
+         * Raise this service to foreground before the tunnel dials: several OEM
+         * task managers kill per-process on task removal, which tore the tunnel
+         * down mid-session. The notification posted is the OWNER's own dial
+         * notification under the owner's id, so it is indistinguishable from the
+         * one the owner already posted; the owner rewrites and dismisses it.
+         */
     @SuppressWarnings("deprecation")
     private void enterTunnelForeground() {
         try {
@@ -779,16 +738,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         stopSelf();
     }
 
-    /**
-     * Replay a START that was parked because a teardown was in flight (the
-     * session-switch path: stopBound() for the old request, then
-     * startBound() for the next). Queued on libraryWorker so it runs only
-     * after any in-flight start task — including its post-dial stop — has
-     * fully exited, then hops to the main thread, where onStartCommand
-     * finds a clean stopped instance and replays the intent as a normal
-     * start. Without this the switch's START lands on a stopping instance
-     * and is silently dropped, hanging the new session.
-     */
+        /**
+         * Replay a START that was parked because a teardown was in flight (the
+         * session switch: stopBound() then startBound()). Queued so it runs only
+         * after the in-flight start task has fully exited — otherwise the switch's
+         * START lands on a stopping instance and is silently dropped.
+         */
     private void scheduleRestartReplay() {
         libraryWorker.execute(() -> logHandler.post(() -> {
             if (destroyed) return;
@@ -819,15 +774,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         }
     }
 
-    /**
-     * Make sure the {@code :psiphon} process does not outlive the app.
-     *
-     * Called from the UI process on every terminal path. {@link #processMustDie}
-     * lives in this class's own process, so the flag is what actually ends it
-     * — {@code stopService} is only what makes Android destroy the service
-     * there. A stop never reaching it leaves an empty cached process, which
-     * holds no tunnel and no sockets.
-     */
+        /**
+         * The {@code :psiphon} process must not outlive the app. {@link
+         * #processMustDie} is a per-process copy: it is the flag that ends it, and
+         * the stop command carrying it is already with the system.
+         */
     public static void killProcessOnExit(Context context) {
         processMustDie = true;
         // processMustDie is a per-process class copy: the assignment above
@@ -905,18 +856,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             // connected-server notices or from a local country list.
             o.put("DisableServerEntriesReporter", false);
             o.put("UseIndistinguishableTLS", true);
-            // tunnel-core's own resolver binds its socket to the underlying
-            // network, so its bootstrap lookups (fronting domains, server
-            // list hosts, tactics) leave on the carrier link -- never through
-            // the TUN. Carriers that hijack UDP/53 answer with a private
-            // address, tunnel-core rejects it ("IP is bogon"), and the tunnel
-            // sits at CandidateServers 0. Pin it to public resolvers on ports
-            // the interception does not cover: Alternate (used when no
-            // system list is visible) and Preferred at probability 1.0
-            // (tried first, unconditionally, when one is -- the default 0.0
-            // leaves the list configured but never chosen). The
-            // default-resolver escape hatch is off so a failed bound lookup
-            // cannot drop back to the carrier resolver.
+                        // tunnel-core's own resolver binds to the underlying network, so
+                        // its bootstrap lookups never leave through the TUN — and carriers
+                        // that hijack UDP/53 answer with a bogon, leaving the tunnel at
+                        // CandidateServers 0. Pin public resolvers on alternate ports:
+                        // Alternate always, Preferred at 1.0 (the default 0.0 configures
+                        // the list but never picks it), and no default-resolver escape.
             org.json.JSONArray bootstrapDns = new org.json.JSONArray();
             bootstrapDns.put("208.67.222.222:5353");
             bootstrapDns.put("9.9.9.9:9953");
@@ -964,12 +909,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             if (wantSocks > 0) o.put("LocalSocksProxyPort", wantSocks);
             if (wantHttp > 0) o.put("LocalHttpProxyPort", wantHttp);
             // "Psiphon through the tunnel": all of Psiphon's own dials
-            // (servers, API calls, remote server list fetches) go through
-            // this proxy — Aether's local SOCKS. This field used to be
-            // logged and then dropped, so Psiphon always dialled the
-            // underlay directly and the chain silently degraded to plain
-            // Psiphon. tunnel-core accepts socks5://, socks4a:// and
-            // http:// here (see psiphon/upstreamproxy/README.md upstream).
+            // (servers, API calls, remote server list fetches) go through this
+            // proxy — Aether's local SOCKS. tunnel-core accepts socks5://,
+            // socks4a:// and http:// here (upstream upstreamproxy/README.md).
             if (!upstreamProxy.isEmpty()) {
                 o.put("UpstreamProxyURL", normalizeUpstreamProxyUrl(upstreamProxy));
             }

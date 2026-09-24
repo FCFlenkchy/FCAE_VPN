@@ -581,14 +581,11 @@ elseif(UNIX)
     if(NOT glfw3_FOUND AND NOT GLFW_FOUND)
         message(FATAL_ERROR "GLFW 3.3+ not found. Install glfw3-dev or set CMAKE_PREFIX_PATH")
     endif()
-    # 1.3.5.4 PATCH: prefer the concrete GL implementation (libGL.so.1)
-    # over the Khronos dispatcher (libOpenGL.so.0). On every glvnd-enabled
-    # distro libGL.so.1 is a hard dependency of libgl1, while libOpenGL.so.0
-    # only ships in the optional `libopengl0` package -- so pinning libGL.so.1
-    # makes the released binary launch on minimal / server installs where
-    # the prior build refused to start with
-    #   error while loading shared libraries: libOpenGL.so.0
-    # We still pass OpenGL::GL on macOS where libGL.so.1 is the only choice.
+    # Prefer the concrete GL implementation (libGL.so.1) over the Khronos
+    # dispatcher (libOpenGL.so.0): on every glvnd distro libGL.so.1 is a hard
+    # dependency of libgl1, while libOpenGL.so.0 ships only in the optional
+    # `libopengl0` package, so a binary linked against it refuses to start on
+    # minimal / server installs. macOS has no choice but libGL.so.1.
     find_package(OpenGL REQUIRED)
     set(FCAE_GL_LIB OpenGL::GL)
     if(NOT APPLE)

@@ -77,8 +77,8 @@ pub fn is_supported() -> bool {
     engine::is_supported()
 }
 
-/// 1.3.5.4 PATCH: re-export the platform privilege probe so the FFI layer's
-/// `fcae_is_privileged()` covers hev-only builds too.
+/// Re-exported so the FFI layer's `fcae_is_privileged()` covers hev-only
+/// builds too.
 pub fn is_privileged() -> bool {
     platform::is_privileged()
 }

@@ -15,19 +15,14 @@ import android.view.View
 import android.widget.RemoteViews
 
 /**
- * Home screen control surface, a fixed 3x2 (widget_vpn_info.xml): name, state
- * with the session's RTT, the live rates, the session totals, and the controls.
+ * Home screen control surface, fixed 3x2 (widget_vpn_info.xml): name, state
+ * with the session's RTT, rates, totals, controls.
  *
- * It renders [SessionState] and sends the commands the app's own notification
- * sends, to the same owner service: CONNECT is the notification's Start, so a
- * tap connects the last session in the background, with no second copy of the
- * connect logic here to drift away from the app's. A tap on the app's own
- * widget is a documented exemption from Android 12's background service-start
- * restriction, which is what makes that headless start legal.
- *
- * Two cases still open the app, both forced by the platform: no session to
- * replay yet (only the UI can compose one) and the one-time VPN consent, whose
- * dialog is an Activity started for result.
+ * Renders [SessionState] and sends the same commands as the app's
+ * notification, to the same owner, so the connect logic has one copy. A tap
+ * on the widget is a documented Android 12 exemption from the background
+ * service-start restriction, which is what makes the headless connect legal;
+ * only "nothing to replay yet" and the one-time VPN consent open the app.
  */
 class VpnWidgetProvider : AppWidgetProvider() {
 
@@ -60,13 +55,11 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 SessionState.markPause(context, !paused)
             }
         }
-        // Nothing else is handled here on purpose. The widget used to take the
-        // app's own state broadcasts too, which meant this receiver — declared
-        // in the manifest — had to be handed every one of them by a running
-        // process; a dead one was started again for them, so the app came back
-        // from every broadcast a teardown sent. The state feed repaints the
-        // widget in-process instead (SessionState.write), the taps above are
-        // its whole wire.
+                // Nothing else is handled here on purpose: this receiver is in
+                // the manifest, and a manifest receiver is delivered by starting
+                // its process — so any app-state action added to the filter
+                // would resurrect the process on every state broadcast. The
+                // feed repaints the widget in-process instead.
     }
 
     private fun toggle(context: Context, intent: Intent) {
@@ -139,7 +132,18 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 }
             }
         }
+        // Committed and pushed to the widget before this process can stop
+        // existing: the record is the launcher's last frame.
         SessionState.markIdle(context)
+        if (!tun && !proxy && !FCAEApplication.uiOnScreen()) {
+            // Nobody to hand the process to and the user is not looking at it:
+            // end it here, by the same rule every other disconnect follows.
+            try {
+                PsiphonTunnelService.killProcessOnExit(context)
+            } catch (_: Throwable) {
+            }
+            FCAEVpnService.killProcessQuietly()
+        }
     }
 
     private fun openApp(context: Context) {
@@ -176,15 +180,12 @@ class VpnWidgetProvider : AppWidgetProvider() {
         @Volatile
         private var lastLive: SessionState.Snapshot? = null
 
-        /**
-         * Repaint now, from wherever a session ended.
-         *
-         * The teardown paths kill this process — that is the point of them — and
-         * a broadcast that is still in flight dies with it, which used to leave
-         * the widget claiming a session and offering DISCONNECT for a tunnel
-         * that was already gone. The owners call this synchronously before the
-         * kill, so the last frame the launcher keeps is the truth.
-         */
+                /**
+                 * Repaint now, from wherever a session ends. The teardown paths kill
+                 * this process and an in-flight broadcast dies with it, so the owners
+                 * call this synchronously before the kill: the last frame the launcher
+                 * keeps is the truth.
+                 */
         @JvmStatic
         fun refresh(context: Context) {
             val ids = ids(context).takeIf { it.isNotEmpty() } ?: return
@@ -232,13 +233,9 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val session = SessionState.reconciled(context)
             val tun = session.mode == 1
 
-            // Readings belong to a session. While one is live they are its last
-            // live sample: Stop is a data-plane pause, not an end of the
-            // session, so nothing on screen changes except the button (the app
-            // makes the same promise), and the numbers must not decay to zero
-            // and crawl back up on Start. The moment the session is over they
-            // go with it — a disconnected widget reports nothing, whatever the
-            // record still holds.
+            // Readings belong to a session: held across a Stop (a data-plane
+            // pause, so they must not decay and crawl back on Start) and gone
+            // with the session — a disconnected widget reports nothing.
             if (session.up && !session.paused) lastLive = session
             val shown = when {
                 !session.active -> SessionState.Snapshot.IDLE
