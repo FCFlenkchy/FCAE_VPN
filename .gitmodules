@@ -13,3 +13,6 @@
 [submodule "hev-socks5-tunnel"]
 	path = core/hev-socks5-tunnel
 	url = https://github.com/heiher/hev-socks5-tunnel.git
+[submodule "imgui"]
+	path = src_cpp/imgui
+	url = https://github.com/ocornut/imgui.git
