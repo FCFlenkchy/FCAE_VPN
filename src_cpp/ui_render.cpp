@@ -1659,14 +1659,14 @@ void render_ui() {
         char rtt_buf[24];
         snprintf(rtt_buf, sizeof(rtt_buf), "%ums",
                  telem.state == FCAE_STATE_CONNECTED ? telem.rtt_ms : 0u);
+        // No mode here: the state line states it once, the way the Android
+        // status does ("CONNECTED - TUN"/"CONNECTED - PROXY", state_label).
         if (telem.backend == FCAE_BACKEND_PSIPHON || g_app.protocol == 4) {
-            ImGui::TextWrapped("%s  |  Mode: %s", rtt_buf,
-                              g_app.mode == 0 ? "Proxy" : "TUN");
+            ImGui::TextWrapped("%s", rtt_buf);
         } else {
-            ImGui::TextWrapped("Peer: %s  |  %s  |  Mode: %s",
+            ImGui::TextWrapped("Peer: %s  |  %s",
                 telem.connected_peer[0] ? telem.connected_peer : "-",
-                rtt_buf,
-                g_app.mode == 0 ? "Proxy" : "TUN");
+                rtt_buf);
         }
         // The state line owns the connect phase ("CONNECTING", nothing
         // else — same as the Psiphon paths and the Android UI); the
