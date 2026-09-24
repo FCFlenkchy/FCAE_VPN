@@ -2090,10 +2090,11 @@ class MainActivity : AppCompatActivity() {
         var icon: android.graphics.drawable.Drawable? = null
     }
 
-        /**
-         * Every installed app, label-first; call off the main thread. Without
-         * GET_META_DATA (which makes the framework parse every package's bundle)
-         * and without decoding icons up front, this is one cheap call.
+    /**
+     * Every installed app, label-first; call off the main thread. Without
+     * GET_META_DATA (which makes the framework parse every package's bundle)
+     * and without decoding icons up front, this is one cheap call.
+     */
     private fun loadSplitTunnelApps(): List<AppEntry> {
         val pm = packageManager
         return pm.getInstalledApplications(0)
