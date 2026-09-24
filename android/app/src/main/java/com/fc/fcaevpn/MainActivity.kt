@@ -1062,8 +1062,28 @@ class MainActivity : AppCompatActivity() {
         handler.post(poll)
     }
 
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleWidgetIntent(intent)
+    }
+
+    private fun handleWidgetIntent(intent: Intent?) {
+        if (intent == null) return
+        if (intent.getBooleanExtra(EXTRA_DISCONNECT_NOW, false)) {
+            intent.removeExtra(EXTRA_DISCONNECT_NOW)
+            disconnectAll()
+        } else if (intent.getBooleanExtra(EXTRA_TRIGGER_CONNECT, false)) {
+            intent.removeExtra(EXTRA_TRIGGER_CONNECT)
+            if (!vpnActive && !engineRunning && !connecting) {
+                connectClicked()
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        handleWidgetIntent(intent)
         inForeground = true
         if (isPsiphonSelected() || isEgressPsiphon()) {
             // The Activity receiver is not registered while it is stopped.
@@ -2799,6 +2819,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        const val EXTRA_DISCONNECT_NOW = "com.fc.fcaevpn.DISCONNECT_NOW"
+        const val EXTRA_TRIGGER_CONNECT = "com.fc.fcaevpn.TRIGGER_CONNECT"
+
         private const val POLL_INTERVAL_MS = 1000L
         // ~70+ log messages on screen. Psiphon's JSON notices average
         // 150-350 chars, so 8000 showed only ~20-30 lines and older lines

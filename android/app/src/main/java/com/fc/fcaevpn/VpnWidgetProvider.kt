@@ -10,7 +10,6 @@ import android.graphics.Color
 import android.net.VpnService
 import android.view.View
 import android.widget.RemoteViews
-import org.json.JSONObject
 
 class VpnWidgetProvider : AppWidgetProvider() {
 
@@ -86,8 +85,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
         val prefs = context.getSharedPreferences("aether_vpn", Context.MODE_PRIVATE)
         val mode = prefs.getInt("mode", 1)
         val isTun = mode == 1
-        val proto = prefs.getInt("protocol", 0)
-        val isPsiphon = proto == 5
 
         if (lastRunning || lastPaused || lastConnecting) {
             if (isTun) {
@@ -111,153 +108,27 @@ class VpnWidgetProvider : AppWidgetProvider() {
             lastRttLine = "RTT: —"
             updateAllWidgets(context)
         } else {
+            // Check VPN permission for TUN mode
             if (isTun) {
                 val prep = VpnService.prepare(context)
                 if (prep != null) {
                     val mainIntent = Intent(context, MainActivity::class.java).apply {
                         flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                        putExtra(MainActivity.EXTRA_TRIGGER_CONNECT, true)
                     }
                     context.startActivity(mainIntent)
                     return
                 }
-
-                val startIntent = buildStartIntentFromPrefs(context)
-                try {
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        context.startForegroundService(startIntent)
-                    } else {
-                        context.startService(startIntent)
-                    }
-                    lastConnecting = true
-                    updateAllWidgets(context)
-                } catch (_: Throwable) {}
-            } else {
-                if (isPsiphon) {
-                    val psiIntent = Intent(context, ProxyNotification::class.java).apply {
-                        action = ProxyNotification.ACTION_PSIPHON
-                        putExtras(buildStartIntentFromPrefs(context))
-                    }
-                    try {
-                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                            context.startForegroundService(psiIntent)
-                        } else {
-                            context.startService(psiIntent)
-                        }
-                        lastConnecting = true
-                        updateAllWidgets(context)
-                    } catch (_: Throwable) {}
-                } else {
-                    val proxyIntent = Intent(context, ProxyNotification::class.java).apply {
-                        action = ProxyNotification.ACTION_START
-                    }
-                    try {
-                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                            context.startForegroundService(proxyIntent)
-                        } else {
-                            context.startService(proxyIntent)
-                        }
-                    } catch (_: Throwable) {}
-                    startEngineNative(context, prefs)
-                    lastConnecting = true
-                    updateAllWidgets(context)
-                }
             }
-        }
-    }
 
-    private fun startEngineNative(context: Context, prefs: android.content.SharedPreferences) {
-        val proto = prefs.getInt("protocol", 0)
-        val scanMode = prefs.getInt("scan", 0)
-        val ipPos = prefs.getInt("ipVersion", 0)
-        val ipVer = when (ipPos) { 0 -> 4; 1 -> 6; 2 -> 10; else -> 4 }
-        val quick = prefs.getBoolean("quick", false)
-        val h2 = prefs.getBoolean("h2", true)
-        val ech = prefs.getBoolean("ech", true)
-        val lan = prefs.getBoolean("lan", false)
-        val sni = prefs.getString("sni", "")?.trim() ?: ""
-        val cfgPath = context.filesDir.resolve("aether.toml").absolutePath
-        val noizeArray = arrayOf("off", "light", "balanced", "aggressive", "firewall", "gfw")
-        val noizePos = prefs.getInt("noize", 2).coerceIn(0, noizeArray.size - 1)
-        val noizeProfile = noizeArray[noizePos]
-        val socksPort = if (prefs.getBoolean("socks", false) || proto in 4..5) prefs.getString("socksPort", "1819")?.toIntOrNull() ?: 1819 else 0
-        val httpPort = if (prefs.getBoolean("http", false)) prefs.getString("httpPort", "1820")?.toIntOrNull() ?: 1820 else 0
-        val forcePeer = prefs.getString("forcePeer", "")?.trim() ?: ""
-        val sysProfile = prefs.getInt("sysprofile", 0)
-        val teamName = prefs.getString("team", "")?.trim() ?: ""
-        val accessToken = prefs.getString("accessToken", "")?.trim() ?: ""
-        val accessEmail = prefs.getString("accessEmail", "")?.trim() ?: ""
-        val routesFile = prefs.getString("routesFile", "")?.trim() ?: ""
-        val routesInline = prefs.getString("routesInline", "")?.trim() ?: ""
-        val torPos = prefs.getInt("tor", 0)
-        val torMode = if (proto in 4..5) 0 else if (torPos in 0..2) torPos else 0
-        val torBridges = prefs.getInt("torBridges", 0)
-        val torBridgeLines = prefs.getString("torBridgeLines", "")?.trim() ?: ""
-        val engineLog = prefs.getInt("engineLog", 3)
-        val backend = prefs.getInt("backend", 0)
-        val torSocksDef = prefs.getString("torSocksPort", "1821")?.toIntOrNull() ?: 0
-        val torSocksPort = if (torSocksDef == 1821) 0 else torSocksDef
-        val torHttpPort = if (prefs.getBoolean("torHttp", false)) prefs.getString("torHttpPort", "1822")?.toIntOrNull() ?: 1822 else 0
-        val throughPsiphon = proto == 5
-        val psiTransport = prefs.getInt("psiphonTransport", 0)
-        val psiphonConfig = JSONObject().put("FCAETransport", psiTransport).toString()
-        val psiphonRegion = prefs.getString("psiphonRegion", "ANY") ?: "ANY"
-        val psiphonSocksPort = prefs.getString("psiphonSocksPort", "0")?.toIntOrNull() ?: 0
-        val psiphonHttpPort = prefs.getString("psiphonHttpPort", "0")?.toIntOrNull() ?: 0
-        val sndbuf = (prefs.getString("tunTcpSndbuf", "256")?.toIntOrNull() ?: 256) * 1000
-        val rcvbuf = (prefs.getString("tunTcpRcvbuf", "256")?.toIntOrNull() ?: 256) * 1000
-        val tunTcpAutoTuning = prefs.getBoolean("tunTcpAutoTuning", false)
-        val tunDnsServers = listOf(prefs.getString("tunDnsV4", "")?.trim() ?: "", prefs.getString("tunDnsV6", "")?.trim() ?: "")
-            .filter { it.isNotEmpty() }
-            .joinToString(",")
-
-        NativeEngine.lifecycleExecutor.execute {
-            try { NativeEngine.nativeInit() } catch (_: Throwable) {}
-            try { NativeEngine.nativeStop() } catch (_: Throwable) {}
-            try {
-                NativeEngine.nativeStart(
-                    protocol = proto,
-                    mode = 0,
-                    lanSharing = lan,
-                    scanMode = scanMode,
-                    ipVersion = ipVer,
-                    quickReconnect = quick,
-                    noizeProfile = noizeProfile,
-                    fragmentEnabled = false,
-                    fragMinSize = 16,
-                    fragMaxSize = 32,
-                    fragMinDelay = 2,
-                    fragMaxDelay = 10,
-                    socksPort = socksPort,
-                    httpPort = httpPort,
-                    forcePeer = forcePeer,
-                    configPath = cfgPath,
-                    h2Enabled = h2,
-                    echEnabled = ech,
-                    sni = sni,
-                    sysProfile = sysProfile,
-                    teamName = teamName,
-                    accessToken = accessToken,
-                    accessEmail = accessEmail,
-                    routesFile = routesFile,
-                    routesInline = routesInline,
-                    torMode = torMode,
-                    torBridges = torBridges,
-                    torBridgeLines = torBridgeLines,
-                    engineLog = engineLog,
-                    backend = backend,
-                    torSocksPort = torSocksPort,
-                    torHttpPort = torHttpPort,
-                    psiphonThroughTunnel = throughPsiphon,
-                    psiphonConfig = psiphonConfig,
-                    psiphonRegion = psiphonRegion,
-                    psiphonSocksPort = psiphonSocksPort,
-                    psiphonHttpPort = psiphonHttpPort,
-                    tunTcpSndbuf = sndbuf,
-                    tunTcpRcvbuf = rcvbuf,
-                    tunTcpAutoTuning = tunTcpAutoTuning,
-                    tunDnsServers = tunDnsServers,
-                )
-            } catch (_: Throwable) {}
+            // Launch MainActivity with trigger to start tunnel cleanly using all its shared logic
+            val mainIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra(MainActivity.EXTRA_TRIGGER_CONNECT, true)
+            }
+            context.startActivity(mainIntent)
+            lastConnecting = true
+            updateAllWidgets(context)
         }
     }
 
@@ -306,73 +177,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
             for (id in ids) {
                 updateWidget(context, appWidgetManager, id)
             }
-        }
-
-        fun buildStartIntentFromPrefs(context: Context): Intent {
-            val prefs = context.getSharedPreferences("aether_vpn", Context.MODE_PRIVATE)
-            val i = Intent(context, FCAEVpnService::class.java)
-            i.action = FCAEVpnService.ACTION_START
-            val proto = prefs.getInt("protocol", 0)
-            i.putExtra("protocol", proto)
-            val mode = prefs.getInt("mode", 1)
-            i.putExtra("mode", mode)
-            i.putExtra("tunEngine", prefs.getInt("tunEngine", 0))
-            val mtu = prefs.getString("tunMtu", "1500")?.toIntOrNull()?.coerceIn(1280, 9000) ?: 1500
-            i.putExtra("tunMtu", mtu)
-            val sndbuf = (prefs.getString("tunTcpSndbuf", "256")?.toIntOrNull() ?: 256) * 1000
-            val rcvbuf = (prefs.getString("tunTcpRcvbuf", "256")?.toIntOrNull() ?: 256) * 1000
-            i.putExtra("tunTcpSndbuf", sndbuf)
-            i.putExtra("tunTcpRcvbuf", rcvbuf)
-            i.putExtra("tunTcpAutoTuning", prefs.getBoolean("tunTcpAutoTuning", false))
-            i.putExtra("scanMode", prefs.getInt("scan", 0))
-            val ipPos = prefs.getInt("ipVersion", 0)
-            val ipVer = when (ipPos) { 0 -> 4; 1 -> 6; 2 -> 10; else -> 4 }
-            i.putExtra("ipVersion", ipVer)
-            i.putExtra("quickReconnect", prefs.getBoolean("quick", false))
-            i.putExtra("h2Enabled", prefs.getBoolean("h2", true))
-            i.putExtra("echEnabled", prefs.getBoolean("ech", true))
-            i.putExtra("lanSharing", prefs.getBoolean("lan", false))
-            i.putExtra("configPath", context.filesDir.resolve("aether.toml").absolutePath)
-            i.putExtra("sni", prefs.getString("sni", "")?.trim() ?: "")
-            val socksChecked = prefs.getBoolean("socks", false)
-            val socksPortVal = prefs.getString("socksPort", "1819")?.toIntOrNull() ?: 1819
-            i.putExtra("socksPort", if (socksChecked || proto in 4..5) socksPortVal else 0)
-            val httpChecked = prefs.getBoolean("http", false)
-            val httpPortVal = prefs.getString("httpPort", "1820")?.toIntOrNull() ?: 1820
-            i.putExtra("httpPort", if (httpChecked) httpPortVal else 0)
-            val noizeArray = arrayOf("off", "light", "balanced", "aggressive", "firewall", "gfw")
-            val noizePos = prefs.getInt("noize", 2).coerceIn(0, noizeArray.size - 1)
-            i.putExtra("noizeProfile", noizeArray[noizePos])
-            i.putExtra("forcePeer", prefs.getString("forcePeer", "")?.trim() ?: "")
-            i.putExtra("sysProfile", prefs.getInt("sysprofile", 0))
-            i.putExtra("teamName", prefs.getString("team", "")?.trim() ?: "")
-            i.putExtra("accessToken", prefs.getString("accessToken", "")?.trim() ?: "")
-            i.putExtra("accessEmail", prefs.getString("accessEmail", "")?.trim() ?: "")
-            i.putExtra("routesFile", prefs.getString("routesFile", "")?.trim() ?: "")
-            i.putExtra("routesInline", prefs.getString("routesInline", "")?.trim() ?: "")
-            val torPos = prefs.getInt("tor", 0)
-            val effectiveTor = if (proto in 4..5) 0 else if (torPos in 0..2) torPos else 0
-            i.putExtra("torMode", effectiveTor)
-            i.putExtra("torBridges", prefs.getInt("torBridges", 0))
-            i.putExtra("torBridgeLines", prefs.getString("torBridgeLines", "")?.trim() ?: "")
-            i.putExtra("engineLog", prefs.getInt("engineLog", 3))
-            i.putExtra("t2sLog", prefs.getInt("t2sLog", 0))
-            i.putExtra("backend", prefs.getInt("backend", 0))
-            val torSocksDef = prefs.getString("torSocksPort", "1821")?.toIntOrNull() ?: 0
-            i.putExtra("torSocksPort", if (torSocksDef == 1821) 0 else torSocksDef)
-            val torHttpChecked = prefs.getBoolean("torHttp", false)
-            val torHttpVal = prefs.getString("torHttpPort", "1822")?.toIntOrNull() ?: 1822
-            i.putExtra("torHttpPort", if (torHttpChecked) torHttpVal else 0)
-            i.putExtra("psiphonThroughTunnel", proto == 5)
-            val psiTransport = prefs.getInt("psiphonTransport", 0)
-            val psiJson = JSONObject().put("FCAETransport", psiTransport).toString()
-            i.putExtra("psiphonConfig", psiJson)
-            i.putExtra("psiphonRegion", prefs.getString("psiphonRegion", "ANY") ?: "ANY")
-            val psiSocks = prefs.getString("psiphonSocksPort", "0")?.toIntOrNull() ?: 0
-            val psiHttp = prefs.getString("psiphonHttpPort", "0")?.toIntOrNull() ?: 0
-            i.putExtra("psiphonSocksPort", psiSocks)
-            i.putExtra("psiphonHttpPort", psiHttp)
-            return i
         }
 
         private fun fmtBytes(bytes: Long): String {
