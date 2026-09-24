@@ -141,7 +141,7 @@ if(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 endif()
 
 # ── Source files ──────────────────────────────────────────────────────────
-set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
+set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/src_cpp/imgui)
 set(IMGUI_BACKEND_DIR ${IMGUI_DIR}/backends)
 
 set(IMGUI_SOURCES

@@ -551,13 +551,6 @@ jobs:
             readelf -lW "$LIB" | awk '$1 == "LOAD" { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
           done
 
-      - name: fetch imgui
-        run: |
-          mkdir -p third_party
-          if [ ! -d "third_party/imgui" ]; then
-            git clone --depth 1 --branch v1.91.8 https://github.com/ocornut/imgui.git third_party/imgui
-          fi
-
       - name: cache zig
         uses: actions/cache@v6
         with:
