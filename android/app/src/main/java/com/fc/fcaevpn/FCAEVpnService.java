@@ -81,6 +81,9 @@ public class FCAEVpnService extends VpnService {
     // its disconnect broadcast, so MainActivity's stale-broadcast filter treats
     // proxy and TUN teardowns identically.
     static final AtomicLong sGeneration = new AtomicLong(0);
+
+    /** Session identity for the readings; see {@link #sessionEpoch()}. */
+    private static final AtomicLong sessionEpoch = new AtomicLong(0);
     private static FCAEVpnService instance; // ADDED for instant UI disconnect
 
     /**
@@ -89,6 +92,20 @@ public class FCAEVpnService extends VpnService {
      */
     public static long stateGeneration() {
         return sGeneration.get();
+    }
+
+    /**
+     * Identity of the session, for everything that is measured once and shown
+     * for as long as it lasts (the RTT, the counters' source).
+     *
+     * Deliberately not {@link #stateGeneration()}: that counter also invalidates
+     * in-flight engine work, so a Stop — which pauses a session's data plane
+     * without ending the session — bumps it. Keying the readings to it made a
+     * Stop-and-Start start the RTT over and re-identify the counters, which is
+     * the flinch the pause was not supposed to cause.
+     */
+    public static long sessionEpoch() {
+        return sessionEpoch.get();
     }
 
     private final AtomicLong cleanupGeneration = new AtomicLong(0);
@@ -751,7 +768,6 @@ public class FCAEVpnService extends VpnService {
             // lets this honest frame through.
             SessionState.command(SessionState.Command.NONE);
             SessionState.markIdle(this);
-            VpnWidgetProvider.refresh(this);
             stopSelf();
             scheduleProcessKill();
             return;
@@ -871,6 +887,7 @@ public class FCAEVpnService extends VpnService {
 
     private void preparePsiphonConnect(Intent intent) {
         if (running || vpnThread != null) return;
+        sessionEpoch.incrementAndGet();
         // Same connect-window reset startVpn() performs: invalidate anything
         // still tearing down from a previous session and claim this one.
         vpnPaused = false;
@@ -891,6 +908,7 @@ public class FCAEVpnService extends VpnService {
     }
 
     private synchronized void startVpn(Intent intent) {
+        sessionEpoch.incrementAndGet();
         final int tunMtu = intent.getIntExtra("tunMtu", 1500);
         if (tunMtu < 1280 || tunMtu > 9000) {
             Log.e(TAG, "Invalid TUN MTU: " + tunMtu);
@@ -1143,6 +1161,10 @@ public class FCAEVpnService extends VpnService {
      *                    session was the last thing this process had to do.
      */
     private synchronized void fullShutdown(boolean killProcess) {
+        // The session is over: the next one starts its own measurements, and no
+        // sample of this one can be published under it.
+        sessionEpoch.incrementAndGet();
+        lastPsiphonStats = null;
         // Idempotent teardown. Disconnect (UI or notification), onRevoke
         // and onDestroy can ALL fire for the same session, and the first
         // call's cleanup thread may already be past its generation check
@@ -1205,7 +1227,6 @@ public class FCAEVpnService extends VpnService {
             // with this process dead, and the widget must not keep offering
             // DISCONNECT for a session that is already over.
             SessionState.markIdle(this);
-            VpnWidgetProvider.refresh(this);
         };
 
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -1456,13 +1477,16 @@ public class FCAEVpnService extends VpnService {
     }
 
     private void notifyUi() {
-        // A live Psiphon exit owns the outside of the tunnel: its counters and
-        // its tunnel RTT are the only ones that exist on that path, and they are
-        // what the notification shows. SessionState picks the source, so the
-        // widget and the app's status line read the same numbers.
-        final long[] stats = SessionState.stats(lastPsiphonStats);
+        // Whether the AAR owns this session's telemetry was decided when the
+        // session started (sessionPsiphonExit), not by asking whether the last
+        // sample is still the newest: a rebind makes it briefly not-newest, and
+        // reading that as "the engine measures this now" is what flipped the
+        // numbers between two meters mid-session.
+        final boolean aar = sessionPsiphonExit;
+        final long[] stats = SessionState.stats(lastPsiphonStats, aar);
         SessionState.publish(this, phase(), 1,
-                stats[0], stats[1], stats[2], stats[3], (int) stats[4]);
+                stats[0], stats[1], stats[2], stats[3], (int) stats[4],
+                aar ? SessionState.SOURCE_AAR : SessionState.SOURCE_ENGINE);
     }
 
     /**
@@ -1492,7 +1516,9 @@ public class FCAEVpnService extends VpnService {
         return SessionState.Phase.CONNECTED;
     }
 
-    private Intent lastPsiphonStats;
+    /** Newest AAR sample of the running session; written by the receiver,
+     *  read by the publishers on the main thread and cleared by teardown. */
+    private volatile Intent lastPsiphonStats;
     private final android.content.BroadcastReceiver psiphonStatsReceiver = new android.content.BroadcastReceiver() {
         @Override public void onReceive(android.content.Context context, Intent intent) {
             if (PsiphonTunnelService.BROADCAST_READY.equals(intent.getAction())) {
@@ -1543,13 +1569,17 @@ public class FCAEVpnService extends VpnService {
     // notification id while its tunnel (re)dials, and the next tick must
     // always restore the owner's content.
     private void updateNotification() {
-        boolean psiphonExpected = PsiphonTunnelService.hasActiveBinding() ||
-                (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) ||
+        // The AAR's last sample is this session's reading for as long as the
+        // session lasts, and the session is the one that says so — the binding
+        // and the broadcast id both churn during a rebind while the numbers
+        // below stay the same numbers.
+        final boolean aarStats = sessionPsiphonExit && lastPsiphonStats != null;
+        boolean psiphonExpected = PsiphonTunnelService.hasActiveBinding() || aarStats ||
                 (lastStartIntent != null && lastStartIntent.getBooleanExtra("psiphonThroughTunnel", false));
 
         if (uiConnecting) {
             int buttons = VpnNotification.BUTTONS_CONNECTING;
-            if (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
+            if (aarStats) {
                 notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats), buttons);
             } else if (psiphonExpected) {
                 notification.show(VpnNotification.zeroTrafficText(), buttons);
@@ -1569,7 +1599,7 @@ public class FCAEVpnService extends VpnService {
             }
         } else if (vpnPaused || running) {
             int buttons = vpnPaused ? VpnNotification.BUTTONS_PAUSED : VpnNotification.BUTTONS_RUNNING;
-            if (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
+            if (aarStats) {
                 notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats), buttons);
                 return;
             }

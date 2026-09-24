@@ -75,14 +75,19 @@
         <receiver
             android:name=".VpnWidgetProvider"
             android:exported="true">
+            <!--
+                Only what the system must be able to deliver to a process that
+                is NOT running: the widget lifecycle, and the button taps
+                (PendingIntents, which the launcher sends without the app).
+                The app's own state actions used to be listed here too, and a
+                manifest receiver is delivered by STARTING its process — so
+                every state broadcast, including the ones a teardown sends on
+                its way out and the AAR's 1 Hz telemetry, was bringing the app
+                back after it had been killed. The widget renders from
+                SessionState directly (same process) instead.
+            -->
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-                <action android:name="com.fc.fcaevpn.VPN_STATE_CHANGED" />
-                <action android:name="com.fc.fcaevpn.VPN_DISCONNECTED" />
-                <action android:name="com.fc.fcaevpn.PSI_READY" />
-                <action android:name="com.fc.fcaevpn.PSI_FAILED" />
-                <action android:name="com.fc.fcaevpn.PSI_STOPPED" />
-                <action android:name="com.fc.fcaevpn.PSI_STATS" />
                 <action android:name="com.fc.fcaevpn.WIDGET_TOGGLE" />
                 <action android:name="com.fc.fcaevpn.WIDGET_PAUSE_RESUME" />
             </intent-filter>

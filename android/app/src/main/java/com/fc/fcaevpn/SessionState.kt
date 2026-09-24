@@ -35,6 +35,20 @@ object SessionState {
     private const val GRACE_MS = 2500L
     private const val COMMAND_TIMEOUT_MS = 4000L
 
+    /** The engine measures the session itself. */
+    const val SOURCE_ENGINE = 0
+
+    /**
+     * The Psiphon AAR owns the session's exit, and therefore its counters.
+     *
+     * A chained session has two meters — the engine's tunnel and the AAR's
+     * tunnel — and they are different numbers for the same traffic. Which one
+     * is the session's is a property of the session, so it is decided once and
+     * then held: switching between them per tick is what made the totals and
+     * the RTT flip between two readings while a Psiphon session ran.
+     */
+    const val SOURCE_AAR = 1
+
     /**
      * What the user sees. One vocabulary for the whole app: the widget renders
      * these words, and the values the Activity's receiver needs (running /
@@ -89,6 +103,10 @@ object SessionState {
     private var rttHeld = 0
     /** Session the held RTT and the frame on screen belong to. */
     private var sessionGeneration = Long.MIN_VALUE
+    /** Which meter this session's counters come from; AAR outranks the engine. */
+    private var statsSource = SOURCE_ENGINE
+    /** Last telemetry of the session's own source: rx, tx, totalRx, totalTx. */
+    private var heldStats = longArrayOf(0L, 0L, 0L, 0L)
     private var pending = Command.NONE
     private var pendingAt = 0L
 
@@ -149,19 +167,38 @@ object SessionState {
         tx: Long,
         totalRx: Long,
         totalTx: Long,
-        rttSample: Int
+        rttSample: Int,
+        source: Int
     ) {
-        // A new session owns its own readings: the generation every owner bumps
-        // when it starts is what tells them apart, so a stale RTT (or a stale
-        // total, if a backend keeps cumulative counters) can never be presented
-        // as this session's.
-        val generation = FCAEVpnService.stateGeneration()
+        // A new session owns its own readings: the epoch the owners bump when a
+        // session starts or ends is what tells them apart, so a stale RTT (or a
+        // stale total, if a backend keeps cumulative counters) can never be
+        // presented as this session's. A Stop is not a new session — it pauses
+        // one — so it does not start the measurements over.
+        val generation = FCAEVpnService.sessionEpoch()
         if (generation != sessionGeneration) {
             sessionGeneration = generation
+            statsSource = SOURCE_ENGINE
+            heldStats = longArrayOf(0L, 0L, 0L, 0L)
             clearRtt()
         }
+        // The session's meter, not the frame's: the AAR claims a session's
+        // counters the first time it reports, and keeps them from then on — a
+        // frame from the other meter still carries the phase, but its numbers
+        // are not this session's and are held back. Replacing a
+        // closer-to-the-exit measurement with a wider one is a change of
+        // measurement, not of session, and it is also where a held RTT from the
+        // lesser meter has to go.
+        val upgraded = source == SOURCE_AAR && statsSource != SOURCE_AAR
+        if (upgraded) {
+            statsSource = SOURCE_AAR
+            clearRtt()
+        }
+        val mine = source == statsSource
+        if (mine) heldStats = longArrayOf(rx, tx, totalRx, totalTx)
         val snapshot = Snapshot(
-            phase, mode, rx, tx, totalRx, totalTx, holdRtt(rttSample)
+            phase, mode, heldStats[0], heldStats[1], heldStats[2], heldStats[3],
+            holdRtt(if (mine) rttSample else 0)
         )
         write(context, snapshot, measured = true)
         val intent = Intent(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
@@ -181,25 +218,6 @@ object SessionState {
             context.sendBroadcast(intent)
         } catch (_: Throwable) {
         }
-    }
-
-    /** Ingest a state broadcast of the app's own channel. */
-    @JvmStatic
-    fun absorb(context: Context, intent: Intent) {
-        val phase = Phase.entries.getOrElse(intent.getIntExtra("phase", 0)) { Phase.DISCONNECTED }
-        write(
-            context,
-            Snapshot(
-                phase,
-                intent.getIntExtra("mode", 1),
-                intent.getLongExtra("rx", 0L),
-                intent.getLongExtra("tx", 0L),
-                intent.getLongExtra("totalRx", 0L),
-                intent.getLongExtra("totalTx", 0L),
-                holdRtt(intent.getIntExtra("rtt", 0))
-            ),
-            measured = true
-        )
     }
 
     /**
@@ -237,12 +255,18 @@ object SessionState {
     }
 
     /**
-     * Byte telemetry of the session: the AAR's when one owns the exit, the
+     * Byte telemetry of the session: the AAR's when it owns the exit, the
      * engine's otherwise. `[rx, tx, totalRx, totalTx, rtt]`.
+     *
+     * `ownAar` is the owner's session-long answer, never a freshness test: a
+     * sample that has stopped being the newest one (a rebind between
+     * broadcasts, a paused session) is still this session's reading, and
+     * falling back to the other meter for those ticks is what made the numbers
+     * flip.
      */
     @JvmStatic
-    fun stats(psiStats: Intent?): LongArray {
-        if (psiStats != null && PsiphonTunnelService.isCurrentBroadcast(psiStats)) {
+    fun stats(psiStats: Intent?, ownAar: Boolean): LongArray {
+        if (ownAar && psiStats != null) {
             return longArrayOf(
                 psiStats.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, 0L),
                 psiStats.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, 0L),
@@ -416,10 +440,23 @@ object SessionState {
      */
     private fun write(context: Context, snapshot: Snapshot, measured: Boolean = false) {
         if (!accepts(snapshot)) return
+        // Only an owner's own frame can confirm a command: the optimistic
+        // writes made here (a command the user just gave) would otherwise
+        // release the latch that is hiding the old state, and the owner's
+        // still-dying frames would flip the surfaces back.
         if (measured) confirmed(snapshot)
         val accepted = stabilize(snapshot.phase, snapshot) ?: return
         latest = accepted
         latestAt = SystemClock.elapsedRealtime()
+        // The frame lands on the widget here, in the process the widget's
+        // provider runs in. It is deliberately not a broadcast: a broadcast
+        // reaches a manifest-registered receiver in a process that is not
+        // running by STARTING that process, so the app's own state messages
+        // were resurrecting the very process a teardown had just ended.
+        try {
+            VpnWidgetProvider.refresh(context)
+        } catch (_: Throwable) {
+        }
         val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (accepted.phase.ordinal == persistedPhase && prefs.contains(K_STAMP)) return
         persistedPhase = accepted.phase.ordinal

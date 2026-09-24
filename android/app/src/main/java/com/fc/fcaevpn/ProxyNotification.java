@@ -57,6 +57,25 @@ public class ProxyNotification extends Service {
      * yes is what kept answering for a process with nothing behind it.
      */
     private volatile boolean sessionRequested;
+
+    /**
+     * The AAR measures this session's traffic. Its counters and its tunnel RTT
+     * are then the session's only real numbers — a chained proxy session is
+     * measured by the AAR outside and by the engine inside, and they are two
+     * different readings of the same traffic.
+     */
+    private boolean psiTelemetry;
+
+    /**
+     * The AAR has reported a live tunnel for this session.
+     *
+     * Set by its own signals (READY, a stats sample) and cleared by its own
+     * signals (STOPPED, FAILED) — never by the absence of a sample for one
+     * tick. That absence is what a rebind looks like, and reading it as
+     * "dialing" made the status flip CONNECTED -> CONNECTING -> CONNECTED on
+     * every rebind.
+     */
+    private volatile boolean psiLive;
     private boolean handingOff;
     private long ownerGeneration;
     private Intent lastPsiphonStats;
@@ -169,14 +188,25 @@ public class ProxyNotification extends Service {
             if (PsiphonTunnelService.BROADCAST_STATS.equals(intent.getAction())) {
                 lastPsiphonStats = new Intent(intent);
                 cachePsiphonStats(context, lastPsiphonStats);
+                psiLive = true;
                 updateNotification();
                 return;
             }
+            if (!psiTelemetry) return;
+            // The AAR's own word on its tunnel: up, or down. These are signals
+            // about the session, not samples of it, so they are the only thing
+            // allowed to move the phase.
+            final boolean ready = PsiphonTunnelService.BROADCAST_READY.equals(intent.getAction());
+            final boolean stopped = PsiphonTunnelService.BROADCAST_STOPPED.equals(intent.getAction())
+                    || PsiphonTunnelService.BROADCAST_FAILED.equals(intent.getAction());
+            if (!ready && !stopped) return;
+            psiLive = ready;
             if (!externalPsiphon) return;
-            if (PsiphonTunnelService.BROADCAST_READY.equals(intent.getAction())) {
-                if (!intent.getBooleanExtra("regionsOnly", false))
-                    showNotification(VpnNotification.zeroTrafficText(), BUTTONS_RUNNING);
-            } else { stopProxy(); }
+            if (stopped) {
+                stopProxy();
+            } else if (!intent.getBooleanExtra("regionsOnly", false)) {
+                showNotification(VpnNotification.zeroTrafficText(), BUTTONS_RUNNING);
+            }
         }
     };
     /** Set once teardown starts, so the watchdog cannot re-enter stopProxy(). */
@@ -328,6 +358,8 @@ public class ProxyNotification extends Service {
             ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
             sessionRequested = true;
             externalPsiphon = true;
+            psiTelemetry = true;
+            psiLive = false;
             showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
             Intent psi = new Intent(this, PsiphonTunnelService.class).setAction(PsiphonTunnelService.ACTION_START);
             if (intent.getExtras() != null) psi.putExtras(intent.getExtras());
@@ -393,6 +425,8 @@ public class ProxyNotification extends Service {
             // Protocol=Psiphon in proxy mode IS the AAR tunnel: no engine
             // session exists, and this owner carries its notification.
             externalPsiphon = true;
+            psiTelemetry = true;
+            psiLive = false;
             Intent psi = new Intent(this, PsiphonTunnelService.class)
                     .setAction(PsiphonTunnelService.ACTION_START)
                     .putExtras(intent)
@@ -401,6 +435,10 @@ public class ProxyNotification extends Service {
             return START_STICKY;
         }
         externalPsiphon = false;
+        // A chained session (Aether through Psiphon) is still measured by the
+        // AAR on its outside; a plain one is measured by the engine.
+        psiTelemetry = described && intent.getBooleanExtra("psiphonThroughTunnel", false);
+        psiLive = false;
         if (described) startEngineFromSession(intent);
         return START_STICKY;
     }
@@ -493,12 +531,12 @@ public class ProxyNotification extends Service {
         if (stopping) return;
         // A pure Psiphon exit lives entirely in the AAR, so this owner is the
         // only publisher its session has; a chained one is measured by the AAR
-        // as well, and its numbers are one session's worth of telemetry.
-        final Intent psi = lastPsiphonStats;
-        final boolean psiFresh = psi != null && PsiphonTunnelService.isCurrentBroadcast(psi);
-        final long[] stats = SessionState.stats(psiFresh ? psi : null);
-        SessionState.publish(this, phase(psiFresh), 0,
-                stats[0], stats[1], stats[2], stats[3], (int) stats[4]);
+        // as well, and its numbers are one session's worth of telemetry. Both
+        // are decided per session, not per tick.
+        final long[] stats = SessionState.stats(psiTelemetry ? lastPsiphonStats : null, psiTelemetry);
+        SessionState.publish(this, phase(), 0,
+                stats[0], stats[1], stats[2], stats[3], (int) stats[4],
+                psiTelemetry ? SessionState.SOURCE_AAR : SessionState.SOURCE_ENGINE);
     }
 
     /**
@@ -506,11 +544,11 @@ public class ProxyNotification extends Service {
      * AAR tunnel is up (its own engine is idle on that path) and it is the only
      * party that does.
      */
-    private SessionState.Phase phase(boolean psiFresh) {
+    private SessionState.Phase phase() {
         if (externalPsiphon) {
-            // Protocol=Psiphon in proxy mode IS the AAR: dialing until its first
-            // telemetry lands, connected for as long as it keeps reporting.
-            return psiFresh ? SessionState.Phase.CONNECTED : SessionState.Phase.CONNECTING;
+            // Protocol=Psiphon in proxy mode IS the AAR: dialing until it says
+            // the tunnel is up, connected until it says otherwise.
+            return psiLive ? SessionState.Phase.CONNECTED : SessionState.Phase.CONNECTING;
         }
         int state = 5;
         try { state = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
@@ -530,7 +568,10 @@ public class ProxyNotification extends Service {
     private void updateNotification() {
         // Root cause: hasActiveBinding flips during rebind -> Rust 0 then Psiphon totals -> flinch
         // Show Psiphon stats if current regardless of binding, else Rust
-        if (lastPsiphonStats != null && PsiphonTunnelService.isCurrentBroadcast(lastPsiphonStats)) {
+        // This session's numbers, whoever last moved them: the AAR's reading
+        // stays the reading while the AAR owns the session, even across the
+        // ticks where a rebind has not produced a new sample yet.
+        if (psiTelemetry && lastPsiphonStats != null) {
             showNotification(psiphonTrafficText(lastPsiphonStats), BUTTONS_RUNNING);
             return;
         }
@@ -560,17 +601,18 @@ public class ProxyNotification extends Service {
         lastPsiphonStats = null;
         stopping = true;
         sessionRequested = false;
+        psiTelemetry = false;
+        psiLive = false;
         handler.removeCallbacks(statsRunnable);
         PsiphonTunnelService.stopBound(this);
         // Proxy mode has no VpnService, so nothing else broadcasts state. The
         // UI listens for these actions to clear its CONNECTED indicator; omit
         // this and the app keeps showing a live session after the engine died.
         broadcastStopped();
-        // The widget is repainted here rather than left to a broadcast: this
-        // owner can end this process moments later (notification Disconnect),
-        // and a frame still in flight would die with it.
+        // Committed synchronously, and pushed to the widget with it: this owner
+        // can end this process moments later (notification Disconnect), and a
+        // frame still in flight would die with it.
         SessionState.markIdle(this);
-        VpnWidgetProvider.refresh(this);
         // Abort the engine immediately, then reap on the cleanup thread.
         if (!externalPsiphon) {
             try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}

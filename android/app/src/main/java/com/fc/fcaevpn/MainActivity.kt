@@ -268,6 +268,18 @@ class MainActivity : AppCompatActivity() {
                 PsiphonTunnelService.BROADCAST_STATS -> {
                     // Tunnel telemetry from :psiphon — owns the stats line on
                     // every psiphon path (the engine getters are empty there).
+                    //
+                    // Only while a session is the user's current intent: the
+                    // AAR keeps reporting for a beat after an explicit
+                    // disconnect, and accepting those samples painted the
+                    // disconnecting session's totals and RTT back over the
+                    // zeroed line — the flinch the disconnect must not have.
+                    // The local flag is the airtight half (a disconnect from
+                    // this UI clears the state before any broadcast can land);
+                    // the record is the half that covers a disconnect from the
+                    // notification or the widget.
+                    if (userInitiatedDisconnect) return
+                    if (!connecting && !commandConnecting && !SessionState.reconciled(this).active) return
                     pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: ""
                     pendingPsiSocks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, pendingPsiSocks)
                     acceptPsiStats(intent)
@@ -1936,7 +1948,6 @@ class MainActivity : AppCompatActivity() {
     resetStats()
     peerText.text = ""
     SessionState.markIdle(this)
-    VpnWidgetProvider.refresh(this)
 
     try {
         PsiphonTunnelService.stopBound(this)
@@ -1982,11 +1993,10 @@ class MainActivity : AppCompatActivity() {
      * we are about to end — so the owners are stopped first.
      */
     private fun endIdleProcess() {
-        // The record is committed before the kill: this process is about to
-        // stop existing, and the widget the launcher keeps must not outlive it
-        // claiming a session.
+        // The record is committed — and the widget repainted with it — before
+        // the kill: this process is about to stop existing, and the frame the
+        // launcher keeps must not claim a session.
         SessionState.markIdle(this)
-        VpnWidgetProvider.refresh(this)
         try { stopService(Intent(this, FCAEVpnService::class.java)) } catch (_: Throwable) {}
         try { stopService(Intent(this, ProxyNotification::class.java)) } catch (_: Throwable) {}
         try { PsiphonTunnelService.killProcessOnExit(this) } catch (_: Throwable) {}

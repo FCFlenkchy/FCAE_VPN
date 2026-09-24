@@ -39,7 +39,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
         when (intent.action) {
             ACTION_WIDGET_TOGGLE -> {
                 toggle(context, intent)
-                refresh(context)
                 if (SessionState.snapshot(context).connecting) scheduleRecheck(context)
             }
 
@@ -59,20 +58,15 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 )
                 // Immediate feedback, before the service has processed anything.
                 SessionState.markPause(context, !paused)
-                refresh(context)
-            }
-
-            // The owners publish; the widget renders. The AAR's own broadcasts
-            // are deliberately not a second source here: the owner that holds
-            // the session already republishes its numbers under one phase, and
-            // two publishers for one session is exactly how the widget ended up
-            // disagreeing with itself.
-            FCAEVpnService.BROADCAST_VPN_STATE_CHANGED,
-            FCAEVpnService.BROADCAST_VPN_DISCONNECTED -> {
-                SessionState.absorb(context, intent)
-                refresh(context)
             }
         }
+        // Nothing else is handled here on purpose. The widget used to take the
+        // app's own state broadcasts too, which meant this receiver — declared
+        // in the manifest — had to be handed every one of them by a running
+        // process; a dead one was started again for them, so the app came back
+        // from every broadcast a teardown sent. The state feed repaints the
+        // widget in-process instead (SessionState.write), the taps above are
+        // its whole wire.
     }
 
     private fun toggle(context: Context, intent: Intent) {
@@ -175,9 +169,11 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private val mainHandler = Handler(Looper.getMainLooper())
 
         /** Last rendered content; identical content is not worth a repaint. */
+        @Volatile
         private var lastRendered: String? = null
 
         /** Last reading published while the session was live, for the pause hold. */
+        @Volatile
         private var lastLive: SessionState.Snapshot? = null
 
         /**
