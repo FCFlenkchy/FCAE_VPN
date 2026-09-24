@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  minHeight covers five rows (title, state + RTT, rates, totals, controls).
-  Anything less and launchers clamp the cell to two rows, which is what used to
-  squeeze the status line out of the header.
+  3x1 by default: three cells wide, one row tall. targetCell* is what modern
+  launchers place it at; minWidth/minHeight carry the same intent on older ones
+  ((70 x cells) - 30).
 -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:initialLayout="@layout/widget_vpn"
-    android:minHeight="140dp"
+    android:minHeight="40dp"
     android:minWidth="180dp"
-    android:resizeMode="horizontal|vertical"
+    android:resizeMode="horizontal"
+    android:targetCellHeight="1"
+    android:targetCellWidth="3"
     android:updatePeriodMillis="0"
     android:widgetCategory="home_screen" />

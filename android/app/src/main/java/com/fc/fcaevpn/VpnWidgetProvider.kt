@@ -14,7 +14,8 @@ import android.widget.RemoteViews
 import java.util.Locale
 
 /**
- * Home screen control surface.
+ * Home screen control surface, sized as a 3x1 strip (widget_vpn_info.xml):
+ * state and RTT, the live rates, the session totals, and the controls.
  *
  * It renders [SessionState] and sends the commands the app's own notification
  * sends, to the same owner service: CONNECT is the notification's Start, so a
@@ -30,14 +31,14 @@ import java.util.Locale
 class VpnWidgetProvider : AppWidgetProvider() {
 
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) =
-        render(context, manager, ids, force = true)
+        render(context, ids, force = true)
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
         when (intent.action) {
             ACTION_WIDGET_TOGGLE -> {
                 toggle(context, intent)
-                renderAll(context)
+                refresh(context)
             }
 
             ACTION_WIDGET_PAUSE_RESUME -> {
@@ -45,7 +46,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 val action = if (session.paused) FCAEVpnService.ACTION_START
                 else FCAEVpnService.ACTION_STOP
                 dispatch(context, Intent(context, FCAEVpnService::class.java).setAction(action))
-                renderAll(context)
+                refresh(context)
             }
 
             // A live Psiphon exit is the AAR's session, not the engine's.
@@ -54,7 +55,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 if (intent.getBooleanExtra("regionsOnly", false)) return
                 if (!PsiphonTunnelService.isCurrentBroadcast(intent)) return
                 SessionState.absorb(context, intent)
-                renderAll(context)
+                refresh(context)
             }
 
             PsiphonTunnelService.BROADCAST_STOPPED,
@@ -63,13 +64,13 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 // live one.
                 if (!PsiphonTunnelService.isCurrentBroadcast(intent)) return
                 SessionState.markIdle(context)
-                renderAll(context)
+                refresh(context)
             }
 
             FCAEVpnService.BROADCAST_VPN_STATE_CHANGED,
             FCAEVpnService.BROADCAST_VPN_DISCONNECTED -> {
                 SessionState.absorb(context, intent)
-                renderAll(context)
+                refresh(context)
             }
         }
     }
@@ -102,7 +103,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 .putExtras(session)
         }
         if (!dispatch(context, command)) return false
-        SessionState.markConnecting(context, FCAEVpnService.stateGeneration())
+        SessionState.markConnecting(context)
         return true
     }
 
@@ -150,125 +151,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
         }
     }
 
-    private fun dispatch(context: Context, intent: Intent): Boolean = try {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent)
-        } else {
-            context.startService(intent)
-        }
-        true
-    } catch (_: Throwable) {
-        false
-    }
-
-    private fun renderAll(context: Context) {
-        val manager = AppWidgetManager.getInstance(context) ?: return
-        val ids = manager.getAppWidgetIds(ComponentName(context, VpnWidgetProvider::class.java))
-        if (ids.isNotEmpty()) render(context, manager, ids)
-    }
-
-    private fun render(
-        context: Context,
-        manager: AppWidgetManager,
-        ids: IntArray,
-        force: Boolean = false
-    ) {
-        val session = SessionState.snapshot(context)
-        val tun = context.getSharedPreferences(PREFS_MAIN, Context.MODE_PRIVATE)
-            .getInt("mode", 1) == 1
-
-        val status: String
-        val statusColor: Int
-        val action: String
-        when {
-            session.connecting -> {
-                status = "CONNECTING"; statusColor = COLOR_PROGRESS; action = "DISCONNECT"
-            }
-            session.paused -> {
-                status = "PAUSED"; statusColor = COLOR_PAUSED; action = "DISCONNECT"
-            }
-            session.running -> {
-                status = "CONNECTED - ${if (tun) "TUN" else "PROXY"}"
-                statusColor = COLOR_CONNECTED
-                action = "DISCONNECT"
-            }
-            else -> {
-                status = "DISCONNECTED"; statusColor = COLOR_DISCONNECTED; action = "CONNECT"
-            }
-        }
-
-        val pausable = tun && (session.running || session.paused)
-        val pauseLabel = if (session.paused) "START" else "STOP"
-        val values = listOf(
-            status,
-            if (session.rtt > 0) "RTT: ${session.rtt} ms" else "RTT: —",
-            "↓ " + fmtRate(session.rx),
-            "↑ " + fmtRate(session.tx),
-            "↓ " + fmtBytes(session.totalRx),
-            "↑ " + fmtBytes(session.totalTx),
-            action,
-            pauseLabel,
-            pausable.toString()
-        )
-        // Every repaint is a round trip to the launcher: identical content is
-        // not worth one.
-        val key = values.joinToString("|")
-        if (!force && key == lastRendered) return
-        lastRendered = key
-
-        val views = RemoteViews(context.packageName, R.layout.widget_vpn)
-        views.setTextViewText(R.id.widget_status, status)
-        views.setTextColor(R.id.widget_status, statusColor)
-        views.setTextViewText(R.id.widget_rtt, values[1])
-        views.setTextViewText(R.id.widget_rx_rate, values[2])
-        views.setTextViewText(R.id.widget_tx_rate, values[3])
-        views.setTextViewText(R.id.widget_rx_total, values[4])
-        views.setTextViewText(R.id.widget_tx_total, values[5])
-        views.setTextViewText(R.id.widget_btn_action, action)
-        views.setInt(
-            R.id.widget_btn_action, "setBackgroundResource",
-            if (action == "CONNECT") R.drawable.widget_btn_connect else R.drawable.widget_btn_disconnect
-        )
-        views.setOnClickPendingIntent(
-            R.id.widget_btn_action,
-            pending(context, ACTION_WIDGET_TOGGLE, 101, session.active)
-        )
-        views.setViewVisibility(
-            R.id.widget_btn_pause_resume, if (pausable) View.VISIBLE else View.GONE
-        )
-        if (pausable) {
-            views.setTextViewText(R.id.widget_btn_pause_resume, pauseLabel)
-            views.setInt(
-                R.id.widget_btn_pause_resume, "setBackgroundResource",
-                if (session.paused) R.drawable.widget_btn_tun_start else R.drawable.widget_btn_tun_stop
-            )
-            views.setOnClickPendingIntent(
-                R.id.widget_btn_pause_resume, pending(context, ACTION_WIDGET_PAUSE_RESUME, 102, false)
-            )
-        }
-
-        val open = PendingIntent.getActivity(
-            context, 100,
-            Intent(context, MainActivity::class.java)
-                .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PENDING_FLAGS
-        )
-        views.setOnClickPendingIntent(R.id.widget_btn_settings, open)
-        views.setOnClickPendingIntent(R.id.widget_header, open)
-
-        for (id in ids) manager.updateAppWidget(id, views)
-    }
-
-    /** A command broadcast, tagged with what the button read when drawn. */
-    private fun pending(context: Context, action: String, code: Int, active: Boolean) =
-        PendingIntent.getBroadcast(
-            context, code,
-            Intent(context, VpnWidgetProvider::class.java)
-                .setAction(action)
-                .putExtra(EXTRA_TAP_ACTIVE, active),
-            PENDING_FLAGS
-        )
-
     companion object {
         const val ACTION_WIDGET_TOGGLE = "com.fc.fcaevpn.WIDGET_TOGGLE"
         const val ACTION_WIDGET_PAUSE_RESUME = "com.fc.fcaevpn.WIDGET_PAUSE_RESUME"
@@ -288,6 +170,137 @@ class VpnWidgetProvider : AppWidgetProvider() {
 
         /** Last rendered content; identical content is not worth a repaint. */
         private var lastRendered: String? = null
+
+        /**
+         * Repaint now, from wherever a session ended.
+         *
+         * The teardown paths kill this process — that is the point of them — and
+         * a broadcast that is still in flight dies with it, which used to leave
+         * the widget claiming a session and offering DISCONNECT for a tunnel
+         * that was already gone. The owners call this synchronously before the
+         * kill, so the last frame the launcher keeps is the truth.
+         */
+        @JvmStatic
+        fun refresh(context: Context) {
+            val ids = ids(context).takeIf { it.isNotEmpty() } ?: return
+            render(context, ids, force = true)
+        }
+
+        private fun ids(context: Context): IntArray {
+            val manager = AppWidgetManager.getInstance(context) ?: return IntArray(0)
+            return manager.getAppWidgetIds(ComponentName(context, VpnWidgetProvider::class.java))
+        }
+
+        private fun dispatch(context: Context, intent: Intent): Boolean = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+            true
+        } catch (_: Throwable) {
+            false
+        }
+
+        private fun render(context: Context, ids: IntArray, force: Boolean = false) {
+            val manager = AppWidgetManager.getInstance(context) ?: return
+            val session = SessionState.snapshot(context)
+            val tun = context.getSharedPreferences(PREFS_MAIN, Context.MODE_PRIVATE)
+                .getInt("mode", 1) == 1
+
+            val status: String
+            val statusColor: Int
+            val action: String
+            when {
+                session.connecting -> {
+                    status = "CONNECTING"; statusColor = COLOR_PROGRESS; action = "DISCONNECT"
+                }
+                session.paused -> {
+                    status = "PAUSED"; statusColor = COLOR_PAUSED; action = "DISCONNECT"
+                }
+                session.running -> {
+                    status = "CONNECTED - ${if (tun) "TUN" else "PROXY"}"
+                    statusColor = COLOR_CONNECTED
+                    action = "DISCONNECT"
+                }
+                else -> {
+                    status = "DISCONNECTED"; statusColor = COLOR_DISCONNECTED; action = "CONNECT"
+                }
+            }
+
+            val pausable = tun && (session.running || session.paused)
+            val pauseLabel = if (session.paused) "START" else "STOP"
+            // Down and up are separate readings, each with its own arrow: rates
+            // and totals each get a row, split into the two directions.
+            val ratesDown = "↓ " + fmtRate(session.rx)
+            val ratesUp = "↑ " + fmtRate(session.tx)
+            val totalDown = "↓ " + fmtBytes(session.totalRx)
+            val totalUp = "↑ " + fmtBytes(session.totalTx)
+            val rtt = if (session.rtt > 0) "${session.rtt} ms" else "—"
+
+            // Every repaint is a round trip to the launcher: identical content
+            // is not worth one.
+            val key = listOf(
+                status, rtt, ratesDown, ratesUp, totalDown, totalUp,
+                action, pauseLabel, pausable.toString()
+            ).joinToString("|")
+            if (!force && key == lastRendered) return
+            lastRendered = key
+
+            val views = RemoteViews(context.packageName, R.layout.widget_vpn)
+            views.setTextViewText(R.id.widget_status, status)
+            views.setTextColor(R.id.widget_status, statusColor)
+            views.setTextViewText(R.id.widget_rtt, rtt)
+            views.setTextViewText(R.id.widget_rx_rate, ratesDown)
+            views.setTextViewText(R.id.widget_tx_rate, ratesUp)
+            views.setTextViewText(R.id.widget_rx_total, totalDown)
+            views.setTextViewText(R.id.widget_tx_total, totalUp)
+            views.setTextViewText(R.id.widget_btn_action, action)
+            views.setInt(
+                R.id.widget_btn_action, "setBackgroundResource",
+                if (action == "CONNECT") R.drawable.widget_btn_connect else R.drawable.widget_btn_disconnect
+            )
+            views.setOnClickPendingIntent(
+                R.id.widget_btn_action,
+                pending(context, ACTION_WIDGET_TOGGLE, 101, session.active)
+            )
+            views.setViewVisibility(
+                R.id.widget_btn_pause_resume, if (pausable) View.VISIBLE else View.GONE
+            )
+            if (pausable) {
+                views.setTextViewText(R.id.widget_btn_pause_resume, pauseLabel)
+                views.setInt(
+                    R.id.widget_btn_pause_resume, "setBackgroundResource",
+                    if (session.paused) R.drawable.widget_btn_tun_start else R.drawable.widget_btn_tun_stop
+                )
+                views.setOnClickPendingIntent(
+                    R.id.widget_btn_pause_resume,
+                    pending(context, ACTION_WIDGET_PAUSE_RESUME, 102, false)
+                )
+            }
+
+            // The whole reading area opens the app; the strip has no room for a
+            // settings button of its own.
+            val open = PendingIntent.getActivity(
+                context, 100,
+                Intent(context, MainActivity::class.java)
+                    .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PENDING_FLAGS
+            )
+            views.setOnClickPendingIntent(R.id.widget_header, open)
+
+            for (id in ids) manager.updateAppWidget(id, views)
+        }
+
+        /** A command broadcast, tagged with what the button read when drawn. */
+        private fun pending(context: Context, action: String, code: Int, active: Boolean) =
+            PendingIntent.getBroadcast(
+                context, code,
+                Intent(context, VpnWidgetProvider::class.java)
+                    .setAction(action)
+                    .putExtra(EXTRA_TAP_ACTIVE, active),
+                PENDING_FLAGS
+            )
 
         private fun fmtBytes(bytes: Long): String = when {
             bytes >= GIB -> String.format(Locale.US, "%.1f GB", bytes / GIB.toDouble())

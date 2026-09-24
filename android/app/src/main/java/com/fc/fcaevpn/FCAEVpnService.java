@@ -728,6 +728,8 @@ public class FCAEVpnService extends VpnService {
             handler.removeCallbacks(statsRunnable);
             notification.dismiss();
             stopForeground(STOP_FOREGROUND_REMOVE);
+            SessionState.markIdle(this);
+            VpnWidgetProvider.refresh(this);
             stopSelf();
             scheduleProcessKill();
             return;
@@ -1151,6 +1153,11 @@ public class FCAEVpnService extends VpnService {
             notifyUi();
             notification.dismiss();
             stopForeground(STOP_FOREGROUND_REMOVE);
+            // Same reason as the broadcast, one step stronger: this turn can end
+            // with this process dead, and the widget must not keep offering
+            // DISCONNECT for a session that is already over.
+            SessionState.markIdle(this);
+            VpnWidgetProvider.refresh(this);
         };
 
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -1355,13 +1362,8 @@ public class FCAEVpnService extends VpnService {
         // what the notification shows. SessionState picks the source, so the
         // widget and the app's status line read the same numbers.
         final Intent psi = lastPsiphonStats;
-        final boolean psiFresh = psi != null && PsiphonTunnelService.isCurrentBroadcast(psi);
-        final long[] stats = SessionState.stats(psiFresh ? psi : null);
-        // An RTT is held for exactly as long as the session it was measured on.
-        final long token = psiFresh
-                ? SessionState.tokenOf(psi)
-                : sGeneration.get();
-        SessionState.publish(this, token, running, vpnPaused && !uiConnecting, uiConnecting,
+        final long[] stats = SessionState.stats(psi);
+        SessionState.publish(this, running, vpnPaused && !uiConnecting, uiConnecting,
                 stats[0], stats[1], stats[2], stats[3], (int) stats[4]);
     }
 

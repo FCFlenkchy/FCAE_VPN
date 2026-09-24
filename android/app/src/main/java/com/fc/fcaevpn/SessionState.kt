@@ -60,24 +60,20 @@ object SessionState {
     @Volatile
     private var latest: Snapshot? = null
 
-    private var rttToken = Long.MIN_VALUE
     private var rttHeld = 0
 
     /**
-     * The RTT of a session, fixed by its first successful probe.
+     * The RTT of the session, fixed by its first successful probe.
      *
-     * `token` names the session (its generation, or the AAR's session id), so a
-     * new session — and only a new session — takes a fresh measurement. Latency
-     * does not change while a tunnel is up; re-probing it only makes the number
-     * under the user's eyes jump.
+     * One value, one session, one place: every surface reads this, so the app,
+     * the notification and the widget cannot show two different latencies for
+     * the same tunnel. Latency does not change while a tunnel is up, so
+     * re-probing it would only make the number under the user's eyes jump; a
+     * new session starts the measurement over.
      */
     @JvmStatic
     @Synchronized
-    fun holdRtt(token: Long, sampleMs: Int): Int {
-        if (token != rttToken) {
-            rttToken = token
-            rttHeld = 0
-        }
+    fun holdRtt(sampleMs: Int): Int {
         if (sampleMs > 0 && rttHeld == 0) rttHeld = sampleMs
         return rttHeld
     }
@@ -86,7 +82,6 @@ object SessionState {
     @JvmStatic
     @Synchronized
     fun clearRtt() {
-        rttToken = Long.MIN_VALUE
         rttHeld = 0
     }
 
@@ -94,7 +89,6 @@ object SessionState {
     @JvmStatic
     fun publish(
         context: Context,
-        token: Long,
         running: Boolean,
         paused: Boolean,
         connecting: Boolean,
@@ -104,11 +98,11 @@ object SessionState {
         totalTx: Long,
         rttSample: Int
     ) {
-        val rtt = holdRtt(token, rttSample)
+        val rtt = holdRtt(rttSample)
         write(context, Snapshot(running, paused, connecting, rx, tx, totalRx, totalTx, rtt))
         val intent = Intent(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
             .setPackage(context.packageName)
-            .putExtra("generation", token)
+            .putExtra("generation", FCAEVpnService.stateGeneration())
             .putExtra("running", running)
             .putExtra("paused", paused)
             .putExtra("connecting", connecting)
@@ -130,7 +124,6 @@ object SessionState {
      */
     @JvmStatic
     fun absorb(context: Context, intent: Intent) {
-        val token = tokenOf(intent)
         val snapshot = when (intent.action) {
             PsiphonTunnelService.BROADCAST_STATS -> Snapshot(
                 running = true, paused = false, connecting = false,
@@ -138,11 +131,11 @@ object SessionState {
                 tx = intent.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, 0L),
                 totalRx = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, 0L),
                 totalTx = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, 0L),
-                rtt = holdRtt(token, intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, 0))
+                rtt = holdRtt(intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, 0))
             )
             PsiphonTunnelService.BROADCAST_READY -> Snapshot(
                 running = true, paused = false, connecting = false,
-                rx = 0L, tx = 0L, totalRx = 0L, totalTx = 0L, rtt = holdRtt(token, 0)
+                rx = 0L, tx = 0L, totalRx = 0L, totalTx = 0L, rtt = holdRtt(0)
             )
             else -> Snapshot(
                 running = intent.getBooleanExtra("running", false),
@@ -152,7 +145,7 @@ object SessionState {
                 tx = intent.getLongExtra("tx", 0L),
                 totalRx = intent.getLongExtra("totalRx", 0L),
                 totalTx = intent.getLongExtra("totalTx", 0L),
-                rtt = holdRtt(token, intent.getIntExtra("rtt", 0))
+                rtt = holdRtt(intent.getIntExtra("rtt", 0))
             )
         }
         write(context, snapshot)
@@ -163,8 +156,8 @@ object SessionState {
      * the second it takes the service to publish its first state.
      */
     @JvmStatic
-    fun markConnecting(context: Context, token: Long) {
-        write(context, Snapshot(false, false, true, 0L, 0L, 0L, 0L, holdRtt(token, 0)))
+    fun markConnecting(context: Context) {
+        write(context, Snapshot(false, false, true, 0L, 0L, 0L, 0L, holdRtt(0)))
     }
 
     /** The session is over: disconnected, stopped, or refused. */
@@ -200,12 +193,6 @@ object SessionState {
         }
         return longArrayOf(rx, tx, totalRx, totalTx, rtt)
     }
-
-    /** The session an intent belongs to: shared generation, or AAR session id. */
-    @JvmStatic
-    fun tokenOf(intent: Intent): Long =
-        if (intent.hasExtra("generation")) intent.getLongExtra("generation", 0L)
-        else intent.getLongExtra("psiSession", 0L)
 
     @JvmStatic
     fun snapshot(context: Context): Snapshot {
@@ -246,6 +233,40 @@ object SessionState {
         }
     }
 
+    private var stableKey = Long.MIN_VALUE
+    private var stable: Snapshot? = null
+    private var regressions = 0
+
+    /**
+     * Session key, and the snapshot published for it.
+     *
+     * One session can be measured by two very different counters — the engine's
+     * and the AAR's — and either can go quiet for a tick (a rebind, a stale
+     * sample, a source switch). Publishing that tick as-is makes the widget drag
+     * the totals backwards and then up again, which is the flicker.
+     */
+    @Synchronized
+    private fun stabilize(key: Long, next: Snapshot): Snapshot? {
+        if (key != stableKey) {
+            stableKey = key
+            stable = next
+            regressions = 0
+            return next
+        }
+        val prev = stable ?: return next
+        val regressed = prev.active && next.active &&
+            (next.totalRx < prev.totalRx || next.totalTx < prev.totalTx)
+        if (!regressed) {
+            regressions = 0
+            return next
+        }
+        // A lone bad tick is held back; a real counter restart (the AAR came
+        // back with fresh counters) confirms itself on the next sample and is
+        // shown then, honestly, instead of being pinned to the old peak.
+        if (++regressions < 2) return null
+        return next
+    }
+
     /**
      * Persist `snapshot`. Ending a session is written synchronously: every
      * disconnect path can take this process down milliseconds later, and a
@@ -253,24 +274,25 @@ object SessionState {
      * for a tunnel that does not exist. Starts stay asynchronous.
      */
     private fun write(context: Context, snapshot: Snapshot) {
-        latest = snapshot
+        val accepted = stabilize(FCAEVpnService.stateGeneration(), snapshot) ?: return
+        latest = accepted
         val flags =
-            (if (snapshot.running) 1 else 0) or
-                (if (snapshot.paused) 2 else 0) or
-                (if (snapshot.connecting) 4 else 0)
+            (if (accepted.running) 1 else 0) or
+                (if (accepted.paused) 2 else 0) or
+                (if (accepted.connecting) 4 else 0)
         val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (flags == persistedFlags && prefs.contains(K_STAMP)) return
         persistedFlags = flags
         val editor = prefs.edit()
-            .putBoolean(K_RUNNING, snapshot.running)
-            .putBoolean(K_PAUSED, snapshot.paused)
-            .putBoolean(K_CONNECTING, snapshot.connecting)
-            .putLong(K_RX, snapshot.rx)
-            .putLong(K_TX, snapshot.tx)
-            .putLong(K_TOTAL_RX, snapshot.totalRx)
-            .putLong(K_TOTAL_TX, snapshot.totalTx)
-            .putInt(K_RTT, snapshot.rtt)
+            .putBoolean(K_RUNNING, accepted.running)
+            .putBoolean(K_PAUSED, accepted.paused)
+            .putBoolean(K_CONNECTING, accepted.connecting)
+            .putLong(K_RX, accepted.rx)
+            .putLong(K_TX, accepted.tx)
+            .putLong(K_TOTAL_RX, accepted.totalRx)
+            .putLong(K_TOTAL_TX, accepted.totalTx)
+            .putInt(K_RTT, accepted.rtt)
             .putLong(K_STAMP, SystemClock.elapsedRealtime())
-        if (snapshot.active) editor.apply() else editor.commit()
+        if (accepted.active) editor.apply() else editor.commit()
     }
 }

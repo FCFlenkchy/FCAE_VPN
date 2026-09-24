@@ -209,7 +209,6 @@ class MainActivity : AppCompatActivity() {
         pendingPsiSocks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, pendingPsiSocks)
         pendingPsiHttp = intent.getIntExtra(PsiphonTunnelService.EXTRA_HTTP, pendingPsiHttp)
         psiRttMs = SessionState.holdRtt(
-            SessionState.tokenOf(intent),
             intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, psiRttMs)
         )
         psiUpBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, psiUpBps)
@@ -449,10 +448,7 @@ class MainActivity : AppCompatActivity() {
                     // latency, already held for its session. Everything else
                     // goes through the same hold -> one value per session.
                     val rtt = if (psiRttMs > 0 && (isPsiphonSelected() || isEgressPsiphon())) psiRttMs
-                        else SessionState.holdRtt(
-                            FCAEVpnService.stateGeneration(),
-                            NativeEngine.nativeGetRttMs()
-                        )
+                        else SessionState.holdRtt(NativeEngine.nativeGetRttMs())
                     val rx = NativeEngine.nativeGetRxBps()
                     val tx = NativeEngine.nativeGetTxBps()
                     val totalRx = NativeEngine.nativeGetTotalRx()
@@ -1917,6 +1913,8 @@ class MainActivity : AppCompatActivity() {
     statusText.setTextColor(Color.parseColor("#8A93A6"))
     resetStats()
     peerText.text = ""
+    SessionState.markIdle(this)
+    VpnWidgetProvider.refresh(this)
 
     try {
         PsiphonTunnelService.stopBound(this)

@@ -467,13 +467,10 @@ public class ProxyNotification extends Service {
         if (stopping || externalPsiphon) return;
         int state = 5;
         try { state = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
-        // Chained Psiphon: the AAR owns the exit, and its numbers and session id
-        // are one session's worth of telemetry, not two.
-        final Intent psi = lastPsiphonStats;
-        final boolean psiFresh = psi != null && PsiphonTunnelService.isCurrentBroadcast(psi);
-        final long[] stats = SessionState.stats(psiFresh ? psi : null);
-        final long token = psiFresh ? SessionState.tokenOf(psi) : ownerGeneration;
-        SessionState.publish(this, token, state != 0 && state != 5, false,
+        // Chained Psiphon: the AAR owns the exit, and its numbers are one
+        // session's worth of telemetry, not two.
+        final long[] stats = SessionState.stats(lastPsiphonStats);
+        SessionState.publish(this, state != 0 && state != 5, false,
                 state == 6 || (state >= 1 && state <= 3),
                 stats[0], stats[1], stats[2], stats[3], (int) stats[4]);
     }
@@ -521,6 +518,11 @@ public class ProxyNotification extends Service {
         // UI listens for these actions to clear its CONNECTED indicator; omit
         // this and the app keeps showing a live session after the engine died.
         broadcastStopped();
+        // The widget is repainted here rather than left to a broadcast: this
+        // owner can end this process moments later (notification Disconnect),
+        // and a frame still in flight would die with it.
+        SessionState.markIdle(this);
+        VpnWidgetProvider.refresh(this);
         // Abort the engine immediately, then reap on the cleanup thread.
         if (!externalPsiphon) {
             try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
