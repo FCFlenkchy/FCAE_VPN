@@ -739,6 +739,10 @@ public class FCAEVpnService extends VpnService {
             handler.removeCallbacks(statsRunnable);
             notification.dismiss();
             stopForeground(STOP_FOREGROUND_REMOVE);
+            // A batch of commands can arrive while the latch still holds a
+            // phase (connect then disconnect, say). Dropping it first is what
+            // lets this honest frame through.
+            SessionState.command(SessionState.Command.NONE);
             SessionState.markIdle(this);
             VpnWidgetProvider.refresh(this);
             stopSelf();
@@ -1372,10 +1376,36 @@ public class FCAEVpnService extends VpnService {
         // its tunnel RTT are the only ones that exist on that path, and they are
         // what the notification shows. SessionState picks the source, so the
         // widget and the app's status line read the same numbers.
-        final Intent psi = lastPsiphonStats;
-        final long[] stats = SessionState.stats(psi);
-        SessionState.publish(this, running, vpnPaused && !uiConnecting, uiConnecting,
+        final long[] stats = SessionState.stats(lastPsiphonStats);
+        SessionState.publish(this, phase(), 1,
                 stats[0], stats[1], stats[2], stats[3], (int) stats[4]);
+    }
+
+    /**
+     * The phase of this session — the one word the user sees, decided here
+     * because this service is the only party that knows the state machine.
+     *
+     * Consumers never re-derive it. Deriving it downstream from running and
+     * paused alone is exactly how the widget came to show a dead tunnel as
+     * CONNECTED, with no RECONNECTING and no CONNECTING at all.
+     */
+    private SessionState.Phase phase() {
+        if (shuttingDown) return SessionState.Phase.DISCONNECTED;
+        if (uiConnecting) return SessionState.Phase.CONNECTING;
+        if (vpnPaused) return SessionState.Phase.PAUSED;
+        if (!running) return SessionState.Phase.DISCONNECTED;
+        int state;
+        try {
+            state = NativeEngine.nativeGetState();
+        } catch (Exception e) {
+            return SessionState.Phase.CONNECTED;
+        }
+        if (state == 6) return SessionState.Phase.RECONNECTING;
+        // 0 = the engine has not reported yet, 1..3 = provisioning/scanning/
+        // connecting: a session that exists and is not passing traffic yet.
+        if (state <= 3) return SessionState.Phase.CONNECTING;
+        if (state == 5) return SessionState.Phase.DISCONNECTED;
+        return SessionState.Phase.CONNECTED;
     }
 
     private Intent lastPsiphonStats;

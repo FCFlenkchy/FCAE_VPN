@@ -466,15 +466,35 @@ public class ProxyNotification extends Service {
      * the rates.
      */
     private void publishState() {
-        if (stopping || externalPsiphon) return;
-        int state = 5;
-        try { state = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
+        if (stopping) return;
         // Chained Psiphon: the AAR owns the exit, and its numbers are one
         // session's worth of telemetry, not two.
-        final long[] stats = SessionState.stats(lastPsiphonStats);
-        SessionState.publish(this, state != 0 && state != 5, false,
-                state == 6 || (state >= 1 && state <= 3),
+        final Intent psi = lastPsiphonStats;
+        final boolean psiFresh = psi != null && PsiphonTunnelService.isCurrentBroadcast(psi);
+        final long[] stats = SessionState.stats(psiFresh ? psi : null);
+        SessionState.publish(this, phase(psiFresh), 0,
                 stats[0], stats[1], stats[2], stats[3], (int) stats[4]);
+    }
+
+    /**
+     * The phase of this session, decided here: this owner knows whether a pure
+     * AAR tunnel is up (its own engine is idle on that path) and it is the only
+     * party that does.
+     */
+    private SessionState.Phase phase(boolean psiFresh) {
+        if (externalPsiphon) {
+            // Protocol=Psiphon in proxy mode IS the AAR: dialing until its first
+            // telemetry lands, connected for as long as it keeps reporting.
+            return psiFresh ? SessionState.Phase.CONNECTED : SessionState.Phase.CONNECTING;
+        }
+        int state = 5;
+        try { state = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
+        if (state == 6) return SessionState.Phase.RECONNECTING;
+        // 0 = not reported yet: the session exists (this owner is running) and is
+        // not passing traffic — dialing, not disconnected.
+        if (state <= 3) return SessionState.Phase.CONNECTING;
+        if (state == 5) return SessionState.Phase.DISCONNECTED;
+        return SessionState.Phase.CONNECTED;
     }
 
     // Byte-flow text only — no state words — so Psiphon exits and plain

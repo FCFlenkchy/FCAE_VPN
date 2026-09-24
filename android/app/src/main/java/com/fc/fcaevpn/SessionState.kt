@@ -7,22 +7,22 @@ import android.os.SystemClock
 /**
  * The one status feed for surfaces without an Activity.
  *
- * [FCAEVpnService] (TUN) and [ProxyNotification] (proxy) publish here on every
- * tick of the loops they already run; the home screen widget renders
- * [snapshot]. The broadcast is the app's own state channel (same action, same
- * extras, same generation), so the Activity and the widget read one story.
+ * [FCAEVpnService] (TUN) and [ProxyNotification] (proxy) publish the session's
+ * *phase* here on every tick of the loops they already run, plus the byte
+ * telemetry that goes with it; the home screen widget renders [reconciled].
+ * The broadcast is the app's own state channel (same action, same extras), so
+ * the Activity and the widget read one story.
  *
- * Only state transitions reach disk — rates live in memory, and a write per
- * second is not worth the flash. That is enough for the widget to draw the
- * truth on a cold start (a tunnel that outlived the launcher, a session that
- * ended off screen) and it takes the numbers from the next tick.
+ * The phase is decided by the owner — which is the only party that knows the
+ * state machine — and never re-derived by a consumer from a handful of
+ * booleans. That is deliberate: re-deriving is how the widget ended up showing
+ * CONNECTED for a dead tunnel, with no RECONNECTING and no CONNECTING at all.
  */
 object SessionState {
 
     private const val PREFS = "fcae_session_state"
-    private const val K_RUNNING = "running"
-    private const val K_PAUSED = "paused"
-    private const val K_CONNECTING = "connecting"
+    private const val K_PHASE = "phase"
+    private const val K_MODE = "mode"
     private const val K_RX = "rx"
     private const val K_TX = "tx"
     private const val K_TOTAL_RX = "totalRx"
@@ -31,45 +31,77 @@ object SessionState {
     /** Write time, elapsedRealtime: a lower clock means the device rebooted. */
     private const val K_STAMP = "stamp"
 
+    /** How long an unconfirmed frame is trusted while a command is carried out. */
+    private const val GRACE_MS = 2500L
+    private const val COMMAND_TIMEOUT_MS = 4000L
+
+    /**
+     * What the user sees. One vocabulary for the whole app: the widget renders
+     * these words, and the values the Activity's receiver needs (running /
+     * paused / connecting) are derived from them — never the other way round.
+     */
+    enum class Phase { DISCONNECTED, CONNECTING, RECONNECTING, CONNECTED, PAUSED }
+
+    /** A command in flight, from the app, the notification or the widget. */
+    enum class Command { NONE, CONNECT, DISCONNECT, PAUSE, RESUME }
+
     data class Snapshot(
-        val running: Boolean,
-        val paused: Boolean,
-        val connecting: Boolean,
+        val phase: Phase,
+        /** 1 = system VPN (TUN), 0 = local proxy. */
+        val mode: Int,
         val rx: Long,
         val tx: Long,
         val totalRx: Long,
         val totalTx: Long,
         val rtt: Int
     ) {
-        /** Up, dialing, or held open. */
-        val active: Boolean get() = running || paused || connecting
+        /** A session is up, dialing, recovering, or held open by a Stop. */
+        val active: Boolean
+            get() = phase == Phase.CONNECTING || phase == Phase.RECONNECTING ||
+                phase == Phase.CONNECTED || phase == Phase.PAUSED
+
+        /** The tunnel is up (a Stop holds it open; only the data plane goes). */
+        val up: Boolean get() = phase == Phase.CONNECTED || phase == Phase.PAUSED
+
+        val paused: Boolean get() = phase == Phase.PAUSED
+
+        /** MainActivity's own vocabulary, for the shared broadcast. */
+        val running: Boolean get() = up || phase == Phase.RECONNECTING
+        val connecting: Boolean get() = phase == Phase.CONNECTING
 
         companion object {
-            @JvmField val IDLE = Snapshot(false, false, false, 0L, 0L, 0L, 0L, 0)
+            @JvmField val IDLE = Snapshot(Phase.DISCONNECTED, 1, 0L, 0L, 0L, 0L, 0)
         }
     }
 
     /** Flags of the last persisted write; statistics alone never trigger one. */
-    private var persistedFlags = -1
+    private var persistedPhase = -1
 
     /**
-     * Last snapshot reported in this process. Publishers and the widget share
-     * the app process, so this is the live value: rates move every second while
-     * the disk copy deliberately stands still.
+     * Last snapshot reported in this process, and when. Publishers and the
+     * widget share the app process, so this is the live value: rates move every
+     * second while the disk copy deliberately stands still.
      */
     @Volatile
     private var latest: Snapshot? = null
+    private var latestAt = 0L
 
     private var rttHeld = 0
+    private var pending = Command.NONE
+    private var pendingAt = 0L
+
+    private var stablePhase = -1
+    private var stable: Snapshot? = null
+    private var regressions = 0
 
     /**
      * The RTT of the session, fixed by its first successful probe.
      *
      * One value, one session, one place: every surface reads this, so the app,
      * the notification and the widget cannot show two different latencies for
-     * the same tunnel. Latency does not change while a tunnel is up, so
-     * re-probing it would only make the number under the user's eyes jump; a
-     * new session starts the measurement over.
+     * one tunnel. Latency does not change while a tunnel is up, so re-probing
+     * it would only make the number under the user's eyes jump; a new session
+     * starts the measurement over.
      */
     @JvmStatic
     @Synchronized
@@ -85,24 +117,15 @@ object SessionState {
         rttHeld = 0
     }
 
-    /** A command in flight. */
-    enum class Command { NONE, CONNECT, DISCONNECT, PAUSE, RESUME }
-
-    private var pending = Command.NONE
-    private var pendingAt = 0L
-    private const val COMMAND_TIMEOUT_MS = 4000L
-
     /**
      * A command was just sent to an owner: from here until the state it asks
      * for arrives, frames that contradict it are held back.
      *
      * Without this the surfaces flinch: a Disconnect takes a moment to tear the
-     * session down, and the owner's ticks keep publishing `running` in that
-     * window, so the widget flipped back to DISCONNECT after the user had
-     * already disconnected. Same in the other direction — a stale all-false
-     * frame lands right after a Connect and reads as DISCONNECTED again. The
-     * latch ends at the first confirming frame, or after a timeout so a command
-     * that is never carried out cannot wedge the display.
+     * session down and the owner's ticks keep publishing the live phase in that
+     * window, so the widget flipped back to CONNECTED right after the user had
+     * disconnected. The latch ends at the first confirming frame, or after a
+     * timeout, so a command that is never carried out cannot wedge the display.
      */
     @JvmStatic
     @Synchronized
@@ -111,90 +134,74 @@ object SessionState {
         pendingAt = SystemClock.elapsedRealtime()
     }
 
-    /** Report a measured state: persist it and broadcast it. */
+    /**
+     * Report a measured phase: persist it and broadcast it. Owners call this on
+     * every tick they already run.
+     */
     @JvmStatic
     fun publish(
         context: Context,
-        running: Boolean,
-        paused: Boolean,
-        connecting: Boolean,
+        phase: Phase,
+        mode: Int,
         rx: Long,
         tx: Long,
         totalRx: Long,
         totalTx: Long,
         rttSample: Int
     ) {
-        val rtt = holdRtt(rttSample)
-        write(context, Snapshot(running, paused, connecting, rx, tx, totalRx, totalTx, rtt), measured = true)
+        val snapshot = Snapshot(
+            phase, mode, rx, tx, totalRx, totalTx, holdRtt(rttSample)
+        )
+        write(context, snapshot, measured = true)
         val intent = Intent(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
             .setPackage(context.packageName)
             .putExtra("generation", FCAEVpnService.stateGeneration())
-            .putExtra("running", running)
-            .putExtra("paused", paused)
-            .putExtra("connecting", connecting)
-            .putExtra("rx", rx)
-            .putExtra("tx", tx)
-            .putExtra("totalRx", totalRx)
-            .putExtra("totalTx", totalTx)
-            .putExtra("rtt", rtt)
+            .putExtra("phase", snapshot.phase.ordinal)
+            .putExtra("mode", snapshot.mode)
+            .putExtra("running", snapshot.running)
+            .putExtra("paused", snapshot.paused)
+            .putExtra("connecting", snapshot.connecting)
+            .putExtra("rx", snapshot.rx)
+            .putExtra("tx", snapshot.tx)
+            .putExtra("totalRx", snapshot.totalRx)
+            .putExtra("totalTx", snapshot.totalTx)
+            .putExtra("rtt", snapshot.rtt)
         try {
             context.sendBroadcast(intent)
         } catch (_: Throwable) {
         }
     }
 
-    /**
-     * Ingest a telemetry intent: a state broadcast of the app's own channel, or
-     * one of the AAR's — a live Psiphon exit measures in its own process, and
-     * its broadcasts are the only numbers that exist on that path.
-     */
+    /** Ingest a state broadcast of the app's own channel. */
     @JvmStatic
     fun absorb(context: Context, intent: Intent) {
-        val snapshot = when (intent.action) {
-            PsiphonTunnelService.BROADCAST_STATS -> Snapshot(
-                running = true, paused = false, connecting = false,
-                rx = intent.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, 0L),
-                tx = intent.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, 0L),
-                totalRx = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, 0L),
-                totalTx = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, 0L),
-                rtt = holdRtt(intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, 0))
-            )
-            PsiphonTunnelService.BROADCAST_READY -> Snapshot(
-                running = true, paused = false, connecting = false,
-                rx = 0L, tx = 0L, totalRx = 0L, totalTx = 0L, rtt = holdRtt(0)
-            )
-            else -> Snapshot(
-                running = intent.getBooleanExtra("running", false),
-                paused = intent.getBooleanExtra("paused", false),
-                connecting = intent.getBooleanExtra("connecting", false),
-                rx = intent.getLongExtra("rx", 0L),
-                tx = intent.getLongExtra("tx", 0L),
-                totalRx = intent.getLongExtra("totalRx", 0L),
-                totalTx = intent.getLongExtra("totalTx", 0L),
-                rtt = holdRtt(intent.getIntExtra("rtt", 0))
-            )
-        }
-        write(context, snapshot, measured = true)
+        val phase = Phase.entries.getOrElse(intent.getIntExtra("phase", 0)) { Phase.DISCONNECTED }
+        write(
+            context,
+            Snapshot(
+                phase,
+                intent.getIntExtra("mode", 1),
+                intent.getLongExtra("rx", 0L),
+                intent.getLongExtra("tx", 0L),
+                intent.getLongExtra("totalRx", 0L),
+                intent.getLongExtra("totalTx", 0L),
+                holdRtt(intent.getIntExtra("rtt", 0))
+            ),
+            measured = true
+        )
     }
 
     /**
-     * Command sent, owner not up yet: keeps the button from looking dead for
-     * the second it takes the service to publish its first state.
+     * Command sent, owner not up yet: keeps the button from looking dead for the
+     * second it takes the service to publish its first phase.
      */
     @JvmStatic
-    fun markConnecting(context: Context) {
-        write(context, Snapshot(false, false, true, 0L, 0L, 0L, 0L, holdRtt(0)))
-    }
-
-    /** The session is over: disconnected, stopped, or refused. */
-    @JvmStatic
-    fun markIdle(context: Context) {
-        clearRtt()
-        write(context, Snapshot.IDLE)
+    fun markConnecting(context: Context, mode: Int) {
+        write(context, Snapshot(Phase.CONNECTING, mode, 0L, 0L, 0L, 0L, holdRtt(0)))
     }
 
     /**
-     * The pause button was tapped: flip the flag now, keep everything else.
+     * The pause button was tapped: flip the phase now, keep everything else.
      *
      * Stop only halts the TUN data plane, so the reading is held exactly as it
      * was — the status, the rates and the totals do not move. Waiting for the
@@ -203,9 +210,19 @@ object SessionState {
      * flinch.
      */
     @JvmStatic
-    fun markPaused(context: Context, paused: Boolean) {
+    fun markPause(context: Context, paused: Boolean) {
         val current = latest?.takeIf { it.active } ?: return
-        write(context, current.copy(paused = paused, connecting = false))
+        write(
+            context,
+            current.copy(phase = if (paused) Phase.PAUSED else Phase.CONNECTED)
+        )
+    }
+
+    /** The session is over: disconnected, stopped, or refused. */
+    @JvmStatic
+    fun markIdle(context: Context) {
+        clearRtt()
+        write(context, Snapshot.IDLE)
     }
 
     /**
@@ -243,16 +260,39 @@ object SessionState {
         // Never written, or written by a boot that has ended since: a tunnel
         // does not survive a reboot, so the record must not claim one did.
         if (stamp == 0L || stamp > SystemClock.elapsedRealtime()) return Snapshot.IDLE
+        val phase = Phase.entries.getOrElse(prefs.getInt(K_PHASE, 0)) { Phase.DISCONNECTED }
         return Snapshot(
-            prefs.getBoolean(K_RUNNING, false),
-            prefs.getBoolean(K_PAUSED, false),
-            prefs.getBoolean(K_CONNECTING, false),
+            phase,
+            prefs.getInt(K_MODE, 1),
             prefs.getLong(K_RX, 0L),
             prefs.getLong(K_TX, 0L),
             prefs.getLong(K_TOTAL_RX, 0L),
             prefs.getLong(K_TOTAL_TX, 0L),
             prefs.getInt(K_RTT, 0)
         )
+    }
+
+    /**
+     * The snapshot a consumer may act on: [snapshot] minus any session that no
+     * longer exists.
+     *
+     * A stored frame can outlive the session it describes — the process is
+     * killed, the app is force-stopped, an OEM task manager takes the tunnel —
+     * and then nothing will ever publish again, so the widget would keep
+     * offering DISCONNECT for a tunnel that is gone. The owners are the only
+     * authority on whether a session exists, so ask them: if none is live and
+     * no fresh frame is arriving, the session is over and the record says so.
+     */
+    @JvmStatic
+    fun reconciled(context: Context): Snapshot {
+        val current = snapshot(context)
+        if (!current.active) return current
+        if (isLive()) return current
+        val last = latest
+        if (last != null && SystemClock.elapsedRealtime() - latestAt < GRACE_MS) return current
+        command(Command.NONE)
+        markIdle(context)
+        return Snapshot.IDLE
     }
 
     /**
@@ -274,9 +314,38 @@ object SessionState {
         }
     }
 
-    private var stableKey = Long.MIN_VALUE
-    private var stable: Snapshot? = null
-    private var regressions = 0
+    /** Whether `snapshot` may be shown while a command is in flight. */
+    @Synchronized
+    private fun accepts(snapshot: Snapshot): Boolean {
+        if (pending == Command.NONE) return true
+        if (SystemClock.elapsedRealtime() - pendingAt > COMMAND_TIMEOUT_MS) {
+            pending = Command.NONE
+            return true
+        }
+        return when (pending) {
+            Command.DISCONNECT -> !snapshot.active
+            Command.CONNECT -> snapshot.active
+            Command.PAUSE -> snapshot.up
+            // A resume is not a connect: the owner publishes CONNECTING while it
+            // re-raises the interface, and that frame would blank the controls
+            // mid-flip.
+            Command.RESUME -> snapshot.phase != Phase.CONNECTING
+            else -> true
+        }
+    }
+
+    /** Release the latch once a frame matches what was asked for. */
+    @Synchronized
+    private fun confirmed(snapshot: Snapshot) {
+        val done = when (pending) {
+            Command.DISCONNECT -> !snapshot.active
+            Command.CONNECT -> snapshot.active
+            Command.PAUSE -> snapshot.paused
+            Command.RESUME -> snapshot.up && !snapshot.paused
+            else -> false
+        }
+        if (done) pending = Command.NONE
+    }
 
     /**
      * Session key, and the snapshot published for it.
@@ -287,9 +356,8 @@ object SessionState {
      * the totals backwards and then up again, which is the flicker.
      */
     @Synchronized
-    private fun stabilize(key: Long, next: Snapshot): Snapshot? {
-        if (key != stableKey) {
-            stableKey = key
+    private fun stabilize(phase: Phase, next: Snapshot): Snapshot? {
+        if (phase != stable?.phase) {
             stable = next
             regressions = 0
             return next
@@ -308,38 +376,6 @@ object SessionState {
         return next
     }
 
-    /** Whether `snapshot` may be shown while a command is in flight. */
-    @Synchronized
-    private fun accepts(snapshot: Snapshot): Boolean {
-        if (pending == Command.NONE) return true
-        if (SystemClock.elapsedRealtime() - pendingAt > COMMAND_TIMEOUT_MS) {
-            pending = Command.NONE
-            return true
-        }
-        return when (pending) {
-            Command.DISCONNECT -> !snapshot.active
-            Command.CONNECT -> snapshot.active
-            // A resume is not a connect: the session stays up, and the
-            // "connecting" frame the owner publishes while it re-raises the
-            // interface would otherwise blank the controls mid-flip.
-            Command.RESUME -> snapshot.running || snapshot.paused
-            else -> true
-        }
-    }
-
-    /** Release the latch once a frame matches what was asked for. */
-    @Synchronized
-    private fun confirmed(snapshot: Snapshot) {
-        val done = when (pending) {
-            Command.DISCONNECT -> !snapshot.active
-            Command.CONNECT -> snapshot.active
-            Command.PAUSE -> snapshot.paused
-            Command.RESUME -> snapshot.running && !snapshot.paused
-            else -> false
-        }
-        if (done) pending = Command.NONE
-    }
-
     /**
      * Persist `snapshot`. Ending a session is written synchronously: every
      * disconnect path can take this process down milliseconds later, and a
@@ -349,19 +385,15 @@ object SessionState {
     private fun write(context: Context, snapshot: Snapshot, measured: Boolean = false) {
         if (!accepts(snapshot)) return
         if (measured) confirmed(snapshot)
-        val accepted = stabilize(FCAEVpnService.stateGeneration(), snapshot) ?: return
+        val accepted = stabilize(snapshot.phase, snapshot) ?: return
         latest = accepted
-        val flags =
-            (if (accepted.running) 1 else 0) or
-                (if (accepted.paused) 2 else 0) or
-                (if (accepted.connecting) 4 else 0)
+        latestAt = SystemClock.elapsedRealtime()
         val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (flags == persistedFlags && prefs.contains(K_STAMP)) return
-        persistedFlags = flags
+        if (accepted.phase.ordinal == persistedPhase && prefs.contains(K_STAMP)) return
+        persistedPhase = accepted.phase.ordinal
         val editor = prefs.edit()
-            .putBoolean(K_RUNNING, accepted.running)
-            .putBoolean(K_PAUSED, accepted.paused)
-            .putBoolean(K_CONNECTING, accepted.connecting)
+            .putInt(K_PHASE, accepted.phase.ordinal)
+            .putInt(K_MODE, accepted.mode)
             .putLong(K_RX, accepted.rx)
             .putLong(K_TX, accepted.tx)
             .putLong(K_TOTAL_RX, accepted.totalRx)

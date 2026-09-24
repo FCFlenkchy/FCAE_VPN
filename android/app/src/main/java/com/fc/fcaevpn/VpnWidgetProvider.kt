@@ -59,28 +59,15 @@ class VpnWidgetProvider : AppWidgetProvider() {
                     )
                 )
                 // Immediate feedback, before the service has processed anything.
-                SessionState.markPaused(context, !paused)
+                SessionState.markPause(context, !paused)
                 refresh(context)
             }
 
-            // A live Psiphon exit is the AAR's session, not the engine's.
-            PsiphonTunnelService.BROADCAST_READY,
-            PsiphonTunnelService.BROADCAST_STATS -> {
-                if (intent.getBooleanExtra("regionsOnly", false)) return
-                if (!PsiphonTunnelService.isCurrentBroadcast(intent)) return
-                SessionState.absorb(context, intent)
-                refresh(context)
-            }
-
-            PsiphonTunnelService.BROADCAST_STOPPED,
-            PsiphonTunnelService.BROADCAST_FAILED -> {
-                // Stamped: a failure of a previous session must not blank a
-                // live one.
-                if (!PsiphonTunnelService.isCurrentBroadcast(intent)) return
-                SessionState.markIdle(context)
-                refresh(context)
-            }
-
+            // The owners publish; the widget renders. The AAR's own broadcasts
+            // are deliberately not a second source here: the owner that holds
+            // the session already republishes its numbers under one phase, and
+            // two publishers for one session is exactly how the widget ended up
+            // disagreeing with itself.
             FCAEVpnService.BROADCAST_VPN_STATE_CHANGED,
             FCAEVpnService.BROADCAST_VPN_DISCONNECTED -> {
                 SessionState.absorb(context, intent)
@@ -121,7 +108,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
             SessionState.command(SessionState.Command.NONE)
             return false
         }
-        SessionState.markConnecting(context)
+        SessionState.markConnecting(context, session.getIntExtra("mode", 1))
         return true
     }
 
@@ -178,7 +165,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
         const val ACTION_WIDGET_PAUSE_RESUME = "com.fc.fcaevpn.WIDGET_PAUSE_RESUME"
 
         private const val EXTRA_TAP_ACTIVE = "tapActive"
-        private const val PREFS_MAIN = "aether_vpn"
         private const val PENDING_FLAGS =
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         private const val RECHECK_DELAY_MS = 2500L
@@ -248,37 +234,38 @@ class VpnWidgetProvider : AppWidgetProvider() {
 
         private fun render(context: Context, ids: IntArray, force: Boolean = false) {
             val manager = AppWidgetManager.getInstance(context) ?: return
-            val session = SessionState.snapshot(context)
-            val tun = context.getSharedPreferences(PREFS_MAIN, Context.MODE_PRIVATE)
-                .getInt("mode", 1) == 1
+            // reconciled(), not snapshot(): a stored frame can outlive its
+            // session, and the widget must never offer DISCONNECT for a tunnel
+            // that no longer exists.
+            val session = SessionState.reconciled(context)
+            val tun = session.mode == 1
 
             // Stop is a data-plane pause, not an end of the session: the app's
             // own rule for it (MainActivity) is that nothing on screen changes
-            // except the button. So there is no PAUSED state here — the status
-            // stays CONNECTED, and the readings stay the last live ones instead
-            // of decaying to zero and crawling back up on Start, which is what
-            // made a Stop look like a start/stop flinch.
-            if (session.running && !session.paused) lastLive = session
+            // except the button. So the status stays CONNECTED, and the readings
+            // stay the last live ones instead of decaying to zero and crawling
+            // back up on Start, which is what made a Stop look like a
+            // start/stop flinch.
+            if (session.up && !session.paused) lastLive = session
             val shown = if (session.paused) lastLive ?: session else session
 
-            val status: String
-            val statusColor: Int
-            val action: String
-            when {
-                session.connecting -> {
-                    status = "CONNECTING"; statusColor = COLOR_PROGRESS; action = "DISCONNECT"
-                }
-                session.running || session.paused -> {
-                    status = "CONNECTED - ${if (tun) "TUN" else "PROXY"}"
-                    statusColor = COLOR_CONNECTED
-                    action = "DISCONNECT"
-                }
-                else -> {
-                    status = "DISCONNECTED"; statusColor = COLOR_DISCONNECTED; action = "CONNECT"
-                }
+            val status = when (session.phase) {
+                SessionState.Phase.DISCONNECTED -> "DISCONNECTED"
+                SessionState.Phase.CONNECTING -> "CONNECTING"
+                SessionState.Phase.RECONNECTING -> "RECONNECTING"
+                SessionState.Phase.CONNECTED,
+                SessionState.Phase.PAUSED -> "CONNECTED - ${if (tun) "TUN" else "PROXY"}"
             }
+            val statusColor = when (session.phase) {
+                SessionState.Phase.DISCONNECTED -> COLOR_DISCONNECTED
+                SessionState.Phase.CONNECTING -> COLOR_PROGRESS
+                SessionState.Phase.RECONNECTING -> COLOR_PROGRESS
+                else -> COLOR_CONNECTED
+            }
+            val action =
+                if (session.phase == SessionState.Phase.DISCONNECTED) "CONNECT" else "DISCONNECT"
 
-            val pausable = tun && (session.running || session.paused)
+            val pausable = tun && (session.up || session.phase == SessionState.Phase.RECONNECTING)
             val pauseLabel = if (session.paused) "START" else "STOP"
             // Down and up are separate readings, each with its own arrow: rates
             // and totals each get a row, split into the two directions.
