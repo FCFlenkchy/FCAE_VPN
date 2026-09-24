@@ -9,6 +9,8 @@ import android.content.Intent
 import android.graphics.Color
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.widget.RemoteViews
 import java.util.Locale
@@ -39,6 +41,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
             ACTION_WIDGET_TOGGLE -> {
                 toggle(context, intent)
                 refresh(context)
+                if (SessionState.snapshot(context).connecting) scheduleRecheck(context)
             }
 
             ACTION_WIDGET_PAUSE_RESUME -> {
@@ -46,12 +49,17 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 // always flips the state it was shown for: a second tap on a
                 // stale button cannot re-issue Stop on a session already paused.
                 val paused = intent.getBooleanExtra(EXTRA_TAP_ACTIVE, false)
+                SessionState.command(
+                    if (paused) SessionState.Command.RESUME else SessionState.Command.PAUSE
+                )
                 dispatch(
                     context,
                     Intent(context, FCAEVpnService::class.java).setAction(
                         if (paused) FCAEVpnService.ACTION_START else FCAEVpnService.ACTION_STOP
                     )
                 )
+                // Immediate feedback, before the service has processed anything.
+                SessionState.markPaused(context, !paused)
                 refresh(context)
             }
 
@@ -108,13 +116,21 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 .setAction(ProxyNotification.ACTION_START)
                 .putExtras(session)
         }
-        if (!dispatch(context, command)) return false
+        SessionState.command(SessionState.Command.CONNECT)
+        if (!dispatch(context, command)) {
+            SessionState.command(SessionState.Command.NONE)
+            return false
+        }
         SessionState.markConnecting(context)
         return true
     }
 
     /** End the session, whichever owner holds it. */
     private fun disconnect(context: Context) {
+        // Latched before the command is sent: the owner needs a moment to tear
+        // the session down, and its ticks keep reporting the old state until it
+        // does. Those frames must not flip the button back.
+        SessionState.command(SessionState.Command.DISCONNECT)
         val tun = FCAEVpnService.ownsSession()
         val proxy = ProxyNotification.isAlive()
         if (tun) {
@@ -165,6 +181,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private const val PREFS_MAIN = "aether_vpn"
         private const val PENDING_FLAGS =
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        private const val RECHECK_DELAY_MS = 2500L
         private const val KIB = 1024L
         private const val MIB = KIB * 1024
         private const val GIB = MIB * 1024
@@ -172,6 +189,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private val COLOR_CONNECTED = Color.parseColor("#34D399")
         private val COLOR_DISCONNECTED = Color.parseColor("#8A93A6")
         private val COLOR_PROGRESS = Color.parseColor("#60A5FA")
+
+        private val mainHandler = Handler(Looper.getMainLooper())
 
         /** Last rendered content; identical content is not worth a repaint. */
         private var lastRendered: String? = null
@@ -197,6 +216,23 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private fun ids(context: Context): IntArray {
             val manager = AppWidgetManager.getInstance(context) ?: return IntArray(0)
             return manager.getAppWidgetIds(ComponentName(context, VpnWidgetProvider::class.java))
+        }
+
+        /**
+         * A start can still be refused after the command was accepted (nothing
+         * to replay, no engine). Re-ask the owners once it had time to come up,
+         * and fall back to DISCONNECTED rather than leaving a button that lies.
+         */
+        private fun scheduleRecheck(context: Context) {
+            val app = context.applicationContext
+            mainHandler.postDelayed({
+                if (SessionState.isLive()) return@postDelayed
+                if (SessionState.snapshot(app).active) {
+                    SessionState.command(SessionState.Command.NONE)
+                    SessionState.markIdle(app)
+                    refresh(app)
+                }
+            }, RECHECK_DELAY_MS)
         }
 
         private fun dispatch(context: Context, intent: Intent): Boolean = try {

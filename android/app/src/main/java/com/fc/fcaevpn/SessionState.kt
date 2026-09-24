@@ -85,6 +85,32 @@ object SessionState {
         rttHeld = 0
     }
 
+    /** A command in flight. */
+    enum class Command { NONE, CONNECT, DISCONNECT, PAUSE, RESUME }
+
+    private var pending = Command.NONE
+    private var pendingAt = 0L
+    private const val COMMAND_TIMEOUT_MS = 4000L
+
+    /**
+     * A command was just sent to an owner: from here until the state it asks
+     * for arrives, frames that contradict it are held back.
+     *
+     * Without this the surfaces flinch: a Disconnect takes a moment to tear the
+     * session down, and the owner's ticks keep publishing `running` in that
+     * window, so the widget flipped back to DISCONNECT after the user had
+     * already disconnected. Same in the other direction — a stale all-false
+     * frame lands right after a Connect and reads as DISCONNECTED again. The
+     * latch ends at the first confirming frame, or after a timeout so a command
+     * that is never carried out cannot wedge the display.
+     */
+    @JvmStatic
+    @Synchronized
+    fun command(command: Command) {
+        pending = command
+        pendingAt = SystemClock.elapsedRealtime()
+    }
+
     /** Report a measured state: persist it and broadcast it. */
     @JvmStatic
     fun publish(
@@ -99,7 +125,7 @@ object SessionState {
         rttSample: Int
     ) {
         val rtt = holdRtt(rttSample)
-        write(context, Snapshot(running, paused, connecting, rx, tx, totalRx, totalTx, rtt))
+        write(context, Snapshot(running, paused, connecting, rx, tx, totalRx, totalTx, rtt), measured = true)
         val intent = Intent(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
             .setPackage(context.packageName)
             .putExtra("generation", FCAEVpnService.stateGeneration())
@@ -148,7 +174,7 @@ object SessionState {
                 rtt = holdRtt(intent.getIntExtra("rtt", 0))
             )
         }
-        write(context, snapshot)
+        write(context, snapshot, measured = true)
     }
 
     /**
@@ -165,6 +191,21 @@ object SessionState {
     fun markIdle(context: Context) {
         clearRtt()
         write(context, Snapshot.IDLE)
+    }
+
+    /**
+     * The pause button was tapped: flip the flag now, keep everything else.
+     *
+     * Stop only halts the TUN data plane, so the reading is held exactly as it
+     * was — the status, the rates and the totals do not move. Waiting for the
+     * owner to confirm instead made the button look dead for a beat, and
+     * rendering the owner's zeroed rates made Stop look like a start-stop
+     * flinch.
+     */
+    @JvmStatic
+    fun markPaused(context: Context, paused: Boolean) {
+        val current = latest?.takeIf { it.active } ?: return
+        write(context, current.copy(paused = paused, connecting = false))
     }
 
     /**
@@ -267,13 +308,47 @@ object SessionState {
         return next
     }
 
+    /** Whether `snapshot` may be shown while a command is in flight. */
+    @Synchronized
+    private fun accepts(snapshot: Snapshot): Boolean {
+        if (pending == Command.NONE) return true
+        if (SystemClock.elapsedRealtime() - pendingAt > COMMAND_TIMEOUT_MS) {
+            pending = Command.NONE
+            return true
+        }
+        return when (pending) {
+            Command.DISCONNECT -> !snapshot.active
+            Command.CONNECT -> snapshot.active
+            // A resume is not a connect: the session stays up, and the
+            // "connecting" frame the owner publishes while it re-raises the
+            // interface would otherwise blank the controls mid-flip.
+            Command.RESUME -> snapshot.running || snapshot.paused
+            else -> true
+        }
+    }
+
+    /** Release the latch once a frame matches what was asked for. */
+    @Synchronized
+    private fun confirmed(snapshot: Snapshot) {
+        val done = when (pending) {
+            Command.DISCONNECT -> !snapshot.active
+            Command.CONNECT -> snapshot.active
+            Command.PAUSE -> snapshot.paused
+            Command.RESUME -> snapshot.running && !snapshot.paused
+            else -> false
+        }
+        if (done) pending = Command.NONE
+    }
+
     /**
      * Persist `snapshot`. Ending a session is written synchronously: every
      * disconnect path can take this process down milliseconds later, and a
      * queued apply() would go with it, leaving a widget that claims a session
      * for a tunnel that does not exist. Starts stay asynchronous.
      */
-    private fun write(context: Context, snapshot: Snapshot) {
+    private fun write(context: Context, snapshot: Snapshot, measured: Boolean = false) {
+        if (!accepts(snapshot)) return
+        if (measured) confirmed(snapshot)
         val accepted = stabilize(FCAEVpnService.stateGeneration(), snapshot) ?: return
         latest = accepted
         val flags =

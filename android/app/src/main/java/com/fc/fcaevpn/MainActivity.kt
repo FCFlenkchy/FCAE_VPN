@@ -1903,6 +1903,7 @@ class MainActivity : AppCompatActivity() {
     commandConnecting = false
 
     // 1. UI updates happen INSTANTLY on main thread
+    SessionState.command(SessionState.Command.DISCONNECT)
     vpnActive = false
     engineRunning = false
     connecting = false

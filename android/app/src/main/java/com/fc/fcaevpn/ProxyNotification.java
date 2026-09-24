@@ -315,10 +315,12 @@ public class ProxyNotification extends Service {
         if (intent != null && ACTION_DISCONNECT_KILL.equals(intent.getAction())) {
             // Notification Disconnect has no UI left to reconnect from, so the
             // process goes with the session — same contract as TUN mode.
+            SessionState.command(SessionState.Command.DISCONNECT);
             tearDownAndKillProcess("Notification Disconnect");
             return START_NOT_STICKY;
         }
         if (intent != null && ACTION_DISCONNECT.equals(intent.getAction())) {
+            SessionState.command(SessionState.Command.DISCONNECT);
             showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
             stopProxy();
             return START_NOT_STICKY;

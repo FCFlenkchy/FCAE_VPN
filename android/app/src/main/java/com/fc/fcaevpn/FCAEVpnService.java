@@ -644,10 +644,15 @@ public class FCAEVpnService extends VpnService {
         if (intent != null && intent.getAction() != null) {
             switch (intent.getAction()) {
                 case ACTION_STOP:
+                    // Latch here as well as at the caller: the notification, the
+                    // widget and the app all send these, and every one of them
+                    // deserves the same flinch-free display.
+                    SessionState.command(SessionState.Command.PAUSE);
                     requestPause();
                     return START_STICKY;
 
                 case ACTION_DISCONNECT:
+                    SessionState.command(SessionState.Command.DISCONNECT);
                     requestDisconnect();
                     return START_NOT_STICKY;
 
@@ -679,6 +684,12 @@ public class FCAEVpnService extends VpnService {
                     return START_STICKY;
 
                 case ACTION_START:
+                    // Resume and connect look the same on the wire and are not
+                    // the same thing on screen: only the connect may show the
+                    // dialing state.
+                    SessionState.command(vpnPaused
+                            ? SessionState.Command.RESUME
+                            : SessionState.Command.CONNECT);
                     requestStart(intent);
                     return START_STICKY;
             }

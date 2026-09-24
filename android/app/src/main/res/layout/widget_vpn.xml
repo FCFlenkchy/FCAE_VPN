@@ -161,19 +161,21 @@
             android:textSize="10sp" />
     </LinearLayout>
 
-    <!-- Row 5: controls. STOP/START exists for a TUN session only. -->
+    <!-- Row 5: controls. STOP/START exists for a TUN session only.
+         The row takes every line the readings do not, and the buttons fill it:
+         a fixed height left a dead strip under them on cells taller than the
+         minimum, which is most launchers at 3x2. -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_marginTop="6dp"
         android:layout_weight="1"
-        android:gravity="bottom"
         android:orientation="horizontal">
 
         <TextView
             android:id="@+id/widget_btn_pause_resume"
             android:layout_width="0dp"
-            android:layout_height="32dp"
+            android:layout_height="match_parent"
             android:layout_marginEnd="6dp"
             android:layout_weight="1"
             android:background="@drawable/widget_btn_tun_stop"
@@ -181,21 +183,21 @@
             android:singleLine="true"
             android:text="STOP"
             android:textColor="#FFFFFFFF"
-            android:textSize="10sp"
+            android:textSize="12sp"
             android:textStyle="bold"
             android:visibility="gone" />
 
         <TextView
             android:id="@+id/widget_btn_action"
             android:layout_width="0dp"
-            android:layout_height="32dp"
+            android:layout_height="match_parent"
             android:layout_weight="2"
             android:background="@drawable/widget_btn_connect"
             android:gravity="center"
             android:singleLine="true"
             android:text="CONNECT"
             android:textColor="#FFFFFFFF"
-            android:textSize="10sp"
+            android:textSize="12sp"
             android:textStyle="bold" />
     </LinearLayout>
 
