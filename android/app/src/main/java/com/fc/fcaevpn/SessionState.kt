@@ -320,6 +320,11 @@ object SessionState {
         // The engine's own state, read through the same test the service uses:
         // ERROR (5) is a session that ended and left its last state behind, and
         // counting it kept a dead session — and the process behind it — alive.
+        // An engine lives in this process, so a process that never loaded it
+        // has no session: asking would load the Go and Rust libraries and run
+        // fcae_init on the caller's thread — the widget's main thread, on a
+        // cold tap, before its button could even repaint.
+        if (!NativeEngine.Loaded.value) return false
         return try {
             FCAEVpnService.engineSessionLive(NativeEngine.nativeGetState())
         } catch (_: Throwable) {

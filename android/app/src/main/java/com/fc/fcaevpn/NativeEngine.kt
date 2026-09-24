@@ -18,7 +18,17 @@ object NativeEngine {
         System.loadLibrary("fcae_go_bridge")
 
         System.loadLibrary("fcaevpn_native")
+        Loaded.value = true
+    }
 
+    /**
+     * Whether the libraries are in this process. A nested object is its own
+     * class, so reading it does not run the loader above: callers that only
+     * need to know whether an engine CAN exist here (the widget, in a process
+     * the launcher just started) ask this instead of paying for the load.
+     */
+    object Loaded {
+        @JvmField @Volatile var value = false
     }
 
     /**
