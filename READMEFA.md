@@ -4,6 +4,12 @@
   <img src="mountain.png" alt="FCAE VPN" width="100%">
 </p>
 
+<p align="center">
+  <a href="https://github.com/FCFlenkchy/FCAE_VPN/releases">
+    <img src="https://img.shields.io/github/downloads/FCFlenkchy/FCAE_VPN/total?style=for-the-badge&logo=github&label=Downloads" alt="Total downloads">
+  </a>
+</p>
+
 **[English](README.md)** | **فارسی** | **[中文](READMECH.md)**
 
 یک فیلترشکنی که برای دور زدن سانسور طراحی‌شده، حتی برای شبکه‌های به‌شدت محدود! این ابزار به‌طور خودکار مسیرهای قابل‌دسترس را کشف می‌کند، و یک تونل رمزگذاری‌شده برقرار می‌کند و یک پروکسی محلی SOCKS5/HTTP برای برنامه‌های شما فراهم می‌کند.

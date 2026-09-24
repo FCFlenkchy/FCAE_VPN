@@ -4,6 +4,12 @@
   <img src="mountain.png" alt="FCAE VPN" width="100%">
 </p>
 
+<p align="center">
+  <a href="https://github.com/FCFlenkchy/FCAE_VPN/releases">
+    <img src="https://img.shields.io/github/downloads/FCFlenkchy/FCAE_VPN/total?style=for-the-badge&logo=github&label=Downloads" alt="Total downloads">
+  </a>
+</p>
+
 A censorship circumvention client designed for heavily restricted networks. It automatically discovers reachable routes, establishes an encrypted tunnel, and exposes a local SOCKS5/HTTP proxy for your applications.
 
 Built on top of **[Aether](https://github.com/CluvexStudio/aether)** with native GUI frontends for Windows, Linux, macOS, and Android.

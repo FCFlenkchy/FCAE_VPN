@@ -4,6 +4,12 @@
   <img src="mountain.png" alt="FCAE VPN" width="100%">
 </p>
 
+<p align="center">
+  <a href="https://github.com/FCFlenkchy/FCAE_VPN/releases">
+    <img src="https://img.shields.io/github/downloads/FCFlenkchy/FCAE_VPN/total?style=for-the-badge&logo=github&label=Downloads" alt="Total downloads">
+  </a>
+</p>
+
 **[English](README.md)** | **[فارسی](READMEFA.md)** | **中文**
 
 一款为高度受限网络设计的审查绕过客户端。它会自动发现可达路由，建立加密隧道，并为您的应用程序暴露本地 SOCKS5/HTTP 代理。
