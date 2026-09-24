@@ -279,7 +279,8 @@ class MainActivity : AppCompatActivity() {
                     // the record is the half that covers a disconnect from the
                     // notification or the widget.
                     if (userInitiatedDisconnect) return
-                    if (!connecting && !commandConnecting && !SessionState.reconciled(this).active) return
+                    if (!connecting && !commandConnecting
+                            && !SessionState.reconciled(this@MainActivity).active) return
                     pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: ""
                     pendingPsiSocks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, pendingPsiSocks)
                     acceptPsiStats(intent)
