@@ -87,6 +87,8 @@ object SessionState {
     private var latestAt = 0L
 
     private var rttHeld = 0
+    /** Session the held RTT and the frame on screen belong to. */
+    private var sessionGeneration = Long.MIN_VALUE
     private var pending = Command.NONE
     private var pendingAt = 0L
 
@@ -149,6 +151,15 @@ object SessionState {
         totalTx: Long,
         rttSample: Int
     ) {
+        // A new session owns its own readings: the generation every owner bumps
+        // when it starts is what tells them apart, so a stale RTT (or a stale
+        // total, if a backend keeps cumulative counters) can never be presented
+        // as this session's.
+        val generation = FCAEVpnService.stateGeneration()
+        if (generation != sessionGeneration) {
+            sessionGeneration = generation
+            clearRtt()
+        }
         val snapshot = Snapshot(
             phase, mode, rx, tx, totalRx, totalTx, holdRtt(rttSample)
         )

@@ -240,14 +240,20 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val session = SessionState.reconciled(context)
             val tun = session.mode == 1
 
-            // Stop is a data-plane pause, not an end of the session: the app's
-            // own rule for it (MainActivity) is that nothing on screen changes
-            // except the button. So the status stays CONNECTED, and the readings
-            // stay the last live ones instead of decaying to zero and crawling
-            // back up on Start, which is what made a Stop look like a
-            // start/stop flinch.
+            // Readings belong to a session. While one is live they are its last
+            // live sample: Stop is a data-plane pause, not an end of the
+            // session, so nothing on screen changes except the button (the app
+            // makes the same promise), and the numbers must not decay to zero
+            // and crawl back up on Start. The moment the session is over they
+            // go with it — a disconnected widget reports nothing, whatever the
+            // record still holds.
             if (session.up && !session.paused) lastLive = session
-            val shown = if (session.paused) lastLive ?: session else session
+            val shown = when {
+                !session.active -> SessionState.Snapshot.IDLE
+                session.paused -> lastLive ?: session
+                else -> session
+            }
+            if (!session.active) lastLive = null
 
             val status = when (session.phase) {
                 SessionState.Phase.DISCONNECTED -> "DISCONNECTED"
@@ -265,7 +271,12 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val action =
                 if (session.phase == SessionState.Phase.DISCONNECTED) "CONNECT" else "DISCONNECT"
 
-            val pausable = tun && (session.up || session.phase == SessionState.Phase.RECONNECTING)
+            // Same rule as the app's own controls (MainActivity.updateButton):
+            // the pair is there for a TUN session from the first moment a
+            // connect is asked for — dialing included — and gone once the
+            // session is over. Stop cancels a dial and pauses a live tunnel, so
+            // the label only flips on the paused phase.
+            val pausable = tun && session.active
             val pauseLabel = if (session.paused) "START" else "STOP"
             // Down and up are separate readings, each with its own arrow: rates
             // and totals each get a row, split into the two directions.

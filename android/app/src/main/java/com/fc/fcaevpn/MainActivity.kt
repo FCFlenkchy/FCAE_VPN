@@ -1223,14 +1223,15 @@ class MainActivity : AppCompatActivity() {
         // in flight when the UI closed (proxy stop) and a session started
         // within the window cancels the kill.
         if (!isChangingConfigurations) {
-            if (!FCAEVpnService.ownsSession() && !ProxyNotification.isAlive()) {
-                try { PsiphonTunnelService.killProcessOnExit(this) } catch (_: Throwable) {}
-            }
+            // The question is "is there a session?", not "is a service object
+            // still alive?": an owner can outlive its session (a failed dial, a
+            // killed AAR, a completed teardown), and asking the wrong one kept
+            // this process cached with no VPN behind it, which is exactly what
+            // the user sees as "the app never gets killed".
+            if (!SessionState.reconciled(this).active) endIdleProcess()
             handler.postDelayed({
-                if (!activityAlive && !FCAEVpnService.ownsSession()
-                        && !ProxyNotification.isAlive()) {
-                    try { PsiphonTunnelService.killProcessOnExit(this@MainActivity) } catch (_: Throwable) {}
-                    FCAEVpnService.killProcessQuietly()
+                if (!activityAlive && !SessionState.reconciled(this@MainActivity).active) {
+                    endIdleProcess()
                 }
             }, PROCESS_EXIT_DELAY_MS)
         }
@@ -1954,6 +1955,18 @@ class MainActivity : AppCompatActivity() {
         }
     }, "Disconnect-Background").start()
 }
+
+    /**
+     * No session, no UI: nothing of this app has a reason to stay cached, and
+     * a still-started service would only invite Android to restart the process
+     * we are about to end — so the owners are stopped first.
+     */
+    private fun endIdleProcess() {
+        try { stopService(Intent(this, FCAEVpnService::class.java)) } catch (_: Throwable) {}
+        try { stopService(Intent(this, ProxyNotification::class.java)) } catch (_: Throwable) {}
+        try { PsiphonTunnelService.killProcessOnExit(this) } catch (_: Throwable) {}
+        FCAEVpnService.killProcessQuietly()
+    }
 
     private fun checkForUpdates() {
         btnCheckUpdates.isEnabled = false

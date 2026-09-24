@@ -13,9 +13,13 @@ public class ProxyNotification extends Service {
     private static final String TAG = "FCAE_PROXY";
     private static final String CHANNEL_ID = "fcaevpn_proxy_hi";
     public static final int NOTIFICATION_ID = 2;
-    /** Long enough for nativeStop and the disconnect broadcast, short enough
-     *  that the process is gone before the user can tell it lingered. */
-    private static final long PROCESS_KILL_DELAY_MS = 600L;
+    /**
+     * Long enough for the disconnect broadcast to reach the UI, short enough
+     * that the process is gone before the user can tell it lingered. The kill
+     * does not wait for the engine teardown on purpose: the process ending IS
+     * the teardown, and the kernel closes what is left.
+     */
+    private static final long PROCESS_KILL_DELAY_MS = 250L;
 
     public static final String ACTION_START = "com.fc.fcaevpn.PROXY_START";
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.PROXY_DISCONNECT";
@@ -467,8 +471,9 @@ public class ProxyNotification extends Service {
      */
     private void publishState() {
         if (stopping) return;
-        // Chained Psiphon: the AAR owns the exit, and its numbers are one
-        // session's worth of telemetry, not two.
+        // A pure Psiphon exit lives entirely in the AAR, so this owner is the
+        // only publisher its session has; a chained one is measured by the AAR
+        // as well, and its numbers are one session's worth of telemetry.
         final Intent psi = lastPsiphonStats;
         final boolean psiFresh = psi != null && PsiphonTunnelService.isCurrentBroadcast(psi);
         final long[] stats = SessionState.stats(psiFresh ? psi : null);

@@ -65,6 +65,9 @@ public class FCAEVpnService extends VpnService {
     private volatile Intent pendingPsiphonStart;
     private static final String TAG = "FCAE_VPN";
 
+    /** A connect may stay unresolved this long before it is declared dead. */
+    private static final long CONNECT_WATCHDOG_MS = 60000L;
+
     public static final String ACTION_STOP       = "com.fc.fcaevpn.STOP";
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
     public static final String ACTION_START      = "com.fc.fcaevpn.START";
@@ -647,16 +650,19 @@ public class FCAEVpnService extends VpnService {
                     // Latch here as well as at the caller: the notification, the
                     // widget and the app all send these, and every one of them
                     // deserves the same flinch-free display.
+                    handler.removeCallbacks(connectWatchdog);
                     SessionState.command(SessionState.Command.PAUSE);
                     requestPause();
                     return START_STICKY;
 
                 case ACTION_DISCONNECT:
+                    handler.removeCallbacks(connectWatchdog);
                     SessionState.command(SessionState.Command.DISCONNECT);
                     requestDisconnect();
                     return START_NOT_STICKY;
 
                 case ACTION_PSIPHON_START:
+                    armConnectWatchdog();
                     pendingPsiphonStart = new Intent(intent);
                     preparePsiphonConnect(intent);
                     PsiphonTunnelService.startBound(this,
@@ -687,6 +693,7 @@ public class FCAEVpnService extends VpnService {
                     // Resume and connect look the same on the wire and are not
                     // the same thing on screen: only the connect may show the
                     // dialing state.
+                    armConnectWatchdog();
                     SessionState.command(vpnPaused
                             ? SessionState.Command.RESUME
                             : SessionState.Command.CONNECT);
@@ -854,6 +861,12 @@ public class FCAEVpnService extends VpnService {
                 startVpn(next);
             }
         }
+    }
+
+    /** Watch a fresh dial; cancelled by any command that ends it. */
+    private void armConnectWatchdog() {
+        handler.removeCallbacks(connectWatchdog);
+        handler.postDelayed(connectWatchdog, CONNECT_WATCHDOG_MS);
     }
 
     private void preparePsiphonConnect(Intent intent) {
@@ -1165,6 +1178,7 @@ public class FCAEVpnService extends VpnService {
         // 1. INSTANT UI & NOTIFICATION CLEANUP
         Runnable uiCleanup = () -> {
             handler.removeCallbacks(statsRunnable);
+            handler.removeCallbacks(connectWatchdog);
             notifyUi();
             notification.dismiss();
             stopForeground(STOP_FOREGROUND_REMOVE);
@@ -1181,31 +1195,72 @@ public class FCAEVpnService extends VpnService {
             handler.post(uiCleanup);
         }
 
-        // 2. Reap only. TUN and UI are already down — do not join the
-        // worker (join(0) waits forever in Java; join(50) was a 50ms stall).
+        // 2. Reap the engine — except when this process is on its way out.
         NativeEngine.lifecycleExecutor.execute(() -> {
             if (myGen != cleanupGeneration.get()) return;
+            if (killProcessOnCleanup) {
+                // Dying on purpose: the kernel closes whatever is left behind,
+                // so the kill must not queue behind the engine's own reaper —
+                // that wait was the slow part of every Disconnect. The reap is
+                // still queued, for the case where the kill never lands.
+                finishTeardown(myGen);
+                NativeEngine.lifecycleExecutor.execute(() -> {
+                    try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
+                });
+                return;
+            }
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-            sweepTun();
-            handler.post(() -> {
-                synchronized (FCAEVpnService.this) {
-                    if (myGen != cleanupGeneration.get()) return;
-                    synchronized (cmdLock) {
-                        engineOpInFlight = false;
-                        queuedStart = null;
-                    }
-                    stopSelf();
-                    ProxyNotification.notifyCleanupComplete(this);
-                    // Queued, not immediate: notifyCleanupComplete's broadcast
-                    // is already on the main looper's queue and must be
-                    // delivered before the process disappears.
-                    if (killProcessOnCleanup) scheduleProcessKill();
-                }
-            });
-            // Activity absence/recreation is not process shutdown. The kill is
-            // decided by the caller, never by teardown itself.
+            finishTeardown(myGen);
         });
     }
+
+    /**
+     * The tail of a teardown: TUN swept, service stopped, UI told, process
+     * ended if the caller asked for it.
+     */
+    private void finishTeardown(long myGen) {
+        sweepTun();
+        handler.post(() -> {
+            synchronized (FCAEVpnService.this) {
+                if (myGen != cleanupGeneration.get()) return;
+                synchronized (cmdLock) {
+                    engineOpInFlight = false;
+                    queuedStart = null;
+                }
+                stopSelf();
+                ProxyNotification.notifyCleanupComplete(this);
+                // Queued, not immediate: notifyCleanupComplete's broadcast is
+                // already on the main looper's queue and must be delivered
+                // before the process disappears.
+                if (killProcessOnCleanup) scheduleProcessKill();
+            }
+        });
+        // Activity absence/recreation is not process shutdown. The kill is
+        // decided by the caller, never by teardown itself.
+    }
+
+    /**
+     * A connect that never resolves.
+     *
+     * A dial can die without ever publishing a terminal state — the AAR's
+     * process is killed, a broadcast is lost — and then nothing clears
+     * uiConnecting. The service would claim it owns a session forever, which
+     * also means the app's own process is never allowed to end when the user
+     * closes it. Bounded: if no engine session, no Psiphon binding and no
+     * engine activity exist by the deadline, the session is declared dead.
+     */
+    private final Runnable connectWatchdog = () -> {
+        synchronized (FCAEVpnService.this) {
+            if (!uiConnecting || running || vpnPaused) return;
+            if (PsiphonTunnelService.hasActiveBinding()) return;
+            int state = 5;
+            try { state = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
+            if (state >= 1 && state <= 4 || state == 6) return;
+            Log.w(TAG, "connect never resolved (engine state " + state
+                    + ") — tearing the session down");
+            fullShutdown();
+        }
+    };
 
     private void scheduleProcessKill() {
         handler.post(this::killEverything);
