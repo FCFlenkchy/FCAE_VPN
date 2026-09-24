@@ -420,6 +420,12 @@ class MainActivity : AppCompatActivity() {
                             // because no traffic flows. The Start button is
                             // the only visible difference.
                             updateButton()
+                            // Same clock as a live session: each owner tick
+                            // re-arms the poll, so the readings land with the
+                            // notification and the widget instead of on a
+                            // timer that drifted up to a second behind them.
+                            handler.removeCallbacks(poll)
+                            handler.post(poll)
                         } else if (!isRunning && !isPaused) {
 
                             lastBroadcastGeneration = gen

@@ -38,6 +38,8 @@ static jobject  g_vpn_service = nullptr;   // global ref to the VpnService
 static jmethodID g_protect_mid = nullptr;
 static std::mutex g_protect_mu;
 
+static void ensure_init();
+
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     g_vm = vm;
     return JNI_VERSION_1_6;
@@ -217,6 +219,10 @@ static int establish_tun() {
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_FCAEVpnService_nativeRegisterVpnService(JNIEnv* env, jobject thiz) {
+    // The fd provider lives on the runtime, so the runtime must exist first:
+    // registered before fcae_init, the provider is refused (NotInitialized)
+    // and the session comes up with no interface to establish.
+    ensure_init();
     std::lock_guard<std::mutex> lock(g_protect_mu);
     if (g_vpn_service) {
         env->DeleteGlobalRef(g_vpn_service);
@@ -259,7 +265,9 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeRegisterVpnService(JNIEnv* env, jobject
     }
     env->DeleteLocalRef(cls);
 
-    fcae_set_tun_fd_provider(g_establish_mid ? establish_tun : nullptr);
+    if (fcae_set_tun_fd_provider(g_establish_mid ? establish_tun : nullptr) != FCAE_OK) {
+        LOGE("fcae_set_tun_fd_provider: %s", fcae_last_error());
+    }
     fcae_set_psiphon_protect(psiphon_protect);
     fcae_set_psiphon_network_callbacks(
         g_dns_mid ? psiphon_dns_servers : nullptr,
