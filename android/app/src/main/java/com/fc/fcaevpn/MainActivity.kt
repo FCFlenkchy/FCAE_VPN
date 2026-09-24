@@ -208,7 +208,10 @@ class MainActivity : AppCompatActivity() {
         pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: pendingPsiLan
         pendingPsiSocks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, pendingPsiSocks)
         pendingPsiHttp = intent.getIntExtra(PsiphonTunnelService.EXTRA_HTTP, pendingPsiHttp)
-        psiRttMs = intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, psiRttMs)
+        psiRttMs = SessionState.holdRtt(
+            SessionState.tokenOf(intent),
+            intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, psiRttMs)
+        )
         psiUpBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, psiUpBps)
         psiDownBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, psiDownBps)
         psiTotalUp = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, psiTotalUp)
@@ -442,11 +445,14 @@ class MainActivity : AppCompatActivity() {
                     // Use structured getters instead of JSON round-trip.
                     // Saves ~1 KB alloc per poll tick.
                     val state = NativeEngine.nativeGetState()
-                    // On psiphon paths the engine's prober owns no RTT; fall
-                    // back to the tunnel probe broadcast from :psiphon.
-                    val rttNative = NativeEngine.nativeGetRttMs()
-                    val rtt = if (rttNative == 0 && psiRttMs > 0
-                            && (isPsiphonSelected() || isEgressPsiphon())) psiRttMs else rttNative
+                    // Psiphon paths: the exit's tunnel probe is the real
+                    // latency, already held for its session. Everything else
+                    // goes through the same hold -> one value per session.
+                    val rtt = if (psiRttMs > 0 && (isPsiphonSelected() || isEgressPsiphon())) psiRttMs
+                        else SessionState.holdRtt(
+                            FCAEVpnService.stateGeneration(),
+                            NativeEngine.nativeGetRttMs()
+                        )
                     val rx = NativeEngine.nativeGetRxBps()
                     val tx = NativeEngine.nativeGetTxBps()
                     val totalRx = NativeEngine.nativeGetTotalRx()
@@ -1622,6 +1628,7 @@ class MainActivity : AppCompatActivity() {
             vpnActive = true
             updateButton()
             saveSettings()
+            FCAEVpnService.rememberSession(this, buildStartIntent())
             resetStats()
             statusText.text = "CONNECTING"
             statusText.setTextColor(COLOR_PROGRESS)
@@ -1731,6 +1738,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("psiphonThroughTunnel", isEgressPsiphon())
         i.putExtra("psiphonConfig", org.json.JSONObject().put("FCAETransport", selectedPsiphonTransportIndex()).toString())
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
+        i.putExtra("psiphonTransport", selectedPsiphonTransportIndex())
         // Prefer the LIVE AAR ports: when this start is the Protocol=Psiphon
         // "raise TUN" step, the AAR already picked random ports and
         // pendingPsiSocks/pendingPsiHttp hold them. Reading only the edit
@@ -1749,6 +1757,8 @@ class MainActivity : AppCompatActivity() {
         engineRunning = false  // will become true once poll confirms connected
         updateButton()
         saveSettings()
+        // Headless replays (the widget) read the session from here.
+        FCAEVpnService.rememberSession(this, buildStartIntent())
 
         // Start proxy notification foreground service for bandwidth stats
         val proxyIntent = Intent(this, ProxyNotification::class.java)
@@ -2470,7 +2480,6 @@ class MainActivity : AppCompatActivity() {
             } else {
                 statsText.text =
                     "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  RTT ${if (rtt > 0) "${rtt}ms" else "—"}"
-                VpnWidgetProvider.updateStats(this@MainActivity, rx, tx, totalRx, totalTx, rtt)
             }
 
             // Psiphon direct and Tor-only sessions do not expose an Aether peer.

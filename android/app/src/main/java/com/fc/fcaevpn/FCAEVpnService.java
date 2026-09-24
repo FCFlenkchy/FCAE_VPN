@@ -1,6 +1,7 @@
 package com.fc.fcaevpn;
 
 import android.app.Notification;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
@@ -78,6 +79,14 @@ public class FCAEVpnService extends VpnService {
     // proxy and TUN teardowns identically.
     static final AtomicLong sGeneration = new AtomicLong(0);
     private static FCAEVpnService instance; // ADDED for instant UI disconnect
+
+    /**
+     * Session generation, for publishers that stamp the shared state channel
+     * (SessionState) instead of building the broadcast themselves.
+     */
+    public static long stateGeneration() {
+        return sGeneration.get();
+    }
 
     private final AtomicLong cleanupGeneration = new AtomicLong(0);
     /**
@@ -565,12 +574,24 @@ public class FCAEVpnService extends VpnService {
      * reads it before ending the process on task removal: a live tunnel has
      * to be torn down by the service, which then kills the process itself.
      */
-    static boolean ownsSession() {
+    public static boolean ownsSession() {
         FCAEVpnService current = instance;
         if (current == null) return false;
         return current.running || current.uiConnecting || current.vpnPaused
                 || current.engineOpInFlight || current.vpnThread != null
                 || current.vpnInterface != null;
+    }
+
+    /**
+     * A session is up or coming up. Narrower than ownsSession(), which also
+     * reports a teardown in flight — in that window a connect tap must stay a
+     * connect rather than read as "something is running".
+     */
+    public static boolean sessionActive() {
+        FCAEVpnService current = instance;
+        if (current == null) return false;
+        return current.running || current.uiConnecting || current.vpnPaused
+                || current.vpnThread != null;
     }
 
     @Override
@@ -763,6 +784,26 @@ public class FCAEVpnService extends VpnService {
                 notifyUi();
                 return;
             }
+        }
+        // A Psiphon session's engine attaches to the AAR's SOCKS listener and
+        // would dial a port nobody holds, so dial Psiphon first; its READY arm
+        // patches the live ports into this session and re-enters here. Same
+        // order the UI's connect click uses.
+        if (lastStartIntent.getIntExtra("backend", 0) == 1
+                && !PsiphonTunnelService.hasActiveBinding()) {
+            pendingPsiphonStart = new Intent(lastStartIntent);
+            preparePsiphonConnect(pendingPsiphonStart);
+            PsiphonTunnelService.startBound(this,
+                    new Intent(this, PsiphonTunnelService.class)
+                            .setAction(PsiphonTunnelService.ACTION_START)
+                            .putExtras(lastStartIntent)
+                            .putExtra(PsiphonTunnelService.EXTRA_OWNER,
+                                    PsiphonTunnelService.OWNER_VPN));
+            return;
+        }
+        // Claim the engine slot only for a start that runs an engine: the
+        // Psiphon-first path above leaves it free for the READY arm.
+        synchronized (cmdLock) {
             engineOpInFlight = true;
         }
         startVpn(lastStartIntent);
@@ -1086,7 +1127,7 @@ public class FCAEVpnService extends VpnService {
             queuedStart = null;
             engineOpInFlight = true;
         }
-        forgetStart();
+        forgetLiveSession();
 
         vpnThread = null;
         pendingPsiphonStart = null;
@@ -1309,24 +1350,19 @@ public class FCAEVpnService extends VpnService {
     }
 
     private void notifyUi() {
-        Intent intent = new Intent(BROADCAST_VPN_STATE_CHANGED);
-        intent.setPackage(getPackageName());
-        intent.putExtra("running", running);
-        intent.putExtra("paused", vpnPaused && !uiConnecting);
-        intent.putExtra("connecting", uiConnecting);
-        intent.putExtra("generation", sGeneration.get());
-        try {
-            long[] stats = nativeGetTrafficStats();
-            if (stats != null && stats.length >= 4) {
-                intent.putExtra("rx", stats[0]);
-                intent.putExtra("tx", stats[1]);
-                intent.putExtra("totalRx", stats[2]);
-                intent.putExtra("totalTx", stats[3]);
-            }
-            int rtt = NativeEngine.nativeGetRttMs();
-            intent.putExtra("rtt", rtt);
-        } catch (Exception ignored) {}
-        sendBroadcast(intent);
+        // A live Psiphon exit owns the outside of the tunnel: its counters and
+        // its tunnel RTT are the only ones that exist on that path, and they are
+        // what the notification shows. SessionState picks the source, so the
+        // widget and the app's status line read the same numbers.
+        final Intent psi = lastPsiphonStats;
+        final boolean psiFresh = psi != null && PsiphonTunnelService.isCurrentBroadcast(psi);
+        final long[] stats = SessionState.stats(psiFresh ? psi : null);
+        // An RTT is held for exactly as long as the session it was measured on.
+        final long token = psiFresh
+                ? SessionState.tokenOf(psi)
+                : sGeneration.get();
+        SessionState.publish(this, token, running, vpnPaused && !uiConnecting, uiConnecting,
+                stats[0], stats[1], stats[2], stats[3], (int) stats[4]);
     }
 
     private Intent lastPsiphonStats;
@@ -1430,9 +1466,29 @@ public class FCAEVpnService extends VpnService {
 
     private static final String PREFS_LAST = "fcae_vpn_last_start";
 
+    /**
+     * Persist a session description. Surfaces without an Activity -- the widget,
+     * the notification after a process restart -- have no views to read a config
+     * from, so the session the app last ran is the session they ask for.
+     */
+    public static void rememberSession(Context context, Intent session) {
+        if (context == null || session == null || !session.hasExtra("protocol")) return;
+        writeSession(context, session);
+    }
+
+    /** The persisted session as an ACTION_START intent, or null if none. */
+    public static Intent recalledSession(Context context) {
+        if (context == null) return null;
+        return readSession(context);
+    }
+
     private void rememberStart(Intent i) {
         if (i == null) return;
-        SharedPreferences.Editor e = getSharedPreferences(PREFS_LAST, MODE_PRIVATE).edit();
+        writeSession(this, i);
+    }
+
+    private static void writeSession(Context context, Intent i) {
+        SharedPreferences.Editor e = context.getSharedPreferences(PREFS_LAST, MODE_PRIVATE).edit();
         e.putBoolean("has", true);
         putInt(e, i, "protocol", 0);
         putInt(e, i, "mode", 1);
@@ -1472,13 +1528,16 @@ public class FCAEVpnService extends VpnService {
         putStr(e, i, "psiphonRegion");
         putInt(e, i, "psiphonSocksPort", 0);
         putInt(e, i, "psiphonHttpPort", 0);
+        // The AAR's transport is not a native config field, but a headless
+        // replay has to start Psiphon with the same one the UI picked.
+        putInt(e, i, "psiphonTransport", 0);
         e.apply();
     }
 
-    private Intent recalledStart() {
-        SharedPreferences p = getSharedPreferences(PREFS_LAST, MODE_PRIVATE);
+    private static Intent readSession(Context context) {
+        SharedPreferences p = context.getSharedPreferences(PREFS_LAST, MODE_PRIVATE);
         if (!p.getBoolean("has", false)) return null;
-        Intent i = new Intent(this, FCAEVpnService.class);
+        Intent i = new Intent(context, FCAEVpnService.class);
         i.setAction(ACTION_START);
         copyInt(p, i, "protocol", 0);
         copyInt(p, i, "mode", 1);
@@ -1518,11 +1577,20 @@ public class FCAEVpnService extends VpnService {
         copyStr(p, i, "psiphonRegion");
         copyInt(p, i, "psiphonSocksPort", 0);
         copyInt(p, i, "psiphonHttpPort", 0);
+        copyInt(p, i, "psiphonTransport", 0);
         return i;
     }
 
-    private void forgetStart() {
-        getSharedPreferences(PREFS_LAST, MODE_PRIVATE).edit().clear().apply();
+    private Intent recalledStart() {
+        return readSession(this);
+    }
+
+    /**
+     * A disconnect ends the session, not the description of it: the record is
+     * what lets CONNECT work again afterwards without the app. Only the
+     * in-memory reference goes, so nothing can resume a session the user ended.
+     */
+    private void forgetLiveSession() {
         lastStartIntent = null;
     }
 

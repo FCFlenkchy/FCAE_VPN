@@ -201,6 +201,7 @@ public class ProxyNotification extends Service {
             }
             if (!stopping && !externalPsiphon) PsiphonTunnelService.pollChainedRequest(ProxyNotification.this);
             updateNotification();
+            publishState();
             handler.postDelayed(this, 1000);
         }
     };
@@ -344,9 +345,37 @@ public class ProxyNotification extends Service {
         ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
         stopping = false;
         nativeFreed = false;
+
+        // A description on the intent means a surface without an Activity is
+        // asking for this session (the widget). MainActivity's own ACTION_START
+        // carries none: it starts the engine itself, from its live views.
+        final boolean described = intent.hasExtra("protocol");
+        if (described && engineAlive()) {
+            // Already up (second tap, stale widget, redelivery). The TUN owner
+            // ignores a start on a live tunnel for the same reason: rebuilding
+            // the session under it would drop everything in flight.
+            Log.i(TAG, "Start ignored: session already up");
+            showNotification(VpnNotification.zeroTrafficText(), BUTTONS_RUNNING);
+            return START_STICKY;
+        }
+
         showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
         handler.removeCallbacks(statsRunnable);
         handler.postDelayed(statsRunnable, 2000L);
+
+        if (described && intent.getIntExtra("backend", 0) == 1) {
+            // Protocol=Psiphon in proxy mode IS the AAR tunnel: no engine
+            // session exists, and this owner carries its notification.
+            externalPsiphon = true;
+            Intent psi = new Intent(this, PsiphonTunnelService.class)
+                    .setAction(PsiphonTunnelService.ACTION_START)
+                    .putExtras(intent)
+                    .putExtra(PsiphonTunnelService.EXTRA_OWNER, PsiphonTunnelService.OWNER_PROXY);
+            PsiphonTunnelService.startBound(this, psi);
+            return START_STICKY;
+        }
+        externalPsiphon = false;
+        if (described) startEngineFromSession(intent);
         return START_STICKY;
     }
 
@@ -387,6 +416,66 @@ public class ProxyNotification extends Service {
         } catch (Exception e) {
             Log.e(TAG, "startForeground failed: " + e.getMessage());
         }
+    }
+
+    /**
+     * Start the engine for a session described by an intent, from this owner
+     * rather than from an Activity (the widget's connect). Runs on the same
+     * lifecycle executor as the UI's connect worker, and is generation-checked
+     * around the stop/start pair so a disconnect that lands mid-way wins.
+     */
+    private void startEngineFromSession(Intent session) {
+        final Intent described = new Intent(session);
+        final long generation = ownerGeneration;
+        NativeEngine.lifecycleExecutor.execute(() -> {
+            if (generation != FCAEVpnService.sGeneration.get() || stopping) return;
+            try { NativeEngine.nativeStop(); } catch (Throwable ignored) {}
+            if (generation != FCAEVpnService.sGeneration.get() || stopping) return;
+            boolean started = false;
+            try {
+                started = NativeEngine.startSession(this, described);
+            } catch (Throwable t) {
+                Log.e(TAG, "headless start failed: " + t);
+            }
+            if (!started) {
+                Log.w(TAG, "headless start refused — ending the session");
+                handler.post(ProxyNotification.this::stopProxy);
+            }
+        });
+    }
+
+    /** True while a session of this process is up or still dialing. */
+    private boolean engineAlive() {
+        try {
+            int state = NativeEngine.nativeGetState();
+            return state != 0 && state != 5;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Publish this owner's state where Activity-less consumers read it (the
+     * widget). The engine state decides, not "the owner is alive": a session
+     * that is still dialing must not render as connected.
+     *
+     * A pure Psiphon exit is skipped: there the engine is idle and the AAR owns
+     * the session, and its own PSI_STATS broadcasts already carry running and
+     * the rates.
+     */
+    private void publishState() {
+        if (stopping || externalPsiphon) return;
+        int state = 5;
+        try { state = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
+        // Chained Psiphon: the AAR owns the exit, and its numbers and session id
+        // are one session's worth of telemetry, not two.
+        final Intent psi = lastPsiphonStats;
+        final boolean psiFresh = psi != null && PsiphonTunnelService.isCurrentBroadcast(psi);
+        final long[] stats = SessionState.stats(psiFresh ? psi : null);
+        final long token = psiFresh ? SessionState.tokenOf(psi) : ownerGeneration;
+        SessionState.publish(this, token, state != 0 && state != 5, false,
+                state == 6 || (state >= 1 && state <= 3),
+                stats[0], stats[1], stats[2], stats[3], (int) stats[4]);
     }
 
     // Byte-flow text only — no state words — so Psiphon exits and plain
@@ -485,8 +574,14 @@ public class ProxyNotification extends Service {
         FCAEVpnService.killProcessQuietly();
     }
 
-    static boolean isAlive() {
+    public static boolean isAlive() {
         return instance != null;
+    }
+
+    /** Whether this owner has a session up, dialing or held open. */
+    public static boolean sessionActive() {
+        ProxyNotification current = instance;
+        return current != null && !current.stopping;
     }
 
     /** Mirrors FCAEVpnService's disconnect broadcast so MainActivity resets. */

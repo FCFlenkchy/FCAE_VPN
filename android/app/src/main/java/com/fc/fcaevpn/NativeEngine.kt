@@ -1,5 +1,8 @@
 package com.fc.fcaevpn
 
+import android.content.Context
+import android.content.Intent
+
 object NativeEngine {
     // Process-wide command ordering, shared by the activity and both owners.
     // StopBegin remains immediate; starts and cleanup must not overtake one another.
@@ -143,6 +146,77 @@ object NativeEngine {
     @JvmStatic external fun nativeGetLanIp(): String
     @JvmStatic external fun nativeGetStatusMsg(): String
     @JvmStatic external fun nativeGetLastError(): String
+
+    /**
+     * Start a session described by a canonical session intent — the extras the
+     * UI writes on every connect and [FCAEVpnService] persists.
+     *
+     * This is the argument list of MainActivity's connect worker, sourced from
+     * the persisted description instead of live views, so a session started by
+     * a headless command (the widget) hands the engine exactly what a session
+     * started from the app does. Callers run it on [lifecycleExecutor], after
+     * cancelling the previous session.
+     */
+    @JvmStatic
+    fun startSession(context: Context, session: Intent): Boolean {
+        val mode = if (session.getIntExtra("mode", 1) == 1) 1 else 0
+        val socks = session.getIntExtra("socksPort", 1819)
+        nativeInit()
+        try {
+            nativeSetNativeLibDir(context.applicationInfo.nativeLibraryDir)
+        } catch (_: Throwable) {
+        }
+        return nativeStart(
+            protocol = session.getIntExtra("protocol", 0),
+            mode = mode,
+            lanSharing = session.getBooleanExtra("lanSharing", false),
+            scanMode = session.getIntExtra("scanMode", 0),
+            ipVersion = session.getIntExtra("ipVersion", 4),
+            quickReconnect = session.getBooleanExtra("quickReconnect", false),
+            noizeProfile = session.getStringExtra("noizeProfile").orEmpty().ifEmpty { "balanced" },
+            // Fragmentation is a UI-only knob in this build: keep the values
+            // MainActivity's worker passes so both paths describe one session.
+            fragmentEnabled = false,
+            fragMinSize = 16,
+            fragMaxSize = 32,
+            fragMinDelay = 2,
+            fragMaxDelay = 10,
+            socksPort = if (mode == 1 && socks == 0) 1819 else socks,
+            httpPort = session.getIntExtra("httpPort", 1820),
+            forcePeer = session.getStringExtra("forcePeer").orEmpty(),
+            configPath = session.getStringExtra("configPath").orEmpty().ifEmpty { "aether.toml" },
+            h2Enabled = session.getBooleanExtra("h2Enabled", true),
+            echEnabled = session.getBooleanExtra("echEnabled", true),
+            sni = session.getStringExtra("sni").orEmpty(),
+            sysProfile = session.getIntExtra("sysProfile", 0),
+            teamName = session.getStringExtra("teamName").orEmpty(),
+            accessToken = session.getStringExtra("accessToken").orEmpty(),
+            accessEmail = session.getStringExtra("accessEmail").orEmpty(),
+            routesFile = session.getStringExtra("routesFile").orEmpty(),
+            routesInline = session.getStringExtra("routesInline").orEmpty(),
+            torMode = session.getIntExtra("torMode", 0),
+            torBridges = session.getIntExtra("torBridges", 0),
+            torBridgeLines = session.getStringExtra("torBridgeLines").orEmpty(),
+            engineLog = session.getIntExtra("engineLog", 3),
+            backend = session.getIntExtra("backend", 0),
+            torSocksPort = session.getIntExtra("torSocksPort", 0),
+            torHttpPort = session.getIntExtra("torHttpPort", 0),
+            psiphonThroughTunnel = session.getBooleanExtra("psiphonThroughTunnel", false),
+            psiphonConfig = session.getStringExtra("psiphonConfig").orEmpty(),
+            psiphonRegion = session.getStringExtra("psiphonRegion").orEmpty(),
+            psiphonSocksPort = session.getIntExtra("psiphonSocksPort", 0),
+            psiphonHttpPort = session.getIntExtra("psiphonHttpPort", 0),
+            tunTcpSndbuf = session.getIntExtra("tunTcpSndbuf", 256000),
+            tunTcpRcvbuf = session.getIntExtra("tunTcpRcvbuf", 256000),
+            tunTcpAutoTuning = session.getBooleanExtra("tunTcpAutoTuning", false),
+            t2sLog = session.getIntExtra("t2sLog", 0),
+            tunEngine = session.getIntExtra("tunEngine", 0),
+            tunMtu = session.getIntExtra("tunMtu", 1500),
+            // TUN DNS is a TUN concern and the VpnService reads it from settings
+            // itself; a proxy session has no interface to configure.
+            tunDnsServers = ""
+        )
+    }
 
     // ── version checker ─────────────────────────────────────────────
     @JvmStatic external fun nativeCheckForUpdates(currentVersion: String, includePrereleases: Boolean)

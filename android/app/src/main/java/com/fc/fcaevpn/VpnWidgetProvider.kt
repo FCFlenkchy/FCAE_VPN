@@ -8,275 +8,295 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.net.VpnService
+import android.os.Build
 import android.view.View
 import android.widget.RemoteViews
+import java.util.Locale
 
+/**
+ * Home screen control surface.
+ *
+ * It renders [SessionState] and sends the commands the app's own notification
+ * sends, to the same owner service: CONNECT is the notification's Start, so a
+ * tap connects the last session in the background, with no second copy of the
+ * connect logic here to drift away from the app's. A tap on the app's own
+ * widget is a documented exemption from Android 12's background service-start
+ * restriction, which is what makes that headless start legal.
+ *
+ * Two cases still open the app, both forced by the platform: no session to
+ * replay yet (only the UI can compose one) and the one-time VPN consent, whose
+ * dialog is an Activity started for result.
+ */
 class VpnWidgetProvider : AppWidgetProvider() {
 
-    override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray) {
-        for (appWidgetId in appWidgetIds) {
-            updateWidget(context, appWidgetManager, appWidgetId)
-        }
-    }
+    override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) =
+        render(context, manager, ids, force = true)
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
-        val action = intent.action ?: return
-
-        when (action) {
+        when (intent.action) {
             ACTION_WIDGET_TOGGLE -> {
-                handleToggle(context)
+                toggle(context, intent)
+                renderAll(context)
             }
+
             ACTION_WIDGET_PAUSE_RESUME -> {
-                handlePauseResume(context)
+                val session = SessionState.snapshot(context)
+                val action = if (session.paused) FCAEVpnService.ACTION_START
+                else FCAEVpnService.ACTION_STOP
+                dispatch(context, Intent(context, FCAEVpnService::class.java).setAction(action))
+                renderAll(context)
             }
-            FCAEVpnService.BROADCAST_VPN_STATE_CHANGED -> {
-                lastRunning = intent.getBooleanExtra("running", false)
-                lastPaused = intent.getBooleanExtra("paused", false)
-                lastConnecting = intent.getBooleanExtra("connecting", false)
-                if (lastRunning || lastPaused) {
-                    val rx = intent.getLongExtra("rx", 0L)
-                    val tx = intent.getLongExtra("tx", 0L)
-                    val totalRx = intent.getLongExtra("totalRx", 0L)
-                    val totalTx = intent.getLongExtra("totalTx", 0L)
-                    val rtt = intent.getIntExtra("rtt", 0)
-                    lastSpeedLine = "↓ ${fmtBytes(rx)}/s (${fmtBytes(totalRx)})  |  ↑ ${fmtBytes(tx)}/s (${fmtBytes(totalTx)})"
-                    lastRttLine = if (rtt > 0) "RTT: ${rtt}ms" else "RTT: —"
-                }
-                updateAllWidgets(context)
-            }
-            FCAEVpnService.BROADCAST_VPN_DISCONNECTED,
-            PsiphonTunnelService.BROADCAST_STOPPED -> {
-                lastRunning = false
-                lastPaused = false
-                lastConnecting = false
-                lastSpeedLine = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)"
-                lastRttLine = "RTT: —"
-                updateAllWidgets(context)
-            }
-            PsiphonTunnelService.BROADCAST_READY -> {
-                lastRunning = true
-                lastPaused = false
-                lastConnecting = false
-                updateAllWidgets(context)
-            }
-            PsiphonTunnelService.BROADCAST_FAILED -> {
-                lastRunning = false
-                lastPaused = false
-                lastConnecting = false
-                lastSpeedLine = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)"
-                lastRttLine = "RTT: —"
-                updateAllWidgets(context)
-            }
+
+            // A live Psiphon exit is the AAR's session, not the engine's.
+            PsiphonTunnelService.BROADCAST_READY,
             PsiphonTunnelService.BROADCAST_STATS -> {
-                val rxBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, 0L)
-                val txBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_UP_BPS, 0L)
-                val totalRx = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, 0L)
-                val totalTx = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, 0L)
-                val rtt = intent.getIntExtra(PsiphonTunnelService.EXTRA_RTT, 0)
-                lastSpeedLine = "↓ ${fmtBytes(rxBps)}/s (${fmtBytes(totalRx)})  |  ↑ ${fmtBytes(txBps)}/s (${fmtBytes(totalTx)})"
-                lastRttLine = if (rtt > 0) "RTT: ${rtt}ms" else "RTT: —"
-                updateAllWidgets(context)
+                if (intent.getBooleanExtra("regionsOnly", false)) return
+                if (!PsiphonTunnelService.isCurrentBroadcast(intent)) return
+                SessionState.absorb(context, intent)
+                renderAll(context)
+            }
+
+            PsiphonTunnelService.BROADCAST_STOPPED,
+            PsiphonTunnelService.BROADCAST_FAILED -> {
+                // Stamped: a failure of a previous session must not blank a
+                // live one.
+                if (!PsiphonTunnelService.isCurrentBroadcast(intent)) return
+                SessionState.markIdle(context)
+                renderAll(context)
+            }
+
+            FCAEVpnService.BROADCAST_VPN_STATE_CHANGED,
+            FCAEVpnService.BROADCAST_VPN_DISCONNECTED -> {
+                SessionState.absorb(context, intent)
+                renderAll(context)
             }
         }
     }
 
-    private fun handleToggle(context: Context) {
-        val prefs = context.getSharedPreferences("aether_vpn", Context.MODE_PRIVATE)
-        val mode = prefs.getInt("mode", 1)
-        val isTun = mode == 1
+    private fun toggle(context: Context, intent: Intent) {
+        // The flag is what the button read when it was rendered: without it a
+        // stale widget could stop the session it just started, or raise a
+        // second one on top of a live one.
+        val renderedActive = intent.getBooleanExtra(EXTRA_TAP_ACTIVE, false)
+        val live = SessionState.isLive()
+        when {
+            renderedActive && live -> disconnect(context)
+            renderedActive -> SessionState.markIdle(context)
+            !live && !connect(context) -> openApp(context)
+            // Button and reality disagree: reality wins, the render fixes it.
+        }
+    }
 
-        if (lastRunning || lastPaused || lastConnecting) {
-            if (isTun) {
-                FCAEVpnService.disconnectNow()
-            } else {
-                val i = Intent(context, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_DISCONNECT)
-                try {
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        context.startForegroundService(i)
-                    } else {
-                        context.startService(i)
-                    }
-                } catch (_: Throwable) {}
-                try { NativeEngine.nativeStop() } catch (_: Throwable) {}
-            }
-            try { PsiphonTunnelService.stopBound(context) } catch (_: Throwable) {}
-            lastRunning = false
-            lastPaused = false
-            lastConnecting = false
-            lastSpeedLine = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)"
-            lastRttLine = "RTT: —"
-            updateAllWidgets(context)
+    /** Replay the last session in the background. False means the app must. */
+    private fun connect(context: Context): Boolean {
+        val session = FCAEVpnService.recalledSession(context) ?: return false
+        val command = if (session.getIntExtra("mode", 1) == 1) {
+            // Consent is an Activity-for-result flow: it can never be granted
+            // from here, and a tunnel must not start blind.
+            if (VpnService.prepare(context) != null) return false
+            Intent(context, FCAEVpnService::class.java).setAction(FCAEVpnService.ACTION_START)
         } else {
-            // Check VPN permission for TUN mode
-            if (isTun) {
-                val prep = VpnService.prepare(context)
-                if (prep != null) {
-                    val mainIntent = Intent(context, MainActivity::class.java).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-                        putExtra(MainActivity.EXTRA_TRIGGER_CONNECT, true)
-                    }
-                    context.startActivity(mainIntent)
-                    return
+            Intent(context, ProxyNotification::class.java)
+                .setAction(ProxyNotification.ACTION_START)
+                .putExtras(session)
+        }
+        if (!dispatch(context, command)) return false
+        SessionState.markConnecting(context, FCAEVpnService.stateGeneration())
+        return true
+    }
+
+    /** End the session, whichever owner holds it. */
+    private fun disconnect(context: Context) {
+        val tun = FCAEVpnService.ownsSession()
+        val proxy = ProxyNotification.isAlive()
+        if (tun) {
+            dispatch(context, Intent(context, FCAEVpnService::class.java)
+                .setAction(FCAEVpnService.ACTION_DISCONNECT))
+        }
+        if (proxy) {
+            dispatch(context, Intent(context, ProxyNotification::class.java)
+                .setAction(ProxyNotification.ACTION_DISCONNECT_KILL))
+        }
+        if (!tun && !proxy) {
+            // No owner left to ask (process recycled under the button): end the
+            // engine directly so no data plane outlives the tap.
+            try {
+                PsiphonTunnelService.stopBound(context)
+            } catch (_: Throwable) {
+            }
+            NativeEngine.lifecycleExecutor.execute {
+                try {
+                    NativeEngine.nativeStopBegin()
+                } catch (_: Throwable) {
+                }
+                try {
+                    NativeEngine.nativeStop()
+                } catch (_: Throwable) {
                 }
             }
-
-            // Launch MainActivity with trigger to start tunnel cleanly using all its shared logic
-            val mainIntent = Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-                putExtra(MainActivity.EXTRA_TRIGGER_CONNECT, true)
-            }
-            context.startActivity(mainIntent)
-            lastConnecting = true
-            updateAllWidgets(context)
         }
+        SessionState.markIdle(context)
     }
 
-    private fun handlePauseResume(context: Context) {
-        val prefs = context.getSharedPreferences("aether_vpn", Context.MODE_PRIVATE)
-        if (prefs.getInt("mode", 1) != 1) return
-
-        val targetAction = if (lastPaused) FCAEVpnService.ACTION_START else FCAEVpnService.ACTION_STOP
-        val intent = Intent(context, FCAEVpnService::class.java).apply {
-            this.action = targetAction
-        }
+    private fun openApp(context: Context) {
         try {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
-        } catch (_: Throwable) {}
+            context.startActivity(
+                Intent(context, MainActivity::class.java)
+                    .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    .putExtra(MainActivity.EXTRA_TRIGGER_CONNECT, true)
+            )
+        } catch (_: Throwable) {
+        }
     }
+
+    private fun dispatch(context: Context, intent: Intent): Boolean = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent)
+        } else {
+            context.startService(intent)
+        }
+        true
+    } catch (_: Throwable) {
+        false
+    }
+
+    private fun renderAll(context: Context) {
+        val manager = AppWidgetManager.getInstance(context) ?: return
+        val ids = manager.getAppWidgetIds(ComponentName(context, VpnWidgetProvider::class.java))
+        if (ids.isNotEmpty()) render(context, manager, ids)
+    }
+
+    private fun render(
+        context: Context,
+        manager: AppWidgetManager,
+        ids: IntArray,
+        force: Boolean = false
+    ) {
+        val session = SessionState.snapshot(context)
+        val tun = context.getSharedPreferences(PREFS_MAIN, Context.MODE_PRIVATE)
+            .getInt("mode", 1) == 1
+
+        val status: String
+        val statusColor: Int
+        val action: String
+        when {
+            session.connecting -> {
+                status = "CONNECTING"; statusColor = COLOR_PROGRESS; action = "DISCONNECT"
+            }
+            session.paused -> {
+                status = "PAUSED"; statusColor = COLOR_PAUSED; action = "DISCONNECT"
+            }
+            session.running -> {
+                status = "CONNECTED - ${if (tun) "TUN" else "PROXY"}"
+                statusColor = COLOR_CONNECTED
+                action = "DISCONNECT"
+            }
+            else -> {
+                status = "DISCONNECTED"; statusColor = COLOR_DISCONNECTED; action = "CONNECT"
+            }
+        }
+
+        val pausable = tun && (session.running || session.paused)
+        val pauseLabel = if (session.paused) "START" else "STOP"
+        val values = listOf(
+            status,
+            if (session.rtt > 0) "RTT: ${session.rtt} ms" else "RTT: —",
+            "↓ " + fmtRate(session.rx),
+            "↑ " + fmtRate(session.tx),
+            "↓ " + fmtBytes(session.totalRx),
+            "↑ " + fmtBytes(session.totalTx),
+            action,
+            pauseLabel,
+            pausable.toString()
+        )
+        // Every repaint is a round trip to the launcher: identical content is
+        // not worth one.
+        val key = values.joinToString("|")
+        if (!force && key == lastRendered) return
+        lastRendered = key
+
+        val views = RemoteViews(context.packageName, R.layout.widget_vpn)
+        views.setTextViewText(R.id.widget_status, status)
+        views.setTextColor(R.id.widget_status, statusColor)
+        views.setTextViewText(R.id.widget_rtt, values[1])
+        views.setTextViewText(R.id.widget_rx_rate, values[2])
+        views.setTextViewText(R.id.widget_tx_rate, values[3])
+        views.setTextViewText(R.id.widget_rx_total, values[4])
+        views.setTextViewText(R.id.widget_tx_total, values[5])
+        views.setTextViewText(R.id.widget_btn_action, action)
+        views.setInt(
+            R.id.widget_btn_action, "setBackgroundResource",
+            if (action == "CONNECT") R.drawable.widget_btn_connect else R.drawable.widget_btn_disconnect
+        )
+        views.setOnClickPendingIntent(
+            R.id.widget_btn_action,
+            pending(context, ACTION_WIDGET_TOGGLE, 101, session.active)
+        )
+        views.setViewVisibility(
+            R.id.widget_btn_pause_resume, if (pausable) View.VISIBLE else View.GONE
+        )
+        if (pausable) {
+            views.setTextViewText(R.id.widget_btn_pause_resume, pauseLabel)
+            views.setInt(
+                R.id.widget_btn_pause_resume, "setBackgroundResource",
+                if (session.paused) R.drawable.widget_btn_tun_start else R.drawable.widget_btn_tun_stop
+            )
+            views.setOnClickPendingIntent(
+                R.id.widget_btn_pause_resume, pending(context, ACTION_WIDGET_PAUSE_RESUME, 102, false)
+            )
+        }
+
+        val open = PendingIntent.getActivity(
+            context, 100,
+            Intent(context, MainActivity::class.java)
+                .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PENDING_FLAGS
+        )
+        views.setOnClickPendingIntent(R.id.widget_btn_settings, open)
+        views.setOnClickPendingIntent(R.id.widget_header, open)
+
+        for (id in ids) manager.updateAppWidget(id, views)
+    }
+
+    /** A command broadcast, tagged with what the button read when drawn. */
+    private fun pending(context: Context, action: String, code: Int, active: Boolean) =
+        PendingIntent.getBroadcast(
+            context, code,
+            Intent(context, VpnWidgetProvider::class.java)
+                .setAction(action)
+                .putExtra(EXTRA_TAP_ACTIVE, active),
+            PENDING_FLAGS
+        )
 
     companion object {
         const val ACTION_WIDGET_TOGGLE = "com.fc.fcaevpn.WIDGET_TOGGLE"
         const val ACTION_WIDGET_PAUSE_RESUME = "com.fc.fcaevpn.WIDGET_PAUSE_RESUME"
+
+        private const val EXTRA_TAP_ACTIVE = "tapActive"
+        private const val PREFS_MAIN = "aether_vpn"
+        private const val PENDING_FLAGS =
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        private const val KIB = 1024L
+        private const val MIB = KIB * 1024
+        private const val GIB = MIB * 1024
 
         private val COLOR_CONNECTED = Color.parseColor("#34D399")
         private val COLOR_DISCONNECTED = Color.parseColor("#8A93A6")
         private val COLOR_PROGRESS = Color.parseColor("#60A5FA")
         private val COLOR_PAUSED = Color.parseColor("#F59E0B")
 
-        private var lastRunning = false
-        private var lastPaused = false
-        private var lastConnecting = false
-        private var lastSpeedLine = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)"
-        private var lastRttLine = "RTT: —"
+        /** Last rendered content; identical content is not worth a repaint. */
+        private var lastRendered: String? = null
 
-        fun updateStats(context: Context, rx: Long, tx: Long, totalRx: Long, totalTx: Long, rtt: Int) {
-            if (!lastRunning && !lastPaused) return
-            lastSpeedLine = "↓ ${fmtBytes(rx)}/s (${fmtBytes(totalRx)})  |  ↑ ${fmtBytes(tx)}/s (${fmtBytes(totalTx)})"
-            lastRttLine = if (rtt > 0) "RTT: ${rtt}ms" else "RTT: —"
-            updateAllWidgets(context)
+        private fun fmtBytes(bytes: Long): String = when {
+            bytes >= GIB -> String.format(Locale.US, "%.1f GB", bytes / GIB.toDouble())
+            bytes >= MIB -> String.format(Locale.US, "%.1f MB", bytes / MIB.toDouble())
+            bytes >= KIB -> String.format(Locale.US, "%.1f KB", bytes / KIB.toDouble())
+            else -> "$bytes B"
         }
 
-        fun updateAllWidgets(context: Context) {
-            val appWidgetManager = AppWidgetManager.getInstance(context) ?: return
-            val ids = appWidgetManager.getAppWidgetIds(ComponentName(context, VpnWidgetProvider::class.java))
-            for (id in ids) {
-                updateWidget(context, appWidgetManager, id)
-            }
-        }
-
-        private fun fmtBytes(bytes: Long): String {
-            return when {
-                bytes >= 1_073_741_824L -> String.format("%.1f GB", bytes / 1_073_741_824.0)
-                bytes >= 1_048_576L -> String.format("%.1f MB", bytes / 1_048_576.0)
-                bytes >= 1024L -> String.format("%.0f KB", bytes / 1024.0)
-                else -> "$bytes B"
-            }
-        }
-
-        private fun updateWidget(
-            context: Context,
-            appWidgetManager: AppWidgetManager,
-            appWidgetId: Int
-        ) {
-            val views = RemoteViews(context.packageName, R.layout.widget_vpn)
-            val prefs = context.getSharedPreferences("aether_vpn", Context.MODE_PRIVATE)
-            val isTun = prefs.getInt("mode", 1) == 1
-            val modeLabel = if (isTun) "TUN" else "PROXY"
-
-            val statusText: String
-            val statusColor: Int
-            val btnText: String
-
-            when {
-                lastConnecting -> {
-                    statusText = "CONNECTING"
-                    statusColor = COLOR_PROGRESS
-                    btnText = "DISCONNECT"
-                }
-                lastPaused -> {
-                    statusText = "PAUSED"
-                    statusColor = COLOR_PAUSED
-                    btnText = "DISCONNECT"
-                }
-                lastRunning -> {
-                    statusText = "CONNECTED - $modeLabel"
-                    statusColor = COLOR_CONNECTED
-                    btnText = "DISCONNECT"
-                }
-                else -> {
-                    statusText = "DISCONNECTED"
-                    statusColor = COLOR_DISCONNECTED
-                    btnText = "CONNECT"
-                }
-            }
-
-            views.setTextViewText(R.id.widget_status, statusText)
-            views.setTextColor(R.id.widget_status, statusColor)
-            views.setTextViewText(R.id.widget_btn_action, btnText)
-
-            val actionBgRes = if (btnText == "CONNECT") R.drawable.widget_btn_connect else R.drawable.widget_btn_disconnect
-            views.setInt(R.id.widget_btn_action, "setBackgroundResource", actionBgRes)
-
-            if (isTun && (lastRunning || lastPaused)) {
-                views.setViewVisibility(R.id.widget_btn_pause_resume, View.VISIBLE)
-                if (lastPaused) {
-                    views.setTextViewText(R.id.widget_btn_pause_resume, "START")
-                    views.setInt(R.id.widget_btn_pause_resume, "setBackgroundResource", R.drawable.widget_btn_tun_start)
-                } else {
-                    views.setTextViewText(R.id.widget_btn_pause_resume, "STOP")
-                    views.setInt(R.id.widget_btn_pause_resume, "setBackgroundResource", R.drawable.widget_btn_tun_stop)
-                }
-
-                val prIntent = Intent(context, VpnWidgetProvider::class.java).apply {
-                    action = ACTION_WIDGET_PAUSE_RESUME
-                }
-                val prPi = PendingIntent.getBroadcast(
-                    context, 102, prIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-                views.setOnClickPendingIntent(R.id.widget_btn_pause_resume, prPi)
-            } else {
-                views.setViewVisibility(R.id.widget_btn_pause_resume, View.GONE)
-            }
-
-            views.setTextViewText(R.id.widget_stats, lastSpeedLine)
-            views.setTextViewText(R.id.widget_rtt, lastRttLine)
-
-            val toggleIntent = Intent(context, VpnWidgetProvider::class.java).apply {
-                action = ACTION_WIDGET_TOGGLE
-            }
-            val togglePi = PendingIntent.getBroadcast(
-                context, 101, toggleIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            views.setOnClickPendingIntent(R.id.widget_btn_action, togglePi)
-
-            val settingsIntent = Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            }
-            val settingsPi = PendingIntent.getActivity(
-                context, 100, settingsIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            views.setOnClickPendingIntent(R.id.widget_btn_settings, settingsPi)
-            views.setOnClickPendingIntent(R.id.widget_header, settingsPi)
-
-            appWidgetManager.updateAppWidget(appWidgetId, views)
-        }
+        private fun fmtRate(bytesPerSecond: Long): String =
+            fmtBytes(if (bytesPerSecond < 0L) 0L else bytesPerSecond) + "/s"
     }
 }
