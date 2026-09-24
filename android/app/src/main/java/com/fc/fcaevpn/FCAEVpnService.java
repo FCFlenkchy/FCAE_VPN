@@ -1352,7 +1352,7 @@ public class FCAEVpnService extends VpnService {
         pendingSessionGen = cleanupGeneration.get();
         updateNotification();
         try {
-            startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
+            startFg(notification.build(sessionTrafficText(), VpnNotification.BUTTONS_CONNECTING));
         } catch (Exception ignored) {}
         notifyUi();
 
@@ -1505,56 +1505,37 @@ public class FCAEVpnService extends VpnService {
     // notification id while its tunnel (re)dials, and the next tick must
     // always restore the owner's content.
     private void updateNotification() {
-        // aarStats: the session has an exit sample to show (readings and their
-        // source are SessionState.stats). psiphonExpected: an exit may still be
-        // dialling, so its controls stay up.
-        final boolean aarStats = sessionPsiphonExit && lastPsiphonStats != null;
-        boolean psiphonExpected = sessionPsiphonExit ||
-                PsiphonTunnelService.hasActiveBinding() ||
-                (lastStartIntent != null && lastStartIntent.getBooleanExtra("psiphonThroughTunnel", false));
-
         if (uiConnecting) {
-            int buttons = VpnNotification.BUTTONS_CONNECTING;
-            if (aarStats) {
-                notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats), buttons);
-            } else if (psiphonExpected) {
-                notification.show(VpnNotification.zeroTrafficText(), buttons);
-            } else {
-                long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
-                try {
-                    long[] stats = nativeGetTrafficStats();
-                    if (stats != null && stats.length >= 4) {
-                        rx = stats[0]; tx = stats[1]; totalRx = stats[2]; totalTx = stats[3];
-                    }
-                } catch (Exception ignored) {}
-                if (totalRx > 0 || totalTx > 0 || rx > 0 || tx > 0) {
-                    notification.show(VpnNotification.trafficText(rx, tx, totalRx, totalTx), buttons);
-                } else {
-                    notification.show(VpnNotification.zeroTrafficText(), buttons);
-                }
-            }
+            notification.show(sessionTrafficText(), VpnNotification.BUTTONS_CONNECTING);
         } else if (vpnPaused || running) {
-            int buttons = vpnPaused ? VpnNotification.BUTTONS_PAUSED : VpnNotification.BUTTONS_RUNNING;
-            if (aarStats) {
-                notification.show(ProxyNotification.psiphonTrafficText(lastPsiphonStats), buttons);
-                return;
-            }
-            if (psiphonExpected) {
-                notification.show(VpnNotification.zeroTrafficText(), buttons);
-                return;
-            }
-            long rx = 0, tx = 0, totalRx = 0, totalTx = 0;
-            try {
-                long[] stats = nativeGetTrafficStats();
-                if (stats != null && stats.length >= 4) {
-                    rx = stats[0]; tx = stats[1]; totalRx = stats[2]; totalTx = stats[3];
-                }
-            } catch (Exception ignored) {}
-            notification.show(VpnNotification.trafficText(rx, tx, totalRx, totalTx), buttons);
+            notification.show(sessionTrafficText(),
+                    vpnPaused ? VpnNotification.BUTTONS_PAUSED : VpnNotification.BUTTONS_RUNNING);
         } else {
             lastPsiphonStats = null;
             notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_PAUSED);
         }
+    }
+
+    /**
+     * The readings the session has so far, from its own meter (see
+     * SessionState.stats): the exit's sample when there is one, nothing while
+     * an exit is still dialling, the engine's counters otherwise. Shared by
+     * every live frame -- CONNECTING included, so a Start after Stop keeps the
+     * live session's counters on screen instead of flashing them to zero.
+     */
+    private String sessionTrafficText() {
+        if (sessionPsiphonExit && lastPsiphonStats != null) {
+            return ProxyNotification.psiphonTrafficText(lastPsiphonStats);
+        }
+        boolean psiphonExpected = sessionPsiphonExit ||
+                PsiphonTunnelService.hasActiveBinding() ||
+                (lastStartIntent != null && lastStartIntent.getBooleanExtra("psiphonThroughTunnel", false));
+        if (psiphonExpected) return VpnNotification.zeroTrafficText();
+        try {
+            long[] s = nativeGetTrafficStats();
+            if (s != null && s.length >= 4) return VpnNotification.trafficText(s[0], s[1], s[2], s[3]);
+        } catch (Exception ignored) {}
+        return VpnNotification.zeroTrafficText();
     }
 
     private static final String PREFS_LAST = "fcae_vpn_last_start";

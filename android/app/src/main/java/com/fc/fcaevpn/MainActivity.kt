@@ -159,6 +159,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     @Volatile private var lastBroadcastGeneration = 0L
+    @Volatile private var lastBroadcastEpoch = 0L
     // Set to true by disconnectAll().  Cleared by connectClicked().
     // When set, the receiver ignores disconnect broadcasts — they belong
     // to the previous cycle and would override the optimistic connect UI.
@@ -358,6 +359,7 @@ class MainActivity : AppCompatActivity() {
                     val isPaused = intent.getBooleanExtra("paused", false)
                     val isConnecting = intent.getBooleanExtra("connecting", false)
                     val gen = intent.getLongExtra("generation", 0)
+                    val epoch = intent.getLongExtra("epoch", 0)
 
                     handler.post {
                         // Ignore stale broadcasts from a previous
@@ -365,8 +367,12 @@ class MainActivity : AppCompatActivity() {
                         if (gen < lastBroadcastGeneration) return@post
 
                         if (isConnecting) {
-                            // A new-generation connect starts a fresh stats session.
-                            if (gen > lastBroadcastGeneration) resetStats()
+                            // Only a new session starts the readings over. A
+                            // Start after Stop bumps the state generation but
+                            // keeps the epoch: the engine's counters carry on,
+                            // so the line must not flash to zero.
+                            if (epoch != lastBroadcastEpoch) resetStats()
+                            lastBroadcastEpoch = epoch
                             userInitiatedDisconnect = false
                             commandPaused = false
                             commandConnecting = true
@@ -383,6 +389,7 @@ class MainActivity : AppCompatActivity() {
                             userInitiatedDisconnect = false
                             commandPaused = false
                             lastBroadcastGeneration = gen
+                            lastBroadcastEpoch = epoch
                             engineRunning = true
                             vpnActive = true
                             // Psiphon paths: keep commandConnecting true until

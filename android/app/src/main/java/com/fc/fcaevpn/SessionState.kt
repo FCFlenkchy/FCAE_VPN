@@ -186,6 +186,7 @@ object SessionState {
         val intent = Intent(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
             .setPackage(context.packageName)
             .putExtra("generation", FCAEVpnService.stateGeneration())
+            .putExtra("epoch", FCAEVpnService.sessionEpoch())
             .putExtra("phase", snapshot.phase.ordinal)
             .putExtra("mode", snapshot.mode)
             .putExtra("running", snapshot.running)
