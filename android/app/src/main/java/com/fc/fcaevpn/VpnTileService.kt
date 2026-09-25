@@ -77,7 +77,7 @@ class VpnTileService : TileService() {
 
     private fun paint(active: Boolean) {
         val tile = qsTile ?: return
-        tile.icon = Icon.createWithResource(this, R.drawable.ic_qs_vpn)
+        tile.icon = Icon.createWithResource(this, R.drawable.ic_fcae_vpn)
         tile.label = getString(R.string.app_name)
         tile.state = if (active) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         tile.updateTile()

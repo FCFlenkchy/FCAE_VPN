@@ -336,8 +336,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 PsiphonTunnelService.BROADCAST_STOPPED -> {
                     // A stop of an older session arriving after a reconnect
-                    // must not reset a live one.
+                    // must not reset a live one. Notification Stop only turns
+                    // the TUN off; that broadcast is not a disconnect.
                     if (!PsiphonTunnelService.isCurrentBroadcast(intent)) return
+                    if (notificationPause()) return
                     handler.post {
                         resetStats()
                         if (userInitiatedDisconnect) return@post
@@ -365,6 +367,12 @@ class MainActivity : AppCompatActivity() {
                         // connect/disconnect cycle.
                         if (gen < lastBroadcastGeneration) return@post
 
+                        // Notification Stop is not a disconnect. An idle frame
+                        // while the interface is closing must not wipe the session.
+                        if (FCAEVpnService.notificationPause && !isRunning && !isPaused && !isConnecting) {
+                            return@post
+                        }
+
                         if (isPaused && FCAEVpnService.notificationPause) {
                             val first = !notificationPauseUi
                             notificationPauseUi = true
@@ -376,9 +384,8 @@ class MainActivity : AppCompatActivity() {
                             connecting = false
                             engineRunning = true
                             vpnActive = true
-                            handler.removeCallbacks(poll)
+                            updateButton()
                             if (first) {
-                                updateButton()
                                 showPausedReadings(
                                     intent.getLongExtra("rx", 0L),
                                     intent.getLongExtra("tx", 0L),
@@ -387,6 +394,8 @@ class MainActivity : AppCompatActivity() {
                                     intent.getIntExtra("rtt", 0)
                                 )
                             }
+                            handler.removeCallbacks(poll)
+                            handler.post(poll)
                             return@post
                         }
                         if (!isPaused && (isConnecting || isRunning)) notificationPauseUi = false
@@ -475,7 +484,7 @@ class MainActivity : AppCompatActivity() {
 
     private val poll = object : Runnable {
         override fun run() {
-            if (!vpnActive || notificationPause()) return
+            if (!vpnActive) return
             if (!pollBusy.compareAndSet(false, true)) {
                 handler.postDelayed(this, POLL_INTERVAL_MS)
                 return
@@ -1098,10 +1107,8 @@ class MainActivity : AppCompatActivity() {
      *  up late only after a notification Stop. */
     private fun showPausedReadings(rx: Long, tx: Long, totalRx: Long, totalTx: Long, rtt: Int) {
         if (!::statsText.isInitialized || !::statusText.isInitialized) return
-        if (statusText.text.isNullOrBlank() || statusText.text == "DISCONNECTED") {
-            statusText.text = "CONNECTED - ${if (isTunModeSelected()) "TUN" else "PROXY"}"
-            statusText.setTextColor(COLOR_CONNECTED)
-        }
+        statusText.text = "CONNECTED - ${if (isTunModeSelected()) "TUN" else "PROXY"}"
+        statusText.setTextColor(COLOR_CONNECTED)
         if (isPsiphonSelected() || isEgressPsiphon()) {
             psiDownBps = rx
             psiUpBps = tx
@@ -1182,10 +1189,13 @@ class MainActivity : AppCompatActivity() {
             engineRunning = true
             updateButton()
             handler.removeCallbacks(poll)
-            if (::statsText.isInitialized && statsText.text.isNullOrBlank()) {
+            if (::statsText.isInitialized && (statsText.text.isNullOrBlank()
+                    || statusText.text.isNullOrBlank()
+                    || statusText.text == "DISCONNECTED")) {
                 val held = SessionState.snapshot(this)
                 showPausedReadings(held.rx, held.tx, held.totalRx, held.totalTx, held.rtt)
             }
+            handler.post(poll)
             return
         }
         val tunPaused = try { NativeEngine.nativeTunPaused() } catch (_: Throwable) { false }
@@ -2652,7 +2662,20 @@ class MainActivity : AppCompatActivity() {
         errMsg: String,
         logs: String
     ) {
-        if (notificationPause()) return
+        if (notificationPause()) {
+            engineRunning = true
+            vpnActive = true
+            connecting = false
+            commandPaused = true
+            if (state == 0 || state == 5) {
+                if (statusText.text.isNullOrBlank() || statusText.text == "DISCONNECTED") {
+                    statusText.text = "CONNECTED - ${if (isTunModeSelected()) "TUN" else "PROXY"}"
+                    statusText.setTextColor(COLOR_CONNECTED)
+                }
+                updateButton()
+                return
+            }
+        }
         try {
             // Freshest device LAN IP for the Psiphon LAN fallback below.
             lastNativeLan = lan

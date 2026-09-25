@@ -630,7 +630,8 @@ public class FCAEVpnService extends VpnService {
                 case ACTION_STOP:
                     // Latched here as well as at the caller: all three surfaces
                     // send this and each deserves the same flinch-free display.
-                    if (intent.getBooleanExtra(EXTRA_FROM_NOTIFICATION, false)) {
+                    boolean fromNotification = intent.getBooleanExtra(EXTRA_FROM_NOTIFICATION, false);
+                    if (fromNotification) {
                         notificationPause = true;
                         if (notification != null) {
                             try {
@@ -642,6 +643,10 @@ public class FCAEVpnService extends VpnService {
                     }
                     handler.removeCallbacks(connectWatchdog);
                     SessionState.command(SessionState.Command.PAUSE);
+                    // The shade has no live poll. Paint the held session now,
+                    // with the readings it already has, so Stop is not a blank
+                    // frame while pauseVpn() closes the interface.
+                    if (fromNotification) SessionState.markPause(this, true);
                     requestPause();
                     return START_STICKY;
 

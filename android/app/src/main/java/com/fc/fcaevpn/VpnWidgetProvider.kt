@@ -36,6 +36,18 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val tapActive = intent.getBooleanExtra(EXTRA_TAP_ACTIVE, false)
             clicks.execute {
                 try {
+                    // Paint before the launcher is released. Connect already
+                    // knows TUN from the saved session, so Stop does not wait
+                    // on the service broadcast. The start itself is the slow
+                    // part and must not hold the broadcast open.
+                    if (action == ACTION_WIDGET_TOGGLE && !tapActive) {
+                        VpnCommands.paintConnecting(app)
+                    }
+                } catch (_: Throwable) {
+                } finally {
+                    pending.finish()
+                }
+                try {
                     when (action) {
                         ACTION_WIDGET_TOGGLE -> {
                             toggle(app, tapActive)
@@ -43,8 +55,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
                         }
                         ACTION_WIDGET_PAUSE_RESUME -> pauseOrResume(app, tapActive)
                     }
-                } finally {
-                    pending.finish()
+                } catch (_: Throwable) {
                 }
             }
             return

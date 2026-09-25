@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- One white silhouette for the tile and the foreground service.
+         FC is cut out of the shield so a tint cannot erase the letters.
+         There is no second color and no background fill. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,2L4,5v6c0,5.55 3.84,10.74 8,12 4.16,-1.26 8,-6.45 8,-12V5L12,2zM6.35,6.90H11.05V8.44H7.92V9.80H10.62V11.17H7.92V15.10H6.35ZM17.77,6.90H15.53A3.44,3.44 0 0 0 12.08,10.34V11.66A3.44,3.44 0 0 0 15.53,15.10H17.77V13.39H15.53A1.74,1.74 0 0 1 13.79,11.66V10.34A1.74,1.74 0 0 1 15.53,8.61H17.77V6.90Z" />
+</vector>

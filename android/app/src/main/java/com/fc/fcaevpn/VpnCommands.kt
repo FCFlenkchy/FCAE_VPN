@@ -36,6 +36,16 @@ object VpnCommands {
         }
     }
 
+    /** Connecting frame from the saved session, before any service start.
+     *  Mode is already known: TUN shows Stop, proxy does not. No broadcast. */
+    fun paintConnecting(context: Context): Boolean {
+        val session = FCAEVpnService.recalledSession(context) ?: return false
+        val mode = session.getIntExtra("mode", 1)
+        SessionState.command(SessionState.Command.CONNECT)
+        SessionState.markConnecting(context, mode)
+        return true
+    }
+
     /** Replay the last session. False means the app must show the consent screen. */
     fun connect(context: Context, start: (Context, Intent) -> Boolean = ::dispatch): Boolean {
         val session = FCAEVpnService.recalledSession(context) ?: return false

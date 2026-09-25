@@ -71,7 +71,7 @@ public class VpnNotification {
 
         nb.setContentTitle("FCAE VPN")
           .setContentText(text)
-          .setSmallIcon(android.R.drawable.ic_lock_lock)
+          .setSmallIcon(R.drawable.ic_fcae_vpn)
           .setContentIntent(piMain)
           .setOngoing(true)
           .setOnlyAlertOnce(true)
