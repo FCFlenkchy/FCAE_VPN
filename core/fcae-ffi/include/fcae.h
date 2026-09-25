@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 8
+#define FCAE_ABI_VERSION 9
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -349,6 +349,15 @@ typedef struct {
     uint64_t    _reserved[4];
 } FcaeTelemetry;
 
+/* Why the last update check failed. ABI v9. */
+typedef enum {
+    FCAE_UPDATE_ERROR_NONE    = 0,
+    FCAE_UPDATE_ERROR_NETWORK = 1,   /* manifest could not be fetched        */
+    FCAE_UPDATE_ERROR_HTTP    = 2,   /* server answered, not with success    */
+    FCAE_UPDATE_ERROR_DECODE  = 3,   /* body is not the manifest; see raw_body */
+    FCAE_UPDATE_ERROR_INVALID = 4    /* decoded, but fails validation        */
+} FcaeUpdateError;
+
 typedef struct {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -356,11 +365,13 @@ typedef struct {
     bool     check_in_progress;
     bool     check_done;
     bool     is_prerelease;
+    uint32_t error_kind;             /* FcaeUpdateError; ABI v9              */
     char     latest_version[32];
     char     release_date[32];
     char     release_notes[1024];
     char     download_url[512];
     char     status_message[256];
+    char     raw_body[4096];         /* server body on DECODE, else ""; ABI v9 */
 } FcaeUpdateInfo;
 
 /* ── Callbacks ─────────────────────────────────────────────────────── */

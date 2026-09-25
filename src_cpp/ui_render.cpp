@@ -40,7 +40,10 @@ AppState g_app;
 // when the update panel still has live content (e.g. "Checking... (3s)").
 static bool s_update_checked = false;
 static bool s_update_available = false;
-static char s_update_status[128] = {};
+static char s_update_status[256] = {};
+static uint32_t s_update_error_kind = FCAE_UPDATE_ERROR_NONE;
+static char s_update_raw_body[4096] = {};
+static bool s_update_decode_popup_open = false;
 static char s_update_latest[32] = {};
 static char s_update_notes[1024] = {};
 static char s_update_dl_url[512] = {};
@@ -176,6 +179,9 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, s_update_available);
     h = fnv_value(h, s_update_in_progress);
     h = fnv_value(h, s_update_popup_open);
+    h = fnv_value(h, s_update_decode_popup_open);
+    h = fnv_value(h, s_update_error_kind);
+    h = fnv_cstr(h, s_update_raw_body);
     h = fnv_value(h, s_about_popup_open);
     h = fnv_cstr(h, s_update_status);
     h = fnv_cstr(h, s_update_latest);
@@ -1445,6 +1451,7 @@ void render_ui() {
                 // Show timeout — the FFI check_in_progress is stuck, but we override the display
                 s_update_checked = true;
                 s_update_available = false;
+                s_update_error_kind = FCAE_UPDATE_ERROR_NETWORK;
                 snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
                     fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
@@ -1464,7 +1471,8 @@ void render_ui() {
                 snprintf(s_update_latest, sizeof(s_update_latest), "%s", info.latest_version);
                 snprintf(s_update_notes, sizeof(s_update_notes), "%s", info.release_notes);
                 snprintf(s_update_dl_url, sizeof(s_update_dl_url), "%s", info.download_url);
-                snprintf(s_update_status, sizeof(s_update_status), "%.127s", info.status_message);
+                snprintf(s_update_status, sizeof(s_update_status), "%s", info.status_message);
+                s_update_error_kind = FCAE_UPDATE_ERROR_NONE;
 
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
@@ -1474,11 +1482,21 @@ void render_ui() {
                 }
                 ImGui::PopStyleColor(2);
             } else if (done && !info.update_available) {
-                // Check finished — no update needed, but allow re-check
                 s_update_available = false;
                 s_update_checked = true;
-                snprintf(s_update_status, sizeof(s_update_status), "%.127s", info.status_message);
-                if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
+                s_update_error_kind = info.error_kind;
+                snprintf(s_update_status, sizeof(s_update_status), "%s", info.status_message);
+                snprintf(s_update_raw_body, sizeof(s_update_raw_body), "%s", info.raw_body);
+                if (s_update_error_kind == FCAE_UPDATE_ERROR_DECODE) {
+                    // The manifest itself is broken: the release pipeline's
+                    // problem, not the network's, so it is raised loudly and
+                    // the click shows what the server sent.
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.78f, 0.16f, 0.16f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.22f, 0.22f, 1.0f));
+                    if (ImGui::Button("ATTENTION!", ImVec2(btn_width, 34)))
+                        s_update_decode_popup_open = true;
+                    ImGui::PopStyleColor(2);
+                } else if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
                     fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
                     s_update_checked = false;
                     s_update_available = false;
@@ -1496,12 +1514,7 @@ void render_ui() {
             // Status text
         if ((done || (info.check_in_progress && s_update_checked)) && !s_update_available && s_update_checked) {
             ImGui::SetCursorPosX((avail - btn_width) * 0.5f);
-            bool is_error = strstr(s_update_status, "Failed") != nullptr ||
-                            strstr(s_update_status, "failed") != nullptr ||
-                            strstr(s_update_status, "HTTP") != nullptr ||
-                            strstr(s_update_status, "error") != nullptr ||
-                            strstr(s_update_status, "timed out") != nullptr;
-            if (is_error) {
+            if (s_update_error_kind != FCAE_UPDATE_ERROR_NONE) {
                 ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "%s", s_update_status);
             } else {
                 ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", s_update_status);
@@ -1560,6 +1573,39 @@ void render_ui() {
                             open_link(url.c_str());
                     }
                 }
+                ImGui::SameLine();
+                if (ImGui::Button("Close"))
+                    ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+            }
+
+            if (s_update_decode_popup_open) {
+                ImGui::OpenPopup("##update_decode_popup");
+                s_update_decode_popup_open = false;
+            }
+            ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
+            if (ImGui::BeginPopupModal("##update_decode_popup", nullptr,
+                    ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "JSON DECODING FAILED");
+                ImGui::Spacing();
+                ImGui::TextWrapped("The update manifest could not be decoded, so no version could be compared.");
+                static const char kPrefix[] = "Update check failed: ";
+                const char* detail = s_update_status;
+                if (strncmp(detail, kPrefix, sizeof(kPrefix) - 1) == 0) detail += sizeof(kPrefix) - 1;
+                ImGui::TextWrapped("%s", detail);
+                ImGui::Spacing();
+                ImGui::Text("Raw response:");
+                if (s_update_raw_body[0]) {
+                    // Read-only editor: scrollable and selectable in place.
+                    ImGui::InputTextMultiline("##update_raw_body", s_update_raw_body,
+                        sizeof(s_update_raw_body), ImVec2(540, 220), ImGuiInputTextFlags_ReadOnly);
+                } else {
+                    ImGui::TextDisabled("(empty body)");
+                }
+                ImGui::Spacing();
+                if (ImGui::Button("Copy"))
+                    ImGui::SetClipboardText(s_update_raw_body);
                 ImGui::SameLine();
                 if (ImGui::Button("Close"))
                     ImGui::CloseCurrentPopup();

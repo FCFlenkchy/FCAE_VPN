@@ -1213,7 +1213,9 @@ pub unsafe extern "C" fn fcae_poll_update(out: *mut FcaeUpdateInfo) -> FcaeStatu
         let s = fcae_runtime::update::snapshot();
         out.check_in_progress = s.in_progress;
         out.check_done = s.done;
+        out.error_kind = s.error_kind as u32;
         fill(&mut out.status_message, &s.status);
+        fill(&mut out.raw_body, &s.raw_body);
 
         match &s.result {
             Some(r) => {

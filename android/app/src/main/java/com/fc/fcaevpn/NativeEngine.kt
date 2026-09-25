@@ -243,5 +243,15 @@ data class FcaeUpdateInfo(
     val statusMessage: String = "",
     /** The offered version is a pre-release (shown as BETA in the UI). */
     val isPrerelease: Boolean = false,
-    val releaseDate: String = ""
-)
+    val releaseDate: String = "",
+    /** FCAE_UPDATE_ERROR_*: why the check failed, 0 after a successful one. */
+    val errorKind: Int = 0,
+    /** The server body when the manifest could not be decoded, else empty. */
+    val rawBody: String = ""
+) {
+    val decodeFailed: Boolean get() = errorKind == ERROR_DECODE
+
+    companion object {
+        const val ERROR_DECODE = 3
+    }
+}

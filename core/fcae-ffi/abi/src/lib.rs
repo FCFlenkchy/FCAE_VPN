@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 8;
+pub const FCAE_ABI_VERSION: u32 = 9;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
@@ -513,6 +513,13 @@ pub struct FcaeTelemetry {
     pub _reserved: [u64; 4],
 }
 
+/// Why the last update check failed (`FcaeUpdateInfo::error_kind`). ABI v9.
+pub const FCAE_UPDATE_ERROR_NONE: u32 = 0;
+pub const FCAE_UPDATE_ERROR_NETWORK: u32 = 1;
+pub const FCAE_UPDATE_ERROR_HTTP: u32 = 2;
+pub const FCAE_UPDATE_ERROR_DECODE: u32 = 3;
+pub const FCAE_UPDATE_ERROR_INVALID: u32 = 4;
+
 /// Result of an update check.
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -523,11 +530,15 @@ pub struct FcaeUpdateInfo {
     pub check_in_progress: bool,
     pub check_done: bool,
     pub is_prerelease: bool,
+    /// One of `FCAE_UPDATE_ERROR_*`. ABI v9.
+    pub error_kind: u32,
     pub latest_version: [c_char; 32],
     pub release_date: [c_char; 32],
     pub release_notes: [c_char; 1024],
     pub download_url: [c_char; 512],
     pub status_message: [c_char; 256],
+    /// Server body of a decode failure, else empty. ABI v9.
+    pub raw_body: [c_char; 4096],
 }
 
 // ── Callbacks ───────────────────────────────────────────────────────────

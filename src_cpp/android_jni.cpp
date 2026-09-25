@@ -856,6 +856,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
     jfieldID fid_status = env->GetFieldID(cls, "statusMessage", "Ljava/lang/String;");
     jfieldID fid_isPre = env->GetFieldID(cls, "isPrerelease", "Z");
     jfieldID fid_date = env->GetFieldID(cls, "releaseDate", "Ljava/lang/String;");
+    jfieldID fid_errKind = env->GetFieldID(cls, "errorKind", "I");
+    jfieldID fid_raw = env->GetFieldID(cls, "rawBody", "Ljava/lang/String;");
 
     jobject obj = env->AllocObject(cls);
     if (!obj) {
@@ -877,6 +879,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
     env->SetObjectField(obj, fid_status, env->NewStringUTF(info.status_message));
     env->SetBooleanField(obj, fid_isPre, info.is_prerelease ? JNI_TRUE : JNI_FALSE);
     env->SetObjectField(obj, fid_date, env->NewStringUTF(info.release_date));
+    env->SetIntField(obj, fid_errKind, (jint)info.error_kind);
+    env->SetObjectField(obj, fid_raw, env->NewStringUTF(info.raw_body));
     env->DeleteLocalRef(cls);
 
     return obj;

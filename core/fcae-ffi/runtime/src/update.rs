@@ -4,11 +4,11 @@
 //! core — the old ABI reached into `aether_engine::version_checker` directly,
 //! which would have broken the moment Aether stopped being the only backend.
 //!
-//! A manifest that fails to decode is reported with the raw body the server
-//! returned (an HTML error page, a redirect, a truncated file): that body is
-//! exactly the diagnostic the operator needs, and the message ends with a
-//! "could not decode" flag so the UI can tell "no update" from "broken
-//! manifest".
+//! A manifest that fails to decode is reported as [`UpdateErrorKind::Decode`]
+//! together with the raw body the server returned (an HTML error page, a
+//! redirect, a truncated file): that body is exactly the diagnostic the
+//! operator needs, and the kind lets the UI raise it louder than a network
+//! failure, which is the user's problem rather than the release pipeline's.
 
 use std::cmp::Ordering;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -19,9 +19,47 @@ use serde::Deserialize;
 const VERSION_URL: &str =
     "https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/version.json";
 
-/// How much of the raw body a decode error keeps: long enough to diagnose an
-/// HTML error page, short enough to stay readable in the UI.
-const RAW_EXCERPT_MAX: usize = 200;
+/// Size of the FFI buffer the raw body of a decode error crosses in: enough
+/// for a whole HTML error page. [`raw_excerpt`] always fits it, NUL included.
+pub const RAW_BODY_MAX: usize = 4096;
+
+/// Why a check failed, coarse enough for the UI to pick a treatment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum UpdateErrorKind {
+    #[default]
+    None = 0,
+    /// The manifest could not be fetched at all.
+    Network = 1,
+    /// The server answered, but not with success.
+    Http = 2,
+    /// The body is not the manifest; `raw_body` carries what it was.
+    Decode = 3,
+    /// Decoded, but the release list does not pass validation.
+    Invalid = 4,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateError {
+    pub kind: UpdateErrorKind,
+    pub message: String,
+    /// Sanitised server body, decode failures only.
+    pub raw_body: String,
+}
+
+impl UpdateError {
+    fn new(kind: UpdateErrorKind, message: impl Into<String>) -> Self {
+        Self { kind, message: message.into(), raw_body: String::new() }
+    }
+
+    fn decode(err: impl std::fmt::Display, raw: &str) -> Self {
+        Self {
+            kind: UpdateErrorKind::Decode,
+            message: format!("could not decode: {err}"),
+            raw_body: raw_excerpt(raw),
+        }
+    }
+}
 
 /// Outcome of a version comparison.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -46,41 +84,47 @@ pub struct ReleaseEntry {
     pub url: String,
 }
 
-fn validate(releases: &[ReleaseEntry]) -> Result<(), String> {
+fn validate(releases: &[ReleaseEntry]) -> Result<(), UpdateError> {
+    let invalid = |m: String| UpdateError::new(UpdateErrorKind::Invalid, m);
     if releases.is_empty() {
-        return Err("Release list is empty".into());
+        return Err(invalid("Release list is empty".into()));
     }
     let mut versions = std::collections::HashSet::new();
     for entry in releases {
         parse_version(&entry.version)
-            .ok_or_else(|| format!("Invalid release version: {}", entry.version))?;
+            .ok_or_else(|| invalid(format!("Invalid release version: {}", entry.version)))?;
         if !versions.insert(&entry.version) {
-            return Err(format!("Duplicate release version: {}", entry.version));
+            return Err(invalid(format!("Duplicate release version: {}", entry.version)));
         }
         let tag = entry.url.strip_prefix(
             "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/"
-        ).ok_or_else(|| format!("Invalid release URL for {}", entry.version))?;
+        ).ok_or_else(|| invalid(format!("Invalid release URL for {}", entry.version)))?;
         if tag.is_empty() || !tag.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._+%".contains(&c)) {
-            return Err(format!("Invalid release URL for {}", entry.version));
+            return Err(invalid(format!("Invalid release URL for {}", entry.version)));
         }
     }
     Ok(())
 }
 
-/// Raw body for decode errors: the message crosses the FFI as a C string, so
-/// NULs and control characters are stripped, and it is cut off so a whole
-/// HTML error page does not end up in the UI.
+/// Server body for decode errors: control characters dropped (it crosses the
+/// FFI as a C string), cut on a character boundary so that body, trailer and
+/// NUL fit in [`RAW_BODY_MAX`] bytes.
 fn raw_excerpt(raw: &str) -> String {
+    const TRAILER: char = '…';
     let clean: String = raw
         .chars()
         .filter(|c| *c >= ' ' || matches!(c, '\n' | '\t'))
         .collect();
     let clean = clean.trim();
-    if clean.len() <= RAW_EXCERPT_MAX {
+    if clean.len() < RAW_BODY_MAX {
         return clean.to_owned();
     }
-    let mut out: String = clean.chars().take(RAW_EXCERPT_MAX).collect();
-    out.push('…');
+    let mut end = RAW_BODY_MAX - 1 - TRAILER.len_utf8();
+    while !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = clean[..end].to_owned();
+    out.push(TRAILER);
     out
 }
 
@@ -90,6 +134,8 @@ struct State {
     done: bool,
     result: Option<UpdateResult>,
     status: String,
+    error_kind: UpdateErrorKind,
+    raw_body: String,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -97,6 +143,8 @@ static STATE: Mutex<State> = Mutex::new(State {
     done: false,
     result: None,
     status: String::new(),
+    error_kind: UpdateErrorKind::None,
+    raw_body: String::new(),
 });
 
 /// Guards against two concurrent checks without holding the state lock across
@@ -110,6 +158,10 @@ pub struct UpdateSnapshot {
     pub done: bool,
     pub result: Option<UpdateResult>,
     pub status: String,
+    /// Why the last check failed; `None` after a successful one.
+    pub error_kind: UpdateErrorKind,
+    /// The server body of a decode failure, empty otherwise.
+    pub raw_body: String,
 }
 
 pub fn snapshot() -> UpdateSnapshot {
@@ -119,6 +171,8 @@ pub fn snapshot() -> UpdateSnapshot {
         done: s.done,
         result: s.result.clone(),
         status: s.status.clone(),
+        error_kind: s.error_kind,
+        raw_body: s.raw_body.clone(),
     }
 }
 
@@ -132,7 +186,7 @@ fn status_for(r: &UpdateResult) -> String {
     }
 }
 
-fn finish(result: Result<UpdateResult, String>) {
+fn finish(result: Result<UpdateResult, UpdateError>) {
     let mut s = STATE.lock();
     s.in_progress = false;
     s.done = true;
@@ -140,31 +194,36 @@ fn finish(result: Result<UpdateResult, String>) {
         Ok(r) => {
             s.status = status_for(&r);
             s.result = Some(r);
+            s.error_kind = UpdateErrorKind::None;
+            s.raw_body.clear();
         }
         Err(e) => {
-            s.status = format!("Update check failed: {e}");
+            s.status = format!("Update check failed: {}", e.message);
             s.result = None;
+            s.error_kind = e.kind;
+            s.raw_body = e.raw_body;
         }
     }
 }
 
 /// Fetch version.json from GitHub (async, non-blocking).
-async fn fetch_latest_version() -> Result<VersionInfo, String> {
+async fn fetch_latest_version() -> Result<VersionInfo, UpdateError> {
+    let network = |m: String| UpdateError::new(UpdateErrorKind::Network, m);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .connect_timeout(std::time::Duration::from_secs(8))
         .build()
-        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+        .map_err(|e| network(format!("Failed to build HTTP client: {e}")))?;
 
     let resp = client
         .get(VERSION_URL)
         .header("User-Agent", "FCAE-VPN/1.0")
         .send()
         .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
+        .map_err(|e| network(format!("HTTP request failed: {e}")))?;
 
     if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
+        return Err(UpdateError::new(UpdateErrorKind::Http, format!("HTTP {}", resp.status())));
     }
 
     // Read the body as text first so a decode failure can quote what the
@@ -172,9 +231,9 @@ async fn fetch_latest_version() -> Result<VersionInfo, String> {
     let text = resp
         .text()
         .await
-        .map_err(|e| format!("Failed to read version.json body: {e}"))?;
+        .map_err(|e| network(format!("Failed to read version.json body: {e}")))?;
     let info: VersionInfo = serde_json::from_str(&text)
-        .map_err(|e| format!("version.json raw: {} -- could not decode: {e}", raw_excerpt(&text)))?;
+        .map_err(|e| UpdateError::decode(e, &text))?;
 
     validate(&info)?;
     Ok(info)
@@ -197,6 +256,8 @@ pub fn check_async(current_version: String, include_prereleases: bool) {
         s.done = false;
         s.result = None;
         s.status = "Checking for updates…".into();
+        s.error_kind = UpdateErrorKind::None;
+        s.raw_body.clear();
     }
 
     let spawned = std::thread::Builder::new()
@@ -205,11 +266,14 @@ pub fn check_async(current_version: String, include_prereleases: bool) {
             // The fetcher is async and needs a reactor; this is a plain worker
             // thread, so give it a small current-thread runtime rather than
             // requiring a global one.
-            let outcome = (|| -> Result<UpdateResult, String> {
+            let outcome = (|| -> Result<UpdateResult, UpdateError> {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .map_err(|e| format!("failed to build update runtime: {e}"))?;
+                    .map_err(|e| UpdateError::new(
+                        UpdateErrorKind::Network,
+                        format!("failed to build update runtime: {e}"),
+                    ))?;
                 let info = rt.block_on(fetch_latest_version())?;
                 compare_versions(&current_version, &info, include_prereleases)
             })();
@@ -219,7 +283,10 @@ pub fn check_async(current_version: String, include_prereleases: bool) {
     if spawned.is_err() {
         // A leaked RUNNING would silently swallow every future check; report
         // the failure through the normal state machine instead.
-        finish(Err("failed to spawn the update thread".into()));
+        finish(Err(UpdateError::new(
+            UpdateErrorKind::Network,
+            "failed to spawn the update thread",
+        )));
         RUNNING.store(false, AtomicOrdering::SeqCst);
     }
 }
@@ -234,9 +301,9 @@ pub fn check_from_json(current_version: &str, json: &str, include_prereleases: b
 }
 
 /// Decode + compare without touching the state machine.
-fn check_json(current: &str, json: &str, include_prereleases: bool) -> Result<UpdateResult, String> {
+fn check_json(current: &str, json: &str, include_prereleases: bool) -> Result<UpdateResult, UpdateError> {
     let info: VersionInfo = serde_json::from_str(json)
-        .map_err(|e| format!("version manifest raw: {} -- could not decode: {e}", raw_excerpt(json)))?;
+        .map_err(|e| UpdateError::decode(e, json))?;
     compare_versions(current, &info, include_prereleases)
 }
 
@@ -245,10 +312,13 @@ fn compare_versions(
     current: &str,
     latest: &VersionInfo,
     include_prereleases: bool,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, UpdateError> {
     validate(latest)?;
     let current_version = parse_version(current)
-        .ok_or_else(|| format!("Cannot compare current version: {current}"))?;
+        .ok_or_else(|| UpdateError::new(
+            UpdateErrorKind::Invalid,
+            format!("Cannot compare current version: {current}"),
+        ))?;
     let best = latest.iter()
         .filter_map(|entry| parse_version(&entry.version).map(|version| (entry, version)))
         .filter(|(_, version)| include_prereleases || !version.is_prerelease())
@@ -413,8 +483,17 @@ mod tests {
         let s = snapshot();
         assert!(s.done);
         assert!(s.result.is_none());
+        assert_eq!(s.error_kind, UpdateErrorKind::Decode);
         assert!(s.status.contains("could not decode"), "{}", s.status);
-        assert!(s.status.contains(raw), "{}", s.status);
+        assert_eq!(s.raw_body, raw);
+
+        assert!(!check_from_json("1.0.0", "[]", false));
+        let s = snapshot();
+        assert_eq!(s.error_kind, UpdateErrorKind::Invalid);
+        assert!(s.raw_body.is_empty());
+
+        assert!(check_from_json("1.0.0", &json, false));
+        assert_eq!(snapshot().error_kind, UpdateErrorKind::None);
     }
 
     #[test]
@@ -525,18 +604,18 @@ mod tests {
     fn decode_errors_show_the_raw_body_and_the_could_not_decode_trailer() {
         let raw = r#"<?xml version="1.0"?><Error><Code>NoSuchKey</Code><Message>object not found</Message></Error>"#;
         let err = check_json("1.3.1", raw, true).unwrap_err();
-        assert!(err.contains("NoSuchKey"), "raw body missing: {err}");
-        assert!(err.contains("could not decode"), "trailer missing: {err}");
+        assert_eq!(err.kind, UpdateErrorKind::Decode);
+        assert!(err.raw_body.contains("NoSuchKey"), "raw body missing: {}", err.raw_body);
+        assert!(err.message.contains("could not decode"), "trailer missing: {}", err.message);
     }
 
     #[test]
     fn raw_excerpt_strips_nuls_and_truncates() {
-        let raw = format!("ab\0cd{}", "x".repeat(500));
+        let raw = format!("ab\0cd{}", "x".repeat(RAW_BODY_MAX));
         let out = raw_excerpt(&raw);
         assert!(!out.contains('\0'));
-        // The cap is in chars; the trailer '…' is three UTF-8 bytes, so a
-        // byte-length bound would be off by two.
-        assert!(out.chars().count() <= RAW_EXCERPT_MAX + 1);
+        // Body, trailer and NUL fit the FFI buffer, so `fill` never cuts it.
+        assert!(out.len() < RAW_BODY_MAX, "{}", out.len());
         assert!(out.ends_with('…'));
     }
 }
