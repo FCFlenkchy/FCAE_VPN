@@ -17,12 +17,8 @@ public class ProxyNotification extends Service {
 
     public static final String ACTION_START = "com.fc.fcaevpn.PROXY_START";
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.PROXY_DISCONNECT";
-    /**
-     * Same teardown as {@link #ACTION_DISCONNECT}, but the process goes too.
-     * Only the notification uses it: MainActivity sends plain
-     * ACTION_DISCONNECT from its own Disconnect button, where the user is
-     * still in the app and expects to reconnect.
-     */
+    /** The notification, widget and tile use this terminal Disconnect.
+     *  MainActivity uses ACTION_DISCONNECT so its UI can reconnect. */
     public static final String ACTION_DISCONNECT_KILL = "com.fc.fcaevpn.PROXY_DISCONNECT_KILL";
     public static final String EXTRA_EXPECT_GENERATION = "expectGeneration";
 
@@ -337,6 +333,7 @@ public class ProxyNotification extends Service {
             return START_STICKY;
         }
         if (intent != null && ACTION_PSIPHON.equals(intent.getAction())) {
+            ProcessExit.cancel();
             ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
             sessionRequested = true;
             externalPsiphon = true;
@@ -350,10 +347,8 @@ public class ProxyNotification extends Service {
             return START_STICKY;
         }
         if (intent != null && ACTION_DISCONNECT_KILL.equals(intent.getAction())) {
-            // Notification Disconnect has no UI left to reconnect from, so the
-            // process goes with the session — same contract as TUN mode.
             SessionState.command(SessionState.Command.DISCONNECT);
-            terminalTeardown("Notification Disconnect");
+            terminalTeardown("Remote Disconnect");
             return START_NOT_STICKY;
         }
         if (intent != null && ACTION_DISCONNECT.equals(intent.getAction())) {
@@ -386,6 +381,7 @@ public class ProxyNotification extends Service {
         // A fresh proxy session: bump the shared generation counter so this
         // session's later disconnect broadcast is never mistaken for a stale
         // one from a previous connect/disconnect cycle.
+        ProcessExit.cancel();
         ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
         sessionRequested = true;
         stopping = false;
@@ -633,37 +629,33 @@ public class ProxyNotification extends Service {
         return true;
     }
 
-        /**
-         * A disconnect from outside the UI (notification button, widget): end
-         * the session, and this process only if the app is not on screen. The
-         * {@code :psiphon} process holds the exit, has no UI, and always goes.
-         */
+    /** Explicit Disconnect from the notification, widget or tile. */
     private void terminalTeardown(String reason) {
         Log.i(TAG, reason + " — ending the session");
         boolean tornDown = false;
         try {
-            tornDown = stopProxy();
+            tornDown = stopProxy(false);
         } catch (Throwable t) {
             Log.w(TAG, "teardown failed: " + t);
         }
         if (!tornDown) {
-            // Already stopping (another teardown got here first), so stopProxy
-            // made no decision of its own about the process — this command still
-            // owes the session one.
+            // An earlier stop can already be in flight; it must still exit
+            // when this remote Disconnect arrives.
             try {
                 stopForeground(STOP_FOREGROUND_REMOVE);
             } catch (Throwable ignored) {
             }
             stopSelf();
-            if (ownerGeneration == FCAEVpnService.sGeneration.get()
-                    && !FCAEApplication.uiVisibleNow()) {
-                if (handler != null) {
-                    handler.postDelayed(this::killOwnProcess, PROCESS_KILL_DELAY_MS);
-                } else {
-                    killOwnProcess();
-                }
-            }
         }
+        final long generation = ownerGeneration;
+        if (generation != FCAEVpnService.stateGeneration()) return;
+        Runnable exit = () -> {
+            if (generation == FCAEVpnService.stateGeneration()) {
+                ProcessExit.request(this, true);
+            }
+        };
+        if (handler != null) handler.postDelayed(exit, PROCESS_KILL_DELAY_MS);
+        else exit.run();
     }
 
     private void killOwnProcess() {
@@ -677,6 +669,18 @@ public class ProxyNotification extends Service {
         current.handler.post(() -> {
             if (instance == current && generation == current.ownerGeneration) {
                 current.terminalTeardown("Direct Disconnect");
+            }
+        });
+        return true;
+    }
+
+    public static boolean disconnectFromUiIfCurrent(long generation) {
+        ProxyNotification current = instance;
+        if (current == null || current.ownerGeneration != generation) return false;
+        current.handler.post(() -> {
+            if (instance == current && generation == current.ownerGeneration
+                    && generation == FCAEVpnService.stateGeneration()) {
+                current.stopProxy(false);
             }
         });
         return true;

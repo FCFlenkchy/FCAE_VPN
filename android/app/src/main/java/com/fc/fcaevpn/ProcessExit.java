@@ -15,14 +15,25 @@ public final class ProcessExit {
 
     private ProcessExit() {}
 
+    /** A new connect can be pending before the service bumps its generation. */
+    public static void cancel() {
+        ticket.incrementAndGet();
+    }
+
     public static void request(Context context) {
+        request(context, false);
+    }
+
+    /** A widget, tile or notification Disconnect explicitly ends the process;
+     *  an in-app Disconnect leaves the visible Activity ready to reconnect. */
+    public static void request(Context context, boolean remoteDisconnect) {
         Context app = context.getApplicationContext();
         long request = ticket.incrementAndGet();
         long generation = FCAEVpnService.stateGeneration();
         long started = SystemClock.elapsedRealtime();
         Runnable finish = () -> {
             boolean deadline = SystemClock.elapsedRealtime() - started >= CLEANUP_DEADLINE_MS;
-            if (request == ticket.get() && mayExit(app, generation, true, deadline)) {
+            if (request == ticket.get() && mayExit(app, generation, true, deadline, remoteDisconnect)) {
                 FCAEVpnService.killProcessQuietly();
             }
         };
@@ -33,7 +44,7 @@ public final class ProcessExit {
         }
         try {
             NativeEngine.lifecycleExecutor.execute(() -> {
-                if (request == ticket.get() && mayExit(app, generation, false, false)) {
+                if (request == ticket.get() && mayExit(app, generation, false, false, remoteDisconnect)) {
                     try { NativeEngine.nativeStopBegin(); } catch (Throwable ignored) {}
                     try { NativeEngine.nativeFree(); } catch (Throwable ignored) {}
                 }
@@ -46,9 +57,11 @@ public final class ProcessExit {
     }
 
     private static boolean mayExit(Context app, long generation,
-                                   boolean afterGrace, boolean deadline) {
+                                   boolean afterGrace, boolean deadline,
+                                   boolean remoteDisconnect) {
         if (generation != FCAEVpnService.stateGeneration()) return false;
-        if (afterGrace ? FCAEApplication.uiOnScreen() : FCAEApplication.uiVisibleNow()) return false;
+        if (!remoteDisconnect && (afterGrace ? FCAEApplication.uiOnScreen()
+                                              : FCAEApplication.uiVisibleNow())) return false;
         if (FCAEVpnService.sessionActive() || ProxyNotification.sessionActive()) return false;
         if (!deadline && FCAEVpnService.ownsSession()) return false;
         return !SessionState.commandInFlight() || !SessionState.snapshot(app).getActive();

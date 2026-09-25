@@ -127,14 +127,11 @@ public class FCAEVpnService extends VpnService {
     private volatile boolean running = false;
     private volatile boolean vpnPaused = false;
     private volatile boolean shuttingDown = false;
-    /**
-     * Set when teardown must end with the process gone: notification
-     * Disconnect, the task being swiped away, or the VPN being revoked. The
-     * kill runs after nativeStop so the engine shuts down cleanly first, and
-     * is queued on the main looper so the disconnect broadcast reaches the UI
-     * ahead of it.
-     */
+    /** Teardown can end with process exit only after the native engine stops. */
     private volatile boolean killProcessOnCleanup = false;
+    /** Notification, widget and tile Disconnect also end the process even if
+     *  an Activity is still started beneath the system UI. */
+    private volatile boolean remoteDisconnect = false;
     private volatile boolean disconnectFromUi = false;
 
     private Intent lastStartIntent;
@@ -553,7 +550,7 @@ public class FCAEVpnService extends VpnService {
     public static boolean disconnectNow() {
         FCAEVpnService current = instance;
         if (current == null) return false;
-        current.fullShutdown();
+        current.requestDisconnect();
         return true;
     }
 
@@ -654,12 +651,11 @@ public class FCAEVpnService extends VpnService {
                     return START_STICKY;
 
                 case ACTION_DISCONNECT:
-                    handler.removeCallbacks(connectWatchdog);
-                    SessionState.command(SessionState.Command.DISCONNECT);
                     requestDisconnect();
                     return START_NOT_STICKY;
 
                 case ACTION_PSIPHON_START:
+                    ProcessExit.cancel();
                     armConnectWatchdog();
                     pendingPsiphonStart = new Intent(intent);
                     preparePsiphonConnect(intent);
@@ -726,16 +722,16 @@ public class FCAEVpnService extends VpnService {
         pauseVpn();
     }
 
-    /**
-     * Notification / widget / UI command: Disconnect. Ends the session and the
-     * service; the process follows only when the app is not on screen.
-     */
+    /** Notification, widget and tile Disconnect end the service and process. */
     private void requestDisconnect() {
+        handler.removeCallbacks(connectWatchdog);
+        SessionState.command(SessionState.Command.DISCONNECT);
         synchronized (cmdLock) {
             queuedStart = null;
         }
-        if (shuttingDown && !FCAEApplication.uiVisibleNow()) {
-            killProcessOnCleanup = true;
+        remoteDisconnect = true;
+        killProcessOnCleanup = true;
+        if (shuttingDown) {
             scheduleProcessKill();
             return;
         }
@@ -758,9 +754,8 @@ public class FCAEVpnService extends VpnService {
             try {
                 PsiphonTunnelService.killProcessOnExit(this);
             } catch (Throwable ignored) {}
-            // Already nothing running. :psiphon still has to go; this process
-            // follows only when the user is not on this screen.
-            if (!FCAEApplication.uiVisibleNow()) scheduleProcessKill();
+            // Already nothing running: stop :psiphon as well, then exit.
+            scheduleProcessKill();
             return;
         }
         fullShutdown();
@@ -784,6 +779,7 @@ public class FCAEVpnService extends VpnService {
             showReady();
             return;
         }
+        ProcessExit.cancel();
         lastStartIntent = new Intent(src);
         rememberStart(lastStartIntent);
 
@@ -811,6 +807,7 @@ public class FCAEVpnService extends VpnService {
                 Log.i(TAG, "Start queued until current stop finishes");
                 shuttingDown = false;
                 killProcessOnCleanup = false;
+                remoteDisconnect = false;
                 uiConnecting = true;
                 notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
                 startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
@@ -881,6 +878,8 @@ public class FCAEVpnService extends VpnService {
     private void preparePsiphonConnect(Intent intent) {
         if (running || vpnThread != null) return;
         disconnectFromUi = false;
+        remoteDisconnect = false;
+        killProcessOnCleanup = false;
         sessionEpoch.incrementAndGet();
         // Same connect-window reset startVpn() performs: invalidate anything
         // still tearing down from a previous session and claim this one.
@@ -903,6 +902,8 @@ public class FCAEVpnService extends VpnService {
 
     private synchronized void startVpn(Intent intent) {
         disconnectFromUi = false;
+        remoteDisconnect = false;
+        killProcessOnCleanup = false;
         sessionEpoch.incrementAndGet();
         final int tunMtu = intent.getIntExtra("tunMtu", 1500);
         if (tunMtu < 1280 || tunMtu > 9000) {
@@ -1149,12 +1150,8 @@ public class FCAEVpnService extends VpnService {
         return state >= 1 && state <= 4 || state == 6;
     }
 
-        /**
-         * End the session, and the process with it when nobody is looking at it.
-         * One rule, one place, every caller (notification, widget, UI, revoke):
-         * app on screen -> session ends, process stays; nothing on screen ->
-         * process goes with the session.
-         */
+    /** Stop the session; remote Disconnect requests process exit after native
+     *  cleanup, while in-app Disconnect keeps the Activity for reconnection. */
     private synchronized void fullShutdown() {
         fullShutdown(false);
     }
@@ -1257,6 +1254,7 @@ public class FCAEVpnService extends VpnService {
                 if (next != null) {
                     shuttingDown = false;
                     killProcessOnCleanup = false;
+                    remoteDisconnect = false;
                     armConnectWatchdog();
                     requestStart(next);
                     return;
@@ -1301,9 +1299,11 @@ public class FCAEVpnService extends VpnService {
      */
     private void scheduleProcessKill() {
         final long gen = cleanupGeneration.get();
+        final boolean remote = remoteDisconnect;
         handler.post(() -> {
-            if (gen == cleanupGeneration.get() && !FCAEApplication.uiVisibleNow()) {
-                ProcessExit.request(this);
+            if (gen == cleanupGeneration.get()
+                    && (remote || !FCAEApplication.uiVisibleNow())) {
+                ProcessExit.request(this, remote);
             }
         });
     }

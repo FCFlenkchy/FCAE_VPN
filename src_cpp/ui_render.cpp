@@ -1086,6 +1086,7 @@ static const char* const kLinkTelegram = "https://t.me/FCAE_VPN";
 static const char* const kLinkGithub = "https://github.com/FCFlenkchy/FCAE_VPN";
 static const std::string kLinkCredits = std::string(kLinkGithub) + "#credits";
 static const std::string kLinkLicense = std::string(kLinkGithub) + "/blob/main/LICENSE";
+static const char* const kTonAddress = "UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV";
 struct CommunityLink { const char* label; const char* url; const char* shown; };
 static const CommunityLink kCommunityLinks[] = {
     { "Telegram", kLinkTelegram, "t.me/FCAE_VPN" },
@@ -1636,6 +1637,11 @@ void render_ui() {
                     ImGui::SameLine(96.0f);
                     ImGui::TextDisabled("%s", link.shown);
                 }
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextUnformatted("Support the developer with TON (The Open Network):");
+                ImGui::TextUnformatted(kTonAddress);
+                if (ImGui::Button("Copy TON address")) ImGui::SetClipboardText(kTonAddress);
                 ImGui::Spacing();
                 ImGui::TextDisabled("%s", build_is_prerelease()
                     ? "Pre-released under the" : "Released under the");

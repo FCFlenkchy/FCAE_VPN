@@ -194,6 +194,14 @@ cmake --build build --config Release
 
 Bug 反馈与功能建议请提交到 **[GitHub Issues](https://github.com/FCFlenkchy/FCAE_VPN/issues)**，以便跟踪与检索；Telegram 频道适合日常交流与提问。
 
+## 支持开发
+
+如果您愿意支持开发者，可以通过 TON（The Open Network）向以下地址捐赠：
+
+`UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV`
+
+请仅使用 TON 网络。捐赠完全自愿。
+
 ## 贡献
 
 欢迎贡献！无论是错误报告、功能请求、文档改进还是代码贡献 — 都可以提交 Issue 或 Pull Request。

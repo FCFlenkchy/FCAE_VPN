@@ -192,6 +192,14 @@ Join the official Telegram channel for release announcements, connectivity notic
 
 Bug reports and feature requests belong in **[GitHub Issues](https://github.com/FCFlenkchy/FCAE_VPN/issues)** so they stay tracked and searchable — the channel is for everything else.
 
+## Support development
+
+If you'd like to support the developer, you can send TON (The Open Network) to:
+
+`UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV`
+
+Use the TON network only. Donations are optional.
+
 ## Contributing
 
 Contributions are welcome! Whether it's bug reports, feature requests, documentation improvements, or code contributions — feel free to open an issue or pull request.

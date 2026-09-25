@@ -886,11 +886,15 @@ class MainActivity : AppCompatActivity() {
         lastLogHash = 0L
 
         btnConnect.setOnClickListener {
-            if (vpnActive || engineRunning || connecting || commandPaused) disconnectAll() else connectClicked()
+            if (vpnActive || engineRunning || connecting || commandPaused || SessionState.isLive()) {
+                disconnectAll()
+            } else {
+                connectClicked()
+            }
         }
 
         btnTunStop.setOnClickListener {
-            if (isTunModeSelected()) {
+            if (isTunSession()) {
                 // Before the service closes anything. A poll already in flight
                 // must not paint the native flicker over CONNECTED.
                 FCAEVpnService.holdConnectedUi = true
@@ -911,7 +915,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnTunStart.setOnClickListener {
-            if (isTunModeSelected()) {
+            if (isTunSession()) {
                 notificationPauseUi = false
                 FCAEVpnService.notificationPause = false
                 try {
@@ -1119,7 +1123,7 @@ class MainActivity : AppCompatActivity() {
         if (!::statusText.isInitialized) return
         val word = statusText.text?.toString() ?: ""
         if (word.startsWith("CONNECTED")) return
-        statusText.text = "CONNECTED - ${if (isTunModeSelected()) "TUN" else "PROXY"}"
+        statusText.text = "CONNECTED - ${if (isTunSession()) "TUN" else "PROXY"}"
         statusText.setTextColor(COLOR_CONNECTED)
     }
 
@@ -1129,7 +1133,7 @@ class MainActivity : AppCompatActivity() {
      *  closes. Widget and in-app Stop do not come through here. */
     private fun showPausedReadings(rx: Long, tx: Long, totalRx: Long, totalTx: Long, rtt: Int) {
         if (!::statsText.isInitialized || !::statusText.isInitialized) return
-        statusText.text = "CONNECTED - ${if (isTunModeSelected()) "TUN" else "PROXY"}"
+        statusText.text = "CONNECTED - ${if (isTunSession()) "TUN" else "PROXY"}"
         statusText.setTextColor(COLOR_CONNECTED)
         if (isPsiphonSelected() || isEgressPsiphon()) {
             restoreLatestPsiStats()
@@ -1231,6 +1235,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        VpnTileService.clearPendingExit(this)
         try { startService(Intent(this, IdleTaskService::class.java)) }
         catch (_: Throwable) {}
         handleWidgetIntent(intent)
@@ -1380,6 +1385,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isTunModeSelected(): Boolean = spinnerMode.selectedItemPosition == 1
+
+    private fun isTunSession(): Boolean {
+        if (FCAEVpnService.sessionActive()) return true
+        if (ProxyNotification.sessionActive()) return false
+        val session = SessionState.snapshot(this)
+        return if (session.active) session.mode == 1 else isTunModeSelected()
+    }
 
     /**
      * SOCKS5 is mandatory in TUN mode: tun2socks dials the engine's local SOCKS5
@@ -1671,6 +1683,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectClicked() {
         if (connecting || engineRunning || vpnActive) return
+        ProcessExit.cancel()
+        VpnTileService.clearPendingExit(this)
         if (commandPaused) {
             notificationPauseUi = false
             FCAEVpnService.notificationPause = false
@@ -1682,8 +1696,11 @@ class MainActivity : AppCompatActivity() {
             updateButton()
             statusText.text = "CONNECTING"
             statusText.setTextColor(COLOR_PROGRESS)
-            if (isTunModeSelected()) {
-                startTunServiceWithConfig()
+            if (isTunSession()) {
+                if (isTunModeSelected()) startTunServiceWithConfig()
+                else startForegroundService(
+                    Intent(this, FCAEVpnService::class.java).setAction(FCAEVpnService.ACTION_START)
+                )
             } else {
                 startForegroundService(
                     Intent(this, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_START)
@@ -2031,6 +2048,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnectAll() {
+        val session = SessionState.snapshot(this)
+        val currentMode = when {
+            FCAEVpnService.sessionActive() -> 1
+            ProxyNotification.sessionActive() -> 0
+            FCAEVpnService.ownsSession() -> 1
+            session.active -> session.mode
+            else -> spinnerMode.selectedItemPosition
+        }
         connectionEpoch++
         userInitiatedDisconnect = true
         commandPaused = false
@@ -2054,37 +2079,44 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) {}
 
         val issued = FCAEVpnService.stateGeneration()
-        val currentMode = spinnerMode.selectedItemPosition
+        val epoch = connectionEpoch
         val psiphonBooting = pendingPsiSocks == 0 && isPsiphonSelected()
         Thread({
             if (currentMode == 1) {
                 val hadVpnService = FCAEVpnService.disconnectIfCurrent(issued)
-                if (!hadVpnService && !psiphonBooting) ProxyNotification.notifyCleanupComplete(this)
-                if (psiphonBooting) {
-                    val stop = Intent(this, ProxyNotification::class.java)
-                        .setAction(ProxyNotification.ACTION_DISCONNECT)
-                        .putExtra(ProxyNotification.EXTRA_EXPECT_GENERATION, issued)
-                    try { startForegroundService(stop) } catch (e: Exception) {
-                        android.util.Log.w("FCAE", "Cannot deliver proxy Stop", e)
-                        ProxyNotification.notifyCleanupComplete(this)
-                    }
+                if (!hadVpnService && !psiphonBooting) {
+                    stopUnownedNative(issued, epoch)
+                    ProxyNotification.notifyCleanupComplete(this)
                 }
+                if (psiphonBooting) disconnectProxyFromUi(issued, epoch)
             } else {
-                // startForegroundService, not startService: (a) startService from
-                // a backgrounded app is blocked on Android 12+, and the old
-                // catch-all silently swallowed that — the engine kept running
-                // while the UI showed DISCONNECTED; (b) if the notification
-                // service already died (watchdog teardown, system reclaim), this
-                // restarts it, stopProxy() runs, and its disconnect broadcast
-                // reaches the UI — self-healing a stuck "CONNECTED" state.
-                try {
-                    val i = Intent(this, ProxyNotification::class.java)
-                        .setAction(ProxyNotification.ACTION_DISCONNECT)
-                        .putExtra(ProxyNotification.EXTRA_EXPECT_GENERATION, issued)
-                    startForegroundService(i)
-                } catch (_: Throwable) {}
+                disconnectProxyFromUi(issued, epoch)
             }
         }, "Disconnect-Background").start()
+    }
+
+    private fun stopUnownedNative(issued: Long, epoch: Long) {
+        if (!NativeEngine.Loaded.value) return
+        NativeEngine.lifecycleExecutor.execute {
+            if (epoch == connectionEpoch && issued == FCAEVpnService.stateGeneration()) {
+                try { NativeEngine.nativeStopBegin() } catch (_: Throwable) {}
+                try { NativeEngine.nativeStop() } catch (_: Throwable) {}
+            }
+        }
+    }
+
+    private fun disconnectProxyFromUi(issued: Long, epoch: Long) {
+        if (ProxyNotification.disconnectFromUiIfCurrent(issued)) return
+        val stop = Intent(this, ProxyNotification::class.java)
+            .setAction(ProxyNotification.ACTION_DISCONNECT)
+            .putExtra(ProxyNotification.EXTRA_EXPECT_GENERATION, issued)
+        try {
+            startForegroundService(stop)
+        } catch (t: Throwable) {
+            android.util.Log.w("FCAE", "Cannot deliver proxy Disconnect", t)
+            stopUnownedNative(issued, epoch)
+            ProxyNotification.notifyCleanupComplete(this)
+        }
     }
 
     /** The update button in one of its three looks; the label is the prompt. */
@@ -2516,9 +2548,33 @@ class MainActivity : AppCompatActivity() {
             }, params)
         }
         content.addView(row)
+        content.addView(TextView(this).apply {
+            text = "Support the developer with TON (The Open Network):"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setPadding(0, (12 * density).toInt(), 0, (4 * density).toInt())
+        })
+        content.addView(TextView(this).apply {
+            text = TON_ADDRESS
+            typeface = Typeface.MONOSPACE
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setTextIsSelectable(true)
+        })
+        content.addView(MaterialButton(this).apply {
+            text = "Copy TON address"
+            isAllCaps = false
+            backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FF0088CC"))
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("TON address", TON_ADDRESS))
+                Toast.makeText(this@MainActivity, "TON address copied", Toast.LENGTH_SHORT).show()
+            }
+        })
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("About")
-            .setView(content)
+            .setView(ScrollView(this).apply { addView(content) })
             .setNegativeButton("Close", null)
             .create()
         dialog.setCanceledOnTouchOutside(true)
@@ -2845,7 +2901,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateButton() {
         btnConnect.isEnabled = true
-        val isTun = isTunModeSelected()
+        val isTun = isTunSession()
         val showPauseResume = isTun && (vpnActive || engineRunning || commandPaused || connecting)
         if (::layoutTunPauseResume.isInitialized) {
             layoutTunPauseResume.visibility = if (showPauseResume) android.view.View.VISIBLE else android.view.View.GONE
@@ -3134,6 +3190,7 @@ class MainActivity : AppCompatActivity() {
         private const val LINK_GITHUB = "https://github.com/FCFlenkchy/FCAE_VPN"
         private const val LINK_CREDITS = LINK_GITHUB + "#credits"
         private const val LINK_LICENSE = LINK_GITHUB + "/blob/main/LICENSE"
+        private const val TON_ADDRESS = "UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV"
 
         // Pre-computed Color constants — avoids String.parseColor() on every poll tick.
         private val COLOR_CONNECTED = Color.parseColor("#34D399")

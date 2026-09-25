@@ -41,6 +41,7 @@ object VpnCommands {
      *  before the widget could say CONNECTING. Mode comes from the small
      *  cache; TUN shows Stop, proxy does not. */
     fun paintConnecting(context: Context): Boolean {
+        VpnTileService.clearPendingExit(context)
         val mode = FCAEVpnService.recalledMode(context)
         SessionState.command(SessionState.Command.CONNECT)
         SessionState.markConnecting(context, mode)
@@ -49,6 +50,7 @@ object VpnCommands {
 
     /** Replay the last session. False means the app must show the consent screen. */
     fun connect(context: Context, start: (Context, Intent) -> Boolean = ::dispatch): Boolean {
+        VpnTileService.clearPendingExit(context)
         val session = FCAEVpnService.recalledSession(context) ?: return false
         val mode = session.getIntExtra("mode", 1)
         val command = if (mode == 1) {
@@ -66,6 +68,7 @@ object VpnCommands {
             SessionState.markIdle(context)
             return false
         }
+        ProcessExit.cancel()
         return true
     }
 
@@ -73,19 +76,14 @@ object VpnCommands {
         SessionState.command(SessionState.Command.DISCONNECT)
         val tun = FCAEVpnService.ownsSession()
         val proxy = ProxyNotification.sessionActive()
+        var orphaned = !tun && !proxy
         if (tun && !start(context, Intent(context, FCAEVpnService::class.java)
-                .setAction(FCAEVpnService.ACTION_DISCONNECT))) {
-            FCAEVpnService.disconnectNow()
-        }
+                .setAction(FCAEVpnService.ACTION_DISCONNECT))
+                && !FCAEVpnService.disconnectNow()) orphaned = true
         if (proxy && !start(context, Intent(context, ProxyNotification::class.java)
-                .setAction(ProxyNotification.ACTION_DISCONNECT_KILL))) {
-            ProxyNotification.disconnectNow()
-        }
-        if (!tun && !proxy) {
-            endIdle(context)
-            return
-        }
-        SessionState.markIdle(context)
+                .setAction(ProxyNotification.ACTION_DISCONNECT_KILL))
+                && !ProxyNotification.disconnectNow()) orphaned = true
+        if (orphaned) endIdle(context)
     }
 
     /** Disconnect when no owner is up. The tap still has to end this process
@@ -106,26 +104,7 @@ object VpnCommands {
             PsiphonTunnelService.killProcessOnExit(app)
         } catch (_: Throwable) {
         }
-        if (!FCAEApplication.uiVisibleNow()) {
-            ProcessExit.request(app)
-            return
-        }
-        // This process is staying. Stop an engine it already loaded; do not
-        // load one just to stop it — a cold widget tap must not pay for that.
-        if (!NativeEngine.Loaded.value) return
-        try {
-            NativeEngine.lifecycleExecutor.execute {
-                try {
-                    NativeEngine.nativeStopBegin()
-                } catch (_: Throwable) {
-                }
-                try {
-                    NativeEngine.nativeStop()
-                } catch (_: Throwable) {
-                }
-            }
-        } catch (_: Throwable) {
-        }
+        ProcessExit.request(app, true)
     }
 
     fun openApp(context: Context) {
