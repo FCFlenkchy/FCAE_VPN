@@ -163,7 +163,11 @@
     <!-- Row 5: controls. STOP/START exists for a TUN session only.
          The row takes every line the readings do not, and the buttons fill it:
          a fixed height left a dead strip under them on cells taller than the
-         minimum, which is most launchers at 3x2. -->
+         minimum, which is most launchers at 3x2.
+
+         Each label is its own view with a fixed background. RemoteViews
+         setBackgroundResource on a partial update is dropped by hosts, which
+         left the previous chrome on screen after the session flipped. -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -172,7 +176,7 @@
         android:orientation="horizontal">
 
         <TextView
-            android:id="@+id/widget_btn_pause_resume"
+            android:id="@+id/widget_btn_stop"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_marginEnd="6dp"
@@ -187,7 +191,22 @@
             android:visibility="gone" />
 
         <TextView
-            android:id="@+id/widget_btn_action"
+            android:id="@+id/widget_btn_start"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="6dp"
+            android:layout_weight="1"
+            android:background="@drawable/widget_btn_tun_start"
+            android:gravity="center"
+            android:singleLine="true"
+            android:text="START"
+            android:textColor="#FFFFFFFF"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/widget_btn_connect"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="2"
@@ -198,6 +217,20 @@
             android:textColor="#FFFFFFFF"
             android:textSize="12sp"
             android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_btn_disconnect"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="2"
+            android:background="@drawable/widget_btn_disconnect"
+            android:gravity="center"
+            android:singleLine="true"
+            android:text="DISCONNECT"
+            android:textColor="#FFFFFFFF"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
     </LinearLayout>
 
 </LinearLayout>

@@ -9,6 +9,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.View
 import android.widget.RemoteViews
 import java.util.concurrent.Executors
@@ -22,6 +23,11 @@ import java.util.concurrent.Executors
  * on the widget is a documented Android 12 exemption from the background
  * service-start restriction, which is what makes the headless connect legal;
  * only "nothing to replay yet" and the one-time VPN consent open the app.
+ *
+ * Launchers rate-limit RemoteViews. Telemetry used to rebuild the whole
+ * widget (buttons, backgrounds, click intents) at 1 Hz, so CONNECT/DISCONNECT
+ * paints were queued or dropped. Controls and meters are separate paints;
+ * button chrome is dedicated views, not setBackgroundResource.
  */
 class VpnWidgetProvider : AppWidgetProvider() {
 
@@ -33,10 +39,32 @@ class VpnWidgetProvider : AppWidgetProvider() {
         if (action == ACTION_WIDGET_TOGGLE || action == ACTION_WIDGET_PAUSE_RESUME) {
             val app = context.applicationContext
             val tapActive = intent.getBooleanExtra(EXTRA_TAP_ACTIVE, false)
-            // Same frame as the tap. A background hop, or reading the saved
-            // session first, is the half-second before CONNECTING appeared.
-            if (action == ACTION_WIDGET_TOGGLE && !tapActive) {
-                try { VpnCommands.paintConnecting(app) } catch (_: Throwable) {}
+            inReceive.set(true)
+            try {
+                // Optimistic frame after the launcher finishes delivering this
+                // click. Updating AppWidgetManager inside onReceive is what
+                // hosts hold until the binder call ends — the half-second
+                // (or dropped) button paint.
+                when (action) {
+                    ACTION_WIDGET_TOGGLE -> {
+                        if (!tapActive) {
+                            try { VpnCommands.paintConnecting(app) } catch (_: Throwable) {}
+                        } else {
+                            try { VpnCommands.paintIdle(app) } catch (_: Throwable) {}
+                        }
+                    }
+                    ACTION_WIDGET_PAUSE_RESUME -> {
+                        try {
+                            SessionState.command(
+                                if (tapActive) SessionState.Command.RESUME
+                                else SessionState.Command.PAUSE
+                            )
+                            SessionState.markPause(app, !tapActive)
+                        } catch (_: Throwable) {}
+                    }
+                }
+            } finally {
+                inReceive.set(false)
             }
             val pending = goAsync()
             clicks.execute {
@@ -68,9 +96,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
     }
 
     private fun pauseOrResume(context: Context, wasPaused: Boolean) {
-        SessionState.command(
-            if (wasPaused) SessionState.Command.RESUME else SessionState.Command.PAUSE
-        )
         if (!dispatch(
                 context,
                 Intent(context, FCAEVpnService::class.java).setAction(
@@ -79,9 +104,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
             )
         ) {
             SessionState.command(SessionState.Command.NONE)
-            return
+            SessionState.markPause(context, wasPaused)
         }
-        SessionState.markPause(context, !wasPaused)
     }
 
     companion object {
@@ -92,6 +116,14 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private const val PENDING_FLAGS =
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         private const val RECHECK_DELAY_MS = 2500L
+        /** Meter-only paints. Control changes never wait on this. */
+        private const val METER_MIN_MS = 2000L
+
+        private const val REQ_OPEN = 100
+        private const val REQ_CONNECT = 101
+        private const val REQ_STOP = 102
+        private const val REQ_DISCONNECT = 103
+        private const val REQ_START = 104
 
         private val COLOR_CONNECTED = Color.parseColor("#34D399")
         private val COLOR_DISCONNECTED = Color.parseColor("#8A93A6")
@@ -101,24 +133,46 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private val clicks = Executors.newSingleThreadExecutor { r ->
             Thread(r, "FCAE-Widget").apply { isDaemon = true }
         }
+        private val inReceive = ThreadLocal.withInitial { false }
 
-        /** Last rendered content; identical content is not worth a repaint. */
-        @Volatile
-        private var lastRendered: String? = null
+        @Volatile private var lastControlKey: String? = null
+        @Volatile private var lastMeterKey: String? = null
+        @Volatile private var lastMeterAt = 0L
+        @Volatile private var paintContext: Context? = null
+        /** First paint of this process must reinflate: layout IDs may have
+         *  changed since the host last inflated, and a partial merge cannot
+         *  create views. */
+        @Volatile private var inflated = false
 
+        private val postedPaint = Runnable {
+            val ctx = paintContext ?: return@Runnable
+            paintNow(ctx)
+        }
 
-                /**
-                 * Repaint now, from wherever a session ends. The teardown paths kill
-                 * this process and an in-flight broadcast dies with it, so the owners
-                 * call this synchronously before the kill: the last frame the launcher
-                 * keeps is the truth.
-                 */
+        /**
+         * Repaint now, from wherever a session ends. The teardown paths kill
+         * this process and an in-flight broadcast dies with it, so the owners
+         * call this synchronously before the kill: the last frame the launcher
+         * keeps is the truth.
+         */
         @JvmStatic
         fun refresh(context: Context) {
-            val ids = ids(context).takeIf { it.isNotEmpty() } ?: return
-            // Partial: a full updateAppWidget after a tap is what launchers
-            // hold for about half a second, and what reinflates the layout.
-            render(context, ids, force = true, full = false)
+            val app = context.applicationContext
+            val ids = ids(app)
+            if (ids.isEmpty()) return
+            paintContext = app
+            val onMain = Looper.myLooper() == Looper.getMainLooper()
+            // Inside the widget click delivery the host is still applying the
+            // tap; a binder update there is deferred or dropped. Everywhere
+            // else — teardown especially — paint on this thread so a process
+            // kill cannot eat the queued frame.
+            if (onMain && inReceive.get() != true) {
+                mainHandler.removeCallbacks(postedPaint)
+                paintNow(app)
+            } else {
+                mainHandler.removeCallbacks(postedPaint)
+                mainHandler.post(postedPaint)
+            }
         }
 
         private fun ids(context: Context): IntArray {
@@ -146,6 +200,12 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private fun dispatch(context: Context, intent: Intent): Boolean =
             VpnCommands.dispatch(context, intent)
 
+        private fun paintNow(context: Context) {
+            val ids = ids(context)
+            if (ids.isEmpty()) return
+            render(context, ids, force = false, full = false)
+        }
+
         private fun render(context: Context, ids: IntArray, force: Boolean = false, full: Boolean = false) {
             val manager = AppWidgetManager.getInstance(context) ?: return
             // reconciled(), not snapshot(): a stored frame can outlive its
@@ -154,9 +214,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val session = SessionState.reconciled(context)
             val tun = session.mode == 1
 
-            // Same meter the notification and the app paint, including while
-            // Stop has the TUN paused. Disconnect is the only frame with no
-            // reading.
             val shown = if (session.active) session else SessionState.Snapshot.IDLE
 
             val status = when (session.phase) {
@@ -172,71 +229,69 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 SessionState.Phase.RECONNECTING -> COLOR_PROGRESS
                 else -> COLOR_CONNECTED
             }
-            val action =
-                if (session.phase == SessionState.Phase.DISCONNECTED) "CONNECT" else "DISCONNECT"
-
-            // Same rule as the app's own controls (MainActivity.updateButton):
-            // the pair is there for a TUN session from the first moment a
-            // connect is asked for — dialing included — and gone once the
-            // session is over. Stop cancels a dial and pauses a live tunnel, so
-            // the label only flips on the paused phase.
+            val connect = session.phase == SessionState.Phase.DISCONNECTED
             val pausable = tun && session.active
-            val pauseLabel = if (session.paused) "START" else "STOP"
-            // Down and up are separate readings, each with its own arrow: rates
-            // and totals each get a row, split into the two directions.
-            // The notification's formatter, not a copy of it: KB/MB/GB text in
-            // the widget has to read exactly like the notification and the app.
+            val paused = session.paused
             val ratesDown = "↓ " + VpnNotification.fmtRate(shown.rx)
             val ratesUp = "↑ " + VpnNotification.fmtRate(shown.tx)
             val totalDown = "↓ " + VpnNotification.fmtBytes(shown.totalRx)
             val totalUp = "↑ " + VpnNotification.fmtBytes(shown.totalTx)
-            // The reading, bare, with its unit — the shape the app's own line
-            // and the desktop's use. No label: this slot is the RTT's.
             val rtt = "${shown.rtt}ms"
 
-            // Every repaint is a round trip to the launcher: identical content
-            // is not worth one.
-            val key = listOf(
-                status, rtt, ratesDown, ratesUp, totalDown, totalUp,
-                action, pauseLabel, pausable.toString()
-            ).joinToString("|")
-            if (!force && key == lastRendered) return
-            lastRendered = key
+            val controlKey = "$status|$statusColor|$connect|$pausable|$paused"
+            val meterKey = "$rtt|$ratesDown|$ratesUp|$totalDown|$totalUp"
+            val controlsChanged = force || controlKey != lastControlKey
+            val metersChanged = force || meterKey != lastMeterKey
+            if (!controlsChanged && !metersChanged) return
+
+            if (!controlsChanged && !full) {
+                val wait = METER_MIN_MS - (SystemClock.elapsedRealtime() - lastMeterAt)
+                if (wait > 0L) {
+                    paintContext = context.applicationContext
+                    mainHandler.removeCallbacks(postedPaint)
+                    mainHandler.postDelayed(postedPaint, wait)
+                    return
+                }
+                val views = RemoteViews(context.packageName, R.layout.widget_vpn)
+                bindMeters(views, rtt, ratesDown, ratesUp, totalDown, totalUp)
+                push(manager, ids, views, full = false)
+                lastMeterKey = meterKey
+                lastMeterAt = SystemClock.elapsedRealtime()
+                return
+            }
 
             val views = RemoteViews(context.packageName, R.layout.widget_vpn)
             views.setTextViewText(R.id.widget_status, status)
             views.setTextColor(R.id.widget_status, statusColor)
-            views.setTextViewText(R.id.widget_rtt, rtt)
-            views.setTextViewText(R.id.widget_rx_rate, ratesDown)
-            views.setTextViewText(R.id.widget_tx_rate, ratesUp)
-            views.setTextViewText(R.id.widget_rx_total, totalDown)
-            views.setTextViewText(R.id.widget_tx_total, totalUp)
-            views.setTextViewText(R.id.widget_btn_action, action)
-            views.setInt(
-                R.id.widget_btn_action, "setBackgroundResource",
-                if (action == "CONNECT") R.drawable.widget_btn_connect else R.drawable.widget_btn_disconnect
+            bindMeters(views, rtt, ratesDown, ratesUp, totalDown, totalUp)
+
+            // Dedicated views, XML backgrounds. setBackgroundResource on a
+            // partial update is what left CONNECT green after the label
+            // flipped, and what some hosts ignore until a full reinflate.
+            views.setViewVisibility(R.id.widget_btn_connect, if (connect) View.VISIBLE else View.GONE)
+            views.setViewVisibility(R.id.widget_btn_disconnect, if (connect) View.GONE else View.VISIBLE)
+            views.setViewVisibility(R.id.widget_btn_stop, if (pausable && !paused) View.VISIBLE else View.GONE)
+            views.setViewVisibility(R.id.widget_btn_start, if (pausable && paused) View.VISIBLE else View.GONE)
+
+            views.setOnClickPendingIntent(
+                R.id.widget_btn_connect,
+                pending(context, ACTION_WIDGET_TOGGLE, REQ_CONNECT, false)
             )
             views.setOnClickPendingIntent(
-                R.id.widget_btn_action,
-                pending(context, ACTION_WIDGET_TOGGLE, 101, session.active)
+                R.id.widget_btn_disconnect,
+                pending(context, ACTION_WIDGET_TOGGLE, REQ_DISCONNECT, true)
             )
-            views.setViewVisibility(
-                R.id.widget_btn_pause_resume, if (pausable) View.VISIBLE else View.GONE
+            views.setOnClickPendingIntent(
+                R.id.widget_btn_stop,
+                pending(context, ACTION_WIDGET_PAUSE_RESUME, REQ_STOP, false)
             )
-            if (pausable) {
-                views.setTextViewText(R.id.widget_btn_pause_resume, pauseLabel)
-                views.setInt(
-                    R.id.widget_btn_pause_resume, "setBackgroundResource",
-                    if (session.paused) R.drawable.widget_btn_tun_start else R.drawable.widget_btn_tun_stop
-                )
-                views.setOnClickPendingIntent(
-                    R.id.widget_btn_pause_resume,
-                    pending(context, ACTION_WIDGET_PAUSE_RESUME, 102, session.paused)
-                )
-            }
+            views.setOnClickPendingIntent(
+                R.id.widget_btn_start,
+                pending(context, ACTION_WIDGET_PAUSE_RESUME, REQ_START, true)
+            )
 
             val open = PendingIntent.getActivity(
-                context, 100,
+                context, REQ_OPEN,
                 Intent(context, MainActivity::class.java)
                     .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PENDING_FLAGS
@@ -246,7 +301,37 @@ class VpnWidgetProvider : AppWidgetProvider() {
 
             // A full update after a tap is what launchers defer (~half a
             // second) and what reinflates the layout, flashing the status
-            // down to its placeholder. Merge into the view already on screen.
+            // down to its placeholder. Merge into the view already on screen
+            // once this process has inflated once.
+            val reinflate = full || !inflated
+            push(manager, ids, views, reinflate)
+            inflated = true
+            lastControlKey = controlKey
+            lastMeterKey = meterKey
+            lastMeterAt = SystemClock.elapsedRealtime()
+        }
+
+        private fun bindMeters(
+            views: RemoteViews,
+            rtt: String,
+            ratesDown: String,
+            ratesUp: String,
+            totalDown: String,
+            totalUp: String
+        ) {
+            views.setTextViewText(R.id.widget_rtt, rtt)
+            views.setTextViewText(R.id.widget_rx_rate, ratesDown)
+            views.setTextViewText(R.id.widget_tx_rate, ratesUp)
+            views.setTextViewText(R.id.widget_rx_total, totalDown)
+            views.setTextViewText(R.id.widget_tx_total, totalUp)
+        }
+
+        private fun push(
+            manager: AppWidgetManager,
+            ids: IntArray,
+            views: RemoteViews,
+            full: Boolean
+        ) {
             if (full) {
                 for (id in ids) manager.updateAppWidget(id, views)
             } else {
@@ -259,6 +344,9 @@ class VpnWidgetProvider : AppWidgetProvider() {
          * toggle carries "the session looked active", the pause button "the
          * session looked paused". One extra, one meaning: never act on a
          * snapshot that may have moved since the user saw that button.
+         *
+         * Each button has its own request code so FLAG_IMMUTABLE extras are
+         * never rewritten on the sibling control.
          */
         private fun pending(context: Context, action: String, code: Int, active: Boolean) =
             PendingIntent.getBroadcast(

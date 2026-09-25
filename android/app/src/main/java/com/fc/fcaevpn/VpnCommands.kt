@@ -48,6 +48,14 @@ object VpnCommands {
         return true
     }
 
+    /** Disconnect frame before teardown runs. The latch hides still-live
+     *  owner ticks, so the button can flip now instead of waiting on the
+     *  service. */
+    fun paintIdle(context: Context) {
+        SessionState.command(SessionState.Command.DISCONNECT)
+        SessionState.markIdle(context)
+    }
+
     /** Replay the last session. False means the app must show the consent screen. */
     fun connect(context: Context, start: (Context, Intent) -> Boolean = ::dispatch): Boolean {
         VpnTileService.clearPendingExit(context)
@@ -73,7 +81,7 @@ object VpnCommands {
     }
 
     fun disconnect(context: Context, start: (Context, Intent) -> Boolean = ::dispatch) {
-        SessionState.command(SessionState.Command.DISCONNECT)
+        paintIdle(context)
         val tun = FCAEVpnService.ownsSession()
         val proxy = ProxyNotification.sessionActive()
         var orphaned = !tun && !proxy
