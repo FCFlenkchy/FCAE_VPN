@@ -13,12 +13,6 @@ public class ProxyNotification extends Service {
     private static final String TAG = "FCAE_PROXY";
     private static final String CHANNEL_ID = "fcaevpn_proxy_hi";
     public static final int NOTIFICATION_ID = 2;
-    /**
-     * Long enough for the disconnect broadcast to reach the UI, short enough
-     * that the process is gone before the user can tell it lingered. The kill
-     * does not wait for the engine teardown on purpose: the process ending IS
-     * the teardown, and the kernel closes what is left.
-     */
     private static final long PROCESS_KILL_DELAY_MS = 250L;
 
     public static final String ACTION_START = "com.fc.fcaevpn.PROXY_START";
@@ -370,7 +364,7 @@ public class ProxyNotification extends Service {
             }
             SessionState.command(SessionState.Command.DISCONNECT);
             showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
-            stopProxy();
+            stopProxy(false);
             return START_NOT_STICKY;
         }
         if (intent == null) {
@@ -595,6 +589,10 @@ public class ProxyNotification extends Service {
      *         to end the process themselves.
      */
     private synchronized boolean stopProxy() {
+        return stopProxy(true);
+    }
+
+    private synchronized boolean stopProxy(boolean allowProcessExit) {
         if (stopping || ownerGeneration != FCAEVpnService.sGeneration.get()) return false;
         lastPsiphonStats = null;
         stopping = true;
@@ -602,7 +600,7 @@ public class ProxyNotification extends Service {
         psiTelemetry = false;
         psiLive = false;
         handler.removeCallbacks(statsRunnable);
-        PsiphonTunnelService.stopBound(this);
+        PsiphonTunnelService.killProcessOnExit(this);
         // Proxy mode has no VpnService, so nothing else broadcasts state. The
         // UI listens for these actions to clear its CONNECTED indicator; omit
         // this and the app keeps showing a live session after the engine died.
@@ -628,7 +626,7 @@ public class ProxyNotification extends Service {
         // Same rule as the TUN owner (see FCAEVpnService.fullShutdown). Queued,
         // not fired here: the stop broadcast above is already on the main looper
         // and has to land before the process goes.
-        if (!FCAEApplication.uiOnScreen() && handler != null) {
+        if (allowProcessExit && !FCAEApplication.uiVisibleNow() && handler != null) {
             handler.postDelayed(this::killOwnProcess, PROCESS_KILL_DELAY_MS);
         }
 
@@ -657,7 +655,8 @@ public class ProxyNotification extends Service {
             } catch (Throwable ignored) {
             }
             stopSelf();
-            if (!FCAEApplication.uiOnScreen()) {
+            if (ownerGeneration == FCAEVpnService.sGeneration.get()
+                    && !FCAEApplication.uiVisibleNow()) {
                 if (handler != null) {
                     handler.postDelayed(this::killOwnProcess, PROCESS_KILL_DELAY_MS);
                 } else {
@@ -665,14 +664,22 @@ public class ProxyNotification extends Service {
                 }
             }
         }
-        try {
-            PsiphonTunnelService.killProcessOnExit(this);
-        } catch (Throwable ignored) {
-        }
     }
 
     private void killOwnProcess() {
-        FCAEVpnService.killProcessQuietly();
+        ProcessExit.request(this);
+    }
+
+    public static boolean disconnectNow() {
+        ProxyNotification current = instance;
+        if (current == null) return false;
+        final long generation = current.ownerGeneration;
+        current.handler.post(() -> {
+            if (instance == current && generation == current.ownerGeneration) {
+                current.terminalTeardown("Direct Disconnect");
+            }
+        });
+        return true;
     }
 
     public static boolean isAlive() {
@@ -731,7 +738,6 @@ public class ProxyNotification extends Service {
         // Android may recreate the notification owner while Psiphon is live.
         // Only an explicit stop may detach the Psiphon service or reset stats.
         if (stopping) {
-            PsiphonTunnelService.stopBound(this);
             broadcastStopped();
             freeNativeOnce();
         }

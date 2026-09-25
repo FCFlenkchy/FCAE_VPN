@@ -57,6 +57,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
      * had its teardown window.
      */
     private static volatile boolean processMustDie = false;
+    private static final java.util.concurrent.atomic.AtomicBoolean terminalStopSent =
+            new java.util.concurrent.atomic.AtomicBoolean();
     // Cancels a pending onDestroy self-kill: a fresh session starting inside
     // the PROCESS_KILL_DELAY_MS window must not be killed mid-dial. Main
     // thread only, :psiphon process.
@@ -185,6 +187,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         return intent.getLongExtra("psiSession", -1) == activeSession;
     }
     public static void startBound(Context context, Intent intent) {
+        terminalStopSent.set(false);
         Context app = context.getApplicationContext();
         final long epoch = bindingEpoch.incrementAndGet();
         new Handler(Looper.getMainLooper()).post(() -> {
@@ -282,37 +285,29 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     public static void stopBound(Context context) {
         Context app = context.getApplicationContext();
-        // Dispatch the explicit stop FIRST, while the component is still
-        // started and bound: the command reaches the live instance and its
-        // stopNow() runs the real teardown. stopService() below only
-        // destroys the component — it cannot reach the Go tunnel running
-        // in the :psiphon process, which would keep connecting (or stay
-        // connected) in an empty cached process.
-        deliverStop(app, true, false);
-        bindingEpoch.incrementAndGet(); // invalidate starts not yet delivered
+        boolean delivered = deliverStop(app, false);
+        releaseBindings(app);
+        if (!delivered) {
+            try { app.stopService(new Intent(app, PsiphonTunnelService.class)); }
+            catch (Throwable ignored) {}
+        }
+    }
+
+    private static void releaseBindings(Context app) {
+        bindingEpoch.incrementAndGet();
         final java.util.List<android.content.ServiceConnection> old =
                 new java.util.ArrayList<>(liveConnections);
         liveConnections.clear();
         connection = null;
-        // This is an actual Psiphon stop or session replacement, not an
-        // Activity lifecycle event. Drop the main-process rehydration snapshot
-        // only here so pause/resume cannot erase live telemetry.
         ProxyNotification.cachePsiphonStats(app, null);
         final long request = clientAttachId;
         clientAttachId = 0;
         if (request != 0) NativeEngine.nativePsiphonAttachComplete(request, 0, 0);
-        // The service is also started so unbinding alone cannot leave an
-        // orphaned tunnel running. stopService is safe when nothing is
-        // running and covers the binder-already-dropped case. A queued
-        // startBound for the NEXT session posts its startService after the
-        // unbinds below, so a fresh session is not hurt.
-        try { app.stopService(new Intent(app, PsiphonTunnelService.class)); }
-        catch (Throwable ignored) {}
         if (!old.isEmpty()) {
             new Handler(Looper.getMainLooper()).post(() -> {
-                // unbindService must run on the thread that bound (main).
                 for (android.content.ServiceConnection c : old) {
-                    try { app.unbindService(c); } catch (IllegalArgumentException ignored) {}
+                    try { app.unbindService(c); }
+                    catch (IllegalArgumentException ignored) {}
                 }
             });
         }
@@ -780,39 +775,44 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
          * the stop command carrying it is already with the system.
          */
     public static void killProcessOnExit(Context context) {
-        processMustDie = true;
-        // processMustDie is a per-process class copy: the assignment above
-        // only marks the caller's own process. What actually ends :psiphon
-        // is the ACTION_STOP command carrying EXTRA_DIE — its onStartCommand
-        // sets the flag there and its onDestroy runs the delayed self-kill.
-        // The command is already with the system and is delivered to
-        // :psiphon even though this process exits right after.
-        deliverStop(context.getApplicationContext(), false, true);
-        try {
-            context.getApplicationContext()
-                    .stopService(new Intent(context.getApplicationContext(),
-                            PsiphonTunnelService.class));
-        } catch (Throwable ignored) {
+        Context app = context.getApplicationContext();
+        if (!terminalStopSent.compareAndSet(false, true)) return;
+        boolean delivered = deliverStop(app, true);
+        releaseBindings(app);
+        if (!delivered) {
+            terminalStopSent.set(false);
+            try { app.stopService(new Intent(app, PsiphonTunnelService.class)); }
+            catch (Throwable ignored) {}
         }
+        long stoppedEpoch = bindingEpoch.get();
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (stoppedEpoch != bindingEpoch.get()) return;
+            try {
+                android.app.ActivityManager manager =
+                        (android.app.ActivityManager) app.getSystemService(Context.ACTIVITY_SERVICE);
+                if (manager == null) return;
+                java.util.List<android.app.ActivityManager.RunningAppProcessInfo> running =
+                        manager.getRunningAppProcesses();
+                if (running == null) return;
+                for (android.app.ActivityManager.RunningAppProcessInfo info : running) {
+                    if (info.uid == android.os.Process.myUid()
+                            && info.pid != android.os.Process.myPid()
+                            && (app.getPackageName() + ":psiphon").equals(info.processName)) {
+                        android.os.Process.killProcess(info.pid);
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }, 1250L);
     }
 
-    /**
-     * Dispatch the explicit stop to the isolated service. Plain
-     * startService, never startForegroundService: a recreated component must
-     * not owe a startForeground call for what is only a stop. Sent while the
-     * component is alive, the command reaches the live instance; if the
-     * component is already gone it is briefly recreated, finds no tunnel and
-     * stops itself — with {@code die}, it takes the process down too.
-     */
-    private static void deliverStop(Context app, boolean onlyIfBound, boolean die) {
-        if (onlyIfBound && liveConnections.isEmpty()) return;
+    private static boolean deliverStop(Context app, boolean die) {
         try {
             app.startService(new Intent(app, PsiphonTunnelService.class)
                     .setAction(ACTION_STOP)
                     .putExtra(EXTRA_DIE, die));
+            return true;
         } catch (Throwable ignored) {
-            // Background-start refusal or the caller dying: stopService
-            // still destroys the component, as before.
+            return false;
         }
     }
 

@@ -61,6 +61,11 @@
                 android:value="proxy" />
         </service>
 
+        <service
+            android:name=".IdleTaskService"
+            android:exported="false"
+            android:stopWithTask="false" />
+
         <!-- Separate process: AAR Go runtime must not share an address space
              with tun2socks. The service is bound to the app-owned foreground
              service AND is itself a specialUse foreground service: task-removal

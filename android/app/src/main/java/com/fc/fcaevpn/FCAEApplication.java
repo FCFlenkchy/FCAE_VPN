@@ -23,18 +23,16 @@ public class FCAEApplication extends Application {
      *
      * Longer than a rotation and shorter than any real decision to leave. A
      * teardown must not end the process in the gap between two of the user's
-     * own gestures — and when the user really is gone, the Activity's own exit
-     * ends the process a moment later anyway.
+     * own gestures.
      */
     private static final long VISIBLE_GRACE_MS = 1500L;
 
-        /**
-         * Whether the user has this app on screen — the question every teardown
-         * asks before touching the process. A UI hidden a moment ago still counts,
-         * so a teardown landing mid-rotation does not kill it either.
-         */
+    public static boolean uiVisibleNow() {
+        return visibleActivities.get() > 0;
+    }
+
     public static boolean uiOnScreen() {
-        if (visibleActivities.get() > 0) return true;
+        if (uiVisibleNow()) return true;
         return android.os.SystemClock.elapsedRealtime() - lastVisibilityChangeAt
                 < VISIBLE_GRACE_MS;
     }

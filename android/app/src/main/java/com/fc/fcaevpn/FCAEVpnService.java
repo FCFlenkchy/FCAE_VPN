@@ -135,6 +135,7 @@ public class FCAEVpnService extends VpnService {
      * ahead of it.
      */
     private volatile boolean killProcessOnCleanup = false;
+    private volatile boolean disconnectFromUi = false;
 
     private Intent lastStartIntent;
     private VpnNotification notification;
@@ -561,16 +562,11 @@ public class FCAEVpnService extends VpnService {
         if (current == null) return false;
         synchronized (current) {
             if (generation != sGeneration.get()) return false;
-            current.fullShutdown();
+            current.fullShutdown(true);
             return true;
         }
     }
 
-    /**
-     * Whether this service still owns a session or a teardown. MainActivity
-     * reads it before ending the process on task removal: a live tunnel has
-     * to be torn down by the service, which then kills the process itself.
-     */
     public static boolean ownsSession() {
         FCAEVpnService current = instance;
         if (current == null) return false;
@@ -738,6 +734,11 @@ public class FCAEVpnService extends VpnService {
         synchronized (cmdLock) {
             queuedStart = null;
         }
+        if (shuttingDown && !FCAEApplication.uiVisibleNow()) {
+            killProcessOnCleanup = true;
+            scheduleProcessKill();
+            return;
+        }
         // On non-Psiphon protocols connecting defers Builder.establish()
         // until SOCKS is up, so vpnInterface is often still null; a Psiphon
         // exit raises it up front. Either way fullShutdown() invalidates the
@@ -759,7 +760,7 @@ public class FCAEVpnService extends VpnService {
             } catch (Throwable ignored) {}
             // Already nothing running. :psiphon still has to go; this process
             // follows only when the user is not on this screen.
-            if (!FCAEApplication.uiOnScreen()) scheduleProcessKill();
+            if (!FCAEApplication.uiVisibleNow()) scheduleProcessKill();
             return;
         }
         fullShutdown();
@@ -879,6 +880,7 @@ public class FCAEVpnService extends VpnService {
 
     private void preparePsiphonConnect(Intent intent) {
         if (running || vpnThread != null) return;
+        disconnectFromUi = false;
         sessionEpoch.incrementAndGet();
         // Same connect-window reset startVpn() performs: invalidate anything
         // still tearing down from a previous session and claim this one.
@@ -900,6 +902,7 @@ public class FCAEVpnService extends VpnService {
     }
 
     private synchronized void startVpn(Intent intent) {
+        disconnectFromUi = false;
         sessionEpoch.incrementAndGet();
         final int tunMtu = intent.getIntExtra("tunMtu", 1500);
         if (tunMtu < 1280 || tunMtu > 9000) {
@@ -1153,6 +1156,11 @@ public class FCAEVpnService extends VpnService {
          * process goes with the session.
          */
     private synchronized void fullShutdown() {
+        fullShutdown(false);
+    }
+
+    private synchronized void fullShutdown(boolean fromUi) {
+        if (fromUi) disconnectFromUi = true;
         notificationPause = false;
         holdConnectedUi = false;
         // The session is over: the next one starts its own measurements, and no
@@ -1164,7 +1172,9 @@ public class FCAEVpnService extends VpnService {
                 // session, and a second pass would repeat nativeStopBegin/nativeStop
                 // ("tun2socks 2 times torn down"). Every field below is cleared by the
                 // first pass, so a repeat call has nothing to do.
-        if (!FCAEApplication.uiOnScreen()) killProcessOnCleanup = true;
+        if (!disconnectFromUi && !shuttingDown && !FCAEApplication.uiVisibleNow()) {
+            killProcessOnCleanup = true;
+        }
         if (shuttingDown && !running && vpnThread == null
                 && vpnInterface == null) {
             // Nothing left to tear down, so the async completion that normally
@@ -1172,7 +1182,7 @@ public class FCAEVpnService extends VpnService {
             if (killProcessOnCleanup) scheduleProcessKill();
             return;
         }
-        PsiphonTunnelService.stopBound(this);
+        PsiphonTunnelService.killProcessOnExit(this);
         sGeneration.incrementAndGet();
         final long myGen = cleanupGeneration.incrementAndGet();
         running = false;
@@ -1221,22 +1231,12 @@ public class FCAEVpnService extends VpnService {
             handler.post(uiCleanup);
         }
 
-        // 2. Reap the engine — except when this process is on its way out.
         NativeEngine.lifecycleExecutor.execute(() -> {
             if (myGen != cleanupGeneration.get()) return;
-            if (killProcessOnCleanup) {
-                // Dying on purpose: the kernel closes whatever is left behind,
-                // so the kill must not queue behind the engine's reaper. The
-                // reap is still queued, in case the kill never lands.
-                finishTeardown(myGen);
-                NativeEngine.lifecycleExecutor.execute(() -> {
-                    try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
-                });
-                return;
-            }
             try { NativeEngine.nativeStop(); } catch (Exception ignored) {}
             finishTeardown(myGen);
         });
+        if (killProcessOnCleanup) scheduleProcessKill();
     }
 
     /**
@@ -1302,7 +1302,9 @@ public class FCAEVpnService extends VpnService {
     private void scheduleProcessKill() {
         final long gen = cleanupGeneration.get();
         handler.post(() -> {
-            if (gen == cleanupGeneration.get()) killEverything();
+            if (gen == cleanupGeneration.get() && !FCAEApplication.uiVisibleNow()) {
+                ProcessExit.request(this);
+            }
         });
     }
 
@@ -1316,15 +1318,6 @@ public class FCAEVpnService extends VpnService {
             android.os.Process.killProcess(android.os.Process.myPid());
         } catch (Throwable ignored) {
         }
-    }
-
-    /** Ends this process and the {@code :psiphon} one. */
-    private void killEverything() {
-        try {
-            PsiphonTunnelService.killProcessOnExit(this);
-        } catch (Throwable ignored) {
-        }
-        killProcessQuietly();
     }
 
     private synchronized void pauseVpn() {

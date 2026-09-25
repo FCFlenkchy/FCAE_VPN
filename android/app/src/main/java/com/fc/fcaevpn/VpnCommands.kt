@@ -72,14 +72,14 @@ object VpnCommands {
     fun disconnect(context: Context, start: (Context, Intent) -> Boolean = ::dispatch) {
         SessionState.command(SessionState.Command.DISCONNECT)
         val tun = FCAEVpnService.ownsSession()
-        val proxy = ProxyNotification.isAlive()
-        if (tun) {
-            start(context, Intent(context, FCAEVpnService::class.java)
-                .setAction(FCAEVpnService.ACTION_DISCONNECT))
+        val proxy = ProxyNotification.sessionActive()
+        if (tun && !start(context, Intent(context, FCAEVpnService::class.java)
+                .setAction(FCAEVpnService.ACTION_DISCONNECT))) {
+            FCAEVpnService.disconnectNow()
         }
-        if (proxy) {
-            start(context, Intent(context, ProxyNotification::class.java)
-                .setAction(ProxyNotification.ACTION_DISCONNECT_KILL))
+        if (proxy && !start(context, Intent(context, ProxyNotification::class.java)
+                .setAction(ProxyNotification.ACTION_DISCONNECT_KILL))) {
+            ProxyNotification.disconnectNow()
         }
         if (!tun && !proxy) {
             endIdle(context)
@@ -106,8 +106,8 @@ object VpnCommands {
             PsiphonTunnelService.killProcessOnExit(app)
         } catch (_: Throwable) {
         }
-        if (!FCAEApplication.uiOnScreen()) {
-            FCAEVpnService.killProcessQuietly()
+        if (!FCAEApplication.uiVisibleNow()) {
+            ProcessExit.request(app)
             return
         }
         // This process is staying. Stop an engine it already loaded; do not

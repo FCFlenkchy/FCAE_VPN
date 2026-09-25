@@ -547,7 +547,6 @@ class MainActivity : AppCompatActivity() {
         // net for OEM ROMs that substitute their own theme values.
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
         super.onCreate(savedInstanceState)
-        activityAlive = true
         setContentView(R.layout.activity_main)
         prefs = getSharedPreferences("aether_vpn", MODE_PRIVATE)
         statusText = findViewById(R.id.statusText)
@@ -1090,6 +1089,8 @@ class MainActivity : AppCompatActivity() {
                 clearEditTextFocus()
                 return  // Consume the event — don't finish the activity yet
             }
+            try { stopService(Intent(this@MainActivity, IdleTaskService::class.java)) }
+            catch (_: Throwable) {}
             isEnabled = false
             onBackPressedDispatcher.onBackPressed()
             isEnabled = true
@@ -1230,6 +1231,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        try { startService(Intent(this, IdleTaskService::class.java)) }
+        catch (_: Throwable) {}
         handleWidgetIntent(intent)
         inForeground = true
         if (isPsiphonSelected() || isEgressPsiphon()) {
@@ -1373,44 +1376,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         handler.removeCallbacks(poll)
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
-        // In proxy mode, the engine is kept alive by ProxyNotification foreground service.
-        // Do NOT stop it here — the proxy should continue running in the background.
-        // In TUN mode, FCAEVpnService manages its own lifecycle.
-        activityAlive = false
         super.onDestroy()
-        // Task removal or finish with nothing running: no session, no UI —
-        // no process of the app has a reason to stay cached. Live sessions
-        // own their own process death at teardown; only the idle case dies
-        // here. The delayed re-check also covers a teardown that was still
-        // in flight when the UI closed (proxy stop) and a session started
-        // within the window cancels the kill.
-        if (!isChangingConfigurations) {
-            handler.post(idleExit)
-            // A teardown can still be in flight when the UI closes (a Stop being
-            // carried out, a disconnect an owner has not finished, an engine
-            // reap): give it its window instead of deciding once, and never
-            // longer than this.
-            for (delay in EXIT_RECHECK_DELAYS_MS) handler.postDelayed(idleExit, delay)
-        }
-    }
-
-        /**
-         * The UI is gone: with no session left either, this process has no reason
-         * to stay cached. Asks the owners, never the last published frame — a
-         * stale frame is exactly the answer that must not keep a process alive.
-         * A command still in flight postpones the exit; every pass re-asks, so a
-         * session that comes up meanwhile cancels it.
-         */
-    private val idleExit = object : Runnable {
-        override fun run() {
-            if (activityAlive || isChangingConfigurations) return
-            if (SessionState.isLive()) {
-                handler.removeCallbacks(this)
-                return
-            }
-            if (SessionState.commandInFlight()) return
-            endIdleProcess()
-        }
     }
 
     private fun isTunModeSelected(): Boolean = spinnerMode.selectedItemPosition == 1
@@ -2084,7 +2050,7 @@ class MainActivity : AppCompatActivity() {
         SessionState.markIdle(this)
 
         try {
-            PsiphonTunnelService.stopBound(this)
+            PsiphonTunnelService.killProcessOnExit(this)
         } catch (_: Throwable) {}
 
         val issued = FCAEVpnService.stateGeneration()
@@ -2119,22 +2085,6 @@ class MainActivity : AppCompatActivity() {
                 } catch (_: Throwable) {}
             }
         }, "Disconnect-Background").start()
-    }
-
-    /**
-     * No session, no UI: nothing of this app has a reason to stay cached, and
-     * a still-started service would only invite Android to restart the process
-     * we are about to end — so the owners are stopped first.
-     */
-    private fun endIdleProcess() {
-        // The record is committed — and the widget repainted with it — before
-        // the kill: this process is about to stop existing, and the frame the
-        // launcher keeps must not claim a session.
-        SessionState.markIdle(this)
-        try { stopService(Intent(this, FCAEVpnService::class.java)) } catch (_: Throwable) {}
-        try { stopService(Intent(this, ProxyNotification::class.java)) } catch (_: Throwable) {}
-        try { PsiphonTunnelService.killProcessOnExit(this) } catch (_: Throwable) {}
-        FCAEVpnService.killProcessQuietly()
     }
 
     /** The update button in one of its three looks; the label is the prompt. */
@@ -3184,15 +3134,6 @@ class MainActivity : AppCompatActivity() {
         private const val LINK_GITHUB = "https://github.com/FCFlenkchy/FCAE_VPN"
         private const val LINK_CREDITS = LINK_GITHUB + "#credits"
         private const val LINK_LICENSE = LINK_GITHUB + "/blob/main/LICENSE"
-
-        // Set to true while the Activity is alive.  The service checks
-        // this after fullShutdown() to decide whether to kill the process.
-        @JvmField @Volatile var activityAlive = false
-        /**
-         * Windows, measured from the UI closing: a teardown still finishing gets
-         * its time, and a session started in the window cancels the exit.
-         */
-        private val EXIT_RECHECK_DELAYS_MS = longArrayOf(800L, 3_000L, 8_000L)
 
         // Pre-computed Color constants — avoids String.parseColor() on every poll tick.
         private val COLOR_CONNECTED = Color.parseColor("#34D399")
