@@ -19,6 +19,14 @@
         android:hasCode="true">
 
         <activity
+            android:name=".VpnTileActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.NoDisplay" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden"
@@ -70,6 +78,17 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="psiphon-tunnel" />
+        </service>
+
+        <service
+            android:name=".VpnTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_qs_vpn"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
         </service>
 
         <receiver

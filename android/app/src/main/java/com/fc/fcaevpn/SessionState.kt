@@ -437,6 +437,10 @@ object SessionState {
             VpnWidgetProvider.refresh(context)
         } catch (_: Throwable) {
         }
+        try {
+            VpnTileService.publish()
+        } catch (_: Throwable) {
+        }
         val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (accepted.phase.ordinal == persistedPhase && prefs.contains(K_STAMP)) return
         persistedPhase = accepted.phase.ordinal

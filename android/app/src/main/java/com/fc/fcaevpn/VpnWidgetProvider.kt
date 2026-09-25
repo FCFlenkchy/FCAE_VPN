@@ -7,8 +7,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
-import android.net.VpnService
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.View
@@ -60,40 +58,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
     }
 
     private fun toggle(context: Context, renderedActive: Boolean) {
-        // The flag is what the button read when it was rendered: without it a
-        // stale widget could stop the session it just started, or raise a
-        // second one on top of a live one.
-        val live = SessionState.isLive()
-        when {
-            renderedActive && live -> disconnect(context)
-            renderedActive -> SessionState.markIdle(context)
-            !live && !connect(context) -> openApp(context)
-            // Button and reality disagree: reality wins, the render fixes it.
-        }
-    }
-
-    /** Replay the last session in the background. False means the app must. */
-    private fun connect(context: Context): Boolean {
-        val session = FCAEVpnService.recalledSession(context) ?: return false
-        val mode = session.getIntExtra("mode", 1)
-        val command = if (mode == 1) {
-            // Consent is an Activity-for-result flow: it can never be granted
-            // from here, and a tunnel must not start blind.
-            if (VpnService.prepare(context) != null) return false
-            Intent(context, FCAEVpnService::class.java).setAction(FCAEVpnService.ACTION_START)
-        } else {
-            Intent(context, ProxyNotification::class.java)
-                .setAction(ProxyNotification.ACTION_START)
-                .putExtras(session)
-        }
-        SessionState.command(SessionState.Command.CONNECT)
-        SessionState.markConnecting(context, mode)
-        if (!dispatch(context, command)) {
-            SessionState.command(SessionState.Command.NONE)
-            SessionState.markIdle(context)
-            return false
-        }
-        return true
+        VpnCommands.toggle(context, renderedActive)
     }
 
     private fun pauseOrResume(context: Context, wasPaused: Boolean) {
@@ -111,65 +76,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
             return
         }
         SessionState.markPause(context, !wasPaused)
-    }
-
-    /** End the session, whichever owner holds it. */
-    private fun disconnect(context: Context) {
-        // Latched before the command is sent: the owner needs a moment to tear
-        // the session down, and its ticks keep reporting the old state until it
-        // does. Those frames must not flip the button back.
-        SessionState.command(SessionState.Command.DISCONNECT)
-        val tun = FCAEVpnService.ownsSession()
-        val proxy = ProxyNotification.isAlive()
-        if (tun) {
-            dispatch(context, Intent(context, FCAEVpnService::class.java)
-                .setAction(FCAEVpnService.ACTION_DISCONNECT))
-        }
-        if (proxy) {
-            dispatch(context, Intent(context, ProxyNotification::class.java)
-                .setAction(ProxyNotification.ACTION_DISCONNECT_KILL))
-        }
-        if (!tun && !proxy) {
-            // No owner left to ask (process recycled under the button): end the
-            // engine directly so no data plane outlives the tap.
-            try {
-                PsiphonTunnelService.stopBound(context)
-            } catch (_: Throwable) {
-            }
-            NativeEngine.lifecycleExecutor.execute {
-                try {
-                    NativeEngine.nativeStopBegin()
-                } catch (_: Throwable) {
-                }
-                try {
-                    NativeEngine.nativeStop()
-                } catch (_: Throwable) {
-                }
-            }
-        }
-        // Committed and pushed to the widget before this process can stop
-        // existing: the record is the launcher's last frame.
-        SessionState.markIdle(context)
-        if (!tun && !proxy && !FCAEApplication.uiOnScreen()) {
-            // Nobody to hand the process to and the user is not looking at it:
-            // end it here, by the same rule every other disconnect follows.
-            try {
-                PsiphonTunnelService.killProcessOnExit(context)
-            } catch (_: Throwable) {
-            }
-            FCAEVpnService.killProcessQuietly()
-        }
-    }
-
-    private fun openApp(context: Context) {
-        try {
-            context.startActivity(
-                Intent(context, MainActivity::class.java)
-                    .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    .putExtra(MainActivity.EXTRA_TRIGGER_CONNECT, true)
-            )
-        } catch (_: Throwable) {
-        }
     }
 
     companion object {
@@ -229,16 +135,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
             }, RECHECK_DELAY_MS)
         }
 
-        private fun dispatch(context: Context, intent: Intent): Boolean = try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
-            true
-        } catch (_: Throwable) {
-            false
-        }
+        private fun dispatch(context: Context, intent: Intent): Boolean =
+            VpnCommands.dispatch(context, intent)
 
         private fun render(context: Context, ids: IntArray, force: Boolean = false) {
             val manager = AppWidgetManager.getInstance(context) ?: return
