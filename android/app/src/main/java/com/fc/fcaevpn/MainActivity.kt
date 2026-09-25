@@ -43,8 +43,8 @@ class MainActivity : AppCompatActivity() {
     // cannot see). The bind itself is 0.0.0.0, so any device LAN IP dials it.
     @Volatile private var lastNativeLan = ""
     private var lastLogHash = 0L
-    private var disconnecting = false
     @Volatile private var connectionEpoch = 0L
+    @Volatile private var connectGeneration = Long.MIN_VALUE
     @Volatile private var vpnActive = false
     private var wasAtBottom = true
     private var logTouchActive = false
@@ -157,6 +157,9 @@ class MainActivity : AppCompatActivity() {
             if (isPsiphonSelected()) startPsiphon() else startTunServiceWithConfig()
         } else {
             pendingAfterVpnPermission = false
+            commandConnecting = false
+            SessionState.command(SessionState.Command.NONE)
+            updateButton()
             Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
         }
     }
@@ -244,18 +247,7 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action?.startsWith("com.fc.fcaevpn.PSI_") == true &&
                 !PsiphonTunnelService.isCurrentBroadcast(intent)) return
-            if (intent.getBooleanExtra("cleanupComplete", false)) {
-                val generation = intent.getLongExtra("generation", -1)
-                val epoch = connectionEpoch
-                NativeEngine.lifecycleExecutor.execute {
-                    handler.post {
-                        if (epoch != connectionEpoch || generation != FCAEVpnService.sGeneration.get()) return@post
-                        disconnecting = false
-                        updateButton()
-                    }
-                }
-                return
-            }
+            if (intent.getBooleanExtra("cleanupComplete", false)) return
             when (intent.action) {
                 PsiphonTunnelService.BROADCAST_REGIONS -> {
                     val regions = intent.getStringExtra(PsiphonTunnelService.EXTRA_REGIONS)
@@ -430,7 +422,7 @@ class MainActivity : AppCompatActivity() {
                             handler.removeCallbacks(poll)
                             handler.post(poll)
                         } else if (!isRunning && !isPaused) {
-
+                            if (commandConnecting && gen <= connectGeneration) return@post
                             lastBroadcastGeneration = gen
                             commandPaused = false
                             commandConnecting = false
@@ -1558,7 +1550,7 @@ class MainActivity : AppCompatActivity() {
         else 256000
 
     private fun connectClicked() {
-        if (disconnecting || connecting || engineRunning || vpnActive) return
+        if (connecting || engineRunning || vpnActive) return
         if (commandPaused) {
             userInitiatedDisconnect = false
             commandPaused = false
@@ -1577,6 +1569,7 @@ class MainActivity : AppCompatActivity() {
                 handler.removeCallbacks(poll)
                 handler.post(poll)
             }
+            connectGeneration = FCAEVpnService.stateGeneration()
             return
         }
         var buffersValid = true
@@ -1596,6 +1589,7 @@ class MainActivity : AppCompatActivity() {
         userInitiatedDisconnect = false
         commandPaused = false
         commandConnecting = true
+        SessionState.command(SessionState.Command.CONNECT)
         pendingPsiSocks = 0
         pendingPsiHttp = 0
         pendingPsiLan = ""
@@ -1679,6 +1673,7 @@ class MainActivity : AppCompatActivity() {
             owner.putExtra("tunMtu", tunMtuBytes())
         }
         startForegroundService(owner)
+        connectGeneration = FCAEVpnService.stateGeneration()
     }
 
     /**
@@ -1696,6 +1691,7 @@ class MainActivity : AppCompatActivity() {
         updateButton()
         saveSettings()
         startForegroundService(buildStartIntent())
+        connectGeneration = FCAEVpnService.stateGeneration()
         // Poll is started by the VPN_STATE_CHANGED broadcast from the service
         // AFTER nativeStart() succeeds — NOT here, to avoid calling native
         // methods while the previous engine is still tearing down.
@@ -1777,6 +1773,7 @@ class MainActivity : AppCompatActivity() {
         // reads its telemetry for the widget has to know which hop measures it.
         proxyIntent.putExtra("psiphonThroughTunnel", isEgressPsiphon())
         startForegroundService(proxyIntent)
+        connectGeneration = FCAEVpnService.stateGeneration()
 
         val protocol = coreProtocolFromSelection()
         // Do not let a protocol/backend mapping override the user's TUN
@@ -1912,64 +1909,61 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnectAll() {
-    if (disconnecting) return
-    disconnecting = true
-    connectionEpoch++
-    userInitiatedDisconnect = true
-    commandPaused = false
-    commandConnecting = false
+        connectionEpoch++
+        userInitiatedDisconnect = true
+        commandPaused = false
+        commandConnecting = false
 
-    // 1. UI updates happen INSTANTLY on main thread
-    SessionState.command(SessionState.Command.DISCONNECT)
-    vpnActive = false
-    engineRunning = false
-    connecting = false
-    handler.removeCallbacks(poll)
-    updateButton()
-    
-    statusText.text = "DISCONNECTED"
-    statusText.setTextColor(Color.parseColor("#8A93A6"))
-    resetStats()
-    peerText.text = ""
-    SessionState.markIdle(this)
+        SessionState.command(SessionState.Command.DISCONNECT)
+        vpnActive = false
+        engineRunning = false
+        connecting = false
+        handler.removeCallbacks(poll)
+        updateButton()
 
-    try {
-        PsiphonTunnelService.stopBound(this)
-    } catch (_: Throwable) {}
+        statusText.text = "DISCONNECTED"
+        statusText.setTextColor(Color.parseColor("#8A93A6"))
+        resetStats()
+        peerText.text = ""
+        SessionState.markIdle(this)
 
-    // 2. Trigger disconnect on a background thread
-    val currentMode = spinnerMode.selectedItemPosition
-    val psiphonBooting = pendingPsiSocks == 0 && isPsiphonSelected()
-    Thread({
-        if (currentMode == 1) {
-            // TUN mode: fullShutdown() handles nativeStop + nativeFree
-            val hadVpnService = FCAEVpnService.disconnectNow()
-            if (!hadVpnService && !psiphonBooting) ProxyNotification.notifyCleanupComplete(this)
-            if (psiphonBooting) {
-                val stop = Intent(this, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_DISCONNECT)
-                try { startForegroundService(stop) } catch (e: Exception) {
-                    android.util.Log.w("FCAE", "Cannot deliver proxy Stop", e)
-                    ProxyNotification.notifyCleanupComplete(this)
+        try {
+            PsiphonTunnelService.stopBound(this)
+        } catch (_: Throwable) {}
+
+        val issued = FCAEVpnService.stateGeneration()
+        val currentMode = spinnerMode.selectedItemPosition
+        val psiphonBooting = pendingPsiSocks == 0 && isPsiphonSelected()
+        Thread({
+            if (currentMode == 1) {
+                val hadVpnService = FCAEVpnService.disconnectIfCurrent(issued)
+                if (!hadVpnService && !psiphonBooting) ProxyNotification.notifyCleanupComplete(this)
+                if (psiphonBooting) {
+                    val stop = Intent(this, ProxyNotification::class.java)
+                        .setAction(ProxyNotification.ACTION_DISCONNECT)
+                        .putExtra(ProxyNotification.EXTRA_EXPECT_GENERATION, issued)
+                    try { startForegroundService(stop) } catch (e: Exception) {
+                        android.util.Log.w("FCAE", "Cannot deliver proxy Stop", e)
+                        ProxyNotification.notifyCleanupComplete(this)
+                    }
                 }
+            } else {
+                // startForegroundService, not startService: (a) startService from
+                // a backgrounded app is blocked on Android 12+, and the old
+                // catch-all silently swallowed that — the engine kept running
+                // while the UI showed DISCONNECTED; (b) if the notification
+                // service already died (watchdog teardown, system reclaim), this
+                // restarts it, stopProxy() runs, and its disconnect broadcast
+                // reaches the UI — self-healing a stuck "CONNECTED" state.
+                try {
+                    val i = Intent(this, ProxyNotification::class.java)
+                        .setAction(ProxyNotification.ACTION_DISCONNECT)
+                        .putExtra(ProxyNotification.EXTRA_EXPECT_GENERATION, issued)
+                    startForegroundService(i)
+                } catch (_: Throwable) {}
             }
-        } else {
-            // Proxy mode: stopProxy() handles nativeStop + nativeFree.
-            //
-            // startForegroundService, not startService: (a) startService from
-            // a backgrounded app is blocked on Android 12+, and the old
-            // catch-all silently swallowed that — the engine kept running
-            // while the UI showed DISCONNECTED; (b) if the notification
-            // service already died (watchdog teardown, system reclaim), this
-            // restarts it, stopProxy() runs, and its disconnect broadcast
-            // reaches the UI — self-healing a stuck "CONNECTED" state.
-            try {
-                val i = Intent(this, ProxyNotification::class.java)
-                i.action = ProxyNotification.ACTION_DISCONNECT
-                startForegroundService(i)
-            } catch (_: Throwable) {}
-        }
-    }, "Disconnect-Background").start()
-}
+        }, "Disconnect-Background").start()
+    }
 
     /**
      * No session, no UI: nothing of this app has a reason to stay cached, and
@@ -2718,12 +2712,7 @@ class MainActivity : AppCompatActivity() {
         if (switchLan.isChecked && nativeLan.isNotEmpty() && nativeLan != "127.0.0.1") nativeLan else ""
 
     private fun updateButton() {
-        btnConnect.isEnabled = !disconnecting
-        if (disconnecting) {
-            btnConnect.text = "DISCONNECTING"
-            if (::layoutTunPauseResume.isInitialized) layoutTunPauseResume.visibility = android.view.View.GONE
-            return
-        }
+        btnConnect.isEnabled = true
         val isTun = isTunModeSelected()
         val showPauseResume = isTun && (vpnActive || engineRunning || commandPaused || connecting)
         if (::layoutTunPauseResume.isInitialized) {

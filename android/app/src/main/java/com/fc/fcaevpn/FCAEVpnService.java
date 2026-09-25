@@ -539,12 +539,21 @@ public class FCAEVpnService extends VpnService {
     private static native void nativeUnregisterVpnService();
     public static native long[] nativeGetTrafficStats();
 
-    // Called directly from MainActivity for the instant (0 ms) UI disconnect.
     public static boolean disconnectNow() {
         FCAEVpnService current = instance;
         if (current == null) return false;
         current.fullShutdown();
         return true;
+    }
+
+    public static boolean disconnectIfCurrent(long generation) {
+        FCAEVpnService current = instance;
+        if (current == null) return false;
+        synchronized (current) {
+            if (generation != sGeneration.get()) return false;
+            current.fullShutdown();
+            return true;
+        }
     }
 
     /**
@@ -770,6 +779,8 @@ public class FCAEVpnService extends VpnService {
                 }
                 queuedStart = lastStartIntent;
                 Log.i(TAG, "Start queued until current stop finishes");
+                shuttingDown = false;
+                killProcessOnCleanup = false;
                 uiConnecting = true;
                 notification.show(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING);
                 startFg(notification.build(VpnNotification.zeroTrafficText(), VpnNotification.BUTTONS_CONNECTING));
@@ -1206,9 +1217,18 @@ public class FCAEVpnService extends VpnService {
         handler.post(() -> {
             synchronized (FCAEVpnService.this) {
                 if (myGen != cleanupGeneration.get()) return;
+                final Intent next;
                 synchronized (cmdLock) {
                     engineOpInFlight = false;
+                    next = queuedStart;
                     queuedStart = null;
+                }
+                if (next != null) {
+                    shuttingDown = false;
+                    killProcessOnCleanup = false;
+                    armConnectWatchdog();
+                    requestStart(next);
+                    return;
                 }
                 stopSelf();
                 ProxyNotification.notifyCleanupComplete(this);

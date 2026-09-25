@@ -30,6 +30,7 @@ public class ProxyNotification extends Service {
      * still in the app and expects to reconnect.
      */
     public static final String ACTION_DISCONNECT_KILL = "com.fc.fcaevpn.PROXY_DISCONNECT_KILL";
+    public static final String EXTRA_EXPECT_GENERATION = "expectGeneration";
 
     private static final int BUTTONS_CONNECTING = 0;
     private static final int BUTTONS_RUNNING = 1;
@@ -362,6 +363,11 @@ public class ProxyNotification extends Service {
             return START_NOT_STICKY;
         }
         if (intent != null && ACTION_DISCONNECT.equals(intent.getAction())) {
+            long expect = intent.getLongExtra(EXTRA_EXPECT_GENERATION, -1L);
+            if (expect >= 0 && expect != FCAEVpnService.sGeneration.get()) {
+                Log.i(TAG, "Disconnect ignored: superseded by a newer session");
+                return START_NOT_STICKY;
+            }
             SessionState.command(SessionState.Command.DISCONNECT);
             showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
             stopProxy();

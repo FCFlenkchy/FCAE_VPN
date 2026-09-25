@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.widget.RemoteViews
+import java.util.concurrent.Executors
 
 /**
  * Home screen control surface, fixed 3x2 (widget_vpn_info.xml): name, state
@@ -30,43 +31,38 @@ class VpnWidgetProvider : AppWidgetProvider() {
         render(context, ids, force = true)
 
     override fun onReceive(context: Context, intent: Intent) {
-        super.onReceive(context, intent)
-        when (intent.action) {
-            ACTION_WIDGET_TOGGLE -> {
-                toggle(context, intent)
-                if (SessionState.snapshot(context).connecting) scheduleRecheck(context)
+        val action = intent.action
+        if (action == ACTION_WIDGET_TOGGLE || action == ACTION_WIDGET_PAUSE_RESUME) {
+            val pending = goAsync()
+            val app = context.applicationContext
+            val tapActive = intent.getBooleanExtra(EXTRA_TAP_ACTIVE, false)
+            clicks.execute {
+                try {
+                    when (action) {
+                        ACTION_WIDGET_TOGGLE -> {
+                            toggle(app, tapActive)
+                            if (SessionState.snapshot(app).connecting) scheduleRecheck(app)
+                        }
+                        ACTION_WIDGET_PAUSE_RESUME -> pauseOrResume(app, tapActive)
+                    }
+                } finally {
+                    pending.finish()
+                }
             }
-
-            ACTION_WIDGET_PAUSE_RESUME -> {
-                // The flag is what the button read when it was drawn, so a tap
-                // always flips the state it was shown for: a second tap on a
-                // stale button cannot re-issue Stop on a session already paused.
-                val paused = intent.getBooleanExtra(EXTRA_TAP_ACTIVE, false)
-                SessionState.command(
-                    if (paused) SessionState.Command.RESUME else SessionState.Command.PAUSE
-                )
-                dispatch(
-                    context,
-                    Intent(context, FCAEVpnService::class.java).setAction(
-                        if (paused) FCAEVpnService.ACTION_START else FCAEVpnService.ACTION_STOP
-                    )
-                )
-                // Immediate feedback, before the service has processed anything.
-                SessionState.markPause(context, !paused)
-            }
+            return
         }
-                // Nothing else is handled here on purpose: this receiver is in
-                // the manifest, and a manifest receiver is delivered by starting
-                // its process — so any app-state action added to the filter
-                // would resurrect the process on every state broadcast. The
-                // feed repaints the widget in-process instead.
+        super.onReceive(context, intent)
+        // Nothing else is handled here on purpose: this receiver is in
+        // the manifest, and a manifest receiver is delivered by starting
+        // its process — so any app-state action added to the filter
+        // would resurrect the process on every state broadcast. The
+        // feed repaints the widget in-process instead.
     }
 
-    private fun toggle(context: Context, intent: Intent) {
+    private fun toggle(context: Context, renderedActive: Boolean) {
         // The flag is what the button read when it was rendered: without it a
         // stale widget could stop the session it just started, or raise a
         // second one on top of a live one.
-        val renderedActive = intent.getBooleanExtra(EXTRA_TAP_ACTIVE, false)
         val live = SessionState.isLive()
         when {
             renderedActive && live -> disconnect(context)
@@ -79,7 +75,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
     /** Replay the last session in the background. False means the app must. */
     private fun connect(context: Context): Boolean {
         val session = FCAEVpnService.recalledSession(context) ?: return false
-        val command = if (session.getIntExtra("mode", 1) == 1) {
+        val mode = session.getIntExtra("mode", 1)
+        val command = if (mode == 1) {
             // Consent is an Activity-for-result flow: it can never be granted
             // from here, and a tunnel must not start blind.
             if (VpnService.prepare(context) != null) return false
@@ -90,12 +87,30 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 .putExtras(session)
         }
         SessionState.command(SessionState.Command.CONNECT)
+        SessionState.markConnecting(context, mode)
         if (!dispatch(context, command)) {
             SessionState.command(SessionState.Command.NONE)
+            SessionState.markIdle(context)
             return false
         }
-        SessionState.markConnecting(context, session.getIntExtra("mode", 1))
         return true
+    }
+
+    private fun pauseOrResume(context: Context, wasPaused: Boolean) {
+        SessionState.command(
+            if (wasPaused) SessionState.Command.RESUME else SessionState.Command.PAUSE
+        )
+        if (!dispatch(
+                context,
+                Intent(context, FCAEVpnService::class.java).setAction(
+                    if (wasPaused) FCAEVpnService.ACTION_START else FCAEVpnService.ACTION_STOP
+                )
+            )
+        ) {
+            SessionState.command(SessionState.Command.NONE)
+            return
+        }
+        SessionState.markPause(context, !wasPaused)
     }
 
     /** End the session, whichever owner holds it. */
@@ -171,6 +186,9 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private val COLOR_PROGRESS = Color.parseColor("#60A5FA")
 
         private val mainHandler = Handler(Looper.getMainLooper())
+        private val clicks = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "FCAE-Widget").apply { isDaemon = true }
+        }
 
         /** Last rendered content; identical content is not worth a repaint. */
         @Volatile
