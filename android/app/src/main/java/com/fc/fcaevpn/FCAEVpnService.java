@@ -742,8 +742,11 @@ public class FCAEVpnService extends VpnService {
             SessionState.command(SessionState.Command.NONE);
             SessionState.markIdle(this);
             stopSelf();
-            // Same rule: the session is over either way, and the process only
-            // goes when the user is not on this screen.
+            try {
+                PsiphonTunnelService.killProcessOnExit(this);
+            } catch (Throwable ignored) {}
+            // Already nothing running. :psiphon still has to go; this process
+            // follows only when the user is not on this screen.
             if (!FCAEApplication.uiOnScreen()) scheduleProcessKill();
             return;
         }

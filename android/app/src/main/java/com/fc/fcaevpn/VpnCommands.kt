@@ -31,7 +31,7 @@ object VpnCommands {
         val live = SessionState.isLive()
         when {
             renderedActive && live -> disconnect(context, start)
-            renderedActive -> SessionState.markIdle(context)
+            renderedActive -> endIdle(context)
             !live && !connect(context, start) -> openApp(context)
         }
     }
@@ -71,10 +71,38 @@ object VpnCommands {
                 .setAction(ProxyNotification.ACTION_DISCONNECT_KILL))
         }
         if (!tun && !proxy) {
-            try {
-                PsiphonTunnelService.stopBound(context)
-            } catch (_: Throwable) {
-            }
+            endIdle(context)
+            return
+        }
+        SessionState.markIdle(context)
+    }
+
+    /** Disconnect when no owner is up. The tap still has to end this process
+     *  and the :psiphon one; clearing the widget frame is not enough. */
+    fun endIdle(context: Context) {
+        val app = context.applicationContext
+        SessionState.command(SessionState.Command.NONE)
+        SessionState.markIdle(app)
+        try {
+            app.stopService(Intent(app, FCAEVpnService::class.java))
+        } catch (_: Throwable) {
+        }
+        try {
+            app.stopService(Intent(app, ProxyNotification::class.java))
+        } catch (_: Throwable) {
+        }
+        try {
+            PsiphonTunnelService.killProcessOnExit(app)
+        } catch (_: Throwable) {
+        }
+        if (!FCAEApplication.uiOnScreen()) {
+            FCAEVpnService.killProcessQuietly()
+            return
+        }
+        // This process is staying. Stop an engine it already loaded; do not
+        // load one just to stop it — a cold widget tap must not pay for that.
+        if (!NativeEngine.Loaded.value) return
+        try {
             NativeEngine.lifecycleExecutor.execute {
                 try {
                     NativeEngine.nativeStopBegin()
@@ -85,14 +113,7 @@ object VpnCommands {
                 } catch (_: Throwable) {
                 }
             }
-        }
-        SessionState.markIdle(context)
-        if (!tun && !proxy && !FCAEApplication.uiOnScreen()) {
-            try {
-                PsiphonTunnelService.killProcessOnExit(context)
-            } catch (_: Throwable) {
-            }
-            FCAEVpnService.killProcessQuietly()
+        } catch (_: Throwable) {
         }
     }
 

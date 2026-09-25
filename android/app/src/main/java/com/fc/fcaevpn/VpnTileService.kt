@@ -42,8 +42,8 @@ class VpnTileService : TileService() {
             return
         }
         if (renderedActive) {
-            SessionState.markIdle(this)
             paint(false)
+            VpnCommands.endIdle(this)
             return
         }
         // Android 14 refuses a foreground start from the tile itself. A blank
