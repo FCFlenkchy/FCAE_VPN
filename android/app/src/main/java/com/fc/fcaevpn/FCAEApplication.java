@@ -58,5 +58,16 @@ public class FCAEApplication extends Application {
     @Override public void onCreate() {
         super.onCreate();
         registerActivityLifecycleCallbacks(callbacks);
+        // Warm the one-int mode cache off the click path. A widget tap must
+        // not be the first thing to open the session prefs.
+        new Thread(() -> {
+            try {
+                android.content.Intent session = FCAEVpnService.recalledSession(this);
+                if (session == null) return;
+                getSharedPreferences("fcae_widget_mode", MODE_PRIVATE).edit()
+                        .putInt("mode", session.getIntExtra("mode", 1))
+                        .apply();
+            } catch (Throwable ignored) {}
+        }, "FCAE-Mode").start();
     }
 }

@@ -9,7 +9,7 @@
     <img src="https://img.shields.io/github/downloads/FCFlenkchy/FCAE_VPN/total?style=for-the-badge&logo=github&label=Downloads" alt="Total downloads">
   </a>
   <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/License-GNU%20GPL%20v3-blue?style=for-the-badge" alt="GNU GPL v3">
+    LICENSE
   </a>
 </p>
 
@@ -210,7 +210,9 @@ For questions and general discussion, see the [Community](#community) section.
 
 ## License
 
-Released under the [GNU GPL v3](LICENSE). Third-party components keep their own licenses.
+[LICENSE](LICENSE)
+
+The names FCAE and FCAE VPN are trademarks of this project. See [TRADEMARK](TRADEMARK).
 
 ---
 

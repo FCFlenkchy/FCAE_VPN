@@ -36,11 +36,12 @@ object VpnCommands {
         }
     }
 
-    /** Connecting frame from the saved session, before any service start.
-     *  Mode is already known: TUN shows Stop, proxy does not. No broadcast. */
+    /** Connecting frame before any service start and before the saved session
+     *  is read. That read loads the Psiphon blob and was the half-second
+     *  before the widget could say CONNECTING. Mode comes from the small
+     *  cache; TUN shows Stop, proxy does not. */
     fun paintConnecting(context: Context): Boolean {
-        val session = FCAEVpnService.recalledSession(context) ?: return false
-        val mode = session.getIntExtra("mode", 1)
+        val mode = FCAEVpnService.recalledMode(context)
         SessionState.command(SessionState.Command.CONNECT)
         SessionState.markConnecting(context, mode)
         return true

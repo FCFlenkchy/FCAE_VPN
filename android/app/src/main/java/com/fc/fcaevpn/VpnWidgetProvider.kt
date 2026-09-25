@@ -26,27 +26,20 @@ import java.util.concurrent.Executors
 class VpnWidgetProvider : AppWidgetProvider() {
 
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) =
-        render(context, ids, force = true)
+        render(context, ids, force = true, full = true)
 
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action
         if (action == ACTION_WIDGET_TOGGLE || action == ACTION_WIDGET_PAUSE_RESUME) {
-            val pending = goAsync()
             val app = context.applicationContext
             val tapActive = intent.getBooleanExtra(EXTRA_TAP_ACTIVE, false)
+            // Same frame as the tap. A background hop, or reading the saved
+            // session first, is the half-second before CONNECTING appeared.
+            if (action == ACTION_WIDGET_TOGGLE && !tapActive) {
+                try { VpnCommands.paintConnecting(app) } catch (_: Throwable) {}
+            }
+            val pending = goAsync()
             clicks.execute {
-                try {
-                    // Paint before the launcher is released. Connect already
-                    // knows TUN from the saved session, so Stop does not wait
-                    // on the service broadcast. The start itself is the slow
-                    // part and must not hold the broadcast open.
-                    if (action == ACTION_WIDGET_TOGGLE && !tapActive) {
-                        VpnCommands.paintConnecting(app)
-                    }
-                } catch (_: Throwable) {
-                } finally {
-                    pending.finish()
-                }
                 try {
                     when (action) {
                         ACTION_WIDGET_TOGGLE -> {
@@ -56,6 +49,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
                         ACTION_WIDGET_PAUSE_RESUME -> pauseOrResume(app, tapActive)
                     }
                 } catch (_: Throwable) {
+                } finally {
+                    pending.finish()
                 }
             }
             return
@@ -121,7 +116,9 @@ class VpnWidgetProvider : AppWidgetProvider() {
         @JvmStatic
         fun refresh(context: Context) {
             val ids = ids(context).takeIf { it.isNotEmpty() } ?: return
-            render(context, ids, force = true)
+            // Partial: a full updateAppWidget after a tap is what launchers
+            // hold for about half a second, and what reinflates the layout.
+            render(context, ids, force = true, full = false)
         }
 
         private fun ids(context: Context): IntArray {
@@ -149,7 +146,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private fun dispatch(context: Context, intent: Intent): Boolean =
             VpnCommands.dispatch(context, intent)
 
-        private fun render(context: Context, ids: IntArray, force: Boolean = false) {
+        private fun render(context: Context, ids: IntArray, force: Boolean = false, full: Boolean = false) {
             val manager = AppWidgetManager.getInstance(context) ?: return
             // reconciled(), not snapshot(): a stored frame can outlive its
             // session, and the widget must never offer DISCONNECT for a tunnel
@@ -247,7 +244,14 @@ class VpnWidgetProvider : AppWidgetProvider() {
             views.setOnClickPendingIntent(R.id.widget_btn_settings, open)
             views.setOnClickPendingIntent(R.id.widget_header, open)
 
-            for (id in ids) manager.updateAppWidget(id, views)
+            // A full update after a tap is what launchers defer (~half a
+            // second) and what reinflates the layout, flashing the status
+            // down to its placeholder. Merge into the view already on screen.
+            if (full) {
+                for (id in ids) manager.updateAppWidget(id, views)
+            } else {
+                for (id in ids) manager.partiallyUpdateAppWidget(id, views)
+            }
         }
 
         /**

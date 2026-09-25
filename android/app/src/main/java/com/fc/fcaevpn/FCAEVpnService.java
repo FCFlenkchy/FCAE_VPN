@@ -63,6 +63,13 @@ public class FCAEVpnService extends VpnService {
     public static final String EXTRA_FROM_NOTIFICATION = "fromNotification";
     /** Notification Stop only. The shade has already dropped the activity poll. */
     public static volatile boolean notificationPause;
+    /**
+     * Stop/Start of a live TUN session. The status line stays
+     * "CONNECTED - TUN" until the engine is paused or the interface is back.
+     * Closing the fd first makes native state flicker, and the poll was
+     * painting that flicker.
+     */
+    public static volatile boolean holdConnectedUi;
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
     public static final String ACTION_START      = "com.fc.fcaevpn.START";
     public static final String ACTION_PSIPHON_REGIONS = "com.fc.fcaevpn.PSIPHON_REGIONS";
@@ -1147,6 +1154,7 @@ public class FCAEVpnService extends VpnService {
          */
     private synchronized void fullShutdown() {
         notificationPause = false;
+        holdConnectedUi = false;
         // The session is over: the next one starts its own measurements, and no
         // sample of this one can be published under it.
         sessionEpoch.incrementAndGet();
@@ -1325,9 +1333,13 @@ public class FCAEVpnService extends VpnService {
         // pause landing in the connect window would not stop the worker, and
         // it would resurrect "running" (live TUN) after the pause.
         final long myGen = cleanupGeneration.incrementAndGet();
+        // A live session keeps its status word. A dial that never connected
+        // does not: Stop there is a cancel, and CONNECTING may stay.
+        final boolean wasUp = running || vpnPaused;
         running = false;
         vpnPaused = true;
         uiConnecting = false;
+        holdConnectedUi = wasUp;
         pendingSessionGen = -1;
         synchronized (cmdLock) {
             engineOpInFlight = true;
@@ -1340,8 +1352,9 @@ public class FCAEVpnService extends VpnService {
             pfd = vpnInterface;
             vpnInterface = null;
         }
-        closeQuiet(pfd);
-        sweepTun();
+        // The fd stays open until the engine's pause flag is set. Closing it
+        // first is what made the session report "tunnel dropped" and the
+        // status line flinch off CONNECTED and back.
 
         Runnable uiCleanup = () -> {
             notifyUi();
@@ -1357,9 +1370,14 @@ public class FCAEVpnService extends VpnService {
         // TUN data plane only. The session and backend stay up so Start can
         // re-enable the interface without a full reconnect.
         NativeEngine.lifecycleExecutor.execute(() -> {
-            if (myGen != cleanupGeneration.get()) return;
+            if (myGen != cleanupGeneration.get()) {
+                handler.post(() -> closeQuiet(pfd));
+                return;
+            }
             try { NativeEngine.nativePauseTun(); } catch (Exception ignored) {}
             handler.post(() -> {
+                closeQuiet(pfd);
+                sweepTun();
                 if (myGen == cleanupGeneration.get()) finishEngineOp();
             });
         });
@@ -1389,13 +1407,17 @@ public class FCAEVpnService extends VpnService {
             return;
         }
         sGeneration.incrementAndGet();
+        // Start after Stop is not a new dial. uiConnecting would publish
+        // CONNECTING and the status line would leave "CONNECTED - TUN"
+        // and come back. Hold the word until the interface is up again.
         vpnPaused = false;
         shuttingDown = false;
-        uiConnecting = true;
+        uiConnecting = false;
+        holdConnectedUi = true;
         pendingSessionGen = cleanupGeneration.get();
         updateNotification();
         try {
-            startFg(notification.build(sessionTrafficText(), VpnNotification.BUTTONS_CONNECTING));
+            startFg(notification.build(sessionTrafficText(), VpnNotification.BUTTONS_RUNNING));
         } catch (Exception ignored) {}
         notifyUi();
 
@@ -1416,6 +1438,7 @@ public class FCAEVpnService extends VpnService {
                         + "); full start");
                 handler.post(() -> {
                     if (myGen != cleanupGeneration.get() || shuttingDown) return;
+                    holdConnectedUi = false;
                     vpnPaused = false;
                     startVpn(fallback);
                 });
@@ -1426,6 +1449,7 @@ public class FCAEVpnService extends VpnService {
                 Log.w(TAG, "resumeVpn: establish failed; full start");
                 handler.post(() -> {
                     if (myGen != cleanupGeneration.get() || shuttingDown) return;
+                    holdConnectedUi = false;
                     vpnPaused = false;
                     startVpn(fallback);
                 });
@@ -1438,6 +1462,7 @@ public class FCAEVpnService extends VpnService {
                 Log.w(TAG, "resumeVpn: native resume failed; full start");
                 handler.post(() -> {
                     if (myGen != cleanupGeneration.get() || shuttingDown) return;
+                    holdConnectedUi = false;
                     vpnPaused = false;
                     startVpn(fallback);
                 });
@@ -1449,6 +1474,7 @@ public class FCAEVpnService extends VpnService {
                     running = true;
                     vpnPaused = false;
                     uiConnecting = false;
+                    holdConnectedUi = false;
                     synchronized (cmdLock) { engineOpInFlight = false; }
                     updateNotification();
                     handler.post(statsRunnable);
@@ -1477,7 +1503,11 @@ public class FCAEVpnService extends VpnService {
      * CONNECTED, with no RECONNECTING and no CONNECTING at all.
      */
     private SessionState.Phase phase() {
-        if (shuttingDown) return SessionState.Phase.DISCONNECTED;
+        if (shuttingDown && !holdConnectedUi) return SessionState.Phase.DISCONNECTED;
+        // Stop/Start of a live session never publishes CONNECTING. That frame
+        // is what flashed the status line on every surface.
+        if (holdConnectedUi) return vpnPaused
+                ? SessionState.Phase.PAUSED : SessionState.Phase.CONNECTED;
         if (uiConnecting) return SessionState.Phase.CONNECTING;
         if (vpnPaused) return SessionState.Phase.PAUSED;
         if (!running) return SessionState.Phase.DISCONNECTED;
@@ -1548,7 +1578,10 @@ public class FCAEVpnService extends VpnService {
     // notification id while its tunnel (re)dials, and the next tick must
     // always restore the owner's content.
     private void updateNotification() {
-        if (uiConnecting) {
+        if (holdConnectedUi) {
+            notification.show(sessionTrafficText(),
+                    vpnPaused ? VpnNotification.BUTTONS_PAUSED : VpnNotification.BUTTONS_RUNNING);
+        } else if (uiConnecting) {
             notification.show(sessionTrafficText(), VpnNotification.BUTTONS_CONNECTING);
         } else if (vpnPaused || running) {
             notification.show(sessionTrafficText(),
@@ -1649,6 +1682,21 @@ public class FCAEVpnService extends VpnService {
         // replay has to start Psiphon with the same one the UI picked.
         putInt(e, i, "psiphonTransport", 0);
         e.apply();
+        // Mode alone, in a file small enough that a widget tap can read it
+        // without loading the session (the Psiphon blob in PREFS_LAST is what
+        // made CONNECTING wait about half a second).
+        context.getSharedPreferences(PREFS_MODE, MODE_PRIVATE).edit()
+                .putInt("mode", i.getIntExtra("mode", 1))
+                .apply();
+    }
+
+    private static final String PREFS_MODE = "fcae_widget_mode";
+
+    /** Last saved mode, or 1 (TUN) if this install has not saved one yet.
+     *  Never opens the session prefs. */
+    public static int recalledMode(Context context) {
+        if (context == null) return 1;
+        return context.getSharedPreferences(PREFS_MODE, MODE_PRIVATE).getInt("mode", 1);
     }
 
     private static Intent readSession(Context context) {

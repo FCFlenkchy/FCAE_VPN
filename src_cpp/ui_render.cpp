@@ -1637,14 +1637,10 @@ void render_ui() {
                     ImGui::TextDisabled("%s", link.shown);
                 }
                 ImGui::Spacing();
-                ImGui::TextDisabled("%s under the", build_is_prerelease() ? "Pre-released" : "Released");
-                ImGui::SameLine(0, 4);
-                if (ImGui::TextLink("GNU GPL v3"))
+                if (ImGui::TextLink("LICENSE"))
                     open_link(kLinkLicense.c_str());
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("%s", kLinkLicense.c_str());
-                ImGui::SameLine(0, 0);
-                ImGui::TextDisabled(".");
                 ImGui::TextDisabled("Credits are listed in the");
                 ImGui::SameLine(0, 4);
                 if (ImGui::TextLink("GitHub repository"))

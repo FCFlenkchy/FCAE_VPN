@@ -7,8 +7,17 @@
     <!-- One white silhouette for the tile and the foreground service.
          FC is cut out of the shield so a tint cannot erase the letters.
          There is no second color and no background fill. -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:fillType="evenOdd"
-        android:pathData="M12,2L4,5v6c0,5.55 3.84,10.74 8,12 4.16,-1.26 8,-6.45 8,-12V5L12,2zM6.35,6.90H11.05V8.44H7.92V9.80H10.62V11.17H7.92V15.10H6.35ZM17.77,6.90H15.53A3.44,3.44 0 0 0 12.08,10.34V11.66A3.44,3.44 0 0 0 15.53,15.10H17.77V13.39H15.53A1.74,1.74 0 0 1 13.79,11.66V10.34A1.74,1.74 0 0 1 15.53,8.61H17.77V6.90Z" />
+    <!-- Scaled to the viewport. The shield was leaving a margin the status
+         bar and the tile both showed as empty. Letters scale with it. -->
+    <group
+        android:pivotX="12"
+        android:pivotY="12"
+        android:scaleX="1.12"
+        android:scaleY="1.12"
+        android:translateY="-0.35">
+        <path
+            android:fillColor="#FFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M12,2L4,5v6c0,5.55 3.84,10.74 8,12 4.16,-1.26 8,-6.45 8,-12V5L12,2zM6.35,6.90H11.05V8.44H7.92V9.80H10.62V11.17H7.92V15.10H6.35ZM17.77,6.90H15.53A3.44,3.44 0 0 0 12.08,10.34V11.66A3.44,3.44 0 0 0 15.53,15.10H17.77V13.39H15.53A1.74,1.74 0 0 1 13.79,11.66V10.34A1.74,1.74 0 0 1 15.53,8.61H17.77V6.90Z" />
+    </group>
 </vector>

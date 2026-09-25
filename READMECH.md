@@ -9,7 +9,7 @@
     <img src="https://img.shields.io/github/downloads/FCFlenkchy/FCAE_VPN/total?style=for-the-badge&logo=github&label=Downloads" alt="Total downloads">
   </a>
   <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/License-GNU%20GPL%20v3-blue?style=for-the-badge" alt="GNU GPL v3">
+    LICENSE
   </a>
 </p>
 
@@ -212,7 +212,9 @@ Bug 反馈与功能建议请提交到 **[GitHub Issues](https://github.com/FCFle
 
 ## 许可证
 
-本项目以 [GNU GPL v3](LICENSE) 发布。第三方组件保留各自的许可证。
+[LICENSE](LICENSE)
+
+FCAE 与 FCAE VPN 为本项目商标。见 [TRADEMARK](TRADEMARK)。
 
 ---
 

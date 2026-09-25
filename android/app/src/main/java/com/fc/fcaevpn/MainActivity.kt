@@ -274,7 +274,7 @@ class MainActivity : AppCompatActivity() {
                 PsiphonTunnelService.BROADCAST_STATS -> {
                     // The AAR keeps reporting for a beat after an explicit
                     // disconnect; those samples would repaint the zeroed line.
-                    if (userInitiatedDisconnect || notificationPause()) return
+                    if (userInitiatedDisconnect) return
                     if (!connecting && !commandConnecting
                             && !SessionState.reconciled(this@MainActivity).active) return
                     pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: ""
@@ -373,9 +373,15 @@ class MainActivity : AppCompatActivity() {
                             return@post
                         }
 
-                        if (isPaused && FCAEVpnService.notificationPause) {
-                            val first = !notificationPauseUi
-                            notificationPauseUi = true
+                        // A paused frame also has running=true (the session is
+                        // still up). Checking running first cleared the pause
+                        // and posted a poll, and that poll painted whatever
+                        // native state the closing TUN reported — the flinch
+                        // off "CONNECTED - TUN" and back.
+                        if (isPaused || FCAEVpnService.holdConnectedUi && !isConnecting && !isRunning) {
+                            val fromNotification = FCAEVpnService.notificationPause
+                            val first = fromNotification && !notificationPauseUi
+                            if (fromNotification) notificationPauseUi = true
                             userInitiatedDisconnect = false
                             commandPaused = true
                             commandConnecting = false
@@ -393,14 +399,16 @@ class MainActivity : AppCompatActivity() {
                                     intent.getLongExtra("totalTx", 0L),
                                     intent.getIntExtra("rtt", 0)
                                 )
+                            } else {
+                                holdConnectedLine()
                             }
-                            handler.removeCallbacks(poll)
-                            handler.post(poll)
                             return@post
                         }
-                        if (!isPaused && (isConnecting || isRunning)) notificationPauseUi = false
+                        if (!isPaused && (isConnecting || isRunning) && !FCAEVpnService.holdConnectedUi) {
+                            notificationPauseUi = false
+                        }
 
-                        if (isConnecting) {
+                        if (isConnecting && !FCAEVpnService.holdConnectedUi && !commandPaused) {
                             // Only a new session starts the readings over. A
                             // Start after Stop bumps the state generation but
                             // keeps the epoch: the engine's counters carry on,
@@ -419,6 +427,20 @@ class MainActivity : AppCompatActivity() {
                             statusText.setTextColor(COLOR_PROGRESS)
                             handler.removeCallbacks(poll)
                             handler.post(poll)
+                        } else if (isConnecting) {
+                            // Start after Stop. Not a new dial: the line stays.
+                            notificationPauseUi = false
+                            FCAEVpnService.notificationPause = false
+                            commandPaused = false
+                            commandConnecting = false
+                            connecting = false
+                            engineRunning = true
+                            vpnActive = true
+                            userInitiatedDisconnect = false
+                            lastBroadcastGeneration = gen
+                            lastBroadcastEpoch = epoch
+                            updateButton()
+                            holdConnectedLine()
                         } else if (isRunning) {
                             userInitiatedDisconnect = false
                             commandPaused = false
@@ -438,28 +460,11 @@ class MainActivity : AppCompatActivity() {
                                 connecting = false
                             }
                             updateButton()
-                            handler.removeCallbacks(poll)
-                            handler.post(poll)
-                        } else if (isPaused) {
-                            userInitiatedDisconnect = false
-                            commandPaused = true
-                            commandConnecting = false
-                            lastBroadcastGeneration = gen
-                            connecting = false
-                            // Stop only turns the TUN interface off: the
-                            // session keeps flowing through the UI exactly
-                            // as it is -- the status stays whatever the
-                            // engine renders, polling and stats continue,
-                            // and the rates fall to zero on their own
-                            // because no traffic flows. The Start button is
-                            // the only visible difference.
-                            updateButton()
-                            // Same clock as a live session: each owner tick
-                            // re-arms the poll, so the readings land with the
-                            // notification and the widget instead of on a
-                            // timer that drifted up to a second behind them.
-                            handler.removeCallbacks(poll)
-                            handler.post(poll)
+                            if (FCAEVpnService.holdConnectedUi) holdConnectedLine()
+                            else {
+                                handler.removeCallbacks(poll)
+                                handler.post(poll)
+                            }
                         } else if (!isRunning && !isPaused) {
                             if (commandConnecting && gen <= connectGeneration) return@post
                             lastBroadcastGeneration = gen
@@ -887,6 +892,11 @@ class MainActivity : AppCompatActivity() {
 
         btnTunStop.setOnClickListener {
             if (isTunModeSelected()) {
+                // Before the service closes anything. A poll already in flight
+                // must not paint the native flicker over CONNECTED.
+                FCAEVpnService.holdConnectedUi = true
+                commandPaused = true
+                holdConnectedLine()
                 try {
                     val intent = android.content.Intent(this, FCAEVpnService::class.java)
                     intent.action = FCAEVpnService.ACTION_STOP
@@ -1102,19 +1112,31 @@ class MainActivity : AppCompatActivity() {
     private fun notificationPause(): Boolean =
         notificationPauseUi || FCAEVpnService.notificationPause
 
-    /** Paint the readings already in the stop broadcast. No poll: the shade
-     *  dropped that clock, and waiting for it is why peer and totals showed
-     *  up late only after a notification Stop. */
+    /** Status word for a session whose TUN is coming down or back up.
+     *  Stop and Start do not change it. */
+    private fun holdConnectedLine() {
+        if (!::statusText.isInitialized) return
+        val word = statusText.text?.toString() ?: ""
+        if (word.startsWith("CONNECTED")) return
+        statusText.text = "CONNECTED - ${if (isTunModeSelected()) "TUN" else "PROXY"}"
+        statusText.setTextColor(COLOR_CONNECTED)
+    }
+
+    /** Paint peer, Psiphon local and totals from what this session already
+     *  holds. Widget and in-app Stop never wait for a poll; neither does this. */
     private fun showPausedReadings(rx: Long, tx: Long, totalRx: Long, totalTx: Long, rtt: Int) {
         if (!::statsText.isInitialized || !::statusText.isInitialized) return
         statusText.text = "CONNECTED - ${if (isTunModeSelected()) "TUN" else "PROXY"}"
         statusText.setTextColor(COLOR_CONNECTED)
         if (isPsiphonSelected() || isEgressPsiphon()) {
-            psiDownBps = rx
-            psiUpBps = tx
-            psiTotalDown = totalRx
-            psiTotalUp = totalTx
-            psiRttMs = rtt
+            restoreLatestPsiStats()
+            if (rx != 0L || tx != 0L || totalRx != 0L || totalTx != 0L || rtt != 0) {
+                psiDownBps = rx
+                psiUpBps = tx
+                psiTotalDown = totalRx
+                psiTotalUp = totalTx
+                psiRttMs = rtt
+            }
             renderPsiStats()
             return
         }
@@ -1188,14 +1210,14 @@ class MainActivity : AppCompatActivity() {
             vpnActive = true
             engineRunning = true
             updateButton()
-            handler.removeCallbacks(poll)
-            if (::statsText.isInitialized && (statsText.text.isNullOrBlank()
-                    || statusText.text.isNullOrBlank()
-                    || statusText.text == "DISCONNECTED")) {
+            if (::statsText.isInitialized && ::peerText.isInitialized &&
+                (statsText.text.isNullOrBlank() || statusText.text.isNullOrBlank()
+                    || statusText.text == "DISCONNECTED"
+                    || ((isPsiphonSelected() || isEgressPsiphon())
+                        && !peerText.text.toString().contains("Psiphon local:")))) {
                 val held = SessionState.snapshot(this)
                 showPausedReadings(held.rx, held.tx, held.totalRx, held.totalTx, held.rtt)
             }
-            handler.post(poll)
             return
         }
         val tunPaused = try { NativeEngine.nativeTunPaused() } catch (_: Throwable) { false }
@@ -2458,7 +2480,7 @@ class MainActivity : AppCompatActivity() {
         val status = if (buildIsPrerelease) "pre-release" else "release"
         val name = "FCAE VPN"
         val verLine = "$displayVersion  |  $status"
-        val licenseLine = (if (buildIsPrerelease) "Pre-released" else "Released") + " under the GNU GPL v3."
+        val licenseLine = "LICENSE"
         val msg = android.text.SpannableString(
             name + "\n" + verLine + "\n\n" +
             "Telegram: t.me/FCAE_VPN\n" +
@@ -2474,7 +2496,7 @@ class MainActivity : AppCompatActivity() {
             verStart, verStart + verLine.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         addLink(msg, "t.me/FCAE_VPN", LINK_TELEGRAM)
         addLink(msg, "github.com/FCFlenkchy/FCAE_VPN", LINK_GITHUB)
-        addLink(msg, "GNU GPL v3", LINK_LICENSE)
+        addLink(msg, "LICENSE", LINK_LICENSE)
         addLink(msg, "GitHub repository", LINK_CREDITS)
         val density = resources.displayMetrics.density
         val content = android.widget.LinearLayout(this).apply {
@@ -2662,16 +2684,17 @@ class MainActivity : AppCompatActivity() {
         errMsg: String,
         logs: String
     ) {
-        if (notificationPause()) {
+        if (notificationPause() || FCAEVpnService.holdConnectedUi || commandPaused) {
             engineRunning = true
             vpnActive = true
             connecting = false
-            commandPaused = true
-            if (state == 0 || state == 5) {
-                if (statusText.text.isNullOrBlank() || statusText.text == "DISCONNECTED") {
-                    statusText.text = "CONNECTED - ${if (isTunModeSelected()) "TUN" else "PROXY"}"
-                    statusText.setTextColor(COLOR_CONNECTED)
-                }
+            // Native state dips while the TUN fd is moving. Painting that dip
+            // is the flinch: CONNECTED, then a blank or RECONNECTING, then
+            // CONNECTED again. The word stays. Stats update only from a real
+            // connected sample. The button is not touched here: Stop has
+            // already chosen START, and Start must be allowed to show STOP.
+            holdConnectedLine()
+            if (state != 4) {
                 updateButton()
                 return
             }
