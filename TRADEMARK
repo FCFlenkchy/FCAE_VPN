@@ -1,12 +1,12 @@
 FCAE and FCAE VPN
 
-The names FCAE and FCAE VPN are trademarks of the FCAE VPN project.
-They identify the official client. They are not registered marks.
+FCAE and FCAE VPN are trademarks of the FCAE VPN project. They name
+the official client. They are not registered marks.
 
-The GNU GPL v3 in LICENSE covers the software. It does not grant a
-trademark license. A fork may use, modify, and redistribute the code
-under that license. It may not use FCAE or FCAE VPN, or a name close
-enough to suggest the fork is the official client or that this project
-endorses it.
+The names are not covered by LICENSE. Permission to use, copy, or
+change the code does not include permission to use the names. That
+is any use of the names, not only a fork: a build, a package, a site,
+or anything else that would make people think it is the official
+client, or that this project endorses it.
 
 Questions: https://github.com/FCFlenkchy/FCAE_VPN
