@@ -4,21 +4,8 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
-    <!-- One white silhouette for the tile and the foreground service.
-         FC is cut out of the shield so a tint cannot erase the letters.
-         There is no second color and no background fill. -->
-    <!-- About twice the drawn mark. A uniform 2x from the center cuts the
-         shield off this 24dp slot, so the scale stops where the peak and the
-         letters still sit inside the viewport. Same path, no second file. -->
-    <group
-        android:pivotX="12"
-        android:pivotY="12"
-        android:scaleX="1.65"
-        android:scaleY="1.65"
-        android:translateY="4.9">
-        <path
-            android:fillColor="#FFFFFF"
-            android:fillType="evenOdd"
-            android:pathData="M12,2L4,5v6c0,5.55 3.84,10.74 8,12 4.16,-1.26 8,-6.45 8,-12V5L12,2zM6.35,6.90H11.05V8.44H7.92V9.80H10.62V11.17H7.92V15.10H6.35ZM17.77,6.90H15.53A3.44,3.44 0 0 0 12.08,10.34V11.66A3.44,3.44 0 0 0 15.53,15.10H17.77V13.39H15.53A1.74,1.74 0 0 1 13.79,11.66V10.34A1.74,1.74 0 0 1 15.53,8.61H17.77V6.90Z" />
-    </group>
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,1.11L3.32,4.36V10.87C3.32,16.89 7.49,22.53 12,23.89C16.51,22.53 20.68,16.89 20.68,10.87V4.36ZM4.94,7.322 H10.579 V8.872 H7.049 V10.422 H10.364 V11.971 H7.049 V15.458 H4.94 ZM16.090,7.150C13.825,7.253 12.049,8.985 12.129,11.326C12.004,13.859 13.936,15.639 16.391,15.631C17.364,15.624 18.252,15.433 19.060,15.028L19.060,13.392C18.325,13.851 17.559,14.189 16.606,14.124C15.121,14.176 14.172,12.767 14.282,11.369C14.183,10.027 15.095,8.637 16.520,8.657C17.436,8.514 18.397,8.982 19.060,9.345L19.017,7.710C18.125,7.301 17.171,7.099 16.090,7.150Z" />
 </vector>
