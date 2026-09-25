@@ -47,11 +47,10 @@
             android:layout_width="26dp"
             android:layout_height="26dp"
             android:background="@android:color/transparent"
-            android:contentDescription="Settings"
-            android:padding="5dp"
+            android:contentDescription="Open FCAE VPN"
+            android:padding="1dp"
             android:scaleType="fitCenter"
-            android:src="@android:drawable/ic_menu_preferences"
-            android:tint="#FF8A93A6" />
+            android:src="@drawable/widget_logo" />
     </LinearLayout>
 
     <!-- Row 2: connection state, and the RTT of the session measuring it. -->

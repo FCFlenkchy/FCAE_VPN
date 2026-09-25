@@ -22,73 +22,9 @@
 
 #include "ui_render.h"
 
-// ── Embedded application icon (generated from src_cpp/icon_48.png) ───────
-// The artwork uses only 4 colours, so it is stored as a tiny palette plus
-// run-length encoded indices (502 bytes) and expanded to RGBA at startup.
-// Keeping it in the binary means the window/taskbar icon is correct even when
-// the app is run straight from the extracted archive.
-//
-// To regenerate after editing icon_48.png, re-run the palette+RLE dump:
-//   from PIL import Image
-//   px = list(Image.open("src_cpp/icon_48.png").convert("RGBA").getdata())
-static const int FCAE_ICON_W = 48;
-static const int FCAE_ICON_H = 48;
-
-static const unsigned char FCAE_ICON_PALETTE[4][4] = {
-    { 16, 40, 64,255},
-    { 34, 68,102,255},
-    { 26, 58, 92,255},
-    {255,255,255,255},
-};
-
-// Pairs of (run length, palette index).
-static const unsigned char FCAE_ICON_RLE[] = {
-    71, 0, 3, 1, 40, 0, 13, 1, 32, 0, 7, 1, 5, 2, 7, 1, 27, 0,
-    5, 1, 13, 2, 5, 1, 23, 0, 4, 1, 19, 2, 4, 1, 20, 0, 3, 1,
-    23, 2, 3, 1, 18, 0, 3, 1, 25, 2, 3, 1, 16, 0, 3, 1, 27, 2,
-    3, 1, 14, 0, 3, 1, 29, 2, 3, 1, 12, 0, 3, 1, 31, 2, 3, 1,
-    10, 0, 3, 1, 33, 2, 3, 1, 9, 0, 2, 1, 35, 2, 2, 1, 8, 0,
-    2, 1, 37, 2, 2, 1, 7, 0, 2, 1, 37, 2, 2, 1, 6, 0, 2, 1,
-    39, 2, 2, 1, 5, 0, 2, 1, 39, 2, 2, 1, 5, 0, 2, 1, 39, 2,
-    2, 1, 4, 0, 2, 1, 41, 2, 2, 1, 3, 0, 2, 1, 41, 2, 2, 1,
-    3, 0, 2, 1, 8, 2, 4, 3, 3, 2, 3, 3, 3, 2, 3, 3, 2, 2,
-    5, 3, 10, 2, 2, 1, 3, 0, 2, 1, 8, 2, 1, 3, 5, 2, 1, 3,
-    3, 2, 1, 3, 1, 2, 1, 3, 3, 2, 1, 3, 1, 2, 1, 3, 14, 2,
-    2, 1, 3, 0, 1, 1, 9, 2, 1, 3, 5, 2, 1, 3, 5, 2, 1, 3,
-    3, 2, 1, 3, 1, 2, 1, 3, 15, 2, 1, 1, 2, 0, 2, 1, 9, 2,
-    3, 3, 3, 2, 1, 3, 5, 2, 5, 3, 1, 2, 3, 3, 13, 2, 2, 1,
-    1, 0, 2, 1, 9, 2, 1, 3, 5, 2, 1, 3, 5, 2, 1, 3, 3, 2,
-    1, 3, 1, 2, 1, 3, 15, 2, 2, 1, 1, 0, 2, 1, 9, 2, 1, 3,
-    5, 2, 1, 3, 3, 2, 1, 3, 1, 2, 1, 3, 3, 2, 1, 3, 1, 2,
-    1, 3, 15, 2, 2, 1, 2, 0, 1, 1, 9, 2, 1, 3, 6, 2, 3, 3,
-    2, 2, 1, 3, 3, 2, 1, 3, 1, 2, 5, 3, 11, 2, 1, 1, 3, 0,
-    2, 1, 41, 2, 2, 1, 3, 0, 2, 1, 41, 2, 2, 1, 3, 0, 2, 1,
-    41, 2, 2, 1, 3, 0, 2, 1, 41, 2, 2, 1, 4, 0, 2, 1, 39, 2,
-    2, 1, 5, 0, 2, 1, 39, 2, 2, 1, 5, 0, 2, 1, 39, 2, 2, 1,
-    6, 0, 2, 1, 37, 2, 2, 1, 7, 0, 2, 1, 37, 2, 2, 1, 8, 0,
-    2, 1, 35, 2, 2, 1, 9, 0, 3, 1, 33, 2, 3, 1, 10, 0, 3, 1,
-    31, 2, 3, 1, 12, 0, 3, 1, 29, 2, 3, 1, 14, 0, 3, 1, 27, 2,
-    3, 1, 16, 0, 3, 1, 25, 2, 3, 1, 18, 0, 3, 1, 23, 2, 3, 1,
-    20, 0, 4, 1, 19, 2, 4, 1, 23, 0, 5, 1, 13, 2, 5, 1, 27, 0,
-    7, 1, 5, 2, 7, 1, 32, 0, 13, 1, 40, 0, 3, 1, 22, 0,
-};
-
-// Expands the RLE icon into `out` (must hold FCAE_ICON_W * FCAE_ICON_H * 4 bytes).
-static void fcae_decode_icon(unsigned char* out) {
-    const size_t total = (size_t)FCAE_ICON_W * FCAE_ICON_H * 4;
-    size_t o = 0;
-    for (size_t i = 0; i + 1 < sizeof(FCAE_ICON_RLE); i += 2) {
-        const unsigned char count = FCAE_ICON_RLE[i];
-        const unsigned char* c    = FCAE_ICON_PALETTE[FCAE_ICON_RLE[i + 1]];
-        for (unsigned char n = 0; n < count && o + 4 <= total; ++n) {
-            out[o++] = c[0];
-            out[o++] = c[1];
-            out[o++] = c[2];
-            out[o++] = c[3];
-        }
-    }
-}
-
+// Window / taskbar icon, embedded so it is right even when the app runs
+// straight from the extracted archive.
+#include "icon_data.h"
 
 static void glfw_error_callback(int error, const char* description) {
     fprintf(stderr, "GLFW Error %d: %s\n", error, description);
@@ -127,15 +63,14 @@ int main(int argc, char** argv) {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
-    // Window / taskbar icon, decoded from the embedded icon_48.png artwork.
     {
-        unsigned char icon_pixels[FCAE_ICON_W * FCAE_ICON_H * 4];
-        fcae_decode_icon(icon_pixels);
-        GLFWimage icon;
-        icon.width  = FCAE_ICON_W;
-        icon.height = FCAE_ICON_H;
-        icon.pixels = icon_pixels;
-        glfwSetWindowIcon(window, 1, &icon);
+        GLFWimage icons[sizeof(FCAE_ICONS) / sizeof(FCAE_ICONS[0])];
+        for (size_t i = 0; i < sizeof(icons) / sizeof(icons[0]); ++i) {
+            icons[i].width  = FCAE_ICONS[i].width;
+            icons[i].height = FCAE_ICONS[i].height;
+            icons[i].pixels = const_cast<unsigned char*>(FCAE_ICONS[i].rgba);
+        }
+        glfwSetWindowIcon(window, (int)(sizeof(icons) / sizeof(icons[0])), icons);
     }
 
     // Set dark title bar on X11 via _GTK_THEME_VARIANT hint
