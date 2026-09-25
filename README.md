@@ -8,6 +8,9 @@
   <a href="https://github.com/FCFlenkchy/FCAE_VPN/releases">
     <img src="https://img.shields.io/github/downloads/FCFlenkchy/FCAE_VPN/total?style=for-the-badge&logo=github&label=Downloads" alt="Total downloads">
   </a>
+  <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/License-GNU%20GPL%20v3-blue?style=for-the-badge" alt="GNU GPL v3">
+  </a>
 </p>
 
 A censorship circumvention client designed for heavily restricted networks. It automatically discovers reachable routes, establishes an encrypted tunnel, and exposes a local SOCKS5/HTTP proxy for your applications.
@@ -207,7 +210,7 @@ For questions and general discussion, see the [Community](#community) section.
 
 ## License
 
-See the individual components for their respective licenses.
+Released under the [GNU GPL v3](LICENSE). Third-party components keep their own licenses.
 
 ---
 

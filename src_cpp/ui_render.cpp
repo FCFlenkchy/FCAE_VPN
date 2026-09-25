@@ -1085,6 +1085,7 @@ static ImVec2 viewport_center() {
 static const char* const kLinkTelegram = "https://t.me/FCAE_VPN";
 static const char* const kLinkGithub = "https://github.com/FCFlenkchy/FCAE_VPN";
 static const std::string kLinkCredits = std::string(kLinkGithub) + "#credits";
+static const std::string kLinkLicense = std::string(kLinkGithub) + "/blob/main/LICENSE";
 struct CommunityLink { const char* label; const char* url; const char* shown; };
 static const CommunityLink kCommunityLinks[] = {
     { "Telegram", kLinkTelegram, "t.me/FCAE_VPN" },
@@ -1636,7 +1637,14 @@ void render_ui() {
                     ImGui::TextDisabled("%s", link.shown);
                 }
                 ImGui::Spacing();
-                ImGui::TextDisabled(build_is_prerelease() ? "Pre-released under the MIT License." : "Released under the MIT License.");
+                ImGui::TextDisabled("%s under the", build_is_prerelease() ? "Pre-released" : "Released");
+                ImGui::SameLine(0, 4);
+                if (ImGui::TextLink("GNU GPL v3"))
+                    open_link(kLinkLicense.c_str());
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", kLinkLicense.c_str());
+                ImGui::SameLine(0, 0);
+                ImGui::TextDisabled(".");
                 ImGui::TextDisabled("Credits are listed in the");
                 ImGui::SameLine(0, 4);
                 if (ImGui::TextLink("GitHub repository"))

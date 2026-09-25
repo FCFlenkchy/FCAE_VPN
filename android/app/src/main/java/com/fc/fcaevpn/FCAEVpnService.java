@@ -60,6 +60,9 @@ public class FCAEVpnService extends VpnService {
     private static final long CONNECT_WATCHDOG_MS = 60000L;
 
     public static final String ACTION_STOP       = "com.fc.fcaevpn.STOP";
+    public static final String EXTRA_FROM_NOTIFICATION = "fromNotification";
+    /** Notification Stop only. The shade has already dropped the activity poll. */
+    public static volatile boolean notificationPause;
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
     public static final String ACTION_START      = "com.fc.fcaevpn.START";
     public static final String ACTION_PSIPHON_REGIONS = "com.fc.fcaevpn.PSIPHON_REGIONS";
@@ -627,6 +630,16 @@ public class FCAEVpnService extends VpnService {
                 case ACTION_STOP:
                     // Latched here as well as at the caller: all three surfaces
                     // send this and each deserves the same flinch-free display.
+                    if (intent.getBooleanExtra(EXTRA_FROM_NOTIFICATION, false)) {
+                        notificationPause = true;
+                        if (notification != null) {
+                            try {
+                                startFg(notification.build(sessionTrafficText(),
+                                        VpnNotification.BUTTONS_PAUSED));
+                            } catch (Exception ignored) {}
+                        }
+                        if (vpnPaused) return START_STICKY;
+                    }
                     handler.removeCallbacks(connectWatchdog);
                     SessionState.command(SessionState.Command.PAUSE);
                     requestPause();
@@ -667,6 +680,7 @@ public class FCAEVpnService extends VpnService {
                     return START_STICKY;
 
                 case ACTION_START:
+                    notificationPause = false;
                     // Resume and connect look the same on the wire and are not
                     // the same thing on screen: only the connect may show the
                     // dialing state.
@@ -1124,6 +1138,7 @@ public class FCAEVpnService extends VpnService {
          * process goes with the session.
          */
     private synchronized void fullShutdown() {
+        notificationPause = false;
         // The session is over: the next one starts its own measurements, and no
         // sample of this one can be published under it.
         sessionEpoch.incrementAndGet();

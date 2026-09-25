@@ -150,6 +150,9 @@ public class VpnNotification {
     private Notification.Action buildAction(String label, String action, int requestCode) {
         Intent intent = new Intent(context, FCAEVpnService.class);
         intent.setAction(action);
+        if (FCAEVpnService.ACTION_STOP.equals(action)) {
+            intent.putExtra(FCAEVpnService.EXTRA_FROM_NOTIFICATION, true);
+        }
         // Explicit component + foreground service so a tap is delivered even
         // when the app is backgrounded (Android 12+).
         PendingIntent pi;

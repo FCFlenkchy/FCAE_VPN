@@ -8,6 +8,9 @@
   <a href="https://github.com/FCFlenkchy/FCAE_VPN/releases">
     <img src="https://img.shields.io/github/downloads/FCFlenkchy/FCAE_VPN/total?style=for-the-badge&logo=github&label=Downloads" alt="Total downloads">
   </a>
+  <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/License-GNU%20GPL%20v3-blue?style=for-the-badge" alt="GNU GPL v3">
+  </a>
 </p>
 
 **[English](README.md)** | **فارسی** | **[中文](READMECH.md)**
@@ -209,7 +212,7 @@ cmake --build build --config Release
 
 ## مجوز
 
-لطفاً مجوزهای هر یک از اجزا را در پروژه‌های مربوطه مشاهده کنید.
+این پروژه تحت [GNU GPL نسخه ۳](LICENSE) منتشر شده است. اجزای شخص ثالث مجوز خود را حفظ می‌کنند.
 
 ---
 

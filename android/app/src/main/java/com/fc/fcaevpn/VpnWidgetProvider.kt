@@ -194,9 +194,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
         @Volatile
         private var lastRendered: String? = null
 
-        /** Last reading published while the session was live, for the pause hold. */
-        @Volatile
-        private var lastLive: SessionState.Snapshot? = null
 
                 /**
                  * Repaint now, from wherever a session ends. The teardown paths kill
@@ -251,16 +248,10 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val session = SessionState.reconciled(context)
             val tun = session.mode == 1
 
-            // Readings belong to a session: held across a Stop (a data-plane
-            // pause, so they must not decay and crawl back on Start) and gone
-            // with the session — a disconnected widget reports nothing.
-            if (session.up && !session.paused) lastLive = session
-            val shown = when {
-                !session.active -> SessionState.Snapshot.IDLE
-                session.paused -> lastLive ?: session
-                else -> session
-            }
-            if (!session.active) lastLive = null
+            // Same meter the notification and the app paint, including while
+            // Stop has the TUN paused. Disconnect is the only frame with no
+            // reading.
+            val shown = if (session.active) session else SessionState.Snapshot.IDLE
 
             val status = when (session.phase) {
                 SessionState.Phase.DISCONNECTED -> "DISCONNECTED"
