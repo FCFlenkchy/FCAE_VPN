@@ -8,9 +8,7 @@
   <a href="https://github.com/FCFlenkchy/FCAE_VPN/releases">
     <img src="https://img.shields.io/github/downloads/FCFlenkchy/FCAE_VPN/total?style=for-the-badge&logo=github&label=Downloads" alt="Total downloads">
   </a>
-  <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">
-    LICENSE
-  </a>
+  Released under the <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">LICENSE</a>
 </p>
 
 **[English](README.md)** | **[فارسی](READMEFA.md)** | **中文**
@@ -212,7 +210,7 @@ Bug 反馈与功能建议请提交到 **[GitHub Issues](https://github.com/FCFle
 
 ## 许可证
 
-[LICENSE](LICENSE)
+Released under the [LICENSE](LICENSE)
 
 FCAE 与 FCAE VPN 为本项目商标。见 [TRADEMARK](TRADEMARK)。
 

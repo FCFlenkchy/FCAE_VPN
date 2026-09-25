@@ -8,9 +8,7 @@
   <a href="https://github.com/FCFlenkchy/FCAE_VPN/releases">
     <img src="https://img.shields.io/github/downloads/FCFlenkchy/FCAE_VPN/total?style=for-the-badge&logo=github&label=Downloads" alt="Total downloads">
   </a>
-  <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">
-    LICENSE
-  </a>
+  Released under the <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">LICENSE</a>
 </p>
 
 **[English](README.md)** | **فارسی** | **[中文](READMECH.md)**
@@ -212,7 +210,7 @@ cmake --build build --config Release
 
 ## مجوز
 
-[LICENSE](LICENSE)
+Released under the [LICENSE](LICENSE)
 
 نام‌های FCAE و FCAE VPN علامت تجاری این پروژه هستند. بنگرید به [TRADEMARK](TRADEMARK).
 

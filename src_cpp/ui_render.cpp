@@ -1637,6 +1637,9 @@ void render_ui() {
                     ImGui::TextDisabled("%s", link.shown);
                 }
                 ImGui::Spacing();
+                ImGui::TextDisabled("%s", build_is_prerelease()
+                    ? "Pre-released under the" : "Released under the");
+                ImGui::SameLine(0, 4);
                 if (ImGui::TextLink("LICENSE"))
                     open_link(kLinkLicense.c_str());
                 if (ImGui::IsItemHovered())

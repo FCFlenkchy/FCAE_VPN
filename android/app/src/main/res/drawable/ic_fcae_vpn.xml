@@ -7,14 +7,15 @@
     <!-- One white silhouette for the tile and the foreground service.
          FC is cut out of the shield so a tint cannot erase the letters.
          There is no second color and no background fill. -->
-    <!-- Scaled to the viewport. The shield was leaving a margin the status
-         bar and the tile both showed as empty. Letters scale with it. -->
+    <!-- About twice the drawn mark. A uniform 2x from the center cuts the
+         shield off this 24dp slot, so the scale stops where the peak and the
+         letters still sit inside the viewport. Same path, no second file. -->
     <group
         android:pivotX="12"
         android:pivotY="12"
-        android:scaleX="1.12"
-        android:scaleY="1.12"
-        android:translateY="-0.35">
+        android:scaleX="1.65"
+        android:scaleY="1.65"
+        android:translateY="4.9">
         <path
             android:fillColor="#FFFFFF"
             android:fillType="evenOdd"

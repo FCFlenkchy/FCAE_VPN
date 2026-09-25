@@ -1122,8 +1122,10 @@ class MainActivity : AppCompatActivity() {
         statusText.setTextColor(COLOR_CONNECTED)
     }
 
-    /** Paint peer, Psiphon local and totals from what this session already
-     *  holds. Widget and in-app Stop never wait for a poll; neither does this. */
+    /** Paint peer, Aether local, Psiphon local and totals in this frame.
+     *  Notification Stop does not post a poll — that poll was the flinch —
+     *  and it must not wait for native state 4, which drops while the TUN
+     *  closes. Widget and in-app Stop do not come through here. */
     private fun showPausedReadings(rx: Long, tx: Long, totalRx: Long, totalTx: Long, rtt: Int) {
         if (!::statsText.isInitialized || !::statusText.isInitialized) return
         statusText.text = "CONNECTED - ${if (isTunModeSelected()) "TUN" else "PROXY"}"
@@ -1138,19 +1140,54 @@ class MainActivity : AppCompatActivity() {
                 psiRttMs = rtt
             }
             renderPsiStats()
-            return
+        } else {
+            statsText.text =
+                "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  ${rtt}ms"
         }
-        statsText.text =
-            "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  ${rtt}ms"
-        if (::peerText.isInitialized && peerText.text.isNullOrBlank() && !isTorOnly()) {
-            bgExecutor.execute {
-                val peer = try { NativeEngine.nativeGetPeer() } catch (_: Throwable) { "" }
-                handler.post {
-                    if (!notificationPause() || peerText.text.isNotBlank()) return@post
-                    peerText.text = "Peer: ${peer.ifEmpty { " \u2014 " }}"
-                }
-            }
+        paintNotificationEndpoints()
+    }
+
+    /** Peer name already on screen, else the engine's, without a poll. */
+    private fun keptPeerName(): String {
+        val shown = if (::peerText.isInitialized) peerText.text?.toString().orEmpty() else ""
+        val marker = "Peer: "
+        val at = shown.indexOf(marker)
+        if (at >= 0) {
+            val line = shown.substring(at + marker.length).substringBefore('\n').trim()
+            if (line.isNotEmpty() && line != "\u2014" && line != "-" && line != "\u2013") return line
         }
+        return try { NativeEngine.nativeGetPeer() } catch (_: Throwable) { "" }
+    }
+
+    /** LAN address already painted, so Stop does not drop the shared line. */
+    private fun lanFromShownEndpoints(): String {
+        val shown = if (::peerText.isInitialized) peerText.text?.toString().orEmpty() else ""
+        val key = " LAN: "
+        val at = shown.indexOf(key)
+        if (at < 0) return ""
+        val token = shown.substring(at + key.length).substringBefore('\n').substringBefore(" | ").trim()
+        val host = token.substringAfter(' ').substringBefore(':')
+        return if (host.isNotEmpty() && host != "127.0.0.1") host else ""
+    }
+
+    private fun notificationEndpointsMissing(): Boolean {
+        val shown = if (::peerText.isInitialized) peerText.text?.toString().orEmpty() else ""
+        if (!isPsiphonSelected() && !isTorOnly() && !shown.contains("Peer:")) return true
+        val wantsAether = !isPsiphonSelected() && !isTorOnly() &&
+            (switchSocks.isChecked || isTunModeSelected() || isEgressPsiphon()
+                || effectiveTorMode() in 1..2 || switchHttp.isChecked)
+        if (wantsAether && !shown.contains("Aether local:")) return true
+        if ((isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0
+            && !shown.contains("Psiphon local:")) return true
+        return false
+    }
+
+    /** Same listener block the poll paints, without waiting for state 4. */
+    private fun paintNotificationEndpoints() {
+        if (!::peerText.isInitialized || !notificationPause()) return
+        val lan = lastNativeLan.ifEmpty { lanFromShownEndpoints() }
+        val painted = sessionEndpointText(keptPeerName(), lan, listenersUp = true)
+        if (painted.isNotEmpty()) peerText.text = painted.trimStart('\n')
     }
 
     /** Restore the UI for a session whose TUN is turned off by Stop: it
@@ -1213,8 +1250,7 @@ class MainActivity : AppCompatActivity() {
             if (::statsText.isInitialized && ::peerText.isInitialized &&
                 (statsText.text.isNullOrBlank() || statusText.text.isNullOrBlank()
                     || statusText.text == "DISCONNECTED"
-                    || ((isPsiphonSelected() || isEgressPsiphon())
-                        && !peerText.text.toString().contains("Psiphon local:")))) {
+                    || notificationEndpointsMissing())) {
                 val held = SessionState.snapshot(this)
                 showPausedReadings(held.rx, held.tx, held.totalRx, held.totalTx, held.rtt)
             }
@@ -2480,7 +2516,7 @@ class MainActivity : AppCompatActivity() {
         val status = if (buildIsPrerelease) "pre-release" else "release"
         val name = "FCAE VPN"
         val verLine = "$displayVersion  |  $status"
-        val licenseLine = "LICENSE"
+        val licenseLine = (if (buildIsPrerelease) "Pre-released" else "Released") + " under the LICENSE"
         val msg = android.text.SpannableString(
             name + "\n" + verLine + "\n\n" +
             "Telegram: t.me/FCAE_VPN\n" +
@@ -2671,6 +2707,43 @@ class MainActivity : AppCompatActivity() {
         // The pre-draw listener follows using the newly laid-out child height.
     }
 
+    /**
+     * Peer and listener lines. Widget and in-app Stop reach this from the
+     * poll, and only while native state is 4 or 6. Notification Stop calls
+     * it with listenersUp already true: the TUN can be down and the lines
+     * still have to be there, in that same frame.
+     */
+    private fun sessionEndpointText(peer: String, lan: String, listenersUp: Boolean): String {
+        val peerLine = StringBuilder()
+        if (!isPsiphonSelected() && !isTorOnly()) {
+            peerLine.append("Peer: ${peer.ifEmpty { " \u2014 " }}")
+        }
+        if (listenersUp && !isPsiphonSelected()) {
+            fun endpoints(backend: String, socks: String?, http: String?) {
+                val local = mutableListOf<String>()
+                val shared = mutableListOf<String>()
+                fun add(kind: String, port: String) {
+                    local.add("$kind 127.0.0.1:$port")
+                    if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") shared.add("$kind $lan:$port")
+                }
+                socks?.let { add("SOCKS5", it) }
+                http?.let { add("HTTP", it) }
+                if (local.isNotEmpty()) peerLine.append("\n$backend local: " + local.joinToString(" | "))
+                if (shared.isNotEmpty()) peerLine.append("\n$backend LAN: " + shared.joinToString(" | "))
+            }
+            if (!isTorOnly()) endpoints("Aether",
+                if (switchSocks.isChecked || isTunModeSelected() || isEgressPsiphon() || effectiveTorMode() in 1..2)
+                    editSocksPort.text.toString().trim().ifEmpty { "1819" } else null,
+                if (switchHttp.isChecked) editHttpPort.text.toString().trim().ifEmpty { "1820" } else null)
+            if (isTorOnly() || effectiveTorMode() in 1..2) endpoints("Tor",
+                editTorSocksPort.text.toString().trim().ifEmpty { "1821" },
+                if (switchTorHttp.isChecked) editTorHttpPort.text.toString() else null)
+        }
+        if (listenersUp && (isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0)
+            peerLine.append("\n" + psiphonEndpointText(nativeLanFallback(lan)))
+        return peerLine.toString()
+    }
+
     private fun applyStatus(
         state: Int,
         rtt: Int,
@@ -2781,36 +2854,9 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Psiphon direct and Tor-only sessions do not expose an Aether peer.
-            // Keep their listener endpoints without rendering a misleading peer line.
-            val peerLine = StringBuilder()
-            if (!isPsiphonSelected() && !isTorOnly()) {
-                peerLine.append("Peer: ${peer.ifEmpty { " \u2014 " }}")
-            }
-            // Show only listeners belonging to the active backend. Tor-only
-            // has its own SOCKS port; Psiphon has ports assigned by its service.
-            if ((state == 4 || state == 6) && !isPsiphonSelected()) {
-                fun endpoints(backend: String, socks: String?, http: String?) {
-                    val local = mutableListOf<String>()
-                    val shared = mutableListOf<String>()
-                    fun add(kind: String, port: String) {
-                        local.add("$kind 127.0.0.1:$port")
-                        if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") shared.add("$kind $lan:$port")
-                    }
-                    socks?.let { add("SOCKS5", it) }
-                    http?.let { add("HTTP", it) }
-                    if (local.isNotEmpty()) peerLine.append("\n$backend local: " + local.joinToString(" | "))
-                    if (shared.isNotEmpty()) peerLine.append("\n$backend LAN: " + shared.joinToString(" | "))
-                }
-                if (!isTorOnly()) endpoints("Aether",
-                    if (switchSocks.isChecked || isTunModeSelected() || isEgressPsiphon() || effectiveTorMode() in 1..2)
-                        editSocksPort.text.toString().trim().ifEmpty { "1819" } else null,
-                    if (switchHttp.isChecked) editHttpPort.text.toString().trim().ifEmpty { "1820" } else null)
-                if (isTorOnly() || effectiveTorMode() in 1..2) endpoints("Tor",
-                    editTorSocksPort.text.toString().trim().ifEmpty { "1821" },
-                    if (switchTorHttp.isChecked) editTorHttpPort.text.toString() else null)
-            }
-            if ((state == 4 || state == 6) && (isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0)
-                peerLine.append("\n" + psiphonEndpointText(nativeLanFallback(lan)))
+            // Listeners stay gated on a live native state here. Notification
+            // Stop paints the same block itself, without this poll.
+            val peerLine = StringBuilder(sessionEndpointText(peer, lan, state == 4 || state == 6))
             // Only append error here if not already shown in statusText (state 5 = ERROR)
             if (errMsg.isNotEmpty() && state != 5) peerLine.append("\nError: $errMsg")
             peerText.text = peerLine.toString()

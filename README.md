@@ -8,9 +8,7 @@
   <a href="https://github.com/FCFlenkchy/FCAE_VPN/releases">
     <img src="https://img.shields.io/github/downloads/FCFlenkchy/FCAE_VPN/total?style=for-the-badge&logo=github&label=Downloads" alt="Total downloads">
   </a>
-  <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">
-    LICENSE
-  </a>
+  Released under the <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">LICENSE</a>
 </p>
 
 A censorship circumvention client designed for heavily restricted networks. It automatically discovers reachable routes, establishes an encrypted tunnel, and exposes a local SOCKS5/HTTP proxy for your applications.
@@ -210,7 +208,7 @@ For questions and general discussion, see the [Community](#community) section.
 
 ## License
 
-[LICENSE](LICENSE)
+Released under the [LICENSE](LICENSE)
 
 The names FCAE and FCAE VPN are trademarks of this project. See [TRADEMARK](TRADEMARK).
 
