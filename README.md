@@ -7,7 +7,7 @@ This is the source code for the [FCAE VPN site](https://fcaevpn.fluxcast.dev/).
 - `index.html` — Main page
 - `style.css` — All styles
 - `icon_48.png` — Favicon
-- `LICENSE` — MIT License
+- `LICENSE` — GNU GPL v3
 
 ## View Live
 
