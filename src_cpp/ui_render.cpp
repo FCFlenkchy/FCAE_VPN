@@ -1177,13 +1177,11 @@ void render_ui() {
         if (ImGui::Button(show_disconnect ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 34))) {
             if (connected || busy || errored || tun_paused) {
                 g_app.start_busy.store(false);
-                // fcae_stop() is a fast control path: it cancels the session
-                // and aborts the TUN descriptors, then returns while the full
-                // teardown (routes/DNS restore, engine stop) runs on the
-                // session worker. It is run on a detached thread purely so the
-                // window keeps painting; the UI may offer CONNECT again at
-                // once — the next start blocks on the reaper barrier until the
-                // teardown finishes, so nothing races the previous session.
+                // Cut the data plane on this click before thread scheduling can
+                // delay it. Full route/DNS/backend cleanup remains asynchronous.
+                if (fcae_stop_begin() != FCAE_OK) {
+                    g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
+                }
                 std::thread([] {
                     if (fcae_stop() != FCAE_OK) {
                         g_app.add_log(FCAE_LOG_WARN, fcae_last_error());

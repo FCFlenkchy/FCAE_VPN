@@ -122,9 +122,15 @@ class VpnTileService : TileService() {
             exitPending = false
         }
 
-        private const val ENABLE_REFRESH_ATTEMPTS = 20
-        private const val ENABLE_REFRESH_INTERVAL_MS = 250L
+        private const val ENABLE_REFRESH_ATTEMPTS = 24
         private val enableRefreshTicket = java.util.concurrent.atomic.AtomicInteger()
+
+        private fun enableRefreshDelay(attempt: Int): Long = when (attempt) {
+            0 -> 25L
+            1 -> 50L
+            2 -> 100L
+            else -> 250L
+        }
 
         fun refreshAfterEnable(context: Context) {
             val ticket = enableRefreshTicket.incrementAndGet()
@@ -146,7 +152,7 @@ class VpnTileService : TileService() {
                 if (ticket == enableRefreshTicket.get() && listening == null) {
                     requestEnabledState(context, ticket, attempt + 1)
                 }
-            }, ENABLE_REFRESH_INTERVAL_MS)
+            }, enableRefreshDelay(attempt))
         }
 
         @Volatile

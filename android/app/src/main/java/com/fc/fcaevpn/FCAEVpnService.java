@@ -594,7 +594,8 @@ public class FCAEVpnService extends VpnService {
     public static boolean publishCurrentState() {
         FCAEVpnService current = instance;
         if (current == null || !sessionActive()) return false;
-        current.handler.post(current::notifyUi);
+        if (Looper.myLooper() == Looper.getMainLooper()) current.notifyUi();
+        else current.handler.post(current::notifyUi);
         return true;
     }
 

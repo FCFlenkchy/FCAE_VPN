@@ -709,7 +709,8 @@ public class ProxyNotification extends Service {
     public static boolean publishCurrentState() {
         ProxyNotification current = instance;
         if (current == null || !sessionActive()) return false;
-        current.handler.post(current::publishState);
+        if (Looper.myLooper() == Looper.getMainLooper()) current.publishState();
+        else current.handler.post(current::publishState);
         return true;
     }
 
