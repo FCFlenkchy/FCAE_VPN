@@ -2,7 +2,10 @@ package com.fc.fcaevpn
 
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The one status feed for surfaces without an Activity.
@@ -19,6 +22,8 @@ object SessionState {
     /** How long an unconfirmed frame is trusted while a command is carried out. */
     private const val GRACE_MS = 2500L
     private const val COMMAND_TIMEOUT_MS = 4000L
+    private val reconcileHandler = Handler(Looper.getMainLooper())
+    private val reconcileScheduled = AtomicBoolean(false)
 
     /** The engine measures the session itself. */
     const val SOURCE_ENGINE = 0
@@ -270,10 +275,23 @@ object SessionState {
         if (!current.active) return current
         if (isLive()) return current
         val last = latest
-        if (last != null && SystemClock.elapsedRealtime() - latestAt < GRACE_MS) return current
+        if (last != null && SystemClock.elapsedRealtime() - latestAt < GRACE_MS) {
+            scheduleReconciliation(context)
+            return current
+        }
         command(Command.NONE)
         markIdle(context)
         return Snapshot.IDLE
+    }
+
+    private fun scheduleReconciliation(context: Context) {
+        if (!reconcileScheduled.compareAndSet(false, true)) return
+        val app = context.applicationContext
+        val delay = (GRACE_MS - (SystemClock.elapsedRealtime() - latestAt)).coerceAtLeast(1L)
+        reconcileHandler.postDelayed({
+            reconcileScheduled.set(false)
+            reconciled(app)
+        }, delay)
     }
 
     /**
