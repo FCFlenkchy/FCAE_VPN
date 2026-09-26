@@ -548,7 +548,7 @@ class MainActivity : AppCompatActivity() {
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        prefs = getSharedPreferences("aether_vpn", MODE_PRIVATE)
+        prefs = getSharedPreferences("fcae_vpn", MODE_PRIVATE)
         statusText = findViewById(R.id.statusText)
         statsText = findViewById(R.id.statsText)
         peerText = findViewById(R.id.peerText)

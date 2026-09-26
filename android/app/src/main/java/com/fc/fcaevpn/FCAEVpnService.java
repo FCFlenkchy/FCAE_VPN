@@ -31,7 +31,7 @@ public class FCAEVpnService extends VpnService {
     public static final String DEFAULT_TUN_DNS_V4 = "1.1.1.1,1.0.0.1";
     public static final String DEFAULT_TUN_DNS_V6 = "2606:4700:4700::1111,2606:4700:4700::1001";
     /** MainActivity's settings store. */
-    private static final String PREFS_MAIN = "aether_vpn";
+    private static final String PREFS_MAIN = "fcae_vpn";
 
         /**
          * MTU of the VpnService interface; the native side configures tun2socks
