@@ -9,21 +9,12 @@ import android.os.SystemClock
  *
  * [FCAEVpnService] (TUN) and [ProxyNotification] (proxy) publish the session's
  * phase and telemetry on every tick of the loops they already run; the widget
- * renders [reconciled]. The phase is the owner's to decide — it is the only
+ * renders [reconciled]. State is process-local by design, so a reboot or cold
+ * process starts idle and only a live owner can restore an active frame. The
+ * phase is the owner's to decide — it is the only
  * party that knows the state machine — and is never re-derived by a consumer.
  */
 object SessionState {
-
-    private const val PREFS = "fcae_session_state"
-    private const val K_PHASE = "phase"
-    private const val K_MODE = "mode"
-    private const val K_RX = "rx"
-    private const val K_TX = "tx"
-    private const val K_TOTAL_RX = "totalRx"
-    private const val K_TOTAL_TX = "totalTx"
-    private const val K_RTT = "rtt"
-    /** Write time, elapsedRealtime: a lower clock means the device rebooted. */
-    private const val K_STAMP = "stamp"
 
     /** How long an unconfirmed frame is trusted while a command is carried out. */
     private const val GRACE_MS = 2500L
@@ -77,9 +68,6 @@ object SessionState {
             @JvmField val IDLE = Snapshot(Phase.DISCONNECTED, 1, 0L, 0L, 0L, 0L, 0)
         }
     }
-
-    /** Flags of the last persisted write; statistics alone never trigger one. */
-    private var persistedPhase = -1
 
     /**
      * Last snapshot reported in this process, and when. Publishers and the
@@ -268,24 +256,7 @@ object SessionState {
     }
 
     @JvmStatic
-    fun snapshot(context: Context): Snapshot {
-        latest?.let { return it }
-        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val stamp = prefs.getLong(K_STAMP, 0L)
-        // Never written, or written by a boot that has ended since: a tunnel
-        // does not survive a reboot, so the record must not claim one did.
-        if (stamp == 0L || stamp > SystemClock.elapsedRealtime()) return Snapshot.IDLE
-        val phase = Phase.entries.getOrElse(prefs.getInt(K_PHASE, 0)) { Phase.DISCONNECTED }
-        return Snapshot(
-            phase,
-            prefs.getInt(K_MODE, 1),
-            prefs.getLong(K_RX, 0L),
-            prefs.getLong(K_TX, 0L),
-            prefs.getLong(K_TOTAL_RX, 0L),
-            prefs.getLong(K_TOTAL_TX, 0L),
-            prefs.getInt(K_RTT, 0)
-        )
-    }
+    fun snapshot(context: Context): Snapshot = latest ?: Snapshot.IDLE
 
         /**
          * [snapshot] minus any session that no longer exists: a stored frame can
@@ -413,10 +384,9 @@ object SessionState {
     }
 
     /**
-     * Persist `snapshot`. Ending a session is written synchronously: every
-     * disconnect path can take this process down milliseconds later, and a
-     * queued apply() would go with it, leaving a widget that claims a session
-     * for a tunnel that does not exist. Starts stay asynchronous.
+     * Publish an in-process snapshot. Control surfaces are projections of the
+     * running owners, never durable state: after process death or reboot they
+     * start idle until a foreground owner reports again.
      */
     private fun write(context: Context, snapshot: Snapshot, measured: Boolean = false) {
         if (!accepts(snapshot)) return
@@ -441,18 +411,5 @@ object SessionState {
             VpnTileService.publish()
         } catch (_: Throwable) {
         }
-        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (accepted.phase.ordinal == persistedPhase && prefs.contains(K_STAMP)) return
-        persistedPhase = accepted.phase.ordinal
-        val editor = prefs.edit()
-            .putInt(K_PHASE, accepted.phase.ordinal)
-            .putInt(K_MODE, accepted.mode)
-            .putLong(K_RX, accepted.rx)
-            .putLong(K_TX, accepted.tx)
-            .putLong(K_TOTAL_RX, accepted.totalRx)
-            .putLong(K_TOTAL_TX, accepted.totalTx)
-            .putInt(K_RTT, accepted.rtt)
-            .putLong(K_STAMP, SystemClock.elapsedRealtime())
-        if (accepted.active) editor.apply() else editor.commit()
     }
 }

@@ -72,6 +72,7 @@ public class FCAEVpnService extends VpnService {
     public static volatile boolean holdConnectedUi;
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
     public static final String ACTION_START      = "com.fc.fcaevpn.START";
+    public static final String ACTION_REPLAY     = "com.fc.fcaevpn.REPLAY";
     public static final String ACTION_PSIPHON_REGIONS = "com.fc.fcaevpn.PSIPHON_REGIONS";
     public static final String ACTION_PSIPHON_START = "com.fc.fcaevpn.PSIPHON_START";
 
@@ -683,6 +684,40 @@ public class FCAEVpnService extends VpnService {
                     }
                     return START_STICKY;
 
+                case ACTION_REPLAY:
+                    Intent recalled = recalledSession(this);
+                    if (recalled == null || !recalled.hasExtra("protocol")) {
+                        SessionState.command(SessionState.Command.NONE);
+                        SessionState.markIdle(this);
+                        notification.dismiss();
+                        stopForeground(STOP_FOREGROUND_REMOVE);
+                        stopSelf(startId);
+                        return START_NOT_STICKY;
+                    }
+                    if (recalled.getIntExtra("mode", 1) == 0) {
+                        Intent proxy = new Intent(this, ProxyNotification.class)
+                                .setAction(ProxyNotification.ACTION_START);
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(proxy);
+                        } else {
+                            startService(proxy);
+                        }
+                        notification.dismiss();
+                        stopForeground(STOP_FOREGROUND_REMOVE);
+                        stopSelf(startId);
+                        return START_NOT_STICKY;
+                    }
+                    if (VpnService.prepare(this) != null) {
+                        SessionState.command(SessionState.Command.NONE);
+                        SessionState.markIdle(this);
+                        notification.dismiss();
+                        stopForeground(STOP_FOREGROUND_REMOVE);
+                        stopSelf(startId);
+                        return START_NOT_STICKY;
+                    }
+                    intent = recalled;
+                    // Fall through to the normal owner path with the complete
+                    // saved configuration loaded by the foreground service.
                 case ACTION_START:
                     notificationPause = false;
                     // Resume and connect look the same on the wire and are not
@@ -1682,21 +1717,6 @@ public class FCAEVpnService extends VpnService {
         // replay has to start Psiphon with the same one the UI picked.
         putInt(e, i, "psiphonTransport", 0);
         e.apply();
-        // Mode alone, in a file small enough that a widget tap can read it
-        // without loading the session (the Psiphon blob in PREFS_LAST is what
-        // made CONNECTING wait about half a second).
-        context.getSharedPreferences(PREFS_MODE, MODE_PRIVATE).edit()
-                .putInt("mode", i.getIntExtra("mode", 1))
-                .apply();
-    }
-
-    private static final String PREFS_MODE = "fcae_widget_mode";
-
-    /** Last saved mode, or 1 (TUN) if this install has not saved one yet.
-     *  Never opens the session prefs. */
-    public static int recalledMode(Context context) {
-        if (context == null) return 1;
-        return context.getSharedPreferences(PREFS_MODE, MODE_PRIVATE).getInt("mode", 1);
     }
 
     private static Intent readSession(Context context) {

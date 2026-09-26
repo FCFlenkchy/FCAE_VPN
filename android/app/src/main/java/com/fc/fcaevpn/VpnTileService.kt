@@ -22,12 +22,10 @@ class VpnTileService : TileService() {
 
     override fun onStopListening() {
         if (listening === this) listening = null
-        // Android may rebind a visible tile after process exit; retry once
-        // the shade closes, but only for an explicit tile Disconnect.
-        val prefs = getSharedPreferences(EXIT_PREFS, MODE_PRIVATE)
-        if (prefs.getBoolean(EXIT_PENDING, false)
-            && !FCAEVpnService.sessionActive() && !ProxyNotification.sessionActive()) {
-            prefs.edit().remove(EXIT_PENDING).commit()
+        // Retry once the shade closes, but only for an explicit disconnect.
+        if (exitPending && !FCAEVpnService.sessionActive()
+            && !ProxyNotification.sessionActive()) {
+            exitPending = false
             ProcessExit.request(this, true)
         }
     }
@@ -41,21 +39,13 @@ class VpnTileService : TileService() {
     private fun perform(renderedActive: Boolean) {
         val live = SessionState.isLive()
         if (live) {
-            getSharedPreferences(EXIT_PREFS, MODE_PRIVATE).edit()
-                .putBoolean(EXIT_PENDING, true).commit()
+            exitPending = true
             paint(false)
             // Same process as the owners: startForegroundService from a tile
             // is rejected on Android 14, and startService can report success
             // without the Disconnect command landing. disconnectNow talks to
             // the running instance directly, like the notification path.
             VpnCommands.disconnect(this)
-            return
-        }
-        if (renderedActive) {
-            getSharedPreferences(EXIT_PREFS, MODE_PRIVATE).edit()
-                .putBoolean(EXIT_PENDING, true).commit()
-            paint(false)
-            VpnCommands.endIdle(this)
             return
         }
         clearPendingExit(this)
@@ -105,12 +95,10 @@ class VpnTileService : TileService() {
     }
 
     companion object {
-        private const val EXIT_PREFS = "fcae_tile_exit"
-        private const val EXIT_PENDING = "pending"
+        @Volatile private var exitPending = false
 
         fun clearPendingExit(context: Context) {
-            context.getSharedPreferences(EXIT_PREFS, Context.MODE_PRIVATE).edit()
-                .remove(EXIT_PENDING).apply()
+            exitPending = false
         }
 
         @Volatile

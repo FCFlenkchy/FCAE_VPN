@@ -2,7 +2,6 @@ package com.fc.fcaevpn
 
 import android.content.Context
 import android.content.Intent
-import android.net.VpnService
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -29,22 +28,16 @@ object VpnCommands {
 
     fun toggle(context: Context, renderedActive: Boolean, start: (Context, Intent) -> Boolean = ::dispatch) {
         val live = SessionState.isLive()
-        when {
-            renderedActive && live -> disconnect(context, start)
-            renderedActive -> endIdle(context)
-            !live && !connect(context, start) -> openApp(context)
-        }
+        if (live) disconnect(context, start)
+        else if (!connect(context, start)) openApp(context)
     }
 
-    /** Connecting frame before any service start and before the saved session
-     *  is read. That read loads the Psiphon blob and was the half-second
-     *  before the widget could say CONNECTING. Mode comes from the small
-     *  cache; TUN shows Stop, proxy does not. */
+    /** Optimistic frame shown before the foreground owner resolves the saved
+     *  session. The owner publishes the authoritative mode and phase. */
     fun paintConnecting(context: Context): Boolean {
         VpnTileService.clearPendingExit(context)
-        val mode = FCAEVpnService.recalledMode(context)
         SessionState.command(SessionState.Command.CONNECT)
-        SessionState.markConnecting(context, mode)
+        SessionState.markConnecting(context, 1)
         return true
     }
 
@@ -56,21 +49,14 @@ object VpnCommands {
         SessionState.markIdle(context)
     }
 
-    /** Replay the last session. False means the app must show the consent screen.
-     *  The service loads the saved config itself: reading it here (the Psiphon
-     *  blob) delayed startForegroundService past the widget-tap exemption. */
+    /** Send a replay command without reading configuration on the control
+     *  surface. The foreground owner loads and validates the saved session. */
     fun connect(context: Context, start: (Context, Intent) -> Boolean = ::dispatch): Boolean {
         VpnTileService.clearPendingExit(context)
-        if (!FCAEVpnService.hasRecalledSession(context)) return false
-        val mode = FCAEVpnService.recalledMode(context)
-        val command = if (mode == 1) {
-            if (VpnService.prepare(context) != null) return false
-            Intent(context, FCAEVpnService::class.java).setAction(FCAEVpnService.ACTION_START)
-        } else {
-            Intent(context, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_START)
-        }
+        val command = Intent(context, FCAEVpnService::class.java)
+            .setAction(FCAEVpnService.ACTION_REPLAY)
         SessionState.command(SessionState.Command.CONNECT)
-        SessionState.markConnecting(context, mode)
+        SessionState.markConnecting(context, 1)
         if (!start(context, command)) {
             SessionState.command(SessionState.Command.NONE)
             SessionState.markIdle(context)
