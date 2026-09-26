@@ -1380,6 +1380,11 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         handler.removeCallbacks(poll)
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
+        if (isFinishing && !isChangingConfigurations
+            && !FCAEVpnService.sessionActive() && !ProxyNotification.sessionActive()) {
+            try { PsiphonTunnelService.killProcessOnExit(this) } catch (_: Throwable) {}
+            ProcessExit.request(this, true)
+        }
         super.onDestroy()
     }
 

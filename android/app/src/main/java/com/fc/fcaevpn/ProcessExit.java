@@ -5,11 +5,13 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class ProcessExit {
     private static final Handler main = new Handler(Looper.getMainLooper());
     private static final AtomicLong ticket = new AtomicLong();
+    private static final AtomicBoolean terminalPending = new AtomicBoolean();
     private static final long UI_GRACE_MS = 250L;
     private static final long CLEANUP_DEADLINE_MS = 2000L;
 
@@ -17,6 +19,7 @@ public final class ProcessExit {
 
     /** A new connect can be pending before the service bumps its generation. */
     public static void cancel() {
+        terminalPending.set(false);
         ticket.incrementAndGet();
     }
 
@@ -28,12 +31,13 @@ public final class ProcessExit {
      *  an in-app Disconnect leaves the visible Activity ready to reconnect. */
     public static void request(Context context, boolean remoteDisconnect) {
         Context app = context.getApplicationContext();
+        boolean terminal = remoteDisconnect || terminalPending.get();
+        if (terminal) terminalPending.set(true);
         long request = ticket.incrementAndGet();
-        long generation = FCAEVpnService.stateGeneration();
         long started = SystemClock.elapsedRealtime();
         Runnable finish = () -> {
             boolean deadline = SystemClock.elapsedRealtime() - started >= CLEANUP_DEADLINE_MS;
-            if (request == ticket.get() && mayExit(app, generation, true, deadline, remoteDisconnect)) {
+            if (request == ticket.get() && mayExit(app, true, deadline, terminal)) {
                 FCAEVpnService.killProcessQuietly();
             }
         };
@@ -44,7 +48,7 @@ public final class ProcessExit {
         }
         try {
             NativeEngine.lifecycleExecutor.execute(() -> {
-                if (request == ticket.get() && mayExit(app, generation, false, false, remoteDisconnect)) {
+                if (request == ticket.get() && mayExit(app, false, false, terminal)) {
                     try { NativeEngine.nativeStopBegin(); } catch (Throwable ignored) {}
                     try { NativeEngine.nativeFree(); } catch (Throwable ignored) {}
                 }
@@ -56,18 +60,17 @@ public final class ProcessExit {
         }
     }
 
-    private static boolean mayExit(Context app, long generation,
-                                   boolean afterGrace, boolean deadline,
-                                   boolean remoteDisconnect) {
-        if (generation != FCAEVpnService.stateGeneration()) return false;
+    private static boolean mayExit(Context app, boolean afterGrace,
+                                   boolean deadline, boolean remoteDisconnect) {
         if (!remoteDisconnect && (afterGrace ? FCAEApplication.uiOnScreen()
                                               : FCAEApplication.uiVisibleNow())) return false;
-        if (FCAEVpnService.sessionActive() || ProxyNotification.sessionActive()) {
-            // A remote Disconnect that never reached the owner would otherwise
-            // pin this process forever. After the deadline the command stands.
-            if (!remoteDisconnect || !deadline) return false;
-        }
-        if (!deadline && FCAEVpnService.ownsSession()) return false;
+        // A terminal control is the user's final instruction. A late owner
+        // generation change, stale active flag, or wedged cleanup must not
+        // leave the application resident forever. A real reconnect cancels
+        // this request through cancel() before starting its owner.
+        if (remoteDisconnect && deadline) return true;
+        if (FCAEVpnService.sessionActive() || ProxyNotification.sessionActive()) return false;
+        if (FCAEVpnService.ownsSession()) return false;
         return !SessionState.commandInFlight() || !SessionState.snapshot(app).getActive();
     }
 }
