@@ -551,8 +551,14 @@ public class FCAEVpnService extends VpnService {
     public static boolean disconnectNow() {
         FCAEVpnService current = instance;
         if (current == null) return false;
-        current.requestDisconnect();
-        return true;
+        synchronized (current) {
+            boolean owns = current.running || current.uiConnecting || current.vpnPaused
+                    || current.engineOpInFlight || current.vpnThread != null
+                    || current.vpnInterface != null;
+            if (!owns) return false;
+            current.requestDisconnect();
+            return true;
+        }
     }
 
     public static boolean disconnectIfCurrent(long generation) {

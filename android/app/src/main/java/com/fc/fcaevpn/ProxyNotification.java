@@ -669,12 +669,18 @@ public class ProxyNotification extends Service {
     public static boolean disconnectNow() {
         ProxyNotification current = instance;
         if (current == null) return false;
-        final long generation = current.ownerGeneration;
-        current.handler.post(() -> {
+        final long generation;
+        synchronized (current) {
+            if (current.stopping || !current.sessionRequested) return false;
+            generation = current.ownerGeneration;
+        }
+        Runnable disconnect = () -> {
             if (instance == current && generation == current.ownerGeneration) {
                 current.terminalTeardown("Direct Disconnect");
             }
-        });
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) disconnect.run();
+        else current.handler.post(disconnect);
         return true;
     }
 
