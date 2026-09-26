@@ -45,6 +45,7 @@ public final class ProcessExit {
         Runnable finish = () -> {
             boolean deadline = SystemClock.elapsedRealtime() - started >= CLEANUP_DEADLINE_MS;
             if (request == ticket.get() && mayExit(app, true, deadline, terminal)) {
+                if (terminal) stopStartedServices(app);
                 FCAEVpnService.killProcessQuietly();
             }
         };
@@ -65,6 +66,17 @@ public final class ProcessExit {
         } catch (Throwable ignored) {
             main.postDelayed(finish, UI_GRACE_MS);
         }
+    }
+
+    private static void stopStartedServices(Context app) {
+        try { app.stopService(new android.content.Intent(app, FCAEVpnService.class)); }
+        catch (Throwable ignored) {}
+        try { app.stopService(new android.content.Intent(app, ProxyNotification.class)); }
+        catch (Throwable ignored) {}
+        try { app.stopService(new android.content.Intent(app, IdleTaskService.class)); }
+        catch (Throwable ignored) {}
+        try { PsiphonTunnelService.killProcessOnExit(app); }
+        catch (Throwable ignored) {}
     }
 
     private static boolean mayExit(Context app, boolean afterGrace,

@@ -408,7 +408,7 @@ object SessionState {
         } catch (_: Throwable) {
         }
         try {
-            VpnTileService.publish()
+            VpnTileService.publish(context)
         } catch (_: Throwable) {
         }
     }

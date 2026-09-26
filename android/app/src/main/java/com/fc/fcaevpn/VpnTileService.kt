@@ -1,6 +1,7 @@
 package com.fc.fcaevpn
 
 import android.app.PendingIntent
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.Icon
@@ -80,6 +81,7 @@ class VpnTileService : TileService() {
     }
 
     private fun paint(active: Boolean) {
+        publishedActive = active
         val tile = qsTile ?: return
         tile.icon = Icon.createWithResource(this, R.drawable.ic_fcae_vpn)
         tile.label = getString(R.string.app_name)
@@ -97,6 +99,7 @@ class VpnTileService : TileService() {
 
     companion object {
         @Volatile private var exitPending = false
+        @Volatile private var publishedActive: Boolean? = null
 
         @JvmStatic
         fun deferTerminalExit(): Boolean {
@@ -114,10 +117,23 @@ class VpnTileService : TileService() {
 
         private val main = Handler(Looper.getMainLooper())
 
-        fun publish() {
-            val tile = listening ?: return
-            if (Looper.myLooper() == Looper.getMainLooper()) tile.refresh()
-            else main.post { if (listening === tile) tile.refresh() }
+        fun publish(context: Context) {
+            val tile = listening
+            val active = SessionState.snapshot(context).active
+            if (tile == null && publishedActive == active) return
+            publishedActive = active
+            if (tile != null) {
+                if (Looper.myLooper() == Looper.getMainLooper()) tile.refresh()
+                else main.post { if (listening === tile) tile.refresh() }
+                return
+            }
+            try {
+                TileService.requestListeningState(
+                    context.applicationContext,
+                    ComponentName(context, VpnTileService::class.java)
+                )
+            } catch (_: RuntimeException) {
+            }
         }
     }
 }
