@@ -68,6 +68,9 @@ class VpnWidgetProvider : AppWidgetProvider() {
                     }
                 }
             } catch (_: Throwable) {
+                SessionState.command(SessionState.Command.NONE)
+                SessionState.markIdle(app)
+                lastControlKey = null
                 refresh(app)
             } finally {
                 inReceive.set(false)
@@ -177,11 +180,11 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val app = context.applicationContext
             mainHandler.postDelayed({
                 if (SessionState.isLive()) return@postDelayed
-                if (SessionState.snapshot(app).active) {
-                    SessionState.command(SessionState.Command.NONE)
-                    SessionState.markIdle(app)
-                    refresh(app)
-                }
+                SessionState.command(SessionState.Command.NONE)
+                SessionState.markIdle(app)
+                lastControlKey = null
+                lastMeterKey = null
+                refresh(app)
             }, RECHECK_DELAY_MS)
         }
 
