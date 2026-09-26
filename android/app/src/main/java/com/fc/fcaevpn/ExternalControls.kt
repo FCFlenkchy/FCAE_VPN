@@ -13,10 +13,10 @@ object ExternalControls {
         widgetSwitch: SwitchMaterial
     ) {
         bindComponent(context, tileSwitch, VpnTileService::class.java) {
-            VpnTileService.publish(context)
+            VpnTileService.refreshAfterEnable(context)
         }
         bindComponent(context, widgetSwitch, VpnWidgetProvider::class.java) {
-            VpnWidgetProvider.refresh(context)
+            VpnWidgetProvider.refreshAfterEnable(context)
         }
     }
 

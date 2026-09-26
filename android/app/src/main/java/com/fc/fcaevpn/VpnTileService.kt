@@ -17,6 +17,7 @@ class VpnTileService : TileService() {
 
     override fun onStartListening() {
         updateRequested = false
+        requestedActive = null
         listening = this
         if (ProcessExit.deferForTileBinding()) exitPending = true
         SessionState.reconciled(this)
@@ -83,6 +84,7 @@ class VpnTileService : TileService() {
 
     private fun paint(active: Boolean) {
         publishedActive = active
+        requestedActive = null
         val tile = qsTile ?: return
         tile.icon = Icon.createWithResource(this, R.drawable.ic_fcae_vpn)
         tile.label = getString(R.string.app_name)
@@ -94,13 +96,18 @@ class VpnTileService : TileService() {
         val tile = qsTile ?: return
         val active = SessionState.snapshot(this).active
         val state = if (active) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-        if (tile.state == state && tile.icon != null) return
+        if (tile.state == state && tile.icon != null) {
+            publishedActive = active
+            requestedActive = null
+            return
+        }
         paint(active)
     }
 
     companion object {
         @Volatile private var exitPending = false
         @Volatile private var updateRequested = false
+        @Volatile private var requestedActive: Boolean? = null
         @Volatile private var publishedActive: Boolean? = null
 
         @JvmStatic
@@ -114,6 +121,22 @@ class VpnTileService : TileService() {
             exitPending = false
         }
 
+        fun refreshAfterEnable(context: Context) {
+            val app = context.applicationContext
+            publishedActive = null
+            requestedActive = null
+            updateRequested = false
+            publish(app)
+            main.postDelayed({
+                if (listening == null) {
+                    publishedActive = null
+                    requestedActive = null
+                    updateRequested = false
+                    publish(app)
+                }
+            }, 250L)
+        }
+
         @Volatile
         private var listening: VpnTileService? = null
 
@@ -122,22 +145,23 @@ class VpnTileService : TileService() {
         fun publish(context: Context) {
             val tile = listening
             val active = SessionState.snapshot(context).active
-            if (tile == null && publishedActive == active) return
+            if (tile == null && (publishedActive == active ||
+                    updateRequested && requestedActive == active)) return
             if (tile != null) {
-                publishedActive = active
                 if (Looper.myLooper() == Looper.getMainLooper()) tile.refresh()
                 else main.post { if (listening === tile) tile.refresh() }
                 return
             }
             updateRequested = true
+            requestedActive = active
             try {
                 TileService.requestListeningState(
                     context.applicationContext,
                     ComponentName(context, VpnTileService::class.java)
                 )
-                publishedActive = active
             } catch (_: RuntimeException) {
                 updateRequested = false
+                requestedActive = null
             }
         }
     }

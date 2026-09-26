@@ -166,6 +166,20 @@ class VpnWidgetProvider : AppWidgetProvider() {
             }
         }
 
+        @JvmStatic
+        fun refreshAfterEnable(context: Context) {
+            val app = context.applicationContext
+            lastControlKey = null
+            lastMeterKey = null
+            inflated = false
+            val widgetIds = ids(app)
+            if (widgetIds.isNotEmpty()) render(app, widgetIds, force = true, full = true)
+            mainHandler.postDelayed({
+                val retryIds = ids(app)
+                if (retryIds.isNotEmpty()) render(app, retryIds, force = true, full = true)
+            }, 250L)
+        }
+
         private fun ids(context: Context): IntArray {
             val manager = AppWidgetManager.getInstance(context) ?: return IntArray(0)
             return manager.getAppWidgetIds(ComponentName(context, VpnWidgetProvider::class.java))
