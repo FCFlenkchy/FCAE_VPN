@@ -16,6 +16,7 @@ class VpnTileService : TileService() {
 
     override fun onStartListening() {
         listening = this
+        if (ProcessExit.deferForTileBinding()) exitPending = true
         SessionState.reconciled(this)
         refresh()
     }
@@ -96,6 +97,13 @@ class VpnTileService : TileService() {
 
     companion object {
         @Volatile private var exitPending = false
+
+        @JvmStatic
+        fun deferTerminalExit(): Boolean {
+            if (listening == null) return false
+            exitPending = true
+            return true
+        }
 
         fun clearPendingExit(context: Context) {
             exitPending = false

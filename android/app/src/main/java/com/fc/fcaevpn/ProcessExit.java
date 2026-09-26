@@ -27,6 +27,12 @@ public final class ProcessExit {
         request(context, false);
     }
 
+    public static boolean deferForTileBinding() {
+        if (!terminalPending.get()) return false;
+        ticket.incrementAndGet();
+        return true;
+    }
+
     /** A widget, tile or notification Disconnect explicitly ends the process;
      *  an in-app Disconnect leaves the visible Activity ready to reconnect. */
     public static void request(Context context, boolean remoteDisconnect) {
@@ -34,6 +40,7 @@ public final class ProcessExit {
         boolean terminal = remoteDisconnect || terminalPending.get();
         if (terminal) terminalPending.set(true);
         long request = ticket.incrementAndGet();
+        if (terminal && VpnTileService.deferTerminalExit()) return;
         long started = SystemClock.elapsedRealtime();
         Runnable finish = () -> {
             boolean deadline = SystemClock.elapsedRealtime() - started >= CLEANUP_DEADLINE_MS;
