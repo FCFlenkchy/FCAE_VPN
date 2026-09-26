@@ -1581,6 +1581,10 @@ class MainActivity : AppCompatActivity() {
             putString("routesInline", editRoutesInline.text.toString().trim())
             apply()
         }
+        // The widget and Quick Settings replay this service-owned snapshot.
+        // Keep it aligned with the UI settings whenever the screen is saved,
+        // not only after Connect is pressed.
+        FCAEVpnService.rememberSession(this, buildStartIntent())
     }
 
     private fun loadSettings() {
@@ -1770,7 +1774,6 @@ class MainActivity : AppCompatActivity() {
             vpnActive = true
             updateButton()
             saveSettings()
-            FCAEVpnService.rememberSession(this, buildStartIntent())
             resetStats()
             statusText.text = "CONNECTING"
             statusText.setTextColor(COLOR_PROGRESS)
@@ -1829,7 +1832,6 @@ class MainActivity : AppCompatActivity() {
         updateButton()
         saveSettings()
         val startIntent = buildStartIntent()
-        FCAEVpnService.rememberSession(this, startIntent)
         startForegroundService(startIntent)
         connectGeneration = FCAEVpnService.stateGeneration()
         // Poll is started by the VPN_STATE_CHANGED broadcast from the service
@@ -1903,8 +1905,6 @@ class MainActivity : AppCompatActivity() {
         engineRunning = false  // will become true once poll confirms connected
         updateButton()
         saveSettings()
-        // Headless replays (the widget) read the session from here.
-        FCAEVpnService.rememberSession(this, buildStartIntent())
 
         // Start proxy notification foreground service for bandwidth stats
         val proxyIntent = Intent(this, ProxyNotification::class.java)

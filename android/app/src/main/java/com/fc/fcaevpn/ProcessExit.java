@@ -10,8 +10,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class ProcessExit {
     private static final Handler main = new Handler(Looper.getMainLooper());
     private static final AtomicLong ticket = new AtomicLong();
-    private static final long UI_GRACE_MS = 1600L;
-    private static final long CLEANUP_DEADLINE_MS = 7000L;
+    private static final long UI_GRACE_MS = 250L;
+    private static final long CLEANUP_DEADLINE_MS = 2000L;
 
     private ProcessExit() {}
 

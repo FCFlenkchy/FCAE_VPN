@@ -69,6 +69,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = appVersion
+        resourceConfigurations += "en"
 
         buildConfigField("String", "APP_VERSION", "\"${appVersion}\"")
         buildConfigField("Boolean", "IS_PRERELEASE", "${isPrerelease}")
@@ -97,6 +98,7 @@ android {
                 cppFlags += listOf(
                     "-std=c++17",
                     "-O3",
+                    "-g0",
                     "-fPIC",
                     "-flto",
                     "-DNDEBUG"
@@ -136,8 +138,14 @@ android {
 
     buildTypes {
         release {
+            isDebuggable = false
+            isJniDebuggable = false
             isMinifyEnabled = true
             isShrinkResources = true
+
+            ndk {
+                debugSymbolLevel = "none"
+            }
 
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

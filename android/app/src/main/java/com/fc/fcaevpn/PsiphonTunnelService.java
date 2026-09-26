@@ -126,6 +126,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
          * crash-safe and the system OOM-kills this process in production anyway.
          */
     private static final long HARD_STOP_TIMEOUT_MS = 500L;
+    private static final long EXIT_FALLBACK_MS = 750L;
     private long session;
     private long attachRequestId;
     private static volatile long clientAttachId;
@@ -802,7 +803,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                     }
                 }
             } catch (Throwable ignored) {}
-        }, 1250L);
+        }, EXIT_FALLBACK_MS);
     }
 
     private static boolean deliverStop(Context app, boolean die) {
