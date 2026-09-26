@@ -166,18 +166,39 @@ class VpnWidgetProvider : AppWidgetProvider() {
             }
         }
 
+        private const val ENABLE_REFRESH_ATTEMPTS = 20
+        private const val ENABLE_REFRESH_INTERVAL_MS = 250L
+        private val enableRefreshTicket = java.util.concurrent.atomic.AtomicInteger()
+
         @JvmStatic
         fun refreshAfterEnable(context: Context) {
-            val app = context.applicationContext
-            lastControlKey = null
-            lastMeterKey = null
-            inflated = false
-            val widgetIds = ids(app)
-            if (widgetIds.isNotEmpty()) render(app, widgetIds, force = true, full = true)
-            mainHandler.postDelayed({
-                val retryIds = ids(app)
-                if (retryIds.isNotEmpty()) render(app, retryIds, force = true, full = true)
-            }, 250L)
+            val ticket = enableRefreshTicket.incrementAndGet()
+            requestEnabledState(context.applicationContext, ticket, 0)
+        }
+
+        @JvmStatic
+        fun cancelEnableRefresh() {
+            enableRefreshTicket.incrementAndGet()
+        }
+
+        private fun requestEnabledState(context: Context, ticket: Int, attempt: Int) {
+            if (ticket != enableRefreshTicket.get()) return
+            val widgetIds = ids(context)
+            if (widgetIds.isNotEmpty()) {
+                lastControlKey = null
+                lastMeterKey = null
+                inflated = false
+                try {
+                    render(context, widgetIds, force = true, full = true)
+                    return
+                } catch (_: RuntimeException) {
+                }
+            }
+            if (attempt + 1 >= ENABLE_REFRESH_ATTEMPTS) return
+            mainHandler.postDelayed(
+                { requestEnabledState(context, ticket, attempt + 1) },
+                ENABLE_REFRESH_INTERVAL_MS
+            )
         }
 
         private fun ids(context: Context): IntArray {

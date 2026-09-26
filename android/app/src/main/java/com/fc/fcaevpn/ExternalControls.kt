@@ -12,11 +12,31 @@ object ExternalControls {
         tileSwitch: SwitchMaterial,
         widgetSwitch: SwitchMaterial
     ) {
-        bindComponent(context, tileSwitch, VpnTileService::class.java) {
-            VpnTileService.refreshAfterEnable(context)
-        }
-        bindComponent(context, widgetSwitch, VpnWidgetProvider::class.java) {
-            VpnWidgetProvider.refreshAfterEnable(context)
+        bindComponent(
+            context,
+            tileSwitch,
+            VpnTileService::class.java,
+            {
+                republishOwnerState()
+                VpnTileService.refreshAfterEnable(context)
+            },
+            VpnTileService::cancelEnableRefresh
+        )
+        bindComponent(
+            context,
+            widgetSwitch,
+            VpnWidgetProvider::class.java,
+            {
+                republishOwnerState()
+                VpnWidgetProvider.refreshAfterEnable(context)
+            },
+            VpnWidgetProvider::cancelEnableRefresh
+        )
+    }
+
+    private fun republishOwnerState() {
+        if (!FCAEVpnService.publishCurrentState()) {
+            ProxyNotification.publishCurrentState()
         }
     }
 
@@ -24,7 +44,8 @@ object ExternalControls {
         context: Context,
         control: SwitchMaterial,
         componentClass: Class<*>,
-        onEnabled: () -> Unit
+        onEnabled: () -> Unit,
+        onDisabled: () -> Unit
     ) {
         val component = ComponentName(context, componentClass)
         control.isChecked = isEnabled(context.packageManager, component)
@@ -36,11 +57,17 @@ object ExternalControls {
                     else PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
                     PackageManager.DONT_KILL_APP
                 )
-                if (enabled) onEnabled()
+                if (enabled) onEnabled() else onDisabled()
             } catch (_: RuntimeException) {
                 button.setOnCheckedChangeListener(null)
                 button.isChecked = !enabled
-                bindComponent(context, button as SwitchMaterial, componentClass, onEnabled)
+                bindComponent(
+                    context,
+                    button as SwitchMaterial,
+                    componentClass,
+                    onEnabled,
+                    onDisabled
+                )
                 Toast.makeText(context, "Could not change this control", Toast.LENGTH_SHORT).show()
             }
         }

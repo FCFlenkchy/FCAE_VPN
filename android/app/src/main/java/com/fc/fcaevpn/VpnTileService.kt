@@ -16,6 +16,7 @@ import android.service.quicksettings.TileService
 class VpnTileService : TileService() {
 
     override fun onStartListening() {
+        enableRefreshTicket.incrementAndGet()
         updateRequested = false
         requestedActive = null
         listening = this
@@ -121,20 +122,31 @@ class VpnTileService : TileService() {
             exitPending = false
         }
 
+        private const val ENABLE_REFRESH_ATTEMPTS = 20
+        private const val ENABLE_REFRESH_INTERVAL_MS = 250L
+        private val enableRefreshTicket = java.util.concurrent.atomic.AtomicInteger()
+
         fun refreshAfterEnable(context: Context) {
-            val app = context.applicationContext
+            val ticket = enableRefreshTicket.incrementAndGet()
+            requestEnabledState(context.applicationContext, ticket, 0)
+        }
+
+        fun cancelEnableRefresh() {
+            enableRefreshTicket.incrementAndGet()
+        }
+
+        private fun requestEnabledState(context: Context, ticket: Int, attempt: Int) {
+            if (ticket != enableRefreshTicket.get()) return
             publishedActive = null
             requestedActive = null
             updateRequested = false
-            publish(app)
+            publish(context)
+            if (attempt + 1 >= ENABLE_REFRESH_ATTEMPTS) return
             main.postDelayed({
-                if (listening == null) {
-                    publishedActive = null
-                    requestedActive = null
-                    updateRequested = false
-                    publish(app)
+                if (ticket == enableRefreshTicket.get() && listening == null) {
+                    requestEnabledState(context, ticket, attempt + 1)
                 }
-            }, 250L)
+            }, ENABLE_REFRESH_INTERVAL_MS)
         }
 
         @Volatile

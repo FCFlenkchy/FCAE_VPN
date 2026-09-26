@@ -591,6 +591,13 @@ public class FCAEVpnService extends VpnService {
                 || current.vpnThread != null;
     }
 
+    public static boolean publishCurrentState() {
+        FCAEVpnService current = instance;
+        if (current == null || !sessionActive()) return false;
+        current.handler.post(current::notifyUi);
+        return true;
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();

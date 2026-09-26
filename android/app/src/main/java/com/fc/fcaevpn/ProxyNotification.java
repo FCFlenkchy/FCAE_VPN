@@ -706,6 +706,13 @@ public class ProxyNotification extends Service {
         return current != null && !current.stopping && current.sessionRequested;
     }
 
+    public static boolean publishCurrentState() {
+        ProxyNotification current = instance;
+        if (current == null || !sessionActive()) return false;
+        current.handler.post(current::publishState);
+        return true;
+    }
+
     /** Mirrors FCAEVpnService's disconnect broadcast so MainActivity resets. */
     private void broadcastStopped() {
         try {
