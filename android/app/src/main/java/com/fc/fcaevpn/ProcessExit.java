@@ -90,6 +90,11 @@ public final class ProcessExit {
         catch (Throwable ignored) {}
         try { PsiphonTunnelService.killProcessOnExit(app); }
         catch (Throwable ignored) {}
+        try {
+            android.app.ActivityManager manager =
+                    (android.app.ActivityManager) app.getSystemService(Context.ACTIVITY_SERVICE);
+            if (manager != null) manager.killBackgroundProcesses(app.getPackageName());
+        } catch (Throwable ignored) {}
     }
 
     private static boolean mayExit(Context app, boolean afterGrace,
