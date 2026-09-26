@@ -1127,11 +1127,6 @@ void render_ui() {
         ImVec4 sc = state_color(cur);
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
         ImGui::Text("FCAE VPN");
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            ImGui::SetTooltip("About");
-        }
-        if (ImGui::IsItemClicked()) s_about_popup_open = true;
         ImGui::PopStyleColor();
 
         ImGui::SameLine(0, 10);
@@ -1139,20 +1134,16 @@ void render_ui() {
                                                 : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
                            "%s  |  %s", fcae_display_version(),
                            build_is_prerelease() ? "pre-release" : "release");
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            if (build_is_prerelease())
-                ImGui::SetTooltip("About\nThis build is a pre-release (%s).\n"
-                                  "Update checks offer only newer versions, respecting\n"
-                                  "your pre-releases setting.", fcae_display_version());
-            else
-                ImGui::SetTooltip("About\nThis build is a release (%s).", fcae_display_version());
-        }
-        if (ImGui::IsItemClicked()) s_about_popup_open = true;
         ImGui::SameLine(0, 10);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.75f, 0.80f, 1.0f));
         ImGui::Text("|");
         ImGui::PopStyleColor();
+        ImGui::SameLine(ImGui::GetWindowWidth() - 42.0f);
+        if (ImGui::SmallButton("(i)")) s_about_popup_open = true;
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip("About FCAE VPN");
+        }
         ImGui::SameLine(0, 10);
         bool tun_paused = false;
         try { tun_paused = fcae_tun_paused(); } catch (...) {}

@@ -835,9 +835,8 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.versionText).apply {
             text = "$displayVersion  |  ${if (buildIsPrerelease) "pre-release" else "release"}"
             setTextColor(Color.parseColor(if (buildIsPrerelease) "#FFF0B429" else "#FF8A93A6"))
-            setOnClickListener { showAboutDialog() }
         }
-        findViewById<TextView>(R.id.title).setOnClickListener { showAboutDialog() }
+        findViewById<TextView>(R.id.aboutButton).setOnClickListener { showAboutDialog() }
 
         // Mode changes re-evaluate the tor hint (and nothing else: no control
         // is ever locked or re-pointed; TUN simply ignores the SOCKS switch,
