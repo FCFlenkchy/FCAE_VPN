@@ -131,6 +131,19 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private long attachRequestId;
     private static volatile long clientAttachId;
     private static boolean attachReceiverRegistered;
+    private static final Handler CHAIN_WATCHDOG = new Handler(Looper.getMainLooper());
+    private static final java.util.concurrent.atomic.AtomicBoolean chainPollScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static final long CHAIN_WATCHDOG_MS = 100L;
+
+    private static void scheduleChainedPoll(Context context) {
+        if (clientAttachId == 0 || !chainPollScheduled.compareAndSet(false, true)) return;
+        Context app = context.getApplicationContext();
+        CHAIN_WATCHDOG.postDelayed(() -> {
+            chainPollScheduled.set(false);
+            if (clientAttachId != 0) pollChainedRequest(app);
+        }, CHAIN_WATCHDOG_MS);
+    }
 
     // Called on main by the foreground owner, not by the activity. Chained
     // startup therefore continues while the UI is backgrounded.
@@ -163,7 +176,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             }
             org.json.JSONObject request = new org.json.JSONObject(raw);
             long id = request.getLong("requestId");
-            if (id == clientAttachId) return;
+            if (id == clientAttachId) {
+                scheduleChainedPoll(app);
+                return;
+            }
             // stopBound and startBound enqueue in order on the main looper.
             if (connection != null) stopBound(app);
             clientAttachId = id;
@@ -177,6 +193,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             start.putExtra("psiphonHttpPort", request.optInt("psiphonHttpPort", 0));
             start.putExtra("lanSharing", request.optBoolean("lanSharing", false));
             startBound(app, start);
+            scheduleChainedPoll(app);
         } catch (Exception e) {
             Log.e(TAG, "Cannot start chained Psiphon exit", e);
             if (clientAttachId != 0) NativeEngine.nativePsiphonAttachComplete(clientAttachId, 0, 0);
@@ -909,10 +926,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             if (!region.isEmpty()) o.put("EgressRegion", region);
             if (wantSocks > 0) o.put("LocalSocksProxyPort", wantSocks);
             if (wantHttp > 0) o.put("LocalHttpProxyPort", wantHttp);
-            // "Psiphon through the tunnel": all of Psiphon's own dials
-            // (servers, API calls, remote server list fetches) go through this
-            // proxy — Aether's local SOCKS. tunnel-core accepts socks5://,
-            // socks4a:// and http:// here (upstream upstreamproxy/README.md).
+            // "Psiphon through the tunnel": tunnel-core routes network operations
+            // through Aether's local SOCKS and filters out tunnel protocols that do
+            // not support an upstream proxy. It accepts socks5://, socks4a:// and
+            // http:// here (upstream upstreamproxy/README.md).
             if (!upstreamProxy.isEmpty()) {
                 o.put("UpstreamProxyURL", normalizeUpstreamProxyUrl(upstreamProxy));
             }

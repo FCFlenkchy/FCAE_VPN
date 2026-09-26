@@ -560,7 +560,20 @@ async fn run_session(
         // the unused-variable warning earned its keep as a real leak).
         let mut psi_handle: Option<Box<dyn BackendHandle>> = None;
         if config.psiphon.through_tunnel {
-            match start_psiphon_through_tunnel(&config, &endpoints, &sink, &cancel).await {
+            let psi_start = tokio::select! {
+                biased;
+                carrier = handle.wait() => {
+                    let detail = carrier.err().map(|e| format!(": {e}"))
+                        .unwrap_or_default();
+                    Err(CoreError::StartFailed(format!(
+                        "Aether dropped while Psiphon was connecting{detail}"
+                    )))
+                }
+                result = start_psiphon_through_tunnel(
+                    &config, &endpoints, &sink, &cancel
+                ) => result,
+            };
+            match psi_start {
                 Ok(h) => {
                     let psi_ep = h.endpoints();
                     if psi_ep.socks.is_none() {

@@ -101,6 +101,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchHttp: SwitchMaterial
     private lateinit var switchAutoUpdate: SwitchMaterial
     private lateinit var switchPreReleases: SwitchMaterial
+    private lateinit var switchQuickSettingsTile: SwitchMaterial
+    private lateinit var switchHomeScreenWidget: SwitchMaterial
     private lateinit var spinnerSysprofile: Spinner
     private lateinit var editSni: android.widget.EditText
     private lateinit var editForcePeer: android.widget.EditText
@@ -590,6 +592,13 @@ class MainActivity : AppCompatActivity() {
         editTorHttpPort = findViewById(R.id.editTorHttpPort)
         switchAutoUpdate = findViewById(R.id.switchAutoUpdate)
         switchPreReleases = findViewById(R.id.switchPreReleases)
+        switchQuickSettingsTile = findViewById(R.id.switchQuickSettingsTile)
+        switchHomeScreenWidget = findViewById(R.id.switchHomeScreenWidget)
+        ExternalControls.bind(
+            this,
+            switchQuickSettingsTile,
+            switchHomeScreenWidget
+        )
         spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
         editSni = findViewById(R.id.editSni)
         editForcePeer = findViewById(R.id.editForcePeer)
