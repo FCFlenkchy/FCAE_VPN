@@ -8,7 +8,6 @@
   <a href="https://github.com/FCFlenkchy/FCAE_VPN/releases">
     <img src="https://img.shields.io/github/downloads/FCFlenkchy/FCAE_VPN/total?style=for-the-badge&logo=github&label=Downloads" alt="Total downloads">
   </a>
-  Released under the <a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">LICENSE</a>
 </p>
 
 **[English](README.md)** | **[فارسی](READMEFA.md)** | **中文**

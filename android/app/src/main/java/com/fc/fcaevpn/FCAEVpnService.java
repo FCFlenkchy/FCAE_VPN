@@ -1625,6 +1625,13 @@ public class FCAEVpnService extends VpnService {
         return readSession(context);
     }
 
+    /** Cheap: does not open the session blob. Widget CONNECT must know
+     *  whether there is something to replay before starting the owner. */
+    public static boolean hasRecalledSession(Context context) {
+        if (context == null) return false;
+        return context.getSharedPreferences(PREFS_LAST, MODE_PRIVATE).getBoolean("has", false);
+    }
+
     private void rememberStart(Intent i) {
         if (i == null) return;
         writeSession(this, i);

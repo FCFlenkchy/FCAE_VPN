@@ -56,18 +56,18 @@ object VpnCommands {
         SessionState.markIdle(context)
     }
 
-    /** Replay the last session. False means the app must show the consent screen. */
+    /** Replay the last session. False means the app must show the consent screen.
+     *  The service loads the saved config itself: reading it here (the Psiphon
+     *  blob) delayed startForegroundService past the widget-tap exemption. */
     fun connect(context: Context, start: (Context, Intent) -> Boolean = ::dispatch): Boolean {
         VpnTileService.clearPendingExit(context)
-        val session = FCAEVpnService.recalledSession(context) ?: return false
-        val mode = session.getIntExtra("mode", 1)
+        if (!FCAEVpnService.hasRecalledSession(context)) return false
+        val mode = FCAEVpnService.recalledMode(context)
         val command = if (mode == 1) {
             if (VpnService.prepare(context) != null) return false
             Intent(context, FCAEVpnService::class.java).setAction(FCAEVpnService.ACTION_START)
         } else {
-            Intent(context, ProxyNotification::class.java)
-                .setAction(ProxyNotification.ACTION_START)
-                .putExtras(session)
+            Intent(context, ProxyNotification::class.java).setAction(ProxyNotification.ACTION_START)
         }
         SessionState.command(SessionState.Command.CONNECT)
         SessionState.markConnecting(context, mode)
@@ -80,18 +80,15 @@ object VpnCommands {
         return true
     }
 
+    /** Tear the owners down in this process. startForegroundService(DISCONNECT)
+     *  from the widget/tile is not the notification's PendingIntent path: it
+     *  can report success without onStartCommand ever running, and then
+     *  disconnectNow was skipped — the session (and process) stayed up. */
     fun disconnect(context: Context, start: (Context, Intent) -> Boolean = ::dispatch) {
         paintIdle(context)
-        val tun = FCAEVpnService.ownsSession()
-        val proxy = ProxyNotification.sessionActive()
-        var orphaned = !tun && !proxy
-        if (tun && !start(context, Intent(context, FCAEVpnService::class.java)
-                .setAction(FCAEVpnService.ACTION_DISCONNECT))
-                && !FCAEVpnService.disconnectNow()) orphaned = true
-        if (proxy && !start(context, Intent(context, ProxyNotification::class.java)
-                .setAction(ProxyNotification.ACTION_DISCONNECT_KILL))
-                && !ProxyNotification.disconnectNow()) orphaned = true
-        if (orphaned) endIdle(context)
+        val tun = FCAEVpnService.disconnectNow()
+        val proxy = ProxyNotification.disconnectNow()
+        if (!tun && !proxy) endIdle(context)
     }
 
     /** Disconnect when no owner is up. The tap still has to end this process
@@ -100,6 +97,8 @@ object VpnCommands {
         val app = context.applicationContext
         SessionState.command(SessionState.Command.NONE)
         SessionState.markIdle(app)
+        FCAEVpnService.disconnectNow()
+        ProxyNotification.disconnectNow()
         try {
             app.stopService(Intent(app, FCAEVpnService::class.java))
         } catch (_: Throwable) {

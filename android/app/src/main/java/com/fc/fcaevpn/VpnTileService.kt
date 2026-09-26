@@ -44,12 +44,11 @@ class VpnTileService : TileService() {
             getSharedPreferences(EXIT_PREFS, MODE_PRIVATE).edit()
                 .putBoolean(EXIT_PENDING, true).commit()
             paint(false)
-            // Already a foreground service. Android 14 rejects
-            // startForegroundService from a tile; a command to the running
-            // service does not need it.
-            VpnCommands.disconnect(this) { ctx, intent ->
-                VpnCommands.start(ctx, intent, foreground = false)
-            }
+            // Same process as the owners: startForegroundService from a tile
+            // is rejected on Android 14, and startService can report success
+            // without the Disconnect command landing. disconnectNow talks to
+            // the running instance directly, like the notification path.
+            VpnCommands.disconnect(this)
             return
         }
         if (renderedActive) {

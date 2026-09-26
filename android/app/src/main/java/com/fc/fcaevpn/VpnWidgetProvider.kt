@@ -12,7 +12,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.View
 import android.widget.RemoteViews
-import java.util.concurrent.Executors
 
 /**
  * Home screen control surface, fixed 3x2 (widget_vpn_info.xml): name, state
@@ -41,10 +40,10 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val tapActive = intent.getBooleanExtra(EXTRA_TAP_ACTIVE, false)
             inReceive.set(true)
             try {
-                // Optimistic frame after the launcher finishes delivering this
-                // click. Updating AppWidgetManager inside onReceive is what
-                // hosts hold until the binder call ends — the half-second
-                // (or dropped) button paint.
+                // Same binder call as the tap: that is the Android 12
+                // exemption that makes startForegroundService legal. A hop
+                // onto clicks[] lost it, startForegroundService threw, and
+                // CONNECT fell through to openApp.
                 when (action) {
                     ACTION_WIDGET_TOGGLE -> {
                         if (!tapActive) {
@@ -52,6 +51,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
                         } else {
                             try { VpnCommands.paintIdle(app) } catch (_: Throwable) {}
                         }
+                        toggle(app, tapActive)
+                        if (SessionState.snapshot(app).connecting) scheduleRecheck(app)
                     }
                     ACTION_WIDGET_PAUSE_RESUME -> {
                         try {
@@ -61,25 +62,12 @@ class VpnWidgetProvider : AppWidgetProvider() {
                             )
                             SessionState.markPause(app, !tapActive)
                         } catch (_: Throwable) {}
+                        pauseOrResume(app, tapActive)
                     }
                 }
+            } catch (_: Throwable) {
             } finally {
                 inReceive.set(false)
-            }
-            val pending = goAsync()
-            clicks.execute {
-                try {
-                    when (action) {
-                        ACTION_WIDGET_TOGGLE -> {
-                            toggle(app, tapActive)
-                            if (SessionState.snapshot(app).connecting) scheduleRecheck(app)
-                        }
-                        ACTION_WIDGET_PAUSE_RESUME -> pauseOrResume(app, tapActive)
-                    }
-                } catch (_: Throwable) {
-                } finally {
-                    pending.finish()
-                }
             }
             return
         }
@@ -130,9 +118,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private val COLOR_PROGRESS = Color.parseColor("#60A5FA")
 
         private val mainHandler = Handler(Looper.getMainLooper())
-        private val clicks = Executors.newSingleThreadExecutor { r ->
-            Thread(r, "FCAE-Widget").apply { isDaemon = true }
-        }
         private val inReceive = ThreadLocal.withInitial { false }
 
         @Volatile private var lastControlKey: String? = null

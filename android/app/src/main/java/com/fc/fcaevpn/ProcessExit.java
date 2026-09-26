@@ -62,7 +62,11 @@ public final class ProcessExit {
         if (generation != FCAEVpnService.stateGeneration()) return false;
         if (!remoteDisconnect && (afterGrace ? FCAEApplication.uiOnScreen()
                                               : FCAEApplication.uiVisibleNow())) return false;
-        if (FCAEVpnService.sessionActive() || ProxyNotification.sessionActive()) return false;
+        if (FCAEVpnService.sessionActive() || ProxyNotification.sessionActive()) {
+            // A remote Disconnect that never reached the owner would otherwise
+            // pin this process forever. After the deadline the command stands.
+            if (!remoteDisconnect || !deadline) return false;
+        }
         if (!deadline && FCAEVpnService.ownsSession()) return false;
         return !SessionState.commandInFlight() || !SessionState.snapshot(app).getActive();
     }

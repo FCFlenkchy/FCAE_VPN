@@ -386,16 +386,20 @@ public class ProxyNotification extends Service {
         sessionRequested = true;
         stopping = false;
         nativeFreed = false;
-        // Which hop measures this session, told by whoever asked for it: the
-        // Activity passes it for an egress session (the engine carries it, the
-        // exit measures it), and a headless start carries it in its own
-        // description. An exit-measured session has no engine numbers to show.
-        psiTelemetry = intent.getBooleanExtra("psiphonThroughTunnel", false);
 
         // A description on the intent means a surface without an Activity is
         // asking for this session (the widget). MainActivity's own ACTION_START
         // carries none: it starts the engine itself, from its live views.
-        final boolean described = intent.hasExtra("protocol");
+        // Headless CONNECT starts this owner without extras so the widget tap
+        // can startForegroundService in the same frame; the saved session is
+        // loaded here, after the foreground notification is up.
+        Intent session = intent;
+        if (!session.hasExtra("protocol")) {
+            Intent recalled = FCAEVpnService.recalledSession(this);
+            if (recalled != null && recalled.hasExtra("protocol")) session = recalled;
+        }
+        final boolean described = session.hasExtra("protocol");
+        psiTelemetry = session.getBooleanExtra("psiphonThroughTunnel", false);
         if (described && engineAlive()) {
             // Already up (second tap, stale widget, redelivery). The TUN owner
             // ignores a start on a live tunnel for the same reason: rebuilding
@@ -409,7 +413,7 @@ public class ProxyNotification extends Service {
         handler.removeCallbacks(statsRunnable);
         handler.postDelayed(statsRunnable, 2000L);
 
-        if (described && intent.getIntExtra("backend", 0) == 1) {
+        if (described && session.getIntExtra("backend", 0) == 1) {
             // Protocol=Psiphon in proxy mode IS the AAR tunnel: no engine
             // session exists, and this owner carries its notification.
             externalPsiphon = true;
@@ -417,16 +421,16 @@ public class ProxyNotification extends Service {
             psiLive = false;
             Intent psi = new Intent(this, PsiphonTunnelService.class)
                     .setAction(PsiphonTunnelService.ACTION_START)
-                    .putExtras(intent)
+                    .putExtras(session)
                     .putExtra(PsiphonTunnelService.EXTRA_OWNER, PsiphonTunnelService.OWNER_PROXY);
             PsiphonTunnelService.startBound(this, psi);
             return START_STICKY;
         }
         externalPsiphon = false;
         psiTelemetry = psiTelemetry ||
-                (described && intent.getBooleanExtra("psiphonThroughTunnel", false));
+                (described && session.getBooleanExtra("psiphonThroughTunnel", false));
         psiLive = false;
-        if (described) startEngineFromSession(intent);
+        if (described) startEngineFromSession(session);
         return START_STICKY;
     }
 
