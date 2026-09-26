@@ -88,7 +88,14 @@ object VpnCommands {
         paintIdle(context)
         val tun = FCAEVpnService.disconnectNow()
         val proxy = ProxyNotification.disconnectNow()
-        if (!tun && !proxy) endIdle(context)
+        if (!tun && !proxy) {
+            endIdle(context)
+            return
+        }
+        // Widget teardown is a direct in-process call, unlike the notification
+        // PendingIntent path. Always arm the remote-disconnect exit watchdog so
+        // an owner that is already stopping cannot leave this process alive.
+        ProcessExit.request(context, true)
     }
 
     /** Disconnect when no owner is up. The tap still has to end this process
