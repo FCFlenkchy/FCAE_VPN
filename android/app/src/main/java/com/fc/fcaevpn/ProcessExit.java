@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class ProcessExit {
     private static final Handler main = new Handler(Looper.getMainLooper());
     private static final AtomicLong ticket = new AtomicLong();
+    private static final AtomicLong terminalStartedAt = new AtomicLong();
     private static final AtomicBoolean terminalPending = new AtomicBoolean();
     private static final long UI_GRACE_MS = 250L;
     private static final long CLEANUP_DEADLINE_MS = 2000L;
@@ -20,6 +21,7 @@ public final class ProcessExit {
     /** A new connect can be pending before the service bumps its generation. */
     public static void cancel() {
         terminalPending.set(false);
+        terminalStartedAt.set(0L);
         ticket.incrementAndGet();
     }
 
@@ -38,10 +40,18 @@ public final class ProcessExit {
     public static void request(Context context, boolean remoteDisconnect) {
         Context app = context.getApplicationContext();
         boolean terminal = remoteDisconnect || terminalPending.get();
-        if (terminal) terminalPending.set(true);
+        long now = SystemClock.elapsedRealtime();
+        if (terminal) {
+            terminalPending.set(true);
+            terminalStartedAt.compareAndSet(0L, now);
+        }
         long request = ticket.incrementAndGet();
-        if (terminal && VpnTileService.deferTerminalExit()) return;
-        long started = SystemClock.elapsedRealtime();
+        long started = terminal ? terminalStartedAt.get() : now;
+        if (terminal && now - started < CLEANUP_DEADLINE_MS
+                && VpnTileService.deferTerminalExit()) {
+            main.postDelayed(() -> request(app, true), UI_GRACE_MS);
+            return;
+        }
         Runnable finish = () -> {
             boolean deadline = SystemClock.elapsedRealtime() - started >= CLEANUP_DEADLINE_MS;
             if (request == ticket.get() && mayExit(app, true, deadline, terminal)) {
@@ -49,7 +59,10 @@ public final class ProcessExit {
                 FCAEVpnService.killProcessQuietly();
             }
         };
-        main.postDelayed(finish, CLEANUP_DEADLINE_MS);
+        main.postDelayed(
+                finish,
+                Math.max(0L, CLEANUP_DEADLINE_MS
+                        - (SystemClock.elapsedRealtime() - started)));
         if (!NativeEngine.Loaded.value) {
             main.postDelayed(finish, UI_GRACE_MS);
             return;

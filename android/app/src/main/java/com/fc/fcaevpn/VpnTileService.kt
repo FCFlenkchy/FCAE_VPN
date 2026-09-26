@@ -16,6 +16,7 @@ import android.service.quicksettings.TileService
 class VpnTileService : TileService() {
 
     override fun onStartListening() {
+        updateRequested = false
         listening = this
         if (ProcessExit.deferForTileBinding()) exitPending = true
         SessionState.reconciled(this)
@@ -99,11 +100,12 @@ class VpnTileService : TileService() {
 
     companion object {
         @Volatile private var exitPending = false
+        @Volatile private var updateRequested = false
         @Volatile private var publishedActive: Boolean? = null
 
         @JvmStatic
         fun deferTerminalExit(): Boolean {
-            if (listening == null) return false
+            if (listening == null && !updateRequested) return false
             exitPending = true
             return true
         }
@@ -121,18 +123,21 @@ class VpnTileService : TileService() {
             val tile = listening
             val active = SessionState.snapshot(context).active
             if (tile == null && publishedActive == active) return
-            publishedActive = active
             if (tile != null) {
+                publishedActive = active
                 if (Looper.myLooper() == Looper.getMainLooper()) tile.refresh()
                 else main.post { if (listening === tile) tile.refresh() }
                 return
             }
+            updateRequested = true
             try {
                 TileService.requestListeningState(
                     context.applicationContext,
                     ComponentName(context, VpnTileService::class.java)
                 )
+                publishedActive = active
             } catch (_: RuntimeException) {
+                updateRequested = false
             }
         }
     }
