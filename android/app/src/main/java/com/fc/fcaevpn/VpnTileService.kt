@@ -34,45 +34,30 @@ class VpnTileService : TileService() {
     }
 
     override fun onClick() {
-        val active = qsTile?.state == Tile.STATE_ACTIVE
-        val run = Runnable { perform(active) }
+        val run = Runnable { perform() }
         if (isLocked) unlockAndRun(run) else run.run()
     }
 
-    private fun perform(renderedActive: Boolean) {
+    private fun perform() {
         val live = SessionState.isLive()
+        val command = Intent(this, VpnTileActivity::class.java)
         if (live) {
             exitPending = true
             paint(false)
-            // Same process as the owners: startForegroundService from a tile
-            // is rejected on Android 14, and startService can report success
-            // without the Disconnect command landing. disconnectNow talks to
-            // the running instance directly, like the notification path.
-            VpnCommands.disconnect(this)
-            return
+            command.putExtra(VpnTileActivity.EXTRA_DISCONNECT, true)
+        } else {
+            clearPendingExit(this)
+            paint(true)
         }
-        clearPendingExit(this)
-        // Android 14 refuses a foreground start from the tile itself. A blank
-        // activity is in the foreground, so the same start the widget uses is
-        // legal there. 12 and 15 do not need the hop.
-        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            collapse(Intent(this, VpnTileActivity::class.java))
-            return
-        }
-        if (!VpnCommands.connect(this)) {
-            collapse(Intent(this, MainActivity::class.java)
-                .putExtra(MainActivity.EXTRA_TRIGGER_CONNECT, true))
-            return
-        }
-        paint(true)
-        VpnCommands.recheck(this)
+        collapse(command)
     }
 
     private fun collapse(intent: Intent) {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val requestCode = if (intent.getBooleanExtra(VpnTileActivity.EXTRA_DISCONNECT, false)) 8 else 7
             startActivityAndCollapse(
-                PendingIntent.getActivity(this, 7, intent,
+                PendingIntent.getActivity(this, requestCode, intent,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             )
         } else {
