@@ -18,6 +18,12 @@
 
 <link rel="icon" type="image/png" href="icon_1024.png">
 <link rel="stylesheet" href="style.css">
+<style>
+  .ton-donate{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;margin:12px auto;color:#aeb8cb}
+  .ton-address{max-width:min(100%,460px);overflow:hidden;text-overflow:ellipsis;padding:7px 10px;border:1px solid rgba(96,165,250,.28);border-radius:8px;background:rgba(96,165,250,.07);color:#dce8ff;font:12px/1.4 "JetBrains Mono",monospace;white-space:nowrap}
+  .ton-action{appearance:none;padding:7px 11px;border:1px solid rgba(96,165,250,.4);border-radius:8px;background:rgba(96,165,250,.12);color:#dce8ff;font:600 12px/1.4 Inter,sans-serif;text-decoration:none;cursor:pointer}
+  .ton-action:hover,.ton-action:focus-visible{background:rgba(96,165,250,.22);outline:none}
+</style>
 </head>
 <body>
 
@@ -250,10 +256,38 @@ cmake --build build --config Release</code></pre>
 <footer>
   <div class="container">
     <p>Made with <span class="heart">♥</span> for a free and open internet</p>
+    <div class="ton-donate" aria-label="Support FCAE VPN with TON">
+      <span>Support FCAE VPN with TON</span>
+      <code class="ton-address" id="ton-address" title="UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV">UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV</code>
+      <button class="ton-action" id="copy-ton" type="button">Copy</button>
+      <a class="ton-action" href="ton://transfer/UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV">Open wallet</a>
+    </div>
     <p><a href="https://github.com/FCFlenkchy/FCAE_VPN/blob/main/LICENSE">LICENSE</a></p>
     <p><a href="https://github.com/FCFlenkchy/FCAE_VPN/tree/GH-Page" target="_blank" rel="noopener">Site Source Code</a></p>
   </div>
 </footer>
+
+<script>
+  document.getElementById('copy-ton').addEventListener('click', async function () {
+    const address = document.getElementById('ton-address').textContent.trim();
+    try {
+      await navigator.clipboard.writeText(address);
+    } catch (_) {
+      const input = document.createElement('textarea');
+      input.value = address;
+      input.setAttribute('readonly', '');
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      input.remove();
+    }
+    const button = this;
+    button.textContent = 'Copied';
+    window.setTimeout(function () { button.textContent = 'Copy'; }, 1600);
+  });
+</script>
 
 </body>
 </html>
