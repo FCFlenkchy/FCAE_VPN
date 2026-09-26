@@ -266,7 +266,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
 
             views.setOnClickPendingIntent(
                 R.id.widget_btn_connect,
-                pending(context, ACTION_WIDGET_TOGGLE, REQ_CONNECT, false)
+                connectPending(context)
             )
             views.setOnClickPendingIntent(
                 R.id.widget_btn_disconnect,
@@ -330,20 +330,23 @@ class VpnWidgetProvider : AppWidgetProvider() {
             }
         }
 
-        /**
-         * A command broadcast, tagged with what the button read when drawn: the
-         * toggle carries "the session looked active", the pause button "the
-         * session looked paused". One extra, one meaning: never act on a
-         * snapshot that may have moved since the user saw that button.
-         *
-         * Each button has its own request code so FLAG_IMMUTABLE extras are
-         * never rewritten on the sibling control.
-         */
+        private fun connectPending(context: Context): PendingIntent {
+            val command = Intent(context, FCAEVpnService::class.java)
+                .setAction(FCAEVpnService.ACTION_REPLAY)
+            return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                PendingIntent.getForegroundService(context, REQ_CONNECT, command, PENDING_FLAGS)
+            } else {
+                PendingIntent.getService(context, REQ_CONNECT, command, PENDING_FLAGS)
+            }
+        }
+
         private fun pending(context: Context, action: String, code: Int, active: Boolean) =
             PendingIntent.getBroadcast(
-                context, code,
+                context,
+                code,
                 Intent(context, VpnWidgetProvider::class.java)
                     .setAction(action)
+                    .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
                     .putExtra(EXTRA_TAP_ACTIVE, active),
                 PENDING_FLAGS
             )

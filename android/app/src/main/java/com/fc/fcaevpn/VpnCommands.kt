@@ -29,7 +29,7 @@ object VpnCommands {
     fun toggle(context: Context, renderedActive: Boolean, start: (Context, Intent) -> Boolean = ::dispatch) {
         val live = SessionState.isLive()
         if (live) disconnect(context, start)
-        else if (!connect(context, start)) openApp(context)
+        else connect(context, start)
     }
 
     /** Optimistic frame shown before the foreground owner resolves the saved
