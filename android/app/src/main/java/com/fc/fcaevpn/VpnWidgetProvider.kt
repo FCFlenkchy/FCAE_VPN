@@ -52,6 +52,7 @@ class VpnWidgetProvider : AppWidgetProvider() {
                             try { VpnCommands.paintIdle(app) } catch (_: Throwable) {}
                         }
                         toggle(app, tapActive)
+                        refresh(app)
                         if (SessionState.snapshot(app).connecting) scheduleRecheck(app)
                     }
                     ACTION_WIDGET_PAUSE_RESUME -> {
@@ -63,9 +64,11 @@ class VpnWidgetProvider : AppWidgetProvider() {
                             SessionState.markPause(app, !tapActive)
                         } catch (_: Throwable) {}
                         pauseOrResume(app, tapActive)
+                        refresh(app)
                     }
                 }
             } catch (_: Throwable) {
+                refresh(app)
             } finally {
                 inReceive.set(false)
             }

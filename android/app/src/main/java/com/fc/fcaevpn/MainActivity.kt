@@ -1829,7 +1829,9 @@ class MainActivity : AppCompatActivity() {
         vpnActive = true
         updateButton()
         saveSettings()
-        startForegroundService(buildStartIntent())
+        val startIntent = buildStartIntent()
+        FCAEVpnService.rememberSession(this, startIntent)
+        startForegroundService(startIntent)
         connectGeneration = FCAEVpnService.stateGeneration()
         // Poll is started by the VPN_STATE_CHANGED broadcast from the service
         // AFTER nativeStart() succeeds — NOT here, to avoid calling native
