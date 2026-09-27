@@ -56,14 +56,17 @@ static FcaeSponsorInfo s_sponsor = {};
 static std::vector<uint8_t> s_sponsor_rgba;
 static uint64_t s_sponsor_loaded_generation = 0;
 static bool s_sponsor_started = false;
-static std::chrono::steady_clock::time_point s_sponsor_manifest_fetch = {};
+static std::chrono::steady_clock::time_point s_sponsor_manifest_check = {};
 
 static void poll_sponsor() {
     const auto now = std::chrono::steady_clock::now();
-    if (!s_sponsor_started || now - s_sponsor_manifest_fetch >= std::chrono::minutes(15)) {
+    if (!s_sponsor_started || now >= s_sponsor_manifest_check) {
+        if (!s_sponsor_started) fcae_sponsor_load_cache();
         s_sponsor_started = true;
-        s_sponsor_manifest_fetch = now;
-        fcae_sponsor_refresh_manifest_async();
+        const uint64_t remaining = fcae_sponsor_manifest_refresh_remaining_secs();
+        if (remaining == 0) fcae_sponsor_refresh_manifest_async();
+        const uint64_t check_after = remaining == 0 ? 12 * 60 * 60 : remaining;
+        s_sponsor_manifest_check = now + std::chrono::seconds(check_after);
     }
     fcae_sponsor_set_connected(g_app.ffi_state.load() == FCAE_STATE_CONNECTED);
     FcaeSponsorInfo info = {};
@@ -1837,7 +1840,7 @@ void render_ui() {
                 }
             }
             const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
-            if (ImGui::TextLink("Want to become a sponsor?")) open_link(sponsor_policy);
+            if (ImGui::TextLink("Want to become a sponsor? Click me")) open_link(sponsor_policy);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", sponsor_policy);
         }
 

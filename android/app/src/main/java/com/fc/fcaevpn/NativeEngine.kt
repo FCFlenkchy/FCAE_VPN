@@ -232,6 +232,9 @@ object NativeEngine {
     // only after the VPN reports connected.
     @JvmStatic external fun nativeSponsorInit(cacheDir: String)
     @JvmStatic external fun nativeSponsorSetManifest(json: String): Boolean
+    @JvmStatic external fun nativeSponsorManifestDue(): Boolean
+    @JvmStatic external fun nativeSponsorManifestRefreshRemainingSecs(): Long
+    @JvmStatic external fun nativeSponsorManifestCheckStarted()
     @JvmStatic external fun nativeSponsorSetConnected(connected: Boolean)
     @JvmStatic external fun nativeSponsorNext()
     @JvmStatic external fun nativePollSponsor(knownGeneration: Long): FcaeSponsorInfo

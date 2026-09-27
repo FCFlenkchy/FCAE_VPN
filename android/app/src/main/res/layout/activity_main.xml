@@ -1139,7 +1139,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="32dp"
                     android:gravity="center"
-                    android:text="Want to become a sponsor?"
+                    android:text="Want to become a sponsor? Click me"
                     android:textColor="#FF60A5FA"
                     android:textSize="12sp" />
 

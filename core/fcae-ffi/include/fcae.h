@@ -566,7 +566,11 @@ FcaeStatus fcae_poll_update(FcaeUpdateInfo *out);
 
 /* Fetch the small GitHub manifest asynchronously. Media is never fetched
  * until fcae_sponsor_set_connected(true) is called. */
+void fcae_sponsor_load_cache(void);
 void fcae_sponsor_refresh_manifest_async(void);
+bool fcae_sponsor_manifest_due(void);
+uint64_t fcae_sponsor_manifest_refresh_remaining_secs(void);
+void fcae_sponsor_manifest_check_started(void);
 FcaeStatus fcae_sponsor_set_manifest_json(const char *json);
 void fcae_sponsor_set_connected(bool connected);
 void fcae_sponsor_next(void);

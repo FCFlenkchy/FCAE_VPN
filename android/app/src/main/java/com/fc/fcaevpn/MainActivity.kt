@@ -78,7 +78,6 @@ class MainActivity : AppCompatActivity() {
     private var sponsorAnimated = false
     private var sponsorCampaignCount = 0
     private val sponsorPollBusy = AtomicBoolean(false)
-    private var lastSponsorManifestFetch = 0L
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
     private lateinit var spinnerScan: Spinner
@@ -570,16 +569,22 @@ class MainActivity : AppCompatActivity() {
     private val sponsorManifestRefresh = object : Runnable {
         override fun run() {
             if (!inForeground) return
-            val now = android.os.SystemClock.elapsedRealtime()
-            val interval = 15 * 60_000L
-            if (now - lastSponsorManifestFetch >= interval) refreshSponsorManifest(now)
-            val remaining = (interval - (now - lastSponsorManifestFetch)).coerceAtLeast(1_000L)
-            handler.postDelayed(this, remaining)
+            val remainingSeconds = try {
+                NativeEngine.nativeSponsorManifestRefreshRemainingSecs()
+            } catch (_: Throwable) {
+                60 * 60L
+            }
+            if (remainingSeconds <= 0) {
+                refreshSponsorManifest()
+                handler.postDelayed(this, 12 * 60 * 60_000L)
+            } else {
+                handler.postDelayed(this, remainingSeconds.coerceAtMost(12 * 60 * 60L) * 1_000L)
+            }
         }
     }
 
-    private fun refreshSponsorManifest(now: Long = android.os.SystemClock.elapsedRealtime()) {
-        lastSponsorManifestFetch = now
+    private fun refreshSponsorManifest() {
+        try { NativeEngine.nativeSponsorManifestCheckStarted() } catch (_: Throwable) { return }
         bgExecutor.execute {
             var connection: java.net.HttpURLConnection? = null
             try {
@@ -647,6 +652,11 @@ class MainActivity : AppCompatActivity() {
                                     sponsorCard.visibility = android.view.View.VISIBLE
                                 }
                             }
+                        } catch (_: Throwable) {
+                            sponsorCard.visibility = android.view.View.GONE
+                            sponsorDestination = ""
+                            sponsorAnimated = false
+                            sponsorCampaignCount = 0
                         } finally {
                             sponsorPollBusy.set(false)
                         }
@@ -741,7 +751,6 @@ class MainActivity : AppCompatActivity() {
         }
         try { NativeEngine.nativeSponsorInit(java.io.File(cacheDir, "sponsors").absolutePath) }
         catch (_: Throwable) {}
-        refreshSponsorManifest()
         spinnerProtocol = findViewById(R.id.spinnerProtocol)
         spinnerMode = findViewById(R.id.spinnerMode)
         spinnerScan = findViewById(R.id.spinnerScan)

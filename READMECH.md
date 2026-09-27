@@ -201,6 +201,10 @@ Bug 反馈与功能建议请提交到 **[GitHub Issues](https://github.com/FCFle
 
 请仅使用 The Open Network 网络。捐赠完全自愿。
 
+## 成为赞助商
+
+有意赞助 FCAE？请阅读 **[赞助政策](SPONSOR_POLICY.md)**，了解资格要求、内容规范、隐私规则和联系方式。
+
 ## 贡献
 
 欢迎贡献！无论是错误报告、功能请求、文档改进还是代码贡献 — 都可以提交 Issue 或 Pull Request。

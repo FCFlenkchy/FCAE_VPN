@@ -199,6 +199,10 @@ If you'd like to support the developer, you can send GRAM (The Open Network) to:
 
 Use The Open Network only. Donations are optional.
 
+## Sponsorship
+
+Interested in sponsoring FCAE? Read the **[Sponsor Policy](SPONSOR_POLICY.md)** for eligibility, content requirements, privacy rules, and contact information.
+
 ## Contributing
 
 Contributions are welcome! Whether it's bug reports, feature requests, documentation improvements, or code contributions — feel free to open an issue or pull request.

@@ -2,9 +2,9 @@ use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
     fs,
     io::{Cursor, Read},
     path::{Path, PathBuf},
@@ -23,6 +23,7 @@ const MAX_FRAMES: usize = 120;
 const MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TOTAL_DECODED_BYTES: usize = 96 * 1024 * 1024;
 const ROTATE_EVERY: Duration = Duration::from_secs(5);
+const MANIFEST_REFRESH_SECS: u64 = 12 * 60 * 60;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,7 +39,6 @@ struct Campaign {
     id: String,
     title: String,
     media_url: String,
-    media_sha256: String,
     destination_url: String,
     #[serde(default = "enabled")]
     enabled: bool,
@@ -102,6 +102,7 @@ struct State {
     rotation_started: Instant,
     current_campaign: usize,
     random_state: u64,
+    manifest_checked_at: u64,
     last_error: String,
 }
 
@@ -115,6 +116,7 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64 ^ std::process::id() as u64,
+    manifest_checked_at: 0,
     last_error: String::new(),
 }));
 static CONNECTED: AtomicBool = AtomicBool::new(false);
@@ -122,8 +124,32 @@ static MANIFEST_BUSY: AtomicBool = AtomicBool::new(false);
 static MEDIA_BUSY: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
 pub fn set_cache_dir(path: impl Into<PathBuf>) {
     STATE.lock().cache_dir = path.into();
+    load_cached_manifest();
+}
+
+pub fn load_cached_manifest() {
+    let cache_dir = STATE.lock().cache_dir.clone();
+    let json = fs::read(cache_dir.join("manifest.json")).ok();
+    let timestamp = fs::read_to_string(cache_dir.join("manifest.timestamp"))
+        .ok().and_then(|value| value.trim().parse::<u64>().ok()).unwrap_or(0);
+    let checked_at = fs::read_to_string(cache_dir.join("manifest.check.timestamp"))
+        .ok().and_then(|value| value.trim().parse::<u64>().ok()).unwrap_or(timestamp);
+    let now = unix_now();
+    {
+        let mut state = STATE.lock();
+        state.manifest_checked_at = if checked_at <= now.saturating_add(300) { checked_at } else { 0 };
+    }
+    if let Some(json) = json {
+        if let Ok(campaigns) = parse_manifest(&json) {
+            apply_campaigns(campaigns);
+        }
+    }
 }
 
 pub fn set_connected(connected: bool) {
@@ -131,8 +157,48 @@ pub fn set_connected(connected: bool) {
     if connected && !was { refresh_media_async(); }
 }
 
+pub fn manifest_refresh_remaining_secs() -> u64 {
+    let checked_at = STATE.lock().manifest_checked_at;
+    if checked_at == 0 { return 0; }
+    let now = unix_now();
+    if checked_at > now.saturating_add(300) { return 0; }
+    MANIFEST_REFRESH_SECS.saturating_sub(now.saturating_sub(checked_at))
+}
+
+pub fn manifest_check_started() {
+    let now = unix_now();
+    let cache_dir = {
+        let mut state = STATE.lock();
+        state.manifest_checked_at = now;
+        state.cache_dir.clone()
+    };
+    let _ = fs::create_dir_all(&cache_dir);
+    let _ = fs::write(cache_dir.join("manifest.check.timestamp"), now.to_string());
+}
+
+pub fn manifest_due() -> bool {
+    manifest_refresh_remaining_secs() == 0
+}
+
 pub fn set_manifest_json(json: &[u8]) -> Result<(), String> {
-    apply_campaigns(parse_manifest(json)?);
+    let campaigns = parse_manifest(json)?;
+    let now = unix_now();
+    apply_campaigns(campaigns);
+    let cache_dir = {
+        let mut state = STATE.lock();
+        state.manifest_checked_at = now;
+        state.cache_dir.clone()
+    };
+    let _ = fs::create_dir_all(&cache_dir);
+    let manifest_tmp = cache_dir.join("manifest.json.tmp");
+    if fs::write(&manifest_tmp, json).is_ok() {
+        let manifest_path = cache_dir.join("manifest.json");
+        let _ = fs::remove_file(&manifest_path);
+        if fs::rename(manifest_tmp, manifest_path).is_ok() {
+            let _ = fs::write(cache_dir.join("manifest.timestamp"), now.to_string());
+            let _ = fs::write(cache_dir.join("manifest.check.timestamp"), now.to_string());
+        }
+    }
     if CONNECTED.load(Ordering::Acquire) { refresh_media_async(); }
     Ok(())
 }
@@ -141,7 +207,6 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
     let mut state = STATE.lock();
     state.ready.retain(|ready| campaigns.iter().any(|campaign|
         campaign.id == ready.campaign.id
-            && campaign.media_sha256.eq_ignore_ascii_case(&ready.campaign.media_sha256)
             && campaign.media_url == ready.campaign.media_url
             && campaign.destination_url == ready.campaign.destination_url
             && campaign.title == ready.campaign.title
@@ -161,13 +226,14 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
 }
 
 pub fn refresh_manifest_async() {
-    if MANIFEST_BUSY.swap(true, Ordering::AcqRel) { return; }
+    if !manifest_due() || MANIFEST_BUSY.swap(true, Ordering::AcqRel) { return; }
+    manifest_check_started();
     thread::spawn(|| {
-        let result = fetch_manifest();
-        match result {
-            Ok(campaigns) => {
-                apply_campaigns(campaigns);
-                if CONNECTED.load(Ordering::Acquire) { refresh_media_async(); }
+        match fetch_manifest() {
+            Ok(json) => {
+                if let Err(error) = set_manifest_json(&json) {
+                    STATE.lock().last_error = error;
+                }
             }
             Err(error) => STATE.lock().last_error = error,
         }
@@ -264,11 +330,10 @@ pub fn current_frame() -> Option<SponsorFrame> {
 
 pub fn last_error() -> String { STATE.lock().last_error.clone() }
 
-fn fetch_manifest() -> Result<Vec<Campaign>, String> {
+fn fetch_manifest() -> Result<Vec<u8>, String> {
     let response = client().get(MANIFEST_URL).send().map_err(|e| e.to_string())?;
     if !response.status().is_success() { return Err(format!("manifest HTTP {}", response.status())); }
-    let body = read_limited(response, MAX_MANIFEST_BYTES)?;
-    parse_manifest(&body)
+    read_limited(response, MAX_MANIFEST_BYTES)
 }
 
 fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
@@ -296,16 +361,16 @@ fn validate_campaign(c: &Campaign) -> Result<(), String> {
     if c.id.is_empty() || c.id.len() > 64 || !c.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         return Err("invalid sponsor id".into());
     }
-    if c.title.is_empty() || c.title.len() > 96 || c.title.chars().any(char::is_control) {
-        return Err("invalid sponsor title".into());
+    if c.title.is_empty() || c.title.len() > 96
+        || !c.title.bytes().all(|byte| matches!(byte, 0x20..=0x7e))
+    {
+        return Err("sponsor title must use printable ASCII".into());
     }
     if c.media_url.len() > 2_048 || c.destination_url.len() > 511
+        || !c.media_url.is_ascii() || !c.destination_url.is_ascii()
         || !is_https(&c.media_url) || !is_https(&c.destination_url)
     {
         return Err("invalid sponsor HTTPS URL".into());
-    }
-    if c.media_sha256.len() != 64 || !c.media_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("invalid media SHA-256".into());
     }
     if matches!((c.starts_at, c.ends_at), (Some(start), Some(end)) if start >= end) {
         return Err("invalid sponsor date range".into());
@@ -323,7 +388,9 @@ fn prune_cache(cache_dir: &Path, campaigns: &[Campaign]) {
     if let Ok(entries) = fs::read_dir(cache_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !keep.contains(&name) { let _ = fs::remove_file(entry.path()); }
+            if name.ends_with(".media") && !keep.contains(&name) {
+                let _ = fs::remove_file(entry.path());
+            }
         }
     }
 }
@@ -334,17 +401,20 @@ fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign>
     let mut decoded_total = 0usize;
     for campaign in campaigns {
         let path = cache_dir.join(cache_name(campaign));
-        let bytes = match fs::read(&path).ok()
-            .filter(|bytes| hash_matches(bytes, &campaign.media_sha256))
-            .or_else(|| download_media(campaign).ok().and_then(|bytes| {
-                if fs::write(&path, &bytes).is_ok() { Some(bytes) } else { None }
-            })) {
-            Some(bytes) => bytes,
-            None => continue,
-        };
-        let decoded = match decode(campaign.clone(), &bytes) {
-            Ok(decoded) => decoded,
-            Err(_) => continue,
+        let decoded = fs::read(&path).ok()
+            .and_then(|bytes| decode(campaign.clone(), &bytes).ok())
+            .or_else(|| {
+                let bytes = download_media(campaign).ok()?;
+                let decoded = decode(campaign.clone(), &bytes).ok()?;
+                let _ = fs::write(&path, &bytes);
+                Some(decoded)
+            });
+        let decoded = match decoded {
+            Some(decoded) => decoded,
+            None => {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
         };
         let decoded_bytes = decoded.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
         if decoded_total.saturating_add(decoded_bytes) > MAX_TOTAL_DECODED_BYTES { continue; }
@@ -354,15 +424,16 @@ fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign>
     ready
 }
 
-fn cache_name(c: &Campaign) -> String { format!("{}-{}.media", c.id, c.media_sha256.to_ascii_lowercase()) }
-fn hash_matches(bytes: &[u8], expected: &str) -> bool { hex::encode(Sha256::digest(bytes)).eq_ignore_ascii_case(expected) }
+fn cache_name(c: &Campaign) -> String {
+    let mut hash = DefaultHasher::new();
+    c.media_url.hash(&mut hash);
+    format!("{}-{:016x}.media", c.id, hash.finish())
+}
 
 fn download_media(c: &Campaign) -> Result<Vec<u8>, String> {
     let response = client().get(&c.media_url).send().map_err(|e| e.to_string())?;
     if !response.status().is_success() { return Err(format!("media HTTP {}", response.status())); }
-    let bytes = read_limited(response, MAX_MEDIA_BYTES)?;
-    if !hash_matches(&bytes, &c.media_sha256) { return Err("media hash mismatch".into()); }
-    Ok(bytes)
+    read_limited(response, MAX_MEDIA_BYTES)
 }
 
 fn read_limited(mut response: reqwest::blocking::Response, limit: usize) -> Result<Vec<u8>, String> {

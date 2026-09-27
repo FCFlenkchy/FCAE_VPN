@@ -1251,8 +1251,28 @@ pub unsafe extern "C" fn fcae_poll_update(out: *mut FcaeUpdateInfo) -> FcaeStatu
 static SPONSOR_FRAME: Mutex<Option<fcae_sponsor::SponsorFrame>> = Mutex::new(None);
 
 #[no_mangle]
+pub extern "C" fn fcae_sponsor_load_cache() {
+    fcae_sponsor::load_cached_manifest();
+}
+
+#[no_mangle]
 pub extern "C" fn fcae_sponsor_refresh_manifest_async() {
     fcae_sponsor::refresh_manifest_async();
+}
+
+#[no_mangle]
+pub extern "C" fn fcae_sponsor_manifest_due() -> bool {
+    fcae_sponsor::manifest_due()
+}
+
+#[no_mangle]
+pub extern "C" fn fcae_sponsor_manifest_refresh_remaining_secs() -> u64 {
+    fcae_sponsor::manifest_refresh_remaining_secs()
+}
+
+#[no_mangle]
+pub extern "C" fn fcae_sponsor_manifest_check_started() {
+    fcae_sponsor::manifest_check_started();
 }
 
 #[no_mangle]

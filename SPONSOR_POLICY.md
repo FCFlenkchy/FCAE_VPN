@@ -35,7 +35,7 @@ FCAE may reject or remove any campaign that creates legal, security, privacy, re
 
 ## Privacy and presentation
 
-Sponsor cards are rendered by FCAE rather than arbitrary HTML or JavaScript. External sponsor media is fetched only after FCAE reports that the VPN is connected. The small GitHub manifest is refreshed at most once every 15 minutes while the client UI is active. Campaigns rotate locally every five seconds and users may swipe or drag the card to move to another sponsor; neither action generates an impression request. With two active campaigns FCAE alternates between them. With three or more, FCAE chooses randomly without immediately repeating the card already shown. A single campaign remains in place.
+Sponsor cards are rendered by FCAE rather than arbitrary HTML or JavaScript. External sponsor `media_url` resources are fetched only after FCAE reports that the VPN is connected. Destination URLs are never prefetched by FCAE; they are handed to the external browser only after an explicit user click. The small GitHub manifest uses a persisted Unix timestamp and is fetched no more than once every 12 hours. Opening and closing the client UI does not reset that interval; the last valid cached manifest remains available if a refresh fails. Campaigns rotate locally every five seconds and users may swipe or drag the card to move to another sponsor; neither action generates an impression request. With two active campaigns FCAE alternates between them. With three or more, FCAE chooses randomly without immediately repeating the card already shown. A single campaign remains in place.
 
 FCAE does not provide sponsors with device identifiers, user profiles, browsing activity, impression reports, or click reports. Destination links open in the user's external browser. The destination site is governed by its own privacy practices.
 
@@ -47,7 +47,6 @@ FCAE does not provide sponsors with device identifiers, user profiles, browsing 
 - Maximum dimensions: 1200 × 800 pixels.
 - Animated GIFs: maximum 120 frames.
 - No audio or video.
-- Media must have a declared SHA-256 digest.
 
 ## Manifest format
 
@@ -61,7 +60,6 @@ Production entries are stored in `sponsors.json`:
       "id": "example-2026",
       "title": "Example Sponsor",
       "media_url": "https://cdn.example.com/fcae/example.webp",
-      "media_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "destination_url": "https://example.com/",
       "enabled": true,
       "starts_at": 1790812800,

@@ -900,6 +900,24 @@ Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetManifest(JNIEnv* env, jclass, j
     return fcae_sponsor_set_manifest_json(value.c_str()) == FCAE_OK ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorManifestDue(JNIEnv*, jclass) {
+    ensure_init();
+    return fcae_sponsor_manifest_due() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorManifestRefreshRemainingSecs(JNIEnv*, jclass) {
+    ensure_init();
+    return (jlong)fcae_sponsor_manifest_refresh_remaining_secs();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorManifestCheckStarted(JNIEnv*, jclass) {
+    ensure_init();
+    fcae_sponsor_manifest_check_started();
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetConnected(JNIEnv*, jclass, jboolean connected) {
     ensure_init();
@@ -926,10 +944,28 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     fcae_sponsor_poll(&info);
     const bool copyFrame = info.available && (jlong)info.generation != knownGeneration;
     jbyteArray rgba = env->NewByteArray(copyFrame ? (jsize)info.rgba_size : 0);
-    if (rgba && copyFrame && info.rgba_size) {
-        std::vector<uint8_t> bytes(info.rgba_size);
-        if (fcae_sponsor_copy_rgba(bytes.data(), bytes.size()) == FCAE_OK)
-            env->SetByteArrayRegion(rgba, 0, (jsize)bytes.size(), (const jbyte*)bytes.data());
+    if (!rgba) {
+        env->DeleteLocalRef(obj);
+        env->DeleteLocalRef(cls);
+        return nullptr;
+    }
+    if (copyFrame && info.rgba_size) {
+        jbyte* pixels = env->GetByteArrayElements(rgba, nullptr);
+        if (!pixels) {
+            env->DeleteLocalRef(rgba);
+            env->DeleteLocalRef(obj);
+            env->DeleteLocalRef(cls);
+            return nullptr;
+        }
+        const FcaeStatus copied = fcae_sponsor_copy_rgba(
+            reinterpret_cast<uint8_t*>(pixels), info.rgba_size);
+        env->ReleaseByteArrayElements(rgba, pixels, copied == FCAE_OK ? 0 : JNI_ABORT);
+        if (copied != FCAE_OK) {
+            env->DeleteLocalRef(rgba);
+            env->DeleteLocalRef(obj);
+            env->DeleteLocalRef(cls);
+            return nullptr;
+        }
     }
     env->SetBooleanField(obj, env->GetFieldID(cls, "available", "Z"), info.available ? JNI_TRUE : JNI_FALSE);
     env->SetObjectField(obj, env->GetFieldID(cls, "id", "Ljava/lang/String;"), env->NewStringUTF(info.id));
