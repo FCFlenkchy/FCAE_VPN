@@ -15,7 +15,7 @@ on:
       publish:
         description: 'publish'
         required: false
-        default: true
+        default: false
         type: boolean
       extra_notes:
         description: 'notes'
