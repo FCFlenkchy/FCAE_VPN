@@ -1298,6 +1298,11 @@ pub extern "C" fn fcae_sponsor_refresh_manifest_async() {
 }
 
 #[no_mangle]
+pub extern "C" fn fcae_sponsor_refresh_manifest_now_async() {
+    fcae_sponsor::refresh_manifest_now_async();
+}
+
+#[no_mangle]
 pub extern "C" fn fcae_sponsor_manifest_due() -> bool {
     fcae_sponsor::manifest_due()
 }

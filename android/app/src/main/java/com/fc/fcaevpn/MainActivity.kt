@@ -577,7 +577,9 @@ class MainActivity : AppCompatActivity() {
             }
             if (remainingSeconds <= 0) {
                 refreshSponsorManifest()
-                handler.postDelayed(this, 12 * 60 * 60_000L)
+                // A failed due check remains due; retry without shortening the
+                // 12-hour interval after a successful manifest.
+                handler.postDelayed(this, 60_000L)
             } else {
                 handler.postDelayed(this, remainingSeconds.coerceAtMost(12 * 60 * 60L) * 1_000L)
             }
@@ -703,6 +705,11 @@ class MainActivity : AppCompatActivity() {
         sponsorImage = findViewById(R.id.sponsorImage)
         sponsorMessage = findViewById(R.id.sponsorMessage)
         sponsorTitle = findViewById(R.id.sponsorTitle)
+        findViewById<android.view.View>(R.id.sponsorRefresh).setOnClickListener {
+            try { NativeEngine.nativeSponsorRefreshManifestNowAsync() } catch (_: Throwable) {}
+            handler.removeCallbacks(sponsorManifestRefresh)
+            handler.post(sponsorManifestRefresh)
+        }
         sponsorCard.setOnClickListener {
             sponsorDestination.takeIf { it.startsWith("https://") }?.let(::openExternal)
         }

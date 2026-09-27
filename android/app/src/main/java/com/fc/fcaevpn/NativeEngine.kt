@@ -236,6 +236,7 @@ object NativeEngine {
     @JvmStatic external fun nativeSponsorManifestRefreshRemainingSecs(): Long
     @JvmStatic external fun nativeSponsorManifestCheckStarted()
     @JvmStatic external fun nativeSponsorRefreshManifestAsync()
+    @JvmStatic external fun nativeSponsorRefreshManifestNowAsync()
     @JvmStatic external fun nativeSponsorSetConnected(connected: Boolean)
     @JvmStatic external fun nativeSponsorNext()
     @JvmStatic external fun nativePollSponsor(knownGeneration: Long): FcaeSponsorInfo

@@ -570,6 +570,8 @@ FcaeStatus fcae_poll_update(FcaeUpdateInfo *out);
  * session is disconnected or has no tunnel proxy. */
 void fcae_sponsor_load_cache(void);
 void fcae_sponsor_refresh_manifest_async(void);
+/* Explicit user refresh; automatic checks still observe the 12-hour interval. */
+void fcae_sponsor_refresh_manifest_now_async(void);
 bool fcae_sponsor_manifest_due(void);
 uint64_t fcae_sponsor_manifest_refresh_remaining_secs(void);
 void fcae_sponsor_manifest_check_started(void);

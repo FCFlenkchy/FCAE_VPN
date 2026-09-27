@@ -44,7 +44,7 @@ struct Manifest {
     sponsors: Vec<Campaign>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Campaign {
     id: String,
@@ -152,6 +152,7 @@ pub fn set_cache_dir(path: impl Into<PathBuf>) {
 pub fn load_cached_manifest() {
     let cache_dir = STATE.lock().cache_dir.clone();
     let json = fs::read(cache_dir.join("manifest.json")).ok();
+    let campaigns = json.as_deref().and_then(|body| parse_manifest(body).ok());
     let timestamp = fs::read_to_string(cache_dir.join("manifest.timestamp"))
         .ok().and_then(|value| value.trim().parse::<u64>().ok()).unwrap_or(0);
     let checked_at = fs::read_to_string(cache_dir.join("manifest.check.timestamp"))
@@ -159,12 +160,15 @@ pub fn load_cached_manifest() {
     let now = unix_now();
     {
         let mut state = STATE.lock();
-        state.manifest_checked_at = if checked_at <= now.saturating_add(300) { checked_at } else { 0 };
+        state.manifest_checked_at = if campaigns.is_some()
+            && checked_at <= now.saturating_add(300) {
+            checked_at
+        } else {
+            0
+        };
     }
-    if let Some(json) = json {
-        if let Ok(campaigns) = parse_manifest(&json) {
-            apply_campaigns(campaigns);
-        }
+    if let Some(campaigns) = campaigns {
+        apply_campaigns(campaigns);
     }
 }
 
@@ -192,15 +196,8 @@ pub fn manifest_refresh_remaining_secs() -> u64 {
 }
 
 pub fn manifest_check_started() {
-    if !CONNECTED.load(Ordering::Acquire) { return; }
-    let now = unix_now();
-    let cache_dir = {
-        let mut state = STATE.lock();
-        state.manifest_checked_at = now;
-        state.cache_dir.clone()
-    };
-    let _ = fs::create_dir_all(&cache_dir);
-    let _ = fs::write(cache_dir.join("manifest.check.timestamp"), now.to_string());
+    let cache_dir = STATE.lock().cache_dir.clone();
+    let _ = fs::create_dir_all(cache_dir);
 }
 
 pub fn manifest_due() -> bool {
@@ -272,13 +269,20 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
 }
 
 pub fn refresh_manifest_async() {
+    refresh_manifest_async_inner(false);
+}
+
+pub fn refresh_manifest_now_async() {
+    refresh_manifest_async_inner(true);
+}
+
+fn refresh_manifest_async_inner(force: bool) {
     if !CONNECTED.load(Ordering::Acquire)
-        || !manifest_due()
+        || (!force && !manifest_due())
         || MANIFEST_BUSY.swap(true, Ordering::AcqRel)
     {
         return;
     }
-    manifest_check_started();
     thread::spawn(|| {
         match fetch_manifest() {
             Ok(json) => {
@@ -305,14 +309,21 @@ pub fn refresh_media_async() {
     };
     thread::spawn(move || {
         let ready = prepare_media(&campaigns, &cache_dir);
+        let mut applied = false;
         if CONNECTED.load(Ordering::Acquire) {
             let mut state = STATE.lock();
-            state.ready = ready;
-            state.current_campaign = 0;
-            state.rotation_started = Instant::now();
-            GENERATION.fetch_add(1, Ordering::Relaxed);
+            if state.campaigns == campaigns {
+                state.ready = ready;
+                state.current_campaign = 0;
+                state.rotation_started = Instant::now();
+                GENERATION.fetch_add(1, Ordering::Relaxed);
+                applied = true;
+            }
         }
         MEDIA_BUSY.store(false, Ordering::Release);
+        if CONNECTED.load(Ordering::Acquire) && !applied {
+            refresh_media_async();
+        }
     });
 }
 
@@ -421,15 +432,17 @@ fn validate_campaign(c: &Campaign) -> Result<(), String> {
         return Err("invalid sponsor id".into());
     }
     if c.title.is_empty() || c.title.len() > 96
-        || !c.title.bytes().all(|byte| matches!(byte, 0x20..=0x7e))
+        || !c.title.chars().all(|character| !character.is_control())
     {
-        return Err("sponsor title must use printable ASCII".into());
+        return Err("sponsor title must use printable text".into());
     }
     if c.message.as_ref().is_some_and(|message| {
-        message.is_empty() || message.len() > 256
-            || !message.bytes().all(|byte| byte == b'\n' || matches!(byte, 0x20..=0x7e))
+        message.len() > 256
+            || !message.chars().all(|character| {
+                character == '\n' || !character.is_control()
+            })
     }) {
-        return Err("sponsor message must use printable ASCII and be at most 256 bytes".into());
+        return Err("sponsor message must use printable text and be at most 256 bytes".into());
     }
     if c.destination_url.len() > 511 || !c.destination_url.is_ascii()
         || !is_https(&c.destination_url)

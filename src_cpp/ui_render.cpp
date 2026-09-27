@@ -69,7 +69,9 @@ static void poll_sponsor() {
     if (now >= s_sponsor_manifest_check) {
         const uint64_t remaining = fcae_sponsor_manifest_refresh_remaining_secs();
         if (remaining == 0) fcae_sponsor_refresh_manifest_async();
-        const uint64_t check_after = remaining == 0 ? 12 * 60 * 60 : remaining;
+        // A failed due check leaves the successful-manifest timestamp unchanged;
+        // retry it soon without shortening the 12-hour success interval.
+        const uint64_t check_after = remaining == 0 ? 60 : remaining;
         s_sponsor_manifest_check = now + std::chrono::seconds(check_after);
     }
     FcaeSponsorInfo info = {};
@@ -1810,6 +1812,15 @@ void render_ui() {
             }
 
             ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextDisabled(s_sponsor.available ? "SPONSORED" : "SPONSOR");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("↻")) {
+                fcae_sponsor_refresh_manifest_now_async();
+                ui_request_redraw();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Refresh sponsor manifest");
             if (s_sponsor.available) {
                 ImTextureID texture = ImTextureID{};
                 if (!s_sponsor_rgba.empty() && s_sponsor.width > 0 && s_sponsor.height > 0
@@ -1819,8 +1830,6 @@ void render_ui() {
                         s_sponsor.generation);
                 }
                 {
-                    ImGui::Separator();
-                    ImGui::TextDisabled("SPONSORED");
                     if (texture) {
                     const float max_w = std::min(320.0f, ImGui::GetContentRegionAvail().x);
                     const float scale = std::min(max_w / (float)s_sponsor.width,
