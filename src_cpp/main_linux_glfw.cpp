@@ -26,6 +26,29 @@
 // straight from the extracted archive.
 #include "icon_data.h"
 
+ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation) {
+    static GLuint texture = 0;
+    static uint64_t loaded = 0;
+    if (!rgba || width <= 0 || height <= 0) return (ImTextureID)0;
+    if (!texture) {
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, texture);
+    }
+    if (loaded != generation) {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, rgba);
+        loaded = generation;
+    }
+    return (ImTextureID)(intptr_t)texture;
+}
+
 static void glfw_error_callback(int error, const char* description) {
     fprintf(stderr, "GLFW Error %d: %s\n", error, description);
 }

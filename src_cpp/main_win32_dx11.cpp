@@ -19,6 +19,34 @@ static ID3D11DeviceContext*    g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain*         g_pSwapChain       = nullptr;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
+ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation) {
+    static ID3D11ShaderResourceView* view = nullptr;
+    static uint64_t loaded = 0;
+    if (!rgba || width <= 0 || height <= 0 || !g_pd3dDevice) return (ImTextureID)0;
+    if (loaded != generation) {
+        if (view) { view->Release(); view = nullptr; }
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = (UINT)width;
+        desc.Height = (UINT)height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_IMMUTABLE;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA data = {};
+        data.pSysMem = rgba;
+        data.SysMemPitch = (UINT)width * 4;
+        ID3D11Texture2D* texture = nullptr;
+        if (SUCCEEDED(g_pd3dDevice->CreateTexture2D(&desc, &data, &texture)) && texture) {
+            g_pd3dDevice->CreateShaderResourceView(texture, nullptr, &view);
+            texture->Release();
+        }
+        loaded = generation;
+    }
+    return (ImTextureID)view;
+}
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 static void CleanupDeviceD3D();

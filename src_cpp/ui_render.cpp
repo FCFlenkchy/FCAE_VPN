@@ -52,6 +52,34 @@ static bool s_about_popup_open = false;
 static char s_update_date[32] = {};
 static std::chrono::steady_clock::time_point s_check_start_time = std::chrono::steady_clock::now();
 static bool s_update_in_progress = false;
+static FcaeSponsorInfo s_sponsor = {};
+static std::vector<uint8_t> s_sponsor_rgba;
+static uint64_t s_sponsor_loaded_generation = 0;
+static bool s_sponsor_started = false;
+static std::chrono::steady_clock::time_point s_sponsor_manifest_fetch = {};
+
+static void poll_sponsor() {
+    const auto now = std::chrono::steady_clock::now();
+    if (!s_sponsor_started || now - s_sponsor_manifest_fetch >= std::chrono::minutes(15)) {
+        s_sponsor_started = true;
+        s_sponsor_manifest_fetch = now;
+        fcae_sponsor_refresh_manifest_async();
+    }
+    fcae_sponsor_set_connected(g_app.ffi_state.load() == FCAE_STATE_CONNECTED);
+    FcaeSponsorInfo info = {};
+    info.struct_size = sizeof(info);
+    info.abi_version = FCAE_ABI_VERSION;
+    if (fcae_sponsor_poll(&info) != FCAE_OK) return;
+    s_sponsor = info;
+    if (!info.available) {
+        s_sponsor_rgba.clear();
+        s_sponsor_loaded_generation = 0;
+    } else if (info.generation != s_sponsor_loaded_generation) {
+        s_sponsor_rgba.resize(info.rgba_size);
+        if (fcae_sponsor_copy_rgba(s_sponsor_rgba.data(), s_sponsor_rgba.size()) == FCAE_OK)
+            s_sponsor_loaded_generation = info.generation;
+    }
+}
 
 // What the last painted frame looked like / when it was painted.
 static uint64_t s_painted_sig = 0;
@@ -195,6 +223,8 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, s_update_latest);
     h = fnv_cstr(h, s_update_notes);
     h = fnv_cstr(h, s_update_dl_url);
+    h = fnv_value(h, s_sponsor.available);
+    h = fnv_value(h, s_sponsor.generation);
     return h;
 }
 
@@ -246,9 +276,9 @@ bool ui_should_render(bool interacting) {
         return g_app.redraw_requested.load() || interacting || !s_painted_once;
     }
 
-    // Telemetry is the main thing that changes without user input; poll it here
-    // so the fingerprint below is up to date.
+    // Telemetry and locally animated sponsor frames change without input.
     ui_poll_telemetry(now);
+    poll_sponsor();
 
     // A redraw request is only cleared once a frame is really painted, so it
     // cannot be lost while the window is minimized.
@@ -265,7 +295,10 @@ bool ui_should_render(bool interacting) {
     // pixel-identical, so skip it and let the platform go back to sleep.
     if (s_painted_once && ui_content_signature() == s_painted_sig) {
         // …except for the few things that tick slowly on their own:
-        const double period = (s_update_in_progress || s_text_input) ? 0.5 : 0.0;
+        const double sponsor_period = s_sponsor.animated ? 0.1
+            : (s_sponsor.campaign_count > 1 ? 0.25 : 0.0);
+        const double period = sponsor_period > 0.0 ? sponsor_period
+            : ((s_update_in_progress || s_text_input) ? 0.5 : 0.0);
         if (period <= 0.0 || now - s_last_paint_t < period) return false;
     }
     return true;
@@ -275,6 +308,8 @@ unsigned ui_sleep_ms() {
     if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Starting)
         return 50;                           // notice completion promptly without spinning
     if (s_busy_anim) return 16;              // connect spinner: keep it smooth
+    if (s_sponsor.animated) return 100;      // GIF frame timing
+    if (s_sponsor.campaign_count > 1) return 250; // five-second local rotation
     if (s_update_in_progress) return 250;    // "Checking... (Ns)" counter
     if (s_text_input) return 250;            // caret blink in a focused field
     if (ui_stats_live()) return 1000;        // counters/state refresh once a second
@@ -1755,6 +1790,55 @@ void render_ui() {
                     ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
             }
+
+            ImGui::Spacing();
+            if (s_sponsor.available && !s_sponsor_rgba.empty()
+                    && s_sponsor_loaded_generation == s_sponsor.generation) {
+                ImTextureID texture = sponsor_texture_update(
+                    s_sponsor_rgba.data(), (int)s_sponsor.width, (int)s_sponsor.height,
+                    s_sponsor.generation);
+                if (texture) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("SPONSORED");
+                    const float max_w = std::min(320.0f, ImGui::GetContentRegionAvail().x);
+                    const float scale = std::min(max_w / (float)s_sponsor.width,
+                                                 120.0f / (float)s_sponsor.height);
+                    const ImVec2 size((float)s_sponsor.width * scale,
+                                      (float)s_sponsor.height * scale);
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX()
+                        + (ImGui::GetContentRegionAvail().x - size.x) * 0.5f);
+                    const ImVec2 image_pos = ImGui::GetCursorScreenPos();
+                    ImGui::Image(texture, size);
+                    const ImVec2 after_image = ImGui::GetCursorScreenPos();
+                    ImGui::SetCursorScreenPos(image_pos);
+                    ImGui::InvisibleButton("##sponsor_card_touch", size);
+                    static bool sponsor_dragged = false;
+                    if (ImGui::IsItemActivated()) sponsor_dragged = false;
+                    if (ImGui::IsItemActive() && s_sponsor.campaign_count > 1
+                            && std::abs(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x) >= 36.0f)
+                        sponsor_dragged = true;
+                    if (ImGui::IsItemDeactivated()) {
+                        if (sponsor_dragged) {
+                            fcae_sponsor_next();
+                        } else if (strncmp(s_sponsor.destination_url, "https://", 8) == 0) {
+                            open_link(s_sponsor.destination_url);
+                        }
+                        sponsor_dragged = false;
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(s_sponsor.campaign_count > 1
+                            ? "Click to open, drag to change sponsor"
+                            : "Click to open sponsor website");
+                    ImGui::SetCursorScreenPos(after_image);
+                    const float title_w = ImGui::CalcTextSize(s_sponsor.title).x;
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX()
+                        + std::max(0.0f, (ImGui::GetContentRegionAvail().x - title_w) * 0.5f));
+                    ImGui::TextUnformatted(s_sponsor.title);
+                }
+            }
+            const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
+            if (ImGui::TextLink("Want to become a sponsor?")) open_link(sponsor_policy);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", sponsor_policy);
         }
 
         ImGui::PopStyleVar(2);

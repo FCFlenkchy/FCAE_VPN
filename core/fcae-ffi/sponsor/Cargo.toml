@@ -1,0 +1,21 @@
+[package]
+name = "fcae-sponsor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Privacy-preserving sponsor manifest, media cache, and rotation for FCAE clients."
+
+[lib]
+name = "fcae_sponsor"
+path = "src/lib.rs"
+
+[dependencies]
+once_cell.workspace = true
+parking_lot.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+sha2 = "0.10"
+hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

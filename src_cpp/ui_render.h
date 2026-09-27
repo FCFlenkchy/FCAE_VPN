@@ -436,6 +436,9 @@ void log_callback(FcaeLogLevel level, const char* message, void* user_data);
 /// running (connect spinner), or while `interacting` is true.
 bool ui_should_render(bool interacting);
 
+// Implemented by each desktop renderer (OpenGL or DX11).
+ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation);
+
 /// How long (ms) the platform may sleep before calling ui_should_render()
 /// again. Small while something is animating or live, 1000 ms when idle.
 unsigned ui_sleep_ms();

@@ -1248,6 +1248,95 @@ pub unsafe extern "C" fn fcae_poll_update(out: *mut FcaeUpdateInfo) -> FcaeStatu
     }
 }
 
+static SPONSOR_FRAME: Mutex<Option<fcae_sponsor::SponsorFrame>> = Mutex::new(None);
+
+#[no_mangle]
+pub extern "C" fn fcae_sponsor_refresh_manifest_async() {
+    fcae_sponsor::refresh_manifest_async();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn fcae_sponsor_set_manifest_json(json: *const c_char) -> FcaeStatus {
+    guard("fcae_sponsor_set_manifest_json", move || {
+        if json.is_null() { return Err(CoreError::NullArgument("json")); }
+        let bytes = CStr::from_ptr(json).to_bytes();
+        fcae_sponsor::set_manifest_json(bytes).map_err(CoreError::InvalidConfig)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn fcae_sponsor_set_connected(connected: bool) {
+    fcae_sponsor::set_connected(connected);
+}
+
+#[no_mangle]
+pub extern "C" fn fcae_sponsor_next() {
+    fcae_sponsor::next_campaign();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn fcae_sponsor_set_cache_dir(path: *const c_char) -> FcaeStatus {
+    guard("fcae_sponsor_set_cache_dir", move || {
+        if path.is_null() { return Err(CoreError::NullArgument("path")); }
+        let value = CStr::from_ptr(path).to_str()
+            .map_err(|_| CoreError::InvalidConfig("sponsor cache path is not UTF-8".into()))?;
+        if value.is_empty() { return Err(CoreError::InvalidConfig("sponsor cache path is empty".into())); }
+        fcae_sponsor::set_cache_dir(value);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeStatus {
+    guard("fcae_sponsor_poll", move || {
+        let out = out.as_mut().ok_or(CoreError::NullArgument("out"))?;
+        if out.abi_version != FCAE_ABI_VERSION
+            || out.struct_size as usize != std::mem::size_of::<FcaeSponsorInfo>()
+        {
+            return Err(CoreError::AbiMismatch("FcaeSponsorInfo".into()));
+        }
+        let frame = fcae_sponsor::current_frame();
+        out.available = frame.is_some();
+        if let Some(frame) = frame {
+            out.width = frame.width;
+            out.height = frame.height;
+            out.rgba_size = frame.rgba.len().try_into()
+                .map_err(|_| CoreError::Internal("sponsor frame is too large".into()))?;
+            out.campaign_count = frame.campaign_count;
+            out.animated = frame.animated;
+            out.generation = frame.generation;
+            fill(&mut out.id, &frame.id);
+            fill(&mut out.title, &frame.title);
+            fill(&mut out.destination_url, &frame.destination_url);
+            *SPONSOR_FRAME.lock() = Some(frame);
+        } else {
+            out.width = 0;
+            out.height = 0;
+            out.rgba_size = 0;
+            out.campaign_count = 0;
+            out.animated = false;
+            out.generation = 0;
+            fill(&mut out.id, "");
+            fill(&mut out.title, "");
+            fill(&mut out.destination_url, "");
+            *SPONSOR_FRAME.lock() = None;
+        }
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn fcae_sponsor_copy_rgba(out: *mut u8, capacity: usize) -> FcaeStatus {
+    guard("fcae_sponsor_copy_rgba", move || {
+        let frame = SPONSOR_FRAME.lock();
+        let frame = frame.as_ref().ok_or_else(|| CoreError::Internal("no sponsor frame".into()))?;
+        if out.is_null() { return Err(CoreError::NullArgument("out")); }
+        if capacity < frame.rgba.len() { return Err(CoreError::InvalidConfig("sponsor frame buffer is too small".into())); }
+        std::ptr::copy_nonoverlapping(frame.rgba.as_slice().as_ptr(), out, frame.rgba.len());
+        Ok(())
+    })
+}
+
 #[cfg(all(test, feature = "tun", feature = "zeptun", feature = "hev"))]
 mod tun_provider_tests {
     use super::*;

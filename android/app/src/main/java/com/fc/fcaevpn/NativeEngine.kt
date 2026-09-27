@@ -227,7 +227,28 @@ object NativeEngine {
     @JvmStatic external fun nativeCheckForUpdates(currentVersion: String, includePrereleases: Boolean)
     @JvmStatic external fun nativePollUpdate(): FcaeUpdateInfo
     @JvmStatic external fun nativeCheckUpdateFromJson(currentVersion: String, json: String, includePrereleases: Boolean): Boolean
+
+    // Sponsor manifest may refresh on any network; external media is enabled
+    // only after the VPN reports connected.
+    @JvmStatic external fun nativeSponsorInit(cacheDir: String)
+    @JvmStatic external fun nativeSponsorSetManifest(json: String): Boolean
+    @JvmStatic external fun nativeSponsorSetConnected(connected: Boolean)
+    @JvmStatic external fun nativeSponsorNext()
+    @JvmStatic external fun nativePollSponsor(knownGeneration: Long): FcaeSponsorInfo
 }
+
+data class FcaeSponsorInfo(
+    val available: Boolean = false,
+    val id: String = "",
+    val title: String = "",
+    val destinationUrl: String = "",
+    val width: Int = 0,
+    val height: Int = 0,
+    val campaignCount: Int = 0,
+    val animated: Boolean = false,
+    val generation: Long = 0,
+    val rgba: ByteArray = byteArrayOf()
+)
 
 /**
  * Mirrors the C FcaeUpdateInfo struct in core/fcae-ffi/include/fcae.h.

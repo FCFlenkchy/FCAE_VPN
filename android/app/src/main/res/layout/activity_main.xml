@@ -1086,6 +1086,64 @@
                 android:popupBackground="#FF1E1E2C" />
 
             </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/homeSectionSponsor"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:id="@+id/sponsorCard"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/rounded_rectangle"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:orientation="vertical"
+                    android:padding="10dp"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="SPONSORED"
+                        android:textColor="#FF8A93A6"
+                        android:textSize="10sp"
+                        android:textStyle="bold" />
+
+                    <ImageView
+                        android:id="@+id/sponsorImage"
+                        android:layout_width="match_parent"
+                        android:layout_height="120dp"
+                        android:layout_marginTop="6dp"
+                        android:contentDescription="Sponsor image"
+                        android:scaleType="centerInside" />
+
+                    <TextView
+                        android:id="@+id/sponsorTitle"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:gravity="center"
+                        android:textColor="#FFE8ECF4"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/sponsorPolicyLink"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:gravity="center"
+                    android:text="Want to become a sponsor?"
+                    android:textColor="#FF60A5FA"
+                    android:textSize="12sp" />
+
+            </LinearLayout>
         </LinearLayout>
     </ScrollView>
 

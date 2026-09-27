@@ -886,6 +886,66 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
     return obj;
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorInit(JNIEnv* env, jclass, jstring cacheDir) {
+    ensure_init();
+    std::string path = jstr(env, cacheDir);
+    fcae_sponsor_set_cache_dir(path.c_str());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetManifest(JNIEnv* env, jclass, jstring json) {
+    ensure_init();
+    std::string value = jstr(env, json);
+    return fcae_sponsor_set_manifest_json(value.c_str()) == FCAE_OK ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetConnected(JNIEnv*, jclass, jboolean connected) {
+    ensure_init();
+    fcae_sponsor_set_connected(connected == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorNext(JNIEnv*, jclass) {
+    ensure_init();
+    fcae_sponsor_next();
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong knownGeneration) {
+    ensure_init();
+    jclass cls = env->FindClass("com/fc/fcaevpn/FcaeSponsorInfo");
+    if (!cls) return nullptr;
+    jobject obj = env->AllocObject(cls);
+    if (!obj) { env->DeleteLocalRef(cls); return nullptr; }
+
+    FcaeSponsorInfo info = {};
+    info.struct_size = sizeof(info);
+    info.abi_version = FCAE_ABI_VERSION;
+    fcae_sponsor_poll(&info);
+    const bool copyFrame = info.available && (jlong)info.generation != knownGeneration;
+    jbyteArray rgba = env->NewByteArray(copyFrame ? (jsize)info.rgba_size : 0);
+    if (rgba && copyFrame && info.rgba_size) {
+        std::vector<uint8_t> bytes(info.rgba_size);
+        if (fcae_sponsor_copy_rgba(bytes.data(), bytes.size()) == FCAE_OK)
+            env->SetByteArrayRegion(rgba, 0, (jsize)bytes.size(), (const jbyte*)bytes.data());
+    }
+    env->SetBooleanField(obj, env->GetFieldID(cls, "available", "Z"), info.available ? JNI_TRUE : JNI_FALSE);
+    env->SetObjectField(obj, env->GetFieldID(cls, "id", "Ljava/lang/String;"), env->NewStringUTF(info.id));
+    env->SetObjectField(obj, env->GetFieldID(cls, "title", "Ljava/lang/String;"), env->NewStringUTF(info.title));
+    env->SetObjectField(obj, env->GetFieldID(cls, "destinationUrl", "Ljava/lang/String;"), env->NewStringUTF(info.destination_url));
+    env->SetIntField(obj, env->GetFieldID(cls, "width", "I"), (jint)info.width);
+    env->SetIntField(obj, env->GetFieldID(cls, "height", "I"), (jint)info.height);
+    env->SetIntField(obj, env->GetFieldID(cls, "campaignCount", "I"), (jint)info.campaign_count);
+    env->SetBooleanField(obj, env->GetFieldID(cls, "animated", "Z"), info.animated ? JNI_TRUE : JNI_FALSE);
+    env->SetLongField(obj, env->GetFieldID(cls, "generation", "J"), (jlong)info.generation);
+    env->SetObjectField(obj, env->GetFieldID(cls, "rgba", "[B"), rgba);
+    if (rgba) env->DeleteLocalRef(rgba);
+    env->DeleteLocalRef(cls);
+    return obj;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeCheckUpdateFromJson(JNIEnv* env, jclass, jstring currentVersion, jstring json, jboolean includePrereleases) {
     ensure_init();

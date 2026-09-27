@@ -374,6 +374,21 @@ typedef struct {
     char     raw_body[4096];         /* server body on DECODE, else ""; ABI v9 */
 } FcaeUpdateInfo;
 
+typedef struct {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    bool     available;
+    uint32_t width;
+    uint32_t height;
+    uint32_t rgba_size;
+    uint32_t campaign_count;
+    bool     animated;
+    uint64_t generation;
+    char     id[65];
+    char     title[97];
+    char     destination_url[512];
+} FcaeSponsorInfo;
+
 /* ── Callbacks ─────────────────────────────────────────────────────── */
 
 /* Invoked from arbitrary threads; `message` is only valid for the call. */
@@ -546,6 +561,21 @@ FcaeStatus fcae_check_update_from_json(const char *current_version,
  * FCAE_TIMEOUT while one is still in flight.
  * `out->struct_size` and `out->abi_version` must be set before calling. */
 FcaeStatus fcae_poll_update(FcaeUpdateInfo *out);
+
+/* ── Privacy-preserving sponsors ───────────────────────────────────── */
+
+/* Fetch the small GitHub manifest asynchronously. Media is never fetched
+ * until fcae_sponsor_set_connected(true) is called. */
+void fcae_sponsor_refresh_manifest_async(void);
+FcaeStatus fcae_sponsor_set_manifest_json(const char *json);
+void fcae_sponsor_set_connected(bool connected);
+void fcae_sponsor_next(void);
+FcaeStatus fcae_sponsor_set_cache_dir(const char *path);
+
+/* Poll current locally rotating card. FCAE_OK with available=false means hidden. */
+FcaeStatus fcae_sponsor_poll(FcaeSponsorInfo *out);
+/* Copy the RGBA frame reported by the latest poll. */
+FcaeStatus fcae_sponsor_copy_rgba(uint8_t *out, size_t capacity);
 
 #ifdef __cplusplus
 } /* extern "C" */

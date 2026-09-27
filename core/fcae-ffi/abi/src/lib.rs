@@ -541,6 +541,24 @@ pub struct FcaeUpdateInfo {
     pub raw_body: [c_char; 4096],
 }
 
+/// Current sponsor card and decoded frame metadata.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FcaeSponsorInfo {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub available: bool,
+    pub width: u32,
+    pub height: u32,
+    pub rgba_size: u32,
+    pub campaign_count: u32,
+    pub animated: bool,
+    pub generation: u64,
+    pub id: [c_char; 65],
+    pub title: [c_char; 97],
+    pub destination_url: [c_char; 512],
+}
+
 // ── Callbacks ───────────────────────────────────────────────────────────
 
 /// Log sink. Invoked from arbitrary engine threads; `message` is only valid

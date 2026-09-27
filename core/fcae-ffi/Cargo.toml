@@ -8,6 +8,7 @@
 members = [
     "abi",
     "runtime",
+    "sponsor",
     "ffi",
     "buildtools",
     "bridges/tun2socks",
@@ -28,6 +29,7 @@ license = "GPL-3.0"
 [workspace.dependencies]
 fcae-abi = { path = "abi" }
 fcae-runtime = { path = "runtime" }
+fcae-sponsor = { path = "sponsor" }
 fcae-build = { path = "buildtools" }
 fcae-bridge-tun2socks = { path = "bridges/tun2socks" }
 fcae-bridge-aether = { path = "bridges/aether" }

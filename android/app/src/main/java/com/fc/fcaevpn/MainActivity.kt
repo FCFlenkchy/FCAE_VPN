@@ -68,6 +68,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnCheckUpdates: MaterialButton
     private var updateAvailableInfo: FcaeUpdateInfo? = null
     private var updateResultDialog: androidx.appcompat.app.AlertDialog? = null
+    private lateinit var sponsorCard: android.view.View
+    private lateinit var sponsorImage: android.widget.ImageView
+    private lateinit var sponsorTitle: TextView
+    private var sponsorGeneration = -1L
+    private var sponsorDestination = ""
+    private var sponsorBitmap: android.graphics.Bitmap? = null
+    private var sponsorConnected = false
+    private var sponsorAnimated = false
+    private var sponsorCampaignCount = 0
+    private val sponsorPollBusy = AtomicBoolean(false)
+    private var lastSponsorManifestFetch = 0L
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
     private lateinit var spinnerScan: Spinner
@@ -556,6 +567,102 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val sponsorManifestRefresh = object : Runnable {
+        override fun run() {
+            if (!inForeground) return
+            val now = android.os.SystemClock.elapsedRealtime()
+            val interval = 15 * 60_000L
+            if (now - lastSponsorManifestFetch >= interval) refreshSponsorManifest(now)
+            val remaining = (interval - (now - lastSponsorManifestFetch)).coerceAtLeast(1_000L)
+            handler.postDelayed(this, remaining)
+        }
+    }
+
+    private fun refreshSponsorManifest(now: Long = android.os.SystemClock.elapsedRealtime()) {
+        lastSponsorManifestFetch = now
+        bgExecutor.execute {
+            var connection: java.net.HttpURLConnection? = null
+            try {
+                connection = java.net.URL(
+                    "https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/sponsors.json"
+                ).openConnection() as java.net.HttpURLConnection
+                connection.instanceFollowRedirects = false
+                connection.connectTimeout = 8_000
+                connection.readTimeout = 8_000
+                connection.setRequestProperty("User-Agent", "FCAE-VPN sponsor client")
+                if (connection.responseCode !in 200..299)
+                    throw java.io.IOException("manifest HTTP ${connection.responseCode}")
+                connection.inputStream.use { input ->
+                    val output = java.io.ByteArrayOutputStream()
+                    val buffer = ByteArray(8_192)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (output.size() + count > 128 * 1024)
+                            throw java.io.IOException("manifest too large")
+                        output.write(buffer, 0, count)
+                    }
+                    NativeEngine.nativeSponsorSetManifest(output.toString(Charsets.UTF_8.name()))
+                }
+            } catch (_: Throwable) {
+            } finally {
+                connection?.disconnect()
+            }
+        }
+    }
+
+    private val sponsorPoll = object : Runnable {
+        override fun run() {
+            if (!inForeground || !::sponsorCard.isInitialized) return
+            if (sponsorPollBusy.compareAndSet(false, true)) {
+                val knownGeneration = sponsorGeneration
+                bgExecutor.execute {
+                    val info = try { NativeEngine.nativePollSponsor(knownGeneration) } catch (_: Throwable) { null }
+                    handler.post {
+                        try {
+                            if (info == null || !info.available) {
+                                sponsorCard.visibility = android.view.View.GONE
+                                sponsorDestination = ""
+                                sponsorAnimated = false
+                                sponsorCampaignCount = 0
+                            } else {
+                                sponsorAnimated = info.animated
+                                sponsorCampaignCount = info.campaignCount
+                                if (info.generation != sponsorGeneration && info.rgba.isNotEmpty()
+                                    && info.width > 0 && info.height > 0) {
+                                    val current = sponsorBitmap
+                                    val bitmap = if (current != null && current.width == info.width
+                                        && current.height == info.height) current else {
+                                        current?.recycle()
+                                        android.graphics.Bitmap.createBitmap(
+                                            info.width, info.height, android.graphics.Bitmap.Config.ARGB_8888
+                                        ).also { sponsorBitmap = it }
+                                    }
+                                    bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(info.rgba))
+                                    sponsorImage.setImageBitmap(bitmap)
+                                    sponsorImage.invalidate()
+                                    sponsorTitle.text = info.title
+                                    sponsorDestination = info.destinationUrl
+                                    sponsorGeneration = info.generation
+                                    sponsorCard.visibility = android.view.View.VISIBLE
+                                }
+                            }
+                        } finally {
+                            sponsorPollBusy.set(false)
+                        }
+                    }
+                }
+            }
+            val delay = when {
+                sponsorCard.visibility != android.view.View.VISIBLE -> 500L
+                sponsorAnimated -> 100L
+                sponsorCampaignCount > 1 -> 250L
+                else -> 5_000L
+            }
+            handler.postDelayed(this, delay)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // The UI is a fixed dark design, but the app theme is DayNight and
         // therefore followed the device system setting. Recent Android
@@ -593,6 +700,48 @@ class MainActivity : AppCompatActivity() {
         btnTunStart = findViewById(R.id.btnTunStart)
         layoutTunPauseResume = findViewById(R.id.layoutTunPauseResume)
         btnCheckUpdates = findViewById(R.id.btnCheckUpdates)
+        sponsorCard = findViewById(R.id.sponsorCard)
+        sponsorImage = findViewById(R.id.sponsorImage)
+        sponsorTitle = findViewById(R.id.sponsorTitle)
+        sponsorCard.setOnClickListener {
+            sponsorDestination.takeIf { it.startsWith("https://") }?.let(::openExternal)
+        }
+        val sponsorSwipeThreshold = android.view.ViewConfiguration.get(this).scaledTouchSlop * 3
+        var sponsorTouchX = 0f
+        var sponsorSwiped = false
+        sponsorCard.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    sponsorTouchX = event.x
+                    sponsorSwiped = false
+                    true
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    if (sponsorCampaignCount > 1
+                        && kotlin.math.abs(event.x - sponsorTouchX) >= sponsorSwipeThreshold) {
+                        sponsorSwiped = true
+                        view.parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    if (sponsorSwiped) {
+                        try { NativeEngine.nativeSponsorNext() } catch (_: Throwable) {}
+                    } else {
+                        view.performClick()
+                    }
+                    true
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> true
+                else -> false
+            }
+        }
+        findViewById<android.view.View>(R.id.sponsorPolicyLink).setOnClickListener {
+            openExternal("https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md")
+        }
+        try { NativeEngine.nativeSponsorInit(java.io.File(cacheDir, "sponsors").absolutePath) }
+        catch (_: Throwable) {}
+        refreshSponsorManifest()
         spinnerProtocol = findViewById(R.id.spinnerProtocol)
         spinnerMode = findViewById(R.id.spinnerMode)
         spinnerScan = findViewById(R.id.spinnerScan)
@@ -689,6 +838,7 @@ class MainActivity : AppCompatActivity() {
             findViewById(R.id.homeSectionStatus),
             findViewById(R.id.homeSectionProtocol),
             findViewById(R.id.homeSectionEgress),
+            findViewById(R.id.homeSectionSponsor),
         )
 
         fun setTabAppearance(
@@ -1209,6 +1359,8 @@ class MainActivity : AppCompatActivity() {
         // TextView updates have nothing to draw into, and the notification
         // already carries the "still connected" signal.
         handler.removeCallbacks(poll)
+        handler.removeCallbacks(sponsorPoll)
+        handler.removeCallbacks(sponsorManifestRefresh)
         saveSettings()
     }
 
@@ -1345,6 +1497,10 @@ class MainActivity : AppCompatActivity() {
         catch (_: Throwable) {}
         handleWidgetIntent(intent)
         inForeground = true
+        handler.removeCallbacks(sponsorPoll)
+        handler.post(sponsorPoll)
+        handler.removeCallbacks(sponsorManifestRefresh)
+        handler.post(sponsorManifestRefresh)
         if (isPsiphonSelected() || isEgressPsiphon()) {
             // The Activity receiver is not registered while it is stopped.
             // Ask the still-bound service to replay its learned list before
@@ -2914,6 +3070,11 @@ class MainActivity : AppCompatActivity() {
         errMsg: String,
         logs: String
     ) {
+        val connectedForSponsors = state == 4
+        if (connectedForSponsors != sponsorConnected) {
+            sponsorConnected = connectedForSponsors
+            try { NativeEngine.nativeSponsorSetConnected(connectedForSponsors) } catch (_: Throwable) {}
+        }
         if (notificationPause() || FCAEVpnService.holdConnectedUi || commandPaused) {
             engineRunning = true
             vpnActive = true
