@@ -735,6 +735,3 @@ impl_try_from_enum!(FcaeStatus, {
     Timeout = 9,
     Internal = 10,
 });
-ut = 9,
-    Internal = 10,
-});
