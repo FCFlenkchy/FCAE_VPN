@@ -5,7 +5,6 @@
       "id": "test",
       "title": "test",
       "message": "HAVE FUN",
-      "media_url": "https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/android_ui.png",
       "destination_url": "https://github.com",
       "enabled": true
     }
