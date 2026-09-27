@@ -193,11 +193,11 @@ Bug reports and feature requests belong in **[GitHub Issues](https://github.com/
 
 ## Support development
 
-If you'd like to support the developer, you can send TON (The Open Network) to:
+If you'd like to support the developer, you can send GRAM (The Open Network) to:
 
 `UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV`
 
-Use the TON network only. Donations are optional.
+Use The Open Network only. Donations are optional.
 
 ## Contributing
 

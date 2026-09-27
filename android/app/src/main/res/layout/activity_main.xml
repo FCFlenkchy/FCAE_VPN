@@ -243,14 +243,6 @@
                     android:textColor="#FF60A5FA"
                     android:textSize="14sp" />
 
-                <TextView
-                    android:id="@+id/updateStatus"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textColor="#FF9AA3B5"
-                    android:textSize="12sp"
-                    android:visibility="gone" />
 
             </LinearLayout>
             <LinearLayout

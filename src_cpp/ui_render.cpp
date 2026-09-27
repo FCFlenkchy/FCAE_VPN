@@ -1148,7 +1148,7 @@ static const char* const kLinkTelegram = "https://t.me/FCAE_VPN";
 static const char* const kLinkGithub = "https://github.com/FCFlenkchy/FCAE_VPN";
 static const std::string kLinkCredits = std::string(kLinkGithub) + "#credits";
 static const std::string kLinkLicense = std::string(kLinkGithub) + "/blob/main/LICENSE";
-static const char* const kTonAddress = "UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV";
+static const char* const kGramAddress = "UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV";
 struct CommunityLink { const char* label; const char* url; const char* shown; };
 static const CommunityLink kCommunityLinks[] = {
     { "Telegram", kLinkTelegram, "t.me/FCAE_VPN" },
@@ -1506,17 +1506,20 @@ void render_ui() {
                 s_update_available = false;
                 s_update_error_kind = FCAE_UPDATE_ERROR_NETWORK;
                 snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
-                if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.14f, 0.14f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.76f, 0.19f, 0.19f, 1.0f));
+                if (ImGui::Button("Check Timed Out", ImVec2(btn_width, 34))) {
                     fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
                     s_update_checked = false;
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
+                ImGui::PopStyleColor(2);
             } else {
+                char checking_label[32];
+                snprintf(checking_label, sizeof(checking_label), "Checking... %llds", (long long)elapsed);
                 ImGui::BeginDisabled();
-                ImGui::Button("Checking...", ImVec2(btn_width, 34));
+                ImGui::Button(checking_label, ImVec2(btn_width, 34));
                 ImGui::EndDisabled();
-                ImGui::SameLine(0, 6);
-                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(%llds)", (long long)elapsed);
             }
         } else if (done && info.update_available) {
                 s_update_available = true;
@@ -1549,11 +1552,21 @@ void render_ui() {
                     if (ImGui::Button("ATTENTION!", ImVec2(btn_width, 34)))
                         s_update_decode_popup_open = true;
                     ImGui::PopStyleColor(2);
-                } else if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
-                    fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
-                    s_update_checked = false;
-                    s_update_available = false;
-                    s_check_start_time = std::chrono::steady_clock::now();
+                } else {
+                    const bool failed = s_update_error_kind != FCAE_UPDATE_ERROR_NONE;
+                    ImGui::PushStyleColor(ImGuiCol_Button,
+                        failed ? ImVec4(0.62f, 0.14f, 0.14f, 1.0f)
+                               : ImVec4(0.12f, 0.48f, 0.20f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                        failed ? ImVec4(0.76f, 0.19f, 0.19f, 1.0f)
+                               : ImVec4(0.16f, 0.60f, 0.26f, 1.0f));
+                    if (ImGui::Button(failed ? "Check Failed" : "Up to Date", ImVec2(btn_width, 34))) {
+                        fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
+                        s_update_checked = false;
+                        s_update_available = false;
+                        s_check_start_time = std::chrono::steady_clock::now();
+                    }
+                    ImGui::PopStyleColor(2);
                 }
             } else {
                 if (ImGui::Button("Check for Updates", ImVec2(btn_width, 34))) {
@@ -1563,16 +1576,6 @@ void render_ui() {
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
             }
-
-            // Status text
-        if ((done || (info.check_in_progress && s_update_checked)) && !s_update_available && s_update_checked) {
-            ImGui::SetCursorPosX((avail - btn_width) * 0.5f);
-            if (s_update_error_kind != FCAE_UPDATE_ERROR_NONE) {
-                ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "%s", s_update_status);
-            } else {
-                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", s_update_status);
-            }
-        }
 
             // Update popup modal
             if (s_update_popup_open) {
@@ -1690,9 +1693,9 @@ void render_ui() {
                 }
                 ImGui::Spacing();
                 ImGui::Separator();
-                ImGui::TextUnformatted("Support the developer with TON (The Open Network):");
-                ImGui::TextUnformatted(kTonAddress);
-                if (ImGui::Button("Copy TON address")) ImGui::SetClipboardText(kTonAddress);
+                ImGui::TextUnformatted("Support the developer with GRAM (The Open Network):");
+                ImGui::TextUnformatted(kGramAddress);
+                if (ImGui::Button("Copy GRAM address")) ImGui::SetClipboardText(kGramAddress);
                 ImGui::Spacing();
                 ImGui::TextDisabled("%s", build_is_prerelease()
                     ? "Pre-released under the" : "Released under the");

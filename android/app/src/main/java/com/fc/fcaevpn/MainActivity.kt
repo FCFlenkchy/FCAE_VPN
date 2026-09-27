@@ -66,7 +66,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnTunStart: MaterialButton
     private lateinit var layoutTunPauseResume: android.view.View
     private lateinit var btnCheckUpdates: MaterialButton
-    private lateinit var updateStatus: TextView
     private var updateAvailableInfo: FcaeUpdateInfo? = null
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
@@ -593,7 +592,6 @@ class MainActivity : AppCompatActivity() {
         btnTunStart = findViewById(R.id.btnTunStart)
         layoutTunPauseResume = findViewById(R.id.layoutTunPauseResume)
         btnCheckUpdates = findViewById(R.id.btnCheckUpdates)
-        updateStatus = findViewById(R.id.updateStatus)
         spinnerProtocol = findViewById(R.id.spinnerProtocol)
         spinnerMode = findViewById(R.id.spinnerMode)
         spinnerScan = findViewById(R.id.spinnerScan)
@@ -2246,8 +2244,6 @@ class MainActivity : AppCompatActivity() {
     private fun checkForUpdates() {
         btnCheckUpdates.isEnabled = false
         styleUpdateButton("Checking...", COLOR_UPDATE_IDLE)
-        updateStatus.visibility = android.view.View.VISIBLE
-        updateStatus.text = "Checking for updates..."
         updateAvailableInfo = null  // Clear cached info on new check
 
         NativeEngine.nativeCheckForUpdates(BuildConfig.APP_VERSION, switchPreReleases.isChecked)
@@ -2278,7 +2274,6 @@ class MainActivity : AppCompatActivity() {
                     when {
                         info.updateAvailable -> {
                             styleUpdateButton("Update Available!", COLOR_UPDATE_AVAILABLE)
-                            updateStatus.text = info.statusMessage
                             // The button is the only prompt; the dialog is a tap.
                             updateAvailableInfo = info
                         }
@@ -2287,26 +2282,26 @@ class MainActivity : AppCompatActivity() {
                         // raised loudly and the tap shows what the server sent.
                         info.decodeFailed -> {
                             styleUpdateButton("ATTENTION!", Color.WHITE, COLOR_UPDATE_ATTENTION)
-                            updateStatus.text = info.statusMessage
                             updateAvailableInfo = info
                         }
+                        info.checkDone && info.errorKind == 0 -> {
+                            styleUpdateButton("Up to Date", COLOR_CONNECTED)
+                            updateAvailableInfo = null
+                        }
                         info.checkDone -> {
-                            styleUpdateButton("Check for Updates", COLOR_UPDATE_IDLE)
-                            updateStatus.text = info.statusMessage
+                            styleUpdateButton("Check Failed", COLOR_ERROR)
                             updateAvailableInfo = null
                         }
                         else -> {
-                            styleUpdateButton("Check for Updates", COLOR_UPDATE_IDLE)
-                            updateStatus.text = "Check timed out"
+                            styleUpdateButton("Check Timed Out", COLOR_ERROR)
                             updateAvailableInfo = null
                         }
                     }
                 }
-            } catch (e: Throwable) {
+            } catch (_: Throwable) {
                 handler.post {
                     btnCheckUpdates.isEnabled = true
-                    styleUpdateButton("Check for Updates", COLOR_UPDATE_IDLE)
-                    updateStatus.text = "Update check failed: ${e.message}"
+                    styleUpdateButton("Check Failed", COLOR_ERROR)
                 }
             }
         }.start()
@@ -2666,27 +2661,27 @@ class MainActivity : AppCompatActivity() {
         }
         content.addView(row)
         content.addView(TextView(this).apply {
-            text = "Support the developer with TON (The Open Network):"
+            text = "Support the developer with GRAM (The Open Network):"
             setTextColor(Color.WHITE)
             textSize = 14f
             setPadding(0, (12 * density).toInt(), 0, (4 * density).toInt())
         })
         content.addView(TextView(this).apply {
-            text = TON_ADDRESS
+            text = GRAM_ADDRESS
             typeface = Typeface.MONOSPACE
             textSize = 12f
             setTextColor(Color.WHITE)
             setTextIsSelectable(true)
         })
         content.addView(MaterialButton(this).apply {
-            text = "Copy TON address"
+            text = "Copy GRAM address"
             isAllCaps = false
             backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FF0088CC"))
             setTextColor(Color.WHITE)
             setOnClickListener {
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("TON address", TON_ADDRESS))
-                Toast.makeText(this@MainActivity, "TON address copied", Toast.LENGTH_SHORT).show()
+                clipboard.setPrimaryClip(ClipData.newPlainText("GRAM address", GRAM_ADDRESS))
+                Toast.makeText(this@MainActivity, "GRAM address copied", Toast.LENGTH_SHORT).show()
             }
         })
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
@@ -3306,7 +3301,7 @@ class MainActivity : AppCompatActivity() {
         private const val LINK_GITHUB = "https://github.com/FCFlenkchy/FCAE_VPN"
         private const val LINK_CREDITS = LINK_GITHUB + "#credits"
         private const val LINK_LICENSE = LINK_GITHUB + "/blob/main/LICENSE"
-        private const val TON_ADDRESS = "UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV"
+        private const val GRAM_ADDRESS = "UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV"
 
         // Pre-computed Color constants — avoids String.parseColor() on every poll tick.
         private val COLOR_CONNECTED = Color.parseColor("#34D399")

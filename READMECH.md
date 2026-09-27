@@ -195,11 +195,11 @@ Bug 反馈与功能建议请提交到 **[GitHub Issues](https://github.com/FCFle
 
 ## 支持开发
 
-如果您愿意支持开发者，可以通过 TON（The Open Network）向以下地址捐赠：
+如果您愿意支持开发者，可以通过 GRAM（The Open Network）向以下地址捐赠：
 
 `UQAz9mcfJ5qlba97SPbrCw-Yt8OhhT58yG9PzARyu1Muz0jV`
 
-请仅使用 TON 网络。捐赠完全自愿。
+请仅使用 The Open Network 网络。捐赠完全自愿。
 
 ## 贡献
 
