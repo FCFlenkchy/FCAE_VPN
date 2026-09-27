@@ -61,15 +61,17 @@ static std::chrono::steady_clock::time_point s_sponsor_manifest_check = {};
 
 static void poll_sponsor() {
     const auto now = std::chrono::steady_clock::now();
-    if (!s_sponsor_started || now >= s_sponsor_manifest_check) {
-        if (!s_sponsor_started) fcae_sponsor_load_cache();
+    if (!s_sponsor_started) {
+        fcae_sponsor_load_cache();
         s_sponsor_started = true;
+    }
+    fcae_sponsor_set_connected(g_app.ffi_state.load() == FCAE_STATE_CONNECTED);
+    if (now >= s_sponsor_manifest_check) {
         const uint64_t remaining = fcae_sponsor_manifest_refresh_remaining_secs();
         if (remaining == 0) fcae_sponsor_refresh_manifest_async();
         const uint64_t check_after = remaining == 0 ? 12 * 60 * 60 : remaining;
         s_sponsor_manifest_check = now + std::chrono::seconds(check_after);
     }
-    fcae_sponsor_set_connected(g_app.ffi_state.load() == FCAE_STATE_CONNECTED);
     FcaeSponsorInfo info = {};
     info.struct_size = sizeof(info);
     info.abi_version = FCAE_ABI_VERSION;
@@ -1809,7 +1811,7 @@ void render_ui() {
 
             ImGui::Spacing();
             if (s_sponsor.available) {
-                ImTextureID texture = nullptr;
+                ImTextureID texture = ImTextureID{};
                 if (!s_sponsor_rgba.empty() && s_sponsor.width > 0 && s_sponsor.height > 0
                         && s_sponsor_loaded_generation == s_sponsor.generation) {
                     texture = sponsor_texture_update(

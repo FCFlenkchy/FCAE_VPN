@@ -919,6 +919,12 @@ Java_com_fc_fcaevpn_NativeEngine_nativeSponsorManifestCheckStarted(JNIEnv*, jcla
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorRefreshManifestAsync(JNIEnv*, jclass) {
+    ensure_init();
+    fcae_sponsor_refresh_manifest_async();
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetConnected(JNIEnv*, jclass, jboolean connected) {
     ensure_init();
     fcae_sponsor_set_connected(connected == JNI_TRUE);

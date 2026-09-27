@@ -228,13 +228,14 @@ object NativeEngine {
     @JvmStatic external fun nativePollUpdate(): FcaeUpdateInfo
     @JvmStatic external fun nativeCheckUpdateFromJson(currentVersion: String, json: String, includePrereleases: Boolean): Boolean
 
-    // Sponsor manifest may refresh on any network; external media is enabled
-    // only after the VPN reports connected.
+    // Sponsor manifest and media are fetched by the native sponsor client
+    // through the connected session's local tunnel proxy.
     @JvmStatic external fun nativeSponsorInit(cacheDir: String)
     @JvmStatic external fun nativeSponsorSetManifest(json: String): Boolean
     @JvmStatic external fun nativeSponsorManifestDue(): Boolean
     @JvmStatic external fun nativeSponsorManifestRefreshRemainingSecs(): Long
     @JvmStatic external fun nativeSponsorManifestCheckStarted()
+    @JvmStatic external fun nativeSponsorRefreshManifestAsync()
     @JvmStatic external fun nativeSponsorSetConnected(connected: Boolean)
     @JvmStatic external fun nativeSponsorNext()
     @JvmStatic external fun nativePollSponsor(knownGeneration: Long): FcaeSponsorInfo

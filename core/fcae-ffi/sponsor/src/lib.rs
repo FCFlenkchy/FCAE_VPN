@@ -1,6 +1,6 @@
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat};
 use once_cell::sync::Lazy;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
 use std::{
     collections::{HashSet, hash_map::DefaultHasher},
@@ -139,6 +139,7 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
     last_error: String::new(),
 }));
 static CONNECTED: AtomicBool = AtomicBool::new(false);
+static SPONSOR_PROXY: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
 static MANIFEST_BUSY: AtomicBool = AtomicBool::new(false);
 static MEDIA_BUSY: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -171,9 +172,19 @@ pub fn load_cached_manifest() {
     }
 }
 
+pub fn set_proxy(proxy: Option<String>) {
+    *SPONSOR_PROXY.write() = proxy;
+}
+
 pub fn set_connected(connected: bool) {
     let was = CONNECTED.swap(connected, Ordering::AcqRel);
-    if connected && !was { refresh_media_async(); }
+    if connected && !was {
+        if manifest_due() {
+            refresh_manifest_async();
+        } else {
+            refresh_media_async();
+        }
+    }
 }
 
 pub fn manifest_refresh_remaining_secs() -> u64 {
@@ -185,6 +196,7 @@ pub fn manifest_refresh_remaining_secs() -> u64 {
 }
 
 pub fn manifest_check_started() {
+    if !CONNECTED.load(Ordering::Acquire) { return; }
     let now = unix_now();
     let cache_dir = {
         let mut state = STATE.lock();
@@ -246,7 +258,12 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
 }
 
 pub fn refresh_manifest_async() {
-    if !manifest_due() || MANIFEST_BUSY.swap(true, Ordering::AcqRel) { return; }
+    if !CONNECTED.load(Ordering::Acquire)
+        || !manifest_due()
+        || MANIFEST_BUSY.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
     manifest_check_started();
     thread::spawn(|| {
         match fetch_manifest() {
@@ -255,7 +272,12 @@ pub fn refresh_manifest_async() {
                     STATE.lock().last_error = error;
                 }
             }
-            Err(error) => STATE.lock().last_error = error,
+            Err(error) => {
+                STATE.lock().last_error = error;
+                if CONNECTED.load(Ordering::Acquire) {
+                    refresh_media_async();
+                }
+            }
         }
         MANIFEST_BUSY.store(false, Ordering::Release);
     });
@@ -354,7 +376,7 @@ pub fn current_frame() -> Option<SponsorFrame> {
 pub fn last_error() -> String { STATE.lock().last_error.clone() }
 
 fn fetch_manifest() -> Result<Vec<u8>, String> {
-    let response = client().get(MANIFEST_URL).send().map_err(|e| e.to_string())?;
+    let response = client()?.get(MANIFEST_URL).send().map_err(|e| e.to_string())?;
     if !response.status().is_success() { return Err(format!("manifest HTTP {}", response.status())); }
     read_limited(response, MAX_MANIFEST_BYTES)
 }
@@ -475,7 +497,7 @@ fn cache_name(c: &Campaign) -> String {
 
 fn download_media(c: &Campaign) -> Result<Vec<u8>, String> {
     let url = c.media_url.as_deref().ok_or_else(|| "sponsor has no media URL".to_string())?;
-    let response = client().get(url).send().map_err(|e| e.to_string())?;
+    let response = client()?.get(url).send().map_err(|e| e.to_string())?;
     if !response.status().is_success() { return Err(format!("media HTTP {}", response.status())); }
     read_limited(response, MAX_MEDIA_BYTES)
 }
@@ -547,8 +569,14 @@ fn validate_dimensions(width: u32, height: u32, frames: usize) -> Result<(), Str
     Ok(())
 }
 
-fn client() -> reqwest::blocking::Client {
+fn client() -> Result<reqwest::blocking::Client, String> {
+    let proxy = SPONSOR_PROXY
+        .read()
+        .clone()
+        .ok_or_else(|| "sponsor network is unavailable without a connected tunnel".to_string())?;
+    let proxy = reqwest::Proxy::all(&proxy).map_err(|e| format!("invalid sponsor tunnel proxy: {e}"))?;
     reqwest::blocking::Client::builder()
+        .proxy(proxy)
         .timeout(Duration::from_secs(12))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.url().scheme() != "https" {
@@ -561,5 +589,5 @@ fn client() -> reqwest::blocking::Client {
         }))
         .user_agent("FCAE-VPN sponsor client")
         .build()
-        .expect("static HTTP client configuration")
+        .map_err(|e| format!("cannot create sponsor tunnel client: {e}"))
 }

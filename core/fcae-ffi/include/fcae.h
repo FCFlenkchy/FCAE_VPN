@@ -565,8 +565,9 @@ FcaeStatus fcae_poll_update(FcaeUpdateInfo *out);
 
 /* ── Privacy-preserving sponsors ───────────────────────────────────── */
 
-/* Fetch the small GitHub manifest asynchronously. Media is never fetched
- * until fcae_sponsor_set_connected(true) is called. */
+/* Fetch the manifest and media asynchronously through the connected
+ * session's local proxy endpoint. No sponsor request is made while the
+ * session is disconnected or has no tunnel proxy. */
 void fcae_sponsor_load_cache(void);
 void fcae_sponsor_refresh_manifest_async(void);
 bool fcae_sponsor_manifest_due(void);

@@ -525,6 +525,29 @@ fn tun_backend_description() -> String {
     }
 }
 
+fn sponsor_proxy_for(config: &config::SessionConfig) -> Option<String> {
+    let (scheme, port) = if config.backend == FcaeBackend::Psiphon
+        || config.psiphon.through_tunnel
+    {
+        ("socks5h", config.psiphon.socks_port)
+    } else if config.tor.is_exit() {
+        let port = config
+            .tor
+            .bind
+            .as_deref()
+            .and_then(|bind| bind.parse::<std::net::SocketAddr>().ok())
+            .map(|address| address.port())
+            .unwrap_or(0);
+        ("socks5h", port)
+    } else if config.socks_port != 0 {
+        ("socks5h", config.socks_port)
+    } else {
+        ("http", config.http_port)
+    };
+
+    (port != 0).then(|| format!("{scheme}://127.0.0.1:{port}"))
+}
+
 /// Start a session.
 ///
 /// # Safety
@@ -549,7 +572,11 @@ pub unsafe extern "C" fn fcae_start(cfg: *const FcaeConfig) -> FcaeStatus {
             (fcae_abi::FcaeMode::Proxy, _) => rt.engines.clear_android_fd(),
         }
 
-        rt.supervisor.start(parsed)
+        let sponsor_proxy = sponsor_proxy_for(&parsed);
+        rt.supervisor.start(parsed)?;
+        fcae_sponsor::set_proxy(sponsor_proxy);
+        fcae_sponsor::set_connected(false);
+        Ok(())
     })
 }
 
@@ -558,7 +585,13 @@ pub unsafe extern "C" fn fcae_start(cfg: *const FcaeConfig) -> FcaeStatus {
 /// reconnect remains gated until the background reaper joins that worker.
 #[no_mangle]
 pub extern "C" fn fcae_stop() -> FcaeStatus {
-    guard("fcae_stop", || runtime()?.supervisor.stop())
+    guard("fcae_stop", || {
+        let rt = runtime()?;
+        let result = rt.supervisor.stop();
+        fcae_sponsor::set_connected(false);
+        fcae_sponsor::set_proxy(None);
+        result
+    })
 }
 
 /// Cancel and abort owned TUN descriptors without joining the session.
@@ -569,6 +602,8 @@ pub extern "C" fn fcae_stop() -> FcaeStatus {
 pub extern "C" fn fcae_stop_begin() -> FcaeStatus {
     guard("fcae_stop_begin", || {
         runtime()?.supervisor.begin_stop();
+        fcae_sponsor::set_connected(false);
+        fcae_sponsor::set_proxy(None);
         Ok(())
     })
 }
@@ -1111,6 +1146,8 @@ fn backend_display_name(id: FcaeBackend) -> &'static str {
 #[no_mangle]
 pub extern "C" fn fcae_shutdown() -> FcaeStatus {
     guard("fcae_shutdown", || {
+        fcae_sponsor::set_connected(false);
+        fcae_sponsor::set_proxy(None);
         if let Some(rt) = RUNTIME.get() {
             let _ = rt.supervisor.stop();
             // stop() is instant for the UI; this call additionally means

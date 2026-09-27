@@ -585,36 +585,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshSponsorManifest() {
-        try { NativeEngine.nativeSponsorManifestCheckStarted() } catch (_: Throwable) { return }
-        bgExecutor.execute {
-            var connection: java.net.HttpURLConnection? = null
-            try {
-                connection = java.net.URL(
-                    "https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/sponsors.json"
-                ).openConnection() as java.net.HttpURLConnection
-                connection.instanceFollowRedirects = false
-                connection.connectTimeout = 8_000
-                connection.readTimeout = 8_000
-                connection.setRequestProperty("User-Agent", "FCAE-VPN sponsor client")
-                if (connection.responseCode !in 200..299)
-                    throw java.io.IOException("manifest HTTP ${connection.responseCode}")
-                connection.inputStream.use { input ->
-                    val output = java.io.ByteArrayOutputStream()
-                    val buffer = ByteArray(8_192)
-                    while (true) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        if (output.size() + count > 128 * 1024)
-                            throw java.io.IOException("manifest too large")
-                        output.write(buffer, 0, count)
-                    }
-                    NativeEngine.nativeSponsorSetManifest(output.toString(Charsets.UTF_8.name()))
-                }
-            } catch (_: Throwable) {
-            } finally {
-                connection?.disconnect()
-            }
-        }
+        if (!sponsorConnected) return
+        try { NativeEngine.nativeSponsorRefreshManifestAsync() } catch (_: Throwable) {}
     }
 
     private val sponsorPoll = object : Runnable {
