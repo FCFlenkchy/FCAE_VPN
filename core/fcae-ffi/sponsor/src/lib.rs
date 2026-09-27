@@ -17,14 +17,10 @@ pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/sponsors.json";
 const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 const MAX_MEDIA_BYTES: usize = 2 * 1024 * 1024;
-#[cfg(target_os = "android")]
+// One portable sponsor canvas keeps the manifest behavior identical on every
+// platform and fits the Android card without requiring platform-specific assets.
 const MAX_WIDTH: u32 = 800;
-#[cfg(not(target_os = "android"))]
-const MAX_WIDTH: u32 = 1200;
-#[cfg(target_os = "android")]
 const MAX_HEIGHT: u32 = 450;
-#[cfg(not(target_os = "android"))]
-const MAX_HEIGHT: u32 = 800;
 #[cfg(target_os = "android")]
 const MAX_FRAMES: usize = 60;
 #[cfg(not(target_os = "android"))]
@@ -236,19 +232,37 @@ pub fn set_manifest_json(json: &[u8]) -> Result<(), String> {
 
 fn apply_campaigns(campaigns: Vec<Campaign>) {
     let mut state = STATE.lock();
-    state.ready.retain(|ready| campaigns.iter().any(|campaign|
-        campaign.id == ready.campaign.id
-            && campaign.media_url == ready.campaign.media_url
-            && campaign.destination_url == ready.campaign.destination_url
-            && campaign.title == ready.campaign.title
-            && campaign.message == ready.campaign.message
-    ));
-    let ready_count = state.ready.len();
-    if ready_count == 0 {
-        state.current_campaign = 0;
-    } else {
-        state.current_campaign %= ready_count;
+    let previous = std::mem::take(&mut state.ready);
+    let mut ready = Vec::with_capacity(campaigns.len());
+
+    for campaign in &campaigns {
+        if let Some(existing) = previous.iter().find(|candidate| {
+            candidate.campaign.id == campaign.id
+                && candidate.campaign.media_url == campaign.media_url
+                && candidate.campaign.destination_url == campaign.destination_url
+                && candidate.campaign.title == campaign.title
+                && candidate.campaign.message == campaign.message
+        }) {
+            ready.push(existing.clone());
+        } else {
+            // Publish the text card immediately. Media decoding is asynchronous
+            // and replaces this fallback when it succeeds.
+            ready.push(ReadyCampaign {
+                campaign: campaign.clone(),
+                width: 0,
+                height: 0,
+                frames: Vec::new(),
+            });
+        }
     }
+
+    let ready_count = ready.len();
+    state.ready = ready;
+    state.current_campaign = if ready_count == 0 {
+        0
+    } else {
+        state.current_campaign % ready_count
+    };
     prune_cache(&state.cache_dir, &campaigns);
     state.campaigns = campaigns;
     state.last_error.clear();

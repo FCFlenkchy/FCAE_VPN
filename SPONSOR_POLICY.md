@@ -44,7 +44,7 @@ FCAE does not provide sponsors with device identifiers, user profiles, browsing 
 - HTTPS only.
 - PNG, JPEG, WebP, or GIF.
 - Maximum encoded size: 2 MiB.
-- Maximum dimensions: 1200 × 800 pixels on desktop and 800 × 450 on Android.
+- Maximum dimensions: 800 × 450 pixels on every platform.
 - Animated GIFs: maximum 120 frames on desktop and 60 on Android.
 - `media_url` is optional; `message` is optional and limited to 256 printable characters.
 - No audio or video.
