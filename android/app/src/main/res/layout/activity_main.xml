@@ -140,7 +140,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="DOWNLOAD"
-                            android:textColor="#FF60A5FA"
+                            android:textColor="#FF4DCCFF"
                             android:textSize="11sp"
                             android:textStyle="bold" />
 
@@ -166,16 +166,11 @@
 
                     <TextView
                         android:id="@+id/rttText"
-                        android:layout_width="72dp"
+                        android:layout_width="64dp"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="6dp"
-                        android:layout_marginEnd="6dp"
-                        android:background="@drawable/home_traffic_card"
                         android:gravity="center"
-                        android:paddingTop="10dp"
-                        android:paddingBottom="10dp"
-                        android:text="—"
-                        android:textColor="#FFF0F3FA"
+                        android:text="0ms"
+                        android:textColor="#FFB0B8C8"
                         android:textSize="13sp"
                         android:textStyle="bold" />
 
@@ -192,7 +187,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="UPLOAD"
-                            android:textColor="#FFC084FC"
+                            android:textColor="#FFFF8C33"
                             android:textSize="11sp"
                             android:textStyle="bold" />
 
