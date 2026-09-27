@@ -630,11 +630,16 @@ class MainActivity : AppCompatActivity() {
         // irrelevant to Home. Keep them out of the first-frame critical path.
         val decor = window.decorView
         decor.viewTreeObserver.addOnDrawListener(object : android.view.ViewTreeObserver.OnDrawListener {
+            private var posted = false
+
             override fun onDraw() {
-                if (decor.viewTreeObserver.isAlive) {
-                    decor.viewTreeObserver.removeOnDrawListener(this)
-                }
+                if (posted) return
+                posted = true
+                val listener = this
                 decor.post {
+                    if (decor.viewTreeObserver.isAlive) {
+                        decor.viewTreeObserver.removeOnDrawListener(listener)
+                    }
                     if (!isFinishing && !isDestroyed) {
                         ExternalControls.bind(
                             this@MainActivity,
