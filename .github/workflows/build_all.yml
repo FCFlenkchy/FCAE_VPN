@@ -12,6 +12,11 @@ on:
         required: false
         default: 'true'
         type: boolean
+      publish:
+        description: 'publish release/pre-release'
+        required: false
+        default: true
+        type: boolean
       extra_notes:
         description: 'notes'
         required: false
@@ -1373,7 +1378,7 @@ jobs:
       FCAE_VERSION: ${{ needs.prepare.outputs.version_full }}
       FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
     runs-on: ubuntu-latest
-    if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch'
+    if: always() && needs.build.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.publish
     permissions:
       contents: write
     steps:
