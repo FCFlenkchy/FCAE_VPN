@@ -68,72 +68,168 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical">
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnConnect"
-                android:layout_width="240dp"
-                android:layout_height="48dp"
-                android:layout_gravity="center_horizontal"
-                android:layout_marginTop="8dp"
-                android:text="CONNECT"
-                android:textAllCaps="false"
-                android:textSize="14sp" />
 
-            <LinearLayout
-                android:id="@+id/layoutTunPauseResume"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center_horizontal"
-                android:layout_marginTop="4dp"
-                android:gravity="center"
-                android:orientation="horizontal"
-                android:visibility="gone">
+                <TextView
+                    android:id="@+id/statusText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginTop="8dp"
+                    android:gravity="center"
+                    android:text="DISCONNECTED"
+                    android:textColor="#FF8A93A6"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
 
                 <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnTunStop"
-                    android:layout_width="104dp"
-                    android:layout_height="36dp"
-                    android:text="STOP"
+                    android:id="@+id/btnConnect"
+                    android:layout_width="240dp"
+                    android:layout_height="48dp"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginTop="8dp"
+                    android:text="CONNECT"
                     android:textAllCaps="false"
-                    android:textSize="12sp"
+                    android:textSize="14sp" />
+
+                <LinearLayout
+                    android:id="@+id/layoutTunPauseResume"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginTop="4dp"
+                    android:gravity="center"
+                    android:orientation="horizontal"
+                    android:visibility="gone">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnTunStop"
+                        android:layout_width="104dp"
+                        android:layout_height="36dp"
+                        android:text="STOP"
+                        android:textAllCaps="false"
+                        android:textSize="12sp"
+                        android:visibility="gone" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnTunStart"
+                        android:layout_width="104dp"
+                        android:layout_height="36dp"
+                        android:text="START"
+                        android:textAllCaps="false"
+                        android:textSize="12sp"
+                        android:visibility="gone" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:background="@drawable/home_traffic_card"
+                        android:gravity="center"
+                        android:orientation="vertical"
+                        android:padding="12dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="DOWNLOAD"
+                            android:textColor="#FF60A5FA"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/downloadRateText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="0 B/s"
+                            android:textColor="#FFF0F3FA"
+                            android:textSize="18sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/downloadTotalText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="Total 0 B"
+                            android:textColor="#FF8A93A6"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/rttText"
+                        android:layout_width="64dp"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:text="RTT\n—"
+                        android:textColor="#FFB0B8C8"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:background="@drawable/home_traffic_card"
+                        android:gravity="center"
+                        android:orientation="vertical"
+                        android:padding="12dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="UPLOAD"
+                            android:textColor="#FFC084FC"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/uploadRateText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="0 B/s"
+                            android:textColor="#FFF0F3FA"
+                            android:textSize="18sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/uploadTotalText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="Total 0 B"
+                            android:textColor="#FF8A93A6"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/statsText"
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
                     android:visibility="gone" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnTunStart"
-                    android:layout_width="104dp"
-                    android:layout_height="36dp"
-                    android:text="START"
-                    android:textAllCaps="false"
+                <TextView
+                    android:id="@+id/peerText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/home_details_card"
+                    android:fontFamily="monospace"
+                    android:padding="12dp"
+                    android:textColor="#FFB0B8C8"
+                    android:textIsSelectable="true"
                     android:textSize="12sp"
                     android:visibility="gone" />
-            </LinearLayout>
-<TextView
-                android:id="@+id/statusText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="DISCONNECTED"
-                android:textColor="#FF8A93A6"
-                android:textSize="16sp" />
-
-            <TextView
-                android:id="@+id/statsText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="\u2193 0 B/s  |  \u2191 0 B/s  |  RTT \u2014"
-                android:textColor="#FFB0B8C8"
-                android:textSize="13sp" />
-
-            <TextView
-                android:id="@+id/peerText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="Peer: \u2014"
-                android:textColor="#FF7A8499"
-                android:textSize="12sp" />
-
-
             </LinearLayout>
             <LinearLayout
                 android:id="@+id/settingsSectionGeneral"

@@ -53,6 +53,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
     private lateinit var statsText: TextView
+    private lateinit var downloadRateText: TextView
+    private lateinit var downloadTotalText: TextView
+    private lateinit var uploadRateText: TextView
+    private lateinit var uploadTotalText: TextView
+    private lateinit var rttText: TextView
     private lateinit var peerText: TextView
     private lateinit var logText: TextView
     private lateinit var logScroll: ScrollView
@@ -199,11 +204,26 @@ class MainActivity : AppCompatActivity() {
         psiTotalDown = 0L
     }
 
+    private fun renderTrafficStats(
+        rx: Long,
+        tx: Long,
+        totalRx: Long,
+        totalTx: Long,
+        rtt: Int,
+    ) {
+        if (!::statsText.isInitialized) return
+        statsText.text =
+            "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  ${rtt}ms"
+        downloadRateText.text = "${fmt(rx)}/s"
+        downloadTotalText.text = "Total ${fmt(totalRx)}"
+        uploadRateText.text = "${fmt(tx)}/s"
+        uploadTotalText.text = "Total ${fmt(totalTx)}"
+        rttText.text = if (rtt > 0) "RTT\n${rtt} ms" else "RTT\n—"
+    }
+
     private fun resetStats() {
         resetPsiStats()
-        if (::statsText.isInitialized) {
-            statsText.text = "↓ 0 B/s (0 B)  |  ↑ 0 B/s (0 B)  |  0ms"
-        }
+        renderTrafficStats(0, 0, 0, 0, 0)
     }
 
     /** Render the latest service-owned telemetry without touching native FFI.
@@ -219,8 +239,7 @@ class MainActivity : AppCompatActivity() {
             peerText.text = if (current.isEmpty()) psiphonEndpointText(nativeLanFallback(lastNativeLan))
             else "$current\n${psiphonEndpointText(nativeLanFallback(lastNativeLan))}"
         }
-        statsText.text =
-            "↓ ${fmt(psiDownBps)}/s (${fmt(psiTotalDown)})  |  ↑ ${fmt(psiUpBps)}/s (${fmt(psiTotalUp)})  |  ${psiRttMs}ms"
+        renderTrafficStats(psiDownBps, psiUpBps, psiTotalDown, psiTotalUp, psiRttMs)
     }
 
     private fun acceptPsiStats(intent: Intent) {
@@ -553,7 +572,20 @@ class MainActivity : AppCompatActivity() {
         prefs = getSharedPreferences("fcae_vpn", MODE_PRIVATE)
         statusText = findViewById(R.id.statusText)
         statsText = findViewById(R.id.statsText)
+        downloadRateText = findViewById(R.id.downloadRateText)
+        downloadTotalText = findViewById(R.id.downloadTotalText)
+        uploadRateText = findViewById(R.id.uploadRateText)
+        uploadTotalText = findViewById(R.id.uploadTotalText)
+        rttText = findViewById(R.id.rttText)
         peerText = findViewById(R.id.peerText)
+        peerText.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                peerText.visibility = if (s.isNullOrBlank()) android.view.View.GONE else android.view.View.VISIBLE
+            }
+        })
+        peerText.visibility = if (peerText.text.isNullOrBlank()) android.view.View.GONE else android.view.View.VISIBLE
         logText = findViewById(R.id.logText)
         logScroll = findViewById(R.id.logScroll)
         btnConnect = findViewById(R.id.btnConnect)
@@ -1208,8 +1240,7 @@ class MainActivity : AppCompatActivity() {
             }
             renderPsiStats()
         } else {
-            statsText.text =
-                "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  ${rtt}ms"
+            renderTrafficStats(rx, tx, totalRx, totalTx, rtt)
         }
         paintNotificationEndpoints()
     }
@@ -2936,8 +2967,7 @@ class MainActivity : AppCompatActivity() {
             } else if (state == 0 || state == 5) {
                 resetStats()
             } else {
-                statsText.text =
-                    "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  ${rtt}ms"
+                renderTrafficStats(rx, tx, totalRx, totalTx, rtt)
             }
 
             // Psiphon direct and Tor-only sessions do not expose an Aether peer.
