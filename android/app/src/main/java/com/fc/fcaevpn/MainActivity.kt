@@ -594,11 +594,25 @@ class MainActivity : AppCompatActivity() {
         switchPreReleases = findViewById(R.id.switchPreReleases)
         switchQuickSettingsTile = findViewById(R.id.switchQuickSettingsTile)
         switchHomeScreenWidget = findViewById(R.id.switchHomeScreenWidget)
-        ExternalControls.bind(
-            this,
-            switchQuickSettingsTile,
-            switchHomeScreenWidget
-        )
+        // PackageManager component queries are synchronous Binder calls and are
+        // irrelevant to Home. Keep them out of the first-frame critical path.
+        val decor = window.decorView
+        decor.viewTreeObserver.addOnDrawListener(object : android.view.ViewTreeObserver.OnDrawListener {
+            override fun onDraw() {
+                if (decor.viewTreeObserver.isAlive) {
+                    decor.viewTreeObserver.removeOnDrawListener(this)
+                }
+                decor.post {
+                    if (!isFinishing && !isDestroyed) {
+                        ExternalControls.bind(
+                            this@MainActivity,
+                            switchQuickSettingsTile,
+                            switchHomeScreenWidget
+                        )
+                    }
+                }
+            }
+        })
         spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
         editSni = findViewById(R.id.editSni)
         editForcePeer = findViewById(R.id.editForcePeer)
@@ -627,22 +641,46 @@ class MainActivity : AppCompatActivity() {
         tabLogsText = findViewById(R.id.tabLogsText)
         tabMainIndicator = findViewById(R.id.tabMainIndicator)
         tabLogsIndicator = findViewById(R.id.tabLogsIndicator)
+        val tabSettings = findViewById<android.view.View>(R.id.tabSettings)
+        val tabSettingsText = findViewById<android.widget.TextView>(R.id.tabSettingsText)
+        val tabSettingsIndicator = findViewById<android.view.View>(R.id.tabSettingsIndicator)
+        val settingsSections = listOf<android.view.View>(
+            findViewById(R.id.settingsSectionGeneral),
+            findViewById(R.id.settingsSectionNetwork),
+            findViewById(R.id.settingsSectionAdvanced),
+        )
+        val homeSections = listOf<android.view.View>(
+            findViewById(R.id.homeSectionStatus),
+            findViewById(R.id.homeSectionProtocol),
+            findViewById(R.id.homeSectionEgress),
+        )
 
-        fun switchTab(isMain: Boolean) {
-            outerScroll.visibility = if (isMain) android.view.View.VISIBLE else android.view.View.GONE
-            layoutLogsContainer.visibility = if (isMain) android.view.View.GONE else android.view.View.VISIBLE
-
-            tabMainText.setTextColor(Color.parseColor(if (isMain) "#FF60A5FA" else "#FF8A93A6"))
-            tabMainText.setTypeface(null, if (isMain) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-            tabMainIndicator.setBackgroundColor(Color.parseColor(if (isMain) "#FF60A5FA" else "#00000000"))
-
-            tabLogsText.setTextColor(Color.parseColor(if (!isMain) "#FF60A5FA" else "#FF8A93A6"))
-            tabLogsText.setTypeface(null, if (!isMain) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-            tabLogsIndicator.setBackgroundColor(Color.parseColor(if (!isMain) "#FF60A5FA" else "#00000000"))
+        fun setTabAppearance(
+            selected: Boolean,
+            text: android.widget.TextView,
+            indicator: android.view.View,
+        ) {
+            text.setTextColor(Color.parseColor(if (selected) "#FF60A5FA" else "#FF8A93A6"))
+            text.setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            indicator.setBackgroundColor(Color.parseColor(if (selected) "#FF60A5FA" else "#00000000"))
         }
 
-        tabMain.setOnClickListener { switchTab(true) }
-        tabLogs.setOnClickListener { switchTab(false) }
+        fun switchTab(tab: Int) {
+            val showContent = tab != 2
+            outerScroll.visibility = if (showContent) android.view.View.VISIBLE else android.view.View.GONE
+            layoutLogsContainer.visibility = if (tab == 2) android.view.View.VISIBLE else android.view.View.GONE
+            homeSections.forEach { it.visibility = if (tab == 0) android.view.View.VISIBLE else android.view.View.GONE }
+            settingsSections.forEach { it.visibility = if (tab == 1) android.view.View.VISIBLE else android.view.View.GONE }
+            if (showContent) outerScroll.scrollTo(0, 0)
+
+            setTabAppearance(tab == 0, tabMainText, tabMainIndicator)
+            setTabAppearance(tab == 1, tabSettingsText, tabSettingsIndicator)
+            setTabAppearance(tab == 2, tabLogsText, tabLogsIndicator)
+        }
+
+        tabMain.setOnClickListener { switchTab(0) }
+        tabSettings.setOnClickListener { switchTab(1) }
+        tabLogs.setOnClickListener { switchTab(2) }
 
 
         // Tapping anywhere outside an EditText clears its focus and moves
@@ -1023,6 +1061,22 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "Native lib failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
                 return@execute
+            }
+            val nativeRegions = try {
+                NativeEngine.nativePsiphonRegions()
+                    .split(',')
+                    .map { it.trim().uppercase() }
+                    .filter { it.isNotEmpty() }
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            if (nativeRegions.isNotEmpty()) {
+                handler.post {
+                    persistRegionCodes(nativeRegions)
+                    applyPsiphonRegionCodes(
+                        (persistedRegionCodes() + nativeRegions).distinct()
+                    )
+                }
             }
 
             // Query native state — if engine is running, sync UI to it.
@@ -1662,7 +1716,11 @@ class MainActivity : AppCompatActivity() {
         editPsiphonSocksPort.setText(prefs.getString("psiphonSocksPort", PsiphonTunnelService.DEFAULT_SOCKS_PORT.toString()))
         editPsiphonHttpPort.setText(prefs.getString("psiphonHttpPort", PsiphonTunnelService.DEFAULT_HTTP_PORT.toString()))
         savedPsiphonRegion = prefs.getString("psiphonRegion", "") ?: ""
-        refreshPsiphonRegions()
+        // Never load the Rust/Go libraries while constructing the first frame.
+        // Cached/AAR regions are sufficient until background nativeInit finishes.
+        applyPsiphonRegionCodes(
+            (persistedRegionCodes() + readReportedRegionFile()).distinct()
+        )
         spinnerPsiphonTransport.setSelection(prefs.getInt("psiphonTransport", 0).coerceIn(0, 23))
         switchEch.isChecked = prefs.getBoolean("ech", true)
         switchQuick.isChecked = prefs.getBoolean("quick", false)

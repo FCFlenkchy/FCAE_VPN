@@ -63,7 +63,50 @@
                 android:textColor="#FF8A93A6"
                 android:textSize="12sp" />
 
-            <TextView
+            <LinearLayout
+                android:id="@+id/homeSectionStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnConnect"
+                android:layout_width="240dp"
+                android:layout_height="48dp"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="8dp"
+                android:text="CONNECT"
+                android:textAllCaps="false"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:id="@+id/layoutTunPauseResume"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="4dp"
+                android:gravity="center"
+                android:orientation="horizontal"
+                android:visibility="gone">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnTunStop"
+                    android:layout_width="104dp"
+                    android:layout_height="36dp"
+                    android:text="STOP"
+                    android:textAllCaps="false"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnTunStart"
+                    android:layout_width="104dp"
+                    android:layout_height="36dp"
+                    android:text="START"
+                    android:textAllCaps="false"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+            </LinearLayout>
+<TextView
                 android:id="@+id/statusText"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -90,48 +133,14 @@
                 android:textColor="#FF7A8499"
                 android:textSize="12sp" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnConnect"
-                android:layout_width="match_parent"
-                android:layout_height="56dp"
-                android:layout_marginTop="20dp"
-                android:text="CONNECT"
-                android:textAllCaps="false"
-                android:textSize="16sp" />
 
+            </LinearLayout>
             <LinearLayout
-                android:id="@+id/layoutTunPauseResume"
+                android:id="@+id/settingsSectionGeneral"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginTop="8dp"
+                android:orientation="vertical"
                 android:visibility="gone">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnTunStop"
-                    android:layout_width="0dp"
-                    android:layout_height="40dp"
-                    android:layout_weight="1"
-                    android:layout_marginStart="6dp"
-                    android:layout_marginEnd="6dp"
-                    android:text="STOP"
-                    android:textAllCaps="false"
-                    android:textSize="13sp"
-                    android:visibility="gone" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnTunStart"
-                    android:layout_width="0dp"
-                    android:layout_height="40dp"
-                    android:layout_weight="1"
-                    android:layout_marginStart="6dp"
-                    android:layout_marginEnd="6dp"
-                    android:text="START"
-                    android:textAllCaps="false"
-                    android:textSize="13sp"
-                    android:visibility="gone" />
-            </LinearLayout>
-
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnCheckUpdates"
                 style="@style/Widget.MaterialComponents.Button.TextButton"
@@ -198,10 +207,17 @@
                 android:text="Allow home-screen widget"
                 android:textColor="#FFE0E4EE" />
 
+            </LinearLayout>
+            <LinearLayout
+                android:id="@+id/homeSectionProtocol"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="20dp"
+                android:id="@+id/labelProtocol"
                 android:text="Protocol"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />
@@ -218,6 +234,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
+                android:id="@+id/labelMode"
                 android:text="Mode"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />
@@ -230,6 +247,13 @@
                 android:background="#FF1E1E2C"
                 android:popupBackground="#FF1E1E2C" />
 
+            </LinearLayout>
+            <LinearLayout
+                android:id="@+id/settingsSectionNetwork"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
             <LinearLayout android:id="@+id/layoutTunSettings" android:layout_width="match_parent"
                 android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
                 <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
@@ -607,10 +631,17 @@
                 android:background="#FF1E1E2C"
                 android:popupBackground="#FF1E1E2C" />
 
+            </LinearLayout>
+            <LinearLayout
+                android:id="@+id/homeSectionEgress"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
+                android:id="@+id/labelEgress"
                 android:text="Egress"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />
@@ -632,6 +663,13 @@
                 android:textSize="12sp"
                 android:visibility="gone" />
 
+            </LinearLayout>
+            <LinearLayout
+                android:id="@+id/settingsSectionAdvanced"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -924,6 +962,7 @@
                 android:background="#FF1E1E2C"
                 android:popupBackground="#FF1E1E2C" />
 
+            </LinearLayout>
         </LinearLayout>
     </ScrollView>
 
@@ -1036,6 +1075,40 @@
         android:layout_height="52dp"
         android:orientation="horizontal"
         android:background="#FF141420">
+
+        <LinearLayout
+            android:id="@+id/tabSettings"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:clickable="true"
+            android:focusable="true"
+            android:background="?attr/selectableItemBackground"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tabSettingsText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Settings"
+                android:textColor="#FF8A93A6"
+                android:textSize="14sp" />
+
+            <View
+                android:id="@+id/tabSettingsIndicator"
+                android:layout_width="32dp"
+                android:layout_height="3dp"
+                android:layout_marginTop="4dp"
+                android:background="#00000000" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="1dp"
+            android:layout_height="match_parent"
+            android:layout_marginTop="12dp"
+            android:layout_marginBottom="12dp"
+            android:background="#FF2A2D3D" />
 
         <LinearLayout
             android:id="@+id/tabMain"

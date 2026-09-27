@@ -6,7 +6,6 @@
 #include <unordered_map>
 #include <algorithm>
 #include <cctype>
-
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -62,6 +61,13 @@ static double   s_last_paint_t = 0.0;
 // UI state that keeps needing frames on its own.
 static bool s_busy_anim = false;      // connect/scan spinner is on screen
 static bool s_text_input = false;     // a text field is focused (blinking caret)
+
+// The native runtime and config are initialized off the render thread. The UI
+// never enters an FFI-backed code path until the release-store publishes all
+// initialization writes, so startup is responsive without partial-runtime races.
+enum class RuntimeInitState : uint8_t { Starting, Ready, Failed };
+static std::atomic<RuntimeInitState> s_runtime_init{RuntimeInitState::Starting};
+static std::thread s_runtime_init_thread;
 
 bool build_is_prerelease() {
 #ifdef FCAE_IS_PRERELEASE
@@ -232,6 +238,12 @@ void ui_request_redraw() {
 bool ui_should_render(bool interacting) {
     const double now = ui_now_seconds();
 
+    // Initialization owns the non-atomic AppState fields until it publishes
+    // Ready. Do not fingerprint or poll them concurrently.
+    if (s_runtime_init.load(std::memory_order_acquire) != RuntimeInitState::Ready) {
+        return g_app.redraw_requested.load() || interacting || !s_painted_once;
+    }
+
     // Telemetry is the main thing that changes without user input; poll it here
     // so the fingerprint below is up to date.
     ui_poll_telemetry(now);
@@ -258,6 +270,8 @@ bool ui_should_render(bool interacting) {
 }
 
 unsigned ui_sleep_ms() {
+    if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Starting)
+        return 50;                           // notice completion promptly without spinning
     if (s_busy_anim) return 16;              // connect spinner: keep it smooth
     if (s_update_in_progress) return 250;    // "Checking... (Ns)" counter
     if (s_text_input) return 250;            // caret blink in a focused field
@@ -266,7 +280,8 @@ unsigned ui_sleep_ms() {
 }
 
 void ui_note_frame_drawn() {
-    s_painted_sig = ui_content_signature();
+    if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Ready)
+        s_painted_sig = ui_content_signature();
     s_painted_once = true;
     s_last_paint_t = ui_now_seconds();
     g_app.redraw_requested.store(false);
@@ -648,72 +663,116 @@ static void draw_spinner(float radius, int segments, float speed) {
 }
 
 void ui_init() {
-    FcaeInitOptions opt = {};
-    opt.struct_size   = sizeof(opt);
-    opt.abi_version   = FCAE_ABI_VERSION;
-    opt.log_cb        = log_callback;
-    opt.state_cb      = nullptr;   // the UI already polls telemetry each frame
-    opt.user_data     = nullptr;
-    opt.max_log_level = FCAE_LOG_INFO;
-    if (fcae_init(&opt) != FCAE_OK) {
-        g_app.add_log(FCAE_LOG_ERROR, fcae_last_error());
-    }
-    if (!load_config()) {
-        // First run: write defaults next to the executable (or app files on
-        // Android). AppState defaults mode = 1, so a fresh install starts in
-        // TUN (full-system) mode on every desktop platform; a saved config
-        // keeps whatever the user last chose.
-        save_config();
-        snprintf(g_app.save_status, sizeof(g_app.save_status), "Created FCAE_VPN.cfg");
-        g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
-    }
-    // Make relative identity path (aether.toml) resolve next to the executable
-    if (g_app.config_path[0] && g_app.config_path[0] != '/' && g_app.config_path[0] != '\\'
-        && !(g_app.config_path[0] && g_app.config_path[1] == ':')) {
-        std::string dir = exe_dir();
-        if (!dir.empty()) {
-            char sep =
-#if defined(_WIN32)
-                '\\';
-#else
-                '/';
-#endif
-            std::string full = dir + sep + g_app.config_path;
-            snprintf(g_app.config_path, sizeof(g_app.config_path), "%s", full.c_str());
+    s_runtime_init.store(RuntimeInitState::Starting, std::memory_order_relaxed);
+    s_runtime_init_thread = std::thread([] {
+        bool runtime_ok = true;
+        FcaeInitOptions opt = {};
+        opt.struct_size   = sizeof(opt);
+        opt.abi_version   = FCAE_ABI_VERSION;
+        opt.log_cb        = log_callback;
+        opt.state_cb      = nullptr;   // the UI already polls telemetry each frame
+        opt.user_data     = nullptr;
+        opt.max_log_level = FCAE_LOG_INFO;
+        if (fcae_init(&opt) != FCAE_OK) {
+            g_app.add_log(FCAE_LOG_ERROR, fcae_last_error());
+            runtime_ok = false;
         }
-    }
-    g_app.add_log(4, ("[ui] settings file: " + get_config_path()).c_str());
-    g_app.add_log(4, (std::string("[ui] identity file: ") + g_app.config_path).c_str());
-
-    // Psiphon keeps a persistent datastore and refuses to start without a
-    // writable directory for it. Default it next to the executable, in its own
-    // subdirectory so it never collides with the engine's state. The user can
-    // still override it in the config file.
-    if (g_app.psiphon_data_dir[0] == '\0') {
-        std::string dir = exe_dir();
-        if (!dir.empty()) {
-            char sep =
-#if defined(_WIN32)
-                '\\';
-#else
-                '/';
-#endif
-            std::string full = dir + sep + "psiphon";
-            snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir),
-                     "%s", full.c_str());
+        if (!load_config()) {
+            // First run: write defaults next to the executable (or app files on
+            // Android). AppState defaults mode = 1, so a fresh install starts in
+            // TUN (full-system) mode on every desktop platform; a saved config
+            // keeps whatever the user last chose.
+            save_config();
+            snprintf(g_app.save_status, sizeof(g_app.save_status), "Created FCAE_VPN.cfg");
+            g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
         }
-    }
+        // Make relative identity path (aether.toml) resolve next to the executable
+        if (g_app.config_path[0] && g_app.config_path[0] != '/' && g_app.config_path[0] != '\\'
+            && !(g_app.config_path[0] && g_app.config_path[1] == ':')) {
+            std::string dir = exe_dir();
+            if (!dir.empty()) {
+                char sep =
+#if defined(_WIN32)
+                    '\\';
+#else
+                    '/';
+#endif
+                std::string full = dir + sep + g_app.config_path;
+                snprintf(g_app.config_path, sizeof(g_app.config_path), "%s", full.c_str());
+            }
+        }
+        g_app.add_log(4, ("[ui] settings file: " + get_config_path()).c_str());
+        g_app.add_log(4, (std::string("[ui] identity file: ") + g_app.config_path).c_str());
 
-    // Auto-trigger update check once on startup if enabled
-    if (g_app.auto_update_check) {
-        fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
-    }
+        // Psiphon keeps a persistent datastore and refuses to start without a
+        // writable directory for it. Default it next to the executable, in its own
+        // subdirectory so it never collides with the engine's state. The user can
+        // still override it in the config file.
+        if (g_app.psiphon_data_dir[0] == '\0') {
+            std::string dir = exe_dir();
+            if (!dir.empty()) {
+                char sep =
+#if defined(_WIN32)
+                    '\\';
+#else
+                    '/';
+#endif
+                std::string full = dir + sep + "psiphon";
+                snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir),
+                         "%s", full.c_str());
+            }
+        }
+
+        // Auto-trigger update check once on startup if enabled and the FFI is live.
+        if (runtime_ok && g_app.auto_update_check) {
+            fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
+        }
+        s_runtime_init.store(
+            runtime_ok ? RuntimeInitState::Ready : RuntimeInitState::Failed,
+            std::memory_order_release);
+        ui_request_redraw();
+    });
+}
+
+static void render_startup_shell(bool failed) {
+    const ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
+    ImGui::Begin("##FCAE", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+    ImGui::Text("FCAE VPN");
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s  |  %s", fcae_display_version(),
+                        build_is_prerelease() ? "pre-release" : "release");
+    ImGui::Spacing();
+    ImGui::TextColored(failed ? ImVec4(0.9f, 0.25f, 0.25f, 1.0f)
+                              : ImVec4(0.55f, 0.58f, 0.65f, 1.0f),
+                       failed ? "INITIALIZATION FAILED" : "DISCONNECTED");
+    ImGui::BeginDisabled();
+    ImGui::Button(" CONNECT ", ImVec2(140, 34));
+    ImGui::EndDisabled();
+    ImGui::End();
 }
 
 void ui_frame() {
     // The update panel sets this again below when a check is running; resetting
     // it first keeps the flag honest on frames that return early.
     s_update_in_progress = false;
+
+    const RuntimeInitState init = s_runtime_init.load(std::memory_order_acquire);
+    if (init != RuntimeInitState::Ready) {
+        render_startup_shell(init == RuntimeInitState::Failed);
+        s_text_input = false;
+        s_busy_anim = false;
+        s_painted_once = true;
+        s_last_paint_t = ui_now_seconds();
+        // Preserve a completion redraw if initialization finished while this
+        // bootstrap frame was being built.
+        g_app.redraw_requested.store(
+            s_runtime_init.load(std::memory_order_acquire) != init);
+        return;
+    }
 
     render_ui();
 
@@ -733,6 +792,10 @@ void ui_frame() {
 }
 
 void ui_shutdown() {
+    // Initialization may still own AppState and the runtime. Join it before
+    // teardown so neither configuration state nor FFI lifetime can race exit.
+    if (s_runtime_init_thread.joinable()) s_runtime_init_thread.join();
+
     // fcae_shutdown() stops any running session and then waits (bounded) for
     // the background worker to finish its OS restore — routes and DNS back —
     // so the process may exit with nothing left dangling. The wait is capped
@@ -1047,7 +1110,6 @@ static bool open_external_url(const char* url) {
         if (*c == '\'' || *c == '"' || *c == '`' || *c == '\\' ||
             *c == '\n' || *c == '\r') return false;
     }
-
 #if defined(_WIN32)
     return (INT_PTR)ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL) > 32;
 #elif defined(ANDROID)
