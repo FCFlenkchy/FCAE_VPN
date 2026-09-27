@@ -83,8 +83,8 @@
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnConnect"
-                    android:layout_width="240dp"
-                    android:layout_height="48dp"
+                    android:layout_width="match_parent"
+                    android:layout_height="56dp"
                     android:layout_gravity="center_horizontal"
                     android:layout_marginTop="8dp"
                     android:text="CONNECT"
@@ -103,8 +103,8 @@
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/btnTunStop"
-                        android:layout_width="104dp"
-                        android:layout_height="36dp"
+                        android:layout_width="180dp"
+                        android:layout_height="44dp"
                         android:text="STOP"
                         android:textAllCaps="false"
                         android:textSize="12sp"
@@ -112,8 +112,8 @@
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/btnTunStart"
-                        android:layout_width="104dp"
-                        android:layout_height="36dp"
+                        android:layout_width="180dp"
+                        android:layout_height="44dp"
                         android:text="START"
                         android:textAllCaps="false"
                         android:textSize="12sp"
@@ -166,12 +166,17 @@
 
                     <TextView
                         android:id="@+id/rttText"
-                        android:layout_width="64dp"
+                        android:layout_width="72dp"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="6dp"
+                        android:layout_marginEnd="6dp"
+                        android:background="@drawable/home_traffic_card"
                         android:gravity="center"
-                        android:text="RTT\n—"
-                        android:textColor="#FFB0B8C8"
-                        android:textSize="12sp"
+                        android:paddingTop="10dp"
+                        android:paddingBottom="10dp"
+                        android:text="—"
+                        android:textColor="#FFF0F3FA"
+                        android:textSize="13sp"
                         android:textStyle="bold" />
 
                     <LinearLayout
@@ -230,6 +235,30 @@
                     android:textIsSelectable="true"
                     android:textSize="12sp"
                     android:visibility="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnCheckUpdates"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:minHeight="44dp"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:text="Check for Updates"
+                    android:textAllCaps="false"
+                    android:textColor="#FF60A5FA"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/updateStatus"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textColor="#FF9AA3B5"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
             </LinearLayout>
             <LinearLayout
                 android:id="@+id/settingsSectionGeneral"
@@ -237,28 +266,6 @@
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
                 android:visibility="gone">
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnCheckUpdates"
-                style="@style/Widget.MaterialComponents.Button.TextButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="Check for Updates"
-                android:textAllCaps="false"
-                android:textSize="14sp"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
-                android:minHeight="44dp"
-                android:textColor="#FF60A5FA" />
-
-            <TextView
-                android:id="@+id/updateStatus"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:textSize="12sp"
-                android:textColor="#FF9AA3B5"
-                android:visibility="gone" />
 
             <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/switchAutoUpdate"

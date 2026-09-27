@@ -218,7 +218,7 @@ class MainActivity : AppCompatActivity() {
         downloadTotalText.text = "Total ${fmt(totalRx)}"
         uploadRateText.text = "${fmt(tx)}/s"
         uploadTotalText.text = "Total ${fmt(totalTx)}"
-        rttText.text = if (rtt > 0) "RTT\n${rtt} ms" else "RTT\n—"
+        rttText.text = if (rtt > 0) "${rtt} ms" else "—"
     }
 
     private fun resetStats() {
