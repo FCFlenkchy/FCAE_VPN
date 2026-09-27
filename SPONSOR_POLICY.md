@@ -12,7 +12,7 @@ An application must provide:
 
 - sponsor name and campaign title;
 - HTTPS destination URL;
-- final image or animated GIF;
+- an optional short message and/or final image or animated GIF;
 - requested start and end dates;
 - confirmation that the applicant owns or is authorized to use every submitted logo, trademark, image, and statement.
 
@@ -35,7 +35,7 @@ FCAE may reject or remove any campaign that creates legal, security, privacy, re
 
 ## Privacy and presentation
 
-Sponsor cards are rendered by FCAE rather than arbitrary HTML or JavaScript. External sponsor `media_url` resources are fetched only after FCAE reports that the VPN is connected. Destination URLs are never prefetched by FCAE; they are handed to the external browser only after an explicit user click. The small GitHub manifest uses a persisted Unix timestamp and is fetched no more than once every 12 hours. Opening and closing the client UI does not reset that interval; the last valid cached manifest remains available if a refresh fails. Campaigns rotate locally every five seconds and users may swipe or drag the card to move to another sponsor; neither action generates an impression request. With two active campaigns FCAE alternates between them. With three or more, FCAE chooses randomly without immediately repeating the card already shown. A single campaign remains in place.
+Sponsor cards are rendered by FCAE rather than arbitrary HTML or JavaScript. Images are optional; a card can use a centered short `message`, and FCAE falls back to a safe title/message card when media is absent, rejected, corrupt, or unavailable. External sponsor `media_url` resources are fetched only after FCAE reports that the VPN is connected. Destination URLs are never prefetched by FCAE; they are handed to the external browser only after an explicit user click. The small GitHub manifest uses a persisted Unix timestamp and is fetched no more than once every 12 hours. Opening and closing the client UI does not reset that interval; the last valid cached manifest remains available if a refresh fails. Campaigns rotate locally every five seconds and users may swipe or drag the card to move to another sponsor; neither action generates an impression request. With two active campaigns FCAE alternates between them. With three or more, FCAE chooses randomly without immediately repeating the card already shown. A single campaign remains in place.
 
 FCAE does not provide sponsors with device identifiers, user profiles, browsing activity, impression reports, or click reports. Destination links open in the user's external browser. The destination site is governed by its own privacy practices.
 
@@ -44,8 +44,9 @@ FCAE does not provide sponsors with device identifiers, user profiles, browsing 
 - HTTPS only.
 - PNG, JPEG, WebP, or GIF.
 - Maximum encoded size: 2 MiB.
-- Maximum dimensions: 1200 × 800 pixels.
-- Animated GIFs: maximum 120 frames.
+- Maximum dimensions: 1200 × 800 pixels on desktop and 800 × 450 on Android.
+- Animated GIFs: maximum 120 frames on desktop and 60 on Android.
+- `media_url` is optional; `message` is optional and limited to 256 printable characters.
 - No audio or video.
 
 ## Manifest format
@@ -59,6 +60,7 @@ Production entries are stored in `sponsors.json`:
     {
       "id": "example-2026",
       "title": "Example Sponsor",
+      "message": "A short optional sponsor message.",
       "media_url": "https://cdn.example.com/fcae/example.webp",
       "destination_url": "https://example.com/",
       "enabled": true,
@@ -69,4 +71,4 @@ Production entries are stored in `sponsors.json`:
 }
 ```
 
-Dates are optional Unix timestamps in UTC. Removing a campaign from the manifest causes FCAE to remove its cached media on the next successful refresh.
+`message`, `media_url`, and dates are optional. Dates are Unix timestamps in UTC. A campaign must retain a title and HTTPS destination. Removing a campaign from the manifest causes FCAE to remove its cached media on the next successful refresh.

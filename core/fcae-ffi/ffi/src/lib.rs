@@ -1327,6 +1327,7 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.generation = frame.generation;
             fill(&mut out.id, &frame.id);
             fill(&mut out.title, &frame.title);
+            fill(&mut out.message, &frame.message);
             fill(&mut out.destination_url, &frame.destination_url);
             *SPONSOR_FRAME.lock() = Some(frame);
         } else {
@@ -1338,6 +1339,7 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.generation = 0;
             fill(&mut out.id, "");
             fill(&mut out.title, "");
+            fill(&mut out.message, "");
             fill(&mut out.destination_url, "");
             *SPONSOR_FRAME.lock() = None;
         }

@@ -17,10 +17,25 @@ pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/sponsors.json";
 const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 const MAX_MEDIA_BYTES: usize = 2 * 1024 * 1024;
+#[cfg(target_os = "android")]
+const MAX_WIDTH: u32 = 800;
+#[cfg(not(target_os = "android"))]
 const MAX_WIDTH: u32 = 1200;
+#[cfg(target_os = "android")]
+const MAX_HEIGHT: u32 = 450;
+#[cfg(not(target_os = "android"))]
 const MAX_HEIGHT: u32 = 800;
+#[cfg(target_os = "android")]
+const MAX_FRAMES: usize = 60;
+#[cfg(not(target_os = "android"))]
 const MAX_FRAMES: usize = 120;
+#[cfg(target_os = "android")]
+const MAX_DECODED_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(not(target_os = "android"))]
 const MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(target_os = "android")]
+const MAX_TOTAL_DECODED_BYTES: usize = 24 * 1024 * 1024;
+#[cfg(not(target_os = "android"))]
 const MAX_TOTAL_DECODED_BYTES: usize = 96 * 1024 * 1024;
 const ROTATE_EVERY: Duration = Duration::from_secs(5);
 const MANIFEST_REFRESH_SECS: u64 = 12 * 60 * 60;
@@ -38,7 +53,10 @@ struct Manifest {
 struct Campaign {
     id: String,
     title: String,
-    media_url: String,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    media_url: Option<String>,
     destination_url: String,
     #[serde(default = "enabled")]
     enabled: bool,
@@ -68,6 +86,7 @@ struct ReadyCampaign {
 pub struct SponsorFrame {
     pub id: String,
     pub title: String,
+    pub message: String,
     pub destination_url: String,
     pub width: u32,
     pub height: u32,
@@ -210,6 +229,7 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
             && campaign.media_url == ready.campaign.media_url
             && campaign.destination_url == ready.campaign.destination_url
             && campaign.title == ready.campaign.title
+            && campaign.message == ready.campaign.message
     ));
     let ready_count = state.ready.len();
     if ready_count == 0 {
@@ -311,19 +331,22 @@ pub fn current_frame() -> Option<SponsorFrame> {
             if target < cursor { break; }
         }
     }
-    let frame = &ready.frames[frame_index];
+    let rgba = ready.frames.get(frame_index)
+        .map(|frame| frame.rgba.clone())
+        .unwrap_or_default();
     let generation = (GENERATION.load(Ordering::Relaxed) << 32)
         ^ ((campaign_index as u64) << 16)
         ^ frame_index as u64;
     Some(SponsorFrame {
         id: ready.campaign.id.clone(),
         title: ready.campaign.title.clone(),
+        message: ready.campaign.message.clone().unwrap_or_default(),
         destination_url: ready.campaign.destination_url.clone(),
         width: ready.width,
         height: ready.height,
         campaign_count: ready_count.try_into().unwrap_or(u32::MAX),
         animated: ready.frames.len() > 1,
-        rgba: frame.rgba.clone(),
+        rgba,
         generation,
     })
 }
@@ -366,11 +389,21 @@ fn validate_campaign(c: &Campaign) -> Result<(), String> {
     {
         return Err("sponsor title must use printable ASCII".into());
     }
-    if c.media_url.len() > 2_048 || c.destination_url.len() > 511
-        || !c.media_url.is_ascii() || !c.destination_url.is_ascii()
-        || !is_https(&c.media_url) || !is_https(&c.destination_url)
+    if c.message.as_ref().is_some_and(|message| {
+        message.is_empty() || message.len() > 256
+            || !message.bytes().all(|byte| byte == b'\n' || matches!(byte, 0x20..=0x7e))
+    }) {
+        return Err("sponsor message must use printable ASCII and be at most 256 bytes".into());
+    }
+    if c.destination_url.len() > 511 || !c.destination_url.is_ascii()
+        || !is_https(&c.destination_url)
     {
-        return Err("invalid sponsor HTTPS URL".into());
+        return Err("invalid sponsor destination HTTPS URL".into());
+    }
+    if c.media_url.as_ref().is_some_and(|url| {
+        url.is_empty() || url.len() > 2_048 || !url.is_ascii() || !is_https(url)
+    }) {
+        return Err("invalid sponsor media HTTPS URL".into());
     }
     if matches!((c.starts_at, c.ends_at), (Some(start), Some(end)) if start >= end) {
         return Err("invalid sponsor date range".into());
@@ -384,7 +417,10 @@ fn is_https(url: &str) -> bool {
 
 fn prune_cache(cache_dir: &Path, campaigns: &[Campaign]) {
     let _ = fs::create_dir_all(cache_dir);
-    let keep: HashSet<String> = campaigns.iter().map(cache_name).collect();
+    let keep: HashSet<String> = campaigns.iter()
+        .filter(|campaign| campaign.media_url.is_some())
+        .map(cache_name)
+        .collect();
     if let Ok(entries) = fs::read_dir(cache_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -400,26 +436,33 @@ fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign>
     let mut ready = Vec::new();
     let mut decoded_total = 0usize;
     for campaign in campaigns {
-        let path = cache_dir.join(cache_name(campaign));
-        let decoded = fs::read(&path).ok()
-            .and_then(|bytes| decode(campaign.clone(), &bytes).ok())
-            .or_else(|| {
-                let bytes = download_media(campaign).ok()?;
-                let decoded = decode(campaign.clone(), &bytes).ok()?;
-                let _ = fs::write(&path, &bytes);
-                Some(decoded)
-            });
-        let decoded = match decoded {
-            Some(decoded) => decoded,
-            None => {
-                let _ = fs::remove_file(&path);
+        let decoded = campaign.media_url.as_ref().and_then(|_| {
+            let path = cache_dir.join(cache_name(campaign));
+            let decoded = fs::read(&path).ok()
+                .and_then(|bytes| decode(campaign.clone(), &bytes).ok())
+                .or_else(|| {
+                    let bytes = download_media(campaign).ok()?;
+                    let decoded = decode(campaign.clone(), &bytes).ok()?;
+                    let _ = fs::write(&path, &bytes);
+                    Some(decoded)
+                });
+            if decoded.is_none() { let _ = fs::remove_file(path); }
+            decoded
+        });
+        if let Some(decoded) = decoded {
+            let decoded_bytes = decoded.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
+            if decoded_total.saturating_add(decoded_bytes) <= MAX_TOTAL_DECODED_BYTES {
+                decoded_total += decoded_bytes;
+                ready.push(decoded);
                 continue;
             }
-        };
-        let decoded_bytes = decoded.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
-        if decoded_total.saturating_add(decoded_bytes) > MAX_TOTAL_DECODED_BYTES { continue; }
-        decoded_total += decoded_bytes;
-        ready.push(decoded);
+        }
+        ready.push(ReadyCampaign {
+            campaign: campaign.clone(),
+            width: 0,
+            height: 0,
+            frames: Vec::new(),
+        });
     }
     ready
 }
@@ -431,7 +474,8 @@ fn cache_name(c: &Campaign) -> String {
 }
 
 fn download_media(c: &Campaign) -> Result<Vec<u8>, String> {
-    let response = client().get(&c.media_url).send().map_err(|e| e.to_string())?;
+    let url = c.media_url.as_deref().ok_or_else(|| "sponsor has no media URL".to_string())?;
+    let response = client().get(url).send().map_err(|e| e.to_string())?;
     if !response.status().is_success() { return Err(format!("media HTTP {}", response.status())); }
     read_limited(response, MAX_MEDIA_BYTES)
 }
@@ -473,6 +517,9 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
         if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP) {
             return Err("unsupported sponsor media".into());
         }
+        let (width, height) = image::ImageReader::with_format(Cursor::new(bytes), format)
+            .into_dimensions().map_err(|e| e.to_string())?;
+        validate_dimensions(width, height, 1)?;
         let image: DynamicImage = image::load_from_memory_with_format(bytes, format).map_err(|e| e.to_string())?;
         let rgba = image.to_rgba8();
         validate_dimensions(rgba.width(), rgba.height(), 1)?;

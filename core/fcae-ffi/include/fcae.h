@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 9
+#define FCAE_ABI_VERSION 10
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -386,6 +386,7 @@ typedef struct {
     uint64_t generation;
     char     id[65];
     char     title[97];
+    char     message[257];
     char     destination_url[512];
 } FcaeSponsorInfo;
 

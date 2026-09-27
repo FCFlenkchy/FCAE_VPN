@@ -244,6 +244,7 @@ data class FcaeSponsorInfo(
     val available: Boolean = false,
     val id: String = "",
     val title: String = "",
+    val message: String = "",
     val destinationUrl: String = "",
     val width: Int = 0,
     val height: Int = 0,

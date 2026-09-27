@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <cctype>
+#include <new>
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -78,9 +79,21 @@ static void poll_sponsor() {
         s_sponsor_rgba.clear();
         s_sponsor_loaded_generation = 0;
     } else if (info.generation != s_sponsor_loaded_generation) {
-        s_sponsor_rgba.resize(info.rgba_size);
-        if (fcae_sponsor_copy_rgba(s_sponsor_rgba.data(), s_sponsor_rgba.size()) == FCAE_OK)
+        if (info.rgba_size == 0) {
+            s_sponsor_rgba.clear();
             s_sponsor_loaded_generation = info.generation;
+        } else {
+            try {
+                s_sponsor_rgba.resize(info.rgba_size);
+            } catch (const std::bad_alloc&) {
+                s_sponsor_rgba.clear();
+                return;
+            }
+            if (fcae_sponsor_copy_rgba(s_sponsor_rgba.data(), s_sponsor_rgba.size()) == FCAE_OK)
+                s_sponsor_loaded_generation = info.generation;
+            else
+                s_sponsor_rgba.clear();
+        }
     }
 }
 
@@ -1795,14 +1808,18 @@ void render_ui() {
             }
 
             ImGui::Spacing();
-            if (s_sponsor.available && !s_sponsor_rgba.empty()
-                    && s_sponsor_loaded_generation == s_sponsor.generation) {
-                ImTextureID texture = sponsor_texture_update(
-                    s_sponsor_rgba.data(), (int)s_sponsor.width, (int)s_sponsor.height,
-                    s_sponsor.generation);
-                if (texture) {
+            if (s_sponsor.available) {
+                ImTextureID texture = nullptr;
+                if (!s_sponsor_rgba.empty() && s_sponsor.width > 0 && s_sponsor.height > 0
+                        && s_sponsor_loaded_generation == s_sponsor.generation) {
+                    texture = sponsor_texture_update(
+                        s_sponsor_rgba.data(), (int)s_sponsor.width, (int)s_sponsor.height,
+                        s_sponsor.generation);
+                }
+                {
                     ImGui::Separator();
                     ImGui::TextDisabled("SPONSORED");
+                    if (texture) {
                     const float max_w = std::min(320.0f, ImGui::GetContentRegionAvail().x);
                     const float scale = std::min(max_w / (float)s_sponsor.width,
                                                  120.0f / (float)s_sponsor.height);
@@ -1833,10 +1850,24 @@ void render_ui() {
                             ? "Click to open, drag to change sponsor"
                             : "Click to open sponsor website");
                     ImGui::SetCursorScreenPos(after_image);
+                    } else {
+                        const ImVec2 card_size(std::min(320.0f, ImGui::GetContentRegionAvail().x), 64.0f);
+                        ImGui::SetCursorPosX(ImGui::GetCursorPosX()
+                            + (ImGui::GetContentRegionAvail().x - card_size.x) * 0.5f);
+                        ImGui::InvisibleButton("##sponsor_card_touch", card_size);
+                        if (ImGui::IsItemClicked() && strncmp(s_sponsor.destination_url, "https://", 8) == 0)
+                            open_link(s_sponsor.destination_url);
+                    }
                     const float title_w = ImGui::CalcTextSize(s_sponsor.title).x;
                     ImGui::SetCursorPosX(ImGui::GetCursorPosX()
                         + std::max(0.0f, (ImGui::GetContentRegionAvail().x - title_w) * 0.5f));
                     ImGui::TextUnformatted(s_sponsor.title);
+                    if (s_sponsor.message[0] != '\0') {
+                        const float message_w = ImGui::CalcTextSize(s_sponsor.message).x;
+                        ImGui::SetCursorPosX(ImGui::GetCursorPosX()
+                            + std::max(0.0f, (ImGui::GetContentRegionAvail().x - message_w) * 0.5f));
+                        ImGui::TextWrapped("%s", s_sponsor.message);
+                    }
                 }
             }
             const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";

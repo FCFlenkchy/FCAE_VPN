@@ -70,6 +70,7 @@ class MainActivity : AppCompatActivity() {
     private var updateResultDialog: androidx.appcompat.app.AlertDialog? = null
     private lateinit var sponsorCard: android.view.View
     private lateinit var sponsorImage: android.widget.ImageView
+    private lateinit var sponsorMessage: android.widget.TextView
     private lateinit var sponsorTitle: TextView
     private var sponsorGeneration = -1L
     private var sponsorDestination = ""
@@ -633,24 +634,40 @@ class MainActivity : AppCompatActivity() {
                             } else {
                                 sponsorAnimated = info.animated
                                 sponsorCampaignCount = info.campaignCount
-                                if (info.generation != sponsorGeneration && info.rgba.isNotEmpty()
-                                    && info.width > 0 && info.height > 0) {
-                                    val current = sponsorBitmap
-                                    val bitmap = if (current != null && current.width == info.width
-                                        && current.height == info.height) current else {
-                                        current?.recycle()
-                                        android.graphics.Bitmap.createBitmap(
-                                            info.width, info.height, android.graphics.Bitmap.Config.ARGB_8888
-                                        ).also { sponsorBitmap = it }
+                                sponsorTitle.text = info.title
+                                sponsorMessage.text = info.message
+                                sponsorMessage.visibility = if (info.message.isBlank()) android.view.View.GONE else android.view.View.VISIBLE
+                                sponsorDestination = info.destinationUrl
+                                if (info.generation != sponsorGeneration) {
+                                    if (info.rgba.isNotEmpty() && info.width > 0 && info.height > 0
+                                        && info.rgba.size.toLong() == info.width.toLong() * info.height.toLong() * 4L) {
+                                        val current = sponsorBitmap
+                                        val bitmap = if (current != null && current.width == info.width
+                                            && current.height == info.height) current else {
+                                            current?.recycle()
+                                            android.graphics.Bitmap.createBitmap(
+                                                info.width, info.height, android.graphics.Bitmap.Config.ARGB_8888
+                                            ).also { sponsorBitmap = it }
+                                        }
+                                        val logicalStride = info.width * 4
+                                        val pixels = if (bitmap.rowBytes == logicalStride) info.rgba else {
+                                            ByteArray(bitmap.rowBytes * info.height).also { padded ->
+                                                for (row in 0 until info.height) {
+                                                    info.rgba.copyInto(padded, row * bitmap.rowBytes, row * logicalStride, (row + 1) * logicalStride)
+                                                }
+                                            }
+                                        }
+                                        bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(pixels))
+                                        sponsorImage.setImageBitmap(bitmap)
+                                        sponsorImage.visibility = android.view.View.VISIBLE
+                                        sponsorImage.invalidate()
+                                    } else {
+                                        sponsorImage.setImageDrawable(null)
+                                        sponsorImage.visibility = android.view.View.GONE
                                     }
-                                    bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(info.rgba))
-                                    sponsorImage.setImageBitmap(bitmap)
-                                    sponsorImage.invalidate()
-                                    sponsorTitle.text = info.title
-                                    sponsorDestination = info.destinationUrl
                                     sponsorGeneration = info.generation
-                                    sponsorCard.visibility = android.view.View.VISIBLE
                                 }
+                                sponsorCard.visibility = android.view.View.VISIBLE
                             }
                         } catch (_: Throwable) {
                             sponsorCard.visibility = android.view.View.GONE
@@ -712,6 +729,7 @@ class MainActivity : AppCompatActivity() {
         btnCheckUpdates = findViewById(R.id.btnCheckUpdates)
         sponsorCard = findViewById(R.id.sponsorCard)
         sponsorImage = findViewById(R.id.sponsorImage)
+        sponsorMessage = findViewById(R.id.sponsorMessage)
         sponsorTitle = findViewById(R.id.sponsorTitle)
         sponsorCard.setOnClickListener {
             sponsorDestination.takeIf { it.startsWith("https://") }?.let(::openExternal)

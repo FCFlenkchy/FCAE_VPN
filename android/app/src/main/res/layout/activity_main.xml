@@ -1123,6 +1123,16 @@
                         android:scaleType="centerInside" />
 
                     <TextView
+                        android:id="@+id/sponsorMessage"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:gravity="center"
+                        android:textColor="#FFC9D1E0"
+                        android:textSize="13sp"
+                        android:visibility="gone" />
+
+                    <TextView
                         android:id="@+id/sponsorTitle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"

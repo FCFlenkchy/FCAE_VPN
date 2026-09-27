@@ -941,7 +941,11 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     FcaeSponsorInfo info = {};
     info.struct_size = sizeof(info);
     info.abi_version = FCAE_ABI_VERSION;
-    fcae_sponsor_poll(&info);
+    if (fcae_sponsor_poll(&info) != FCAE_OK) {
+        env->DeleteLocalRef(obj);
+        env->DeleteLocalRef(cls);
+        return nullptr;
+    }
     const bool copyFrame = info.available && (jlong)info.generation != knownGeneration;
     jbyteArray rgba = env->NewByteArray(copyFrame ? (jsize)info.rgba_size : 0);
     if (!rgba) {
@@ -967,19 +971,63 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
             return nullptr;
         }
     }
-    env->SetBooleanField(obj, env->GetFieldID(cls, "available", "Z"), info.available ? JNI_TRUE : JNI_FALSE);
-    env->SetObjectField(obj, env->GetFieldID(cls, "id", "Ljava/lang/String;"), env->NewStringUTF(info.id));
-    env->SetObjectField(obj, env->GetFieldID(cls, "title", "Ljava/lang/String;"), env->NewStringUTF(info.title));
-    env->SetObjectField(obj, env->GetFieldID(cls, "destinationUrl", "Ljava/lang/String;"), env->NewStringUTF(info.destination_url));
-    env->SetIntField(obj, env->GetFieldID(cls, "width", "I"), (jint)info.width);
-    env->SetIntField(obj, env->GetFieldID(cls, "height", "I"), (jint)info.height);
-    env->SetIntField(obj, env->GetFieldID(cls, "campaignCount", "I"), (jint)info.campaign_count);
-    env->SetBooleanField(obj, env->GetFieldID(cls, "animated", "Z"), info.animated ? JNI_TRUE : JNI_FALSE);
-    env->SetLongField(obj, env->GetFieldID(cls, "generation", "J"), (jlong)info.generation);
-    env->SetObjectField(obj, env->GetFieldID(cls, "rgba", "[B"), rgba);
-    if (rgba) env->DeleteLocalRef(rgba);
+    const auto getField = [env, cls](const char* name, const char* signature) -> jfieldID {
+        return env->ExceptionCheck() ? nullptr : env->GetFieldID(cls, name, signature);
+    };
+    const jfieldID fidAvailable = getField("available", "Z");
+    const jfieldID fidId = getField("id", "Ljava/lang/String;");
+    const jfieldID fidTitle = getField("title", "Ljava/lang/String;");
+    const jfieldID fidMessage = getField("message", "Ljava/lang/String;");
+    const jfieldID fidDestination = getField("destinationUrl", "Ljava/lang/String;");
+    const jfieldID fidWidth = getField("width", "I");
+    const jfieldID fidHeight = getField("height", "I");
+    const jfieldID fidCampaignCount = getField("campaignCount", "I");
+    const jfieldID fidAnimated = getField("animated", "Z");
+    const jfieldID fidGeneration = getField("generation", "J");
+    const jfieldID fidRgba = getField("rgba", "[B");
+    if (env->ExceptionCheck() || !fidAvailable || !fidId || !fidTitle || !fidMessage
+            || !fidDestination || !fidWidth || !fidHeight || !fidCampaignCount
+            || !fidAnimated || !fidGeneration || !fidRgba) {
+        env->DeleteLocalRef(rgba);
+        env->DeleteLocalRef(obj);
+        env->DeleteLocalRef(cls);
+        return nullptr;
+    }
+    const auto newString = [env](const char* value) -> jstring {
+        return env->ExceptionCheck() ? nullptr : env->NewStringUTF(value);
+    };
+    jstring id = newString(info.id);
+    jstring title = newString(info.title);
+    jstring message = newString(info.message);
+    jstring destination = newString(info.destination_url);
+    if (env->ExceptionCheck() || !id || !title || !message || !destination) {
+        if (id) env->DeleteLocalRef(id);
+        if (title) env->DeleteLocalRef(title);
+        if (message) env->DeleteLocalRef(message);
+        if (destination) env->DeleteLocalRef(destination);
+        env->DeleteLocalRef(rgba);
+        env->DeleteLocalRef(obj);
+        env->DeleteLocalRef(cls);
+        return nullptr;
+    }
+    env->SetBooleanField(obj, fidAvailable, info.available ? JNI_TRUE : JNI_FALSE);
+    env->SetObjectField(obj, fidId, id);
+    env->SetObjectField(obj, fidTitle, title);
+    env->SetObjectField(obj, fidMessage, message);
+    env->SetObjectField(obj, fidDestination, destination);
+    env->SetIntField(obj, fidWidth, (jint)info.width);
+    env->SetIntField(obj, fidHeight, (jint)info.height);
+    env->SetIntField(obj, fidCampaignCount, (jint)info.campaign_count);
+    env->SetBooleanField(obj, fidAnimated, info.animated ? JNI_TRUE : JNI_FALSE);
+    env->SetLongField(obj, fidGeneration, (jlong)info.generation);
+    env->SetObjectField(obj, fidRgba, rgba);
+    env->DeleteLocalRef(id);
+    env->DeleteLocalRef(title);
+    env->DeleteLocalRef(message);
+    env->DeleteLocalRef(destination);
+    env->DeleteLocalRef(rgba);
     env->DeleteLocalRef(cls);
-    return obj;
+    return env->ExceptionCheck() ? nullptr : obj;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

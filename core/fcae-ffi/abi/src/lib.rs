@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 9;
+pub const FCAE_ABI_VERSION: u32 = 10;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
@@ -471,7 +471,7 @@ pub struct FcaeConfig {
     /// Former reserved[3]; preserves size and existing Psiphon reserved[0].
     pub tor_http_port: u64,
     /// tun2socks data-plane log verbosity (`FcaeT2sLog`): 0 = default
-    /// (silent), 1 = silent, 2 = error, 3 = warn, 4 = info, 5 = debug.
+    /// (silent), 1 = silent,  2 = error, 3 = warn, 4 = info, 5 = debug.
     /// ABI v7: appended after `tor_http_port` so all earlier offsets hold.
     pub tun2socks_log_level: u64,
     /// TUN data-plane engine: one of `FCAE_TUN_ENGINE_*`. Only consumed in
@@ -556,6 +556,7 @@ pub struct FcaeSponsorInfo {
     pub generation: u64,
     pub id: [c_char; 65],
     pub title: [c_char; 97],
+    pub message: [c_char; 257],
     pub destination_url: [c_char; 512],
 }
 
@@ -732,5 +733,8 @@ impl_try_from_enum!(FcaeStatus, {
     PermissionDenied = 7,
     StartFailed = 8,
     Timeout = 9,
+    Internal = 10,
+});
+ut = 9,
     Internal = 10,
 });
