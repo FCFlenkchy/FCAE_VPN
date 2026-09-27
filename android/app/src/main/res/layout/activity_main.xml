@@ -81,43 +81,49 @@
                     android:textSize="15sp"
                     android:textStyle="bold" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnConnect"
+                <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="56dp"
-                    android:layout_gravity="center_horizontal"
                     android:layout_marginTop="8dp"
-                    android:text="CONNECT"
-                    android:textAllCaps="false"
-                    android:textSize="14sp" />
-
-                <LinearLayout
-                    android:id="@+id/layoutTunPauseResume"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_gravity="center_horizontal"
-                    android:layout_marginTop="4dp"
                     android:gravity="center"
-                    android:orientation="horizontal"
-                    android:visibility="gone">
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:id="@+id/layoutTunPauseResume"
+                        android:layout_width="0dp"
+                        android:layout_height="match_parent"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
+                        android:orientation="horizontal"
+                        android:visibility="gone">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTunStop"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:text="STOP"
+                            android:textAllCaps="false"
+                            android:textSize="13sp"
+                            android:visibility="gone" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnTunStart"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:text="START"
+                            android:textAllCaps="false"
+                            android:textSize="13sp"
+                            android:visibility="gone" />
+                    </LinearLayout>
 
                     <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnTunStop"
-                        android:layout_width="180dp"
-                        android:layout_height="44dp"
-                        android:text="STOP"
+                        android:id="@+id/btnConnect"
+                        android:layout_width="0dp"
+                        android:layout_height="match_parent"
+                        android:layout_weight="2"
+                        android:text="CONNECT"
                         android:textAllCaps="false"
-                        android:textSize="12sp"
-                        android:visibility="gone" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnTunStart"
-                        android:layout_width="180dp"
-                        android:layout_height="44dp"
-                        android:text="START"
-                        android:textAllCaps="false"
-                        android:textSize="12sp"
-                        android:visibility="gone" />
+                        android:textSize="14sp" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -131,7 +137,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:background="@drawable/home_traffic_card"
+                        android:background="@drawable/rounded_rectangle"
                         android:gravity="center"
                         android:orientation="vertical"
                         android:padding="12dp">
@@ -166,11 +172,16 @@
 
                     <TextView
                         android:id="@+id/rttText"
-                        android:layout_width="64dp"
+                        android:layout_width="72dp"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="6dp"
+                        android:layout_marginEnd="6dp"
+                        android:background="@drawable/rounded_rectangle"
                         android:gravity="center"
+                        android:paddingTop="10dp"
+                        android:paddingBottom="10dp"
                         android:text="0ms"
-                        android:textColor="#FFB0B8C8"
+                        android:textColor="#FFF0F3FA"
                         android:textSize="13sp"
                         android:textStyle="bold" />
 
@@ -178,7 +189,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:background="@drawable/home_traffic_card"
+                        android:background="@drawable/rounded_rectangle"
                         android:gravity="center"
                         android:orientation="vertical"
                         android:padding="12dp">
@@ -216,19 +227,6 @@
                     android:id="@+id/statsText"
                     android:layout_width="0dp"
                     android:layout_height="0dp"
-                    android:visibility="gone" />
-
-                <TextView
-                    android:id="@+id/peerText"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:background="@drawable/home_details_card"
-                    android:fontFamily="monospace"
-                    android:padding="12dp"
-                    android:textColor="#FFB0B8C8"
-                    android:textIsSelectable="true"
-                    android:textSize="12sp"
                     android:visibility="gone" />
 
                 <com.google.android.material.button.MaterialButton
@@ -758,6 +756,19 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
                 android:textColor="#FF5A6478"
+                android:textSize="12sp"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/peerText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/home_details_card"
+                android:fontFamily="monospace"
+                android:padding="12dp"
+                android:textColor="#FFB0B8C8"
+                android:textIsSelectable="true"
                 android:textSize="12sp"
                 android:visibility="gone" />
 
