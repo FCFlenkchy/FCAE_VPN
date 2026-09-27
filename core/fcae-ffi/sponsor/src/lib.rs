@@ -37,7 +37,6 @@ const ROTATE_EVERY: Duration = Duration::from_secs(5);
 const MANIFEST_REFRESH_SECS: u64 = 12 * 60 * 60;
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Manifest {
     schema_version: u32,
     #[serde(default)]
@@ -45,7 +44,6 @@ struct Manifest {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 struct Campaign {
     id: String,
     title: String,
@@ -137,6 +135,7 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
 static CONNECTED: AtomicBool = AtomicBool::new(false);
 static SPONSOR_PROXY: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
 static MANIFEST_BUSY: AtomicBool = AtomicBool::new(false);
+static MANIFEST_FORCE_PENDING: AtomicBool = AtomicBool::new(false);
 static MEDIA_BUSY: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -168,7 +167,10 @@ pub fn load_cached_manifest() {
         };
     }
     if let Some(campaigns) = campaigns {
+        log::info!("[sponsor] loaded cached manifest ({} active campaigns)", campaigns.len());
         apply_campaigns(campaigns);
+    } else if json.is_some() {
+        log::warn!("[sponsor] cached manifest is invalid; forcing a refresh");
     }
 }
 
@@ -206,8 +208,10 @@ pub fn manifest_due() -> bool {
 
 pub fn set_manifest_json(json: &[u8]) -> Result<(), String> {
     let campaigns = parse_manifest(json)?;
+    let active_count = campaigns.len();
     let now = unix_now();
     apply_campaigns(campaigns);
+    log::info!("[sponsor] accepted manifest ({} active campaigns)", active_count);
     let cache_dir = {
         let mut state = STATE.lock();
         state.manifest_checked_at = now;
@@ -277,20 +281,27 @@ pub fn refresh_manifest_now_async() {
 }
 
 fn refresh_manifest_async_inner(force: bool) {
-    if !CONNECTED.load(Ordering::Acquire)
-        || (!force && !manifest_due())
-        || MANIFEST_BUSY.swap(true, Ordering::AcqRel)
-    {
+    if !CONNECTED.load(Ordering::Acquire) || (!force && !manifest_due()) {
+        return;
+    }
+    if MANIFEST_BUSY.swap(true, Ordering::AcqRel) {
+        if force {
+            MANIFEST_FORCE_PENDING.store(true, Ordering::Release);
+            log::info!("[sponsor] queued explicit refresh behind the active fetch");
+        }
         return;
     }
     thread::spawn(|| {
         match fetch_manifest() {
             Ok(json) => {
+                log::info!("[sponsor] manifest response received ({} bytes)", json.len());
                 if let Err(error) = set_manifest_json(&json) {
+                    log::warn!("[sponsor] manifest rejected: {error}");
                     STATE.lock().last_error = error;
                 }
             }
             Err(error) => {
+                log::warn!("[sponsor] manifest fetch failed: {error}");
                 STATE.lock().last_error = error;
                 if CONNECTED.load(Ordering::Acquire) {
                     refresh_media_async();
@@ -298,6 +309,11 @@ fn refresh_manifest_async_inner(force: bool) {
             }
         }
         MANIFEST_BUSY.store(false, Ordering::Release);
+        if MANIFEST_FORCE_PENDING.swap(false, Ordering::AcqRel)
+            && CONNECTED.load(Ordering::Acquire)
+        {
+            refresh_manifest_async_inner(true);
+        }
     });
 }
 
@@ -309,6 +325,7 @@ pub fn refresh_media_async() {
     };
     thread::spawn(move || {
         let ready = prepare_media(&campaigns, &cache_dir);
+        let ready_count = ready.len();
         let mut applied = false;
         if CONNECTED.load(Ordering::Acquire) {
             let mut state = STATE.lock();
@@ -321,7 +338,10 @@ pub fn refresh_media_async() {
             }
         }
         MEDIA_BUSY.store(false, Ordering::Release);
-        if CONNECTED.load(Ordering::Acquire) && !applied {
+        if applied {
+            log::info!("[sponsor] published media refresh ({} active campaigns)", ready_count);
+        } else if CONNECTED.load(Ordering::Acquire) {
+            log::info!("[sponsor] discarded stale media refresh; scheduling another pass");
             refresh_media_async();
         }
     });
@@ -421,6 +441,15 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
             && campaign.starts_at.map_or(true, |start| now >= start)
             && campaign.ends_at.map_or(true, |end| now <= end)
         {
+            let mut campaign = campaign;
+            if campaign.message.as_ref().is_some_and(|message| !valid_message(message)) {
+                log::warn!("[sponsor] campaign {} has invalid optional message; using title only", campaign.id);
+                campaign.message = None;
+            }
+            if campaign.media_url.as_ref().is_some_and(|url| !valid_media_url(url)) {
+                log::warn!("[sponsor] campaign {} has invalid optional media URL; using text fallback", campaign.id);
+                campaign.media_url = None;
+            }
             valid.push(campaign);
         }
     }
@@ -436,28 +465,24 @@ fn validate_campaign(c: &Campaign) -> Result<(), String> {
     {
         return Err("sponsor title must use printable text".into());
     }
-    if c.message.as_ref().is_some_and(|message| {
-        message.len() > 256
-            || !message.chars().all(|character| {
-                character == '\n' || !character.is_control()
-            })
-    }) {
-        return Err("sponsor message must use printable text and be at most 256 bytes".into());
-    }
     if c.destination_url.len() > 511 || !c.destination_url.is_ascii()
         || !is_https(&c.destination_url)
     {
         return Err("invalid sponsor destination HTTPS URL".into());
     }
-    if c.media_url.as_ref().is_some_and(|url| {
-        url.is_empty() || url.len() > 2_048 || !url.is_ascii() || !is_https(url)
-    }) {
-        return Err("invalid sponsor media HTTPS URL".into());
-    }
     if matches!((c.starts_at, c.ends_at), (Some(start), Some(end)) if start >= end) {
         return Err("invalid sponsor date range".into());
     }
     Ok(())
+}
+
+fn valid_message(message: &str) -> bool {
+    message.len() <= 256
+        && message.chars().all(|character| character == '\n' || !character.is_control())
+}
+
+fn valid_media_url(url: &str) -> bool {
+    !url.is_empty() && url.len() <= 2_048 && url.is_ascii() && is_https(url)
 }
 
 fn is_https(url: &str) -> bool {
@@ -487,14 +512,14 @@ fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign>
     for campaign in campaigns {
         let decoded = campaign.media_url.as_ref().and_then(|_| {
             let path = cache_dir.join(cache_name(campaign));
-            let decoded = fs::read(&path).ok()
-                .and_then(|bytes| decode(campaign.clone(), &bytes).ok())
-                .or_else(|| {
-                    let bytes = download_media(campaign).ok()?;
-                    let decoded = decode(campaign.clone(), &bytes).ok()?;
-                    let _ = fs::write(&path, &bytes);
-                    Some(decoded)
-                });
+            let cached = fs::read(&path).ok()
+                .and_then(|bytes| decode(campaign.clone(), &bytes).ok());
+            let decoded = cached.or_else(|| {
+                let bytes = download_media(campaign).ok()?;
+                let decoded = decode(campaign.clone(), &bytes).ok()?;
+                let _ = fs::write(&path, &bytes);
+                Some(decoded)
+            });
             if decoded.is_none() { let _ = fs::remove_file(path); }
             decoded
         });
@@ -502,9 +527,15 @@ fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign>
             let decoded_bytes = decoded.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
             if decoded_total.saturating_add(decoded_bytes) <= MAX_TOTAL_DECODED_BYTES {
                 decoded_total += decoded_bytes;
+                log::info!("[sponsor] campaign {} media ready", campaign.id);
                 ready.push(decoded);
                 continue;
             }
+            log::warn!("[sponsor] campaign {} media exceeds the decoded-size budget; using text fallback", campaign.id);
+        } else if campaign.media_url.is_some() {
+            log::warn!("[sponsor] campaign {} media unavailable; using text fallback", campaign.id);
+        } else {
+            log::info!("[sponsor] campaign {} is text-only", campaign.id);
         }
         ready.push(ReadyCampaign {
             campaign: campaign.clone(),
