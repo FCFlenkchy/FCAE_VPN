@@ -67,6 +67,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var layoutTunPauseResume: android.view.View
     private lateinit var btnCheckUpdates: MaterialButton
     private var updateAvailableInfo: FcaeUpdateInfo? = null
+    private var updateResultDialog: androidx.appcompat.app.AlertDialog? = null
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
     private lateinit var spinnerScan: Spinner
@@ -1043,8 +1044,8 @@ class MainActivity : AppCompatActivity() {
             val cached = updateAvailableInfo
             when {
                 cached == null -> checkForUpdates()
-                cached.updateAvailable -> showUpdateDialog(cached)
-                cached.decodeFailed -> showDecodeFailureDialog(cached)
+                cached.updateAvailable -> showUpdateResult { showUpdateDialog(cached) }
+                cached.decodeFailed -> showUpdateResult { showDecodeFailureDialog(cached) }
                 else -> checkForUpdates()
             }
         }
@@ -2273,16 +2274,14 @@ class MainActivity : AppCompatActivity() {
                     btnCheckUpdates.isEnabled = true
                     when {
                         info.updateAvailable -> {
-                            styleUpdateButton("Update Available!", COLOR_UPDATE_AVAILABLE)
-                            // The button is the only prompt; the dialog is a tap.
+                            styleUpdateButton("Update Available", COLOR_UPDATE_AVAILABLE)
                             updateAvailableInfo = info
+                            showUpdateResult { showUpdateDialog(info) }
                         }
-                        // The manifest itself is broken: that is the release
-                        // pipeline's problem, not the network's, so it is
-                        // raised loudly and the tap shows what the server sent.
                         info.decodeFailed -> {
-                            styleUpdateButton("ATTENTION!", Color.WHITE, COLOR_UPDATE_ATTENTION)
+                            styleUpdateButton("ATTENTION", Color.WHITE, COLOR_UPDATE_ATTENTION)
                             updateAvailableInfo = info
+                            showUpdateResult { showDecodeFailureDialog(info) }
                         }
                         info.checkDone && info.errorKind == 0 -> {
                             styleUpdateButton("Up to Date", COLOR_CONNECTED)
@@ -2291,17 +2290,25 @@ class MainActivity : AppCompatActivity() {
                         info.checkDone -> {
                             styleUpdateButton("Check Failed", COLOR_ERROR)
                             updateAvailableInfo = null
+                            showUpdateResult { showUpdateErrorDialog(info.statusMessage) }
                         }
                         else -> {
-                            styleUpdateButton("Check Timed Out", COLOR_ERROR)
+                            styleUpdateButton("Timed Out", COLOR_ERROR)
                             updateAvailableInfo = null
+                            showUpdateResult {
+                                showUpdateErrorDialog("The update check timed out. Check your network connection and try again.")
+                            }
                         }
                     }
                 }
-            } catch (_: Throwable) {
+            } catch (t: Throwable) {
                 handler.post {
                     btnCheckUpdates.isEnabled = true
                     styleUpdateButton("Check Failed", COLOR_ERROR)
+                    showUpdateResult {
+                        showUpdateErrorDialog(t.message?.takeIf { it.isNotBlank() }
+                            ?: "The update check could not be completed.")
+                    }
                 }
             }
         }.start()
@@ -2694,6 +2701,18 @@ class MainActivity : AppCompatActivity() {
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
     }
 
+    private inline fun showUpdateResult(show: () -> Unit) {
+        if (isFinishing || isDestroyed || updateResultDialog?.isShowing == true) return
+        show()
+    }
+
+    private fun trackUpdateResultDialog(dialog: androidx.appcompat.app.AlertDialog) {
+        updateResultDialog = dialog
+        dialog.setOnDismissListener {
+            if (updateResultDialog === dialog) updateResultDialog = null
+        }
+    }
+
     private fun showUpdateDialog(info: FcaeUpdateInfo) {
         val msg = android.text.SpannableString(buildString {
             append("Current: $displayVersion  |  ${if (buildIsPrerelease) "pre-release" else "release"}\n")
@@ -2713,6 +2732,7 @@ class MainActivity : AppCompatActivity() {
             .create()
         // Allow dismissing by tapping outside the dialog
         dialog.setCanceledOnTouchOutside(true)
+        trackUpdateResultDialog(dialog)
         dialog.show()
         // Force the message and button text to white (theme default was dark blue)
         showDialogMessage(dialog, msg)
@@ -2760,7 +2780,26 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Close", null)
             .create()
         dialog.setCanceledOnTouchOutside(true)
+        trackUpdateResultDialog(dialog)
         dialog.show()
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.CYAN)
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
+    }
+
+    private fun showUpdateErrorDialog(message: String) {
+        val detail = message.removePrefix("Update check failed: ").ifBlank {
+            "The update check could not be completed."
+        }
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Update Check Failed")
+            .setMessage(detail)
+            .setPositiveButton("Retry") { _, _ -> checkForUpdates() }
+            .setNegativeButton("Close", null)
+            .create()
+        dialog.setCanceledOnTouchOutside(true)
+        trackUpdateResultDialog(dialog)
+        dialog.show()
+        showDialogMessage(dialog, detail)
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.CYAN)
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
     }
