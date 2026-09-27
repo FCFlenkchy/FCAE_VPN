@@ -39,7 +39,8 @@ public final class ProcessExit {
      *  an in-app Disconnect leaves the visible Activity ready to reconnect. */
     public static void request(Context context, boolean remoteDisconnect) {
         Context app = context.getApplicationContext();
-        boolean terminal = remoteDisconnect || terminalPending.get();
+        boolean terminal = (remoteDisconnect && !FCAEApplication.uiVisibleNow())
+                || terminalPending.get();
         long now = SystemClock.elapsedRealtime();
         if (terminal) {
             terminalPending.set(true);

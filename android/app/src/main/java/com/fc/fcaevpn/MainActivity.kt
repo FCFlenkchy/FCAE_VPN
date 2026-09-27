@@ -1241,6 +1241,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // Bringing the UI back is a new foreground claim. Invalidate a terminal
+        // exit armed by an earlier notification/widget/tile disconnect; cleanup
+        // continues, but it must not kill this newly visible Activity.
+        ProcessExit.cancel()
+    }
+
     override fun onResume() {
         super.onResume()
         VpnTileService.clearPendingExit(this)
