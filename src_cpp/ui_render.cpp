@@ -103,6 +103,10 @@ static void poll_sponsor() {
     const bool card_available = info.available || info.campaign_count != 0;
     const bool card_changed = card_available != s_sponsor.available
         || info.generation != s_sponsor.generation;
+    const bool foreground_shape_changed = info.width != s_sponsor.width
+        || info.height != s_sponsor.height;
+    const bool background_shape_changed = info.background_width != s_sponsor.background_width
+        || info.background_height != s_sponsor.background_height;
     if (card_available && info.generation != s_sponsor_logged_generation) {
         s_sponsor_logged_generation = info.generation;
         char message[192];
@@ -115,7 +119,7 @@ static void poll_sponsor() {
     }
     s_sponsor = info;
     s_sponsor.available = card_available;
-    if (card_changed) ui_request_redraw();
+    bool media_copied = false;
     if (!card_available) {
         s_sponsor_rgba.clear();
         s_sponsor_background_rgba.clear();
@@ -123,9 +127,13 @@ static void poll_sponsor() {
         s_sponsor_loaded_background_generation = 0;
     } else {
         const bool foreground_changed = sponsor_foreground_changed(
-            info.generation, s_sponsor_loaded_foreground_generation);
+            info.generation, s_sponsor_loaded_foreground_generation)
+            || foreground_shape_changed
+            || (info.rgba_size != 0 && s_sponsor_rgba.empty());
         const bool background_changed = sponsor_background_changed(
-            info.generation, s_sponsor_loaded_background_generation);
+            info.generation, s_sponsor_loaded_background_generation)
+            || background_shape_changed
+            || (info.background_rgba_size != 0 && s_sponsor_background_rgba.empty());
         if (foreground_changed) {
             try {
                 s_sponsor_rgba.resize(info.rgba_size);
@@ -137,8 +145,10 @@ static void poll_sponsor() {
                 || fcae_sponsor_copy_rgba(s_sponsor_rgba.data(), s_sponsor_rgba.size()) == FCAE_OK;
             if (copied) {
                 s_sponsor_loaded_foreground_generation = info.generation;
+                media_copied = true;
             } else {
                 s_sponsor_rgba.clear();
+                s_sponsor_loaded_foreground_generation = 0;
             }
         }
         if (background_changed) {
@@ -153,11 +163,14 @@ static void poll_sponsor() {
                     s_sponsor_background_rgba.data(), s_sponsor_background_rgba.size()) == FCAE_OK;
             if (copied) {
                 s_sponsor_loaded_background_generation = info.generation;
+                media_copied = true;
             } else {
                 s_sponsor_background_rgba.clear();
+                s_sponsor_loaded_background_generation = 0;
             }
         }
     }
+    if (card_changed || media_copied) ui_request_redraw();
 }
 
 static ImVec4 sponsor_color(uint32_t packed, ImVec4 fallback) {

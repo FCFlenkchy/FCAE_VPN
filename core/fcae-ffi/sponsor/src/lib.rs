@@ -68,7 +68,6 @@ const MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TOTAL_DECODED_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_TOTAL_DECODED_BYTES: usize = 256 * 1024 * 1024;
-const MAX_MEDIA_WORKERS: usize = 2;
 const DEFAULT_TITLE_COLOR: u32 = 0xFFFFFFFF;
 const DEFAULT_MESSAGE_COLOR: u32 = 0xFFD8E7FF;
 const DEFAULT_CARD_COLOR: u32 = 0xFF142A44;
@@ -272,9 +271,9 @@ static CLIENT_CACHE: Lazy<Mutex<Option<(String, reqwest::blocking::Client)>>> =
 static MANIFEST_BUSY: AtomicBool = AtomicBool::new(false);
 static MANIFEST_FORCE_PENDING: AtomicBool = AtomicBool::new(false);
 static MEDIA_BUSY: AtomicBool = AtomicBool::new(false);
-// Sponsor audio is enabled by default; the attached text control changes it
-// to muted explicitly and persists only for the running client process.
-static AUDIO_ENABLED: AtomicBool = AtomicBool::new(true);
+// Sponsor audio is muted by default; the attached text control explicitly
+// enables it and the setting lasts only for the running client process.
+static AUDIO_ENABLED: AtomicBool = AtomicBool::new(false);
 // Audio is allowed only while a client UI owns the sponsor card. Android
 // toggles this from Activity onResume/onPause; desktop keeps it active while
 // the ImGui window is rendering and clears it during shutdown.
@@ -920,6 +919,7 @@ pub fn current_frame() -> Option<SponsorFrame> {
         }
         let current_duration = state.ready.get(state.current_campaign)
             .map(|campaign| campaign.duration_seconds)
+            .filter(|duration| *duration > 0)
             .unwrap_or(DEFAULT_DURATION_SECONDS);
         if state.ready.len() > 1
             && state.rotation_started.elapsed() >= Duration::from_secs(current_duration as u64)
@@ -1281,22 +1281,10 @@ fn prepare_media(
             || (audio_requested() && campaign.audio_url.is_some())
     })).then(|| client().ok()).flatten();
 
-    // Cache the encoded bytes for every active campaign, but do not decode
-    // them here. Decoding is reserved for the campaign that is currently
-    // visible; inactive campaigns remain cheap on disk until rotation reaches
-    // them.
-    for batch in campaigns.chunks(MAX_MEDIA_WORKERS) {
-        thread::scope(|scope| {
-            batch.iter().for_each(|campaign| {
-                let client = network_client.as_ref();
-                scope.spawn(move || {
-                    let _ = load_campaign_payload(
-                        campaign, cache_dir, false, false, false, client);
-                });
-            });
-        });
-    }
-
+    // Decode and cache only the campaign that is currently visible. Inactive
+    // campaigns stay lightweight until rotation reaches them; this prevents a
+    // manifest refresh from blocking the first useful frame on unrelated
+    // downloads while preserving every existing encoded/decoded cache entry.
     let mut ready = Vec::with_capacity(campaigns.len());
     let mut decoded_total = 0usize;
     for campaign in campaigns {

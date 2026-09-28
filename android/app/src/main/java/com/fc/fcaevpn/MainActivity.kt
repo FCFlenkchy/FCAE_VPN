@@ -617,6 +617,14 @@ class MainActivity : AppCompatActivity() {
         try { NativeEngine.nativeSponsorRefreshManifestAsync() } catch (_: Throwable) {}
     }
 
+    private fun sponsorForegroundChanged(current: Long, previous: Long): Boolean {
+        return ((current xor previous) and 0xFFFL.inv()) != 0L
+    }
+
+    private fun sponsorBackgroundChanged(current: Long, previous: Long): Boolean {
+        return ((current xor previous) and 0xFFF000L.inv()) != 0L
+    }
+
     private fun bitmapFromRgba(
         current: android.graphics.Bitmap?,
         width: Int,
@@ -832,7 +840,17 @@ class MainActivity : AppCompatActivity() {
                                 if (card.generation != sponsorGeneration) {
                                     // The native bridge sends only the media
                                     // plane that changed. Preserve a static
-                                    // icon while a video/GIF background advances.
+                                    // icon while a video/GIF background advances,
+                                    // and clear a plane only when that plane
+                                    // itself changed to an empty value.
+                                    val foregroundChanged = sponsorForegroundChanged(
+                                        card.generation,
+                                        sponsorGeneration,
+                                    )
+                                    val backgroundChanged = sponsorBackgroundChanged(
+                                        card.generation,
+                                        sponsorGeneration,
+                                    )
                                     if (card.rgba.isNotEmpty()) {
                                         val previousBitmap = sponsorBitmap
                                         val bitmap = bitmapFromRgba(sponsorBitmap, card.width, card.height, card.rgba)
@@ -842,7 +860,7 @@ class MainActivity : AppCompatActivity() {
                                             sponsorImage.visibility = android.view.View.VISIBLE
                                             sponsorImage.invalidate()
                                         }
-                                    } else if (card.width <= 0 || card.height <= 0) {
+                                    } else if (foregroundChanged && (card.width <= 0 || card.height <= 0)) {
                                         sponsorImage.setImageDrawable(null)
                                         sponsorImage.visibility = android.view.View.GONE
                                     }
@@ -860,7 +878,9 @@ class MainActivity : AppCompatActivity() {
                                             sponsorBackgroundImage.visibility = android.view.View.VISIBLE
                                             sponsorBackgroundImage.invalidate()
                                         }
-                                    } else if (card.backgroundWidth <= 0 || card.backgroundHeight <= 0) {
+                                    } else if (backgroundChanged
+                                        && (card.backgroundWidth <= 0 || card.backgroundHeight <= 0)
+                                    ) {
                                         sponsorBackgroundImage.setImageDrawable(null)
                                         sponsorBackgroundImage.visibility = android.view.View.GONE
                                     }

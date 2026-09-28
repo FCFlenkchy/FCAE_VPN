@@ -1175,7 +1175,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     env->SetIntField(obj, fidBackgroundScale, (jint)info.background_scale);
     env->SetIntField(obj, fidIconX, (jint)info.icon_x);
     env->SetIntField(obj, fidIconY, (jint)info.icon_y);
-    env->SetIntField(obj, fidDurationSeconds, (jint)info.duration_seconds);
+    env->SetIntField(obj, fidDurationSeconds,
+                     (jint)(info.duration_seconds > 0 ? info.duration_seconds : 10));
     env->SetLongField(obj, fidGeneration, (jlong)info.generation);
     env->SetObjectField(obj, fidRgba, rgba);
     env->SetObjectField(obj, fidBackgroundRgba, backgroundRgba);
