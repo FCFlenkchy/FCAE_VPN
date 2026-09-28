@@ -83,20 +83,23 @@ static void poll_sponsor() {
         g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
         return;
     }
-    const bool card_changed = info.available != s_sponsor.available
+    const bool card_available = info.available || info.campaign_count != 0;
+    const bool card_changed = card_available != s_sponsor.available
         || info.generation != s_sponsor.generation;
-    if (info.available && info.generation != s_sponsor_logged_generation) {
+    if (card_available && info.generation != s_sponsor_logged_generation) {
         s_sponsor_logged_generation = info.generation;
         char message[192];
         snprintf(message, sizeof(message),
-                 "[sponsor] UI frame available: id=%s generation=%llu campaigns=%u rgba=%u",
+                 "[sponsor] UI frame available=%s: id=%s generation=%llu campaigns=%u rgba=%u",
+                 info.available ? "true" : "inferred",
                  info.id, (unsigned long long)info.generation,
                  info.campaign_count, info.rgba_size);
         g_app.add_log(FCAE_LOG_INFO, message);
     }
     s_sponsor = info;
+    s_sponsor.available = card_available;
     if (card_changed) ui_request_redraw();
-    if (!info.available) {
+    if (!card_available) {
         s_sponsor_rgba.clear();
         s_sponsor_loaded_generation = 0;
     } else if (info.generation != s_sponsor_loaded_generation) {
@@ -1830,7 +1833,10 @@ void render_ui() {
 
             ImGui::Spacing();
             ImGui::Separator();
-            ImGui::TextDisabled(s_sponsor.available ? "SPONSORED" : "SPONSOR");
+            ImGui::TextColored(s_sponsor.available
+                ? ImVec4(0.55f, 0.72f, 1.0f, 1.0f)
+                : ImVec4(0.55f, 0.55f, 0.62f, 1.0f),
+                s_sponsor.available ? "SPONSORED" : "SPONSOR");
             ImGui::SameLine();
             if (ImGui::SmallButton("↻")) {
                 fcae_sponsor_refresh_manifest_now_async();
@@ -1846,6 +1852,14 @@ void render_ui() {
                         s_sponsor_rgba.data(), (int)s_sponsor.width, (int)s_sponsor.height,
                         s_sponsor.generation);
                 }
+                const float sponsor_card_height = texture ? 230.0f : 150.0f;
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.49f, 0.76f, 1.0f));
+                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
+                ImGui::BeginChild("##sponsor_card", ImVec2(0, sponsor_card_height),
+                    ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
+                ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "FEATURED SPONSOR");
+                ImGui::Spacing();
                 {
                     if (texture) {
                     const float max_w = std::min(320.0f, ImGui::GetContentRegionAvail().x);
@@ -1897,6 +1911,9 @@ void render_ui() {
                         ImGui::TextWrapped("%s", s_sponsor.message);
                     }
                 }
+                ImGui::EndChild();
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(2);
             }
             const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
             if (ImGui::TextLink("Want to become a sponsor? Click me")) open_link(sponsor_policy);

@@ -612,34 +612,39 @@ class MainActivity : AppCompatActivity() {
                     }
                     handler.post {
                         try {
-                            if (info == null || !info.available) {
+                            val card = info
+                            if (card == null) {
+                                // A failed native poll is not a manifest result.
+                                // Keep the last rendered card until a valid
+                                // empty snapshot explicitly replaces it.
+                            } else if (!(card.available || card.campaignCount > 0)) {
                                 sponsorCard.visibility = android.view.View.GONE
                                 sponsorDestination = ""
                                 sponsorAnimated = false
                                 sponsorCampaignCount = 0
                             } else {
-                                sponsorAnimated = info.animated
-                                sponsorCampaignCount = info.campaignCount
-                                sponsorTitle.text = info.title
-                                sponsorMessage.text = info.message
-                                sponsorMessage.visibility = if (info.message.isBlank()) android.view.View.GONE else android.view.View.VISIBLE
-                                sponsorDestination = info.destinationUrl
-                                if (info.generation != sponsorGeneration) {
-                                    if (info.rgba.isNotEmpty() && info.width > 0 && info.height > 0
-                                        && info.rgba.size.toLong() == info.width.toLong() * info.height.toLong() * 4L) {
+                                sponsorAnimated = card.animated
+                                sponsorCampaignCount = card.campaignCount
+                                sponsorTitle.text = card.title
+                                sponsorMessage.text = card.message
+                                sponsorMessage.visibility = if (card.message.isBlank()) android.view.View.GONE else android.view.View.VISIBLE
+                                sponsorDestination = card.destinationUrl
+                                if (card.generation != sponsorGeneration) {
+                                    if (card.rgba.isNotEmpty() && card.width > 0 && card.height > 0
+                                        && card.rgba.size.toLong() == card.width.toLong() * card.height.toLong() * 4L) {
                                         val current = sponsorBitmap
-                                        val bitmap = if (current != null && current.width == info.width
-                                            && current.height == info.height) current else {
+                                        val bitmap = if (current != null && current.width == card.width
+                                            && current.height == card.height) current else {
                                             current?.recycle()
                                             android.graphics.Bitmap.createBitmap(
-                                                info.width, info.height, android.graphics.Bitmap.Config.ARGB_8888
+                                                card.width, card.height, android.graphics.Bitmap.Config.ARGB_8888
                                             ).also { sponsorBitmap = it }
                                         }
-                                        val logicalStride = info.width * 4
-                                        val pixels = if (bitmap.rowBytes == logicalStride) info.rgba else {
-                                            ByteArray(bitmap.rowBytes * info.height).also { padded ->
-                                                for (row in 0 until info.height) {
-                                                    info.rgba.copyInto(padded, row * bitmap.rowBytes, row * logicalStride, (row + 1) * logicalStride)
+                                        val logicalStride = card.width * 4
+                                        val pixels = if (bitmap.rowBytes == logicalStride) card.rgba else {
+                                            ByteArray(bitmap.rowBytes * card.height).also { padded ->
+                                                for (row in 0 until card.height) {
+                                                    card.rgba.copyInto(padded, row * bitmap.rowBytes, row * logicalStride, (row + 1) * logicalStride)
                                                 }
                                             }
                                         }
@@ -651,7 +656,7 @@ class MainActivity : AppCompatActivity() {
                                         sponsorImage.setImageDrawable(null)
                                         sponsorImage.visibility = android.view.View.GONE
                                     }
-                                    sponsorGeneration = info.generation
+                                    sponsorGeneration = card.generation
                                 }
                                 sponsorCard.visibility = android.view.View.VISIBLE
                             }

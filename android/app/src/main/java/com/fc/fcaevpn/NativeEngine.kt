@@ -242,18 +242,18 @@ object NativeEngine {
     @JvmStatic external fun nativePollSponsor(knownGeneration: Long): FcaeSponsorInfo
 }
 
-data class FcaeSponsorInfo(
-    val available: Boolean = false,
-    val id: String = "",
-    val title: String = "",
-    val message: String = "",
-    val destinationUrl: String = "",
-    val width: Int = 0,
-    val height: Int = 0,
-    val campaignCount: Int = 0,
-    val animated: Boolean = false,
-    val generation: Long = 0,
-    val rgba: ByteArray = byteArrayOf()
+class FcaeSponsorInfo(
+    @JvmField var available: Boolean = false,
+    @JvmField var id: String = "",
+    @JvmField var title: String = "",
+    @JvmField var message: String = "",
+    @JvmField var destinationUrl: String = "",
+    @JvmField var width: Int = 0,
+    @JvmField var height: Int = 0,
+    @JvmField var campaignCount: Int = 0,
+    @JvmField var animated: Boolean = false,
+    @JvmField var generation: Long = 0,
+    @JvmField var rgba: ByteArray = byteArrayOf()
 )
 
 /**
