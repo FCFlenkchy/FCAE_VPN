@@ -1881,10 +1881,10 @@ void render_ui() {
                 }
                 const float image_scale = std::clamp(
                     (float)s_sponsor.image_scale / 100.0f, 0.5f, 1.6f);
-                const float sponsor_image_height = 120.0f * image_scale;
+                const float sponsor_image_height = std::min(150.0f, 120.0f * image_scale);
                 // Keep the native sponsor box stable even when an icon is
                 // missing or a campaign changes its image scale.
-                constexpr float sponsor_card_height = 300.0f;
+                constexpr float sponsor_card_height = 240.0f;
                 const ImVec4 card_color = sponsor_color(s_sponsor.card_color,
                     ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
                 const ImVec4 text_color = sponsor_color(s_sponsor.text_color,
@@ -2079,7 +2079,8 @@ void render_ui() {
                 else
                     ImGui::TextWrapped("%s local: %s 127.0.0.1:%u", backend, kind, port);
             };
-            ImGui::TextWrapped("Peer: %s", telem.connected_peer[0] ? telem.connected_peer : "-");
+            if (telem.connected_peer[0])
+                ImGui::TextWrapped("Peer: %s", telem.connected_peer);
             if (telem.backend != FCAE_BACKEND_PSIPHON) {
                 if (g_app.protocol != 4 && (g_app.socks_enabled || g_app.mode == 1 || g_app.tor_mode != 0)) endpoint("Aether", "SOCKS5", g_app.socks_port ? g_app.socks_port : 1819);
                 if (g_app.protocol != 4 && g_app.http_enabled) endpoint("Aether", "HTTP", g_app.http_port);
@@ -2092,8 +2093,6 @@ void render_ui() {
                 endpoint("Psiphon", "SOCKS5", fcae_psiphon_socks_port());
                 endpoint("Psiphon", "HTTP", fcae_psiphon_http_port());
             }
-        } else {
-            ImGui::TextDisabled("No endpoint details available.");
         }
         ImGui::EndChild();
         ImGui::PopStyleColor(2);

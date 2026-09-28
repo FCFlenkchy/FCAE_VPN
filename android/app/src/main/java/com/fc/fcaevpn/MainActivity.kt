@@ -70,6 +70,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnCheckUpdates: MaterialButton
     private var updateAvailableInfo: FcaeUpdateInfo? = null
     private var updateResultDialog: androidx.appcompat.app.AlertDialog? = null
+    private var connectionInfoDialog: androidx.appcompat.app.AlertDialog? = null
+    private val connectionInfoSync = object : Runnable {
+        override fun run() {
+            val dialog = connectionInfoDialog
+            if (dialog == null || !dialog.isShowing) return
+            dialog.findViewById<TextView>(android.R.id.message)?.text = currentConnectionInfoText()
+            handler.postDelayed(this, 250L)
+        }
+    }
     private lateinit var sponsorCard: android.view.View
     private lateinit var sponsorImage: android.widget.ImageView
     private lateinit var sponsorBackgroundImage: android.widget.ImageView
@@ -683,9 +692,9 @@ class MainActivity : AppCompatActivity() {
                                 sponsorMessage.gravity = textGravity
                                 val imageScale = card.imageScale.coerceIn(50, 160)
                                 sponsorImage.layoutParams = sponsorImage.layoutParams.apply {
-                                    height = (192 * resources.displayMetrics.density).toInt()
+                                    height = (150 * resources.displayMetrics.density).toInt()
                                 }
-                                val imageScaleFactor = imageScale / 160f
+                                val imageScaleFactor = (120f * imageScale / 100f / 150f).coerceAtMost(1f)
                                 sponsorImage.scaleX = imageScaleFactor
                                 sponsorImage.scaleY = imageScaleFactor
                                 sponsorImage.scaleType = if (card.imageFit == 1) {
@@ -2857,31 +2866,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun currentConnectionInfoText(): String =
+        if (::peerText.isInitialized) peerText.text?.toString()?.trim().orEmpty() else ""
+
     private fun showConnectionInfoDialog() {
-        val endpointText = peerText.text?.toString()?.trim().orEmpty()
-        val details = endpointText.ifEmpty { "No endpoint details available." }
-        val density = resources.displayMetrics.density
-        val body = TextView(this).apply {
-            text = details
-            setTextColor(Color.WHITE)
-            textSize = 14f
-            typeface = Typeface.MONOSPACE
-            setTextIsSelectable(true)
-            setBackgroundResource(R.drawable.home_details_card)
-            setPadding(
-                (16 * density).toInt(),
-                (16 * density).toInt(),
-                (16 * density).toInt(),
-                (16 * density).toInt(),
-            )
-        }
+        connectionInfoDialog?.let { if (it.isShowing) return }
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Connection info")
-            .setView(ScrollView(this).apply { addView(body) })
+            // Keep INFO in the dialog's native message area: it is one plain
+            // modal surface, not a second card or overlay. An empty message is
+            // intentional while disconnected; the sync runnable fills it as
+            // soon as endpoint telemetry becomes available.
+            .setMessage(currentConnectionInfoText())
             .setPositiveButton("Close", null)
             .create()
+        connectionInfoDialog = dialog
+        dialog.setOnDismissListener {
+            handler.removeCallbacks(connectionInfoSync)
+            if (connectionInfoDialog === dialog) connectionInfoDialog = null
+        }
         dialog.show()
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.CYAN)
+        dialog.findViewById<TextView>(android.R.id.message)?.apply {
+            setTextIsSelectable(true)
+            typeface = Typeface.MONOSPACE
+        }
+        handler.post(connectionInfoSync)
     }
 
     private fun showAboutDialog() {
@@ -3143,8 +3153,8 @@ class MainActivity : AppCompatActivity() {
      */
     private fun sessionEndpointText(peer: String, lan: String, listenersUp: Boolean): String {
         val peerLine = StringBuilder()
-        if (!isPsiphonSelected() && !isTorOnly()) {
-            peerLine.append("Peer: ${peer.ifEmpty { " \u2014 " }}")
+        if (!isPsiphonSelected() && !isTorOnly() && peer.isNotBlank()) {
+            peerLine.append("Peer: $peer")
         }
         if (listenersUp && !isPsiphonSelected()) {
             fun endpoints(backend: String, socks: String?, http: String?) {

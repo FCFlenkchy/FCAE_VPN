@@ -1154,7 +1154,7 @@
                 <FrameLayout
                     android:id="@+id/sponsorCard"
                     android:layout_width="match_parent"
-                    android:layout_height="300dp"
+                    android:layout_height="240dp"
                     android:background="@drawable/sponsor_card"
                     android:clickable="true"
                     android:elevation="3dp"
@@ -1181,7 +1181,7 @@
                     <ImageView
                         android:id="@+id/sponsorImage"
                         android:layout_width="match_parent"
-                        android:layout_height="192dp"
+                        android:layout_height="150dp"
                         android:layout_marginTop="6dp"
                         android:contentDescription="Sponsor icon"
                         android:scaleType="centerInside" />

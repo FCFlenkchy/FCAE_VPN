@@ -3,8 +3,7 @@ use once_cell::sync::Lazy;
 use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
 use std::{
-    collections::{HashSet, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
+    collections::HashSet,
     fs,
     io::{Cursor, Read},
     path::{Path, PathBuf},
@@ -53,14 +52,14 @@ struct Campaign {
     title: String,
     #[serde(default)]
     message: Option<String>,
-    #[serde(default, alias = "media_url")]
+    #[serde(default)]
     icon_url: Option<String>,
     #[serde(default)]
     background_url: Option<String>,
     #[serde(default)]
     text_color: Option<String>,
     #[serde(default)]
-    card_color: Option<String>,
+    background_color: Option<String>,
     #[serde(default)]
     text_align: Option<String>,
     #[serde(default)]
@@ -517,9 +516,9 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
                 log::warn!("[sponsor] campaign {} has invalid text color; using the default", campaign.id);
                 campaign.text_color = None;
             }
-            if campaign.card_color.as_ref().is_some_and(|color| !valid_color(color)) {
-                log::warn!("[sponsor] campaign {} has invalid card color; using the default", campaign.id);
-                campaign.card_color = None;
+            if campaign.background_color.as_ref().is_some_and(|color| !valid_color(color)) {
+                log::warn!("[sponsor] campaign {} has invalid background color; using the default", campaign.id);
+                campaign.background_color = None;
             }
             if campaign.text_align.as_ref().is_some_and(|align| !valid_text_align(align)) {
                 log::warn!("[sponsor] campaign {} has invalid text alignment; using centered text", campaign.id);
@@ -619,7 +618,7 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
         background_height: 0,
         background_rgba: Arc::new(Vec::new()),
         text_color: color_value(campaign.text_color.as_deref(), DEFAULT_TEXT_COLOR),
-        card_color: color_value(campaign.card_color.as_deref(), DEFAULT_CARD_COLOR),
+        card_color: color_value(campaign.background_color.as_deref(), DEFAULT_CARD_COLOR),
         text_align: text_align_value(campaign.text_align.as_deref()),
         image_fit: image_fit_value(campaign.image_fit.as_deref()),
         image_scale: image_scale_value(campaign.image_scale),
@@ -940,9 +939,14 @@ struct BackgroundImage {
 }
 
 fn cache_name_for(campaign: &Campaign, url: Option<&str>, suffix: &str) -> String {
-    let mut hash = DefaultHasher::new();
-    url.hash(&mut hash);
-    format!("{}-{:016x}.{}", campaign.id, hash.finish(), suffix)
+    // Use a stable hash so cache filenames remain identical across process
+    // restarts and unchanged campaign URLs can be reused.
+    let mut hash = 14695981039346656037u64;
+    for byte in url.unwrap_or_default().as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(1099511628211u64);
+    }
+    format!("{}-{:016x}.{}", campaign.id, hash, suffix)
 }
 
 fn cache_name(campaign: &Campaign) -> String {
