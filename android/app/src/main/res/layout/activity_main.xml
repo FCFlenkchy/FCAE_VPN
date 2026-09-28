@@ -1154,7 +1154,7 @@
                 <FrameLayout
                     android:id="@+id/sponsorCard"
                     android:layout_width="match_parent"
-                    android:layout_height="240dp"
+                    android:layout_height="150dp"
                     android:background="@drawable/sponsor_card"
                     android:clickable="true"
                     android:elevation="3dp"
@@ -1171,40 +1171,42 @@
                         android:scaleType="centerCrop"
                         android:alpha="0.34" />
 
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:orientation="vertical"
-                        android:padding="14dp">
-
                     <ImageView
                         android:id="@+id/sponsorImage"
                         android:layout_width="match_parent"
-                        android:layout_height="150dp"
-                        android:layout_marginTop="6dp"
+                        android:layout_height="80dp"
+                        android:layout_gravity="top|center_horizontal"
+                        android:layout_marginTop="4dp"
                         android:contentDescription="Sponsor icon"
                         android:scaleType="centerInside" />
 
-                    <TextView
-                        android:id="@+id/sponsorMessage"
+                    <LinearLayout
+                        android:id="@+id/sponsorTextBlock"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp"
-                        android:gravity="center"
-                        android:textColor="#FFD8E7FF"
-                        android:textSize="14sp"
-                        android:visibility="gone" />
+                        android:layout_gravity="top|start"
+                        android:gravity="center_horizontal"
+                        android:orientation="vertical">
 
-                    <TextView
-                        android:id="@+id/sponsorTitle"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:gravity="center"
-                        android:textColor="#FFFFFFFF"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
+                        <TextView
+                            android:id="@+id/sponsorMessage"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="10dp"
+                            android:gravity="center"
+                            android:textColor="#FFD8E7FF"
+                            android:textSize="14sp"
+                            android:visibility="gone" />
+
+                        <TextView
+                            android:id="@+id/sponsorTitle"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:gravity="center"
+                            android:textColor="#FFFFFFFF"
+                            android:textSize="16sp"
+                            android:textStyle="bold" />
 
                     </LinearLayout>
                 </FrameLayout>

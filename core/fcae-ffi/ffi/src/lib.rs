@@ -1377,7 +1377,8 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
                 .map_err(|_| CoreError::Internal("sponsor background is too large".into()))?;
             out.text_color = frame.text_color;
             out.card_color = frame.card_color;
-            out.text_align = frame.text_align;
+            out.text_x = frame.text_x;
+            out.text_y = frame.text_y;
             out.image_fit = frame.image_fit;
             out.image_scale = frame.image_scale;
             *SPONSOR_FRAME.lock() = Some(frame);
@@ -1393,7 +1394,8 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.background_rgba_size = 0;
             out.text_color = 0;
             out.card_color = 0;
-            out.text_align = 0;
+            out.text_x = 50;
+            out.text_y = 50;
             out.image_fit = 0;
             out.image_scale = 0;
             fill(&mut out.id, "");

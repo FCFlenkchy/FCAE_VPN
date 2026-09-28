@@ -61,7 +61,9 @@ struct Campaign {
     #[serde(default)]
     background_color: Option<String>,
     #[serde(default)]
-    text_align: Option<String>,
+    text_x: Option<u32>,
+    #[serde(default)]
+    text_y: Option<u32>,
     #[serde(default)]
     image_fit: Option<String>,
     #[serde(default)]
@@ -95,7 +97,8 @@ struct ReadyCampaign {
     background_rgba: Arc<Vec<u8>>,
     text_color: u32,
     card_color: u32,
-    text_align: u8,
+    text_x: u8,
+    text_y: u8,
     image_fit: u8,
     image_scale: u32,
 }
@@ -130,7 +133,8 @@ pub struct SponsorFrame {
     pub background_rgba: Arc<Vec<u8>>,
     pub text_color: u32,
     pub card_color: u32,
-    pub text_align: u8,
+    pub text_x: u8,
+    pub text_y: u8,
     pub image_fit: u8,
     pub image_scale: u32,
     pub generation: u64,
@@ -192,7 +196,9 @@ fn unix_now() -> u64 {
 }
 
 pub fn set_cache_dir(path: impl Into<PathBuf>) {
-    STATE.lock().cache_dir = path.into();
+    let path = path.into();
+    let _ = fs::create_dir_all(&path);
+    STATE.lock().cache_dir = path;
     load_cached_manifest();
 }
 
@@ -217,6 +223,10 @@ pub fn load_cached_manifest() {
     if let Some(campaigns) = campaigns {
         log::info!("[sponsor] loaded cached manifest ({} active campaigns)", campaigns.len());
         apply_campaigns(campaigns);
+        // Decode local media immediately, even while disconnected. This never
+        // downloads: it only rehydrates files already in the cache so a
+        // reconnect or process restart cannot make a valid sponsor disappear.
+        refresh_cached_media_async();
     } else if json.is_some() {
         log::warn!("[sponsor] cached manifest is invalid; forcing a refresh");
     }
@@ -228,7 +238,13 @@ pub fn set_proxy(proxy: Option<String>) {
 
 pub fn set_connected(connected: bool) {
     let was = CONNECTED.swap(connected, Ordering::AcqRel);
-    if connected && !was {
+    if !connected {
+        // Disconnecting only disables network work. Keep the in-memory frame
+        // and durable files; rehydrate local media if a refresh was in flight.
+        if was { refresh_cached_media_async(); }
+        return;
+    }
+    if !was {
         if manifest_due() {
             refresh_manifest_async();
         } else {
@@ -266,16 +282,16 @@ pub fn set_manifest_json(json: &[u8]) -> Result<(), String> {
         state.cache_dir.clone()
     };
     let _ = fs::create_dir_all(&cache_dir);
-    let manifest_tmp = cache_dir.join("manifest.json.tmp");
-    if fs::write(&manifest_tmp, json).is_ok() {
-        let manifest_path = cache_dir.join("manifest.json");
-        let _ = fs::remove_file(&manifest_path);
-        if fs::rename(manifest_tmp, manifest_path).is_ok() {
-            let _ = fs::write(cache_dir.join("manifest.timestamp"), now.to_string());
-            let _ = fs::write(cache_dir.join("manifest.check.timestamp"), now.to_string());
-        }
+    let manifest_path = cache_dir.join("manifest.json");
+    if write_atomic_preserving_old(&manifest_path, json) {
+        let _ = fs::write(cache_dir.join("manifest.timestamp"), now.to_string());
+        let _ = fs::write(cache_dir.join("manifest.check.timestamp"), now.to_string());
     }
-    if CONNECTED.load(Ordering::Acquire) { refresh_media_async(); }
+    if CONNECTED.load(Ordering::Acquire) {
+        refresh_media_async();
+    } else {
+        refresh_cached_media_async();
+    }
     Ok(())
 }
 
@@ -359,7 +375,19 @@ fn refresh_manifest_async_inner(force: bool) {
 }
 
 pub fn refresh_media_async() {
-    if !CONNECTED.load(Ordering::Acquire) || MEDIA_BUSY.swap(true, Ordering::AcqRel) { return; }
+    refresh_media_async_inner(false);
+}
+
+fn refresh_cached_media_async() {
+    refresh_media_async_inner(true);
+}
+
+fn refresh_media_async_inner(allow_disconnected: bool) {
+    if (!allow_disconnected && !CONNECTED.load(Ordering::Acquire))
+        || MEDIA_BUSY.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
     let (campaigns, cache_dir, previous) = {
         let state = STATE.lock();
         (state.campaigns.clone(), state.cache_dir.clone(), state.ready.clone())
@@ -367,8 +395,9 @@ pub fn refresh_media_async() {
     thread::spawn(move || {
         let ready = prepare_media(&campaigns, &cache_dir, &previous);
         let ready_count = ready.len();
+        let connected = CONNECTED.load(Ordering::Acquire);
         let mut applied = false;
-        if CONNECTED.load(Ordering::Acquire) {
+        if (allow_disconnected || connected) {
             let mut state = STATE.lock();
             if state.campaigns == campaigns {
                 state.ready = ready;
@@ -381,9 +410,18 @@ pub fn refresh_media_async() {
         MEDIA_BUSY.store(false, Ordering::Release);
         if applied {
             log::info!("[sponsor] published media refresh ({} active campaigns)", ready_count);
+            // If the offline pass finished after a reconnect, follow it with
+            // one tunnel-backed pass so uncached media is downloaded too.
+            if allow_disconnected && CONNECTED.load(Ordering::Acquire) {
+                refresh_media_async();
+            }
         } else if CONNECTED.load(Ordering::Acquire) {
             log::info!("[sponsor] discarded stale media refresh; scheduling another pass");
             refresh_media_async();
+        } else if !allow_disconnected {
+            // The tunnel may have closed while downloading. The raw bytes were
+            // written first; now rehydrate them without touching the network.
+            refresh_cached_media_async();
         }
     });
 }
@@ -469,7 +507,8 @@ pub fn current_frame() -> Option<SponsorFrame> {
         background_rgba,
         text_color: ready.text_color,
         card_color: ready.card_color,
-        text_align: ready.text_align,
+        text_x: ready.text_x,
+        text_y: ready.text_y,
         image_fit: ready.image_fit,
         image_scale: ready.image_scale,
         generation,
@@ -520,9 +559,13 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
                 log::warn!("[sponsor] campaign {} has invalid background color; using the default", campaign.id);
                 campaign.background_color = None;
             }
-            if campaign.text_align.as_ref().is_some_and(|align| !valid_text_align(align)) {
-                log::warn!("[sponsor] campaign {} has invalid text alignment; using centered text", campaign.id);
-                campaign.text_align = None;
+            if campaign.text_x.is_some_and(|position| position > 100) {
+                log::warn!("[sponsor] campaign {} has invalid text X position; using 50 percent", campaign.id);
+                campaign.text_x = None;
+            }
+            if campaign.text_y.is_some_and(|position| position > 100) {
+                log::warn!("[sponsor] campaign {} has invalid text Y position; using 50 percent", campaign.id);
+                campaign.text_y = None;
             }
             if campaign.image_fit.as_ref().is_some_and(|fit| !valid_image_fit(fit)) {
                 log::warn!("[sponsor] campaign {} has invalid image fit; using contain", campaign.id);
@@ -579,12 +622,8 @@ fn color_value(color: Option<&str>, default: u32) -> u32 {
     if color.len() == 7 { 0xFF00_0000 | value } else { value }
 }
 
-fn text_align_value(value: Option<&str>) -> u8 {
-    match value {
-        Some("left") => 1,
-        Some("right") => 2,
-        _ => 0,
-    }
+fn text_position_value(value: Option<u32>) -> u8 {
+    value.filter(|position| *position <= 100).unwrap_or(50) as u8
 }
 
 fn image_fit_value(value: Option<&str>) -> u8 {
@@ -593,10 +632,6 @@ fn image_fit_value(value: Option<&str>) -> u8 {
 
 fn image_scale_value(value: Option<u32>) -> u32 {
     value.filter(|scale| (50..=160).contains(scale)).unwrap_or(DEFAULT_IMAGE_SCALE)
-}
-
-fn valid_text_align(value: &str) -> bool {
-    matches!(value, "left" | "center" | "right")
 }
 
 fn valid_image_fit(value: &str) -> bool {
@@ -619,7 +654,8 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
         background_rgba: Arc::new(Vec::new()),
         text_color: color_value(campaign.text_color.as_deref(), DEFAULT_TEXT_COLOR),
         card_color: color_value(campaign.background_color.as_deref(), DEFAULT_CARD_COLOR),
-        text_align: text_align_value(campaign.text_align.as_deref()),
+        text_x: text_position_value(campaign.text_x),
+        text_y: text_position_value(campaign.text_y),
         image_fit: image_fit_value(campaign.image_fit.as_deref()),
         image_scale: image_scale_value(campaign.image_scale),
     }
@@ -723,9 +759,9 @@ fn prepare_media(
 ) -> Vec<ReadyCampaign> {
     let mut ready = Vec::with_capacity(campaigns.len());
     let mut decoded_total = 0usize;
-    let network_client = campaigns.iter().any(|campaign| {
+    let network_client = (CONNECTED.load(Ordering::Acquire) && campaigns.iter().any(|campaign| {
         campaign.icon_url.is_some() || campaign.background_url.is_some()
-    }).then(|| client().ok()).flatten();
+    })).then(|| client().ok()).flatten();
 
     for batch in campaigns.chunks(MAX_MEDIA_WORKERS) {
         let payloads: Vec<Option<CampaignPayload>> = thread::scope(|scope| {
@@ -859,6 +895,29 @@ fn find_cached_payload(
     })
 }
 
+fn write_atomic_preserving_old(path: &Path, bytes: &[u8]) -> bool {
+    let Some(parent) = path.parent() else { return false; };
+    if fs::create_dir_all(parent).is_err() { return false; }
+    let tmp = path.with_extension("download.tmp");
+    if fs::write(&tmp, bytes).is_err() { return false; }
+    if fs::rename(&tmp, path).is_ok() { return true; }
+
+    // Windows cannot rename over an existing file. Move the old valid entry
+    // aside only after the new bytes are safely on disk, and restore it if the
+    // replacement fails. A failed refresh must never erase the last good file.
+    let backup = path.with_extension("previous.tmp");
+    let had_old = path.exists() && fs::rename(path, &backup).is_ok();
+    let replaced = fs::rename(&tmp, path).is_ok();
+    if replaced {
+        if had_old { let _ = fs::remove_file(backup); }
+        true
+    } else {
+        if had_old { let _ = fs::rename(backup, path); }
+        let _ = fs::remove_file(&tmp);
+        false
+    }
+}
+
 fn load_payload(
     url: Option<&str>,
     path: PathBuf,
@@ -868,13 +927,20 @@ fn load_payload(
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<MediaPayload> {
     let url = url?;
+    let _ = fs::create_dir_all(cache_dir);
     let fallback = find_cached_payload(cache_dir, campaign_id, suffix, &path);
     if let Ok(bytes) = fs::read(&path) {
         return Some(MediaPayload { path, bytes, cached: true, fallback });
     }
-    if let Some(client) = client {
-        if let Ok(bytes) = download_media(client, url) {
-            return Some(MediaPayload { path, bytes, cached: false, fallback });
+    if CONNECTED.load(Ordering::Acquire) {
+        if let Some(client) = client {
+            if let Ok(bytes) = download_media(client, url) {
+                // Persist the original bytes before decoding. A disconnect or
+                // process exit during GIF frame expansion must not lose a valid
+                // download; decode_payload removes it later only if invalid.
+                let cached = write_atomic_preserving_old(&path, &bytes);
+                return Some(MediaPayload { path, bytes, cached, fallback });
+            }
         }
     }
     fallback.and_then(|path| fs::read(&path).ok().map(|bytes| MediaPayload {
@@ -904,13 +970,14 @@ fn decode_payload(
             let _ = fs::remove_file(fallback_path);
         }
         if cached { let _ = fs::remove_file(&path); }
+        if !CONNECTED.load(Ordering::Acquire) { return None; }
         let client = client?;
         bytes = download_media(client, url).ok()?;
         cached = false;
         decoded = decode(campaign.clone(), &bytes).ok();
     }
     if decoded.is_some() {
-        if !cached { let _ = fs::write(&path, &bytes); }
+        if !cached { let _ = write_atomic_preserving_old(&path, &bytes); }
     } else {
         let _ = fs::remove_file(path);
     }
@@ -1011,7 +1078,8 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             background_rgba: Arc::new(Vec::new()),
             text_color: DEFAULT_TEXT_COLOR,
             card_color: DEFAULT_CARD_COLOR,
-            text_align: 0,
+            text_x: 50,
+            text_y: 50,
             image_fit: 0,
             image_scale: DEFAULT_IMAGE_SCALE,
         })
@@ -1036,7 +1104,8 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             background_rgba: Arc::new(Vec::new()),
             text_color: DEFAULT_TEXT_COLOR,
             card_color: DEFAULT_CARD_COLOR,
-            text_align: 0,
+            text_x: 50,
+            text_y: 50,
             image_fit: 0,
             image_scale: DEFAULT_IMAGE_SCALE,
         })

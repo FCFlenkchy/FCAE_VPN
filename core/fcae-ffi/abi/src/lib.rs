@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 12;
+pub const FCAE_ABI_VERSION: u32 = 13;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
@@ -565,8 +565,10 @@ pub struct FcaeSponsorInfo {
     pub text_color: u32,
     /// Packed ARGB color for the sponsor card background.
     pub card_color: u32,
-    /// 0=center, 1=left, 2=right.
-    pub text_align: u8,
+    /// Horizontal text position as a percentage of the available card width.
+    pub text_x: u8,
+    /// Vertical text position as a percentage of the available card height.
+    pub text_y: u8,
     /// 0=contain, 1=cover.
     pub image_fit: u8,
     /// Foreground image scale percentage, constrained to 50..=160.

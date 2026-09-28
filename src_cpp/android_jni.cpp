@@ -1031,7 +1031,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     const jfieldID fidBackgroundHeight = getField("backgroundHeight", "I");
     const jfieldID fidTextColor = getField("textColor", "I");
     const jfieldID fidCardColor = getField("cardColor", "I");
-    const jfieldID fidTextAlign = getField("textAlign", "I");
+    const jfieldID fidTextX = getField("textX", "I");
+    const jfieldID fidTextY = getField("textY", "I");
     const jfieldID fidImageFit = getField("imageFit", "I");
     const jfieldID fidImageScale = getField("imageScale", "I");
     const jfieldID fidGeneration = getField("generation", "J");
@@ -1040,7 +1041,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     if (env->ExceptionCheck() || !fidAvailable || !fidId || !fidTitle || !fidMessage
             || !fidDestination || !fidWidth || !fidHeight || !fidCampaignCount
             || !fidAnimated || !fidBackgroundWidth || !fidBackgroundHeight
-            || !fidTextColor || !fidCardColor || !fidTextAlign || !fidImageFit
+            || !fidTextColor || !fidCardColor || !fidTextX || !fidTextY || !fidImageFit
             || !fidImageScale || !fidGeneration || !fidRgba
             || !fidBackgroundRgba) {
         env->DeleteLocalRef(rgba);
@@ -1080,7 +1081,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     env->SetIntField(obj, fidBackgroundHeight, (jint)info.background_height);
     env->SetIntField(obj, fidTextColor, (jint)info.text_color);
     env->SetIntField(obj, fidCardColor, (jint)info.card_color);
-    env->SetIntField(obj, fidTextAlign, (jint)info.text_align);
+    env->SetIntField(obj, fidTextX, (jint)info.text_x);
+    env->SetIntField(obj, fidTextY, (jint)info.text_y);
     env->SetIntField(obj, fidImageFit, (jint)info.image_fit);
     env->SetIntField(obj, fidImageScale, (jint)info.image_scale);
     env->SetLongField(obj, fidGeneration, (jlong)info.generation);

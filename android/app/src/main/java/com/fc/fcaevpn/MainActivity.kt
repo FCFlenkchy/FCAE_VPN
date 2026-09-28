@@ -82,6 +82,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sponsorCard: android.view.View
     private lateinit var sponsorImage: android.widget.ImageView
     private lateinit var sponsorBackgroundImage: android.widget.ImageView
+    private lateinit var sponsorTextBlock: android.widget.LinearLayout
     private lateinit var sponsorMessage: android.widget.TextView
     private lateinit var sponsorTitle: TextView
     private var sponsorGeneration = -1L
@@ -629,6 +630,32 @@ class MainActivity : AppCompatActivity() {
         return bitmap
     }
 
+    private fun positionSponsorText(textX: Int, textY: Int) {
+        if (!::sponsorCard.isInitialized || !::sponsorTextBlock.isInitialized) return
+        val x = textX.coerceIn(0, 100)
+        val y = textY.coerceIn(0, 100)
+        sponsorTextBlock.post {
+            val cardWidth = sponsorCard.width
+            val cardHeight = sponsorCard.height
+            if (cardWidth <= 0 || cardHeight <= 0) return@post
+            val params = (sponsorTextBlock.layoutParams as? android.widget.FrameLayout.LayoutParams)
+                ?: return@post
+            val left = (cardWidth * x / 100f).toInt().coerceIn(0, cardWidth - 1)
+            val blockWidth = (cardWidth - left).coerceAtLeast(1)
+            params.width = blockWidth
+            params.leftMargin = left
+            params.topMargin = 0
+            params.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            sponsorTextBlock.layoutParams = params
+            sponsorTextBlock.post {
+                val availableHeight = (cardHeight - sponsorTextBlock.height).coerceAtLeast(0)
+                val updated = sponsorTextBlock.layoutParams as android.widget.FrameLayout.LayoutParams
+                updated.topMargin = (availableHeight * y / 100f).toInt()
+                sponsorTextBlock.layoutParams = updated
+            }
+        }
+    }
+
     private fun showEmptySponsorCard() {
         sponsorDestination = ""
         sponsorAnimated = false
@@ -647,6 +674,7 @@ class MainActivity : AppCompatActivity() {
         sponsorBackgroundImage.setImageDrawable(null)
         sponsorBackgroundImage.visibility = android.view.View.GONE
         sponsorCard.visibility = android.view.View.VISIBLE
+        positionSponsorText(50, 50)
     }
 
     private val sponsorPoll = object : Runnable {
@@ -683,18 +711,11 @@ class MainActivity : AppCompatActivity() {
                                 sponsorTitle.setTextColor(textColor)
                                 sponsorMessage.setTextColor(textColor)
                                 sponsorCard.backgroundTintList = ColorStateList.valueOf(cardColor)
-                                val textGravity = when (card.textAlign) {
-                                    1 -> android.view.Gravity.START
-                                    2 -> android.view.Gravity.END
-                                    else -> android.view.Gravity.CENTER
-                                }
-                                sponsorTitle.gravity = textGravity
-                                sponsorMessage.gravity = textGravity
                                 val imageScale = card.imageScale.coerceIn(50, 160)
                                 sponsorImage.layoutParams = sponsorImage.layoutParams.apply {
-                                    height = (150 * resources.displayMetrics.density).toInt()
+                                    height = (80 * resources.displayMetrics.density).toInt()
                                 }
-                                val imageScaleFactor = (120f * imageScale / 100f / 150f).coerceAtMost(1f)
+                                val imageScaleFactor = imageScale / 160f
                                 sponsorImage.scaleX = imageScaleFactor
                                 sponsorImage.scaleY = imageScaleFactor
                                 sponsorImage.scaleType = if (card.imageFit == 1) {
@@ -705,6 +726,7 @@ class MainActivity : AppCompatActivity() {
                                 sponsorTitle.text = card.title
                                 sponsorMessage.text = card.message
                                 sponsorMessage.visibility = if (card.message.isBlank()) android.view.View.GONE else android.view.View.VISIBLE
+                                positionSponsorText(card.textX, card.textY)
                                 sponsorDestination = card.destinationUrl
                                 if (card.generation != sponsorGeneration) {
                                     val bitmap = bitmapFromRgba(sponsorBitmap, card.width, card.height, card.rgba)
@@ -793,6 +815,7 @@ class MainActivity : AppCompatActivity() {
         sponsorCard = findViewById(R.id.sponsorCard)
         sponsorImage = findViewById(R.id.sponsorImage)
         sponsorBackgroundImage = findViewById(R.id.sponsorBackgroundImage)
+        sponsorTextBlock = findViewById(R.id.sponsorTextBlock)
         sponsorMessage = findViewById(R.id.sponsorMessage)
         sponsorTitle = findViewById(R.id.sponsorTitle)
         showEmptySponsorCard()
@@ -837,7 +860,10 @@ class MainActivity : AppCompatActivity() {
         findViewById<android.view.View>(R.id.sponsorPolicyLink).setOnClickListener {
             openExternal("https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md")
         }
-        try { NativeEngine.nativeSponsorInit(java.io.File(cacheDir, "sponsors").absolutePath) }
+        // Sponsor media is durable application data, not an OS-evictable
+        // cache. It must survive disconnects, process restarts, and cache
+        // cleanup so an unchanged campaign is not downloaded again.
+        try { NativeEngine.nativeSponsorInit(java.io.File(filesDir, "sponsors").absolutePath) }
         catch (_: Throwable) {}
         spinnerProtocol = findViewById(R.id.spinnerProtocol)
         spinnerMode = findViewById(R.id.spinnerMode)

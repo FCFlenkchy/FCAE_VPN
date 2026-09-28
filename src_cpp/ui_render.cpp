@@ -1881,10 +1881,10 @@ void render_ui() {
                 }
                 const float image_scale = std::clamp(
                     (float)s_sponsor.image_scale / 100.0f, 0.5f, 1.6f);
-                const float sponsor_image_height = std::min(150.0f, 120.0f * image_scale);
-                // Keep the native sponsor box stable even when an icon is
-                // missing or a campaign changes its image scale.
-                constexpr float sponsor_card_height = 240.0f;
+                const float sponsor_image_height = std::min(82.0f, 72.0f * image_scale);
+                // Half-size native sponsor boxes stay fixed regardless of
+                // media presence, animation, or image scaling.
+                constexpr float sponsor_card_height = 150.0f;
                 const ImVec4 card_color = sponsor_color(s_sponsor.card_color,
                     ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
                 const ImVec4 text_color = sponsor_color(s_sponsor.text_color,
@@ -1963,20 +1963,18 @@ void render_ui() {
                         if (ImGui::IsItemClicked() && strncmp(s_sponsor.destination_url, "https://", 8) == 0)
                             open_link(s_sponsor.destination_url);
                     }
-                    auto align_sponsor_text = [&](const char* text) {
-                        const float text_w = ImGui::CalcTextSize(text).x;
-                        const float available = ImGui::GetContentRegionAvail().x;
-                        float offset = 0.0f;
-                        if (s_sponsor.text_align == 0) offset = std::max(0.0f, (available - text_w) * 0.5f);
-                        else if (s_sponsor.text_align == 2) offset = std::max(0.0f, available - text_w);
-                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset);
-                    };
-                    align_sponsor_text(sponsor_title);
+                    const ImVec2 content_min = ImGui::GetWindowContentRegionMin();
+                    const ImVec2 content_max = ImGui::GetWindowContentRegionMax();
+                    const float content_width = content_max.x - content_min.x;
+                    const float content_height = content_max.y - content_min.y;
+                    const float text_x = content_width * (float)s_sponsor.text_x / 100.0f;
+                    const float text_y = content_height * (float)s_sponsor.text_y / 100.0f;
+                    ImGui::SetCursorPos(ImVec2(text_x, text_y));
+                    ImGui::PushTextWrapPos(content_width);
                     ImGui::TextUnformatted(sponsor_title);
-                    if (sponsor_message[0] != '\0') {
-                        align_sponsor_text(sponsor_message);
+                    if (sponsor_message[0] != '\0')
                         ImGui::TextWrapped("%s", sponsor_message);
-                    }
+                    ImGui::PopTextWrapPos();
                 }
                 ImGui::PopStyleColor();
                 ImGui::EndChild();
