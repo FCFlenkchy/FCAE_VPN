@@ -13,6 +13,7 @@ use std::{
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Once,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -29,6 +30,14 @@ const MAX_MEDIA_BYTES: usize = 15 * 1024 * 1024;
 // platform and fits the Android card without requiring platform-specific assets.
 const MAX_WIDTH: u32 = 800;
 const MAX_HEIGHT: u32 = 450;
+// MP4 frames may be larger than the portable sponsor canvas. Decode only a
+// bounded source size, then downsample before retaining RGBA frames so a
+// valid 16:9 960x540 campaign video is not rejected just because the card is
+// capped at 800x450.
+const MAX_VIDEO_SOURCE_WIDTH: u32 = 1920;
+const MAX_VIDEO_SOURCE_HEIGHT: u32 = 1080;
+const MAX_VIDEO_SOURCE_PIXELS: u64 =
+    MAX_VIDEO_SOURCE_WIDTH as u64 * MAX_VIDEO_SOURCE_HEIGHT as u64;
 #[cfg(target_os = "android")]
 const MAX_FRAMES: usize = 60;
 #[cfg(not(target_os = "android"))]
@@ -221,6 +230,9 @@ struct State {
     current_campaign: usize,
     random_state: u64,
     manifest_checked_at: u64,
+    // Prevent a failed media request from being retried once per UI poll;
+    // successful publishing clears the backoff immediately.
+    media_retry_after: Instant,
     last_error: String,
 }
 
@@ -235,6 +247,7 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
         .unwrap_or_default()
         .as_nanos() as u64 ^ std::process::id() as u64,
     manifest_checked_at: 0,
+    media_retry_after: Instant::now(),
     last_error: String::new(),
 }));
 static CONNECTED: AtomicBool = AtomicBool::new(false);
@@ -253,6 +266,29 @@ static AUDIO_CONTROLLER: Lazy<Mutex<AudioController>> = Lazy::new(|| {
 });
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(target_os = "android")]
+static ANDROID_CONTEXT_INIT: Once = Once::new();
+
+/// CPAL's Android AAudio backend needs the JavaVM and a long-lived Android
+/// Context when it is used from a JNI-loaded Rust static library. ndk-glue
+/// normally fills this global, but this app owns its JVM entry point itself.
+/// Keep the first application-context reference for the lifetime of the
+/// process and make repeated Activity recreation calls harmless.
+#[cfg(target_os = "android")]
+pub fn initialize_android_context(
+    java_vm: *mut std::ffi::c_void,
+    context: *mut std::ffi::c_void,
+) -> bool {
+    let mut initialized = false;
+    ANDROID_CONTEXT_INIT.call_once(|| {
+        // SAFETY: the JNI bridge passes a live JavaVM pointer and a global
+        // reference to the application Context, both valid for this process.
+        unsafe { ndk_context::initialize_android_context(java_vm, context); }
+        initialized = true;
+    });
+    initialized
+}
+
 enum AudioCommand {
     Play { path: PathBuf },
     Stop,
@@ -267,19 +303,45 @@ struct AudioController {
 }
 
 fn audio_worker(receiver: Receiver<AudioCommand>) {
-    let stream = OutputStreamBuilder::open_default_stream().ok();
+    // Open lazily on the first Play command. In particular, this happens
+    // after the Android JNI bridge has initialized ndk-context, rather than
+    // while the worker is being created during UI startup. Keep the stream
+    // alive for the worker lifetime: dropping it stops AAudio immediately.
+    let mut stream = None;
     let mut sink: Option<Sink> = None;
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(AudioCommand::Play { path }) => {
                 sink.take();
-                let Some(stream) = stream.as_ref() else { continue; };
-                let Ok(file) = fs::File::open(path) else { continue; };
-                let Ok(source) = AudioDecoder::try_from(BufReader::new(file)) else { continue; };
-                let next_sink = Sink::connect_new(stream.mixer());
+                if stream.is_none() {
+                    match OutputStreamBuilder::open_default_stream() {
+                        Ok(output) => stream = Some(output),
+                        Err(error) => {
+                            log::warn!("[sponsor] audio output stream unavailable: {error}");
+                            continue;
+                        }
+                    }
+                }
+                let Some(output) = stream.as_ref() else { continue; };
+                let file = match fs::File::open(&path) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        log::warn!("[sponsor] audio cache open failed ({}): {error}", path.display());
+                        continue;
+                    }
+                };
+                let source = match AudioDecoder::try_from(BufReader::new(file)) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        log::warn!("[sponsor] audio decode failed ({}): {error}", path.display());
+                        continue;
+                    }
+                };
+                let next_sink = Sink::connect_new(output.mixer());
                 next_sink.append(source);
                 next_sink.play();
                 sink = Some(next_sink);
+                log::info!("[sponsor] playing cached audio {}", path.display());
             }
             Ok(AudioCommand::Stop) => {
                 sink.take();
@@ -388,7 +450,12 @@ fn start_audio_for_campaign(campaign_id: &str) {
             state.cache_dir.join(audio_cache_name(campaign))
         }))
     };
-    let Some(path) = path.filter(|path| path.is_file()) else {
+    let Some(path) = path.filter(|path| {
+        path.is_file()
+            && fs::metadata(path)
+                .map(|metadata| metadata.len() <= MAX_MEDIA_BYTES as u64)
+                .unwrap_or(false)
+    }) else {
         stop_audio();
         return;
     };
@@ -436,7 +503,7 @@ fn audio_needs_refresh() -> bool {
         return false;
     };
     campaign.audio_url.is_some()
-        && !state.cache_dir.join(audio_cache_name(campaign)).is_file()
+        && !cached_media_file_is_valid(&state.cache_dir.join(audio_cache_name(campaign)))
 }
 
 fn media_needs_refresh() -> bool {
@@ -528,6 +595,7 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
     };
     state.campaigns = campaigns.clone();
     state.last_error.clear();
+    state.media_retry_after = Instant::now();
     state.rotation_started = Instant::now();
     GENERATION.fetch_add(1, Ordering::Relaxed);
     drop(state);
@@ -595,6 +663,12 @@ fn publish_media(campaigns: &[Campaign], ready: Vec<ReadyCampaign>) -> bool {
     } else {
         state.current_campaign % ready_count
     };
+    let current_needs_media = state.ready.get(state.current_campaign)
+        .map(|ready| ready_needs_media(ready, &state.cache_dir))
+        .unwrap_or(false);
+    if !current_needs_media {
+        state.media_retry_after = Instant::now();
+    }
     state.rotation_started = Instant::now();
     GENERATION.fetch_add(1, Ordering::Relaxed);
     true
@@ -604,6 +678,7 @@ fn refresh_cached_media_sync() {
     if MEDIA_BUSY.swap(true, Ordering::AcqRel) {
         return;
     }
+    STATE.lock().media_retry_after = Instant::now() + Duration::from_secs(30);
     let (campaigns, cache_dir, previous, target_id) = {
         let state = STATE.lock();
         let target_id = state.campaigns.get(state.current_campaign)
@@ -635,6 +710,7 @@ fn refresh_media_async_inner(allow_disconnected: bool) {
     {
         return;
     }
+    STATE.lock().media_retry_after = Instant::now() + Duration::from_secs(30);
     let (campaigns, cache_dir, previous, target_id) = {
         let state = STATE.lock();
         let target_id = state.campaigns.get(state.current_campaign)
@@ -722,6 +798,23 @@ fn frame_index_at(frames: &[Frame], elapsed: Duration) -> usize {
     index
 }
 
+fn cached_media_file_is_valid(path: &Path) -> bool {
+    path.is_file()
+        && fs::metadata(path)
+            .map(|metadata| metadata.len() <= MAX_MEDIA_BYTES as u64)
+            .unwrap_or(false)
+}
+
+fn ready_needs_media(ready: &ReadyCampaign, cache_dir: &Path) -> bool {
+    (ready.campaign.icon_url.is_some() && ready.frames.is_empty())
+        || (ready.campaign.background_url.is_some()
+            && ready.background_frames.is_empty()
+            && ready.background_rgba.is_empty())
+        || (AUDIO_ENABLED.load(Ordering::Acquire)
+            && ready.campaign.audio_url.is_some()
+            && !cached_media_file_is_valid(&cache_dir.join(audio_cache_name(&ready.campaign))))
+}
+
 pub fn current_frame() -> Option<SponsorFrame> {
     let (frame, should_refresh) = {
         let mut state = STATE.lock();
@@ -737,8 +830,16 @@ pub fn current_frame() -> Option<SponsorFrame> {
         let ready_count = state.ready.len();
         state.current_campaign %= ready_count;
         let campaign_index = state.current_campaign;
-        let ready = &state.ready[campaign_index];
         let within = state.rotation_started.elapsed();
+        let needs_media = ready_needs_media(
+            &state.ready[campaign_index],
+            &state.cache_dir,
+        );
+        let should_refresh = needs_media && Instant::now() >= state.media_retry_after;
+        if should_refresh {
+            state.media_retry_after = Instant::now() + Duration::from_secs(30);
+        }
+        let ready = &state.ready[campaign_index];
         let frame_index = frame_index_at(&ready.frames, within);
         let background_frame_index = frame_index_at(&ready.background_frames, within);
         let rgba = ready.frames.get(frame_index)
@@ -747,10 +848,6 @@ pub fn current_frame() -> Option<SponsorFrame> {
         let background_rgba = ready.background_frames.get(background_frame_index)
             .map(|frame| frame.rgba.clone())
             .unwrap_or_else(|| ready.background_rgba.clone());
-        let needs_media = (ready.campaign.icon_url.is_some() && ready.frames.is_empty())
-            || (ready.campaign.background_url.is_some()
-                && ready.background_frames.is_empty()
-                && ready.background_rgba.is_empty());
         let generation = (GENERATION.load(Ordering::Relaxed) << 32)
             ^ ((campaign_index as u64) << 24)
             ^ ((frame_index as u64) << 12)
@@ -782,7 +879,7 @@ pub fn current_frame() -> Option<SponsorFrame> {
             icon_scale: ready.icon_scale,
             background_scale: ready.background_scale,
             generation,
-        }, needs_media)
+        }, should_refresh)
     };
 
     if should_refresh {
@@ -1293,7 +1390,11 @@ fn load_payload(
     let _ = fs::create_dir_all(cache_dir);
     let fallback = find_cached_payload(cache_dir, campaign_id, suffix, &path);
     if let Ok(bytes) = fs::read(&path) {
-        return Some(MediaPayload { path, bytes, cached: true, fallback });
+        if bytes.len() <= MAX_MEDIA_BYTES {
+            return Some(MediaPayload { path, bytes, cached: true, fallback });
+        }
+        log::warn!("[sponsor] ignoring oversized cached {} media: {} bytes", suffix, bytes.len());
+        let _ = fs::remove_file(&path);
     }
     if CONNECTED.load(Ordering::Acquire) {
         if let Some(client) = client {
@@ -1306,12 +1407,19 @@ fn load_payload(
             }
         }
     }
-    fallback.and_then(|path| fs::read(&path).ok().map(|bytes| MediaPayload {
-        path,
-        bytes,
-        cached: true,
-        fallback: None,
-    }))
+    fallback.and_then(|path| {
+        let bytes = fs::read(&path).ok()?;
+        if bytes.len() > MAX_MEDIA_BYTES {
+            log::warn!("[sponsor] ignoring oversized fallback {} media: {} bytes", suffix, bytes.len());
+            return None;
+        }
+        Some(MediaPayload {
+            path,
+            bytes,
+            cached: true,
+            fallback: None,
+        })
+    })
 }
 
 fn decoded_cache_path(path: &Path) -> PathBuf {
@@ -1425,7 +1533,8 @@ fn decode_payload(
                     return Some(fallback_decoded);
                 }
             }
-            let _ = fs::remove_file(fallback_path);
+            // Preserve the previous encoded entry even when this refresh
+            // cannot decode it; it is still the campaign's last fallback.
         }
         if cached {
             let _ = fs::remove_file(&path);
@@ -1479,14 +1588,30 @@ fn decode_video_payload(
     if !path.exists() && !write_atomic_preserving_old(&path, &bytes) {
         return None;
     }
-    let mut decoded = decode_video_file(campaign.clone(), &path).ok();
+    let mut decoded = match decode_video_file(campaign.clone(), &path) {
+        Ok(decoded) => Some(decoded),
+        Err(error) => {
+            log::warn!("[sponsor] video decode failed ({}): {error}", path.display());
+            None
+        }
+    };
     if decoded.is_none() {
         if let Some(fallback_path) = fallback {
-            decoded = decode_video_file(campaign.clone(), &fallback_path).ok();
+            decoded = match decode_video_file(campaign.clone(), &fallback_path) {
+                Ok(decoded) => Some(decoded),
+                Err(error) => {
+                    log::warn!(
+                        "[sponsor] cached video fallback decode failed ({}): {error}",
+                        fallback_path.display()
+                    );
+                    None
+                }
+            };
             if decoded.is_some() {
                 return decoded;
             }
-            let _ = fs::remove_file(fallback_path);
+            // Preserve the previous encoded entry even when this refresh
+            // cannot decode it; it is still the campaign's last fallback.
         }
         if cached {
             let _ = fs::remove_file(&path);
@@ -1500,7 +1625,13 @@ fn decode_video_payload(
         if !write_atomic_preserving_old(&path, &fresh) {
             return None;
         }
-        decoded = decode_video_file(campaign.clone(), &path).ok();
+        decoded = match decode_video_file(campaign.clone(), &path) {
+            Ok(decoded) => Some(decoded),
+            Err(error) => {
+                log::warn!("[sponsor] refreshed video decode failed ({}): {error}", path.display());
+                None
+            }
+        };
     }
     if let Some(decoded) = decoded {
         write_decoded_cache(&decoded_path, &decoded);
@@ -1510,6 +1641,51 @@ fn decode_video_payload(
         let _ = fs::remove_file(&decoded_path);
         None
     }
+}
+
+fn validate_video_source_dimensions(width: u32, height: u32) -> Result<(), String> {
+    if width == 0 || height == 0
+        || width > MAX_VIDEO_SOURCE_WIDTH
+        || height > MAX_VIDEO_SOURCE_HEIGHT
+        || (width as u64).saturating_mul(height as u64) > MAX_VIDEO_SOURCE_PIXELS
+    {
+        return Err("video source dimensions exceed limits".into());
+    }
+    Ok(())
+}
+
+fn bounded_video_rgb(
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
+) -> Result<(u32, u32, Vec<u8>), String> {
+    validate_video_source_dimensions(width, height)?;
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| "video frame dimensions overflow".to_string())?;
+    if rgb.len() != expected {
+        return Err("unexpected video RGB frame size".into());
+    }
+
+    let scale = (MAX_WIDTH as f64 / width as f64)
+        .min(MAX_HEIGHT as f64 / height as f64)
+        .min(1.0);
+    let target_width = ((width as f64 * scale).round() as u32).max(1);
+    let target_height = ((height as f64 * scale).round() as u32).max(1);
+    if target_width == width && target_height == height {
+        return Ok((width, height, rgb));
+    }
+
+    let image = image::RgbImage::from_raw(width, height, rgb)
+        .ok_or_else(|| "video RGB frame could not be constructed".to_string())?;
+    let resized = image::imageops::resize(
+        &image,
+        target_width,
+        target_height,
+        image::imageops::FilterType::Triangle,
+    );
+    Ok((target_width, target_height, resized.into_raw()))
 }
 
 fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, String> {
@@ -1523,33 +1699,45 @@ fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, S
     let mut height = 0u32;
 
     while frames.len() < MAX_FRAMES {
-        let Some(frame) = reader.next_frame().map_err(|error| error.to_string())? else {
-            break;
+        let frame = match reader.next_frame() {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break,
+            Err(error) if !frames.is_empty() => {
+                // A damaged trailing sample must not discard already decoded
+                // frames. Keep the usable prefix and let the card animate it;
+                // the encoded entry remains cached for a later retry.
+                log::warn!(
+                    "[sponsor] video decode stopped after {} frames ({}): {}",
+                    frames.len(),
+                    path.display(),
+                    error,
+                );
+                break;
+            }
+            Err(error) => return Err(error.to_string()),
         };
         let frame_width = u32::try_from(frame.width)
             .map_err(|_| "video frame width exceeds limits".to_string())?;
         let frame_height = u32::try_from(frame.height)
             .map_err(|_| "video frame height exceeds limits".to_string())?;
+        let (rgb_width, rgb_height, rgb) = bounded_video_rgb(
+            frame_width,
+            frame_height,
+            frame.rgb8_data,
+        )?;
         if frames.is_empty() {
-            validate_dimensions(frame_width, frame_height, 1)?;
-            width = frame_width;
-            height = frame_height;
-        } else if frame_width != width || frame_height != height {
+            width = rgb_width;
+            height = rgb_height;
+        } else if rgb_width != width || rgb_height != height {
             return Err("inconsistent video frame dimensions".into());
         }
-        let expected_rgb = (frame_width as usize)
-            .checked_mul(frame_height as usize)
-            .and_then(|pixels| pixels.checked_mul(3))
-            .ok_or_else(|| "video frame dimensions overflow".to_string())?;
-        if frame.rgb8_data.len() != expected_rgb {
-            return Err("unexpected video RGB frame size".into());
-        }
-        let rgba_size = expected_rgb / 3 * 4;
+        let rgb_bytes = rgb.len();
+        let rgba_size = rgb_bytes / 3 * 4;
         if total_bytes.saturating_add(rgba_size) > MAX_DECODED_BYTES {
             break;
         }
         let mut rgba = Vec::with_capacity(rgba_size);
-        for pixel in frame.rgb8_data.chunks_exact(3) {
+        for pixel in rgb.chunks_exact(3) {
             rgba.extend_from_slice(pixel);
             rgba.push(0xFF);
         }

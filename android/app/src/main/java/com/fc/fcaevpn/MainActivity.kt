@@ -949,6 +949,10 @@ class MainActivity : AppCompatActivity() {
         // Sponsor media is durable application data, not an OS-evictable
         // cache. It must survive disconnects, process restarts, and cache
         // cleanup so an unchanged campaign is not downloaded again.
+        // CPAL/AAudio needs the JVM and a long-lived Context before its output
+        // stream is opened on the Rust audio worker.
+        try { NativeEngine.nativeSponsorInitAndroidContext(applicationContext) }
+        catch (error: Throwable) { Log.w("FCAE_VPN", "Sponsor audio context unavailable", error) }
         try { NativeEngine.nativeSponsorInit(java.io.File(filesDir, "sponsors").absolutePath) }
         catch (_: Throwable) {}
         spinnerProtocol = findViewById(R.id.spinnerProtocol)

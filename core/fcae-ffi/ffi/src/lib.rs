@@ -1287,6 +1287,15 @@ pub unsafe extern "C" fn fcae_poll_update(out: *mut FcaeUpdateInfo) -> FcaeStatu
 
 static SPONSOR_FRAME: Mutex<Option<fcae_sponsor::SponsorFrame>> = Mutex::new(None);
 
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn fcae_sponsor_initialize_android_context(
+    java_vm: *mut c_void,
+    context: *mut c_void,
+) -> bool {
+    fcae_sponsor::initialize_android_context(java_vm, context)
+}
+
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_load_cache() {
     fcae_sponsor::load_cached_manifest();

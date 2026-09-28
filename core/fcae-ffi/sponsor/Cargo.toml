@@ -20,3 +20,10 @@ log.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks"] }
 rodio = { version = "0.21", default-features = false, features = ["playback", "symphonia-all"] }
 yscv-video = "0.1.11"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# CPAL's Android AAudio backend obtains the JavaVM/application context from
+# ndk-context when the Rust library is embedded through JNI rather than
+# launched by ndk-glue. The JNI bridge initializes it before sponsor audio can
+# be requested.
+ndk-context = "0.1"

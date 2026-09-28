@@ -231,6 +231,7 @@ object NativeEngine {
     // Sponsor manifest and media are fetched by the native sponsor client
     // through the connected session's local tunnel proxy.
     @JvmStatic external fun nativeSponsorInit(cacheDir: String)
+    @JvmStatic external fun nativeSponsorInitAndroidContext(context: android.content.Context)
     @JvmStatic external fun nativeSponsorSetManifest(json: String): Boolean
     @JvmStatic external fun nativeSponsorManifestDue(): Boolean
     @JvmStatic external fun nativeSponsorManifestRefreshRemainingSecs(): Long

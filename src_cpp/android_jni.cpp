@@ -10,6 +10,10 @@
 
 #include "fcae.h"
 
+// Android-only FFI helper: kept out of the generated public C header because
+// it is an embedding hook rather than part of the cross-platform ABI.
+extern "C" bool fcae_sponsor_initialize_android_context(void* java_vm, void* context);
+
 #define LOG_TAG "FCAE_VPN"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -892,6 +896,35 @@ Java_com_fc_fcaevpn_NativeEngine_nativeSponsorInit(JNIEnv* env, jclass, jstring 
     ensure_init();
     std::string path = jstr(env, cacheDir);
     fcae_sponsor_set_cache_dir(path.c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorInitAndroidContext(
+        JNIEnv* env, jclass, jobject context) {
+    ensure_init();
+    if (!env || !context) {
+        LOGE("Sponsor audio context initialization received no Android Context");
+        return;
+    }
+    JavaVM* vm = nullptr;
+    if (env->GetJavaVM(&vm) != JNI_OK || !vm) {
+        LOGE("Sponsor audio context initialization could not get JavaVM");
+        return;
+    }
+    // ndk-context retains this pointer. Use the application Context from
+    // Kotlin, and retain it as a JNI global reference for process lifetime.
+    jobject global_context = env->NewGlobalRef(context);
+    if (!global_context) {
+        LOGE("Sponsor audio context initialization could not create global ref");
+        return;
+    }
+    const bool kept = fcae_sponsor_initialize_android_context(
+        reinterpret_cast<void*>(vm), reinterpret_cast<void*>(global_context));
+    if (!kept) {
+        // Activity recreation calls this method again; only the first global
+        // reference belongs to ndk-context.
+        env->DeleteGlobalRef(global_context);
+    }
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
