@@ -1858,9 +1858,9 @@ void render_ui() {
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Refresh sponsor manifest");
+            const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
             {
                 const bool sponsor_has_content = s_sponsor.available;
-                const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
                 const char* sponsor_destination = sponsor_has_content
                     ? s_sponsor.destination_url : sponsor_policy;
                 const char* sponsor_title = sponsor_has_content && s_sponsor.title[0] != '\0'

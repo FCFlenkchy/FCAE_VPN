@@ -30,10 +30,13 @@ const MAX_FRAMES: usize = 120;
 const MAX_DECODED_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
+// Allow both GIF demos to retain their background frames even when the same
+// source asset is used by more than one campaign, while keeping a finite
+// aggregate decoded-memory ceiling.
 #[cfg(target_os = "android")]
-const MAX_TOTAL_DECODED_BYTES: usize = 24 * 1024 * 1024;
+const MAX_TOTAL_DECODED_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
-const MAX_TOTAL_DECODED_BYTES: usize = 96 * 1024 * 1024;
+const MAX_TOTAL_DECODED_BYTES: usize = 256 * 1024 * 1024;
 const MAX_MEDIA_WORKERS: usize = 2;
 const DEFAULT_TITLE_COLOR: u32 = 0xFFFFFFFF;
 const DEFAULT_MESSAGE_COLOR: u32 = 0xFFD8E7FF;
