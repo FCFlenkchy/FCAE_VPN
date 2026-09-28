@@ -215,6 +215,36 @@ endfunction()
 # libfcae_ffi.a, and cargo's dylib directives never reach this CMake link,
 # so the .so must be named explicitly (or ld.lld reports undefined t2s_*).
 # Do not link a second Go runtime next to it — that SIGSEGVs at dlopen.
+function(fcae_link_audio_backend target_name)
+    # Cargo's native-link metadata is not propagated through the later CMake
+    # link of the Rust static library. Add each rodio/cpal platform backend to
+    # the final executable/shared-library link explicitly.
+    if(AETHER_TARGET MATCHES "^ANDROID_" OR ANDROID)
+        find_library(FCAE_AAUDIO_LIB aaudio)
+        if(NOT FCAE_AAUDIO_LIB)
+            message(FATAL_ERROR "Android AAudio library not found in the NDK sysroot")
+        endif()
+        target_link_libraries(${target_name} PRIVATE ${FCAE_AAUDIO_LIB})
+    elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "MACOS_X64")
+        target_link_libraries(${target_name} PRIVATE
+            "-framework CoreAudio"
+            "-framework AudioToolbox"
+        )
+    elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
+        # WASAPI's COM and UUID imports are already covered by the existing
+        # ole32/uuid entries below. CPAL also calls the Kernel32 wait/event
+        # APIs, whose native-link metadata is not propagated from the Rust
+        # static library.
+        target_link_libraries(${target_name} PRIVATE kernel32)
+    elseif(UNIX)
+        find_library(FCAE_ALSA_LIB asound)
+        if(NOT FCAE_ALSA_LIB)
+            message(FATAL_ERROR "ALSA library not found; install libasound2-dev")
+        endif()
+        target_link_libraries(${target_name} PRIVATE ${FCAE_ALSA_LIB})
+    endif()
+endfunction()
+
 function(fcae_link_go_bridges target_name abi)
     set(jni_dir ${CMAKE_SOURCE_DIR}/android/app/src/main/jniLibs/${abi})
     # TUN mode always needs it: a hard dependency.
@@ -280,6 +310,7 @@ if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
 
     fcae_ffi_lib_path(FCAE_FFI_A aarch64-linux-android)
     fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
+    fcae_link_audio_backend(fcaevpn_native)
     fcae_link_go_bridges(fcaevpn_native arm64-v8a)
 
     target_link_libraries(fcaevpn_native PRIVATE
@@ -310,6 +341,7 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_ARM32")
 
     fcae_ffi_lib_path(FCAE_FFI_A armv7-linux-androideabi)
     fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
+    fcae_link_audio_backend(fcaevpn_native)
     fcae_link_go_bridges(fcaevpn_native armeabi-v7a)
 
     target_link_libraries(fcaevpn_native PRIVATE
@@ -340,6 +372,7 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_X86_64")
 
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-linux-android)
     fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
+    fcae_link_audio_backend(fcaevpn_native)
     fcae_link_go_bridges(fcaevpn_native x86_64)
 
     target_link_libraries(fcaevpn_native PRIVATE
@@ -382,6 +415,7 @@ elseif(AETHER_TARGET STREQUAL "ANDROID_UNIVERSAL")
         fcae_ffi_lib_path(FCAE_FFI_A aarch64-linux-android)
     endif()
     fcae_link_ffi(fcaevpn_native "${FCAE_FFI_A}")
+    fcae_link_audio_backend(fcaevpn_native)
     fcae_link_go_bridges(fcaevpn_native ${ANDROID_ABI})
 
     target_link_libraries(fcaevpn_native PRIVATE
@@ -422,6 +456,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
 
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-pc-windows-gnu)
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
+    fcae_link_audio_backend(fcaevpn)
     # Cargo native-link metadata is not propagated through the CMake link.
     # Add the static zeptun archive explicitly after libfcae_ffi.a so the
     # bridge's zeptun_* references resolve without importing zeptun.dll.
@@ -528,6 +563,7 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
         endif()
     endif()
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
+    fcae_link_audio_backend(fcaevpn)
     if(AETHER_TARGET STREQUAL "MACOS_ARM64")
         fcae_link_psiphon(fcaevpn aarch64-apple-darwin)
     elseif(AETHER_TARGET STREQUAL "MACOS_X64")
@@ -638,6 +674,7 @@ elseif(UNIX)
 
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-unknown-linux-gnu)
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
+    fcae_link_audio_backend(fcaevpn)
     fcae_link_psiphon(fcaevpn x86_64-unknown-linux-gnu)
 
     # Link GLFW: use imported target if available, otherwise raw lib name

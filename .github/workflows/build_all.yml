@@ -394,7 +394,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev \
-            libxrandr-dev libxinerama-dev libxxf86vm-dev \
+            libxrandr-dev libxinerama-dev libxxf86vm-dev libasound2-dev \
             libssl-dev libcurl4-openssl-dev libbz2-dev liblzma-dev zlib1g-dev \
             libevent-dev protobuf-compiler nasm cmake ninja-build
           curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 30 \

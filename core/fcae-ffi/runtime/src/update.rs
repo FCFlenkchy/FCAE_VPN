@@ -443,6 +443,7 @@ fn parse_version(raw: &str) -> Option<ParsedVersion> {
     Some(ParsedVersion { nums, prerelease })
 }
 
+#[cfg(test)]
 fn is_prerelease_tag(raw: &str) -> bool {
     parse_version(raw).map(|v| v.is_prerelease()).unwrap_or(false)
 }
