@@ -1881,20 +1881,17 @@ void render_ui() {
                 }
                 const float image_scale = std::clamp(
                     (float)s_sponsor.image_scale / 100.0f, 0.5f, 1.6f);
-                const float sponsor_image_height = std::min(82.0f, 72.0f * image_scale);
-                // Half-size native sponsor boxes stay fixed regardless of
-                // media presence, animation, or image scaling.
-                constexpr float sponsor_card_height = 150.0f;
+                // Keep the native sponsor card fixed at 140 units. Text and
+                // media changes are drawn inside it and cannot reflow the UI.
+                constexpr float sponsor_card_height = 140.0f;
+                constexpr float sponsor_media_height = 70.0f;
                 const ImVec4 card_color = sponsor_color(s_sponsor.card_color,
                     ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
-                const ImVec4 text_color = sponsor_color(s_sponsor.text_color,
-                    ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
                 ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.49f, 0.76f, 1.0f));
                 ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
                 ImGui::BeginChild("##sponsor_card", ImVec2(0, sponsor_card_height),
                     ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
-                ImGui::PushStyleColor(ImGuiCol_Text, text_color);
                 if (background_texture) {
                     const ImVec2 background_min = ImGui::GetCursorScreenPos();
                     const ImVec2 background_size = ImGui::GetContentRegionAvail();
@@ -1908,15 +1905,21 @@ void render_ui() {
                 {
                     if (texture) {
                     const float box_w = std::min(320.0f, ImGui::GetContentRegionAvail().x);
-                    const float box_h = sponsor_image_height;
+                    const float box_h = sponsor_media_height;
                     ImVec2 size(box_w, box_h);
                     ImVec2 uv0(0, 0);
                     ImVec2 uv1(1, 1);
                     if (s_sponsor.image_fit == 0) {
                         const float scale = std::min(box_w / (float)s_sponsor.width,
-                                                     box_h / (float)s_sponsor.height);
+                                                     box_h / (float)s_sponsor.height)
+                            * image_scale;
                         size = ImVec2((float)s_sponsor.width * scale,
                                       (float)s_sponsor.height * scale);
+                        if (size.x > box_w || size.y > box_h) {
+                            const float fit = std::min(box_w / size.x, box_h / size.y);
+                            size.x *= fit;
+                            size.y *= fit;
+                        }
                     } else {
                         const float image_ratio = (float)s_sponsor.width / (float)s_sponsor.height;
                         const float box_ratio = box_w / box_h;
@@ -1967,16 +1970,29 @@ void render_ui() {
                     const ImVec2 content_max = ImGui::GetWindowContentRegionMax();
                     const float content_width = content_max.x - content_min.x;
                     const float content_height = content_max.y - content_min.y;
-                    const float text_x = content_width * (float)s_sponsor.text_x / 100.0f;
-                    const float text_y = content_height * (float)s_sponsor.text_y / 100.0f;
-                    ImGui::SetCursorPos(ImVec2(text_x, text_y));
+                    const float title_x = content_width * (float)s_sponsor.title_x / 100.0f;
+                    const float title_y = content_height * (float)s_sponsor.title_y / 100.0f;
+                    const ImVec4 title_color = sponsor_color(s_sponsor.title_color,
+                        ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, title_color);
+                    ImGui::SetCursorPos(ImVec2(title_x, title_y));
                     ImGui::PushTextWrapPos(content_width);
                     ImGui::TextUnformatted(sponsor_title);
-                    if (sponsor_message[0] != '\0')
-                        ImGui::TextWrapped("%s", sponsor_message);
                     ImGui::PopTextWrapPos();
+                    ImGui::PopStyleColor();
+                    if (sponsor_message[0] != '\0') {
+                        const float message_x = content_width * (float)s_sponsor.message_x / 100.0f;
+                        const float message_y = content_height * (float)s_sponsor.message_y / 100.0f;
+                        const ImVec4 message_color = sponsor_color(s_sponsor.message_color,
+                            ImVec4(0.85f, 0.91f, 1.0f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_Text, message_color);
+                        ImGui::SetCursorPos(ImVec2(message_x, message_y));
+                        ImGui::PushTextWrapPos(content_width);
+                        ImGui::TextWrapped("%s", sponsor_message);
+                        ImGui::PopTextWrapPos();
+                        ImGui::PopStyleColor();
+                    }
                 }
-                ImGui::PopStyleColor();
                 ImGui::EndChild();
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor(2);

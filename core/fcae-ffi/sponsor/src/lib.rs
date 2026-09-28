@@ -33,8 +33,13 @@ const MAX_TOTAL_DECODED_BYTES: usize = 24 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_TOTAL_DECODED_BYTES: usize = 96 * 1024 * 1024;
 const MAX_MEDIA_WORKERS: usize = 2;
-const DEFAULT_TEXT_COLOR: u32 = 0xFFFFFFFF;
+const DEFAULT_TITLE_COLOR: u32 = 0xFFFFFFFF;
+const DEFAULT_MESSAGE_COLOR: u32 = 0xFFD8E7FF;
 const DEFAULT_CARD_COLOR: u32 = 0xFF142A44;
+const DEFAULT_TITLE_X: u8 = 50;
+const DEFAULT_TITLE_Y: u8 = 50;
+const DEFAULT_MESSAGE_X: u8 = 50;
+const DEFAULT_MESSAGE_Y: u8 = 72;
 const DEFAULT_IMAGE_SCALE: u32 = 100;
 const ROTATE_EVERY: Duration = Duration::from_secs(5);
 const MANIFEST_REFRESH_SECS: u64 = 12 * 60 * 60;
@@ -57,13 +62,19 @@ struct Campaign {
     #[serde(default)]
     background_url: Option<String>,
     #[serde(default)]
-    text_color: Option<String>,
+    title_color: Option<String>,
+    #[serde(default)]
+    message_color: Option<String>,
     #[serde(default)]
     background_color: Option<String>,
     #[serde(default)]
-    text_x: Option<u32>,
+    title_x: Option<u32>,
     #[serde(default)]
-    text_y: Option<u32>,
+    title_y: Option<u32>,
+    #[serde(default)]
+    message_x: Option<u32>,
+    #[serde(default)]
+    message_y: Option<u32>,
     #[serde(default)]
     image_fit: Option<String>,
     #[serde(default)]
@@ -95,10 +106,13 @@ struct ReadyCampaign {
     background_width: u32,
     background_height: u32,
     background_rgba: Arc<Vec<u8>>,
-    text_color: u32,
+    title_color: u32,
+    message_color: u32,
     card_color: u32,
-    text_x: u8,
-    text_y: u8,
+    title_x: u8,
+    title_y: u8,
+    message_x: u8,
+    message_y: u8,
     image_fit: u8,
     image_scale: u32,
 }
@@ -131,10 +145,13 @@ pub struct SponsorFrame {
     pub background_width: u32,
     pub background_height: u32,
     pub background_rgba: Arc<Vec<u8>>,
-    pub text_color: u32,
+    pub title_color: u32,
+    pub message_color: u32,
     pub card_color: u32,
-    pub text_x: u8,
-    pub text_y: u8,
+    pub title_x: u8,
+    pub title_y: u8,
+    pub message_x: u8,
+    pub message_y: u8,
     pub image_fit: u8,
     pub image_scale: u32,
     pub generation: u64,
@@ -223,10 +240,10 @@ pub fn load_cached_manifest() {
     if let Some(campaigns) = campaigns {
         log::info!("[sponsor] loaded cached manifest ({} active campaigns)", campaigns.len());
         apply_campaigns(campaigns);
-        // Decode local media immediately, even while disconnected. This never
-        // downloads: it only rehydrates files already in the cache so a
-        // reconnect or process restart cannot make a valid sponsor disappear.
-        refresh_cached_media_async();
+        // Rehydrate local media before publishing the first UI snapshot. This
+        // never downloads, so a restart shows the cached GIF/image immediately
+        // instead of briefly showing a text-only card.
+        refresh_cached_media_sync();
     } else if json.is_some() {
         log::warn!("[sponsor] cached manifest is invalid; forcing a refresh");
     }
@@ -307,17 +324,21 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
             // visible when a changed URL is temporarily unavailable.
             ready.push(fallback_ready(existing, campaign));
         } else {
-            // Publish the text card immediately. Media decoding is asynchronous
-            // and replaces this fallback when it succeeds.
+            // Stage a safe text fallback. Startup cache hydration replaces it
+            // before the first snapshot; connected refreshes can replace it
+            // asynchronously when a new asset is available.
             ready.push(empty_ready(campaign));
         }
     }
 
     let ready_count = ready.len();
+    let had_previous = !previous.is_empty();
     let cache_dir = state.cache_dir.clone();
     state.ready = ready;
     state.current_campaign = if ready_count == 0 {
         0
+    } else if !had_previous {
+        (next_random(&mut state) as usize) % ready_count
     } else {
         state.current_campaign % ready_count
     };
@@ -378,6 +399,40 @@ pub fn refresh_media_async() {
     refresh_media_async_inner(false);
 }
 
+fn publish_media(campaigns: &[Campaign], ready: Vec<ReadyCampaign>) -> bool {
+    let mut state = STATE.lock();
+    if state.campaigns.as_slice() != campaigns {
+        return false;
+    }
+    state.ready = ready;
+    let ready_count = state.ready.len();
+    state.current_campaign = if ready_count == 0 {
+        0
+    } else {
+        state.current_campaign % ready_count
+    };
+    state.rotation_started = Instant::now();
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+fn refresh_cached_media_sync() {
+    if MEDIA_BUSY.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let (campaigns, cache_dir, previous) = {
+        let state = STATE.lock();
+        (state.campaigns.clone(), state.cache_dir.clone(), state.ready.clone())
+    };
+    let ready = prepare_media(&campaigns, &cache_dir, &previous, false);
+    let ready_count = ready.len();
+    let applied = publish_media(&campaigns, ready);
+    MEDIA_BUSY.store(false, Ordering::Release);
+    if applied {
+        log::info!("[sponsor] published synchronous cached media ({} active campaigns)", ready_count);
+    }
+}
+
 fn refresh_cached_media_async() {
     refresh_media_async_inner(true);
 }
@@ -393,20 +448,14 @@ fn refresh_media_async_inner(allow_disconnected: bool) {
         (state.campaigns.clone(), state.cache_dir.clone(), state.ready.clone())
     };
     thread::spawn(move || {
-        let ready = prepare_media(&campaigns, &cache_dir, &previous);
+        let ready = prepare_media(&campaigns, &cache_dir, &previous, !allow_disconnected);
         let ready_count = ready.len();
         let connected = CONNECTED.load(Ordering::Acquire);
-        let mut applied = false;
-        if (allow_disconnected || connected) {
-            let mut state = STATE.lock();
-            if state.campaigns == campaigns {
-                state.ready = ready;
-                state.current_campaign = 0;
-                state.rotation_started = Instant::now();
-                GENERATION.fetch_add(1, Ordering::Relaxed);
-                applied = true;
-            }
-        }
+        let applied = if allow_disconnected || connected {
+            publish_media(&campaigns, ready)
+        } else {
+            false
+        };
         MEDIA_BUSY.store(false, Ordering::Release);
         if applied {
             log::info!("[sponsor] published media refresh ({} active campaigns)", ready_count);
@@ -419,11 +468,20 @@ fn refresh_media_async_inner(allow_disconnected: bool) {
             log::info!("[sponsor] discarded stale media refresh; scheduling another pass");
             refresh_media_async();
         } else if !allow_disconnected {
-            // The tunnel may have closed while downloading. The raw bytes were
-            // written first; now rehydrate them without touching the network.
+            // The tunnel may have closed while downloading. Rehydrate any
+            // validated cache files without touching the network.
             refresh_cached_media_async();
         }
     });
+}
+
+fn next_random(state: &mut State) -> u64 {
+    let mut value = state.random_state;
+    value ^= value << 13;
+    value ^= value >> 7;
+    value ^= value << 17;
+    state.random_state = value;
+    value
 }
 
 fn advance_campaign(state: &mut State) {
@@ -436,12 +494,7 @@ fn advance_campaign(state: &mut State) {
         (state.current_campaign + 1) % 2
     } else {
         // Xorshift64 chooses among every campaign except the one on screen.
-        let mut value = state.random_state;
-        value ^= value << 13;
-        value ^= value >> 7;
-        value ^= value << 17;
-        state.random_state = value;
-        let choice = value as usize % (count - 1);
+        let choice = next_random(state) as usize % (count - 1);
         if choice >= state.current_campaign { choice + 1 } else { choice }
     };
     state.rotation_started = Instant::now();
@@ -505,10 +558,13 @@ pub fn current_frame() -> Option<SponsorFrame> {
         background_width: ready.background_width,
         background_height: ready.background_height,
         background_rgba,
-        text_color: ready.text_color,
+        title_color: ready.title_color,
+        message_color: ready.message_color,
         card_color: ready.card_color,
-        text_x: ready.text_x,
-        text_y: ready.text_y,
+        title_x: ready.title_x,
+        title_y: ready.title_y,
+        message_x: ready.message_x,
+        message_y: ready.message_y,
         image_fit: ready.image_fit,
         image_scale: ready.image_scale,
         generation,
@@ -551,21 +607,28 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
                 log::warn!("[sponsor] campaign {} has invalid optional background URL; using the card color", campaign.id);
                 campaign.background_url = None;
             }
-            if campaign.text_color.as_ref().is_some_and(|color| !valid_color(color)) {
-                log::warn!("[sponsor] campaign {} has invalid text color; using the default", campaign.id);
-                campaign.text_color = None;
+            if campaign.title_color.as_ref().is_some_and(|color| !valid_color(color)) {
+                log::warn!("[sponsor] campaign {} has invalid title color; using the default", campaign.id);
+                campaign.title_color = None;
+            }
+            if campaign.message_color.as_ref().is_some_and(|color| !valid_color(color)) {
+                log::warn!("[sponsor] campaign {} has invalid message color; using the default", campaign.id);
+                campaign.message_color = None;
             }
             if campaign.background_color.as_ref().is_some_and(|color| !valid_color(color)) {
                 log::warn!("[sponsor] campaign {} has invalid background color; using the default", campaign.id);
                 campaign.background_color = None;
             }
-            if campaign.text_x.is_some_and(|position| position > 100) {
-                log::warn!("[sponsor] campaign {} has invalid text X position; using 50 percent", campaign.id);
-                campaign.text_x = None;
-            }
-            if campaign.text_y.is_some_and(|position| position > 100) {
-                log::warn!("[sponsor] campaign {} has invalid text Y position; using 50 percent", campaign.id);
-                campaign.text_y = None;
+            for (name, position) in [
+                ("title X", &mut campaign.title_x),
+                ("title Y", &mut campaign.title_y),
+                ("message X", &mut campaign.message_x),
+                ("message Y", &mut campaign.message_y),
+            ] {
+                if position.as_ref().is_some_and(|value| *value > 100) {
+                    log::warn!("[sponsor] campaign {} has invalid {name} position; using the default", campaign.id);
+                    *position = None;
+                }
             }
             if campaign.image_fit.as_ref().is_some_and(|fit| !valid_image_fit(fit)) {
                 log::warn!("[sponsor] campaign {} has invalid image fit; using contain", campaign.id);
@@ -622,8 +685,8 @@ fn color_value(color: Option<&str>, default: u32) -> u32 {
     if color.len() == 7 { 0xFF00_0000 | value } else { value }
 }
 
-fn text_position_value(value: Option<u32>) -> u8 {
-    value.filter(|position| *position <= 100).unwrap_or(50) as u8
+fn position_value(value: Option<u32>, default: u8) -> u8 {
+    value.filter(|position| *position <= 100).unwrap_or(default as u32) as u8
 }
 
 fn image_fit_value(value: Option<&str>) -> u8 {
@@ -652,10 +715,13 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
         background_width: 0,
         background_height: 0,
         background_rgba: Arc::new(Vec::new()),
-        text_color: color_value(campaign.text_color.as_deref(), DEFAULT_TEXT_COLOR),
+        title_color: color_value(campaign.title_color.as_deref(), DEFAULT_TITLE_COLOR),
+        message_color: color_value(campaign.message_color.as_deref(), DEFAULT_MESSAGE_COLOR),
         card_color: color_value(campaign.background_color.as_deref(), DEFAULT_CARD_COLOR),
-        text_x: text_position_value(campaign.text_x),
-        text_y: text_position_value(campaign.text_y),
+        title_x: position_value(campaign.title_x, DEFAULT_TITLE_X),
+        title_y: position_value(campaign.title_y, DEFAULT_TITLE_Y),
+        message_x: position_value(campaign.message_x, DEFAULT_MESSAGE_X),
+        message_y: position_value(campaign.message_y, DEFAULT_MESSAGE_Y),
         image_fit: image_fit_value(campaign.image_fit.as_deref()),
         image_scale: image_scale_value(campaign.image_scale),
     }
@@ -756,10 +822,13 @@ fn prepare_media(
     campaigns: &[Campaign],
     cache_dir: &Path,
     previous: &[ReadyCampaign],
+    allow_network: bool,
 ) -> Vec<ReadyCampaign> {
     let mut ready = Vec::with_capacity(campaigns.len());
     let mut decoded_total = 0usize;
-    let network_client = (CONNECTED.load(Ordering::Acquire) && campaigns.iter().any(|campaign| {
+    let network_client = (allow_network
+        && CONNECTED.load(Ordering.Acquire)
+        && campaigns.iter().any(|campaign| {
         campaign.icon_url.is_some() || campaign.background_url.is_some()
     })).then(|| client().ok()).flatten();
 
@@ -1076,10 +1145,13 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             background_width: 0,
             background_height: 0,
             background_rgba: Arc::new(Vec::new()),
-            text_color: DEFAULT_TEXT_COLOR,
+            title_color: DEFAULT_TITLE_COLOR,
+            message_color: DEFAULT_MESSAGE_COLOR,
             card_color: DEFAULT_CARD_COLOR,
-            text_x: 50,
-            text_y: 50,
+            title_x: DEFAULT_TITLE_X,
+            title_y: DEFAULT_TITLE_Y,
+            message_x: DEFAULT_MESSAGE_X,
+            message_y: DEFAULT_MESSAGE_Y,
             image_fit: 0,
             image_scale: DEFAULT_IMAGE_SCALE,
         })
@@ -1102,10 +1174,13 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             background_width: 0,
             background_height: 0,
             background_rgba: Arc::new(Vec::new()),
-            text_color: DEFAULT_TEXT_COLOR,
+            title_color: DEFAULT_TITLE_COLOR,
+            message_color: DEFAULT_MESSAGE_COLOR,
             card_color: DEFAULT_CARD_COLOR,
-            text_x: 50,
-            text_y: 50,
+            title_x: DEFAULT_TITLE_X,
+            title_y: DEFAULT_TITLE_Y,
+            message_x: DEFAULT_MESSAGE_X,
+            message_y: DEFAULT_MESSAGE_Y,
             image_fit: 0,
             image_scale: DEFAULT_IMAGE_SCALE,
         })

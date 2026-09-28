@@ -1375,12 +1375,18 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.background_height = frame.background_height;
             out.background_rgba_size = frame.background_rgba.len().try_into()
                 .map_err(|_| CoreError::Internal("sponsor background is too large".into()))?;
-            out.text_color = frame.text_color;
+            out.text_color = frame.title_color;
             out.card_color = frame.card_color;
-            out.text_x = frame.text_x;
-            out.text_y = frame.text_y;
+            out.text_x = frame.title_x;
+            out.text_y = frame.title_y;
             out.image_fit = frame.image_fit;
             out.image_scale = frame.image_scale;
+            out.title_color = frame.title_color;
+            out.message_color = frame.message_color;
+            out.title_x = frame.title_x;
+            out.title_y = frame.title_y;
+            out.message_x = frame.message_x;
+            out.message_y = frame.message_y;
             *SPONSOR_FRAME.lock() = Some(frame);
         } else {
             out.width = 0;
@@ -1398,6 +1404,12 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.text_y = 50;
             out.image_fit = 0;
             out.image_scale = 0;
+            out.title_color = 0;
+            out.message_color = 0;
+            out.title_x = 50;
+            out.title_y = 50;
+            out.message_x = 50;
+            out.message_y = 72;
             fill(&mut out.id, "");
             fill(&mut out.title, "");
             fill(&mut out.message, "");

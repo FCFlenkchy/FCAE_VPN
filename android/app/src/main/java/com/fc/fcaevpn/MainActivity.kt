@@ -82,9 +82,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sponsorCard: android.view.View
     private lateinit var sponsorImage: android.widget.ImageView
     private lateinit var sponsorBackgroundImage: android.widget.ImageView
-    private lateinit var sponsorTextBlock: android.widget.LinearLayout
+    private lateinit var sponsorTextBlock: android.widget.FrameLayout
     private lateinit var sponsorMessage: android.widget.TextView
     private lateinit var sponsorTitle: TextView
+    private var sponsorTextLayoutKey = ""
     private var sponsorGeneration = -1L
     private var sponsorDestination = ""
     private var sponsorBitmap: android.graphics.Bitmap? = null
@@ -630,29 +631,45 @@ class MainActivity : AppCompatActivity() {
         return bitmap
     }
 
-    private fun positionSponsorText(textX: Int, textY: Int) {
+    private fun positionSponsorText(
+        titleX: Int,
+        titleY: Int,
+        messageX: Int,
+        messageY: Int,
+    ) {
         if (!::sponsorCard.isInitialized || !::sponsorTextBlock.isInitialized) return
-        val x = textX.coerceIn(0, 100)
-        val y = textY.coerceIn(0, 100)
+        val safeTitleX = titleX.coerceIn(0, 100)
+        val safeTitleY = titleY.coerceIn(0, 100)
+        val safeMessageX = messageX.coerceIn(0, 100)
+        val safeMessageY = messageY.coerceIn(0, 100)
+        val messageVisible = sponsorMessage.visibility == android.view.View.VISIBLE
         sponsorTextBlock.post {
             val cardWidth = sponsorCard.width
             val cardHeight = sponsorCard.height
             if (cardWidth <= 0 || cardHeight <= 0) return@post
-            val params = (sponsorTextBlock.layoutParams as? android.widget.FrameLayout.LayoutParams)
-                ?: return@post
-            val left = (cardWidth * x / 100f).toInt().coerceIn(0, cardWidth - 1)
-            val blockWidth = (cardWidth - left).coerceAtLeast(1)
-            params.width = blockWidth
-            params.leftMargin = left
-            params.topMargin = 0
-            params.gravity = android.view.Gravity.TOP or android.view.Gravity.START
-            sponsorTextBlock.layoutParams = params
-            sponsorTextBlock.post {
-                val availableHeight = (cardHeight - sponsorTextBlock.height).coerceAtLeast(0)
-                val updated = sponsorTextBlock.layoutParams as android.widget.FrameLayout.LayoutParams
-                updated.topMargin = (availableHeight * y / 100f).toInt()
-                sponsorTextBlock.layoutParams = updated
+            val key = "$safeTitleX:$safeTitleY:$safeMessageX:$safeMessageY:$messageVisible:${cardWidth}x$cardHeight"
+            if (key == sponsorTextLayoutKey) return@post
+
+            fun applyPosition(view: android.view.View, x: Int, y: Int) {
+                val params = (view.layoutParams as? android.widget.FrameLayout.LayoutParams)
+                    ?: android.widget.FrameLayout.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                    )
+                val left = (cardWidth * x / 100f).toInt().coerceIn(0, cardWidth - 1)
+                params.width = (cardWidth - left).coerceAtLeast(1)
+                params.height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+                params.leftMargin = left
+                params.topMargin = (cardHeight * y / 100f).toInt().coerceIn(0, cardHeight - 1)
+                params.rightMargin = 0
+                params.bottomMargin = 0
+                params.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                view.layoutParams = params
             }
+
+            applyPosition(sponsorTitle, safeTitleX, safeTitleY)
+            applyPosition(sponsorMessage, safeMessageX, safeMessageY)
+            sponsorTextLayoutKey = key
         }
     }
 
@@ -665,7 +682,7 @@ class MainActivity : AppCompatActivity() {
         sponsorMessage.text = "Sponsor cards will appear here when available."
         sponsorMessage.visibility = android.view.View.VISIBLE
         sponsorTitle.setTextColor(Color.WHITE)
-        sponsorMessage.setTextColor(Color.WHITE)
+        sponsorMessage.setTextColor(Color.parseColor("#FFD8E7FF"))
         sponsorCard.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FF142A44"))
         sponsorImage.setImageDrawable(null)
         sponsorImage.scaleX = 1f
@@ -674,7 +691,7 @@ class MainActivity : AppCompatActivity() {
         sponsorBackgroundImage.setImageDrawable(null)
         sponsorBackgroundImage.visibility = android.view.View.GONE
         sponsorCard.visibility = android.view.View.VISIBLE
-        positionSponsorText(50, 50)
+        positionSponsorText(50, 50, 50, 72)
     }
 
     private val sponsorPoll = object : Runnable {
@@ -706,14 +723,15 @@ class MainActivity : AppCompatActivity() {
                             } else {
                                 sponsorAnimated = card.animated
                                 sponsorCampaignCount = card.campaignCount
-                                val textColor = if (card.textColor != 0) card.textColor else Color.WHITE
+                                val titleColor = if (card.titleColor != 0) card.titleColor else Color.WHITE
+                                val messageColor = if (card.messageColor != 0) card.messageColor else Color.parseColor("#FFD8E7FF")
                                 val cardColor = if (card.cardColor != 0) card.cardColor else Color.parseColor("#FF142A44")
-                                sponsorTitle.setTextColor(textColor)
-                                sponsorMessage.setTextColor(textColor)
+                                sponsorTitle.setTextColor(titleColor)
+                                sponsorMessage.setTextColor(messageColor)
                                 sponsorCard.backgroundTintList = ColorStateList.valueOf(cardColor)
                                 val imageScale = card.imageScale.coerceIn(50, 160)
                                 sponsorImage.layoutParams = sponsorImage.layoutParams.apply {
-                                    height = (80 * resources.displayMetrics.density).toInt()
+                                    height = (70 * resources.displayMetrics.density).toInt()
                                 }
                                 val imageScaleFactor = imageScale / 160f
                                 sponsorImage.scaleX = imageScaleFactor
@@ -726,7 +744,12 @@ class MainActivity : AppCompatActivity() {
                                 sponsorTitle.text = card.title
                                 sponsorMessage.text = card.message
                                 sponsorMessage.visibility = if (card.message.isBlank()) android.view.View.GONE else android.view.View.VISIBLE
-                                positionSponsorText(card.textX, card.textY)
+                                positionSponsorText(
+                                    card.titleX,
+                                    card.titleY,
+                                    card.messageX,
+                                    card.messageY,
+                                )
                                 sponsorDestination = card.destinationUrl
                                 if (card.generation != sponsorGeneration) {
                                     val bitmap = bitmapFromRgba(sponsorBitmap, card.width, card.height, card.rgba)

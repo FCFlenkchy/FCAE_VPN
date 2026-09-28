@@ -260,6 +260,12 @@ class FcaeSponsorInfo(
     @JvmField var textY: Int = 50,
     @JvmField var imageFit: Int = 0,
     @JvmField var imageScale: Int = 100,
+    @JvmField var titleColor: Int = 0,
+    @JvmField var messageColor: Int = 0,
+    @JvmField var titleX: Int = 50,
+    @JvmField var titleY: Int = 50,
+    @JvmField var messageX: Int = 50,
+    @JvmField var messageY: Int = 72,
     @JvmField var generation: Long = 0,
     @JvmField var rgba: ByteArray = byteArrayOf(),
     @JvmField var backgroundRgba: ByteArray = byteArrayOf()

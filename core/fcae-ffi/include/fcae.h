@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 13
+#define FCAE_ABI_VERSION 14
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -391,12 +391,18 @@ typedef struct {
     uint32_t background_width;
     uint32_t background_height;
     uint32_t background_rgba_size;
-    uint32_t text_color; /* packed ARGB */
+    uint32_t text_color; /* legacy combined text color; use title/message colors */
     uint32_t card_color; /* packed ARGB */
-    uint8_t  text_x;      /* percentage of available card width, 0..100 */
-    uint8_t  text_y;      /* percentage of available card height, 0..100 */
+    uint8_t  text_x;      /* legacy combined X position */
+    uint8_t  text_y;      /* legacy combined Y position */
     uint8_t  image_fit;   /* 0=contain, 1=cover */
     uint32_t image_scale; /* percentage, 50..160 */
+    uint32_t title_color; /* packed ARGB */
+    uint32_t message_color; /* packed ARGB */
+    uint8_t  title_x;     /* percentage of available card width, 0..100 */
+    uint8_t  title_y;     /* percentage of available card height, 0..100 */
+    uint8_t  message_x;   /* percentage of available card width, 0..100 */
+    uint8_t  message_y;   /* percentage of available card height, 0..100 */
 } FcaeSponsorInfo;
 
 /* ── Callbacks ─────────────────────────────────────────────────────── */
