@@ -827,7 +827,7 @@ fn prepare_media(
     let mut ready = Vec::with_capacity(campaigns.len());
     let mut decoded_total = 0usize;
     let network_client = (allow_network
-        && CONNECTED.load(Ordering.Acquire)
+        && CONNECTED.load(Ordering::Acquire)
         && campaigns.iter().any(|campaign| {
         campaign.icon_url.is_some() || campaign.background_url.is_some()
     })).then(|| client().ok()).flatten();
