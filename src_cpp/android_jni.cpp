@@ -1034,13 +1034,14 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     const jfieldID fidTextX = getField("textX", "I");
     const jfieldID fidTextY = getField("textY", "I");
     const jfieldID fidImageFit = getField("imageFit", "I");
-    const jfieldID fidImageScale = getField("imageScale", "I");
     const jfieldID fidTitleColor = getField("titleColor", "I");
     const jfieldID fidMessageColor = getField("messageColor", "I");
     const jfieldID fidTitleX = getField("titleX", "I");
     const jfieldID fidTitleY = getField("titleY", "I");
     const jfieldID fidMessageX = getField("messageX", "I");
     const jfieldID fidMessageY = getField("messageY", "I");
+    const jfieldID fidIconScale = getField("iconScale", "I");
+    const jfieldID fidBackgroundScale = getField("backgroundScale", "I");
     const jfieldID fidGeneration = getField("generation", "J");
     const jfieldID fidRgba = getField("rgba", "[B");
     const jfieldID fidBackgroundRgba = getField("backgroundRgba", "[B");
@@ -1048,8 +1049,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
             || !fidDestination || !fidWidth || !fidHeight || !fidCampaignCount
             || !fidAnimated || !fidBackgroundWidth || !fidBackgroundHeight
             || !fidTextColor || !fidCardColor || !fidTextX || !fidTextY || !fidImageFit
-            || !fidImageScale || !fidTitleColor || !fidMessageColor || !fidTitleX
-            || !fidTitleY || !fidMessageX || !fidMessageY || !fidGeneration || !fidRgba
+            || !fidTitleColor || !fidMessageColor || !fidTitleX
+            || !fidTitleY || !fidMessageX || !fidMessageY || !fidIconScale
+            || !fidBackgroundScale || !fidGeneration || !fidRgba
             || !fidBackgroundRgba) {
         env->DeleteLocalRef(rgba);
         env->DeleteLocalRef(backgroundRgba);
@@ -1091,13 +1093,14 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     env->SetIntField(obj, fidTextX, (jint)info.text_x);
     env->SetIntField(obj, fidTextY, (jint)info.text_y);
     env->SetIntField(obj, fidImageFit, (jint)info.image_fit);
-    env->SetIntField(obj, fidImageScale, (jint)info.image_scale);
     env->SetIntField(obj, fidTitleColor, (jint)info.title_color);
     env->SetIntField(obj, fidMessageColor, (jint)info.message_color);
     env->SetIntField(obj, fidTitleX, (jint)info.title_x);
     env->SetIntField(obj, fidTitleY, (jint)info.title_y);
     env->SetIntField(obj, fidMessageX, (jint)info.message_x);
     env->SetIntField(obj, fidMessageY, (jint)info.message_y);
+    env->SetIntField(obj, fidIconScale, (jint)info.icon_scale);
+    env->SetIntField(obj, fidBackgroundScale, (jint)info.background_scale);
     env->SetLongField(obj, fidGeneration, (jlong)info.generation);
     env->SetObjectField(obj, fidRgba, rgba);
     env->SetObjectField(obj, fidBackgroundRgba, backgroundRgba);

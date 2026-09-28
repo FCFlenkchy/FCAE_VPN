@@ -673,11 +673,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showEmptySponsorCard() {
-        sponsorDestination = ""
+        sponsorDestination = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md"
         sponsorCampaignCount = 0
         sponsorGeneration = -1L
-        sponsorTitle.text = "No sponsored campaigns"
-        sponsorMessage.text = "Sponsor cards will appear here when available."
+        sponsorTitle.text = "Become a sponsor"
+        sponsorTitle.textSize = 20f
+        sponsorMessage.text = "Want to become a sponsor? Click me"
+        sponsorMessage.textSize = 14f
         sponsorMessage.visibility = android.view.View.VISIBLE
         sponsorTitle.setTextColor(Color.WHITE)
         sponsorMessage.setTextColor(Color.parseColor("#FFD8E7FF"))
@@ -687,9 +689,11 @@ class MainActivity : AppCompatActivity() {
         sponsorImage.scaleY = 1f
         sponsorImage.visibility = android.view.View.GONE
         sponsorBackgroundImage.setImageDrawable(null)
+        sponsorBackgroundImage.scaleX = 1f
+        sponsorBackgroundImage.scaleY = 1f
         sponsorBackgroundImage.visibility = android.view.View.GONE
         sponsorCard.visibility = android.view.View.VISIBLE
-        positionSponsorText(50, 50, 50, 72)
+        positionSponsorText(50, 40, 50, 68)
     }
 
     private val sponsorPoll = object : Runnable {
@@ -725,14 +729,20 @@ class MainActivity : AppCompatActivity() {
                                 val cardColor = if (card.cardColor != 0) card.cardColor else Color.parseColor("#FF142A44")
                                 sponsorTitle.setTextColor(titleColor)
                                 sponsorMessage.setTextColor(messageColor)
+                                sponsorTitle.textSize = 16f
+                                sponsorMessage.textSize = 14f
                                 sponsorCard.backgroundTintList = ColorStateList.valueOf(cardColor)
-                                val imageScale = card.imageScale.coerceIn(50, 160)
+                                val iconScale = card.iconScale.coerceIn(50, 160)
+                                val backgroundScale = card.backgroundScale.coerceIn(50, 160)
                                 sponsorImage.layoutParams = sponsorImage.layoutParams.apply {
                                     height = (70 * resources.displayMetrics.density).toInt()
                                 }
-                                val imageScaleFactor = imageScale / 160f
-                                sponsorImage.scaleX = imageScaleFactor
-                                sponsorImage.scaleY = imageScaleFactor
+                                val iconScaleFactor = iconScale / 100f
+                                sponsorImage.scaleX = iconScaleFactor
+                                sponsorImage.scaleY = iconScaleFactor
+                                val backgroundScaleFactor = backgroundScale / 100f
+                                sponsorBackgroundImage.scaleX = backgroundScaleFactor
+                                sponsorBackgroundImage.scaleY = backgroundScaleFactor
                                 sponsorImage.scaleType = if (card.imageFit == 1) {
                                     android.widget.ImageView.ScaleType.CENTER_CROP
                                 } else {

@@ -15,7 +15,9 @@ use std::{
 pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/sponsors.json";
 const MAX_MANIFEST_BYTES: usize = 128 * 1024;
-const MAX_MEDIA_BYTES: usize = 2 * 1024 * 1024;
+// Each foreground icon and optional background may use up to 10 MiB on disk.
+// Decoded frame and aggregate budgets below still bound memory use.
+const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 // One portable sponsor canvas keeps the manifest behavior identical on every
 // platform and fits the Android card without requiring platform-specific assets.
 const MAX_WIDTH: u32 = 800;
@@ -40,8 +42,11 @@ const DEFAULT_TITLE_X: u8 = 50;
 const DEFAULT_TITLE_Y: u8 = 50;
 const DEFAULT_MESSAGE_X: u8 = 50;
 const DEFAULT_MESSAGE_Y: u8 = 72;
-const DEFAULT_IMAGE_SCALE: u32 = 100;
-const ROTATE_EVERY: Duration = Duration::from_secs(5);
+const DEFAULT_ICON_SCALE: u32 = 100;
+const DEFAULT_BACKGROUND_SCALE: u32 = 100;
+// Keep the current campaign visible for ten seconds before rotating.
+const ROTATE_EVERY: Duration = Duration::from_secs(10);
+// The manifest is checked at most once every twelve hours unless explicitly refreshed.
 const MANIFEST_REFRESH_SECS: u64 = 12 * 60 * 60;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -78,7 +83,9 @@ struct Campaign {
     #[serde(default)]
     image_fit: Option<String>,
     #[serde(default)]
-    image_scale: Option<u32>,
+    icon_scale: Option<u32>,
+    #[serde(default)]
+    background_scale: Option<u32>,
     destination_url: String,
     #[serde(default = "enabled")]
     enabled: bool,
@@ -114,7 +121,8 @@ struct ReadyCampaign {
     message_x: u8,
     message_y: u8,
     image_fit: u8,
-    image_scale: u32,
+    icon_scale: u32,
+    background_scale: u32,
 }
 
 struct MediaPayload {
@@ -153,7 +161,8 @@ pub struct SponsorFrame {
     pub message_x: u8,
     pub message_y: u8,
     pub image_fit: u8,
-    pub image_scale: u32,
+    pub icon_scale: u32,
+    pub background_scale: u32,
     pub generation: u64,
 }
 
@@ -264,10 +273,28 @@ pub fn set_connected(connected: bool) {
     if !was {
         if manifest_due() {
             refresh_manifest_async();
-        } else {
+        } else if media_needs_refresh() {
+            // A reconnect should not start another media pass when every
+            // campaign already has the same usable decoded media. A pass is
+            // still allowed when a URL changed or a campaign has no usable
+            // cached frame yet.
             refresh_media_async();
         }
     }
+}
+
+fn media_needs_refresh() -> bool {
+    let state = STATE.lock();
+    state.campaigns.iter().any(|campaign| {
+        let Some(existing) = state.ready.iter().find(|ready|
+            ready.campaign.id == campaign.id) else { return true; };
+        (campaign.icon_url.is_some()
+            && (!icon_url_matches(existing, campaign) || existing.frames.is_empty()))
+            || (campaign.background_url.is_some()
+                && (!background_url_matches(existing, campaign)
+                    || (existing.background_frames.is_empty()
+                        && existing.background_rgba.is_empty())))
+    })
 }
 
 pub fn manifest_refresh_remaining_secs() -> u64 {
@@ -566,7 +593,8 @@ pub fn current_frame() -> Option<SponsorFrame> {
         message_x: ready.message_x,
         message_y: ready.message_y,
         image_fit: ready.image_fit,
-        image_scale: ready.image_scale,
+        icon_scale: ready.icon_scale,
+        background_scale: ready.background_scale,
         generation,
     })
 }
@@ -634,9 +662,13 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
                 log::warn!("[sponsor] campaign {} has invalid image fit; using contain", campaign.id);
                 campaign.image_fit = None;
             }
-            if campaign.image_scale.is_some_and(|scale| !(50..=160).contains(&scale)) {
-                log::warn!("[sponsor] campaign {} has invalid image scale; using 100 percent", campaign.id);
-                campaign.image_scale = None;
+            if campaign.icon_scale.is_some_and(|scale| !(50..=160).contains(&scale)) {
+                log::warn!("[sponsor] campaign {} has invalid icon scale; using 100 percent", campaign.id);
+                campaign.icon_scale = None;
+            }
+            if campaign.background_scale.is_some_and(|scale| !(50..=160).contains(&scale)) {
+                log::warn!("[sponsor] campaign {} has invalid background scale; using 100 percent", campaign.id);
+                campaign.background_scale = None;
             }
             valid.push(campaign);
         }
@@ -693,8 +725,8 @@ fn image_fit_value(value: Option<&str>) -> u8 {
     if value == Some("cover") { 1 } else { 0 }
 }
 
-fn image_scale_value(value: Option<u32>) -> u32 {
-    value.filter(|scale| (50..=160).contains(scale)).unwrap_or(DEFAULT_IMAGE_SCALE)
+fn media_scale_value(value: Option<u32>, default: u32) -> u32 {
+    value.filter(|scale| (50..=160).contains(scale)).unwrap_or(default)
 }
 
 fn valid_image_fit(value: &str) -> bool {
@@ -723,7 +755,8 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
         message_x: position_value(campaign.message_x, DEFAULT_MESSAGE_X),
         message_y: position_value(campaign.message_y, DEFAULT_MESSAGE_Y),
         image_fit: image_fit_value(campaign.image_fit.as_deref()),
-        image_scale: image_scale_value(campaign.image_scale),
+        icon_scale: media_scale_value(campaign.icon_scale, DEFAULT_ICON_SCALE),
+        background_scale: media_scale_value(campaign.background_scale, DEFAULT_BACKGROUND_SCALE),
     }
 }
 
@@ -849,6 +882,12 @@ fn prepare_media(
         });
 
         for (campaign, payload) in batch.iter().zip(payloads) {
+            let reused_media = previous.iter().any(|existing|
+                icon_url_matches(existing, campaign) && !existing.frames.is_empty());
+            let reused_background = previous.iter().any(|existing|
+                background_url_matches(existing, campaign)
+                    && (!existing.background_frames.is_empty()
+                        || !existing.background_rgba.is_empty()));
             let (media, background) = match payload {
                 Some(payload) => (
                     payload.media.and_then(|payload| {
@@ -862,10 +901,15 @@ fn prepare_media(
                 ),
                 None => (None, None),
             };
-            if campaign.icon_url.is_some() && media.is_none() {
+            let media_loaded = media.is_some();
+            let background_loaded = background.is_some();
+            // A reused in-memory frame deliberately produces no payload in
+            // load_campaign_payload. Do not report that cache hit as a failed
+            // download; otherwise every reconnect looks like a new fetch.
+            if campaign.icon_url.is_some() && !media_loaded && !reused_media {
                 log::warn!("[sponsor] campaign {} icon unavailable; using fallback", campaign.id);
             }
-            if campaign.background_url.is_some() && background.is_none() {
+            if campaign.background_url.is_some() && !background_loaded && !reused_background {
                 log::warn!("[sponsor] campaign {} background unavailable; using card color", campaign.id);
             }
 
@@ -904,8 +948,10 @@ fn prepare_media(
             if decoded_total.saturating_add(retained_bytes) <= MAX_TOTAL_DECODED_BYTES {
                 decoded_total += retained_bytes;
                 if retained_bytes != 0 {
-                    log::info!("[sponsor] campaign {} media ready", campaign.id);
-                } else {
+                    if media_loaded || background_loaded {
+                        log::info!("[sponsor] campaign {} media ready", campaign.id);
+                    }
+                } else if media_loaded || background_loaded {
                     log::info!("[sponsor] campaign {} is text-only", campaign.id);
                 }
                 ready.push(candidate);
@@ -1156,7 +1202,8 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             message_x: DEFAULT_MESSAGE_X,
             message_y: DEFAULT_MESSAGE_Y,
             image_fit: 0,
-            image_scale: DEFAULT_IMAGE_SCALE,
+            icon_scale: DEFAULT_ICON_SCALE,
+            background_scale: DEFAULT_BACKGROUND_SCALE,
         })
     } else {
         if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP) {
@@ -1185,7 +1232,8 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             message_x: DEFAULT_MESSAGE_X,
             message_y: DEFAULT_MESSAGE_Y,
             image_fit: 0,
-            image_scale: DEFAULT_IMAGE_SCALE,
+            icon_scale: DEFAULT_ICON_SCALE,
+            background_scale: DEFAULT_BACKGROUND_SCALE,
         })
     }
 }

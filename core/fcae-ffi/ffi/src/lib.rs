@@ -1380,13 +1380,15 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.text_x = frame.title_x;
             out.text_y = frame.title_y;
             out.image_fit = frame.image_fit;
-            out.image_scale = frame.image_scale;
+            out.image_scale = 0;
             out.title_color = frame.title_color;
             out.message_color = frame.message_color;
             out.title_x = frame.title_x;
             out.title_y = frame.title_y;
             out.message_x = frame.message_x;
             out.message_y = frame.message_y;
+            out.icon_scale = frame.icon_scale;
+            out.background_scale = frame.background_scale;
             *SPONSOR_FRAME.lock() = Some(frame);
         } else {
             out.width = 0;
@@ -1410,6 +1412,8 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.title_y = 50;
             out.message_x = 50;
             out.message_y = 72;
+            out.icon_scale = 100;
+            out.background_scale = 100;
             fill(&mut out.id, "");
             fill(&mut out.title, "");
             fill(&mut out.message, "");

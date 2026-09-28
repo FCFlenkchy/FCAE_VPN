@@ -1860,10 +1860,13 @@ void render_ui() {
                 ImGui::SetTooltip("Refresh sponsor manifest");
             {
                 const bool sponsor_has_content = s_sponsor.available;
+                const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
+                const char* sponsor_destination = sponsor_has_content
+                    ? s_sponsor.destination_url : sponsor_policy;
                 const char* sponsor_title = sponsor_has_content && s_sponsor.title[0] != '\0'
-                    ? s_sponsor.title : "No sponsored campaigns";
+                    ? s_sponsor.title : "Become a sponsor";
                 const char* sponsor_message = sponsor_has_content
-                    ? s_sponsor.message : "Sponsor cards will appear here when available.";
+                    ? s_sponsor.message : "Want to become a sponsor? Click me";
                 ImTextureID texture = ImTextureID{};
                 ImTextureID background_texture = ImTextureID{};
                 if (!s_sponsor_rgba.empty() && s_sponsor.width > 0 && s_sponsor.height > 0
@@ -1879,8 +1882,10 @@ void render_ui() {
                         s_sponsor_background_rgba.data(), (int)s_sponsor.background_width,
                         (int)s_sponsor.background_height, s_sponsor.generation, 1);
                 }
-                const float image_scale = std::clamp(
-                    (float)s_sponsor.image_scale / 100.0f, 0.5f, 1.6f);
+                const float icon_scale = std::clamp(
+                    (float)s_sponsor.icon_scale / 100.0f, 0.5f, 1.6f);
+                const float background_scale = std::clamp(
+                    (float)s_sponsor.background_scale / 100.0f, 0.5f, 1.6f);
                 // Keep the native sponsor card fixed at 140 units. Text and
                 // media changes are drawn inside it and cannot reflow the UI.
                 constexpr float sponsor_card_height = 140.0f;
@@ -1895,12 +1900,22 @@ void render_ui() {
                 if (background_texture) {
                     const ImVec2 background_min = ImGui::GetCursorScreenPos();
                     const ImVec2 background_size = ImGui::GetContentRegionAvail();
+                    const float cover_scale = std::max(
+                        background_size.x / (float)s_sponsor.background_width,
+                        background_size.y / (float)s_sponsor.background_height)
+                        * background_scale;
+                    const ImVec2 scaled_size(
+                        s_sponsor.background_width * cover_scale,
+                        s_sponsor.background_height * cover_scale);
+                    const ImVec2 scaled_min(
+                        background_min.x + (background_size.x - scaled_size.x) * 0.5f,
+                        background_min.y + (background_size.y - scaled_size.y) * 0.5f);
                     ImGui::GetWindowDrawList()->AddImage(
-                        background_texture, background_min,
-                        ImVec2(background_min.x + background_size.x,
-                               background_min.y + background_size.y),
+                        background_texture, scaled_min,
+                        ImVec2(scaled_min.x + scaled_size.x,
+                               scaled_min.y + scaled_size.y),
                         ImVec2(0, 0), ImVec2(1, 1),
-                        ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, 0.36f)));
+                        ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, 0.42f)));
                 }
                 {
                     if (texture) {
@@ -1912,7 +1927,7 @@ void render_ui() {
                     if (s_sponsor.image_fit == 0) {
                         const float scale = std::min(box_w / (float)s_sponsor.width,
                                                      box_h / (float)s_sponsor.height)
-                            * image_scale;
+                            * icon_scale;
                         size = ImVec2((float)s_sponsor.width * scale,
                                       (float)s_sponsor.height * scale);
                         if (size.x > box_w || size.y > box_h) {
@@ -1948,8 +1963,8 @@ void render_ui() {
                     if (ImGui::IsItemDeactivated()) {
                         if (sponsor_dragged) {
                             fcae_sponsor_next();
-                        } else if (strncmp(s_sponsor.destination_url, "https://", 8) == 0) {
-                            open_link(s_sponsor.destination_url);
+                        } else if (strncmp(sponsor_destination, "https://", 8) == 0) {
+                            open_link(sponsor_destination);
                         }
                         sponsor_dragged = false;
                     }
@@ -1963,8 +1978,8 @@ void render_ui() {
                         ImGui::SetCursorPosX(ImGui::GetCursorPosX()
                             + (ImGui::GetContentRegionAvail().x - card_size.x) * 0.5f);
                         ImGui::InvisibleButton("##sponsor_card_touch", card_size);
-                        if (ImGui::IsItemClicked() && strncmp(s_sponsor.destination_url, "https://", 8) == 0)
-                            open_link(s_sponsor.destination_url);
+                        if (ImGui::IsItemClicked() && strncmp(sponsor_destination, "https://", 8) == 0)
+                            open_link(sponsor_destination);
                     }
                     const ImVec2 content_min = ImGui::GetWindowContentRegionMin();
                     const ImVec2 content_max = ImGui::GetWindowContentRegionMax();
@@ -1974,12 +1989,14 @@ void render_ui() {
                     const float title_y = content_height * (float)s_sponsor.title_y / 100.0f;
                     const ImVec4 title_color = sponsor_color(s_sponsor.title_color,
                         ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                    if (!sponsor_has_content) ImGui::SetWindowFontScale(1.35f);
                     ImGui::PushStyleColor(ImGuiCol_Text, title_color);
                     ImGui::SetCursorPos(ImVec2(title_x, title_y));
                     ImGui::PushTextWrapPos(content_width);
                     ImGui::TextUnformatted(sponsor_title);
                     ImGui::PopTextWrapPos();
                     ImGui::PopStyleColor();
+                    if (!sponsor_has_content) ImGui::SetWindowFontScale(1.0f);
                     if (sponsor_message[0] != '\0') {
                         const float message_x = content_width * (float)s_sponsor.message_x / 100.0f;
                         const float message_y = content_height * (float)s_sponsor.message_y / 100.0f;
@@ -1997,7 +2014,6 @@ void render_ui() {
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor(2);
             }
-            const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
             if (ImGui::TextLink("Want to become a sponsor? Click me")) open_link(sponsor_policy);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", sponsor_policy);
         }

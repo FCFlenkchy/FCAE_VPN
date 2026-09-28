@@ -15,7 +15,8 @@
       "message_x": 50,
       "message_y": 70,
       "image_fit": "contain",
-      "image_scale": 100,
+      "icon_scale": 100,
+      "background_scale": 100,
       "destination_url": "https://www.rust-lang.org/",
       "enabled": true
     },
@@ -33,7 +34,8 @@
       "message_x": 8,
       "message_y": 72,
       "image_fit": "cover",
-      "image_scale": 110,
+      "icon_scale": 110,
+      "background_scale": 100,
       "destination_url": "https://developer.android.com/",
       "enabled": true
     },
@@ -51,7 +53,8 @@
       "message_x": 58,
       "message_y": 72,
       "image_fit": "contain",
-      "image_scale": 90,
+      "icon_scale": 90,
+      "background_scale": 100,
       "destination_url": "https://www.kernel.org/",
       "enabled": true
     },
@@ -69,7 +72,8 @@
       "message_x": 50,
       "message_y": 70,
       "image_fit": "contain",
-      "image_scale": 100,
+      "icon_scale": 100,
+      "background_scale": 100,
       "destination_url": "https://commons.wikimedia.org/",
       "enabled": true
     },
@@ -87,7 +91,8 @@
       "message_x": 50,
       "message_y": 68,
       "image_fit": "contain",
-      "image_scale": 100,
+      "icon_scale": 100,
+      "background_scale": 100,
       "destination_url": "https://commons.wikimedia.org/",
       "enabled": true
     }
