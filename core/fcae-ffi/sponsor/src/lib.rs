@@ -637,15 +637,15 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
     }
 
     let ready_count = ready.len();
-    let had_previous = !previous.is_empty();
     let cache_dir = state.cache_dir.clone();
     state.ready = ready;
+    // A fresh cache load and every accepted manifest should start from a
+    // random campaign. Media-only refreshes use publish_media() and preserve
+    // the current campaign, so this does not cause animation jitter.
     state.current_campaign = if ready_count == 0 {
         0
-    } else if !had_previous {
-        (next_random(&mut state) as usize) % ready_count
     } else {
-        state.current_campaign % ready_count
+        (next_random(&mut state) as usize) % ready_count
     };
     state.campaigns = campaigns.clone();
     state.last_error.clear();

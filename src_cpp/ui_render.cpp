@@ -2064,10 +2064,17 @@ void render_ui() {
                     // the media/text hit regions.
                     const bool audio_enabled = fcae_sponsor_audio_enabled();
                     const float audio_x = std::max(
-                        0.0f, ImGui::GetContentRegionAvail().x - 64.0f);
+                        0.0f, ImGui::GetContentRegionAvail().x - 72.0f);
                     ImGui::SetCursorPos(ImVec2(audio_x, ImGui::GetCursorPosY() + 2.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Button,
+                        ImVec4(0.10f, 0.38f, 0.62f, 0.95f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                        ImVec4(0.16f, 0.52f, 0.78f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                        ImVec4(0.08f, 0.30f, 0.50f, 1.0f));
                     const bool clicked = ImGui::Button(
-                        audio_enabled ? "Mute" : "Unmute", ImVec2(64.0f, 24.0f));
+                        audio_enabled ? "Mute" : "Unmute", ImVec2(72.0f, 26.0f));
+                    ImGui::PopStyleColor(3);
                     if (clicked) {
                         fcae_sponsor_set_audio_enabled(!audio_enabled);
                         ui_request_redraw();
@@ -2758,4 +2765,6 @@ void render_ui() {
 
     ImGui::PopStyleVar(2);
     ImGui::End();
+}
+
 }
