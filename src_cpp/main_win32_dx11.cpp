@@ -18,15 +18,22 @@ static ID3D11Device*           g_pd3dDevice       = nullptr;
 static ID3D11DeviceContext*    g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain*         g_pSwapChain       = nullptr;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
+static ID3D11Texture2D*        g_sponsor_textures[2] = {};
+static ID3D11ShaderResourceView* g_sponsor_views[2] = {};
+static uint64_t g_sponsor_loaded[2] = {};
+static int g_sponsor_texture_width[2] = {};
+static int g_sponsor_texture_height[2] = {};
 
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
-    static ID3D11ShaderResourceView* views[2] = {};
-    static uint64_t loaded[2] = {};
     const int index = slot == 1 ? 1 : 0;
-    ID3D11ShaderResourceView*& view = views[index];
-    if (!rgba || width <= 0 || height <= 0 || !g_pd3dDevice) return (ImTextureID)0;
-    if (loaded[index] != generation) {
+    ID3D11Texture2D*& texture = g_sponsor_textures[index];
+    ID3D11ShaderResourceView*& view = g_sponsor_views[index];
+    if (!rgba || width <= 0 || height <= 0 || !g_pd3dDevice || !g_pd3dDeviceContext)
+        return (ImTextureID)0;
+    if (!texture || g_sponsor_texture_width[index] != width
+            || g_sponsor_texture_height[index] != height) {
         if (view) { view->Release(); view = nullptr; }
+        if (texture) { texture->Release(); texture = nullptr; }
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width = (UINT)width;
         desc.Height = (UINT)height;
@@ -34,19 +41,34 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
         desc.ArraySize = 1;
         desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_IMMUTABLE;
+        desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SUBRESOURCE_DATA data = {};
-        data.pSysMem = rgba;
-        data.SysMemPitch = (UINT)width * 4;
-        ID3D11Texture2D* texture = nullptr;
-        if (SUCCEEDED(g_pd3dDevice->CreateTexture2D(&desc, &data, &texture)) && texture) {
-            g_pd3dDevice->CreateShaderResourceView(texture, nullptr, &view);
-            texture->Release();
+        if (FAILED(g_pd3dDevice->CreateTexture2D(&desc, nullptr, &texture)) || !texture
+                || FAILED(g_pd3dDevice->CreateShaderResourceView(texture, nullptr, &view))) {
+            if (view) { view->Release(); view = nullptr; }
+            if (texture) { texture->Release(); texture = nullptr; }
+            return (ImTextureID)0;
         }
-        loaded[index] = generation;
+        g_sponsor_texture_width[index] = width;
+        g_sponsor_texture_height[index] = height;
+        g_sponsor_loaded[index] = 0;
+    }
+    if (g_sponsor_loaded[index] != generation) {
+        g_pd3dDeviceContext->UpdateSubresource(
+            texture, 0, nullptr, rgba, (UINT)width * 4, (UINT)width * (UINT)height * 4);
+        g_sponsor_loaded[index] = generation;
     }
     return (ImTextureID)view;
+}
+
+static void release_sponsor_textures() {
+    for (int i = 0; i < 2; ++i) {
+        if (g_sponsor_views[i]) { g_sponsor_views[i]->Release(); g_sponsor_views[i] = nullptr; }
+        if (g_sponsor_textures[i]) { g_sponsor_textures[i]->Release(); g_sponsor_textures[i] = nullptr; }
+        g_sponsor_loaded[i] = 0;
+        g_sponsor_texture_width[i] = 0;
+        g_sponsor_texture_height[i] = 0;
+    }
 }
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -151,6 +173,7 @@ static bool CreateDeviceD3D(HWND hWnd) {
 }
 
 static void CleanupDeviceD3D() {
+    release_sponsor_textures();
     if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
     if (g_pSwapChain)  { g_pSwapChain->Release();  g_pSwapChain = nullptr; }
     if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
@@ -248,6 +271,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // don't change anything (a repeated WM_MOUSEMOVE at the same position, for
     // example) no longer force a frame.
     bool done = false;
+    bool sponsor_window_visible = false;
     auto last_frame_time = std::chrono::steady_clock::now();
     auto last_input_time = last_frame_time;
     POINT last_mouse_pos = {};
@@ -262,7 +286,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         // A minimized or hidden window has nothing to paint. Sleep in 1 s steps
         // (keeps the engine-state poll alive) and leave a pending redraw request
         // alone so the first frame after restoring is guaranteed to be fresh.
-        const bool paintable = !IsIconic(hWnd) && IsWindowVisible(hWnd);
+        bool paintable = !IsIconic(hWnd) && IsWindowVisible(hWnd);
 
         DWORD timeout;
         if (!paintable)         timeout = 1000;
@@ -304,9 +328,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         }
         if (done) break;
         if (got_input) last_input_time = std::chrono::steady_clock::now();
+        paintable = !IsIconic(hWnd) && IsWindowVisible(hWnd);
 
-        // Hidden window: keep the engine poll alive, paint nothing.
-        if (!paintable) continue;
+        // Hidden/minimized windows keep the engine alive but release sponsor
+        // audio immediately; restoring the window claims it again before the
+        // next animation poll.
+        if (!paintable) {
+            if (sponsor_window_visible) {
+                ui_set_window_visible(false);
+                sponsor_window_visible = false;
+            }
+            continue;
+        }
+        if (!sponsor_window_visible) {
+            ui_set_window_visible(true);
+            sponsor_window_visible = true;
+        }
 
         // Throttle to 60 FPS max — skip the frame if it is too early.
         const auto frame_now = std::chrono::steady_clock::now();

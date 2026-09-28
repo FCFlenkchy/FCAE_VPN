@@ -80,6 +80,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
     private lateinit var sponsorCard: android.view.View
+    private lateinit var sponsorAudioSlot: android.view.View
     private lateinit var sponsorAudioToggle: MaterialButton
     private lateinit var sponsorImage: android.widget.ImageView
     private lateinit var sponsorBackgroundImage: android.widget.ImageView
@@ -93,6 +94,13 @@ class MainActivity : AppCompatActivity() {
     private var sponsorBackgroundBitmap: android.graphics.Bitmap? = null
     private var sponsorConnected = false
     private var sponsorCampaignCount = 0
+    private var sponsorAnimated = false
+    // The high portion of the native generation identifies the campaign and
+    // published metadata; the lower 24 bits are reserved for animation frame
+    // changes. Avoid relayout/recoloring the card on every decoded frame.
+    private var sponsorStaticToken = -1L
+    private var sponsorAudioUiEnabled: Boolean? = null
+    private var sponsorAudioUiVisible = false
     private val sponsorPollBusy = AtomicBoolean(false)
     @Volatile private var sponsorPollFailureLogged = false
     private lateinit var spinnerProtocol: Spinner
@@ -698,14 +706,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateSponsorAudioToggle(visible: Boolean) {
-        if (!::sponsorAudioToggle.isInitialized) return
+        if (!::sponsorAudioToggle.isInitialized || !::sponsorAudioSlot.isInitialized) return
+        if (sponsorAudioUiVisible != visible) {
+            sponsorAudioUiVisible = visible
+            sponsorAudioSlot.visibility = if (visible) android.view.View.VISIBLE else android.view.View.GONE
+        }
+        if (!visible) {
+            sponsorAudioToggle.visibility = android.view.View.GONE
+            return
+        }
+        sponsorAudioToggle.visibility = android.view.View.VISIBLE
         val enabled = try {
             NativeEngine.nativeSponsorAudioEnabled()
         } catch (_: Throwable) {
             false
         }
-        sponsorAudioToggle.visibility = if (visible) android.view.View.VISIBLE else android.view.View.GONE
-        sponsorAudioToggle.text = if (enabled) "🔊" else "🔇"
+        // The animation poll runs at display cadence. Do not recreate the
+        // vector drawable/tint on every frame when the preference is unchanged.
+        if (sponsorAudioUiEnabled == enabled) return
+        sponsorAudioUiEnabled = enabled
+        sponsorAudioToggle.text = ""
+        sponsorAudioToggle.icon = androidx.appcompat.content.res.AppCompatResources.getDrawable(
+            this,
+            if (enabled) R.drawable.ic_sponsor_volume_up else R.drawable.ic_sponsor_volume_off,
+        )
+        sponsorAudioToggle.iconTint = ColorStateList.valueOf(
+            Color.argb(if (enabled) 185 else 145, 220, 232, 248),
+        )
         sponsorAudioToggle.contentDescription = if (enabled) {
             "Disable sponsor audio"
         } else {
@@ -716,6 +743,8 @@ class MainActivity : AppCompatActivity() {
     private fun showEmptySponsorCard() {
         sponsorDestination = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md"
         sponsorCampaignCount = 0
+        sponsorAnimated = false
+        sponsorStaticToken = -1L
         sponsorGeneration = -1L
         sponsorTitle.text = "Become a sponsor"
         sponsorTitle.textSize = 20f
@@ -766,65 +795,79 @@ class MainActivity : AppCompatActivity() {
                             } else if (!(card.available || card.campaignCount > 0)) {
                                 showEmptySponsorCard()
                             } else {
-                                sponsorCampaignCount = card.campaignCount
-                                val titleColor = if (card.titleColor != 0) card.titleColor else Color.WHITE
-                                val messageColor = if (card.messageColor != 0) card.messageColor else Color.parseColor("#FFD8E7FF")
-                                val cardColor = if (card.cardColor != 0) card.cardColor else Color.parseColor("#FF142A44")
-                                sponsorTitle.setTextColor(titleColor)
-                                sponsorMessage.setTextColor(messageColor)
-                                sponsorTitle.textSize = 16f
-                                sponsorMessage.textSize = 14f
-                                sponsorCard.backgroundTintList = ColorStateList.valueOf(cardColor)
-                                val iconScale = card.iconScale.coerceIn(50, 160)
-                                val backgroundScale = card.backgroundScale.coerceIn(50, 160)
-                                sponsorImage.layoutParams = sponsorImage.layoutParams.apply {
-                                    height = (70 * resources.displayMetrics.density).toInt()
-                                }
-                                val iconScaleFactor = iconScale / 100f
-                                sponsorImage.scaleX = iconScaleFactor
-                                sponsorImage.scaleY = iconScaleFactor
-                                positionSponsorIcon(card.iconX, card.iconY)
-                                val backgroundScaleFactor = backgroundScale / 100f
-                                sponsorBackgroundImage.scaleX = backgroundScaleFactor
-                                sponsorBackgroundImage.scaleY = backgroundScaleFactor
-                                sponsorImage.scaleType = if (card.imageFit == 1) {
-                                    android.widget.ImageView.ScaleType.CENTER_CROP
-                                } else {
-                                    android.widget.ImageView.ScaleType.FIT_CENTER
-                                }
-                                sponsorTitle.text = card.title
-                                sponsorMessage.text = card.message
-                                sponsorMessage.visibility = if (card.message.isBlank()) android.view.View.GONE else android.view.View.VISIBLE
-                                positionSponsorText(
-                                    card.titleX,
-                                    card.titleY,
-                                    card.messageX,
-                                    card.messageY,
-                                )
-                                sponsorDestination = card.destinationUrl
-                                if (card.generation != sponsorGeneration) {
-                                    val bitmap = bitmapFromRgba(sponsorBitmap, card.width, card.height, card.rgba)
-                                    if (bitmap != null) {
-                                        sponsorBitmap = bitmap
-                                        sponsorImage.setImageBitmap(bitmap)
-                                        sponsorImage.visibility = android.view.View.VISIBLE
-                                        sponsorImage.invalidate()
+                                val staticToken = card.generation ushr 24
+                                if (staticToken != sponsorStaticToken) {
+                                    sponsorCampaignCount = card.campaignCount
+                                    sponsorAnimated = card.animated
+                                    val titleColor = if (card.titleColor != 0) card.titleColor else Color.WHITE
+                                    val messageColor = if (card.messageColor != 0) card.messageColor else Color.parseColor("#FFD8E7FF")
+                                    val cardColor = if (card.cardColor != 0) card.cardColor else Color.parseColor("#FF142A44")
+                                    sponsorTitle.setTextColor(titleColor)
+                                    sponsorMessage.setTextColor(messageColor)
+                                    sponsorTitle.textSize = 16f
+                                    sponsorMessage.textSize = 14f
+                                    sponsorCard.backgroundTintList = ColorStateList.valueOf(cardColor)
+                                    val iconScale = card.iconScale.coerceIn(50, 160)
+                                    val backgroundScale = card.backgroundScale.coerceIn(50, 160)
+                                    sponsorImage.layoutParams = sponsorImage.layoutParams.apply {
+                                        height = (70 * resources.displayMetrics.density).toInt()
+                                    }
+                                    val iconScaleFactor = iconScale / 100f
+                                    sponsorImage.scaleX = iconScaleFactor
+                                    sponsorImage.scaleY = iconScaleFactor
+                                    positionSponsorIcon(card.iconX, card.iconY)
+                                    val backgroundScaleFactor = backgroundScale / 100f
+                                    sponsorBackgroundImage.scaleX = backgroundScaleFactor
+                                    sponsorBackgroundImage.scaleY = backgroundScaleFactor
+                                    sponsorImage.scaleType = if (card.imageFit == 1) {
+                                        android.widget.ImageView.ScaleType.CENTER_CROP
                                     } else {
+                                        android.widget.ImageView.ScaleType.FIT_CENTER
+                                    }
+                                    sponsorTitle.text = card.title
+                                    sponsorMessage.text = card.message
+                                    sponsorMessage.visibility = if (card.message.isBlank()) android.view.View.GONE else android.view.View.VISIBLE
+                                    positionSponsorText(
+                                        card.titleX,
+                                        card.titleY,
+                                        card.messageX,
+                                        card.messageY,
+                                    )
+                                    sponsorDestination = card.destinationUrl
+                                    sponsorStaticToken = staticToken
+                                }
+                                if (card.generation != sponsorGeneration) {
+                                    // The native bridge sends only the media
+                                    // plane that changed. Preserve a static
+                                    // icon while a video/GIF background advances.
+                                    if (card.rgba.isNotEmpty()) {
+                                        val previousBitmap = sponsorBitmap
+                                        val bitmap = bitmapFromRgba(sponsorBitmap, card.width, card.height, card.rgba)
+                                        if (bitmap != null) {
+                                            sponsorBitmap = bitmap
+                                            if (previousBitmap !== bitmap) sponsorImage.setImageBitmap(bitmap)
+                                            sponsorImage.visibility = android.view.View.VISIBLE
+                                            sponsorImage.invalidate()
+                                        }
+                                    } else if (card.width <= 0 || card.height <= 0) {
                                         sponsorImage.setImageDrawable(null)
                                         sponsorImage.visibility = android.view.View.GONE
                                     }
-                                    val background = bitmapFromRgba(
-                                        sponsorBackgroundBitmap,
-                                        card.backgroundWidth,
-                                        card.backgroundHeight,
-                                        card.backgroundRgba,
-                                    )
-                                    if (background != null) {
-                                        sponsorBackgroundBitmap = background
-                                        sponsorBackgroundImage.setImageBitmap(background)
-                                        sponsorBackgroundImage.visibility = android.view.View.VISIBLE
-                                        sponsorBackgroundImage.invalidate()
-                                    } else {
+                                    if (card.backgroundRgba.isNotEmpty()) {
+                                        val previousBackground = sponsorBackgroundBitmap
+                                        val background = bitmapFromRgba(
+                                            sponsorBackgroundBitmap,
+                                            card.backgroundWidth,
+                                            card.backgroundHeight,
+                                            card.backgroundRgba,
+                                        )
+                                        if (background != null) {
+                                            sponsorBackgroundBitmap = background
+                                            if (previousBackground !== background) sponsorBackgroundImage.setImageBitmap(background)
+                                            sponsorBackgroundImage.visibility = android.view.View.VISIBLE
+                                            sponsorBackgroundImage.invalidate()
+                                        }
+                                    } else if (card.backgroundWidth <= 0 || card.backgroundHeight <= 0) {
                                         sponsorBackgroundImage.setImageDrawable(null)
                                         sponsorBackgroundImage.visibility = android.view.View.GONE
                                     }
@@ -847,7 +890,8 @@ class MainActivity : AppCompatActivity() {
             }
             val delay = when {
                 sponsorCard.visibility != android.view.View.VISIBLE -> 500L
-                sponsorCampaignCount > 0 -> 100L
+                sponsorAnimated -> 16L
+                sponsorCampaignCount > 0 -> 250L
                 else -> 500L
             }
             handler.postDelayed(this, delay)
@@ -887,6 +931,7 @@ class MainActivity : AppCompatActivity() {
         layoutTunPauseResume = findViewById(R.id.layoutTunPauseResume)
         btnCheckUpdates = findViewById(R.id.btnCheckUpdates)
         sponsorCard = findViewById(R.id.sponsorCard)
+        sponsorAudioSlot = findViewById(R.id.sponsorAudioSlot)
         sponsorAudioToggle = findViewById(R.id.sponsorAudioToggle)
         sponsorAudioToggle.setOnClickListener {
             val enabled = try {
@@ -1558,6 +1603,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        try { NativeEngine.nativeSponsorSetUiActive(false) } catch (_: Throwable) {}
         inForeground = false
         logTouchActive = false
         // Keyboard gone, cursor gone with it.
@@ -1704,6 +1750,7 @@ class MainActivity : AppCompatActivity() {
         catch (_: Throwable) {}
         handleWidgetIntent(intent)
         inForeground = true
+        try { NativeEngine.nativeSponsorSetUiActive(true) } catch (_: Throwable) {}
         handler.removeCallbacks(sponsorPoll)
         handler.post(sponsorPoll)
         handler.removeCallbacks(sponsorManifestRefresh)

@@ -17,6 +17,8 @@
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
     static GLuint textures[2] = {};
     static uint64_t loaded[2] = {};
+    static int texture_width[2] = {};
+    static int texture_height[2] = {};
     const int index = slot == 1 ? 1 : 0;
     GLuint& texture = textures[index];
     if (!rgba || width <= 0 || height <= 0) return (ImTextureID)0;
@@ -32,8 +34,15 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
     }
     if (loaded[index] != generation) {
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
-                     GL_UNSIGNED_BYTE, rgba);
+        if (texture_width[index] != width || texture_height[index] != height) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, rgba);
+            texture_width[index] = width;
+            texture_height[index] = height;
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA,
+                            GL_UNSIGNED_BYTE, rgba);
+        }
         loaded[index] = generation;
     }
     return (ImTextureID)(intptr_t)texture;
@@ -122,6 +131,7 @@ int main(int argc, char** argv) {
     constexpr double interaction_tail  = 0.7;
     double last_event_time = -1e9;                                       // monotonic seconds (glfwGetTime)
     bool minimized = false;
+    bool sponsor_window_visible = false;
 
     while (!glfwWindowShouldClose(window) && g_app.running.load()) {
         minimized = glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
@@ -139,7 +149,18 @@ int main(int argc, char** argv) {
         if (t - t_before < timeout - 0.005) last_event_time = t;
         interacting = (t - last_event_time) < interaction_tail;
 
-        if (minimized) continue;
+        minimized = glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
+        if (minimized) {
+            if (sponsor_window_visible) {
+                ui_set_window_visible(false);
+                sponsor_window_visible = false;
+            }
+            continue;
+        }
+        if (!sponsor_window_visible) {
+            ui_set_window_visible(true);
+            sponsor_window_visible = true;
+        }
 
         auto now = std::chrono::steady_clock::now();
         if (now - last_frame_time < min_frame_interval) continue;

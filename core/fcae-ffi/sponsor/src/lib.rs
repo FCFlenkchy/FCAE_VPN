@@ -1,7 +1,7 @@
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat};
 use once_cell::sync::Lazy;
 use parking_lot::{Mutex, RwLock};
-use rodio::{Decoder as AudioDecoder, OutputStreamBuilder, Sink};
+use rodio::{Decoder as AudioDecoder, OutputStreamBuilder, Sink, Source};
 use serde::Deserialize;
 use yscv_video::Mp4VideoReader;
 use std::{
@@ -38,6 +38,21 @@ const MAX_VIDEO_SOURCE_WIDTH: u32 = 1920;
 const MAX_VIDEO_SOURCE_HEIGHT: u32 = 1080;
 const MAX_VIDEO_SOURCE_PIXELS: u64 =
     MAX_VIDEO_SOURCE_WIDTH as u64 * MAX_VIDEO_SOURCE_HEIGHT as u64;
+// Video backgrounds are displayed in a 140-unit card. Retaining an 800x450
+// frame for every animation step wastes memory and makes JNI/texture uploads
+// expensive, especially on Android. Use a card-sized decode canvas while
+// keeping the public background_scale for display composition.
+#[cfg(target_os = "android")]
+const VIDEO_MAX_WIDTH: u32 = 360;
+#[cfg(target_os = "android")]
+const VIDEO_MAX_HEIGHT: u32 = 202;
+#[cfg(not(target_os = "android"))]
+const VIDEO_MAX_WIDTH: u32 = 480;
+#[cfg(not(target_os = "android"))]
+const VIDEO_MAX_HEIGHT: u32 = 270;
+// Decode enough source samples to cover normal short sponsor clips, but do not
+// let a long or malicious MP4 turn startup into an unbounded decode.
+const MAX_VIDEO_INPUT_FRAMES: usize = 300;
 #[cfg(target_os = "android")]
 const MAX_FRAMES: usize = 60;
 #[cfg(not(target_os = "android"))]
@@ -258,6 +273,10 @@ static MANIFEST_BUSY: AtomicBool = AtomicBool::new(false);
 static MANIFEST_FORCE_PENDING: AtomicBool = AtomicBool::new(false);
 static MEDIA_BUSY: AtomicBool = AtomicBool::new(false);
 static AUDIO_ENABLED: AtomicBool = AtomicBool::new(false);
+// Audio is allowed only while a client UI owns the sponsor card. Android
+// toggles this from Activity onResume/onPause; desktop keeps it active while
+// the ImGui window is rendering and clears it during shutdown.
+static AUDIO_UI_ACTIVE: AtomicBool = AtomicBool::new(false);
 static AUDIO_CONTROLLER: Lazy<Mutex<AudioController>> = Lazy::new(|| {
     Mutex::new(AudioController {
         sender: None,
@@ -302,27 +321,31 @@ struct AudioController {
     campaign_id: Option<String>,
 }
 
+fn audio_requested() -> bool {
+    AUDIO_ENABLED.load(Ordering::Acquire)
+        && AUDIO_UI_ACTIVE.load(Ordering::Acquire)
+}
+
 fn audio_worker(receiver: Receiver<AudioCommand>) {
     // Open lazily on the first Play command. In particular, this happens
     // after the Android JNI bridge has initialized ndk-context, rather than
-    // while the worker is being created during UI startup. Keep the stream
-    // alive for the worker lifetime: dropping it stops AAudio immediately.
+    // while the worker is being created during UI startup. The stream is
+    // dropped on Stop so mute/backgrounding releases the output device too.
     let mut stream = None;
     let mut sink: Option<Sink> = None;
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(AudioCommand::Play { path }) => {
-                sink.take();
-                if stream.is_none() {
-                    match OutputStreamBuilder::open_default_stream() {
-                        Ok(output) => stream = Some(output),
-                        Err(error) => {
-                            log::warn!("[sponsor] audio output stream unavailable: {error}");
-                            continue;
-                        }
-                    }
+                // Muting or backgrounding can race a queued Play command.
+                // Check before opening the file, then check again after the
+                // potentially expensive decoder setup so muted audio is never
+                // read/decoded or attached to an output sink.
+                if !audio_requested() {
+                    sink.take();
+                    stream.take();
+                    continue;
                 }
-                let Some(output) = stream.as_ref() else { continue; };
+                sink.take();
                 let file = match fs::File::open(&path) {
                     Ok(file) => file,
                     Err(error) => {
@@ -337,14 +360,37 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                         continue;
                     }
                 };
+                if !audio_requested() {
+                    stream.take();
+                    continue;
+                }
+                if stream.is_none() {
+                    match OutputStreamBuilder::open_default_stream() {
+                        Ok(output) => stream = Some(output),
+                        Err(error) => {
+                            log::warn!("[sponsor] audio output stream unavailable: {error}");
+                            continue;
+                        }
+                    }
+                }
+                if !audio_requested() {
+                    stream.take();
+                    continue;
+                }
+                let Some(output) = stream.as_ref() else { continue; };
                 let next_sink = Sink::connect_new(output.mixer());
-                next_sink.append(source);
+                // A single source is attached once and repeats at the source
+                // level, so it does not depend on UI polling cadence.
+                next_sink.append(source.repeat_infinite());
                 next_sink.play();
                 sink = Some(next_sink);
-                log::info!("[sponsor] playing cached audio {}", path.display());
+                log::info!("[sponsor] playing looping cached audio {}", path.display());
             }
             Ok(AudioCommand::Stop) => {
                 sink.take();
+                // Release the platform output device as well. Mute therefore
+                // leaves no decoder, sink, or audio device retained.
+                stream.take();
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -437,8 +483,15 @@ pub fn audio_enabled() -> bool {
     AUDIO_ENABLED.load(Ordering::Acquire)
 }
 
+pub fn set_audio_ui_active(active: bool) {
+    AUDIO_UI_ACTIVE.store(active, Ordering::Release);
+    if !active {
+        stop_audio();
+    }
+}
+
 fn start_audio_for_campaign(campaign_id: &str) {
-    if !audio_enabled() {
+    if !audio_requested() {
         stop_audio();
         return;
     }
@@ -460,9 +513,8 @@ fn start_audio_for_campaign(campaign_id: &str) {
         return;
     };
     let mut controller = AUDIO_CONTROLLER.lock();
-    // Play a campaign's clip once per card display. Do not restart a short
-    // clip on every polling tick after its sink reaches the end; rotation or
-    // an explicit disable/re-enable starts it again.
+    // Start one looping sink per visible campaign. Do not replace it on every
+    // polling tick; rotation or an explicit disable/re-enable starts it again.
     if controller.campaign_id.as_deref() == Some(campaign_id) {
         return;
     }
@@ -497,7 +549,7 @@ pub fn set_connected(connected: bool) {
 }
 
 fn audio_needs_refresh() -> bool {
-    if !audio_enabled() { return false; }
+    if !audio_requested() { return false; }
     let state = STATE.lock();
     let Some(campaign) = state.campaigns.get(state.current_campaign) else {
         return false;
@@ -784,18 +836,20 @@ pub fn next_campaign() {
 
 fn frame_index_at(frames: &[Frame], elapsed: Duration) -> usize {
     if frames.len() <= 1 { return 0; }
-    let mut cursor = Duration::ZERO;
-    let cycle = frames.iter().fold(Duration::ZERO, |sum, frame| sum + frame.delay);
-    let target = if cycle.is_zero() { Duration::ZERO } else {
-        Duration::from_millis((elapsed.as_millis() % cycle.as_millis()) as u64)
-    };
-    let mut index = 0;
+    // Use nanoseconds rather than truncating the cycle to milliseconds. The
+    // modulo makes replay explicit and keeps short MP4/GIF delays from drifting
+    // or getting stuck on the final frame after a long-running UI session.
+    let cycle_nanos = frames.iter()
+        .map(|frame| frame.delay.as_nanos())
+        .fold(0u128, |sum, delay| sum.saturating_add(delay));
+    if cycle_nanos == 0 { return 0; }
+    let target = elapsed.as_nanos() % cycle_nanos;
+    let mut cursor = 0u128;
     for (frame_index, frame) in frames.iter().enumerate() {
-        cursor += frame.delay;
-        index = frame_index;
-        if target < cursor { break; }
+        cursor = cursor.saturating_add(frame.delay.as_nanos());
+        if target < cursor { return frame_index; }
     }
-    index
+    frames.len() - 1
 }
 
 fn cached_media_file_is_valid(path: &Path) -> bool {
@@ -810,7 +864,7 @@ fn ready_needs_media(ready: &ReadyCampaign, cache_dir: &Path) -> bool {
         || (ready.campaign.background_url.is_some()
             && ready.background_frames.is_empty()
             && ready.background_rgba.is_empty())
-        || (AUDIO_ENABLED.load(Ordering::Acquire)
+        || (audio_requested()
             && ready.campaign.audio_url.is_some()
             && !cached_media_file_is_valid(&cache_dir.join(audio_cache_name(&ready.campaign))))
 }
@@ -818,7 +872,11 @@ fn ready_needs_media(ready: &ReadyCampaign, cache_dir: &Path) -> bool {
 pub fn current_frame() -> Option<SponsorFrame> {
     let (frame, should_refresh) = {
         let mut state = STATE.lock();
-        if state.ready.is_empty() { return None; }
+        if state.ready.is_empty() {
+            drop(state);
+            stop_audio();
+            return None;
+        }
         let current_duration = state.ready.get(state.current_campaign)
             .map(|campaign| campaign.duration_seconds)
             .unwrap_or(DEFAULT_DURATION_SECONDS);
@@ -848,6 +906,11 @@ pub fn current_frame() -> Option<SponsorFrame> {
         let background_rgba = ready.background_frames.get(background_frame_index)
             .map(|frame| frame.rgba.clone())
             .unwrap_or_else(|| ready.background_rgba.clone());
+        // Keep the animation planes independently identifiable across FFI:
+        // published campaign metadata is above bit 24, foreground frame index
+        // occupies bits 12..23, and background frame index occupies 0..11.
+        // Android and desktop can therefore avoid copying an unchanged icon
+        // while a video/GIF background advances.
         let generation = (GENERATION.load(Ordering::Relaxed) << 32)
             ^ ((campaign_index as u64) << 24)
             ^ ((frame_index as u64) << 12)
@@ -1183,7 +1246,7 @@ fn prepare_media(
         && campaigns.iter().any(|campaign| {
         campaign.icon_url.is_some()
             || campaign.background_url.is_some()
-            || (audio_enabled() && campaign.audio_url.is_some())
+            || (audio_requested() && campaign.audio_url.is_some())
     })).then(|| client().ok()).flatten();
 
     // Cache the encoded bytes for every active campaign, but do not decode
@@ -1222,7 +1285,7 @@ fn prepare_media(
                 cache_dir,
                 false,
                 false,
-                audio_enabled(),
+                audio_requested(),
                 network_client.as_ref(),
             );
             let (media, background, _audio) = match payload {
@@ -1318,7 +1381,7 @@ fn load_campaign_payload(
         "background",
         client,
     )).flatten();
-    let audio = load_audio.then(|| load_payload(
+    let audio = (load_audio && audio_requested()).then(|| load_payload(
         campaign.audio_url.as_deref(),
         cache_dir.join(audio_cache_name(campaign)),
         cache_dir,
@@ -1430,7 +1493,10 @@ fn decoded_ready_from_cache(campaign: &Campaign, path: &Path) -> Option<ReadyCam
     let bytes = fs::read(path).ok()?;
     if bytes.len() > MAX_DECODED_BYTES.saturating_add(MAX_FRAMES * 8 + 32)
         || bytes.len() < 16
-        || &bytes[0..4] != b"FDEC"
+        // FDV2 invalidates the old 800x450 video cache after the bounded
+        // video decode canvas changed; stale large frames would defeat the
+        // rendering-performance fix.
+        || &bytes[0..4] != b"FDV2"
     {
         let _ = fs::remove_file(path);
         return None;
@@ -1501,7 +1567,7 @@ fn write_decoded_cache(path: &Path, decoded: &ReadyCampaign) {
         return;
     }
     let mut bytes = Vec::with_capacity(16 + frame_bytes + decoded.frames.len() * 8);
-    bytes.extend_from_slice(b"FDEC");
+    bytes.extend_from_slice(b"FDV2");
     bytes.extend_from_slice(&decoded.width.to_le_bytes());
     bytes.extend_from_slice(&decoded.height.to_le_bytes());
     bytes.extend_from_slice(&(decoded.frames.len() as u32).to_le_bytes());
@@ -1668,8 +1734,8 @@ fn bounded_video_rgb(
         return Err("unexpected video RGB frame size".into());
     }
 
-    let scale = (MAX_WIDTH as f64 / width as f64)
-        .min(MAX_HEIGHT as f64 / height as f64)
+    let scale = (VIDEO_MAX_WIDTH as f64 / width as f64)
+        .min(VIDEO_MAX_HEIGHT as f64 / height as f64)
         .min(1.0);
     let target_width = ((width as f64 * scale).round() as u32).max(1);
     let target_height = ((height as f64 * scale).round() as u32).max(1);
@@ -1688,6 +1754,24 @@ fn bounded_video_rgb(
     Ok((target_width, target_height, resized.into_raw()))
 }
 
+fn compact_video_frames(frames: &mut Vec<Frame>, total_bytes: &mut usize) {
+    if frames.len() < 2 {
+        return;
+    }
+    let mut compacted = Vec::with_capacity((frames.len() + 1) / 2);
+    let mut iter = frames.drain(..);
+    while let Some(mut kept) = iter.next() {
+        if let Some(dropped) = iter.next() {
+            // Keeping the first frame of each pair and adding the dropped
+            // frame's display time preserves the original video duration.
+            kept.delay = kept.delay.saturating_add(dropped.delay);
+        }
+        compacted.push(kept);
+    }
+    *frames = compacted;
+    *total_bytes = frames.iter().map(|frame| frame.rgba.len()).sum();
+}
+
 fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, String> {
     // MP4 is the portable sponsor-video format. The reader is pure Rust and
     // does not require FFmpeg or a platform media framework.
@@ -1697,8 +1781,9 @@ fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, S
     let mut previous_timestamp = None;
     let mut width = 0u32;
     let mut height = 0u32;
+    let mut source_frames = 0usize;
 
-    while frames.len() < MAX_FRAMES {
+    while source_frames < MAX_VIDEO_INPUT_FRAMES {
         let frame = match reader.next_frame() {
             Ok(Some(frame)) => frame,
             Ok(None) => break,
@@ -1716,6 +1801,7 @@ fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, S
             }
             Err(error) => return Err(error.to_string()),
         };
+        source_frames += 1;
         let frame_width = u32::try_from(frame.width)
             .map_err(|_| "video frame width exceeds limits".to_string())?;
         let frame_height = u32::try_from(frame.height)
@@ -1733,6 +1819,15 @@ fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, S
         }
         let rgb_bytes = rgb.len();
         let rgba_size = rgb_bytes / 3 * 4;
+        // Keep decoding the source after the retention budget is reached.
+        // Compacting pairs of retained frames preserves the complete clip
+        // timeline instead of looping only over its first few frames.
+        while (frames.len() >= MAX_FRAMES
+            || total_bytes.saturating_add(rgba_size) > MAX_DECODED_BYTES)
+            && frames.len() > 1
+        {
+            compact_video_frames(&mut frames, &mut total_bytes);
+        }
         if total_bytes.saturating_add(rgba_size) > MAX_DECODED_BYTES {
             break;
         }
@@ -1850,26 +1945,36 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
         let (width, height) = decoder.dimensions();
         validate_dimensions(width, height, 1)?;
         let frame_bytes = width as usize * height as usize * 4;
-        let mut decoded = Vec::new();
-        for frame in decoder.into_frames() {
-            if decoded.len() >= MAX_FRAMES || (decoded.len() + 1) * frame_bytes > MAX_DECODED_BYTES {
-                // Keep the validated prefix rather than rejecting the whole
-                // GIF. Larger animations still move, but never exceed the
-                // platform's bounded decoded-frame budget.
-                break;
-            }
+        let mut frames = Vec::new();
+        let mut total_bytes = 0usize;
+        for (source_index, frame) in decoder.into_frames().enumerate() {
+            if source_index >= MAX_VIDEO_INPUT_FRAMES { break; }
             let frame = frame.map_err(|e| e.to_string())?;
             if frame.buffer().width() != width || frame.buffer().height() != height {
                 return Err("inconsistent GIF frame dimensions".into());
             }
-            decoded.push(frame);
-        }
-        if decoded.is_empty() { return Err("invalid GIF frame count".into()); }
-        let frames = decoded.into_iter().map(|frame| {
             let (numer, denom) = frame.delay().numer_denom_ms();
             let millis = if denom == 0 { 100 } else { (numer / denom).clamp(20, 10_000) };
-            Frame { rgba: Arc::new(frame.into_buffer().into_raw()), delay: Duration::from_millis(millis as u64) }
-        }).collect();
+            let rgba = frame.into_buffer().into_raw();
+            // Retain the complete bounded GIF timeline. When the retention
+            // budget is reached, merge adjacent frames and add their delays
+            // instead of silently replaying only the prefix.
+            while (frames.len() >= MAX_FRAMES
+                || total_bytes.saturating_add(frame_bytes) > MAX_DECODED_BYTES)
+                && frames.len() > 1
+            {
+                compact_video_frames(&mut frames, &mut total_bytes);
+            }
+            if total_bytes.saturating_add(rgba.len()) > MAX_DECODED_BYTES {
+                break;
+            }
+            total_bytes += rgba.len();
+            frames.push(Frame {
+                rgba: Arc::new(rgba),
+                delay: Duration::from_millis(millis as u64),
+            });
+        }
+        if frames.is_empty() { return Err("invalid GIF frame count".into()); }
         Ok(ReadyCampaign {
             campaign,
             width,

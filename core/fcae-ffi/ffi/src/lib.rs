@@ -1341,6 +1341,11 @@ pub extern "C" fn fcae_sponsor_set_connected(connected: bool) {
 }
 
 #[no_mangle]
+pub extern "C" fn fcae_sponsor_set_ui_active(active: bool) {
+    fcae_sponsor::set_audio_ui_active(active);
+}
+
+#[no_mangle]
 pub extern "C" fn fcae_sponsor_set_audio_enabled(enabled: bool) {
     fcae_sponsor::set_audio_enabled(enabled);
 }

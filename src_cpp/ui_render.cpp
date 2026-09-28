@@ -26,6 +26,9 @@
 #include <unistd.h>
 #endif
 
+// UI-lifetime audio gate is an embedding hook rather than a public ABI field.
+extern "C" void fcae_sponsor_set_ui_active(bool active);
+
 // ── Global application state ─────────────────────────────────────────────
 
 AppState g_app;
@@ -57,7 +60,18 @@ static bool s_update_in_progress = false;
 static FcaeSponsorInfo s_sponsor = {};
 static std::vector<uint8_t> s_sponsor_rgba;
 static std::vector<uint8_t> s_sponsor_background_rgba;
-static uint64_t s_sponsor_loaded_generation = 0;
+static uint64_t s_sponsor_loaded_foreground_generation = 0;
+static uint64_t s_sponsor_loaded_background_generation = 0;
+// Sponsor generation packs campaign/published metadata above bit 24,
+// foreground frame in bits 12..23, and background frame in bits 0..11.
+static constexpr uint64_t kSponsorBackgroundFrameMask = 0xFFFULL;
+static constexpr uint64_t kSponsorForegroundFrameMask = 0xFFF000ULL;
+static bool sponsor_foreground_changed(uint64_t current, uint64_t previous) {
+    return ((current ^ previous) & ~kSponsorBackgroundFrameMask) != 0;
+}
+static bool sponsor_background_changed(uint64_t current, uint64_t previous) {
+    return ((current ^ previous) & ~kSponsorForegroundFrameMask) != 0;
+}
 static bool s_sponsor_started = false;
 static uint64_t s_sponsor_logged_generation = 0;
 static std::chrono::steady_clock::time_point s_sponsor_manifest_check = {};
@@ -68,6 +82,7 @@ static void poll_sponsor() {
         fcae_sponsor_load_cache();
         s_sponsor_started = true;
     }
+    fcae_sponsor_set_ui_active(true);
     fcae_sponsor_set_connected(g_app.ffi_state.load() == FCAE_STATE_CONNECTED);
     if (now >= s_sponsor_manifest_check) {
         const uint64_t remaining = fcae_sponsor_manifest_refresh_remaining_secs();
@@ -104,26 +119,43 @@ static void poll_sponsor() {
     if (!card_available) {
         s_sponsor_rgba.clear();
         s_sponsor_background_rgba.clear();
-        s_sponsor_loaded_generation = 0;
-    } else if (info.generation != s_sponsor_loaded_generation) {
-        try {
-            s_sponsor_rgba.resize(info.rgba_size);
-            s_sponsor_background_rgba.resize(info.background_rgba_size);
-        } catch (const std::bad_alloc&) {
-            s_sponsor_rgba.clear();
-            s_sponsor_background_rgba.clear();
-            return;
+        s_sponsor_loaded_foreground_generation = 0;
+        s_sponsor_loaded_background_generation = 0;
+    } else {
+        const bool foreground_changed = sponsor_foreground_changed(
+            info.generation, s_sponsor_loaded_foreground_generation);
+        const bool background_changed = sponsor_background_changed(
+            info.generation, s_sponsor_loaded_background_generation);
+        if (foreground_changed) {
+            try {
+                s_sponsor_rgba.resize(info.rgba_size);
+            } catch (const std::bad_alloc&) {
+                s_sponsor_rgba.clear();
+                return;
+            }
+            const bool copied = info.rgba_size == 0
+                || fcae_sponsor_copy_rgba(s_sponsor_rgba.data(), s_sponsor_rgba.size()) == FCAE_OK;
+            if (copied) {
+                s_sponsor_loaded_foreground_generation = info.generation;
+            } else {
+                s_sponsor_rgba.clear();
+            }
         }
-        const bool foreground_ok = info.rgba_size == 0
-            || fcae_sponsor_copy_rgba(s_sponsor_rgba.data(), s_sponsor_rgba.size()) == FCAE_OK;
-        const bool background_ok = info.background_rgba_size == 0
-            || fcae_sponsor_copy_background_rgba(
-                s_sponsor_background_rgba.data(), s_sponsor_background_rgba.size()) == FCAE_OK;
-        if (foreground_ok && background_ok) {
-            s_sponsor_loaded_generation = info.generation;
-        } else {
-            s_sponsor_rgba.clear();
-            s_sponsor_background_rgba.clear();
+        if (background_changed) {
+            try {
+                s_sponsor_background_rgba.resize(info.background_rgba_size);
+            } catch (const std::bad_alloc&) {
+                s_sponsor_background_rgba.clear();
+                return;
+            }
+            const bool copied = info.background_rgba_size == 0
+                || fcae_sponsor_copy_background_rgba(
+                    s_sponsor_background_rgba.data(), s_sponsor_background_rgba.size()) == FCAE_OK;
+            if (copied) {
+                s_sponsor_loaded_background_generation = info.generation;
+            } else {
+                s_sponsor_background_rgba.clear();
+            }
         }
     }
 }
@@ -325,6 +357,10 @@ void ui_request_redraw() {
     g_app.redraw_requested.store(true);
 }
 
+void ui_set_window_visible(bool visible) {
+    fcae_sponsor_set_ui_active(visible);
+}
+
 bool ui_should_render(bool interacting) {
     const double now = ui_now_seconds();
 
@@ -353,7 +389,10 @@ bool ui_should_render(bool interacting) {
     // pixel-identical, so skip it and let the platform go back to sleep.
     if (s_painted_once && ui_content_signature() == s_painted_sig) {
         // …except for the few things that tick slowly on their own:
-        const double sponsor_period = s_sponsor.animated ? 0.1
+        // Animated sponsor frames are decoded in memory; poll at the native
+        // display cadence instead of the old 100 ms GIF cadence so video does
+        // not appear slow or miss its replay timing.
+        const double sponsor_period = s_sponsor.animated ? (1.0 / 60.0)
             : (s_sponsor.campaign_count > 1 ? 0.25 : 0.0);
         const double period = sponsor_period > 0.0 ? sponsor_period
             : ((s_update_in_progress || s_text_input) ? 0.5 : 0.0);
@@ -366,7 +405,7 @@ unsigned ui_sleep_ms() {
     if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Starting)
         return 50;                           // notice completion promptly without spinning
     if (s_busy_anim) return 16;              // connect spinner: keep it smooth
-    if (s_sponsor.animated) return 100;      // GIF frame timing
+    if (s_sponsor.animated) return 16;       // GIF/video frame timing
     if (s_sponsor.campaign_count > 1) return 250; // five-second local rotation
     if (s_update_in_progress) return 250;    // "Checking... (Ns)" counter
     if (s_text_input) return 250;            // caret blink in a focused field
@@ -887,6 +926,7 @@ void ui_frame() {
 }
 
 void ui_shutdown() {
+    fcae_sponsor_set_ui_active(false);
     // Initialization may still own AppState and the runtime. Join it before
     // teardown so neither configuration state nor FFI lifetime can race exit.
     if (s_runtime_init_thread.joinable()) s_runtime_init_thread.join();
@@ -1871,17 +1911,18 @@ void render_ui() {
                 ImTextureID texture = ImTextureID{};
                 ImTextureID background_texture = ImTextureID{};
                 if (!s_sponsor_rgba.empty() && s_sponsor.width > 0 && s_sponsor.height > 0
-                        && s_sponsor_loaded_generation == s_sponsor.generation) {
+                        && s_sponsor_loaded_foreground_generation != 0) {
                     texture = sponsor_texture_update(
                         s_sponsor_rgba.data(), (int)s_sponsor.width, (int)s_sponsor.height,
-                        s_sponsor.generation, 0);
+                        s_sponsor_loaded_foreground_generation, 0);
                 }
                 if (!s_sponsor_background_rgba.empty() && s_sponsor.background_width > 0
                         && s_sponsor.background_height > 0
-                        && s_sponsor_loaded_generation == s_sponsor.generation) {
+                        && s_sponsor_loaded_background_generation != 0) {
                     background_texture = sponsor_texture_update(
                         s_sponsor_background_rgba.data(), (int)s_sponsor.background_width,
-                        (int)s_sponsor.background_height, s_sponsor.generation, 1);
+                        (int)s_sponsor.background_height,
+                        s_sponsor_loaded_background_generation, 1);
                 }
                 const float icon_scale = std::clamp(
                     (float)s_sponsor.icon_scale / 100.0f, 0.5f, 1.6f);
@@ -2016,22 +2057,57 @@ void render_ui() {
                         ImGui::PopTextWrapPos();
                         ImGui::PopStyleColor();
                     }
-                    if (sponsor_has_content) {
-                        const bool audio_enabled = fcae_sponsor_audio_enabled();
-                        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
-                        ImGui::SetCursorPos(ImVec2(
-                            std::max(0.0f, content_width - 38.0f), 4.0f));
-                        if (ImGui::Button(audio_enabled ? "🔊" : "🔇", ImVec2(34.0f, 26.0f))) {
-                            fcae_sponsor_set_audio_enabled(!audio_enabled);
-                            ui_request_redraw();
-                        }
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip(audio_enabled
-                                ? "Disable sponsor audio" : "Enable sponsor audio");
-                        ImGui::PopStyleVar();
-                    }
-                }
                 ImGui::EndChild();
+                if (sponsor_has_content) {
+                    // Keep the 140-unit sponsor card fully opaque and put the
+                    // audio control in a tiny attached row below it. This also
+                    // keeps the control out of the media/text hit regions.
+                    const bool audio_enabled = fcae_sponsor_audio_enabled();
+                    const float audio_x = std::max(
+                        0.0f, ImGui::GetContentRegionAvail().x - 28.0f);
+                    ImGui::SetCursorPos(ImVec2(audio_x, ImGui::GetCursorPosY() + 2.0f));
+                    const bool clicked = ImGui::InvisibleButton(
+                        "##sponsor_audio", ImVec2(28.0f, 24.0f));
+                    const ImVec2 button_min = ImGui::GetItemRectMin();
+                    const ImVec2 button_max = ImGui::GetItemRectMax();
+                    ImDrawList* draw = ImGui::GetWindowDrawList();
+                    const ImU32 color = IM_COL32(220, 232, 248,
+                        ImGui::IsItemHovered() ? 205 : 135);
+                    const float center_y = (button_min.y + button_max.y) * 0.5f;
+                    const float left = button_min.x + 5.0f;
+                    draw->AddRectFilled(
+                        ImVec2(left, center_y - 3.0f),
+                        ImVec2(left + 4.0f, center_y + 3.0f), color);
+                    draw->AddTriangleFilled(
+                        ImVec2(left + 3.0f, center_y - 5.5f),
+                        ImVec2(left + 11.0f, center_y - 10.0f),
+                        ImVec2(left + 11.0f, center_y + 10.0f), color);
+                    if (audio_enabled) {
+                        draw->AddLine(
+                            ImVec2(left + 14.0f, center_y - 4.0f),
+                            ImVec2(left + 17.0f, center_y), color, 1.5f);
+                        draw->AddLine(
+                            ImVec2(left + 17.0f, center_y),
+                            ImVec2(left + 14.0f, center_y + 4.0f), color, 1.5f);
+                        draw->AddLine(
+                            ImVec2(left + 18.0f, center_y - 7.0f),
+                            ImVec2(left + 22.0f, center_y), color, 1.5f);
+                        draw->AddLine(
+                            ImVec2(left + 22.0f, center_y),
+                            ImVec2(left + 18.0f, center_y + 7.0f), color, 1.5f);
+                    } else {
+                        draw->AddLine(
+                            ImVec2(left + 14.0f, center_y - 8.0f),
+                            ImVec2(left + 22.0f, center_y + 8.0f), color, 2.0f);
+                    }
+                    if (clicked) {
+                        fcae_sponsor_set_audio_enabled(!audio_enabled);
+                        ui_request_redraw();
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(audio_enabled
+                            ? "Disable sponsor audio" : "Enable sponsor audio");
+                }
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor(2);
             }

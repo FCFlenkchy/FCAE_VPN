@@ -239,6 +239,7 @@ object NativeEngine {
     @JvmStatic external fun nativeSponsorRefreshManifestAsync()
     @JvmStatic external fun nativeSponsorRefreshManifestNowAsync()
     @JvmStatic external fun nativeSponsorSetConnected(connected: Boolean)
+    @JvmStatic external fun nativeSponsorSetUiActive(active: Boolean)
     @JvmStatic external fun nativeSponsorSetAudioEnabled(enabled: Boolean)
     @JvmStatic external fun nativeSponsorAudioEnabled(): Boolean
     @JvmStatic external fun nativeSponsorNext()

@@ -451,5 +451,9 @@ void ui_request_redraw();
 /// Bookkeeping after a frame was actually painted. Called by ui_frame().
 void ui_note_frame_drawn();
 
+/// Tell the sponsor audio layer whether the native desktop window is visible.
+/// Minimized/hidden windows must not keep media audio alive.
+void ui_set_window_visible(bool visible);
+
 /// Monotonic clock in seconds, shared by the telemetry poll and the render gate.
 double ui_now_seconds();

@@ -13,6 +13,7 @@
 // Android-only FFI helper: kept out of the generated public C header because
 // it is an embedding hook rather than part of the cross-platform ABI.
 extern "C" bool fcae_sponsor_initialize_android_context(void* java_vm, void* context);
+extern "C" void fcae_sponsor_set_ui_active(bool active);
 
 #define LOG_TAG "FCAE_VPN"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -29,6 +30,17 @@ static std::deque<std::string> g_logs;
 static constexpr size_t kMaxLogs = 250;
 static std::atomic<bool> g_inited{false};
 static std::atomic<uint64_t> g_sponsor_logged_generation{0};
+// Sponsor generation layout mirrors the Rust publisher: campaign/metadata
+// above bit 24, foreground frame in bits 12..23, background frame in bits
+// 0..11. Only copy the media plane whose frame actually changed.
+static constexpr uint64_t kSponsorBackgroundFrameMask = 0xFFFULL;
+static constexpr uint64_t kSponsorForegroundFrameMask = 0xFFF000ULL;
+static bool sponsor_foreground_changed(uint64_t current, uint64_t previous) {
+    return ((current ^ previous) & ~kSponsorBackgroundFrameMask) != 0;
+}
+static bool sponsor_background_changed(uint64_t current, uint64_t previous) {
+    return ((current ^ previous) & ~kSponsorForegroundFrameMask) != 0;
+}
 
 // ── Psiphon socket protection ───────────────────────────────────────────
 //
@@ -927,6 +939,12 @@ Java_com_fc_fcaevpn_NativeEngine_nativeSponsorInitAndroidContext(
     }
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetUiActive(JNIEnv*, jclass, jboolean active) {
+    ensure_init();
+    fcae_sponsor_set_ui_active(active == JNI_TRUE);
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetManifest(JNIEnv* env, jclass, jstring json) {
     ensure_init();
@@ -1010,9 +1028,14 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
         LOGI("Sponsor frame available: id=%s generation=%llu campaigns=%u rgba=%u",
              info.id, (unsigned long long)info.generation, info.campaign_count, info.rgba_size);
     }
-    const bool copyFrame = info.available && (jlong)info.generation != knownGeneration;
-    jbyteArray rgba = env->NewByteArray(copyFrame ? (jsize)info.rgba_size : 0);
-    jbyteArray backgroundRgba = env->NewByteArray(copyFrame ? (jsize)info.background_rgba_size : 0);
+    const uint64_t previous_generation = static_cast<uint64_t>(knownGeneration);
+    const bool copyForeground = info.available
+        && sponsor_foreground_changed(info.generation, previous_generation);
+    const bool copyBackground = info.available
+        && sponsor_background_changed(info.generation, previous_generation);
+    jbyteArray rgba = env->NewByteArray(copyForeground ? (jsize)info.rgba_size : 0);
+    jbyteArray backgroundRgba = env->NewByteArray(
+        copyBackground ? (jsize)info.background_rgba_size : 0);
     if (!rgba || !backgroundRgba) {
         if (rgba) env->DeleteLocalRef(rgba);
         if (backgroundRgba) env->DeleteLocalRef(backgroundRgba);
@@ -1020,7 +1043,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
         env->DeleteLocalRef(cls);
         return nullptr;
     }
-    if (copyFrame && info.rgba_size) {
+    if (copyForeground && info.rgba_size) {
         jbyte* pixels = env->GetByteArrayElements(rgba, nullptr);
         if (!pixels) {
             env->DeleteLocalRef(rgba);
@@ -1040,7 +1063,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
             return nullptr;
         }
     }
-    if (copyFrame && info.background_rgba_size) {
+    if (copyBackground && info.background_rgba_size) {
         jbyte* pixels = env->GetByteArrayElements(backgroundRgba, nullptr);
         if (!pixels) {
             env->DeleteLocalRef(rgba);
