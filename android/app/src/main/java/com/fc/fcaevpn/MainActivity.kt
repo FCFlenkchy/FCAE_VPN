@@ -14,6 +14,7 @@ import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.content.SharedPreferences
 import android.widget.ArrayAdapter
 import android.widget.LinearLayout
@@ -79,6 +80,7 @@ class MainActivity : AppCompatActivity() {
     private var sponsorAnimated = false
     private var sponsorCampaignCount = 0
     private val sponsorPollBusy = AtomicBoolean(false)
+    @Volatile private var sponsorPollFailureLogged = false
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
     private lateinit var spinnerScan: Spinner
@@ -597,7 +599,17 @@ class MainActivity : AppCompatActivity() {
             if (sponsorPollBusy.compareAndSet(false, true)) {
                 val knownGeneration = sponsorGeneration
                 bgExecutor.execute {
-                    val info = try { NativeEngine.nativePollSponsor(knownGeneration) } catch (_: Throwable) { null }
+                    val info = try {
+                        NativeEngine.nativePollSponsor(knownGeneration).also {
+                            sponsorPollFailureLogged = false
+                        }
+                    } catch (error: Throwable) {
+                        if (!sponsorPollFailureLogged) {
+                            sponsorPollFailureLogged = true
+                            Log.w("FCAE_VPN", "Sponsor UI poll failed", error)
+                        }
+                        null
+                    }
                     handler.post {
                         try {
                             if (info == null || !info.available) {
@@ -643,7 +655,11 @@ class MainActivity : AppCompatActivity() {
                                 }
                                 sponsorCard.visibility = android.view.View.VISIBLE
                             }
-                        } catch (_: Throwable) {
+                        } catch (error: Throwable) {
+                            if (!sponsorPollFailureLogged) {
+                                sponsorPollFailureLogged = true
+                                Log.w("FCAE_VPN", "Sponsor UI update failed", error)
+                            }
                             sponsorCard.visibility = android.view.View.GONE
                             sponsorDestination = ""
                             sponsorAnimated = false

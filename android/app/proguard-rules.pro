@@ -16,6 +16,12 @@
     <fields>;
 }
 
+# Constructed and populated directly by nativePollSponsor. JNI resolves every
+# field by its source name, so R8 must not rename or remove this DTO.
+-keep,allowoptimization class com.fc.fcaevpn.FcaeSponsorInfo {
+    <fields>;
+}
+
 # Official Psiphon AAR (gomobile)
 -keep class ca.psiphon.** { *; }
 -keep class psi.** { *; }

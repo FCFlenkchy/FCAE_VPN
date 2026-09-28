@@ -24,6 +24,7 @@ static std::deque<std::string> g_logs;
 // Psiphon AAR notices are chatty; 30 lines vanished before the user saw them.
 static constexpr size_t kMaxLogs = 250;
 static std::atomic<bool> g_inited{false};
+static std::atomic<uint64_t> g_sponsor_logged_generation{0};
 
 // ── Psiphon socket protection ───────────────────────────────────────────
 //
@@ -953,10 +954,16 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     FcaeSponsorInfo info = {};
     info.struct_size = sizeof(info);
     info.abi_version = FCAE_ABI_VERSION;
-    if (fcae_sponsor_poll(&info) != FCAE_OK) {
+    const FcaeStatus pollStatus = fcae_sponsor_poll(&info);
+    if (pollStatus != FCAE_OK) {
+        LOGE("Sponsor poll failed: status=%d", (int)pollStatus);
         env->DeleteLocalRef(obj);
         env->DeleteLocalRef(cls);
         return nullptr;
+    }
+    if (info.available && g_sponsor_logged_generation.exchange(info.generation) != info.generation) {
+        LOGI("Sponsor frame available: id=%s generation=%llu campaigns=%u rgba=%u",
+             info.id, (unsigned long long)info.generation, info.campaign_count, info.rgba_size);
     }
     const bool copyFrame = info.available && (jlong)info.generation != knownGeneration;
     jbyteArray rgba = env->NewByteArray(copyFrame ? (jsize)info.rgba_size : 0);

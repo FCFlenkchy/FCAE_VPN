@@ -57,6 +57,7 @@ static FcaeSponsorInfo s_sponsor = {};
 static std::vector<uint8_t> s_sponsor_rgba;
 static uint64_t s_sponsor_loaded_generation = 0;
 static bool s_sponsor_started = false;
+static uint64_t s_sponsor_logged_generation = 0;
 static std::chrono::steady_clock::time_point s_sponsor_manifest_check = {};
 
 static void poll_sponsor() {
@@ -77,8 +78,24 @@ static void poll_sponsor() {
     FcaeSponsorInfo info = {};
     info.struct_size = sizeof(info);
     info.abi_version = FCAE_ABI_VERSION;
-    if (fcae_sponsor_poll(&info) != FCAE_OK) return;
+    const FcaeStatus poll_status = fcae_sponsor_poll(&info);
+    if (poll_status != FCAE_OK) {
+        g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
+        return;
+    }
+    const bool card_changed = info.available != s_sponsor.available
+        || info.generation != s_sponsor.generation;
+    if (info.available && info.generation != s_sponsor_logged_generation) {
+        s_sponsor_logged_generation = info.generation;
+        char message[192];
+        snprintf(message, sizeof(message),
+                 "[sponsor] UI frame available: id=%s generation=%llu campaigns=%u rgba=%u",
+                 info.id, (unsigned long long)info.generation,
+                 info.campaign_count, info.rgba_size);
+        g_app.add_log(FCAE_LOG_INFO, message);
+    }
     s_sponsor = info;
+    if (card_changed) ui_request_redraw();
     if (!info.available) {
         s_sponsor_rgba.clear();
         s_sponsor_loaded_generation = 0;
