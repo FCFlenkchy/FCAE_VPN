@@ -567,12 +567,10 @@ fn media_needs_refresh() -> bool {
     };
     let Some(existing) = state.ready.iter().find(|ready|
         ready.campaign.id == campaign.id) else { return true; };
-    (campaign.icon_url.is_some()
-        && (!icon_url_matches(existing, campaign) || existing.frames.is_empty()))
+    (campaign.icon_url.is_some() && existing.frames.is_empty())
         || (campaign.background_url.is_some()
-            && (!background_url_matches(existing, campaign)
-                || (existing.background_frames.is_empty()
-                    && existing.background_rgba.is_empty())))
+            && existing.background_frames.is_empty()
+            && existing.background_rgba.is_empty())
 }
 
 pub fn manifest_refresh_remaining_secs() -> u64 {
@@ -596,7 +594,7 @@ pub fn set_manifest_json(json: &[u8]) -> Result<(), String> {
     let campaigns = parse_manifest(json)?;
     let active_count = campaigns.len();
     let now = unix_now();
-    apply_campaigns(campaigns);
+    let selected_campaign_changed = apply_campaigns(campaigns);
     log::info!("[sponsor] accepted manifest ({} active campaigns)", active_count);
     let cache_dir = {
         let mut state = STATE.lock();
@@ -609,24 +607,28 @@ pub fn set_manifest_json(json: &[u8]) -> Result<(), String> {
         let _ = fs::write(cache_dir.join("manifest.timestamp"), now.to_string());
         let _ = fs::write(cache_dir.join("manifest.check.timestamp"), now.to_string());
     }
-    if CONNECTED.load(Ordering::Acquire) {
+    let media_needed = selected_campaign_changed
+        || media_needs_refresh()
+        || audio_needs_refresh();
+    if media_needed && CONNECTED.load(Ordering::Acquire) {
         refresh_media_async();
-    } else {
+    } else if media_needed {
         refresh_cached_media_async();
     }
     Ok(())
 }
 
-fn apply_campaigns(campaigns: Vec<Campaign>) {
+fn apply_campaigns(campaigns: Vec<Campaign>) -> bool {
     let mut state = STATE.lock();
+    let previous_selected_id = state.campaigns.get(state.current_campaign)
+        .map(|campaign| campaign.id.clone());
     let previous = std::mem::take(&mut state.ready);
     let mut ready = Vec::with_capacity(campaigns.len());
 
     for campaign in &campaigns {
         if let Some(existing) = previous.iter().find(|candidate| candidate.campaign.id == campaign.id) {
-            // Keep the last usable foreground/background pixels while the new
-            // manifest version is being fetched. This also keeps a valid card
-            // visible when a changed URL is temporarily unavailable.
+            // Keep the last usable foreground/background pixels for this
+            // campaign while the new manifest version is being applied.
             ready.push(fallback_ready(existing, campaign));
         } else {
             // Stage a safe text fallback. Startup cache hydration replaces it
@@ -647,6 +649,9 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
     } else {
         (next_random(&mut state) as usize) % ready_count
     };
+    let selected_campaign_id = campaigns.get(state.current_campaign)
+        .map(|campaign| campaign.id.clone());
+    let selected_campaign_changed = previous_selected_id != selected_campaign_id;
     state.campaigns = campaigns.clone();
     state.last_error.clear();
     state.media_retry_after = Instant::now();
@@ -654,6 +659,7 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
     GENERATION.fetch_add(1, Ordering::Relaxed);
     drop(state);
     prune_cache(&cache_dir, &campaigns);
+    selected_campaign_changed
 }
 
 pub fn refresh_manifest_async() {
@@ -705,12 +711,45 @@ pub fn refresh_media_async() {
     refresh_media_async_inner(false);
 }
 
+fn merge_ready_media(previous: &[ReadyCampaign], ready: Vec<ReadyCampaign>) -> Vec<ReadyCampaign> {
+    ready.into_iter().map(|mut candidate| {
+        let Some(existing) = previous.iter().find(|ready| ready.campaign.id == candidate.campaign.id)
+        else {
+            return candidate;
+        };
+        // A prepared list may intentionally contain only the current target's
+        // newly decoded planes. Retain the other campaign's last usable planes
+        // at publication time as a second line of defense against a partial
+        // refresh replacing the whole ready list with text-only cards.
+        if candidate.campaign.icon_url.is_some()
+            && candidate.frames.is_empty()
+            && !existing.frames.is_empty()
+        {
+            candidate.width = existing.width;
+            candidate.height = existing.height;
+            candidate.frames = existing.frames.clone();
+        }
+        if candidate.campaign.background_url.is_some()
+            && candidate.background_frames.is_empty()
+            && candidate.background_rgba.is_empty()
+            && (!existing.background_frames.is_empty() || !existing.background_rgba.is_empty())
+        {
+            candidate.background_width = existing.background_width;
+            candidate.background_height = existing.background_height;
+            candidate.background_frames = existing.background_frames.clone();
+            candidate.background_rgba = existing.background_rgba.clone();
+        }
+        candidate
+    }).collect()
+}
+
 fn publish_media(campaigns: &[Campaign], ready: Vec<ReadyCampaign>) -> bool {
     let mut state = STATE.lock();
     if state.campaigns.as_slice() != campaigns {
         return false;
     }
-    state.ready = ready;
+    let previous = state.ready.clone();
+    state.ready = merge_ready_media(&previous, ready);
     let ready_count = state.ready.len();
     state.current_campaign = if ready_count == 0 {
         0
@@ -1141,15 +1180,6 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
     }
 }
 
-fn icon_url_matches(previous: &ReadyCampaign, campaign: &Campaign) -> bool {
-    previous.campaign.id == campaign.id && previous.campaign.icon_url == campaign.icon_url
-}
-
-fn background_url_matches(previous: &ReadyCampaign, campaign: &Campaign) -> bool {
-    previous.campaign.id == campaign.id
-        && previous.campaign.background_url == campaign.background_url
-}
-
 fn fallback_ready(previous: &ReadyCampaign, campaign: &Campaign) -> ReadyCampaign {
     let mut fallback = empty_ready(campaign);
     if campaign.icon_url.is_some() && !previous.frames.is_empty() {
@@ -1273,13 +1303,13 @@ fn prepare_media(
         let is_target = target_id == Some(campaign.id.as_str());
         let previous = previous.iter().find(|existing|
             existing.campaign.id == campaign.id);
-        let mut candidate = if is_target {
-            previous.map_or_else(|| empty_ready(campaign), |existing| fallback_ready(existing, campaign))
-        } else {
-            // Keep only a text-safe placeholder for inactive campaigns. Their
-            // encoded files remain cached and will be decoded on demand later.
-            empty_ready(campaign)
-        };
+        // Preserve every previously decoded campaign while refreshing one
+        // target. A manifest refresh must not turn the other cards into
+        // text-only placeholders just because their duplicate/shared asset
+        // URLs were not decoded in this pass; the old pixels remain a valid
+        // fallback until that campaign is visited and its new media is ready.
+        let mut candidate = previous
+            .map_or_else(|| empty_ready(campaign), |existing| fallback_ready(existing, campaign));
 
         if is_target {
             let payload = load_campaign_payload(
