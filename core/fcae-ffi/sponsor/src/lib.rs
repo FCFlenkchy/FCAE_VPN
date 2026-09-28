@@ -1760,8 +1760,11 @@ fn compact_video_frames(frames: &mut Vec<Frame>, total_bytes: &mut usize) {
     if frames.len() < 2 {
         return;
     }
-    let mut compacted = Vec::with_capacity((frames.len() + 1) / 2);
-    let mut iter = frames.drain(..);
+    // Move the vector out before iterating so the iterator does not retain a
+    // Drain borrow while the compacted vector is installed back into `frames`.
+    let old_frames = std::mem::take(frames);
+    let mut compacted = Vec::with_capacity((old_frames.len() + 1) / 2);
+    let mut iter = old_frames.into_iter();
     while let Some(mut kept) = iter.next() {
         if let Some(dropped) = iter.next() {
             // Keeping the first frame of each pair and adding the dropped
@@ -1770,8 +1773,8 @@ fn compact_video_frames(frames: &mut Vec<Frame>, total_bytes: &mut usize) {
         }
         compacted.push(kept);
     }
+    *total_bytes = compacted.iter().map(|frame| frame.rgba.len()).sum();
     *frames = compacted;
-    *total_bytes = frames.iter().map(|frame| frame.rgba.len()).sum();
 }
 
 fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, String> {
