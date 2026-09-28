@@ -1,7 +1,7 @@
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat};
 use once_cell::sync::Lazy;
 use parking_lot::{Mutex, RwLock};
-use rodio::{Decoder as AudioDecoder, OutputStream, OutputStreamBuilder, Sink};
+use rodio::{Decoder as AudioDecoder, OutputStreamBuilder, Sink};
 use serde::Deserialize;
 use yscv_video::Mp4VideoReader;
 use std::{
@@ -9,7 +9,11 @@ use std::{
     fs,
     io::{BufReader, Cursor, Read},
     path::{Path, PathBuf},
-    sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}},
+    sync::{
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -241,13 +245,64 @@ static MANIFEST_BUSY: AtomicBool = AtomicBool::new(false);
 static MANIFEST_FORCE_PENDING: AtomicBool = AtomicBool::new(false);
 static MEDIA_BUSY: AtomicBool = AtomicBool::new(false);
 static AUDIO_ENABLED: AtomicBool = AtomicBool::new(false);
-static AUDIO_PLAYBACK: Lazy<Mutex<Option<AudioPlayback>>> = Lazy::new(|| Mutex::new(None));
+static AUDIO_CONTROLLER: Lazy<Mutex<AudioController>> = Lazy::new(|| {
+    Mutex::new(AudioController {
+        sender: None,
+        campaign_id: None,
+    })
+});
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
-struct AudioPlayback {
-    campaign_id: String,
-    _stream: OutputStream,
-    sink: Sink,
+enum AudioCommand {
+    Play { path: PathBuf },
+    Stop,
+}
+
+// cpal's CoreAudio stream is intentionally kept on its owning thread: on
+// macOS it contains a non-Send property-listener callback. The global state
+// stores only an mpsc Sender, which is Send + Sync on every target.
+struct AudioController {
+    sender: Option<Sender<AudioCommand>>,
+    campaign_id: Option<String>,
+}
+
+fn audio_worker(receiver: Receiver<AudioCommand>) {
+    let stream = OutputStreamBuilder::open_default_stream().ok();
+    let mut sink: Option<Sink> = None;
+    loop {
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(AudioCommand::Play { path }) => {
+                sink.take();
+                let Some(stream) = stream.as_ref() else { continue; };
+                let Ok(file) = fs::File::open(path) else { continue; };
+                let Ok(source) = AudioDecoder::try_from(BufReader::new(file)) else { continue; };
+                let next_sink = Sink::connect_new(stream.mixer());
+                next_sink.append(source);
+                next_sink.play();
+                sink = Some(next_sink);
+            }
+            Ok(AudioCommand::Stop) => {
+                sink.take();
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+fn audio_sender(controller: &mut AudioController) -> Option<Sender<AudioCommand>> {
+    if controller.sender.is_none() {
+        let (sender, receiver) = mpsc::channel();
+        if thread::Builder::new()
+            .name("fcae-sponsor-audio".into())
+            .spawn(move || audio_worker(receiver))
+            .is_err()
+        {
+            return None;
+        }
+        controller.sender = Some(sender);
+    }
+    controller.sender.clone()
 }
 
 fn unix_now() -> u64 {
@@ -295,10 +350,18 @@ pub fn set_proxy(proxy: Option<String>) {
     *SPONSOR_PROXY.write() = proxy;
 }
 
+fn stop_audio() {
+    let mut controller = AUDIO_CONTROLLER.lock();
+    controller.campaign_id = None;
+    if let Some(sender) = controller.sender.as_ref() {
+        let _ = sender.send(AudioCommand::Stop);
+    }
+}
+
 pub fn set_audio_enabled(enabled: bool) {
     AUDIO_ENABLED.store(enabled, Ordering::Release);
     if !enabled {
-        AUDIO_PLAYBACK.lock().take();
+        stop_audio();
     } else if CONNECTED.load(Ordering::Acquire) {
         // Audio is deliberately lazy: enabling the card control is the first
         // point at which the current campaign's audio may be downloaded.
@@ -314,7 +377,7 @@ pub fn audio_enabled() -> bool {
 
 fn start_audio_for_campaign(campaign_id: &str) {
     if !audio_enabled() {
-        AUDIO_PLAYBACK.lock().take();
+        stop_audio();
         return;
     }
     let path = {
@@ -325,29 +388,24 @@ fn start_audio_for_campaign(campaign_id: &str) {
             state.cache_dir.join(audio_cache_name(campaign))
         }))
     };
-    let Some(path) = path else {
-        AUDIO_PLAYBACK.lock().take();
+    let Some(path) = path.filter(|path| path.is_file()) else {
+        stop_audio();
         return;
     };
-    let mut playback = AUDIO_PLAYBACK.lock();
+    let mut controller = AUDIO_CONTROLLER.lock();
     // Play a campaign's clip once per card display. Do not restart a short
     // clip on every polling tick after its sink reaches the end; rotation or
     // an explicit disable/re-enable starts it again.
-    if playback.as_ref().is_some_and(|current| current.campaign_id == campaign_id) {
+    if controller.campaign_id.as_deref() == Some(campaign_id) {
         return;
     }
-    playback.take();
-    let Ok(file) = fs::File::open(path) else { return; };
-    let Ok(stream) = OutputStreamBuilder::open_default_stream() else { return; };
-    let sink = Sink::connect_new(stream.mixer());
-    let Ok(source) = AudioDecoder::try_from(BufReader::new(file)) else { return; };
-    sink.append(source);
-    sink.play();
-    *playback = Some(AudioPlayback {
-        campaign_id: campaign_id.to_string(),
-        _stream: stream,
-        sink,
-    });
+    let Some(sender) = audio_sender(&mut controller) else { return; };
+    if sender.send(AudioCommand::Play { path }).is_err() {
+        controller.sender = None;
+        controller.campaign_id = None;
+        return;
+    }
+    controller.campaign_id = Some(campaign_id.to_string());
 }
 
 pub fn set_connected(connected: bool) {
