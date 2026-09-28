@@ -514,6 +514,12 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         || matches!(raw.tor.mode, FcaeTorMode::Chain | FcaeTorMode::Reverse)) {
         cfg.socks_port = 1819;
     }
+    // The SOCKS listener is the private tun2socks bridge in TUN mode. The
+    // public HTTP listener has no TUN data-plane role and must not be started
+    // merely because a stale UI or headless caller supplied its old port.
+    if cfg.mode == FcaeMode::Tun {
+        cfg.http_port = 0;
+    }
     if cfg.protocol != FcaeProtocol::Tor && raw.tor.mode != FcaeTorMode::Only
         && cfg.http_port != 0 && cfg.http_port == cfg.socks_port {
         return Err(CoreError::InvalidConfig(format!(

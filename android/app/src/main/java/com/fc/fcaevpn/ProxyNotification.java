@@ -589,11 +589,20 @@ public class ProxyNotification extends Service {
      *         to end the process themselves.
      */
     private synchronized boolean stopProxy() {
-        return stopProxy(true);
+        return stopProxy(true, false);
     }
 
     private synchronized boolean stopProxy(boolean allowProcessExit) {
-        if (stopping || ownerGeneration != FCAEVpnService.sGeneration.get()) return false;
+        return stopProxy(allowProcessExit, false);
+    }
+
+    /** Stop an older proxy owner before a new TUN owner takes over. */
+    private synchronized boolean stopProxyForModeSwitch() {
+        return stopProxy(false, true);
+    }
+
+    private synchronized boolean stopProxy(boolean allowProcessExit, boolean allowStale) {
+        if (stopping || (!allowStale && ownerGeneration != FCAEVpnService.sGeneration.get())) return false;
         lastPsiphonStats = null;
         stopping = true;
         sessionRequested = false;
@@ -693,6 +702,24 @@ public class ProxyNotification extends Service {
                 current.stopProxy(false);
             }
         });
+        return true;
+    }
+
+    /**
+     * TUN and proxy owners are mutually exclusive. A stale proxy owner can
+     * otherwise keep its own foreground notification after the UI has selected
+     * TUN and the VPN owner has taken over.
+     */
+    public static boolean stopForModeSwitch() {
+        ProxyNotification current = instance;
+        if (current == null || !current.sessionRequested) return false;
+        Runnable stop = () -> {
+            if (instance == current && current.sessionRequested) {
+                current.stopProxyForModeSwitch();
+            }
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) stop.run();
+        else current.handler.post(stop);
         return true;
     }
 

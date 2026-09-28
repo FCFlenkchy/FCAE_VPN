@@ -102,7 +102,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerNoize: Spinner
     private lateinit var spinnerTor: Spinner
     private lateinit var spinnerTorBridges: Spinner
-    private lateinit var textTorHint: android.widget.TextView
     private lateinit var editTorBridgeLines: android.widget.EditText
     private lateinit var spinnerEngineLog: Spinner
     private lateinit var spinnerT2sLog: Spinner
@@ -128,6 +127,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchLan: SwitchMaterial
     private lateinit var switchLogging: SwitchMaterial
     private lateinit var switchSocks: SwitchMaterial
+    private var proxySocksChoice = true
+    private var proxyHttpChoice = true
+    private var lastProxyUiMode: Int? = null
     private lateinit var switchTorHttp: SwitchMaterial
     private lateinit var editTorHttpPort: android.widget.EditText
     private lateinit var switchHttp: SwitchMaterial
@@ -956,7 +958,6 @@ class MainActivity : AppCompatActivity() {
         spinnerNoize = findViewById(R.id.spinnerNoize)
         spinnerTor = findViewById(R.id.spinnerTor)
         spinnerTorBridges = findViewById(R.id.spinnerTorBridges)
-        textTorHint = findViewById(R.id.textTorHint)
         editTorBridgeLines = findViewById(R.id.editTorBridgeLines)
         spinnerEngineLog = findViewById(R.id.spinnerEngineLog)
         spinnerT2sLog = findViewById(R.id.spinnerT2sLog)
@@ -1278,9 +1279,7 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<TextView>(R.id.aboutButton).setOnClickListener { showAboutDialog() }
 
-        // Mode changes re-evaluate the tor hint (and nothing else: no control
-        // is ever locked or re-pointed; TUN simply ignores the SOCKS switch,
-        // which the service forces on for tun2socks anyway).
+        // Mode changes only update which controls are applicable.
         spinnerMode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: android.widget.AdapterView<*>?,
@@ -1298,9 +1297,8 @@ class MainActivity : AppCompatActivity() {
         applyModeSocksLock()
         applyTunEngineVisibility()
 
-        // The protocol list owns "Tor only", so the tor hint (which port
-        // carries tor traffic in proxy mode) must refresh on protocol change
-        // too, not just on the egress spinner.
+        // The protocol list owns "Tor only"; refresh egress applicability
+        // when the protocol changes.
         spinnerProtocol.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: android.widget.AdapterView<*>?,
@@ -1312,12 +1310,10 @@ class MainActivity : AppCompatActivity() {
                 // combo; Tor protocol grays the two Tor entries). Do not reset
                 // the combo — restoring protocol restores the pick.
                 applyTorLock()
-                updateTorHint()
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
-        updateTorHint()
 
         onBackPressedDispatcher.addCallback(this, backPressedCallback)
 
@@ -1867,21 +1863,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * SOCKS5 is mandatory in TUN mode: tun2socks dials the engine's local SOCKS5
-     * listener for every connection (and the core also starts an internal SOCKS5
-     * on 1819 when TUN is active). So while TUN is selected the SOCKS5 switch is
-     * forced ON and grayed out, and the port field is locked too — the same
-     * auto/locked behaviour the desktop UI has for its SOCKS5 checkbox.
-     * Switching back to Proxy mode restores the user's own choice.
+     * TUN uses an internal loopback SOCKS listener for tun2socks, not a user
+     * proxy. Keep the public SOCKS/HTTP controls off and unavailable while TUN
+     * is selected, without changing the user's saved proxy choices when they
+     * switch back to Proxy mode.
      */
     private fun applyModeSocksLock() {
-        if (!::spinnerMode.isInitialized || !::switchSocks.isInitialized) return
-        // No lock, no forced value: in TUN mode FCAEVpnService forces the
-        // local SOCKS5 listener tun2socks dials ((mode==1 && port==0) ->
-        // 1819), so the switch is simply ignored there.
-        switchSocks.text = "SOCKS5 proxy"
-        // The tor hint depends on which mode is active.
-        updateTorHint()
+        if (!::spinnerMode.isInitialized || !::switchSocks.isInitialized ||
+            !::switchHttp.isInitialized || !::editSocksPort.isInitialized ||
+            !::editHttpPort.isInitialized) return
+        val mode = if (isTunModeSelected()) 1 else 0
+        when {
+            lastProxyUiMode == null -> {
+                proxySocksChoice = switchSocks.isChecked
+                proxyHttpChoice = switchHttp.isChecked
+            }
+            lastProxyUiMode == 0 && mode == 1 -> {
+                proxySocksChoice = switchSocks.isChecked
+                proxyHttpChoice = switchHttp.isChecked
+            }
+            lastProxyUiMode == 1 && mode == 0 -> {
+                switchSocks.isChecked = proxySocksChoice
+                switchHttp.isChecked = proxyHttpChoice
+            }
+        }
+        lastProxyUiMode = mode
+        val proxyMode = mode == 0
+        switchSocks.isEnabled = proxyMode
+        switchHttp.isEnabled = proxyMode
+        editSocksPort.isEnabled = proxyMode
+        editHttpPort.isEnabled = proxyMode
+        if (!proxyMode) {
+            switchSocks.isChecked = false
+            switchHttp.isChecked = false
+        }
     }
 
     private fun t2sLogValue(): Int = spinnerT2sLog.selectedItemPosition + 1
@@ -1951,7 +1966,6 @@ class MainActivity : AppCompatActivity() {
     private fun applyTorLock() {
         if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
         ensureEgressAdapter()
-        updateTorHint()
     }
 
     /**
@@ -1972,37 +1986,6 @@ class MainActivity : AppCompatActivity() {
             this, R.layout.spinner_dark_item, labels)
         a.setDropDownViewResource(R.layout.spinner_dark_item)
         spinnerTor.adapter = a
-    }
-
-    /**
-     * In TUN mode the traffic is routed to the right port internally, but in
-     * proxy mode the user dials the ports by hand -- say which one actually
-     * carries tor traffic, or the tor setting looks broken (they dial the
-     * tunnel's plain port and wonder why it is not tor'ed).
-     */
-    private fun updateTorHint() {
-        if (!::textTorHint.isInitialized || !::spinnerMode.isInitialized ||
-            !::spinnerProtocol.isInitialized || !::spinnerTor.isInitialized) return
-        val hint = if (spinnerMode.selectedItemPosition != 0) {
-            "" // TUN mode: routing is automatic
-        } else if (isPsiphonProtocol()) {
-            "Psiphon connects independently. Egress is unused."
-        } else if (isTorOnly() && isEgressPsiphon()) {
-            // user -> Psiphon -> Tor -> internet: the AAR dials its servers
-            // through the Tor-only engine SOCKS (UpstreamProxyURL).
-            "Psiphon chains through the Tor-only tunnel (UpstreamProxyURL): Tor first, then Psiphon exits."
-        } else if (isEgressPsiphon()) {
-            "Aether connects first; Psiphon then dials through Aether SOCKS (UpstreamProxyURL)."
-        } else when (spinnerTor.selectedItemPosition) {
-            1 -> "Proxy mode: point SOCKS clients at the Tor SOCKS port; the tunnel's own ports stay plain (un-tor'ed)."
-            2 -> "Proxy mode: use the tunnel's SOCKS/HTTP ports as usual; tor is the carrier underneath them."
-            else -> if (isTorOnly())
-                "Proxy mode: dial the Tor SOCKS port; Tor has no WARP tunnel. Egress can chain Psiphon through it."
-            else ""
-        }
-        textTorHint.text = hint
-        textTorHint.visibility =
-            if (hint.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
     }
 
     private fun saveSettings() {
@@ -2029,10 +2012,10 @@ class MainActivity : AppCompatActivity() {
             putBoolean("quick", switchQuick.isChecked)
             putBoolean("lan", switchLan.isChecked)
             putBoolean("logging", switchLogging.isChecked)
-            putBoolean("socks", switchSocks.isChecked)
+            putBoolean("socks", if (isTunModeSelected()) proxySocksChoice else switchSocks.isChecked)
             putBoolean("torHttp", switchTorHttp.isChecked)
             putString("torHttpPort", editTorHttpPort.text.toString())
-            putBoolean("http", switchHttp.isChecked)
+            putBoolean("http", if (isTunModeSelected()) proxyHttpChoice else switchHttp.isChecked)
             putBoolean("autoUpdate", switchAutoUpdate.isChecked)
             putBoolean("checkPreReleases", switchPreReleases.isChecked)
             putString("sni", editSni.text.toString().trim())
@@ -2283,6 +2266,9 @@ class MainActivity : AppCompatActivity() {
         }
         i.extras?.let { owner.putExtras(it) }
         if (isTunModeSelected()) {
+            // A previous proxy owner must not keep its foreground service alive
+            // while this TUN owner takes over.
+            ProxyNotification.stopForModeSwitch()
             // Full session config rides on the owner: FCAEVpnService starts
             // the engine session itself when Psiphon reports READY, so the
             // connect survives this activity being swiped away mid-dial.
@@ -2309,6 +2295,9 @@ class MainActivity : AppCompatActivity() {
         vpnActive = true
         updateButton()
         saveSettings()
+        // TUN and proxy owners are mutually exclusive. Remove any stale proxy
+        // foreground service before handing the session to VpnService.
+        ProxyNotification.stopForModeSwitch()
         val startIntent = buildStartIntent()
         startForegroundService(startIntent)
         connectGeneration = FCAEVpnService.stateGeneration()
@@ -2343,8 +2332,10 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("lanSharing", switchLan.isChecked)
         i.putExtra("configPath", filesDir.resolve("aether.toml").absolutePath)
         i.putExtra("sni", editSni.text.toString().trim())
-        i.putExtra("socksPort", if (switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0)
-        i.putExtra("httpPort", if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0)
+        // TUN needs a loopback SOCKS listener internally, but it must not
+        // expose the public proxy controls. HTTP proxying is disabled in TUN.
+        i.putExtra("socksPort", if (isTunModeSelected() || switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0)
+        i.putExtra("httpPort", if (!isTunModeSelected() && switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0)
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
         i.putExtra("forcePeer", editForcePeer.text.toString().trim())
         i.putExtra("sysProfile", spinnerSysprofile.selectedItemPosition)
@@ -2407,8 +2398,8 @@ class MainActivity : AppCompatActivity() {
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
         // Extract ALL UI values on the main thread — never read Views from bg.
         val noizeProfile = spinnerNoize.selectedItem.toString()
-        val socksPort = if (switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0
-        val httpPort = if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0
+        val socksPort = if (mode == 1 || switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0
+        val httpPort = if (mode == 0 && switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0
         val forcePeer = editForcePeer.text.toString().trim()
         val sysProfile = spinnerSysprofile.selectedItemPosition
         val teamName = editTeam.text.toString().trim()
@@ -3267,22 +3258,26 @@ class MainActivity : AppCompatActivity() {
             peerLine.append("Peer: $peer")
         }
         if (listenersUp && !isPsiphonSelected()) {
-            fun endpoints(backend: String, socks: String?, http: String?) {
+            fun endpoints(backend: String, socks: String?, http: String?, socksKind: String = "SOCKS5") {
                 val local = mutableListOf<String>()
                 val shared = mutableListOf<String>()
                 fun add(kind: String, port: String) {
                     local.add("$kind 127.0.0.1:$port")
                     if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") shared.add("$kind $lan:$port")
                 }
-                socks?.let { add("SOCKS5", it) }
+                socks?.let { add(socksKind, it) }
                 http?.let { add("HTTP", it) }
                 if (local.isNotEmpty()) peerLine.append("\n$backend local: " + local.joinToString(" | "))
                 if (shared.isNotEmpty()) peerLine.append("\n$backend LAN: " + shared.joinToString(" | "))
             }
-            if (!isTorOnly()) endpoints("Aether",
-                if (switchSocks.isChecked || isTunModeSelected() || isEgressPsiphon() || effectiveTorMode() in 1..2)
-                    editSocksPort.text.toString().trim().ifEmpty { "1819" } else null,
-                if (switchHttp.isChecked) editHttpPort.text.toString().trim().ifEmpty { "1820" } else null)
+            if (!isTorOnly()) {
+                val tun = isTunModeSelected()
+                endpoints("Aether",
+                    if (switchSocks.isChecked || tun || isEgressPsiphon() || effectiveTorMode() in 1..2)
+                        editSocksPort.text.toString().trim().ifEmpty { "1819" } else null,
+                    if (!tun && switchHttp.isChecked) editHttpPort.text.toString().trim().ifEmpty { "1820" } else null,
+                    if (tun) "internal SOCKS5" else "SOCKS5")
+            }
             if (isTorOnly() || effectiveTorMode() in 1..2) endpoints("Tor",
                 editTorSocksPort.text.toString().trim().ifEmpty { "1821" },
                 if (switchTorHttp.isChecked) editTorHttpPort.text.toString() else null)

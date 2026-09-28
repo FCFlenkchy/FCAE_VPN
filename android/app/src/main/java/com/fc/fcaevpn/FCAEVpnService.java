@@ -997,10 +997,12 @@ public class FCAEVpnService extends VpnService {
         final boolean ech     = intent.getBooleanExtra("echEnabled", true);
         final boolean lan     = intent.getBooleanExtra("lanSharing", false);
         final int socks       = intent.getIntExtra("socksPort", 1819);
-        final int http        = intent.getIntExtra("httpPort", 1820);
-        // SOCKS5 is mandatory in TUN mode (tun2socks dials the local SOCKS5
-        // listener for every connection), so never hand the engine a disabled
-        // SOCKS5 there. The UI locks the switch on; this is the defensive net.
+        // TUN's SOCKS listener is an internal tun2socks bridge. It is not the
+        // user's public proxy, and TUN never starts the public HTTP listener.
+        final int http        = mode == 1 ? 0 : intent.getIntExtra("httpPort", 1820);
+        // SOCKS5 is mandatory in TUN mode because tun2socks dials the local
+        // listener for every connection. Keep that internal bridge alive even
+        // if a stale or headless caller supplies zero.
         final int socksPortForMode = (mode == 1 && socks == 0) ? 1819 : socks;
         final String noize    = intent.getStringExtra("noizeProfile");
         final String peer     = intent.getStringExtra("forcePeer");

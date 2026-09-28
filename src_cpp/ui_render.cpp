@@ -2133,8 +2133,11 @@ void render_ui() {
             if (telem.connected_peer[0])
                 ImGui::TextWrapped("Peer: %s", telem.connected_peer);
             if (telem.backend != FCAE_BACKEND_PSIPHON) {
-                if (g_app.protocol != 4 && (g_app.socks_enabled || g_app.mode == 1 || g_app.tor_mode != 0)) endpoint("Aether", "SOCKS5", g_app.socks_port ? g_app.socks_port : 1819);
-                if (g_app.protocol != 4 && g_app.http_enabled) endpoint("Aether", "HTTP", g_app.http_port);
+                if (g_app.protocol != 4 && (g_app.socks_enabled || g_app.mode == 1 || g_app.tor_mode != 0))
+                    endpoint("Aether", g_app.mode == 1 ? "internal SOCKS5" : "SOCKS5",
+                             g_app.socks_port ? g_app.socks_port : 1819);
+                if (g_app.protocol != 4 && g_app.mode == 0 && g_app.http_enabled)
+                    endpoint("Aether", "HTTP", g_app.http_port);
                 if (g_app.tor_http_enabled && (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2))
                     endpoint("Tor", "HTTP", g_app.tor_http_port);
                 if (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)
@@ -2216,23 +2219,18 @@ void render_ui() {
             ImGui::Text("Transport Options");
             ImGui::Checkbox("ECH", &g_app.ech_enabled);
             ImGui::Checkbox("Quick Reconnect", &g_app.quick_reconnect);
-            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Text("Proxy Ports");
-            ImGui::PushItemWidth(100);
-            // No forcing, no locking: the checkbox governs proxy mode only.
-            // In TUN the local SOCKS5 listener is mandatory, so to_config()
-            // ignores the checkbox there and always raises it (same rule as
-            // Android's FCAEVpnService).
-            ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
-            ImGui::SameLine(0, 20);
-            ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
-            ImGui::Checkbox("Aether HTTP proxy", &g_app.http_enabled);
-            ImGui::SameLine(0, 20);
-            ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
-            ImGui::PopItemWidth();
-            if (g_app.mode == 1)
-                ImGui::TextDisabled("TUN always raises the local SOCKS5 listener; this checkbox only governs proxy mode.");
-            ImGui::Spacing();
+            if (g_app.mode == 0) {
+                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+                ImGui::Text("Proxy Ports");
+                ImGui::PushItemWidth(100);
+                ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
+                ImGui::SameLine(0, 20);
+                ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
+                ImGui::Checkbox("Aether HTTP proxy", &g_app.http_enabled);
+                ImGui::SameLine(0, 20);
+                ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
+                ImGui::PopItemWidth();
+            }
             if (g_app.mode == 1 && ImGui::CollapsingHeader("TUN Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Text("TUN engine");
                 ImGui::SameLine(0, 8);
@@ -2329,8 +2327,6 @@ void render_ui() {
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Psiphon");
-            ImGui::TextDisabled("Config is built automatically. Select a target egress region;");
-            ImGui::TextDisabled("the list is populated after Psiphon reports available regions.");
 
             // Region selection with human-readable country names and dynamic discovery
             {
@@ -2470,41 +2466,10 @@ void render_ui() {
             // protocol is simply ignored — tor_mode is normalized at use
             // time (ui_render.h) — and the pick is never touched, so
             // switching protocols restores it verbatim. Same as Android.
-            const bool proto_tor = (g_app.protocol == 4);
             if (g_app.tor_mode < 0 || g_app.tor_mode > 3) g_app.tor_mode = 0;
             ImGui::Combo("Egress", &g_app.tor_mode, kEgressModes, 4);
-            if (g_app.backend == 1)
-                ImGui::TextDisabled("Psiphon is the transport; egress applies to Aether sessions only.");
-            else if (proto_tor && g_app.tor_mode == 3)
-                ImGui::TextDisabled("Psiphon chains through the Tor-only SOCKS (UpstreamProxyURL): Tor first, then Psiphon exits.");
-            else if (proto_tor)
-                ImGui::TextDisabled("Tor-only engine. Egress can chain Psiphon through it.");
-            // In TUN mode the routing to the right port happens internally,
-            // but in proxy mode the user dials the ports by hand -- tell
-            // them which one actually carries tor traffic, or they will use
-            // the tunnel's plain port and wonder why "tor" did nothing.
-            if (g_app.mode == 0) {
-                if (g_app.backend == 1)
-                    ImGui::TextDisabled(
-                        "Psiphon connects independently.");
-                else if (g_app.protocol != 4 && g_app.tor_mode == 3)
-                    ImGui::TextDisabled(
-                        "Aether connects first; Psiphon dials through Aether SOCKS.");
-                else if (g_app.tor_mode == 1)
-                    ImGui::TextDisabled(
-                        "Proxy mode: point SOCKS clients at the Tor SOCKS port below; "
-                        "the tunnel's own SOCKS/HTTP ports stay plain (un-tor'ed).");
-                else if (g_app.tor_mode == 2)
-                    ImGui::TextDisabled(
-                        "Proxy mode: use the tunnel's SOCKS/HTTP ports as usual; "
-                        "tor is the carrier underneath them.");
-                else if (g_app.protocol == 4)
-                    ImGui::TextDisabled(
-                        "Proxy mode: dial the Tor SOCKS port below; Tor-only has no WARP tunnel.");
-            }
             // All Tor knobs stay editable in every combo; the engine
-            // ignores them when no Tor is in play (to_config normalises),
-            // same ignore-not-gray policy as the egress combo above.
+            // ignores them when no Tor is in play (to_config normalises).
             ImGui::Checkbox("Tor HTTP proxy", &g_app.tor_http_enabled);
             ImGui::InputInt("Tor HTTP port", &g_app.tor_http_port);
             if (g_app.tor_http_enabled && g_app.tor_http_port == 0) g_app.tor_http_port = 1822;

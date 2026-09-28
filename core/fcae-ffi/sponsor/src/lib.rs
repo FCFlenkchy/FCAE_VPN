@@ -22,9 +22,9 @@ pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/sponsors.json";
 const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 // Each foreground icon, optional background, or optional audio clip may use up
-// to 10 MiB on disk. Decoded frame and aggregate budgets below still bound
+// to 15 MiB on disk. Decoded frame and aggregate budgets below still bound
 // memory use.
-const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
+const MAX_MEDIA_BYTES: usize = 15 * 1024 * 1024;
 // One portable sponsor canvas keeps the manifest behavior identical on every
 // platform and fits the Android card without requiring platform-specific assets.
 const MAX_WIDTH: u32 = 800;
