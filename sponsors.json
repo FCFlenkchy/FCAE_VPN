@@ -2,10 +2,27 @@
   "schema_version": 1,
   "sponsors": [
     {
-      "id": "test",
-      "title": "test",
-      "message": "HAVE FUN",
-      "destination_url": "https://github.com",
+      "id": "demo-rust",
+      "title": "Rust Tools Showcase",
+      "message": "Fast, reliable software for everyone.",
+      "media_url": "https://raw.githubusercontent.com/github/explore/main/topics/rust/rust.png",
+      "destination_url": "https://www.rust-lang.org/",
+      "enabled": true
+    },
+    {
+      "id": "demo-android",
+      "title": "Android Open Source",
+      "message": "Build experiences that belong on every device.",
+      "media_url": "https://raw.githubusercontent.com/github/explore/main/topics/android/android.png",
+      "destination_url": "https://developer.android.com/",
+      "enabled": true
+    },
+    {
+      "id": "demo-linux",
+      "title": "Linux Community",
+      "message": "Powering open technology around the world.",
+      "media_url": "https://raw.githubusercontent.com/github/explore/main/topics/linux/linux.png",
+      "destination_url": "https://www.kernel.org/",
       "enabled": true
     }
   ]

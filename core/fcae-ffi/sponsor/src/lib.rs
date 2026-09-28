@@ -33,6 +33,7 @@ const MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TOTAL_DECODED_BYTES: usize = 24 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_TOTAL_DECODED_BYTES: usize = 96 * 1024 * 1024;
+const MAX_MEDIA_WORKERS: usize = 2;
 const ROTATE_EVERY: Duration = Duration::from_secs(5);
 const MANIFEST_REFRESH_SECS: u64 = 12 * 60 * 60;
 
@@ -74,6 +75,12 @@ struct ReadyCampaign {
     width: u32,
     height: u32,
     frames: Vec<Frame>,
+}
+
+struct MediaPayload {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    cached: bool,
 }
 
 #[derive(Clone)]
@@ -134,6 +141,8 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
 }));
 static CONNECTED: AtomicBool = AtomicBool::new(false);
 static SPONSOR_PROXY: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
+static CLIENT_CACHE: Lazy<Mutex<Option<(String, reqwest::blocking::Client)>>> =
+    Lazy::new(|| Mutex::new(None));
 static MANIFEST_BUSY: AtomicBool = AtomicBool::new(false);
 static MANIFEST_FORCE_PENDING: AtomicBool = AtomicBool::new(false);
 static MEDIA_BUSY: AtomicBool = AtomicBool::new(false);
@@ -258,18 +267,19 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
     }
 
     let ready_count = ready.len();
+    let cache_dir = state.cache_dir.clone();
     state.ready = ready;
     state.current_campaign = if ready_count == 0 {
         0
     } else {
         state.current_campaign % ready_count
     };
-    prune_cache(&state.cache_dir, &campaigns);
-    state.campaigns = campaigns;
+    state.campaigns = campaigns.clone();
     state.last_error.clear();
     state.rotation_started = Instant::now();
-    drop(state);
     GENERATION.fetch_add(1, Ordering::Relaxed);
+    drop(state);
+    prune_cache(&cache_dir, &campaigns);
 }
 
 pub fn refresh_manifest_async() {
@@ -432,8 +442,8 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
     if manifest.schema_version != 1 { return Err("unsupported sponsor schema".into()); }
     if manifest.sponsors.len() > 32 { return Err("too many sponsor campaigns".into()); }
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    let mut ids = HashSet::new();
-    let mut valid = Vec::new();
+    let mut ids = HashSet::with_capacity(manifest.sponsors.len());
+    let mut valid = Vec::with_capacity(manifest.sponsors.len());
     for campaign in manifest.sponsors {
         validate_campaign(&campaign)?;
         if !ids.insert(campaign.id.clone()) { return Err("duplicate sponsor id".into()); }
@@ -506,45 +516,84 @@ fn prune_cache(cache_dir: &Path, campaigns: &[Campaign]) {
 }
 
 fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign> {
-    prune_cache(cache_dir, campaigns);
-    let mut ready = Vec::new();
+    let mut ready = Vec::with_capacity(campaigns.len());
     let mut decoded_total = 0usize;
-    for campaign in campaigns {
-        let decoded = campaign.media_url.as_ref().and_then(|_| {
-            let path = cache_dir.join(cache_name(campaign));
-            let cached = fs::read(&path).ok()
-                .and_then(|bytes| decode(campaign.clone(), &bytes).ok());
-            let decoded = cached.or_else(|| {
-                let bytes = download_media(campaign).ok()?;
-                let decoded = decode(campaign.clone(), &bytes).ok()?;
-                let _ = fs::write(&path, &bytes);
-                Some(decoded)
+    let network_client = campaigns.iter().any(|campaign| campaign.media_url.is_some())
+        .then(|| client().ok())
+        .flatten();
+
+    for batch in campaigns.chunks(MAX_MEDIA_WORKERS) {
+        let payloads: Vec<Option<MediaPayload>> = thread::scope(|scope| {
+            batch.iter().map(|campaign| {
+                let client = network_client.as_ref();
+                scope.spawn(move || load_media_bytes(campaign, cache_dir, client))
+            }).map(|worker| worker.join().ok().flatten()).collect()
+        });
+
+        for (campaign, payload) in batch.iter().zip(payloads) {
+            let decoded = payload.and_then(|payload| {
+                decode_media(campaign, payload, network_client.as_ref())
             });
-            if decoded.is_none() { let _ = fs::remove_file(path); }
-            decoded
-        });
-        if let Some(decoded) = decoded {
-            let decoded_bytes = decoded.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
-            if decoded_total.saturating_add(decoded_bytes) <= MAX_TOTAL_DECODED_BYTES {
-                decoded_total += decoded_bytes;
-                log::info!("[sponsor] campaign {} media ready", campaign.id);
-                ready.push(decoded);
-                continue;
+            if let Some(decoded) = decoded {
+                let decoded_bytes = decoded.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
+                if decoded_total.saturating_add(decoded_bytes) <= MAX_TOTAL_DECODED_BYTES {
+                    decoded_total += decoded_bytes;
+                    log::info!("[sponsor] campaign {} media ready", campaign.id);
+                    ready.push(decoded);
+                    continue;
+                }
+                log::warn!("[sponsor] campaign {} media exceeds the decoded-size budget; using text fallback", campaign.id);
+            } else if campaign.media_url.is_some() {
+                log::warn!("[sponsor] campaign {} media unavailable; using text fallback", campaign.id);
+            } else {
+                log::info!("[sponsor] campaign {} is text-only", campaign.id);
             }
-            log::warn!("[sponsor] campaign {} media exceeds the decoded-size budget; using text fallback", campaign.id);
-        } else if campaign.media_url.is_some() {
-            log::warn!("[sponsor] campaign {} media unavailable; using text fallback", campaign.id);
-        } else {
-            log::info!("[sponsor] campaign {} is text-only", campaign.id);
+            ready.push(ReadyCampaign {
+                campaign: campaign.clone(),
+                width: 0,
+                height: 0,
+                frames: Vec::new(),
+            });
         }
-        ready.push(ReadyCampaign {
-            campaign: campaign.clone(),
-            width: 0,
-            height: 0,
-            frames: Vec::new(),
-        });
     }
     ready
+}
+
+fn load_media_bytes(
+    campaign: &Campaign,
+    cache_dir: &Path,
+    client: Option<&reqwest::blocking::Client>,
+) -> Option<MediaPayload> {
+    if campaign.media_url.is_none() { return None; }
+    let path = cache_dir.join(cache_name(campaign));
+    if let Ok(bytes) = fs::read(&path) {
+        return Some(MediaPayload { path, bytes, cached: true });
+    }
+    let client = client?;
+    let bytes = download_media(client, campaign).ok()?;
+    Some(MediaPayload { path, bytes, cached: false })
+}
+
+fn decode_media(
+    campaign: &Campaign,
+    payload: MediaPayload,
+    client: Option<&reqwest::blocking::Client>,
+) -> Option<ReadyCampaign> {
+    let MediaPayload { path, mut bytes, mut cached } = payload;
+    let mut decoded = decode(campaign.clone(), &bytes).ok();
+    if decoded.is_none() && cached {
+        let _ = fs::remove_file(&path);
+        let client = client?;
+        bytes = download_media(client, campaign).ok()?;
+        cached = false;
+        decoded = decode(campaign.clone(), &bytes).ok();
+    }
+    if decoded.is_some() {
+        if !cached { let _ = fs::write(&path, &bytes); }
+    } else {
+        let _ = fs::remove_file(path);
+    }
+    decoded
 }
 
 fn cache_name(c: &Campaign) -> String {
@@ -553,16 +602,21 @@ fn cache_name(c: &Campaign) -> String {
     format!("{}-{:016x}.media", c.id, hash.finish())
 }
 
-fn download_media(c: &Campaign) -> Result<Vec<u8>, String> {
+fn download_media(client: &reqwest::blocking::Client, c: &Campaign) -> Result<Vec<u8>, String> {
     let url = c.media_url.as_deref().ok_or_else(|| "sponsor has no media URL".to_string())?;
-    let response = client()?.get(url).send().map_err(|e| e.to_string())?;
+    let response = client.get(url).send().map_err(|e| e.to_string())?;
     if !response.status().is_success() { return Err(format!("media HTTP {}", response.status())); }
     read_limited(response, MAX_MEDIA_BYTES)
 }
 
 fn read_limited(mut response: reqwest::blocking::Response, limit: usize) -> Result<Vec<u8>, String> {
-    if response.content_length().is_some_and(|length| length > limit as u64) { return Err("response too large".into()); }
-    let mut bytes = Vec::new();
+    let content_length = response.content_length();
+    if content_length.is_some_and(|length| length > limit as u64) { return Err("response too large".into()); }
+    let reserve = content_length
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0)
+        .min(limit);
+    let mut bytes = Vec::with_capacity(reserve);
     response.by_ref().take(limit as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     if bytes.len() > limit { return Err("response too large".into()); }
     Ok(bytes)
@@ -628,12 +682,19 @@ fn validate_dimensions(width: u32, height: u32, frames: usize) -> Result<(), Str
 }
 
 fn client() -> Result<reqwest::blocking::Client, String> {
-    let proxy = SPONSOR_PROXY
+    let proxy_url = SPONSOR_PROXY
         .read()
         .clone()
         .ok_or_else(|| "sponsor network is unavailable without a connected tunnel".to_string())?;
-    let proxy = reqwest::Proxy::all(&proxy).map_err(|e| format!("invalid sponsor tunnel proxy: {e}"))?;
-    reqwest::blocking::Client::builder()
+    let mut cached = CLIENT_CACHE.lock();
+    if let Some((cached_proxy, client)) = cached.as_ref()
+        && cached_proxy == &proxy_url
+    {
+        return Ok(client.clone());
+    }
+    let proxy = reqwest::Proxy::all(&proxy_url)
+        .map_err(|e| format!("invalid sponsor tunnel proxy: {e}"))?;
+    let client = reqwest::blocking::Client::builder()
         .proxy(proxy)
         .timeout(Duration::from_secs(12))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -647,5 +708,7 @@ fn client() -> Result<reqwest::blocking::Client, String> {
         }))
         .user_agent("FCAE-VPN sponsor client")
         .build()
-        .map_err(|e| format!("cannot create sponsor tunnel client: {e}"))
+        .map_err(|e| format!("cannot create sponsor tunnel client: {e}"))?;
+    *cached = Some((proxy_url, client.clone()));
+    Ok(client)
 }
