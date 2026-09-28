@@ -59,6 +59,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var uploadRateText: TextView
     private lateinit var uploadTotalText: TextView
     private lateinit var rttText: TextView
+    private lateinit var connectionInfoButton: MaterialButton
     private lateinit var peerText: TextView
     private lateinit var logText: TextView
     private lateinit var logScroll: ScrollView
@@ -71,11 +72,13 @@ class MainActivity : AppCompatActivity() {
     private var updateResultDialog: androidx.appcompat.app.AlertDialog? = null
     private lateinit var sponsorCard: android.view.View
     private lateinit var sponsorImage: android.widget.ImageView
+    private lateinit var sponsorBackgroundImage: android.widget.ImageView
     private lateinit var sponsorMessage: android.widget.TextView
     private lateinit var sponsorTitle: TextView
     private var sponsorGeneration = -1L
     private var sponsorDestination = ""
     private var sponsorBitmap: android.graphics.Bitmap? = null
+    private var sponsorBackgroundBitmap: android.graphics.Bitmap? = null
     private var sponsorConnected = false
     private var sponsorAnimated = false
     private var sponsorCampaignCount = 0
@@ -593,6 +596,30 @@ class MainActivity : AppCompatActivity() {
         try { NativeEngine.nativeSponsorRefreshManifestAsync() } catch (_: Throwable) {}
     }
 
+    private fun bitmapFromRgba(
+        current: android.graphics.Bitmap?,
+        width: Int,
+        height: Int,
+        rgba: ByteArray,
+    ): android.graphics.Bitmap? {
+        if (width <= 0 || height <= 0
+            || rgba.size.toLong() != width.toLong() * height.toLong() * 4L) return null
+        val bitmap = if (current != null && current.width == width && current.height == height) current else {
+            current?.recycle()
+            android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+        }
+        val logicalStride = width * 4
+        val pixels = if (bitmap.rowBytes == logicalStride) rgba else {
+            ByteArray(bitmap.rowBytes * height).also { padded ->
+                for (row in 0 until height) {
+                    rgba.copyInto(padded, row * bitmap.rowBytes, row * logicalStride, (row + 1) * logicalStride)
+                }
+            }
+        }
+        bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(pixels))
+        return bitmap
+    }
+
     private val sponsorPoll = object : Runnable {
         override fun run() {
             if (!inForeground || !::sponsorCard.isInitialized) return
@@ -622,39 +649,60 @@ class MainActivity : AppCompatActivity() {
                                 sponsorDestination = ""
                                 sponsorAnimated = false
                                 sponsorCampaignCount = 0
+                                sponsorBackgroundImage.visibility = android.view.View.GONE
                             } else {
                                 sponsorAnimated = card.animated
                                 sponsorCampaignCount = card.campaignCount
+                                val textColor = if (card.textColor != 0) card.textColor else Color.WHITE
+                                val cardColor = if (card.cardColor != 0) card.cardColor else Color.parseColor("#FF142A44")
+                                sponsorTitle.setTextColor(textColor)
+                                sponsorMessage.setTextColor(textColor)
+                                sponsorCard.backgroundTintList = ColorStateList.valueOf(cardColor)
+                                val textGravity = when (card.textAlign) {
+                                    1 -> android.view.Gravity.START
+                                    2 -> android.view.Gravity.END
+                                    else -> android.view.Gravity.CENTER
+                                }
+                                sponsorTitle.gravity = textGravity
+                                sponsorMessage.gravity = textGravity
+                                val imageScale = card.imageScale.coerceIn(50, 160)
+                                sponsorImage.layoutParams = sponsorImage.layoutParams.apply {
+                                    height = (120 * imageScale / 100f).toInt()
+                                }
+                                sponsorImage.scaleType = if (card.imageFit == 1) {
+                                    android.widget.ImageView.ScaleType.CENTER_CROP
+                                } else {
+                                    android.widget.ImageView.ScaleType.FIT_CENTER
+                                }
                                 sponsorTitle.text = card.title
                                 sponsorMessage.text = card.message
                                 sponsorMessage.visibility = if (card.message.isBlank()) android.view.View.GONE else android.view.View.VISIBLE
                                 sponsorDestination = card.destinationUrl
                                 if (card.generation != sponsorGeneration) {
-                                    if (card.rgba.isNotEmpty() && card.width > 0 && card.height > 0
-                                        && card.rgba.size.toLong() == card.width.toLong() * card.height.toLong() * 4L) {
-                                        val current = sponsorBitmap
-                                        val bitmap = if (current != null && current.width == card.width
-                                            && current.height == card.height) current else {
-                                            current?.recycle()
-                                            android.graphics.Bitmap.createBitmap(
-                                                card.width, card.height, android.graphics.Bitmap.Config.ARGB_8888
-                                            ).also { sponsorBitmap = it }
-                                        }
-                                        val logicalStride = card.width * 4
-                                        val pixels = if (bitmap.rowBytes == logicalStride) card.rgba else {
-                                            ByteArray(bitmap.rowBytes * card.height).also { padded ->
-                                                for (row in 0 until card.height) {
-                                                    card.rgba.copyInto(padded, row * bitmap.rowBytes, row * logicalStride, (row + 1) * logicalStride)
-                                                }
-                                            }
-                                        }
-                                        bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(pixels))
+                                    val bitmap = bitmapFromRgba(sponsorBitmap, card.width, card.height, card.rgba)
+                                    if (bitmap != null) {
+                                        sponsorBitmap = bitmap
                                         sponsorImage.setImageBitmap(bitmap)
                                         sponsorImage.visibility = android.view.View.VISIBLE
                                         sponsorImage.invalidate()
                                     } else {
                                         sponsorImage.setImageDrawable(null)
                                         sponsorImage.visibility = android.view.View.GONE
+                                    }
+                                    val background = bitmapFromRgba(
+                                        sponsorBackgroundBitmap,
+                                        card.backgroundWidth,
+                                        card.backgroundHeight,
+                                        card.backgroundRgba,
+                                    )
+                                    if (background != null) {
+                                        sponsorBackgroundBitmap = background
+                                        sponsorBackgroundImage.setImageBitmap(background)
+                                        sponsorBackgroundImage.visibility = android.view.View.VISIBLE
+                                        sponsorBackgroundImage.invalidate()
+                                    } else {
+                                        sponsorBackgroundImage.setImageDrawable(null)
+                                        sponsorBackgroundImage.visibility = android.view.View.GONE
                                     }
                                     sponsorGeneration = card.generation
                                 }
@@ -669,6 +717,7 @@ class MainActivity : AppCompatActivity() {
                             sponsorDestination = ""
                             sponsorAnimated = false
                             sponsorCampaignCount = 0
+                            sponsorBackgroundImage.visibility = android.view.View.GONE
                         } finally {
                             sponsorPollBusy.set(false)
                         }
@@ -706,15 +755,10 @@ class MainActivity : AppCompatActivity() {
         uploadRateText = findViewById(R.id.uploadRateText)
         uploadTotalText = findViewById(R.id.uploadTotalText)
         rttText = findViewById(R.id.rttText)
+        connectionInfoButton = findViewById(R.id.connectionInfoButton)
         peerText = findViewById(R.id.peerText)
-        peerText.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) {
-                peerText.visibility = if (s.isNullOrBlank()) android.view.View.GONE else android.view.View.VISIBLE
-            }
-        })
-        peerText.visibility = if (peerText.text.isNullOrBlank()) android.view.View.GONE else android.view.View.VISIBLE
+        peerText.visibility = android.view.View.GONE
+        connectionInfoButton.setOnClickListener { showConnectionInfoDialog() }
         logText = findViewById(R.id.logText)
         logScroll = findViewById(R.id.logScroll)
         btnConnect = findViewById(R.id.btnConnect)
@@ -724,6 +768,7 @@ class MainActivity : AppCompatActivity() {
         btnCheckUpdates = findViewById(R.id.btnCheckUpdates)
         sponsorCard = findViewById(R.id.sponsorCard)
         sponsorImage = findViewById(R.id.sponsorImage)
+        sponsorBackgroundImage = findViewById(R.id.sponsorBackgroundImage)
         sponsorMessage = findViewById(R.id.sponsorMessage)
         sponsorTitle = findViewById(R.id.sponsorTitle)
         findViewById<android.view.View>(R.id.sponsorRefresh).setOnClickListener {
@@ -2794,6 +2839,35 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun showConnectionInfoDialog() {
+        val endpointText = peerText.text?.toString()?.trim().orEmpty()
+        val status = statusText.text?.toString()?.trim().orEmpty().ifEmpty { "UNKNOWN" }
+        val details = buildString {
+            append("Status: ").append(status)
+            if (endpointText.isNotEmpty()) {
+                append("\n\n").append(endpointText)
+            } else {
+                append("\n\nNo active tunnel endpoints.")
+            }
+        }
+        val density = resources.displayMetrics.density
+        val body = TextView(this).apply {
+            text = details
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            setPadding((24 * density).toInt(), (8 * density).toInt(), (24 * density).toInt(), 0)
+        }
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Connection info")
+            .setView(ScrollView(this).apply { addView(body) })
+            .setPositiveButton("Close", null)
+            .create()
+        dialog.show()
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.CYAN)
     }
 
     private fun showAboutDialog() {

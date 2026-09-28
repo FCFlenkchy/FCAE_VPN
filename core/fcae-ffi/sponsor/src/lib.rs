@@ -34,6 +34,9 @@ const MAX_TOTAL_DECODED_BYTES: usize = 24 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_TOTAL_DECODED_BYTES: usize = 96 * 1024 * 1024;
 const MAX_MEDIA_WORKERS: usize = 2;
+const DEFAULT_TEXT_COLOR: u32 = 0xFFFFFFFF;
+const DEFAULT_CARD_COLOR: u32 = 0xFF142A44;
+const DEFAULT_IMAGE_SCALE: u32 = 100;
 const ROTATE_EVERY: Duration = Duration::from_secs(5);
 const MANIFEST_REFRESH_SECS: u64 = 12 * 60 * 60;
 
@@ -52,6 +55,18 @@ struct Campaign {
     message: Option<String>,
     #[serde(default)]
     media_url: Option<String>,
+    #[serde(default)]
+    background_url: Option<String>,
+    #[serde(default)]
+    text_color: Option<String>,
+    #[serde(default)]
+    card_color: Option<String>,
+    #[serde(default)]
+    text_align: Option<String>,
+    #[serde(default)]
+    image_fit: Option<String>,
+    #[serde(default)]
+    image_scale: Option<u32>,
     destination_url: String,
     #[serde(default = "enabled")]
     enabled: bool,
@@ -75,12 +90,25 @@ struct ReadyCampaign {
     width: u32,
     height: u32,
     frames: Vec<Frame>,
+    background_width: u32,
+    background_height: u32,
+    background_rgba: Arc<Vec<u8>>,
+    text_color: u32,
+    card_color: u32,
+    text_align: u8,
+    image_fit: u8,
+    image_scale: u32,
 }
 
 struct MediaPayload {
     path: PathBuf,
     bytes: Vec<u8>,
     cached: bool,
+}
+
+struct CampaignPayload {
+    media: Option<MediaPayload>,
+    background: Option<MediaPayload>,
 }
 
 #[derive(Clone)]
@@ -94,6 +122,14 @@ pub struct SponsorFrame {
     pub campaign_count: u32,
     pub animated: bool,
     pub rgba: Arc<Vec<u8>>,
+    pub background_width: u32,
+    pub background_height: u32,
+    pub background_rgba: Arc<Vec<u8>>,
+    pub text_color: u32,
+    pub card_color: u32,
+    pub text_align: u8,
+    pub image_fit: u8,
+    pub image_scale: u32,
     pub generation: u64,
 }
 
@@ -249,6 +285,12 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
         if let Some(existing) = previous.iter().find(|candidate| {
             candidate.campaign.id == campaign.id
                 && candidate.campaign.media_url == campaign.media_url
+                && candidate.campaign.background_url == campaign.background_url
+                && candidate.campaign.text_color == campaign.text_color
+                && candidate.campaign.card_color == campaign.card_color
+                && candidate.campaign.text_align == campaign.text_align
+                && candidate.campaign.image_fit == campaign.image_fit
+                && candidate.campaign.image_scale == campaign.image_scale
                 && candidate.campaign.destination_url == campaign.destination_url
                 && candidate.campaign.title == campaign.title
                 && candidate.campaign.message == campaign.message
@@ -257,12 +299,7 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
         } else {
             // Publish the text card immediately. Media decoding is asynchronous
             // and replaces this fallback when it succeeds.
-            ready.push(ReadyCampaign {
-                campaign: campaign.clone(),
-                width: 0,
-                height: 0,
-                frames: Vec::new(),
-            });
+            ready.push(empty_ready(campaign));
         }
     }
 
@@ -424,6 +461,14 @@ pub fn current_frame() -> Option<SponsorFrame> {
         campaign_count: ready_count.try_into().unwrap_or(u32::MAX),
         animated: ready.frames.len() > 1,
         rgba,
+        background_width: ready.background_width,
+        background_height: ready.background_height,
+        background_rgba: ready.background_rgba.clone(),
+        text_color: ready.text_color,
+        card_color: ready.card_color,
+        text_align: ready.text_align,
+        image_fit: ready.image_fit,
+        image_scale: ready.image_scale,
         generation,
     })
 }
@@ -460,6 +505,30 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
                 log::warn!("[sponsor] campaign {} has invalid optional media URL; using text fallback", campaign.id);
                 campaign.media_url = None;
             }
+            if campaign.background_url.as_ref().is_some_and(|url| !valid_media_url(url)) {
+                log::warn!("[sponsor] campaign {} has invalid optional background URL; using the card color", campaign.id);
+                campaign.background_url = None;
+            }
+            if campaign.text_color.as_ref().is_some_and(|color| !valid_color(color)) {
+                log::warn!("[sponsor] campaign {} has invalid text color; using the default", campaign.id);
+                campaign.text_color = None;
+            }
+            if campaign.card_color.as_ref().is_some_and(|color| !valid_color(color)) {
+                log::warn!("[sponsor] campaign {} has invalid card color; using the default", campaign.id);
+                campaign.card_color = None;
+            }
+            if campaign.text_align.as_ref().is_some_and(|align| !valid_text_align(align)) {
+                log::warn!("[sponsor] campaign {} has invalid text alignment; using centered text", campaign.id);
+                campaign.text_align = None;
+            }
+            if campaign.image_fit.as_ref().is_some_and(|fit| !valid_image_fit(fit)) {
+                log::warn!("[sponsor] campaign {} has invalid image fit; using contain", campaign.id);
+                campaign.image_fit = None;
+            }
+            if campaign.image_scale.is_some_and(|scale| !(50..=160).contains(&scale)) {
+                log::warn!("[sponsor] campaign {} has invalid image scale; using 100 percent", campaign.id);
+                campaign.image_scale = None;
+            }
             valid.push(campaign);
         }
     }
@@ -495,20 +564,74 @@ fn valid_media_url(url: &str) -> bool {
     !url.is_empty() && url.len() <= 2_048 && url.is_ascii() && is_https(url)
 }
 
+fn valid_color(color: &str) -> bool {
+    (color.len() == 7 || color.len() == 9)
+        && color.as_bytes().first() == Some(&b'#')
+        && color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn color_value(color: Option<&str>, default: u32) -> u32 {
+    let Some(color) = color.filter(|color| valid_color(color)) else { return default; };
+    let value = u32::from_str_radix(&color[1..], 16).unwrap_or(0);
+    if color.len() == 7 { 0xFF00_0000 | value } else { value }
+}
+
+fn text_align_value(value: Option<&str>) -> u8 {
+    match value {
+        Some("left") => 1,
+        Some("right") => 2,
+        _ => 0,
+    }
+}
+
+fn image_fit_value(value: Option<&str>) -> u8 {
+    if value == Some("cover") { 1 } else { 0 }
+}
+
+fn image_scale_value(value: Option<u32>) -> u32 {
+    value.filter(|scale| (50..=160).contains(scale)).unwrap_or(DEFAULT_IMAGE_SCALE)
+}
+
+fn valid_text_align(value: &str) -> bool {
+    matches!(value, "left" | "center" | "right")
+}
+
+fn valid_image_fit(value: &str) -> bool {
+    matches!(value, "contain" | "cover")
+}
+
 fn is_https(url: &str) -> bool {
     url.starts_with("https://") && !url.bytes().any(|b| matches!(b, b'\r' | b'\n' | b'\0'))
 }
 
+fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
+    ReadyCampaign {
+        campaign: campaign.clone(),
+        width: 0,
+        height: 0,
+        frames: Vec::new(),
+        background_width: 0,
+        background_height: 0,
+        background_rgba: Arc::new(Vec::new()),
+        text_color: color_value(campaign.text_color.as_deref(), DEFAULT_TEXT_COLOR),
+        card_color: color_value(campaign.card_color.as_deref(), DEFAULT_CARD_COLOR),
+        text_align: text_align_value(campaign.text_align.as_deref()),
+        image_fit: image_fit_value(campaign.image_fit.as_deref()),
+        image_scale: image_scale_value(campaign.image_scale),
+    }
+}
+
 fn prune_cache(cache_dir: &Path, campaigns: &[Campaign]) {
     let _ = fs::create_dir_all(cache_dir);
-    let keep: HashSet<String> = campaigns.iter()
-        .filter(|campaign| campaign.media_url.is_some())
-        .map(cache_name)
-        .collect();
+    let mut keep = HashSet::with_capacity(campaigns.len() * 2);
+    for campaign in campaigns {
+        if campaign.media_url.is_some() { keep.insert(cache_name(campaign)); }
+        if campaign.background_url.is_some() { keep.insert(background_cache_name(campaign)); }
+    }
     if let Ok(entries) = fs::read_dir(cache_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".media") && !keep.contains(&name) {
+            if (name.ends_with(".media") || name.ends_with(".background")) && !keep.contains(&name) {
                 let _ = fs::remove_file(entry.path());
             }
         }
@@ -518,64 +641,116 @@ fn prune_cache(cache_dir: &Path, campaigns: &[Campaign]) {
 fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign> {
     let mut ready = Vec::with_capacity(campaigns.len());
     let mut decoded_total = 0usize;
-    let network_client = campaigns.iter().any(|campaign| campaign.media_url.is_some())
-        .then(|| client().ok())
-        .flatten();
+    let network_client = campaigns.iter().any(|campaign| {
+        campaign.media_url.is_some() || campaign.background_url.is_some()
+    }).then(|| client().ok()).flatten();
 
     for batch in campaigns.chunks(MAX_MEDIA_WORKERS) {
-        let payloads: Vec<Option<MediaPayload>> = thread::scope(|scope| {
+        let payloads: Vec<Option<CampaignPayload>> = thread::scope(|scope| {
             batch.iter().map(|campaign| {
                 let client = network_client.as_ref();
-                scope.spawn(move || load_media_bytes(campaign, cache_dir, client))
+                scope.spawn(move || load_campaign_payload(campaign, cache_dir, client))
             }).map(|worker| worker.join().ok().flatten()).collect()
         });
 
         for (campaign, payload) in batch.iter().zip(payloads) {
-            let decoded = payload.and_then(|payload| {
-                decode_media(campaign, payload, network_client.as_ref())
-            });
-            if let Some(decoded) = decoded {
-                let decoded_bytes = decoded.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
-                if decoded_total.saturating_add(decoded_bytes) <= MAX_TOTAL_DECODED_BYTES {
-                    decoded_total += decoded_bytes;
-                    log::info!("[sponsor] campaign {} media ready", campaign.id);
-                    ready.push(decoded);
-                    continue;
-                }
-                log::warn!("[sponsor] campaign {} media exceeds the decoded-size budget; using text fallback", campaign.id);
-            } else if campaign.media_url.is_some() {
-                log::warn!("[sponsor] campaign {} media unavailable; using text fallback", campaign.id);
-            } else {
-                log::info!("[sponsor] campaign {} is text-only", campaign.id);
+            let (media, background) = match payload {
+                Some(payload) => (
+                    payload.media.and_then(|payload| {
+                        let url = campaign.media_url.as_deref()?;
+                        decode_payload(campaign, url, payload, network_client.as_ref())
+                    }),
+                    payload.background.and_then(|payload| {
+                        let url = campaign.background_url.as_deref()?;
+                        decode_background(campaign, url, payload, network_client.as_ref())
+                    }),
+                ),
+                None => (None, None),
+            };
+            if campaign.media_url.is_some() && media.is_none() {
+                log::warn!("[sponsor] campaign {} media unavailable; using fallback", campaign.id);
             }
-            ready.push(ReadyCampaign {
-                campaign: campaign.clone(),
-                width: 0,
-                height: 0,
-                frames: Vec::new(),
-            });
+            if campaign.background_url.is_some() && background.is_none() {
+                log::warn!("[sponsor] campaign {} background unavailable; using card color", campaign.id);
+            }
+
+            let mut candidate = empty_ready(campaign);
+            if let Some(media) = media {
+                candidate.width = media.width;
+                candidate.height = media.height;
+                candidate.frames = media.frames;
+            }
+            if let Some(background) = background {
+                candidate.background_width = background.width;
+                candidate.background_height = background.height;
+                candidate.background_rgba = background.rgba;
+            }
+            let media_bytes = candidate.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
+            let background_bytes = candidate.background_rgba.len();
+            if decoded_total.saturating_add(media_bytes).saturating_add(background_bytes)
+                > MAX_TOTAL_DECODED_BYTES
+            {
+                if background_bytes != 0 {
+                    log::warn!("[sponsor] campaign {} background exceeds the decoded-size budget; using card color", campaign.id);
+                    candidate.background_width = 0;
+                    candidate.background_height = 0;
+                    candidate.background_rgba = Arc::new(Vec::new());
+                }
+            }
+            let retained_bytes = candidate.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>()
+                + candidate.background_rgba.len();
+            if decoded_total.saturating_add(retained_bytes) <= MAX_TOTAL_DECODED_BYTES {
+                decoded_total += retained_bytes;
+                if retained_bytes != 0 {
+                    log::info!("[sponsor] campaign {} media ready", campaign.id);
+                } else {
+                    log::info!("[sponsor] campaign {} is text-only", campaign.id);
+                }
+                ready.push(candidate);
+            } else {
+                log::warn!("[sponsor] campaign {} media exceeds the decoded-size budget; using text fallback", campaign.id);
+                ready.push(empty_ready(campaign));
+            }
         }
     }
     ready
 }
 
-fn load_media_bytes(
+fn load_campaign_payload(
     campaign: &Campaign,
     cache_dir: &Path,
     client: Option<&reqwest::blocking::Client>,
+) -> Option<CampaignPayload> {
+    let media = load_payload(
+        campaign.media_url.as_deref(),
+        cache_dir.join(cache_name(campaign)),
+        client,
+    );
+    let background = load_payload(
+        campaign.background_url.as_deref(),
+        cache_dir.join(background_cache_name(campaign)),
+        client,
+    );
+    if media.is_none() && background.is_none() { None } else { Some(CampaignPayload { media, background }) }
+}
+
+fn load_payload(
+    url: Option<&str>,
+    path: PathBuf,
+    client: Option<&reqwest::blocking::Client>,
 ) -> Option<MediaPayload> {
-    if campaign.media_url.is_none() { return None; }
-    let path = cache_dir.join(cache_name(campaign));
+    let url = url?;
     if let Ok(bytes) = fs::read(&path) {
         return Some(MediaPayload { path, bytes, cached: true });
     }
     let client = client?;
-    let bytes = download_media(client, campaign).ok()?;
+    let bytes = download_media(client, url).ok()?;
     Some(MediaPayload { path, bytes, cached: false })
 }
 
-fn decode_media(
+fn decode_payload(
     campaign: &Campaign,
+    url: &str,
     payload: MediaPayload,
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<ReadyCampaign> {
@@ -584,7 +759,7 @@ fn decode_media(
     if decoded.is_none() && cached {
         let _ = fs::remove_file(&path);
         let client = client?;
-        bytes = download_media(client, campaign).ok()?;
+        bytes = download_media(client, url).ok()?;
         cached = false;
         decoded = decode(campaign.clone(), &bytes).ok();
     }
@@ -596,14 +771,42 @@ fn decode_media(
     decoded
 }
 
-fn cache_name(c: &Campaign) -> String {
-    let mut hash = DefaultHasher::new();
-    c.media_url.hash(&mut hash);
-    format!("{}-{:016x}.media", c.id, hash.finish())
+fn decode_background(
+    campaign: &Campaign,
+    url: &str,
+    payload: MediaPayload,
+    client: Option<&reqwest::blocking::Client>,
+) -> Option<BackgroundImage> {
+    let decoded = decode_payload(campaign, url, payload, client)?;
+    let frame = decoded.frames.first()?;
+    Some(BackgroundImage {
+        width: decoded.width,
+        height: decoded.height,
+        rgba: frame.rgba.clone(),
+    })
 }
 
-fn download_media(client: &reqwest::blocking::Client, c: &Campaign) -> Result<Vec<u8>, String> {
-    let url = c.media_url.as_deref().ok_or_else(|| "sponsor has no media URL".to_string())?;
+struct BackgroundImage {
+    width: u32,
+    height: u32,
+    rgba: Arc<Vec<u8>>,
+}
+
+fn cache_name_for(campaign: &Campaign, url: Option<&str>, suffix: &str) -> String {
+    let mut hash = DefaultHasher::new();
+    url.hash(&mut hash);
+    format!("{}-{:016x}.{}", campaign.id, hash.finish(), suffix)
+}
+
+fn cache_name(campaign: &Campaign) -> String {
+    cache_name_for(campaign, campaign.media_url.as_deref(), "media")
+}
+
+fn background_cache_name(campaign: &Campaign) -> String {
+    cache_name_for(campaign, campaign.background_url.as_deref(), "background")
+}
+
+fn download_media(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
     let response = client.get(url).send().map_err(|e| e.to_string())?;
     if !response.status().is_success() { return Err(format!("media HTTP {}", response.status())); }
     read_limited(response, MAX_MEDIA_BYTES)
@@ -646,7 +849,20 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             let millis = if denom == 0 { 100 } else { (numer / denom).clamp(20, 10_000) };
             Frame { rgba: Arc::new(frame.into_buffer().into_raw()), delay: Duration::from_millis(millis as u64) }
         }).collect();
-        Ok(ReadyCampaign { campaign, width, height, frames })
+        Ok(ReadyCampaign {
+            campaign,
+            width,
+            height,
+            frames,
+            background_width: 0,
+            background_height: 0,
+            background_rgba: Arc::new(Vec::new()),
+            text_color: DEFAULT_TEXT_COLOR,
+            card_color: DEFAULT_CARD_COLOR,
+            text_align: 0,
+            image_fit: 0,
+            image_scale: DEFAULT_IMAGE_SCALE,
+        })
     } else {
         if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP) {
             return Err("unsupported sponsor media".into());
@@ -662,6 +878,14 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             width: rgba.width(),
             height: rgba.height(),
             frames: vec![Frame { rgba: Arc::new(rgba.into_raw()), delay: ROTATE_EVERY }],
+            background_width: 0,
+            background_height: 0,
+            background_rgba: Arc::new(Vec::new()),
+            text_color: DEFAULT_TEXT_COLOR,
+            card_color: DEFAULT_CARD_COLOR,
+            text_align: 0,
+            image_fit: 0,
+            image_scale: DEFAULT_IMAGE_SCALE,
         })
     }
 }

@@ -50,11 +50,13 @@ static char s_update_notes[1024] = {};
 static char s_update_dl_url[512] = {};
 static bool s_update_popup_open = false;
 static bool s_about_popup_open = false;
+static bool s_connection_info_popup_open = false;
 static char s_update_date[32] = {};
 static std::chrono::steady_clock::time_point s_check_start_time = std::chrono::steady_clock::now();
 static bool s_update_in_progress = false;
 static FcaeSponsorInfo s_sponsor = {};
 static std::vector<uint8_t> s_sponsor_rgba;
+static std::vector<uint8_t> s_sponsor_background_rgba;
 static uint64_t s_sponsor_loaded_generation = 0;
 static bool s_sponsor_started = false;
 static uint64_t s_sponsor_logged_generation = 0;
@@ -101,24 +103,38 @@ static void poll_sponsor() {
     if (card_changed) ui_request_redraw();
     if (!card_available) {
         s_sponsor_rgba.clear();
+        s_sponsor_background_rgba.clear();
         s_sponsor_loaded_generation = 0;
     } else if (info.generation != s_sponsor_loaded_generation) {
-        if (info.rgba_size == 0) {
+        try {
+            s_sponsor_rgba.resize(info.rgba_size);
+            s_sponsor_background_rgba.resize(info.background_rgba_size);
+        } catch (const std::bad_alloc&) {
             s_sponsor_rgba.clear();
+            s_sponsor_background_rgba.clear();
+            return;
+        }
+        const bool foreground_ok = info.rgba_size == 0
+            || fcae_sponsor_copy_rgba(s_sponsor_rgba.data(), s_sponsor_rgba.size()) == FCAE_OK;
+        const bool background_ok = info.background_rgba_size == 0
+            || fcae_sponsor_copy_background_rgba(
+                s_sponsor_background_rgba.data(), s_sponsor_background_rgba.size()) == FCAE_OK;
+        if (foreground_ok && background_ok) {
             s_sponsor_loaded_generation = info.generation;
         } else {
-            try {
-                s_sponsor_rgba.resize(info.rgba_size);
-            } catch (const std::bad_alloc&) {
-                s_sponsor_rgba.clear();
-                return;
-            }
-            if (fcae_sponsor_copy_rgba(s_sponsor_rgba.data(), s_sponsor_rgba.size()) == FCAE_OK)
-                s_sponsor_loaded_generation = info.generation;
-            else
-                s_sponsor_rgba.clear();
+            s_sponsor_rgba.clear();
+            s_sponsor_background_rgba.clear();
         }
     }
+}
+
+static ImVec4 sponsor_color(uint32_t packed, ImVec4 fallback) {
+    if (packed == 0) return fallback;
+    return ImVec4(
+        ((packed >> 16) & 0xFF) / 255.0f,
+        ((packed >> 8) & 0xFF) / 255.0f,
+        (packed & 0xFF) / 255.0f,
+        ((packed >> 24) & 0xFF) / 255.0f);
 }
 
 // What the last painted frame looked like / when it was painted.
@@ -259,6 +275,7 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, s_update_error_kind);
     h = fnv_cstr(h, s_update_raw_body);
     h = fnv_value(h, s_about_popup_open);
+    h = fnv_value(h, s_connection_info_popup_open);
     h = fnv_cstr(h, s_update_status);
     h = fnv_cstr(h, s_update_latest);
     h = fnv_cstr(h, s_update_notes);
@@ -1846,31 +1863,73 @@ void render_ui() {
                 ImGui::SetTooltip("Refresh sponsor manifest");
             if (s_sponsor.available) {
                 ImTextureID texture = ImTextureID{};
+                ImTextureID background_texture = ImTextureID{};
                 if (!s_sponsor_rgba.empty() && s_sponsor.width > 0 && s_sponsor.height > 0
                         && s_sponsor_loaded_generation == s_sponsor.generation) {
                     texture = sponsor_texture_update(
                         s_sponsor_rgba.data(), (int)s_sponsor.width, (int)s_sponsor.height,
-                        s_sponsor.generation);
+                        s_sponsor.generation, 0);
                 }
-                const float sponsor_card_height = texture ? 230.0f : 150.0f;
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
+                if (!s_sponsor_background_rgba.empty() && s_sponsor.background_width > 0
+                        && s_sponsor.background_height > 0
+                        && s_sponsor_loaded_generation == s_sponsor.generation) {
+                    background_texture = sponsor_texture_update(
+                        s_sponsor_background_rgba.data(), (int)s_sponsor.background_width,
+                        (int)s_sponsor.background_height, s_sponsor.generation, 1);
+                }
+                const float image_scale = std::clamp(
+                    (float)s_sponsor.image_scale / 100.0f, 0.5f, 1.6f);
+                const float sponsor_image_height = 120.0f * image_scale;
+                const float sponsor_card_height = texture
+                    ? 110.0f + sponsor_image_height : 150.0f;
+                const ImVec4 card_color = sponsor_color(s_sponsor.card_color,
+                    ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
+                const ImVec4 text_color = sponsor_color(s_sponsor.text_color,
+                    ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
                 ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.49f, 0.76f, 1.0f));
                 ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
                 ImGui::BeginChild("##sponsor_card", ImVec2(0, sponsor_card_height),
                     ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
-                ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "FEATURED SPONSOR");
-                ImGui::Spacing();
+                ImGui::PushStyleColor(ImGuiCol_Text, text_color);
+                if (background_texture) {
+                    const ImVec2 background_min = ImGui::GetCursorScreenPos();
+                    const ImVec2 background_size = ImGui::GetContentRegionAvail();
+                    ImGui::GetWindowDrawList()->AddImage(
+                        background_texture, background_min,
+                        ImVec2(background_min.x + background_size.x,
+                               background_min.y + background_size.y),
+                        ImVec2(0, 0), ImVec2(1, 1), ImVec4(1, 1, 1, 0.36f));
+                }
                 {
                     if (texture) {
-                    const float max_w = std::min(320.0f, ImGui::GetContentRegionAvail().x);
-                    const float scale = std::min(max_w / (float)s_sponsor.width,
-                                                 120.0f / (float)s_sponsor.height);
-                    const ImVec2 size((float)s_sponsor.width * scale,
+                    const float box_w = std::min(320.0f, ImGui::GetContentRegionAvail().x);
+                    const float box_h = sponsor_image_height;
+                    ImVec2 size(box_w, box_h);
+                    ImVec2 uv0(0, 0);
+                    ImVec2 uv1(1, 1);
+                    if (s_sponsor.image_fit == 0) {
+                        const float scale = std::min(box_w / (float)s_sponsor.width,
+                                                     box_h / (float)s_sponsor.height);
+                        size = ImVec2((float)s_sponsor.width * scale,
                                       (float)s_sponsor.height * scale);
+                    } else {
+                        const float image_ratio = (float)s_sponsor.width / (float)s_sponsor.height;
+                        const float box_ratio = box_w / box_h;
+                        if (image_ratio > box_ratio) {
+                            const float crop = 1.0f - box_ratio / image_ratio;
+                            uv0.x = crop * 0.5f;
+                            uv1.x = 1.0f - crop * 0.5f;
+                        } else {
+                            const float crop = 1.0f - image_ratio / box_ratio;
+                            uv0.y = crop * 0.5f;
+                            uv1.y = 1.0f - crop * 0.5f;
+                        }
+                    }
                     ImGui::SetCursorPosX(ImGui::GetCursorPosX()
                         + (ImGui::GetContentRegionAvail().x - size.x) * 0.5f);
                     const ImVec2 image_pos = ImGui::GetCursorScreenPos();
-                    ImGui::Image(texture, size);
+                    ImGui::Image(texture, size, uv0, uv1);
                     const ImVec2 after_image = ImGui::GetCursorScreenPos();
                     ImGui::SetCursorScreenPos(image_pos);
                     ImGui::InvisibleButton("##sponsor_card_touch", size);
@@ -1900,17 +1959,22 @@ void render_ui() {
                         if (ImGui::IsItemClicked() && strncmp(s_sponsor.destination_url, "https://", 8) == 0)
                             open_link(s_sponsor.destination_url);
                     }
-                    const float title_w = ImGui::CalcTextSize(s_sponsor.title).x;
-                    ImGui::SetCursorPosX(ImGui::GetCursorPosX()
-                        + std::max(0.0f, (ImGui::GetContentRegionAvail().x - title_w) * 0.5f));
+                    auto align_sponsor_text = [&](const char* text) {
+                        const float text_w = ImGui::CalcTextSize(text).x;
+                        const float available = ImGui::GetContentRegionAvail().x;
+                        float offset = 0.0f;
+                        if (s_sponsor.text_align == 0) offset = std::max(0.0f, (available - text_w) * 0.5f);
+                        else if (s_sponsor.text_align == 2) offset = std::max(0.0f, available - text_w);
+                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset);
+                    };
+                    align_sponsor_text(s_sponsor.title);
                     ImGui::TextUnformatted(s_sponsor.title);
                     if (s_sponsor.message[0] != '\0') {
-                        const float message_w = ImGui::CalcTextSize(s_sponsor.message).x;
-                        ImGui::SetCursorPosX(ImGui::GetCursorPosX()
-                            + std::max(0.0f, (ImGui::GetContentRegionAvail().x - message_w) * 0.5f));
+                        align_sponsor_text(s_sponsor.message);
                         ImGui::TextWrapped("%s", s_sponsor.message);
                     }
                 }
+                ImGui::PopStyleColor();
                 ImGui::EndChild();
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor(2);
@@ -1968,15 +2032,16 @@ void render_ui() {
         char rtt_buf[24];
         snprintf(rtt_buf, sizeof(rtt_buf), "%ums",
                  telem.state == FCAE_STATE_CONNECTED ? telem.rtt_ms : 0u);
-        // No mode here: the state line states it once, the way the Android
-        // status does ("CONNECTED - TUN"/"CONNECTED - PROXY", state_label).
-        if (telem.backend == FCAE_BACKEND_PSIPHON || g_app.protocol == 4) {
-            ImGui::TextWrapped("%s", rtt_buf);
-        } else {
-            ImGui::TextWrapped("Peer: %s  |  %s",
-                telem.connected_peer[0] ? telem.connected_peer : "-",
-                rtt_buf);
+        // Peer and local listener details live behind INFO so the home view
+        // stays compact while the complete diagnostic block remains one tap
+        // away, matching the Android surface.
+        ImGui::TextWrapped("%s", rtt_buf);
+        if (ImGui::SmallButton("INFO")) {
+            s_connection_info_popup_open = true;
+            ui_request_redraw();
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Show connection details");
         // The state line owns the connect phase ("CONNECTING", nothing
         // else — same as the Psiphon paths and the Android UI); the
         // engine's sub-message is connected-state telemetry only.
@@ -1985,13 +2050,20 @@ void render_ui() {
         }
     }
 
-    // ── Address callout ──────────────────────────────────────────────────
-    {
+    if (s_connection_info_popup_open) {
+        ImGui::OpenPopup("##connection_info_popup");
+        s_connection_info_popup_open = false;
+    }
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("##connection_info_popup", nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Connection info");
+        ImGui::Spacing();
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.16f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.85f, 0.45f, 1.0f));
-        float addr_h = narrow ? 130.0f : 94.0f;
-        ImGui::BeginChild("##addr", ImVec2(0, addr_h), ImGuiChildFlags_Borders);
+        ImGui::BeginChild("##connection_info_body", ImVec2(0, 190), ImGuiChildFlags_Borders);
 
         if (connected) {
             const char* lip = telem.lan_ip;
@@ -2003,7 +2075,8 @@ void render_ui() {
                 else
                     ImGui::TextWrapped("%s local: %s 127.0.0.1:%u", backend, kind, port);
             };
-            ImGui::TextWrapped("Routing: %s", telem.status_message);
+            ImGui::TextWrapped("Peer: %s", telem.connected_peer[0] ? telem.connected_peer : "-");
+            ImGui::TextWrapped("Routing: %s", telem.status_message[0] ? telem.status_message : "-");
             if (telem.backend != FCAE_BACKEND_PSIPHON) {
                 if (g_app.protocol != 4 && (g_app.socks_enabled || g_app.mode == 1 || g_app.tor_mode != 0)) endpoint("Aether", "SOCKS5", g_app.socks_port ? g_app.socks_port : 1819);
                 if (g_app.protocol != 4 && g_app.http_enabled) endpoint("Aether", "HTTP", g_app.http_port);
@@ -2017,11 +2090,15 @@ void render_ui() {
                 endpoint("Psiphon", "HTTP", fcae_psiphon_http_port());
             }
         } else {
-            ImGui::Text("  No active tunnel");
+            ImGui::Text("No active tunnel");
         }
         ImGui::EndChild();
         ImGui::PopStyleColor(2);
         ImGui::PopStyleVar();
+        ImGui::Spacing();
+        if (ImGui::Button("Close"))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
     }
 
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();

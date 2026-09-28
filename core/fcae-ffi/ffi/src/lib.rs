@@ -1371,6 +1371,15 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             fill(&mut out.title, &frame.title);
             fill(&mut out.message, &frame.message);
             fill(&mut out.destination_url, &frame.destination_url);
+            out.background_width = frame.background_width;
+            out.background_height = frame.background_height;
+            out.background_rgba_size = frame.background_rgba.len().try_into()
+                .map_err(|_| CoreError::Internal("sponsor background is too large".into()))?;
+            out.text_color = frame.text_color;
+            out.card_color = frame.card_color;
+            out.text_align = frame.text_align;
+            out.image_fit = frame.image_fit;
+            out.image_scale = frame.image_scale;
             *SPONSOR_FRAME.lock() = Some(frame);
         } else {
             out.width = 0;
@@ -1379,6 +1388,14 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.campaign_count = 0;
             out.animated = false;
             out.generation = 0;
+            out.background_width = 0;
+            out.background_height = 0;
+            out.background_rgba_size = 0;
+            out.text_color = 0;
+            out.card_color = 0;
+            out.text_align = 0;
+            out.image_fit = 0;
+            out.image_scale = 0;
             fill(&mut out.id, "");
             fill(&mut out.title, "");
             fill(&mut out.message, "");
@@ -1397,6 +1414,21 @@ pub unsafe extern "C" fn fcae_sponsor_copy_rgba(out: *mut u8, capacity: usize) -
         if out.is_null() { return Err(CoreError::NullArgument("out")); }
         if capacity < frame.rgba.len() { return Err(CoreError::InvalidConfig("sponsor frame buffer is too small".into())); }
         std::ptr::copy_nonoverlapping(frame.rgba.as_slice().as_ptr(), out, frame.rgba.len());
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn fcae_sponsor_copy_background_rgba(out: *mut u8, capacity: usize) -> FcaeStatus {
+    guard("fcae_sponsor_copy_background_rgba", move || {
+        let frame = SPONSOR_FRAME.lock();
+        let frame = frame.as_ref().ok_or_else(|| CoreError::Internal("no sponsor frame".into()))?;
+        if out.is_null() { return Err(CoreError::NullArgument("out")); }
+        if capacity < frame.background_rgba.len() {
+            return Err(CoreError::InvalidConfig("sponsor background buffer is too small".into()));
+        }
+        std::ptr::copy_nonoverlapping(
+            frame.background_rgba.as_slice().as_ptr(), out, frame.background_rgba.len());
         Ok(())
     })
 }

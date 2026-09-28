@@ -14,9 +14,11 @@
 
 #include "ui_render.h"
 
-ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation) {
-    static GLuint texture = 0;
-    static uint64_t loaded = 0;
+ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
+    static GLuint textures[2] = {};
+    static uint64_t loaded[2] = {};
+    const int index = slot == 1 ? 1 : 0;
+    GLuint& texture = textures[index];
     if (!rgba || width <= 0 || height <= 0) return (ImTextureID)0;
     if (!texture) {
         glGenTextures(1, &texture);
@@ -28,11 +30,11 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
     } else {
         glBindTexture(GL_TEXTURE_2D, texture);
     }
-    if (loaded != generation) {
+    if (loaded[index] != generation) {
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
                      GL_UNSIGNED_BYTE, rgba);
-        loaded = generation;
+        loaded[index] = generation;
     }
     return (ImTextureID)(intptr_t)texture;
 }

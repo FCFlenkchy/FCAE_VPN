@@ -967,7 +967,10 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     }
     const bool copyFrame = info.available && (jlong)info.generation != knownGeneration;
     jbyteArray rgba = env->NewByteArray(copyFrame ? (jsize)info.rgba_size : 0);
-    if (!rgba) {
+    jbyteArray backgroundRgba = env->NewByteArray(copyFrame ? (jsize)info.background_rgba_size : 0);
+    if (!rgba || !backgroundRgba) {
+        if (rgba) env->DeleteLocalRef(rgba);
+        if (backgroundRgba) env->DeleteLocalRef(backgroundRgba);
         env->DeleteLocalRef(obj);
         env->DeleteLocalRef(cls);
         return nullptr;
@@ -976,6 +979,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
         jbyte* pixels = env->GetByteArrayElements(rgba, nullptr);
         if (!pixels) {
             env->DeleteLocalRef(rgba);
+            env->DeleteLocalRef(backgroundRgba);
             env->DeleteLocalRef(obj);
             env->DeleteLocalRef(cls);
             return nullptr;
@@ -985,6 +989,27 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
         env->ReleaseByteArrayElements(rgba, pixels, copied == FCAE_OK ? 0 : JNI_ABORT);
         if (copied != FCAE_OK) {
             env->DeleteLocalRef(rgba);
+            env->DeleteLocalRef(backgroundRgba);
+            env->DeleteLocalRef(obj);
+            env->DeleteLocalRef(cls);
+            return nullptr;
+        }
+    }
+    if (copyFrame && info.background_rgba_size) {
+        jbyte* pixels = env->GetByteArrayElements(backgroundRgba, nullptr);
+        if (!pixels) {
+            env->DeleteLocalRef(rgba);
+            env->DeleteLocalRef(backgroundRgba);
+            env->DeleteLocalRef(obj);
+            env->DeleteLocalRef(cls);
+            return nullptr;
+        }
+        const FcaeStatus copied = fcae_sponsor_copy_background_rgba(
+            reinterpret_cast<uint8_t*>(pixels), info.background_rgba_size);
+        env->ReleaseByteArrayElements(backgroundRgba, pixels, copied == FCAE_OK ? 0 : JNI_ABORT);
+        if (copied != FCAE_OK) {
+            env->DeleteLocalRef(rgba);
+            env->DeleteLocalRef(backgroundRgba);
             env->DeleteLocalRef(obj);
             env->DeleteLocalRef(cls);
             return nullptr;
@@ -1002,12 +1027,24 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     const jfieldID fidHeight = getField("height", "I");
     const jfieldID fidCampaignCount = getField("campaignCount", "I");
     const jfieldID fidAnimated = getField("animated", "Z");
+    const jfieldID fidBackgroundWidth = getField("backgroundWidth", "I");
+    const jfieldID fidBackgroundHeight = getField("backgroundHeight", "I");
+    const jfieldID fidTextColor = getField("textColor", "I");
+    const jfieldID fidCardColor = getField("cardColor", "I");
+    const jfieldID fidTextAlign = getField("textAlign", "I");
+    const jfieldID fidImageFit = getField("imageFit", "I");
+    const jfieldID fidImageScale = getField("imageScale", "I");
     const jfieldID fidGeneration = getField("generation", "J");
     const jfieldID fidRgba = getField("rgba", "[B");
+    const jfieldID fidBackgroundRgba = getField("backgroundRgba", "[B");
     if (env->ExceptionCheck() || !fidAvailable || !fidId || !fidTitle || !fidMessage
             || !fidDestination || !fidWidth || !fidHeight || !fidCampaignCount
-            || !fidAnimated || !fidGeneration || !fidRgba) {
+            || !fidAnimated || !fidBackgroundWidth || !fidBackgroundHeight
+            || !fidTextColor || !fidCardColor || !fidTextAlign || !fidImageFit
+            || !fidImageScale || !fidGeneration || !fidRgba
+            || !fidBackgroundRgba) {
         env->DeleteLocalRef(rgba);
+        env->DeleteLocalRef(backgroundRgba);
         env->DeleteLocalRef(obj);
         env->DeleteLocalRef(cls);
         return nullptr;
@@ -1025,6 +1062,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
         if (message) env->DeleteLocalRef(message);
         if (destination) env->DeleteLocalRef(destination);
         env->DeleteLocalRef(rgba);
+        env->DeleteLocalRef(backgroundRgba);
         env->DeleteLocalRef(obj);
         env->DeleteLocalRef(cls);
         return nullptr;
@@ -1038,13 +1076,22 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     env->SetIntField(obj, fidHeight, (jint)info.height);
     env->SetIntField(obj, fidCampaignCount, (jint)info.campaign_count);
     env->SetBooleanField(obj, fidAnimated, info.animated ? JNI_TRUE : JNI_FALSE);
+    env->SetIntField(obj, fidBackgroundWidth, (jint)info.background_width);
+    env->SetIntField(obj, fidBackgroundHeight, (jint)info.background_height);
+    env->SetIntField(obj, fidTextColor, (jint)info.text_color);
+    env->SetIntField(obj, fidCardColor, (jint)info.card_color);
+    env->SetIntField(obj, fidTextAlign, (jint)info.text_align);
+    env->SetIntField(obj, fidImageFit, (jint)info.image_fit);
+    env->SetIntField(obj, fidImageScale, (jint)info.image_scale);
     env->SetLongField(obj, fidGeneration, (jlong)info.generation);
     env->SetObjectField(obj, fidRgba, rgba);
+    env->SetObjectField(obj, fidBackgroundRgba, backgroundRgba);
     env->DeleteLocalRef(id);
     env->DeleteLocalRef(title);
     env->DeleteLocalRef(message);
     env->DeleteLocalRef(destination);
     env->DeleteLocalRef(rgba);
+    env->DeleteLocalRef(backgroundRgba);
     env->DeleteLocalRef(cls);
     return env->ExceptionCheck() ? nullptr : obj;
 }

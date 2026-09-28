@@ -6,6 +6,12 @@
       "title": "Rust Tools Showcase",
       "message": "Fast, reliable software for everyone.",
       "media_url": "https://raw.githubusercontent.com/github/explore/main/topics/rust/rust.png",
+      "background_url": "https://raw.githubusercontent.com/github/explore/main/topics/android/android.png",
+      "text_color": "#FFFFFFFF",
+      "card_color": "#FF172554",
+      "text_align": "center",
+      "image_fit": "contain",
+      "image_scale": 100,
       "destination_url": "https://www.rust-lang.org/",
       "enabled": true
     },
@@ -14,6 +20,12 @@
       "title": "Android Open Source",
       "message": "Build experiences that belong on every device.",
       "media_url": "https://raw.githubusercontent.com/github/explore/main/topics/android/android.png",
+      "background_url": "https://raw.githubusercontent.com/github/explore/main/topics/linux/linux.png",
+      "text_color": "#FFF8FAFC",
+      "card_color": "#FF1E293B",
+      "text_align": "left",
+      "image_fit": "cover",
+      "image_scale": 110,
       "destination_url": "https://developer.android.com/",
       "enabled": true
     },
@@ -22,6 +34,12 @@
       "title": "Linux Community",
       "message": "Powering open technology around the world.",
       "media_url": "https://raw.githubusercontent.com/github/explore/main/topics/linux/linux.png",
+      "background_url": "https://raw.githubusercontent.com/github/explore/main/topics/rust/rust.png",
+      "text_color": "#FFFFF7ED",
+      "card_color": "#FF3B1F14",
+      "text_align": "right",
+      "image_fit": "contain",
+      "image_scale": 90,
       "destination_url": "https://www.kernel.org/",
       "enabled": true
     }

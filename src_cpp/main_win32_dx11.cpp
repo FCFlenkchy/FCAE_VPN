@@ -19,11 +19,13 @@ static ID3D11DeviceContext*    g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain*         g_pSwapChain       = nullptr;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
-ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation) {
-    static ID3D11ShaderResourceView* view = nullptr;
-    static uint64_t loaded = 0;
+ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
+    static ID3D11ShaderResourceView* views[2] = {};
+    static uint64_t loaded[2] = {};
+    const int index = slot == 1 ? 1 : 0;
+    ID3D11ShaderResourceView*& view = views[index];
     if (!rgba || width <= 0 || height <= 0 || !g_pd3dDevice) return (ImTextureID)0;
-    if (loaded != generation) {
+    if (loaded[index] != generation) {
         if (view) { view->Release(); view = nullptr; }
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width = (UINT)width;
@@ -42,7 +44,7 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
             g_pd3dDevice->CreateShaderResourceView(texture, nullptr, &view);
             texture->Release();
         }
-        loaded = generation;
+        loaded[index] = generation;
     }
     return (ImTextureID)view;
 }

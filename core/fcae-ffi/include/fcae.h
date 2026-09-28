@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 10
+#define FCAE_ABI_VERSION 12
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -388,6 +388,14 @@ typedef struct {
     char     title[97];
     char     message[257];
     char     destination_url[512];
+    uint32_t background_width;
+    uint32_t background_height;
+    uint32_t background_rgba_size;
+    uint32_t text_color; /* packed ARGB */
+    uint32_t card_color; /* packed ARGB */
+    uint8_t  text_align;  /* 0=center, 1=left, 2=right */
+    uint8_t  image_fit;   /* 0=contain, 1=cover */
+    uint32_t image_scale;  /* percentage, 50..160 */
 } FcaeSponsorInfo;
 
 /* ── Callbacks ─────────────────────────────────────────────────────── */
@@ -584,6 +592,7 @@ FcaeStatus fcae_sponsor_set_cache_dir(const char *path);
 FcaeStatus fcae_sponsor_poll(FcaeSponsorInfo *out);
 /* Copy the RGBA frame reported by the latest poll. */
 FcaeStatus fcae_sponsor_copy_rgba(uint8_t *out, size_t capacity);
+FcaeStatus fcae_sponsor_copy_background_rgba(uint8_t *out, size_t capacity);
 
 #ifdef __cplusplus
 } /* extern "C" */

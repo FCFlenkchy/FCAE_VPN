@@ -204,20 +204,43 @@
                             android:textSize="11sp" />
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/rttText"
+                    <LinearLayout
                         android:layout_width="72dp"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="6dp"
                         android:layout_marginEnd="6dp"
-                        android:background="@drawable/rounded_rectangle"
-                        android:gravity="center"
-                        android:paddingTop="10dp"
-                        android:paddingBottom="10dp"
-                        android:text="0ms"
-                        android:textColor="#FFF0F3FA"
-                        android:textSize="13sp"
-                        android:textStyle="bold" />
+                        android:gravity="center_horizontal"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/rttText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:background="@drawable/rounded_rectangle"
+                            android:gravity="center"
+                            android:paddingTop="10dp"
+                            android:paddingBottom="10dp"
+                            android:text="0ms"
+                            android:textColor="#FFF0F3FA"
+                            android:textSize="13sp"
+                            android:textStyle="bold" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/connectionInfoButton"
+                            style="@style/Widget.MaterialComponents.Button.TextButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="30dp"
+                            android:layout_marginTop="2dp"
+                            android:contentDescription="Show connection information"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp"
+                            android:minWidth="0dp"
+                            android:minHeight="0dp"
+                            android:padding="0dp"
+                            android:text="INFO"
+                            android:textColor="#FF60A5FA"
+                            android:textSize="10sp" />
+                    </LinearLayout>
 
                     <LinearLayout
                         android:layout_width="0dp"
@@ -1096,6 +1119,39 @@
                 android:orientation="vertical">
 
                 <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="32dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:letterSpacing="0.12"
+                        android:text="SPONSORED"
+                        android:textColor="#FF8DB8FF"
+                        android:textSize="10sp"
+                        android:textStyle="bold" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/sponsorRefresh"
+                        style="@style/Widget.MaterialComponents.Button.TextButton"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:contentDescription="Refresh sponsor manifest"
+                        android:gravity="center"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:minWidth="0dp"
+                        android:minHeight="0dp"
+                        android:padding="0dp"
+                        android:text="↻"
+                        android:textColor="#FF60A5FA"
+                        android:textSize="18sp" />
+                </LinearLayout>
+
+                <FrameLayout
                     android:id="@+id/sponsorCard"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -1104,18 +1160,22 @@
                     android:elevation="3dp"
                     android:focusable="true"
                     android:foreground="?attr/selectableItemBackground"
-                    android:orientation="vertical"
-                    android:padding="14dp"
+                    android:clipToOutline="true"
                     android:visibility="gone">
 
-                    <TextView
-                        android:layout_width="wrap_content"
+                    <ImageView
+                        android:id="@+id/sponsorBackgroundImage"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:contentDescription=""
+                        android:scaleType="centerCrop"
+                        android:alpha="0.34" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:letterSpacing="0.12"
-                        android:text="SPONSORED  •  SUPPORTER"
-                        android:textColor="#FF8DB8FF"
-                        android:textSize="10sp"
-                        android:textStyle="bold" />
+                        android:orientation="vertical"
+                        android:padding="14dp">
 
                     <ImageView
                         android:id="@+id/sponsorImage"
@@ -1145,7 +1205,8 @@
                         android:textSize="16sp"
                         android:textStyle="bold" />
 
-                </LinearLayout>
+                    </LinearLayout>
+                </FrameLayout>
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -1161,23 +1222,6 @@
                         android:text="Want to become a sponsor? Click me"
                         android:textColor="#FF60A5FA"
                         android:textSize="12sp" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/sponsorRefresh"
-                        style="@style/Widget.MaterialComponents.Button.TextButton"
-                        android:layout_width="32dp"
-                        android:layout_height="32dp"
-                        android:layout_marginStart="6dp"
-                        android:contentDescription="Refresh sponsor manifest"
-                        android:gravity="center"
-                        android:insetTop="0dp"
-                        android:insetBottom="0dp"
-                        android:minWidth="0dp"
-                        android:minHeight="0dp"
-                        android:padding="0dp"
-                        android:text="↻"
-                        android:textColor="#FF60A5FA"
-                        android:textSize="18sp" />
                 </LinearLayout>
 
             </LinearLayout>

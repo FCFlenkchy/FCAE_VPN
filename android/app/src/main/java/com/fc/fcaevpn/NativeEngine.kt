@@ -252,8 +252,16 @@ class FcaeSponsorInfo(
     @JvmField var height: Int = 0,
     @JvmField var campaignCount: Int = 0,
     @JvmField var animated: Boolean = false,
+    @JvmField var backgroundWidth: Int = 0,
+    @JvmField var backgroundHeight: Int = 0,
+    @JvmField var textColor: Int = 0,
+    @JvmField var cardColor: Int = 0,
+    @JvmField var textAlign: Int = 0,
+    @JvmField var imageFit: Int = 0,
+    @JvmField var imageScale: Int = 100,
     @JvmField var generation: Long = 0,
-    @JvmField var rgba: ByteArray = byteArrayOf()
+    @JvmField var rgba: ByteArray = byteArrayOf(),
+    @JvmField var backgroundRgba: ByteArray = byteArrayOf()
 )
 
 /**
