@@ -60,9 +60,9 @@ public class VpnNotification {
         }
     }
 
-    // Notification.Builder.setPriority is deprecated since API 26 (channels
-    // own importance there), but is the only lever on API 24/25 -- the app's
-    // minSdk. Kept deliberately for those two levels; ignored elsewhere.
+    // Notification.Builder.setPriority is deprecated since API 26 because
+    // channels own importance there. Keep it for compatibility with the
+    // legacy builder path; the app's minimum supported API is 26.
     @SuppressWarnings("deprecation")
     public Notification build(String text, int buttons) {
         Notification.Builder nb = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O

@@ -21,7 +21,7 @@
         <item name="android:textColorPrimary">#FFE8ECF4</item>
         <item name="android:textColorSecondary">#FFB0B8C8</item>
         <!-- EditText text/placeholder (attributes exist since API 14/21;
-             minSdk is 24). -->
+             minSdk is 26). -->
         <item name="android:editTextColor">#FFE8ECF4</item>
         <item name="android:textColorHint">#FF6B7280</item>
         <!-- Active controls (switch thumb/track, checkboxes): app accent
@@ -29,7 +29,7 @@
         <item name="android:colorControlActivated">#FF60A5FA</item>
         <!-- Links inside dialog message text (LinkMovementMethod). -->
         <item name="android:textColorLink">#FF60A5FA</item>
-        <!-- System bars stay dark with light icons (API 23+, minSdk 24). -->
+        <!-- System bars stay dark with light icons (API 23+, minSdk 26). -->
         <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>
