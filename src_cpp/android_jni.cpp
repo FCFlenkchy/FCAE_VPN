@@ -938,6 +938,18 @@ Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetConnected(JNIEnv*, jclass, jboo
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetAudioEnabled(JNIEnv*, jclass, jboolean enabled) {
+    ensure_init();
+    fcae_sponsor_set_audio_enabled(enabled == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorAudioEnabled(JNIEnv*, jclass) {
+    ensure_init();
+    return fcae_sponsor_audio_enabled() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeSponsorNext(JNIEnv*, jclass) {
     ensure_init();
     fcae_sponsor_next();
@@ -1042,6 +1054,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     const jfieldID fidMessageY = getField("messageY", "I");
     const jfieldID fidIconScale = getField("iconScale", "I");
     const jfieldID fidBackgroundScale = getField("backgroundScale", "I");
+    const jfieldID fidIconX = getField("iconX", "I");
+    const jfieldID fidIconY = getField("iconY", "I");
+    const jfieldID fidDurationSeconds = getField("durationSeconds", "I");
     const jfieldID fidGeneration = getField("generation", "J");
     const jfieldID fidRgba = getField("rgba", "[B");
     const jfieldID fidBackgroundRgba = getField("backgroundRgba", "[B");
@@ -1051,7 +1066,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
             || !fidTextColor || !fidCardColor || !fidTextX || !fidTextY || !fidImageFit
             || !fidTitleColor || !fidMessageColor || !fidTitleX
             || !fidTitleY || !fidMessageX || !fidMessageY || !fidIconScale
-            || !fidBackgroundScale || !fidGeneration || !fidRgba
+            || !fidBackgroundScale || !fidIconX || !fidIconY || !fidDurationSeconds
+            || !fidGeneration || !fidRgba
             || !fidBackgroundRgba) {
         env->DeleteLocalRef(rgba);
         env->DeleteLocalRef(backgroundRgba);
@@ -1101,6 +1117,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     env->SetIntField(obj, fidMessageY, (jint)info.message_y);
     env->SetIntField(obj, fidIconScale, (jint)info.icon_scale);
     env->SetIntField(obj, fidBackgroundScale, (jint)info.background_scale);
+    env->SetIntField(obj, fidIconX, (jint)info.icon_x);
+    env->SetIntField(obj, fidIconY, (jint)info.icon_y);
+    env->SetIntField(obj, fidDurationSeconds, (jint)info.duration_seconds);
     env->SetLongField(obj, fidGeneration, (jlong)info.generation);
     env->SetObjectField(obj, fidRgba, rgba);
     env->SetObjectField(obj, fidBackgroundRgba, backgroundRgba);

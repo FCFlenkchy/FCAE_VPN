@@ -238,6 +238,8 @@ object NativeEngine {
     @JvmStatic external fun nativeSponsorRefreshManifestAsync()
     @JvmStatic external fun nativeSponsorRefreshManifestNowAsync()
     @JvmStatic external fun nativeSponsorSetConnected(connected: Boolean)
+    @JvmStatic external fun nativeSponsorSetAudioEnabled(enabled: Boolean)
+    @JvmStatic external fun nativeSponsorAudioEnabled(): Boolean
     @JvmStatic external fun nativeSponsorNext()
     @JvmStatic external fun nativePollSponsor(knownGeneration: Long): FcaeSponsorInfo
 }
@@ -267,6 +269,9 @@ class FcaeSponsorInfo(
     @JvmField var messageY: Int = 72,
     @JvmField var iconScale: Int = 100,
     @JvmField var backgroundScale: Int = 100,
+    @JvmField var iconX: Int = 50,
+    @JvmField var iconY: Int = 25,
+    @JvmField var durationSeconds: Int = 10,
     @JvmField var generation: Long = 0,
     @JvmField var rgba: ByteArray = byteArrayOf(),
     @JvmField var backgroundRgba: ByteArray = byteArrayOf()

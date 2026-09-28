@@ -282,6 +282,7 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, s_update_dl_url);
     h = fnv_value(h, s_sponsor.available);
     h = fnv_value(h, s_sponsor.generation);
+    h = fnv_value(h, fcae_sponsor_audio_enabled());
     return h;
 }
 
@@ -1894,7 +1895,7 @@ void render_ui() {
                     ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
                 ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.49f, 0.76f, 1.0f));
-                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
                 ImGui::BeginChild("##sponsor_card", ImVec2(0, sponsor_card_height),
                     ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
                 if (background_texture) {
@@ -1948,8 +1949,14 @@ void render_ui() {
                             uv1.y = 1.0f - crop * 0.5f;
                         }
                     }
-                    ImGui::SetCursorPosX(ImGui::GetCursorPosX()
-                        + (ImGui::GetContentRegionAvail().x - size.x) * 0.5f);
+                    const ImVec2 icon_area = ImGui::GetContentRegionAvail();
+                    const float icon_center_x = icon_area.x
+                        * std::clamp((float)s_sponsor.icon_x / 100.0f, 0.0f, 1.0f);
+                    const float icon_center_y = icon_area.y
+                        * std::clamp((float)s_sponsor.icon_y / 100.0f, 0.0f, 1.0f);
+                    ImGui::SetCursorPos(ImVec2(
+                        icon_center_x - size.x * 0.5f,
+                        icon_center_y - size.y * 0.5f));
                     const ImVec2 image_pos = ImGui::GetCursorScreenPos();
                     ImGui::Image(texture, size, uv0, uv1);
                     const ImVec2 after_image = ImGui::GetCursorScreenPos();
@@ -2008,6 +2015,20 @@ void render_ui() {
                         ImGui::TextWrapped("%s", sponsor_message);
                         ImGui::PopTextWrapPos();
                         ImGui::PopStyleColor();
+                    }
+                    if (sponsor_has_content) {
+                        const bool audio_enabled = fcae_sponsor_audio_enabled();
+                        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
+                        ImGui::SetCursorPos(ImVec2(
+                            std::max(0.0f, content_width - 38.0f), 4.0f));
+                        if (ImGui::Button(audio_enabled ? "🔊" : "🔇", ImVec2(34.0f, 26.0f))) {
+                            fcae_sponsor_set_audio_enabled(!audio_enabled);
+                            ui_request_redraw();
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(audio_enabled
+                                ? "Disable sponsor audio" : "Enable sponsor audio");
+                        ImGui::PopStyleVar();
                     }
                 }
                 ImGui::EndChild();

@@ -12,8 +12,8 @@ An application must provide:
 
 - sponsor name and an optional campaign title;
 - HTTPS destination URL;
-- an optional short message and/or final image or animated GIF; a campaign may be media-only, text-only, or use both;
-- optional presentation preferences: background image, title/message/card colors, title/message X/Y positions, image fit, icon scale, and background scale;
+- an optional short message and/or final image, animated GIF, or MP4 video; a campaign may be media-only, text-only, or use both;
+- optional audio narration or sound and presentation preferences: background image/video, title/message/card colors, title/message X/Y positions, image fit, icon scale, and background scale;
 - requested start and end dates;
 - confirmation that the applicant owns or is authorized to use every submitted logo, trademark, image, and statement.
 
@@ -34,26 +34,28 @@ FCAE may reject or remove any campaign that creates legal, security, privacy, re
 
 ## Privacy and presentation
 
-Sponsor cards are rendered by FCAE rather than arbitrary HTML or JavaScript. The icon and background are optional; a card can use a short message with explicit title/message X/Y positions, and FCAE falls back to a safe title/message card when either resource is absent, rejected, corrupt, or unavailable. Sponsors may provide an optional `background_url`, `title_color`, `message_color`, and `background_color`, plus `title_x`, `title_y`, `message_x`, `message_y`, `image_fit`, `icon_scale`, and `background_scale` presentation preferences. These controls style the native card only; sponsors cannot supply HTML, JavaScript, fonts, or arbitrary layout code. Native clients reserve a fixed 140-unit sponsor card (140dp on Android and 140px on desktop) so missing media or different icon/background scales do not reflow the surrounding interface. The sponsor manifest and external `icon_url`/`background_url` resources are fetched only after FCAE reports that the VPN is connected, and only through the connected session's local tunnel proxy. If no tunnel proxy is available, FCAE does not fetch them; previously cached manifest/media remain usable offline and are not deleted on disconnect. Encoded media is cached for active campaigns, while decoded pixels are loaded on demand for the visible campaign and released when it is no longer current. Destination URLs are never prefetched by FCAE; they are handed to the external browser only after an explicit user click. The small GitHub manifest uses a persisted Unix timestamp and automatic refreshes occur no more than once every 12 hours. An explicit user press of the sponsor refresh button may request an immediate refresh while the VPN is connected. Opening and closing the client UI does not reset the automatic interval; the last valid cached manifest remains available if a refresh fails. Campaigns rotate locally every ten seconds and users may swipe or drag the card to move to another sponsor; neither action generates an impression request. With two active campaigns FCAE alternates between them. With three or more, FCAE chooses randomly without immediately repeating the card already shown. A single campaign remains in place.
+Sponsor cards are rendered by FCAE rather than arbitrary HTML or JavaScript. The icon and background are optional; a card can use a short message with explicit title/message X/Y positions, and FCAE falls back to a safe title/message card when either resource is absent, rejected, corrupt, or unavailable. Sponsors may provide an optional `background_url`, `audio_url`, `title_color`, `message_color`, and `background_color`, plus `title_x`, `title_y`, `message_x`, `message_y`, `image_fit`, `icon_scale`, and `background_scale` presentation preferences. `icon_url` and `background_url` may contain still images, animated GIFs, or MP4 video; video is decoded to bounded frames by the same native media path. Audio is disabled by default and can be enabled or disabled with the card-level audio control. These controls style the native card only; sponsors cannot supply HTML, JavaScript, fonts, or arbitrary layout code. Native clients reserve a fixed 140-unit sponsor card (140dp on Android and 140px on desktop) so missing media or different icon/background scales do not reflow the surrounding interface. The sponsor manifest and external `icon_url`/`background_url`/`audio_url` resources are fetched only after FCAE reports that the VPN is connected, and only through the connected session's local tunnel proxy. If no tunnel proxy is available, FCAE does not fetch them; previously cached manifest/media remain usable offline and are not deleted on disconnect. Encoded media is cached for active campaigns, while decoded pixels are loaded on demand for the visible campaign and released when it is no longer current. Audio is downloaded lazily only after the user enables it. Destination URLs are never prefetched by FCAE; they are handed to the external browser only after an explicit user click. The small GitHub manifest uses a persisted Unix timestamp and automatic refreshes occur no more than once every 12 hours. An explicit user press of the sponsor refresh button may request an immediate refresh while the VPN is connected. Opening and closing the client UI does not reset the automatic interval; the last valid cached manifest remains available if a refresh fails. Campaigns rotate locally every ten seconds and users may swipe or drag the card to move to another sponsor; neither action generates an impression request. With two active campaigns FCAE alternates between them. With three or more, FCAE chooses randomly without immediately repeating the card already shown. A single campaign remains in place.
 
 FCAE does not provide sponsors with device identifiers, user profiles, browsing activity, impression reports, or click reports. Destination links open in the user's external browser. The destination site is governed by its own privacy practices.
 
 ## Media requirements
 
 - HTTPS only.
-- PNG, JPEG, WebP, or GIF.
-- Maximum encoded size: 10 MiB per icon or background asset.
+- PNG, JPEG, WebP, GIF, or MP4 video for `icon_url` and `background_url`.
+- `audio_url` is optional and supports audio formats understood by the Rust decoder, including MP3, WAV, Ogg, and FLAC.
+- Maximum encoded size: 10 MiB per icon, background, or audio asset.
 - Maximum dimensions: 800 × 450 pixels on every platform.
-- Animated GIFs: maximum 120 frames on desktop and 60 on Android.
-- `icon_url` and `background_url` are optional; both accept PNG, JPEG, WebP, or GIF with the same HTTPS, encoded-size, and dimension limits. Animated GIF frames are retained for both the icon and background.
+- Animated GIFs: maximum 120 frames on desktop and 60 on Android; MP4 video is retained up to the same bounded frame and decoded-byte budgets.
+- `icon_url` and `background_url` are optional and accept PNG, JPEG, WebP, GIF, or MP4 with the same HTTPS, encoded-size, and dimension limits. Animated GIF and video frames are retained for both the icon and background.
 - `title` is optional and limited to 96 printable characters; an omitted title renders no title text.
 - `message` is optional and limited to 256 printable characters.
+- `icon_x` and `icon_y` are optional integer percentages from 0 through 100 for the foreground icon center; they default to 50,25.
 - `title_x`, `title_y`, `message_x`, and `message_y` are integer percentages from 0 through 100, measured from the top-left of the usable card area. Title position defaults to 50,50; message position defaults to 50,72.
+- `duration_seconds` is optional, defaults to 10, and accepts 1 through 3600 seconds.
 - `title_color`, `message_color`, and `background_color` use `#RRGGBB` or `#AARRGGBB`.
 - `image_fit` is `contain` or `cover`; it defaults to `contain`.
 - `icon_scale` and `background_scale` are percentages from 50 through 160 and default to 100.
 - Invalid presentation values are ignored and replaced with safe defaults.
-- No audio or video.
 
 ## Manifest format
 
@@ -67,7 +69,8 @@ Production entries are stored in `sponsors.json`:
       "title": "Example Sponsor",
       "message": "A short optional sponsor message.",
       "icon_url": "https://cdn.example.com/fcae/example.webp",
-      "background_url": "https://cdn.example.com/fcae/example-background.webp",
+      "background_url": "https://cdn.example.com/fcae/example-background.mp4",
+      "audio_url": "https://cdn.example.com/fcae/example.mp3",
       "title_color": "#FFFFFFFF",
       "message_color": "#FFD8E7FF",
       "background_color": "#FF142A44",
@@ -78,6 +81,9 @@ Production entries are stored in `sponsors.json`:
       "image_fit": "contain",
       "icon_scale": 100,
       "background_scale": 100,
+      "icon_x": 50,
+      "icon_y": 25,
+      "duration_seconds": 10,
       "destination_url": "https://example.com/",
       "enabled": true,
       "starts_at": 1790812800,
@@ -87,4 +93,4 @@ Production entries are stored in `sponsors.json`:
 }
 ```
 
-`message`, `icon_url`, and dates are optional. Dates are Unix timestamps in UTC. A campaign must retain a title and HTTPS destination. Removing a campaign from the manifest causes FCAE to remove its cached icon/background media on the next successful refresh.
+`message`, `icon_url`, `background_url`, `audio_url`, and dates are optional. Dates are Unix timestamps in UTC. A campaign must retain a title and HTTPS destination. `starts_at` is optional and delays campaign eligibility until its Unix timestamp. Removing a campaign from the manifest causes FCAE to remove its cached icon/background/audio media on the next successful refresh.

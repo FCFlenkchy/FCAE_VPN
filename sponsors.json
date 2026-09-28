@@ -5,7 +5,7 @@
       "title": "Rust Tools Showcase",
       "message": "Fast, reliable software for everyone.",
       "icon_url": "https://raw.githubusercontent.com/github/explore/main/topics/rust/rust.png",
-      "background_url": "https://raw.githubusercontent.com/github/explore/main/topics/android/android.png",
+      "background_url": "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
       "title_color": "#FFFFFFFF",
       "message_color": "#FFD8E7FF",
       "background_color": "#FF172554",
@@ -17,7 +17,11 @@
       "icon_scale": 100,
       "background_scale": 100,
       "destination_url": "https://www.rust-lang.org/",
-      "enabled": true
+      "enabled": true,
+      "icon_x": 50,
+      "icon_y": 25,
+      "duration_seconds": 10,
+      "audio_url": "https://interactive-examples.mdn.mozilla.net/media/cc0-audio/t-rex-roar.mp3"
     },
     {
       "id": "demo-android",
@@ -36,7 +40,10 @@
       "icon_scale": 110,
       "background_scale": 100,
       "destination_url": "https://developer.android.com/",
-      "enabled": true
+      "enabled": true,
+      "icon_x": 50,
+      "icon_y": 25,
+      "duration_seconds": 10
     },
     {
       "id": "demo-linux",
@@ -55,7 +62,10 @@
       "icon_scale": 90,
       "background_scale": 100,
       "destination_url": "https://www.kernel.org/",
-      "enabled": true
+      "enabled": true,
+      "icon_x": 50,
+      "icon_y": 25,
+      "duration_seconds": 10
     },
     {
       "id": "demo-gif",
@@ -74,7 +84,10 @@
       "icon_scale": 100,
       "background_scale": 100,
       "destination_url": "https://commons.wikimedia.org/",
-      "enabled": true
+      "enabled": true,
+      "icon_x": 50,
+      "icon_y": 25,
+      "duration_seconds": 10
     },
     {
       "id": "demo-gif-precession",
@@ -93,7 +106,10 @@
       "icon_scale": 100,
       "background_scale": 100,
       "destination_url": "https://commons.wikimedia.org/",
-      "enabled": true
+      "enabled": true,
+      "icon_x": 50,
+      "icon_y": 25,
+      "duration_seconds": 10
     }
   ]
 }

@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 15
+#define FCAE_ABI_VERSION 16
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -405,6 +405,9 @@ typedef struct {
     uint8_t  message_y;   /* percentage of available card height, 0..100 */
     uint32_t icon_scale;   /* percentage, 50..160 */
     uint32_t background_scale; /* percentage, 50..160 */
+    uint8_t  icon_x; /* foreground icon center X percentage, 0..100 */
+    uint8_t  icon_y; /* foreground icon center Y percentage, 0..100 */
+    uint32_t duration_seconds; /* campaign duration, 1..3600 seconds */
 } FcaeSponsorInfo;
 
 /* ── Callbacks ─────────────────────────────────────────────────────── */
@@ -594,6 +597,8 @@ uint64_t fcae_sponsor_manifest_refresh_remaining_secs(void);
 void fcae_sponsor_manifest_check_started(void);
 FcaeStatus fcae_sponsor_set_manifest_json(const char *json);
 void fcae_sponsor_set_connected(bool connected);
+void fcae_sponsor_set_audio_enabled(bool enabled);
+bool fcae_sponsor_audio_enabled(void);
 void fcae_sponsor_next(void);
 FcaeStatus fcae_sponsor_set_cache_dir(const char *path);
 
@@ -609,4 +614,4 @@ FcaeStatus fcae_sponsor_copy_background_rgba(uint8_t *out, size_t capacity);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0xcc85ec86a65b14e8 */
+/* fcae-abi-fingerprint: 0x83293041368bc5e3 */

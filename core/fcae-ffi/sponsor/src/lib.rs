@@ -1,11 +1,13 @@
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat};
 use once_cell::sync::Lazy;
 use parking_lot::{Mutex, RwLock};
+use rodio::{Decoder as AudioDecoder, OutputStream, OutputStreamBuilder, Sink};
 use serde::Deserialize;
+use yscv_video::Mp4VideoReader;
 use std::{
     collections::HashSet,
     fs,
-    io::{Cursor, Read},
+    io::{BufReader, Cursor, Read},
     path::{Path, PathBuf},
     sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}},
     thread,
@@ -15,8 +17,9 @@ use std::{
 pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/sponsors.json";
 const MAX_MANIFEST_BYTES: usize = 128 * 1024;
-// Each foreground icon and optional background may use up to 10 MiB on disk.
-// Decoded frame and aggregate budgets below still bound memory use.
+// Each foreground icon, optional background, or optional audio clip may use up
+// to 10 MiB on disk. Decoded frame and aggregate budgets below still bound
+// memory use.
 const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 // One portable sponsor canvas keeps the manifest behavior identical on every
 // platform and fits the Android card without requiring platform-specific assets.
@@ -41,12 +44,16 @@ const MAX_MEDIA_WORKERS: usize = 2;
 const DEFAULT_TITLE_COLOR: u32 = 0xFFFFFFFF;
 const DEFAULT_MESSAGE_COLOR: u32 = 0xFFD8E7FF;
 const DEFAULT_CARD_COLOR: u32 = 0xFF142A44;
+const DEFAULT_ICON_X: u8 = 50;
+const DEFAULT_ICON_Y: u8 = 25;
 const DEFAULT_TITLE_X: u8 = 50;
 const DEFAULT_TITLE_Y: u8 = 50;
 const DEFAULT_MESSAGE_X: u8 = 50;
 const DEFAULT_MESSAGE_Y: u8 = 72;
 const DEFAULT_ICON_SCALE: u32 = 100;
 const DEFAULT_BACKGROUND_SCALE: u32 = 100;
+const DEFAULT_DURATION_SECONDS: u32 = 10;
+const MAX_DURATION_SECONDS: u32 = 3_600;
 // Keep the current campaign visible for ten seconds before rotating.
 const ROTATE_EVERY: Duration = Duration::from_secs(10);
 // The manifest is checked at most once every twelve hours unless explicitly refreshed.
@@ -70,6 +77,8 @@ struct Campaign {
     #[serde(default)]
     background_url: Option<String>,
     #[serde(default)]
+    audio_url: Option<String>,
+    #[serde(default)]
     title_color: Option<String>,
     #[serde(default)]
     message_color: Option<String>,
@@ -89,6 +98,12 @@ struct Campaign {
     icon_scale: Option<u32>,
     #[serde(default)]
     background_scale: Option<u32>,
+    #[serde(default)]
+    icon_x: Option<u32>,
+    #[serde(default)]
+    icon_y: Option<u32>,
+    #[serde(default)]
+    duration_seconds: Option<u32>,
     destination_url: String,
     #[serde(default = "enabled")]
     enabled: bool,
@@ -119,6 +134,9 @@ struct ReadyCampaign {
     title_color: u32,
     message_color: u32,
     card_color: u32,
+    icon_x: u8,
+    icon_y: u8,
+    duration_seconds: u32,
     title_x: u8,
     title_y: u8,
     message_x: u8,
@@ -140,6 +158,7 @@ struct MediaPayload {
 struct CampaignPayload {
     media: Option<MediaPayload>,
     background: Option<MediaPayload>,
+    audio: Option<MediaPayload>,
 }
 
 #[derive(Clone)]
@@ -159,6 +178,9 @@ pub struct SponsorFrame {
     pub title_color: u32,
     pub message_color: u32,
     pub card_color: u32,
+    pub icon_x: u8,
+    pub icon_y: u8,
+    pub duration_seconds: u32,
     pub title_x: u8,
     pub title_y: u8,
     pub message_x: u8,
@@ -218,7 +240,15 @@ static CLIENT_CACHE: Lazy<Mutex<Option<(String, reqwest::blocking::Client)>>> =
 static MANIFEST_BUSY: AtomicBool = AtomicBool::new(false);
 static MANIFEST_FORCE_PENDING: AtomicBool = AtomicBool::new(false);
 static MEDIA_BUSY: AtomicBool = AtomicBool::new(false);
+static AUDIO_ENABLED: AtomicBool = AtomicBool::new(false);
+static AUDIO_PLAYBACK: Lazy<Mutex<Option<AudioPlayback>>> = Lazy::new(|| Mutex::new(None));
 static GENERATION: AtomicU64 = AtomicU64::new(1);
+
+struct AudioPlayback {
+    campaign_id: String,
+    _stream: OutputStream,
+    sink: Sink,
+}
 
 fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
@@ -265,6 +295,61 @@ pub fn set_proxy(proxy: Option<String>) {
     *SPONSOR_PROXY.write() = proxy;
 }
 
+pub fn set_audio_enabled(enabled: bool) {
+    AUDIO_ENABLED.store(enabled, Ordering::Release);
+    if !enabled {
+        AUDIO_PLAYBACK.lock().take();
+    } else if CONNECTED.load(Ordering::Acquire) {
+        // Audio is deliberately lazy: enabling the card control is the first
+        // point at which the current campaign's audio may be downloaded.
+        refresh_media_async();
+    } else {
+        refresh_cached_media_async();
+    }
+}
+
+pub fn audio_enabled() -> bool {
+    AUDIO_ENABLED.load(Ordering::Acquire)
+}
+
+fn start_audio_for_campaign(campaign_id: &str) {
+    if !audio_enabled() {
+        AUDIO_PLAYBACK.lock().take();
+        return;
+    }
+    let path = {
+        let state = STATE.lock();
+        let campaign = state.campaigns.iter().find(|campaign|
+            campaign.id == campaign_id);
+        campaign.and_then(|campaign| campaign.audio_url.as_ref().map(|_| {
+            state.cache_dir.join(audio_cache_name(campaign))
+        }))
+    };
+    let Some(path) = path else {
+        AUDIO_PLAYBACK.lock().take();
+        return;
+    };
+    let mut playback = AUDIO_PLAYBACK.lock();
+    // Play a campaign's clip once per card display. Do not restart a short
+    // clip on every polling tick after its sink reaches the end; rotation or
+    // an explicit disable/re-enable starts it again.
+    if playback.as_ref().is_some_and(|current| current.campaign_id == campaign_id) {
+        return;
+    }
+    playback.take();
+    let Ok(file) = fs::File::open(path) else { return; };
+    let Ok(stream) = OutputStreamBuilder::open_default_stream() else { return; };
+    let sink = Sink::connect_new(stream.mixer());
+    let Ok(source) = AudioDecoder::try_from(BufReader::new(file)) else { return; };
+    sink.append(source);
+    sink.play();
+    *playback = Some(AudioPlayback {
+        campaign_id: campaign_id.to_string(),
+        _stream: stream,
+        sink,
+    });
+}
+
 pub fn set_connected(connected: bool) {
     let was = CONNECTED.swap(connected, Ordering::AcqRel);
     if !connected {
@@ -276,14 +361,24 @@ pub fn set_connected(connected: bool) {
     if !was {
         if manifest_due() {
             refresh_manifest_async();
-        } else if media_needs_refresh() {
+        } else if media_needs_refresh() || audio_needs_refresh() {
             // A reconnect should not start another media pass when every
             // campaign already has the same usable decoded media. A pass is
             // still allowed when a URL changed or a campaign has no usable
-            // cached frame yet.
+            // cached frame/audio yet.
             refresh_media_async();
         }
     }
+}
+
+fn audio_needs_refresh() -> bool {
+    if !audio_enabled() { return false; }
+    let state = STATE.lock();
+    let Some(campaign) = state.campaigns.get(state.current_campaign) else {
+        return false;
+    };
+    campaign.audio_url.is_some()
+        && !state.cache_dir.join(audio_cache_name(campaign)).is_file()
 }
 
 fn media_needs_refresh() -> bool {
@@ -573,7 +668,12 @@ pub fn current_frame() -> Option<SponsorFrame> {
     let (frame, should_refresh) = {
         let mut state = STATE.lock();
         if state.ready.is_empty() { return None; }
-        if state.ready.len() > 1 && state.rotation_started.elapsed() >= ROTATE_EVERY {
+        let current_duration = state.ready.get(state.current_campaign)
+            .map(|campaign| campaign.duration_seconds)
+            .unwrap_or(DEFAULT_DURATION_SECONDS);
+        if state.ready.len() > 1
+            && state.rotation_started.elapsed() >= Duration::from_secs(current_duration as u64)
+        {
             advance_campaign(&mut state);
         }
         let ready_count = state.ready.len();
@@ -613,6 +713,9 @@ pub fn current_frame() -> Option<SponsorFrame> {
             title_color: ready.title_color,
             message_color: ready.message_color,
             card_color: ready.card_color,
+            icon_x: ready.icon_x,
+            icon_y: ready.icon_y,
+            duration_seconds: ready.duration_seconds,
             title_x: ready.title_x,
             title_y: ready.title_y,
             message_x: ready.message_x,
@@ -631,6 +734,7 @@ pub fn current_frame() -> Option<SponsorFrame> {
             refresh_cached_media_async();
         }
     }
+    start_audio_for_campaign(&frame.id);
     Some(frame)
 }
 
@@ -669,6 +773,10 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
                 log::warn!("[sponsor] campaign {} has invalid optional background URL; using the card color", campaign.id);
                 campaign.background_url = None;
             }
+            if campaign.audio_url.as_ref().is_some_and(|url| !valid_audio_url(url)) {
+                log::warn!("[sponsor] campaign {} has invalid optional audio URL; audio disabled", campaign.id);
+                campaign.audio_url = None;
+            }
             if campaign.title_color.as_ref().is_some_and(|color| !valid_color(color)) {
                 log::warn!("[sponsor] campaign {} has invalid title color; using the default", campaign.id);
                 campaign.title_color = None;
@@ -686,6 +794,8 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
                 ("title Y", &mut campaign.title_y),
                 ("message X", &mut campaign.message_x),
                 ("message Y", &mut campaign.message_y),
+                ("icon X", &mut campaign.icon_x),
+                ("icon Y", &mut campaign.icon_y),
             ] {
                 if position.as_ref().is_some_and(|value| *value > 100) {
                     log::warn!("[sponsor] campaign {} has invalid {name} position; using the default", campaign.id);
@@ -703,6 +813,12 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
             if campaign.background_scale.is_some_and(|scale| !(50..=160).contains(&scale)) {
                 log::warn!("[sponsor] campaign {} has invalid background scale; using 100 percent", campaign.id);
                 campaign.background_scale = None;
+            }
+            if campaign.duration_seconds.is_some_and(|duration|
+                !(1..=MAX_DURATION_SECONDS).contains(&duration))
+            {
+                log::warn!("[sponsor] campaign {} has invalid duration; using 10 seconds", campaign.id);
+                campaign.duration_seconds = None;
             }
             valid.push(campaign);
         }
@@ -738,6 +854,10 @@ fn valid_message(message: &str) -> bool {
 }
 
 fn valid_icon_url(url: &str) -> bool {
+    !url.is_empty() && url.len() <= 2_048 && url.is_ascii() && is_https(url)
+}
+
+fn valid_audio_url(url: &str) -> bool {
     !url.is_empty() && url.len() <= 2_048 && url.is_ascii() && is_https(url)
 }
 
@@ -786,6 +906,11 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
         title_color: color_value(campaign.title_color.as_deref(), DEFAULT_TITLE_COLOR),
         message_color: color_value(campaign.message_color.as_deref(), DEFAULT_MESSAGE_COLOR),
         card_color: color_value(campaign.background_color.as_deref(), DEFAULT_CARD_COLOR),
+        icon_x: position_value(campaign.icon_x, DEFAULT_ICON_X),
+        icon_y: position_value(campaign.icon_y, DEFAULT_ICON_Y),
+        duration_seconds: campaign.duration_seconds
+            .filter(|duration| (1..=MAX_DURATION_SECONDS).contains(duration))
+            .unwrap_or(DEFAULT_DURATION_SECONDS),
         title_x: position_value(campaign.title_x, DEFAULT_TITLE_X),
         title_y: position_value(campaign.title_y, DEFAULT_TITLE_Y),
         message_x: position_value(campaign.message_x, DEFAULT_MESSAGE_X),
@@ -840,7 +965,10 @@ fn prune_cache(cache_dir: &Path, campaigns: &[Campaign]) {
     if let Ok(entries) = fs::read_dir(cache_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let media_cache = name.ends_with(".media") || name.ends_with(".background");
+            let media_cache = name.ends_with(".media")
+                || name.ends_with(".background")
+                || name.ends_with(".audio")
+                || name.ends_with(".decoded");
             let belongs_to_active_campaign = active_prefixes.iter()
                 .any(|prefix| name.starts_with(prefix));
             if media_cache && !belongs_to_active_campaign {
@@ -853,6 +981,7 @@ fn prune_cache(cache_dir: &Path, campaigns: &[Campaign]) {
         for (suffix, current_name) in [
             ("media", campaign.icon_url.as_ref().map(|_| cache_name(campaign))),
             ("background", campaign.background_url.as_ref().map(|_| background_cache_name(campaign))),
+            ("audio", campaign.audio_url.as_ref().map(|_| audio_cache_name(campaign))),
         ] {
             let prefix = format!("{}-", campaign.id);
             let mut candidates = Vec::new();
@@ -897,7 +1026,9 @@ fn prepare_media(
     let network_client = (allow_network
         && CONNECTED.load(Ordering::Acquire)
         && campaigns.iter().any(|campaign| {
-        campaign.icon_url.is_some() || campaign.background_url.is_some()
+        campaign.icon_url.is_some()
+            || campaign.background_url.is_some()
+            || (audio_enabled() && campaign.audio_url.is_some())
     })).then(|| client().ok()).flatten();
 
     // Cache the encoded bytes for every active campaign, but do not decode
@@ -910,7 +1041,7 @@ fn prepare_media(
                 let client = network_client.as_ref();
                 scope.spawn(move || {
                     let _ = load_campaign_payload(
-                        campaign, cache_dir, false, false, client);
+                        campaign, cache_dir, false, false, false, client);
                 });
             });
         });
@@ -932,19 +1063,26 @@ fn prepare_media(
 
         if is_target {
             let payload = load_campaign_payload(
-                campaign, cache_dir, false, false, network_client.as_ref());
-            let (media, background) = match payload {
+                campaign,
+                cache_dir,
+                false,
+                false,
+                audio_enabled(),
+                network_client.as_ref(),
+            );
+            let (media, background, _audio) = match payload {
                 Some(payload) => (
                     payload.media.and_then(|payload| {
                         let url = campaign.icon_url.as_deref()?;
-                        decode_payload(campaign, url, payload, network_client.as_ref())
+                        decode_media(campaign, url, payload, network_client.as_ref())
                     }),
                     payload.background.and_then(|payload| {
                         let url = campaign.background_url.as_deref()?;
                         decode_background(campaign, url, payload, network_client.as_ref())
                     }),
+                    payload.audio,
                 ),
-                None => (None, None),
+                None => (None, None, None),
             };
             let media_loaded = media.is_some();
             let background_loaded = background.is_some();
@@ -1006,6 +1144,7 @@ fn load_campaign_payload(
     cache_dir: &Path,
     reuse_media: bool,
     reuse_background: bool,
+    load_audio: bool,
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<CampaignPayload> {
     let media = (!reuse_media).then(|| load_payload(
@@ -1024,7 +1163,19 @@ fn load_campaign_payload(
         "background",
         client,
     )).flatten();
-    if media.is_none() && background.is_none() { None } else { Some(CampaignPayload { media, background }) }
+    let audio = load_audio.then(|| load_payload(
+        campaign.audio_url.as_deref(),
+        cache_dir.join(audio_cache_name(campaign)),
+        cache_dir,
+        &campaign.id,
+        "audio",
+        client,
+    )).flatten();
+    if media.is_none() && background.is_none() && audio.is_none() {
+        None
+    } else {
+        Some(CampaignPayload { media, background, audio })
+    }
 }
 
 fn find_cached_payload(
@@ -1050,14 +1201,16 @@ fn find_cached_payload(
 fn write_atomic_preserving_old(path: &Path, bytes: &[u8]) -> bool {
     let Some(parent) = path.parent() else { return false; };
     if fs::create_dir_all(parent).is_err() { return false; }
-    let tmp = path.with_extension("download.tmp");
+    let filename = path.file_name().and_then(|name| name.to_str()).unwrap_or("media");
+    let tmp = parent.join(format!(".{filename}.download.tmp"));
     if fs::write(&tmp, bytes).is_err() { return false; }
     if fs::rename(&tmp, path).is_ok() { return true; }
 
     // Windows cannot rename over an existing file. Move the old valid entry
     // aside only after the new bytes are safely on disk, and restore it if the
-    // replacement fails. A failed refresh must never erase the last good file.
-    let backup = path.with_extension("previous.tmp");
+    // replacement fails. The temporary names include the complete cache
+    // filename so concurrent media/decoded writes cannot collide.
+    let backup = parent.join(format!(".{filename}.previous.tmp"));
     let had_old = path.exists() && fs::rename(path, &backup).is_ok();
     let replaced = fs::rename(&tmp, path).is_ok();
     if replaced {
@@ -1103,6 +1256,97 @@ fn load_payload(
     }))
 }
 
+fn decoded_cache_path(path: &Path) -> PathBuf {
+    path.with_extension("decoded")
+}
+
+fn decoded_ready_from_cache(campaign: &Campaign, path: &Path) -> Option<ReadyCampaign> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() > MAX_DECODED_BYTES.saturating_add(MAX_FRAMES * 8 + 32)
+        || bytes.len() < 16
+        || &bytes[0..4] != b"FDEC"
+    {
+        let _ = fs::remove_file(path);
+        return None;
+    }
+    let mut cursor = Cursor::new(&bytes[4..]);
+    let width = read_u32(&mut cursor)?;
+    let height = read_u32(&mut cursor)?;
+    let frame_count = read_u32(&mut cursor)? as usize;
+    if frame_count == 0 || frame_count > MAX_FRAMES
+        || validate_dimensions(width, height, frame_count).is_err()
+    {
+        let _ = fs::remove_file(path);
+        return None;
+    }
+    let frame_bytes = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+    let mut frames = Vec::with_capacity(frame_count);
+    let mut decoded_total = 0usize;
+    for _ in 0..frame_count {
+        let delay = read_u32(&mut cursor)?.clamp(20, 10_000);
+        let size = read_u32(&mut cursor)? as usize;
+        if size != frame_bytes || decoded_total.checked_add(size)? > MAX_DECODED_BYTES {
+            let _ = fs::remove_file(path);
+            return None;
+        }
+        let mut rgba = vec![0u8; size];
+        cursor.read_exact(&mut rgba).ok()?;
+        decoded_total += size;
+        frames.push(Frame { rgba: Arc::new(rgba), delay: Duration::from_millis(delay as u64) });
+    }
+    Some(ReadyCampaign {
+        campaign: campaign.clone(),
+        width,
+        height,
+        frames,
+        background_frames: Vec::new(),
+        background_width: 0,
+        background_height: 0,
+        background_rgba: Arc::new(Vec::new()),
+        title_color: DEFAULT_TITLE_COLOR,
+        message_color: DEFAULT_MESSAGE_COLOR,
+        card_color: DEFAULT_CARD_COLOR,
+        icon_x: DEFAULT_ICON_X,
+        icon_y: DEFAULT_ICON_Y,
+        duration_seconds: DEFAULT_DURATION_SECONDS,
+        title_x: DEFAULT_TITLE_X,
+        title_y: DEFAULT_TITLE_Y,
+        message_x: DEFAULT_MESSAGE_X,
+        message_y: DEFAULT_MESSAGE_Y,
+        image_fit: 0,
+        icon_scale: DEFAULT_ICON_SCALE,
+        background_scale: DEFAULT_BACKGROUND_SCALE,
+    })
+}
+
+fn read_u32(cursor: &mut Cursor<&[u8]>) -> Option<u32> {
+    let mut bytes = [0u8; 4];
+    cursor.read_exact(&mut bytes).ok()?;
+    Some(u32::from_le_bytes(bytes))
+}
+
+fn write_decoded_cache(path: &Path, decoded: &ReadyCampaign) {
+    let frame_bytes = decoded.frames.iter()
+        .map(|frame| frame.rgba.len())
+        .sum::<usize>();
+    if decoded.frames.is_empty() || decoded.frames.len() > MAX_FRAMES
+        || frame_bytes > MAX_DECODED_BYTES
+    {
+        return;
+    }
+    let mut bytes = Vec::with_capacity(16 + frame_bytes + decoded.frames.len() * 8);
+    bytes.extend_from_slice(b"FDEC");
+    bytes.extend_from_slice(&decoded.width.to_le_bytes());
+    bytes.extend_from_slice(&decoded.height.to_le_bytes());
+    bytes.extend_from_slice(&(decoded.frames.len() as u32).to_le_bytes());
+    for frame in &decoded.frames {
+        bytes.extend_from_slice(&(frame.delay.as_millis() as u32).clamp(20, 10_000).to_le_bytes());
+        bytes.extend_from_slice(&(frame.rgba.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(frame.rgba.as_slice());
+    }
+    let _ = write_atomic_preserving_old(path, &bytes);
+}
+
 fn decode_payload(
     campaign: &Campaign,
     url: &str,
@@ -1110,6 +1354,10 @@ fn decode_payload(
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<ReadyCampaign> {
     let MediaPayload { path, mut bytes, mut cached, fallback } = payload;
+    let decoded_path = decoded_cache_path(&path);
+    if let Some(decoded) = decoded_ready_from_cache(campaign, &decoded_path) {
+        return Some(decoded);
+    }
     let mut decoded = decode(campaign.clone(), &bytes).ok();
     if decoded.is_none() {
         if let Some(fallback_path) = fallback {
@@ -1121,19 +1369,169 @@ fn decode_payload(
             }
             let _ = fs::remove_file(fallback_path);
         }
-        if cached { let _ = fs::remove_file(&path); }
+        if cached {
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(&decoded_path);
+        }
         if !CONNECTED.load(Ordering::Acquire) { return None; }
         let client = client?;
         bytes = download_media(client, url).ok()?;
         cached = false;
         decoded = decode(campaign.clone(), &bytes).ok();
     }
-    if decoded.is_some() {
+    if let Some(decoded) = decoded {
         if !cached { let _ = write_atomic_preserving_old(&path, &bytes); }
+        write_decoded_cache(&decoded_path, &decoded);
+        Some(decoded)
     } else {
         let _ = fs::remove_file(path);
+        let _ = fs::remove_file(decoded_path);
+        None
     }
-    decoded
+}
+
+fn decode_media(
+    campaign: &Campaign,
+    url: &str,
+    payload: MediaPayload,
+    client: Option<&reqwest::blocking::Client>,
+) -> Option<ReadyCampaign> {
+    if image::guess_format(&payload.bytes).is_ok() {
+        decode_payload(campaign, url, payload, client)
+    } else {
+        decode_video_payload(campaign, url, payload, client)
+    }
+}
+
+fn decode_video_payload(
+    campaign: &Campaign,
+    url: &str,
+    payload: MediaPayload,
+    client: Option<&reqwest::blocking::Client>,
+) -> Option<ReadyCampaign> {
+    let MediaPayload { path, bytes, cached, fallback } = payload;
+    let decoded_path = decoded_cache_path(&path);
+    if let Some(decoded) = decoded_ready_from_cache(campaign, &decoded_path) {
+        return Some(decoded);
+    }
+
+    // Video readers operate on a bounded file path. The encoded cache is
+    // written before this function in the normal path; retry the write when a
+    // platform could not atomically install a newly downloaded file.
+    if !path.exists() && !write_atomic_preserving_old(&path, &bytes) {
+        return None;
+    }
+    let mut decoded = decode_video_file(campaign.clone(), &path).ok();
+    if decoded.is_none() {
+        if let Some(fallback_path) = fallback {
+            decoded = decode_video_file(campaign.clone(), &fallback_path).ok();
+            if decoded.is_some() {
+                return decoded;
+            }
+            let _ = fs::remove_file(fallback_path);
+        }
+        if cached {
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(&decoded_path);
+        }
+        if !CONNECTED.load(Ordering::Acquire) {
+            return None;
+        }
+        let client = client?;
+        let fresh = download_media(client, url).ok()?;
+        if !write_atomic_preserving_old(&path, &fresh) {
+            return None;
+        }
+        decoded = decode_video_file(campaign.clone(), &path).ok();
+    }
+    if let Some(decoded) = decoded {
+        write_decoded_cache(&decoded_path, &decoded);
+        Some(decoded)
+    } else {
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&decoded_path);
+        None
+    }
+}
+
+fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, String> {
+    // MP4 is the portable sponsor-video format. The reader is pure Rust and
+    // does not require FFmpeg or a platform media framework.
+    let mut reader = Mp4VideoReader::open(path).map_err(|error| error.to_string())?;
+    let mut frames = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut previous_timestamp = None;
+    let mut width = 0u32;
+    let mut height = 0u32;
+
+    while frames.len() < MAX_FRAMES {
+        let Some(frame) = reader.next_frame().map_err(|error| error.to_string())? else {
+            break;
+        };
+        let frame_width = u32::try_from(frame.width)
+            .map_err(|_| "video frame width exceeds limits".to_string())?;
+        let frame_height = u32::try_from(frame.height)
+            .map_err(|_| "video frame height exceeds limits".to_string())?;
+        if frames.is_empty() {
+            validate_dimensions(frame_width, frame_height, 1)?;
+            width = frame_width;
+            height = frame_height;
+        } else if frame_width != width || frame_height != height {
+            return Err("inconsistent video frame dimensions".into());
+        }
+        let expected_rgb = (frame_width as usize)
+            .checked_mul(frame_height as usize)
+            .and_then(|pixels| pixels.checked_mul(3))
+            .ok_or_else(|| "video frame dimensions overflow".to_string())?;
+        if frame.rgb8_data.len() != expected_rgb {
+            return Err("unexpected video RGB frame size".into());
+        }
+        let rgba_size = expected_rgb / 3 * 4;
+        if total_bytes.saturating_add(rgba_size) > MAX_DECODED_BYTES {
+            break;
+        }
+        let mut rgba = Vec::with_capacity(rgba_size);
+        for pixel in frame.rgb8_data.chunks_exact(3) {
+            rgba.extend_from_slice(pixel);
+            rgba.push(0xFF);
+        }
+        let delay_us = previous_timestamp
+            .and_then(|previous| frame.timestamp_us.checked_sub(previous))
+            .unwrap_or(100_000)
+            .clamp(20_000, 10_000_000);
+        previous_timestamp = Some(frame.timestamp_us);
+        frames.push(Frame {
+            rgba: Arc::new(rgba),
+            delay: Duration::from_micros(delay_us),
+        });
+        total_bytes += rgba_size;
+    }
+    if frames.is_empty() {
+        return Err("video contained no usable frames".into());
+    }
+    Ok(ReadyCampaign {
+        campaign,
+        width,
+        height,
+        frames,
+        background_frames: Vec::new(),
+        background_width: 0,
+        background_height: 0,
+        background_rgba: Arc::new(Vec::new()),
+        title_color: DEFAULT_TITLE_COLOR,
+        message_color: DEFAULT_MESSAGE_COLOR,
+        card_color: DEFAULT_CARD_COLOR,
+        icon_x: DEFAULT_ICON_X,
+        icon_y: DEFAULT_ICON_Y,
+        duration_seconds: DEFAULT_DURATION_SECONDS,
+        title_x: DEFAULT_TITLE_X,
+        title_y: DEFAULT_TITLE_Y,
+        message_x: DEFAULT_MESSAGE_X,
+        message_y: DEFAULT_MESSAGE_Y,
+        image_fit: 0,
+        icon_scale: DEFAULT_ICON_SCALE,
+        background_scale: DEFAULT_BACKGROUND_SCALE,
+    })
 }
 
 fn decode_background(
@@ -1142,7 +1540,7 @@ fn decode_background(
     payload: MediaPayload,
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<BackgroundImage> {
-    let decoded = decode_payload(campaign, url, payload, client)?;
+    let decoded = decode_media(campaign, url, payload, client)?;
     if decoded.frames.is_empty() { return None; }
     Some(BackgroundImage {
         width: decoded.width,
@@ -1174,6 +1572,10 @@ fn cache_name(campaign: &Campaign) -> String {
 
 fn background_cache_name(campaign: &Campaign) -> String {
     cache_name_for(campaign, campaign.background_url.as_deref(), "background")
+}
+
+fn audio_cache_name(campaign: &Campaign) -> String {
+    cache_name_for(campaign, campaign.audio_url.as_deref(), "audio")
 }
 
 fn download_media(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
@@ -1234,6 +1636,9 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             title_color: DEFAULT_TITLE_COLOR,
             message_color: DEFAULT_MESSAGE_COLOR,
             card_color: DEFAULT_CARD_COLOR,
+            icon_x: DEFAULT_ICON_X,
+            icon_y: DEFAULT_ICON_Y,
+            duration_seconds: DEFAULT_DURATION_SECONDS,
             title_x: DEFAULT_TITLE_X,
             title_y: DEFAULT_TITLE_Y,
             message_x: DEFAULT_MESSAGE_X,
@@ -1264,6 +1669,9 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             title_color: DEFAULT_TITLE_COLOR,
             message_color: DEFAULT_MESSAGE_COLOR,
             card_color: DEFAULT_CARD_COLOR,
+            icon_x: DEFAULT_ICON_X,
+            icon_y: DEFAULT_ICON_Y,
+            duration_seconds: DEFAULT_DURATION_SECONDS,
             title_x: DEFAULT_TITLE_X,
             title_y: DEFAULT_TITLE_Y,
             message_x: DEFAULT_MESSAGE_X,

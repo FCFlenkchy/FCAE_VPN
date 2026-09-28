@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 15;
+pub const FCAE_ABI_VERSION: u32 = 16;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
@@ -589,6 +589,12 @@ pub struct FcaeSponsorInfo {
     pub icon_scale: u32,
     /// Background image scale percentage, constrained to 50..=160.
     pub background_scale: u32,
+    /// Foreground icon center X percentage of the card, 0..=100.
+    pub icon_x: u8,
+    /// Foreground icon center Y percentage of the card, 0..=100.
+    pub icon_y: u8,
+    /// Campaign rotation duration in seconds, constrained to 1..=3600.
+    pub duration_seconds: u32,
 }
 
 // ── Callbacks ───────────────────────────────────────────────────────────

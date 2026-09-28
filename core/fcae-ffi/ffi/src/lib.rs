@@ -1332,6 +1332,16 @@ pub extern "C" fn fcae_sponsor_set_connected(connected: bool) {
 }
 
 #[no_mangle]
+pub extern "C" fn fcae_sponsor_set_audio_enabled(enabled: bool) {
+    fcae_sponsor::set_audio_enabled(enabled);
+}
+
+#[no_mangle]
+pub extern "C" fn fcae_sponsor_audio_enabled() -> bool {
+    fcae_sponsor::audio_enabled()
+}
+
+#[no_mangle]
 pub extern "C" fn fcae_sponsor_next() {
     fcae_sponsor::next_campaign();
 }
@@ -1389,6 +1399,9 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.message_y = frame.message_y;
             out.icon_scale = frame.icon_scale;
             out.background_scale = frame.background_scale;
+            out.icon_x = frame.icon_x;
+            out.icon_y = frame.icon_y;
+            out.duration_seconds = frame.duration_seconds;
             *SPONSOR_FRAME.lock() = Some(frame);
         } else {
             out.width = 0;
@@ -1414,6 +1427,9 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.message_y = 72;
             out.icon_scale = 100;
             out.background_scale = 100;
+            out.icon_x = 50;
+            out.icon_y = 25;
+            out.duration_seconds = 10;
             fill(&mut out.id, "");
             fill(&mut out.title, "");
             fill(&mut out.message, "");

@@ -18,3 +18,5 @@ serde_json.workspace = true
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 log.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks"] }
+rodio = { version = "0.21", default-features = false, features = ["playback", "symphonia-all"] }
+yscv-video = "0.1.11"

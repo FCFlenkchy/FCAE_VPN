@@ -80,6 +80,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
     private lateinit var sponsorCard: android.view.View
+    private lateinit var sponsorAudioToggle: MaterialButton
     private lateinit var sponsorImage: android.widget.ImageView
     private lateinit var sponsorBackgroundImage: android.widget.ImageView
     private lateinit var sponsorTextBlock: android.widget.FrameLayout
@@ -672,6 +673,44 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun positionSponsorIcon(iconX: Int, iconY: Int) {
+        if (!::sponsorCard.isInitialized || !::sponsorImage.isInitialized) return
+        val safeX = iconX.coerceIn(0, 100)
+        val safeY = iconY.coerceIn(0, 100)
+        sponsorCard.post {
+            val cardWidth = sponsorCard.width
+            val cardHeight = sponsorCard.height
+            if (cardWidth <= 0 || cardHeight <= 0) return@post
+            val iconHeight = (70 * resources.displayMetrics.density).toInt()
+            val params = (sponsorImage.layoutParams as? android.widget.FrameLayout.LayoutParams)
+                ?: android.widget.FrameLayout.LayoutParams(cardWidth, iconHeight)
+            params.width = cardWidth
+            params.height = iconHeight
+            params.leftMargin = (cardWidth * safeX / 100f - cardWidth / 2f).toInt()
+            params.topMargin = (cardHeight * safeY / 100f - iconHeight / 2f).toInt()
+            params.rightMargin = 0
+            params.bottomMargin = 0
+            params.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            sponsorImage.layoutParams = params
+        }
+    }
+
+    private fun updateSponsorAudioToggle(visible: Boolean) {
+        if (!::sponsorAudioToggle.isInitialized) return
+        val enabled = try {
+            NativeEngine.nativeSponsorAudioEnabled()
+        } catch (_: Throwable) {
+            false
+        }
+        sponsorAudioToggle.visibility = if (visible) android.view.View.VISIBLE else android.view.View.GONE
+        sponsorAudioToggle.text = if (enabled) "🔊" else "🔇"
+        sponsorAudioToggle.contentDescription = if (enabled) {
+            "Disable sponsor audio"
+        } else {
+            "Enable sponsor audio"
+        }
+    }
+
     private fun showEmptySponsorCard() {
         sponsorDestination = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md"
         sponsorCampaignCount = 0
@@ -688,11 +727,13 @@ class MainActivity : AppCompatActivity() {
         sponsorImage.scaleX = 1f
         sponsorImage.scaleY = 1f
         sponsorImage.visibility = android.view.View.GONE
+        positionSponsorIcon(50, 25)
         sponsorBackgroundImage.setImageDrawable(null)
         sponsorBackgroundImage.scaleX = 1f
         sponsorBackgroundImage.scaleY = 1f
         sponsorBackgroundImage.visibility = android.view.View.GONE
         sponsorCard.visibility = android.view.View.VISIBLE
+        updateSponsorAudioToggle(false)
         positionSponsorText(50, 40, 50, 68)
     }
 
@@ -740,6 +781,7 @@ class MainActivity : AppCompatActivity() {
                                 val iconScaleFactor = iconScale / 100f
                                 sponsorImage.scaleX = iconScaleFactor
                                 sponsorImage.scaleY = iconScaleFactor
+                                positionSponsorIcon(card.iconX, card.iconY)
                                 val backgroundScaleFactor = backgroundScale / 100f
                                 sponsorBackgroundImage.scaleX = backgroundScaleFactor
                                 sponsorBackgroundImage.scaleY = backgroundScaleFactor
@@ -787,6 +829,7 @@ class MainActivity : AppCompatActivity() {
                                     sponsorGeneration = card.generation
                                 }
                                 sponsorCard.visibility = android.view.View.VISIBLE
+                                updateSponsorAudioToggle(true)
                             }
                         } catch (error: Throwable) {
                             if (!sponsorPollFailureLogged) {
@@ -842,6 +885,18 @@ class MainActivity : AppCompatActivity() {
         layoutTunPauseResume = findViewById(R.id.layoutTunPauseResume)
         btnCheckUpdates = findViewById(R.id.btnCheckUpdates)
         sponsorCard = findViewById(R.id.sponsorCard)
+        sponsorAudioToggle = findViewById(R.id.sponsorAudioToggle)
+        sponsorAudioToggle.setOnClickListener {
+            val enabled = try {
+                NativeEngine.nativeSponsorAudioEnabled()
+            } catch (_: Throwable) {
+                false
+            }
+            try {
+                NativeEngine.nativeSponsorSetAudioEnabled(!enabled)
+            } catch (_: Throwable) {}
+            updateSponsorAudioToggle(true)
+        }
         sponsorImage = findViewById(R.id.sponsorImage)
         sponsorBackgroundImage = findViewById(R.id.sponsorBackgroundImage)
         sponsorTextBlock = findViewById(R.id.sponsorTextBlock)
