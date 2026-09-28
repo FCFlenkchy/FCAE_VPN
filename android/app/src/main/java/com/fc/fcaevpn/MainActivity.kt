@@ -721,22 +721,15 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) {
             false
         }
-        // The animation poll runs at display cadence. Do not recreate the
-        // vector drawable/tint on every frame when the preference is unchanged.
+        // The animation poll runs at display cadence. Do not rewrite the
+        // button text on every frame when the preference is unchanged.
         if (sponsorAudioUiEnabled == enabled) return
         sponsorAudioUiEnabled = enabled
-        sponsorAudioToggle.text = ""
-        sponsorAudioToggle.icon = androidx.appcompat.content.res.AppCompatResources.getDrawable(
-            this,
-            if (enabled) R.drawable.ic_sponsor_volume_up else R.drawable.ic_sponsor_volume_off,
-        )
-        sponsorAudioToggle.iconTint = ColorStateList.valueOf(
-            Color.argb(if (enabled) 185 else 145, 220, 232, 248),
-        )
+        sponsorAudioToggle.text = if (enabled) "Mute" else "Unmute"
         sponsorAudioToggle.contentDescription = if (enabled) {
-            "Disable sponsor audio"
+            "Mute sponsor audio"
         } else {
-            "Enable sponsor audio"
+            "Unmute sponsor audio"
         }
     }
 

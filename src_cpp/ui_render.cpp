@@ -2060,53 +2060,21 @@ void render_ui() {
                 ImGui::EndChild();
                 if (sponsor_has_content) {
                     // Keep the 140-unit sponsor card fully opaque and put the
-                    // audio control in a tiny attached row below it. This also
-                    // keeps the control out of the media/text hit regions.
+                    // text control in a tiny attached row below it, outside
+                    // the media/text hit regions.
                     const bool audio_enabled = fcae_sponsor_audio_enabled();
                     const float audio_x = std::max(
-                        0.0f, ImGui::GetContentRegionAvail().x - 28.0f);
+                        0.0f, ImGui::GetContentRegionAvail().x - 64.0f);
                     ImGui::SetCursorPos(ImVec2(audio_x, ImGui::GetCursorPosY() + 2.0f));
-                    const bool clicked = ImGui::InvisibleButton(
-                        "##sponsor_audio", ImVec2(28.0f, 24.0f));
-                    const ImVec2 button_min = ImGui::GetItemRectMin();
-                    const ImVec2 button_max = ImGui::GetItemRectMax();
-                    ImDrawList* draw = ImGui::GetWindowDrawList();
-                    const ImU32 color = IM_COL32(220, 232, 248,
-                        ImGui::IsItemHovered() ? 205 : 135);
-                    const float center_y = (button_min.y + button_max.y) * 0.5f;
-                    const float left = button_min.x + 5.0f;
-                    draw->AddRectFilled(
-                        ImVec2(left, center_y - 3.0f),
-                        ImVec2(left + 4.0f, center_y + 3.0f), color);
-                    draw->AddTriangleFilled(
-                        ImVec2(left + 3.0f, center_y - 5.5f),
-                        ImVec2(left + 11.0f, center_y - 10.0f),
-                        ImVec2(left + 11.0f, center_y + 10.0f), color);
-                    if (audio_enabled) {
-                        draw->AddLine(
-                            ImVec2(left + 14.0f, center_y - 4.0f),
-                            ImVec2(left + 17.0f, center_y), color, 1.5f);
-                        draw->AddLine(
-                            ImVec2(left + 17.0f, center_y),
-                            ImVec2(left + 14.0f, center_y + 4.0f), color, 1.5f);
-                        draw->AddLine(
-                            ImVec2(left + 18.0f, center_y - 7.0f),
-                            ImVec2(left + 22.0f, center_y), color, 1.5f);
-                        draw->AddLine(
-                            ImVec2(left + 22.0f, center_y),
-                            ImVec2(left + 18.0f, center_y + 7.0f), color, 1.5f);
-                    } else {
-                        draw->AddLine(
-                            ImVec2(left + 14.0f, center_y - 8.0f),
-                            ImVec2(left + 22.0f, center_y + 8.0f), color, 2.0f);
-                    }
+                    const bool clicked = ImGui::Button(
+                        audio_enabled ? "Mute" : "Unmute", ImVec2(64.0f, 24.0f));
                     if (clicked) {
                         fcae_sponsor_set_audio_enabled(!audio_enabled);
                         ui_request_redraw();
                     }
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip(audio_enabled
-                            ? "Disable sponsor audio" : "Enable sponsor audio");
+                            ? "Mute sponsor audio" : "Unmute sponsor audio");
                 }
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor(2);

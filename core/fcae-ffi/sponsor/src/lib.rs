@@ -272,7 +272,9 @@ static CLIENT_CACHE: Lazy<Mutex<Option<(String, reqwest::blocking::Client)>>> =
 static MANIFEST_BUSY: AtomicBool = AtomicBool::new(false);
 static MANIFEST_FORCE_PENDING: AtomicBool = AtomicBool::new(false);
 static MEDIA_BUSY: AtomicBool = AtomicBool::new(false);
-static AUDIO_ENABLED: AtomicBool = AtomicBool::new(false);
+// Sponsor audio is enabled by default; the attached text control changes it
+// to muted explicitly and persists only for the running client process.
+static AUDIO_ENABLED: AtomicBool = AtomicBool::new(true);
 // Audio is allowed only while a client UI owns the sponsor card. Android
 // toggles this from Activity onResume/onPause; desktop keeps it active while
 // the ImGui window is rendering and clears it during shutdown.

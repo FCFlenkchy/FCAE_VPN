@@ -1234,20 +1234,19 @@
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/sponsorAudioToggle"
                         style="@style/Widget.MaterialComponents.Button.TextButton"
-                        android:layout_width="32dp"
+                        android:layout_width="64dp"
                         android:layout_height="28dp"
                         android:layout_gravity="top|end"
-                        android:alpha="0.68"
-                        android:contentDescription="Enable sponsor audio"
+                        android:alpha="0.78"
+                        android:contentDescription="Mute sponsor audio"
                         android:gravity="center"
                         android:insetTop="0dp"
                         android:insetBottom="0dp"
-                        android:iconPadding="0dp"
                         android:minWidth="0dp"
                         android:minHeight="0dp"
                         android:padding="0dp"
-                        android:text=""
-                        android:textSize="1sp" />
+                        android:text="Mute"
+                        android:textSize="10sp" />
                 </FrameLayout>
 
             </LinearLayout>
