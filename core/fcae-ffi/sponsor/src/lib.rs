@@ -288,16 +288,17 @@ pub fn set_connected(connected: bool) {
 
 fn media_needs_refresh() -> bool {
     let state = STATE.lock();
-    state.campaigns.iter().any(|campaign| {
-        let Some(existing) = state.ready.iter().find(|ready|
-            ready.campaign.id == campaign.id) else { return true; };
-        (campaign.icon_url.is_some()
-            && (!icon_url_matches(existing, campaign) || existing.frames.is_empty()))
-            || (campaign.background_url.is_some()
-                && (!background_url_matches(existing, campaign)
-                    || (existing.background_frames.is_empty()
-                        && existing.background_rgba.is_empty())))
-    })
+    let Some(campaign) = state.campaigns.get(state.current_campaign) else {
+        return false;
+    };
+    let Some(existing) = state.ready.iter().find(|ready|
+        ready.campaign.id == campaign.id) else { return true; };
+    (campaign.icon_url.is_some()
+        && (!icon_url_matches(existing, campaign) || existing.frames.is_empty()))
+        || (campaign.background_url.is_some()
+            && (!background_url_matches(existing, campaign)
+                || (existing.background_frames.is_empty()
+                    && existing.background_rgba.is_empty())))
 }
 
 pub fn manifest_refresh_remaining_secs() -> u64 {
@@ -450,11 +451,19 @@ fn refresh_cached_media_sync() {
     if MEDIA_BUSY.swap(true, Ordering::AcqRel) {
         return;
     }
-    let (campaigns, cache_dir, previous) = {
+    let (campaigns, cache_dir, previous, target_id) = {
         let state = STATE.lock();
-        (state.campaigns.clone(), state.cache_dir.clone(), state.ready.clone())
+        let target_id = state.campaigns.get(state.current_campaign)
+            .map(|campaign| campaign.id.clone());
+        (state.campaigns.clone(), state.cache_dir.clone(), state.ready.clone(), target_id)
     };
-    let ready = prepare_media(&campaigns, &cache_dir, &previous, false);
+    let ready = prepare_media(
+        &campaigns,
+        &cache_dir,
+        &previous,
+        false,
+        target_id.as_deref(),
+    );
     let ready_count = ready.len();
     let applied = publish_media(&campaigns, ready);
     MEDIA_BUSY.store(false, Ordering::Release);
@@ -473,12 +482,20 @@ fn refresh_media_async_inner(allow_disconnected: bool) {
     {
         return;
     }
-    let (campaigns, cache_dir, previous) = {
+    let (campaigns, cache_dir, previous, target_id) = {
         let state = STATE.lock();
-        (state.campaigns.clone(), state.cache_dir.clone(), state.ready.clone())
+        let target_id = state.campaigns.get(state.current_campaign)
+            .map(|campaign| campaign.id.clone());
+        (state.campaigns.clone(), state.cache_dir.clone(), state.ready.clone(), target_id)
     };
     thread::spawn(move || {
-        let ready = prepare_media(&campaigns, &cache_dir, &previous, !allow_disconnected);
+        let ready = prepare_media(
+            &campaigns,
+            &cache_dir,
+            &previous,
+            !allow_disconnected,
+            target_id.as_deref(),
+        );
         let ready_count = ready.len();
         let connected = CONNECTED.load(Ordering::Acquire);
         let applied = if allow_disconnected || connected {
@@ -553,53 +570,68 @@ fn frame_index_at(frames: &[Frame], elapsed: Duration) -> usize {
 }
 
 pub fn current_frame() -> Option<SponsorFrame> {
-    let mut state = STATE.lock();
-    if state.ready.is_empty() { return None; }
-    if state.ready.len() > 1 && state.rotation_started.elapsed() >= ROTATE_EVERY {
-        advance_campaign(&mut state);
+    let (frame, should_refresh) = {
+        let mut state = STATE.lock();
+        if state.ready.is_empty() { return None; }
+        if state.ready.len() > 1 && state.rotation_started.elapsed() >= ROTATE_EVERY {
+            advance_campaign(&mut state);
+        }
+        let ready_count = state.ready.len();
+        state.current_campaign %= ready_count;
+        let campaign_index = state.current_campaign;
+        let ready = &state.ready[campaign_index];
+        let within = state.rotation_started.elapsed();
+        let frame_index = frame_index_at(&ready.frames, within);
+        let background_frame_index = frame_index_at(&ready.background_frames, within);
+        let rgba = ready.frames.get(frame_index)
+            .map(|frame| frame.rgba.clone())
+            .unwrap_or_default();
+        let background_rgba = ready.background_frames.get(background_frame_index)
+            .map(|frame| frame.rgba.clone())
+            .unwrap_or_else(|| ready.background_rgba.clone());
+        let needs_media = (ready.campaign.icon_url.is_some() && ready.frames.is_empty())
+            || (ready.campaign.background_url.is_some()
+                && ready.background_frames.is_empty()
+                && ready.background_rgba.is_empty());
+        let generation = (GENERATION.load(Ordering::Relaxed) << 32)
+            ^ ((campaign_index as u64) << 24)
+            ^ ((frame_index as u64) << 12)
+            ^ background_frame_index as u64;
+        (SponsorFrame {
+            id: ready.campaign.id.clone(),
+            title: ready.campaign.title.clone(),
+            message: ready.campaign.message.clone().unwrap_or_default(),
+            destination_url: ready.campaign.destination_url.clone(),
+            width: ready.width,
+            height: ready.height,
+            campaign_count: ready_count.try_into().unwrap_or(u32::MAX),
+            animated: ready.frames.len() > 1 || ready.background_frames.len() > 1,
+            rgba,
+            background_width: ready.background_width,
+            background_height: ready.background_height,
+            background_rgba,
+            title_color: ready.title_color,
+            message_color: ready.message_color,
+            card_color: ready.card_color,
+            title_x: ready.title_x,
+            title_y: ready.title_y,
+            message_x: ready.message_x,
+            message_y: ready.message_y,
+            image_fit: ready.image_fit,
+            icon_scale: ready.icon_scale,
+            background_scale: ready.background_scale,
+            generation,
+        }, needs_media)
+    };
+
+    if should_refresh {
+        if CONNECTED.load(Ordering::Acquire) {
+            refresh_media_async();
+        } else {
+            refresh_cached_media_async();
+        }
     }
-    let ready_count = state.ready.len();
-    state.current_campaign %= ready_count;
-    let campaign_index = state.current_campaign;
-    let ready = &state.ready[campaign_index];
-    let within = state.rotation_started.elapsed();
-    let frame_index = frame_index_at(&ready.frames, within);
-    let background_frame_index = frame_index_at(&ready.background_frames, within);
-    let rgba = ready.frames.get(frame_index)
-        .map(|frame| frame.rgba.clone())
-        .unwrap_or_default();
-    let background_rgba = ready.background_frames.get(background_frame_index)
-        .map(|frame| frame.rgba.clone())
-        .unwrap_or_else(|| ready.background_rgba.clone());
-    let generation = (GENERATION.load(Ordering::Relaxed) << 32)
-        ^ ((campaign_index as u64) << 24)
-        ^ ((frame_index as u64) << 12)
-        ^ background_frame_index as u64;
-    Some(SponsorFrame {
-        id: ready.campaign.id.clone(),
-        title: ready.campaign.title.clone(),
-        message: ready.campaign.message.clone().unwrap_or_default(),
-        destination_url: ready.campaign.destination_url.clone(),
-        width: ready.width,
-        height: ready.height,
-        campaign_count: ready_count.try_into().unwrap_or(u32::MAX),
-        animated: ready.frames.len() > 1 || ready.background_frames.len() > 1,
-        rgba,
-        background_width: ready.background_width,
-        background_height: ready.background_height,
-        background_rgba,
-        title_color: ready.title_color,
-        message_color: ready.message_color,
-        card_color: ready.card_color,
-        title_x: ready.title_x,
-        title_y: ready.title_y,
-        message_x: ready.message_x,
-        message_y: ready.message_y,
-        image_fit: ready.image_fit,
-        icon_scale: ready.icon_scale,
-        background_scale: ready.background_scale,
-        generation,
-    })
+    Some(frame)
 }
 
 pub fn last_error() -> String { STATE.lock().last_error.clone() }
@@ -859,38 +891,47 @@ fn prepare_media(
     cache_dir: &Path,
     previous: &[ReadyCampaign],
     allow_network: bool,
+    target_id: Option<&str>,
 ) -> Vec<ReadyCampaign> {
-    let mut ready = Vec::with_capacity(campaigns.len());
-    let mut decoded_total = 0usize;
     let network_client = (allow_network
         && CONNECTED.load(Ordering::Acquire)
         && campaigns.iter().any(|campaign| {
         campaign.icon_url.is_some() || campaign.background_url.is_some()
     })).then(|| client().ok()).flatten();
 
+    // Cache the encoded bytes for every active campaign, but do not decode
+    // them here. Decoding is reserved for the campaign that is currently
+    // visible; inactive campaigns remain cheap on disk until rotation reaches
+    // them.
     for batch in campaigns.chunks(MAX_MEDIA_WORKERS) {
-        let payloads: Vec<Option<CampaignPayload>> = thread::scope(|scope| {
-            batch.iter().map(|campaign| {
-                let previous = previous.iter().find(|existing| existing.campaign.id == campaign.id);
-                let reuse_media = previous.is_some_and(|existing|
-                    icon_url_matches(existing, campaign) && !existing.frames.is_empty());
-                let reuse_background = previous.is_some_and(|existing|
-                    background_url_matches(existing, campaign)
-                        && (!existing.background_frames.is_empty()
-                            || !existing.background_rgba.is_empty()));
+        thread::scope(|scope| {
+            batch.iter().for_each(|campaign| {
                 let client = network_client.as_ref();
-                scope.spawn(move || load_campaign_payload(
-                    campaign, cache_dir, reuse_media, reuse_background, client))
-            }).map(|worker| worker.join().ok().flatten()).collect()
+                scope.spawn(move || {
+                    let _ = load_campaign_payload(
+                        campaign, cache_dir, false, false, client);
+                });
+            });
         });
+    }
 
-        for (campaign, payload) in batch.iter().zip(payloads) {
-            let reused_media = previous.iter().any(|existing|
-                icon_url_matches(existing, campaign) && !existing.frames.is_empty());
-            let reused_background = previous.iter().any(|existing|
-                background_url_matches(existing, campaign)
-                    && (!existing.background_frames.is_empty()
-                        || !existing.background_rgba.is_empty()));
+    let mut ready = Vec::with_capacity(campaigns.len());
+    let mut decoded_total = 0usize;
+    for campaign in campaigns {
+        let is_target = target_id == Some(campaign.id.as_str());
+        let previous = previous.iter().find(|existing|
+            existing.campaign.id == campaign.id);
+        let mut candidate = if is_target {
+            previous.map_or_else(|| empty_ready(campaign), |existing| fallback_ready(existing, campaign))
+        } else {
+            // Keep only a text-safe placeholder for inactive campaigns. Their
+            // encoded files remain cached and will be decoded on demand later.
+            empty_ready(campaign)
+        };
+
+        if is_target {
+            let payload = load_campaign_payload(
+                campaign, cache_dir, false, false, network_client.as_ref());
             let (media, background) = match payload {
                 Some(payload) => (
                     payload.media.and_then(|payload| {
@@ -906,19 +947,17 @@ fn prepare_media(
             };
             let media_loaded = media.is_some();
             let background_loaded = background.is_some();
-            // A reused in-memory frame deliberately produces no payload in
-            // load_campaign_payload. Do not report that cache hit as a failed
-            // download; otherwise every reconnect looks like a new fetch.
-            if campaign.icon_url.is_some() && !media_loaded && !reused_media {
+            if campaign.icon_url.is_some() && !media_loaded && candidate.frames.is_empty() {
                 log::warn!("[sponsor] campaign {} icon unavailable; using fallback", campaign.id);
             }
-            if campaign.background_url.is_some() && !background_loaded && !reused_background {
+            if campaign.background_url.is_some() && !background_loaded
+                    && candidate.background_frames.is_empty()
+                    && candidate.background_rgba.is_empty() {
                 log::warn!("[sponsor] campaign {} background unavailable; using card color", campaign.id);
             }
-
-            let mut candidate = previous.iter()
-                .find(|existing| existing.campaign.id == campaign.id)
-                .map_or_else(|| empty_ready(campaign), |existing| fallback_ready(existing, campaign));
+            if media_loaded || background_loaded {
+                log::info!("[sponsor] campaign {} media ready (decoded on demand)", campaign.id);
+            }
             if let Some(media) = media {
                 candidate.width = media.width;
                 candidate.height = media.height;
@@ -932,36 +971,30 @@ fn prepare_media(
                     .map(|frame| frame.rgba.clone())
                     .unwrap_or_default();
             }
-            let media_bytes = candidate.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
-            let background_bytes = candidate.background_frames.iter()
-                .map(|frame| frame.rgba.len()).sum::<usize>();
-            if decoded_total.saturating_add(media_bytes).saturating_add(background_bytes)
-                > MAX_TOTAL_DECODED_BYTES
-            {
-                if background_bytes != 0 {
-                    log::warn!("[sponsor] campaign {} background exceeds the decoded-size budget; using card color", campaign.id);
-                    candidate.background_frames.clear();
-                    candidate.background_width = 0;
-                    candidate.background_height = 0;
-                    candidate.background_rgba = Arc::new(Vec::new());
-                }
+        }
+
+        let media_bytes = candidate.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
+        let background_bytes = candidate.background_frames.iter()
+            .map(|frame| frame.rgba.len()).sum::<usize>();
+        if decoded_total.saturating_add(media_bytes).saturating_add(background_bytes)
+            > MAX_TOTAL_DECODED_BYTES
+        {
+            if background_bytes != 0 {
+                log::warn!("[sponsor] campaign {} background exceeds the decoded-size budget; using card color", campaign.id);
+                candidate.background_frames.clear();
+                candidate.background_width = 0;
+                candidate.background_height = 0;
+                candidate.background_rgba = Arc::new(Vec::new());
             }
-            let retained_bytes = candidate.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>()
-                + candidate.background_frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
-            if decoded_total.saturating_add(retained_bytes) <= MAX_TOTAL_DECODED_BYTES {
-                decoded_total += retained_bytes;
-                if retained_bytes != 0 {
-                    if media_loaded || background_loaded {
-                        log::info!("[sponsor] campaign {} media ready", campaign.id);
-                    }
-                } else if media_loaded || background_loaded {
-                    log::info!("[sponsor] campaign {} is text-only", campaign.id);
-                }
-                ready.push(candidate);
-            } else {
-                log::warn!("[sponsor] campaign {} media exceeds the decoded-size budget; using text fallback", campaign.id);
-                ready.push(empty_ready(campaign));
-            }
+        }
+        let retained_bytes = candidate.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>()
+            + candidate.background_frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
+        if decoded_total.saturating_add(retained_bytes) <= MAX_TOTAL_DECODED_BYTES {
+            decoded_total += retained_bytes;
+            ready.push(candidate);
+        } else {
+            log::warn!("[sponsor] campaign {} media exceeds the decoded-size budget; using text fallback", campaign.id);
+            ready.push(empty_ready(campaign));
         }
     }
     ready
