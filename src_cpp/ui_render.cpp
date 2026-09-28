@@ -1850,7 +1850,7 @@ void render_ui() {
 
             ImGui::Spacing();
             ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORED");
+            ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORS");
             ImGui::SameLine();
             if (ImGui::SmallButton("↻")) {
                 fcae_sponsor_refresh_manifest_now_async();

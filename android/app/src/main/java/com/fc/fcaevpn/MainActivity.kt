@@ -91,7 +91,6 @@ class MainActivity : AppCompatActivity() {
     private var sponsorBitmap: android.graphics.Bitmap? = null
     private var sponsorBackgroundBitmap: android.graphics.Bitmap? = null
     private var sponsorConnected = false
-    private var sponsorAnimated = false
     private var sponsorCampaignCount = 0
     private val sponsorPollBusy = AtomicBoolean(false)
     @Volatile private var sponsorPollFailureLogged = false
@@ -675,7 +674,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun showEmptySponsorCard() {
         sponsorDestination = ""
-        sponsorAnimated = false
         sponsorCampaignCount = 0
         sponsorGeneration = -1L
         sponsorTitle.text = "No sponsored campaigns"
@@ -721,7 +719,6 @@ class MainActivity : AppCompatActivity() {
                             } else if (!(card.available || card.campaignCount > 0)) {
                                 showEmptySponsorCard()
                             } else {
-                                sponsorAnimated = card.animated
                                 sponsorCampaignCount = card.campaignCount
                                 val titleColor = if (card.titleColor != 0) card.titleColor else Color.WHITE
                                 val messageColor = if (card.messageColor != 0) card.messageColor else Color.parseColor("#FFD8E7FF")
@@ -795,9 +792,8 @@ class MainActivity : AppCompatActivity() {
             }
             val delay = when {
                 sponsorCard.visibility != android.view.View.VISIBLE -> 500L
-                sponsorAnimated -> 100L
-                sponsorCampaignCount > 1 -> 250L
-                else -> 5_000L
+                sponsorCampaignCount > 0 -> 100L
+                else -> 500L
             }
             handler.postDelayed(this, delay)
         }

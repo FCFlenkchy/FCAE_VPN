@@ -1122,7 +1122,10 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
         let mut decoded = Vec::new();
         for frame in decoder.into_frames() {
             if decoded.len() >= MAX_FRAMES || (decoded.len() + 1) * frame_bytes > MAX_DECODED_BYTES {
-                return Err("GIF exceeds decoded frame limits".into());
+                // Keep the validated prefix rather than rejecting the whole
+                // GIF. Larger animations still move, but never exceed the
+                // platform's bounded decoded-frame budget.
+                break;
             }
             let frame = frame.map_err(|e| e.to_string())?;
             if frame.buffer().width() != width || frame.buffer().height() != height {
