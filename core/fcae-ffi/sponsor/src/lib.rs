@@ -54,7 +54,6 @@ const MANIFEST_REFRESH_SECS: u64 = 12 * 60 * 60;
 
 #[derive(Clone, Debug, Deserialize)]
 struct Manifest {
-    schema_version: u32,
     #[serde(default)]
     sponsors: Vec<Campaign>,
 }
@@ -646,7 +645,6 @@ fn fetch_manifest() -> Result<Vec<u8>, String> {
 fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
     if body.len() > MAX_MANIFEST_BYTES { return Err("manifest too large".into()); }
     let manifest: Manifest = serde_json::from_slice(body).map_err(|e| e.to_string())?;
-    if manifest.schema_version != 1 { return Err("unsupported sponsor schema".into()); }
     if manifest.sponsors.len() > 32 { return Err("too many sponsor campaigns".into()); }
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let mut ids = HashSet::with_capacity(manifest.sponsors.len());

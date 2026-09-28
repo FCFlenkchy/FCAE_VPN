@@ -61,7 +61,6 @@ Production entries are stored in `sponsors.json`:
 
 ```json
 {
-  "schema_version": 1,
   "sponsors": [
     {
       "id": "example-2026",
