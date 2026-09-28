@@ -72,7 +72,7 @@ fn run(program: &str, args: &[&str]) -> bool {
 /// Run a command and capture stdout.
 ///
 /// Unused on Android, for the same reason as [`run`].
-#[cfg_attr(target_os = "android", allow(dead_code))]
+#[cfg_attr(any(target_os = "android", target_os = "windows"), allow(dead_code))]
 fn capture(program: &str, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new(program);
     cmd.args(args);

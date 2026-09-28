@@ -687,10 +687,10 @@ fn client() -> Result<reqwest::blocking::Client, String> {
         .clone()
         .ok_or_else(|| "sponsor network is unavailable without a connected tunnel".to_string())?;
     let mut cached = CLIENT_CACHE.lock();
-    if let Some((cached_proxy, client)) = cached.as_ref()
-        && cached_proxy == &proxy_url
-    {
-        return Ok(client.clone());
+    if let Some((cached_proxy, client)) = cached.as_ref() {
+        if cached_proxy == &proxy_url {
+            return Ok(client.clone());
+        }
     }
     let proxy = reqwest::Proxy::all(&proxy_url)
         .map_err(|e| format!("invalid sponsor tunnel proxy: {e}"))?;
