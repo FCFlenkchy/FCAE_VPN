@@ -53,8 +53,8 @@ struct Campaign {
     title: String,
     #[serde(default)]
     message: Option<String>,
-    #[serde(default)]
-    media_url: Option<String>,
+    #[serde(default, alias = "media_url")]
+    icon_url: Option<String>,
     #[serde(default)]
     background_url: Option<String>,
     #[serde(default)]
@@ -90,6 +90,7 @@ struct ReadyCampaign {
     width: u32,
     height: u32,
     frames: Vec<Frame>,
+    background_frames: Vec<Frame>,
     background_width: u32,
     background_height: u32,
     background_rgba: Arc<Vec<u8>>,
@@ -104,6 +105,9 @@ struct MediaPayload {
     path: PathBuf,
     bytes: Vec<u8>,
     cached: bool,
+    // If the current URL's cache entry is corrupt or a refresh fails, retain
+    // the last valid entry for this campaign as a decoding fallback.
+    fallback: Option<PathBuf>,
 }
 
 struct CampaignPayload {
@@ -282,20 +286,11 @@ fn apply_campaigns(campaigns: Vec<Campaign>) {
     let mut ready = Vec::with_capacity(campaigns.len());
 
     for campaign in &campaigns {
-        if let Some(existing) = previous.iter().find(|candidate| {
-            candidate.campaign.id == campaign.id
-                && candidate.campaign.media_url == campaign.media_url
-                && candidate.campaign.background_url == campaign.background_url
-                && candidate.campaign.text_color == campaign.text_color
-                && candidate.campaign.card_color == campaign.card_color
-                && candidate.campaign.text_align == campaign.text_align
-                && candidate.campaign.image_fit == campaign.image_fit
-                && candidate.campaign.image_scale == campaign.image_scale
-                && candidate.campaign.destination_url == campaign.destination_url
-                && candidate.campaign.title == campaign.title
-                && candidate.campaign.message == campaign.message
-        }) {
-            ready.push(existing.clone());
+        if let Some(existing) = previous.iter().find(|candidate| candidate.campaign.id == campaign.id) {
+            // Keep the last usable foreground/background pixels while the new
+            // manifest version is being fetched. This also keeps a valid card
+            // visible when a changed URL is temporarily unavailable.
+            ready.push(fallback_ready(existing, campaign));
         } else {
             // Publish the text card immediately. Media decoding is asynchronous
             // and replaces this fallback when it succeeds.
@@ -366,12 +361,12 @@ fn refresh_manifest_async_inner(force: bool) {
 
 pub fn refresh_media_async() {
     if !CONNECTED.load(Ordering::Acquire) || MEDIA_BUSY.swap(true, Ordering::AcqRel) { return; }
-    let (campaigns, cache_dir) = {
+    let (campaigns, cache_dir, previous) = {
         let state = STATE.lock();
-        (state.campaigns.clone(), state.cache_dir.clone())
+        (state.campaigns.clone(), state.cache_dir.clone(), state.ready.clone())
     };
     thread::spawn(move || {
-        let ready = prepare_media(&campaigns, &cache_dir);
+        let ready = prepare_media(&campaigns, &cache_dir, &previous);
         let ready_count = ready.len();
         let mut applied = false;
         if CONNECTED.load(Ordering::Acquire) {
@@ -421,6 +416,22 @@ pub fn next_campaign() {
     advance_campaign(&mut state);
 }
 
+fn frame_index_at(frames: &[Frame], elapsed: Duration) -> usize {
+    if frames.len() <= 1 { return 0; }
+    let mut cursor = Duration::ZERO;
+    let cycle = frames.iter().fold(Duration::ZERO, |sum, frame| sum + frame.delay);
+    let target = if cycle.is_zero() { Duration::ZERO } else {
+        Duration::from_millis((elapsed.as_millis() % cycle.as_millis()) as u64)
+    };
+    let mut index = 0;
+    for (frame_index, frame) in frames.iter().enumerate() {
+        cursor += frame.delay;
+        index = frame_index;
+        if target < cursor { break; }
+    }
+    index
+}
+
 pub fn current_frame() -> Option<SponsorFrame> {
     let mut state = STATE.lock();
     if state.ready.is_empty() { return None; }
@@ -432,25 +443,18 @@ pub fn current_frame() -> Option<SponsorFrame> {
     let campaign_index = state.current_campaign;
     let ready = &state.ready[campaign_index];
     let within = state.rotation_started.elapsed();
-    let mut frame_index = 0;
-    if ready.frames.len() > 1 {
-        let mut cursor = Duration::ZERO;
-        let cycle = ready.frames.iter().fold(Duration::ZERO, |sum, frame| sum + frame.delay);
-        let target = if cycle.is_zero() { Duration::ZERO } else {
-            Duration::from_millis((within.as_millis() % cycle.as_millis()) as u64)
-        };
-        for (index, frame) in ready.frames.iter().enumerate() {
-            cursor += frame.delay;
-            frame_index = index;
-            if target < cursor { break; }
-        }
-    }
+    let frame_index = frame_index_at(&ready.frames, within);
+    let background_frame_index = frame_index_at(&ready.background_frames, within);
     let rgba = ready.frames.get(frame_index)
         .map(|frame| frame.rgba.clone())
         .unwrap_or_default();
+    let background_rgba = ready.background_frames.get(background_frame_index)
+        .map(|frame| frame.rgba.clone())
+        .unwrap_or_else(|| ready.background_rgba.clone());
     let generation = (GENERATION.load(Ordering::Relaxed) << 32)
-        ^ ((campaign_index as u64) << 16)
-        ^ frame_index as u64;
+        ^ ((campaign_index as u64) << 24)
+        ^ ((frame_index as u64) << 12)
+        ^ background_frame_index as u64;
     Some(SponsorFrame {
         id: ready.campaign.id.clone(),
         title: ready.campaign.title.clone(),
@@ -459,11 +463,11 @@ pub fn current_frame() -> Option<SponsorFrame> {
         width: ready.width,
         height: ready.height,
         campaign_count: ready_count.try_into().unwrap_or(u32::MAX),
-        animated: ready.frames.len() > 1,
+        animated: ready.frames.len() > 1 || ready.background_frames.len() > 1,
         rgba,
         background_width: ready.background_width,
         background_height: ready.background_height,
-        background_rgba: ready.background_rgba.clone(),
+        background_rgba,
         text_color: ready.text_color,
         card_color: ready.card_color,
         text_align: ready.text_align,
@@ -501,11 +505,11 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
                 log::warn!("[sponsor] campaign {} has invalid optional message; using title only", campaign.id);
                 campaign.message = None;
             }
-            if campaign.media_url.as_ref().is_some_and(|url| !valid_media_url(url)) {
-                log::warn!("[sponsor] campaign {} has invalid optional media URL; using text fallback", campaign.id);
-                campaign.media_url = None;
+            if campaign.icon_url.as_ref().is_some_and(|url| !valid_icon_url(url)) {
+                log::warn!("[sponsor] campaign {} has invalid optional icon URL; using text fallback", campaign.id);
+                campaign.icon_url = None;
             }
-            if campaign.background_url.as_ref().is_some_and(|url| !valid_media_url(url)) {
+            if campaign.background_url.as_ref().is_some_and(|url| !valid_icon_url(url)) {
                 log::warn!("[sponsor] campaign {} has invalid optional background URL; using the card color", campaign.id);
                 campaign.background_url = None;
             }
@@ -560,7 +564,7 @@ fn valid_message(message: &str) -> bool {
         && message.chars().all(|character| character == '\n' || !character.is_control())
 }
 
-fn valid_media_url(url: &str) -> bool {
+fn valid_icon_url(url: &str) -> bool {
     !url.is_empty() && url.len() <= 2_048 && url.is_ascii() && is_https(url)
 }
 
@@ -610,6 +614,7 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
         width: 0,
         height: 0,
         frames: Vec::new(),
+        background_frames: Vec::new(),
         background_width: 0,
         background_height: 0,
         background_rgba: Arc::new(Vec::new()),
@@ -621,35 +626,121 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
     }
 }
 
+fn icon_url_matches(previous: &ReadyCampaign, campaign: &Campaign) -> bool {
+    previous.campaign.id == campaign.id && previous.campaign.icon_url == campaign.icon_url
+}
+
+fn background_url_matches(previous: &ReadyCampaign, campaign: &Campaign) -> bool {
+    previous.campaign.id == campaign.id
+        && previous.campaign.background_url == campaign.background_url
+}
+
+fn fallback_ready(previous: &ReadyCampaign, campaign: &Campaign) -> ReadyCampaign {
+    let mut fallback = empty_ready(campaign);
+    if campaign.icon_url.is_some() && !previous.frames.is_empty() {
+        fallback.width = previous.width;
+        fallback.height = previous.height;
+        fallback.frames = previous.frames.clone();
+    }
+    if campaign.background_url.is_some()
+        && (!previous.background_frames.is_empty() || !previous.background_rgba.is_empty())
+    {
+        fallback.background_width = previous.background_width;
+        fallback.background_height = previous.background_height;
+        fallback.background_frames = previous.background_frames.clone();
+        fallback.background_rgba = previous.background_rgba.clone();
+        if fallback.background_frames.is_empty() && !fallback.background_rgba.is_empty() {
+            fallback.background_frames.push(Frame {
+                rgba: fallback.background_rgba.clone(),
+                delay: ROTATE_EVERY,
+            });
+        }
+    }
+    fallback
+}
+
 fn prune_cache(cache_dir: &Path, campaigns: &[Campaign]) {
     let _ = fs::create_dir_all(cache_dir);
-    let mut keep = HashSet::with_capacity(campaigns.len() * 2);
-    for campaign in campaigns {
-        if campaign.media_url.is_some() { keep.insert(cache_name(campaign)); }
-        if campaign.background_url.is_some() { keep.insert(background_cache_name(campaign)); }
-    }
+    // Keep the current URL and one previous version for each active campaign.
+    // A changed URL gets a new entry while the old entry remains available as
+    // a bounded fallback if the new download fails.
+    let active_prefixes: Vec<String> = campaigns.iter()
+        .map(|campaign| format!("{}-", campaign.id))
+        .collect();
     if let Ok(entries) = fs::read_dir(cache_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if (name.ends_with(".media") || name.ends_with(".background")) && !keep.contains(&name) {
+            let media_cache = name.ends_with(".media") || name.ends_with(".background");
+            let belongs_to_active_campaign = active_prefixes.iter()
+                .any(|prefix| name.starts_with(prefix));
+            if media_cache && !belongs_to_active_campaign {
                 let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    for campaign in campaigns {
+        for (suffix, current_name) in [
+            ("media", campaign.icon_url.as_ref().map(|_| cache_name(campaign))),
+            ("background", campaign.background_url.as_ref().map(|_| background_cache_name(campaign))),
+        ] {
+            let prefix = format!("{}-", campaign.id);
+            let mut candidates = Vec::new();
+            if let Ok(entries) = fs::read_dir(cache_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with(&prefix) && name.ends_with(&format!(".{suffix}")) {
+                        candidates.push(path);
+                    }
+                }
+            }
+            candidates.sort_by_key(|path| {
+                fs::metadata(path).and_then(|metadata| metadata.modified())
+                    .unwrap_or(UNIX_EPOCH)
+            });
+            candidates.reverse();
+            let mut kept_fallback = false;
+            for path in candidates {
+                let is_current = current_name.as_ref().map_or(false, |name|
+                    path.file_name().and_then(|value| value.to_str()) == Some(name.as_str()));
+                if is_current {
+                    continue;
+                }
+                if current_name.is_some() && !kept_fallback {
+                    kept_fallback = true;
+                } else {
+                    let _ = fs::remove_file(path);
+                }
             }
         }
     }
 }
 
-fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign> {
+fn prepare_media(
+    campaigns: &[Campaign],
+    cache_dir: &Path,
+    previous: &[ReadyCampaign],
+) -> Vec<ReadyCampaign> {
     let mut ready = Vec::with_capacity(campaigns.len());
     let mut decoded_total = 0usize;
     let network_client = campaigns.iter().any(|campaign| {
-        campaign.media_url.is_some() || campaign.background_url.is_some()
+        campaign.icon_url.is_some() || campaign.background_url.is_some()
     }).then(|| client().ok()).flatten();
 
     for batch in campaigns.chunks(MAX_MEDIA_WORKERS) {
         let payloads: Vec<Option<CampaignPayload>> = thread::scope(|scope| {
             batch.iter().map(|campaign| {
+                let previous = previous.iter().find(|existing| existing.campaign.id == campaign.id);
+                let reuse_media = previous.is_some_and(|existing|
+                    icon_url_matches(existing, campaign) && !existing.frames.is_empty());
+                let reuse_background = previous.is_some_and(|existing|
+                    background_url_matches(existing, campaign)
+                        && (!existing.background_frames.is_empty()
+                            || !existing.background_rgba.is_empty()));
                 let client = network_client.as_ref();
-                scope.spawn(move || load_campaign_payload(campaign, cache_dir, client))
+                scope.spawn(move || load_campaign_payload(
+                    campaign, cache_dir, reuse_media, reuse_background, client))
             }).map(|worker| worker.join().ok().flatten()).collect()
         });
 
@@ -657,7 +748,7 @@ fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign>
             let (media, background) = match payload {
                 Some(payload) => (
                     payload.media.and_then(|payload| {
-                        let url = campaign.media_url.as_deref()?;
+                        let url = campaign.icon_url.as_deref()?;
                         decode_payload(campaign, url, payload, network_client.as_ref())
                     }),
                     payload.background.and_then(|payload| {
@@ -667,14 +758,16 @@ fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign>
                 ),
                 None => (None, None),
             };
-            if campaign.media_url.is_some() && media.is_none() {
-                log::warn!("[sponsor] campaign {} media unavailable; using fallback", campaign.id);
+            if campaign.icon_url.is_some() && media.is_none() {
+                log::warn!("[sponsor] campaign {} icon unavailable; using fallback", campaign.id);
             }
             if campaign.background_url.is_some() && background.is_none() {
                 log::warn!("[sponsor] campaign {} background unavailable; using card color", campaign.id);
             }
 
-            let mut candidate = empty_ready(campaign);
+            let mut candidate = previous.iter()
+                .find(|existing| existing.campaign.id == campaign.id)
+                .map_or_else(|| empty_ready(campaign), |existing| fallback_ready(existing, campaign));
             if let Some(media) = media {
                 candidate.width = media.width;
                 candidate.height = media.height;
@@ -683,22 +776,27 @@ fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign>
             if let Some(background) = background {
                 candidate.background_width = background.width;
                 candidate.background_height = background.height;
-                candidate.background_rgba = background.rgba;
+                candidate.background_frames = background.frames;
+                candidate.background_rgba = candidate.background_frames.first()
+                    .map(|frame| frame.rgba.clone())
+                    .unwrap_or_default();
             }
             let media_bytes = candidate.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
-            let background_bytes = candidate.background_rgba.len();
+            let background_bytes = candidate.background_frames.iter()
+                .map(|frame| frame.rgba.len()).sum::<usize>();
             if decoded_total.saturating_add(media_bytes).saturating_add(background_bytes)
                 > MAX_TOTAL_DECODED_BYTES
             {
                 if background_bytes != 0 {
                     log::warn!("[sponsor] campaign {} background exceeds the decoded-size budget; using card color", campaign.id);
+                    candidate.background_frames.clear();
                     candidate.background_width = 0;
                     candidate.background_height = 0;
                     candidate.background_rgba = Arc::new(Vec::new());
                 }
             }
             let retained_bytes = candidate.frames.iter().map(|frame| frame.rgba.len()).sum::<usize>()
-                + candidate.background_rgba.len();
+                + candidate.background_frames.iter().map(|frame| frame.rgba.len()).sum::<usize>();
             if decoded_total.saturating_add(retained_bytes) <= MAX_TOTAL_DECODED_BYTES {
                 decoded_total += retained_bytes;
                 if retained_bytes != 0 {
@@ -719,33 +817,73 @@ fn prepare_media(campaigns: &[Campaign], cache_dir: &Path) -> Vec<ReadyCampaign>
 fn load_campaign_payload(
     campaign: &Campaign,
     cache_dir: &Path,
+    reuse_media: bool,
+    reuse_background: bool,
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<CampaignPayload> {
-    let media = load_payload(
-        campaign.media_url.as_deref(),
+    let media = (!reuse_media).then(|| load_payload(
+        campaign.icon_url.as_deref(),
         cache_dir.join(cache_name(campaign)),
+        cache_dir,
+        &campaign.id,
+        "media",
         client,
-    );
-    let background = load_payload(
+    )).flatten();
+    let background = (!reuse_background).then(|| load_payload(
         campaign.background_url.as_deref(),
         cache_dir.join(background_cache_name(campaign)),
+        cache_dir,
+        &campaign.id,
+        "background",
         client,
-    );
+    )).flatten();
     if media.is_none() && background.is_none() { None } else { Some(CampaignPayload { media, background }) }
+}
+
+fn find_cached_payload(
+    cache_dir: &Path,
+    campaign_id: &str,
+    suffix: &str,
+    exclude: &Path,
+) -> Option<PathBuf> {
+    let prefix = format!("{}-", campaign_id);
+    fs::read_dir(cache_dir).ok()?.flatten().find_map(|entry| {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if path.as_path() == exclude
+            || !name.starts_with(&prefix)
+            || !name.ends_with(&format!(".{suffix}"))
+        {
+            return None;
+        }
+        Some(path)
+    })
 }
 
 fn load_payload(
     url: Option<&str>,
     path: PathBuf,
+    cache_dir: &Path,
+    campaign_id: &str,
+    suffix: &str,
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<MediaPayload> {
     let url = url?;
+    let fallback = find_cached_payload(cache_dir, campaign_id, suffix, &path);
     if let Ok(bytes) = fs::read(&path) {
-        return Some(MediaPayload { path, bytes, cached: true });
+        return Some(MediaPayload { path, bytes, cached: true, fallback });
     }
-    let client = client?;
-    let bytes = download_media(client, url).ok()?;
-    Some(MediaPayload { path, bytes, cached: false })
+    if let Some(client) = client {
+        if let Ok(bytes) = download_media(client, url) {
+            return Some(MediaPayload { path, bytes, cached: false, fallback });
+        }
+    }
+    fallback.and_then(|path| fs::read(&path).ok().map(|bytes| MediaPayload {
+        path,
+        bytes,
+        cached: true,
+        fallback: None,
+    }))
 }
 
 fn decode_payload(
@@ -754,10 +892,19 @@ fn decode_payload(
     payload: MediaPayload,
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<ReadyCampaign> {
-    let MediaPayload { path, mut bytes, mut cached } = payload;
+    let MediaPayload { path, mut bytes, mut cached, fallback } = payload;
     let mut decoded = decode(campaign.clone(), &bytes).ok();
-    if decoded.is_none() && cached {
-        let _ = fs::remove_file(&path);
+    if decoded.is_none() {
+        if let Some(fallback_path) = fallback {
+            if let Ok(fallback_bytes) = fs::read(&fallback_path) {
+                if let Some(fallback_decoded) = decode(campaign.clone(), &fallback_bytes).ok() {
+                    if cached { let _ = fs::remove_file(&path); }
+                    return Some(fallback_decoded);
+                }
+            }
+            let _ = fs::remove_file(fallback_path);
+        }
+        if cached { let _ = fs::remove_file(&path); }
         let client = client?;
         bytes = download_media(client, url).ok()?;
         cached = false;
@@ -778,18 +925,18 @@ fn decode_background(
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<BackgroundImage> {
     let decoded = decode_payload(campaign, url, payload, client)?;
-    let frame = decoded.frames.first()?;
+    if decoded.frames.is_empty() { return None; }
     Some(BackgroundImage {
         width: decoded.width,
         height: decoded.height,
-        rgba: frame.rgba.clone(),
+        frames: decoded.frames,
     })
 }
 
 struct BackgroundImage {
     width: u32,
     height: u32,
-    rgba: Arc<Vec<u8>>,
+    frames: Vec<Frame>,
 }
 
 fn cache_name_for(campaign: &Campaign, url: Option<&str>, suffix: &str) -> String {
@@ -799,7 +946,7 @@ fn cache_name_for(campaign: &Campaign, url: Option<&str>, suffix: &str) -> Strin
 }
 
 fn cache_name(campaign: &Campaign) -> String {
-    cache_name_for(campaign, campaign.media_url.as_deref(), "media")
+    cache_name_for(campaign, campaign.icon_url.as_deref(), "media")
 }
 
 fn background_cache_name(campaign: &Campaign) -> String {
@@ -854,6 +1001,7 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             width,
             height,
             frames,
+            background_frames: Vec::new(),
             background_width: 0,
             background_height: 0,
             background_rgba: Arc::new(Vec::new()),
@@ -878,6 +1026,7 @@ fn decode(campaign: Campaign, bytes: &[u8]) -> Result<ReadyCampaign, String> {
             width: rgba.width(),
             height: rgba.height(),
             frames: vec![Frame { rgba: Arc::new(rgba.into_raw()), delay: ROTATE_EVERY }],
+            background_frames: Vec::new(),
             background_width: 0,
             background_height: 0,
             background_rgba: Arc::new(Vec::new()),

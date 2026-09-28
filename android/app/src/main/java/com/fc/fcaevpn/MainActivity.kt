@@ -620,6 +620,26 @@ class MainActivity : AppCompatActivity() {
         return bitmap
     }
 
+    private fun showEmptySponsorCard() {
+        sponsorDestination = ""
+        sponsorAnimated = false
+        sponsorCampaignCount = 0
+        sponsorGeneration = -1L
+        sponsorTitle.text = "No sponsored campaigns"
+        sponsorMessage.text = "Sponsor cards will appear here when available."
+        sponsorMessage.visibility = android.view.View.VISIBLE
+        sponsorTitle.setTextColor(Color.WHITE)
+        sponsorMessage.setTextColor(Color.WHITE)
+        sponsorCard.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FF142A44"))
+        sponsorImage.setImageDrawable(null)
+        sponsorImage.scaleX = 1f
+        sponsorImage.scaleY = 1f
+        sponsorImage.visibility = android.view.View.GONE
+        sponsorBackgroundImage.setImageDrawable(null)
+        sponsorBackgroundImage.visibility = android.view.View.GONE
+        sponsorCard.visibility = android.view.View.VISIBLE
+    }
+
     private val sponsorPoll = object : Runnable {
         override fun run() {
             if (!inForeground || !::sponsorCard.isInitialized) return
@@ -645,11 +665,7 @@ class MainActivity : AppCompatActivity() {
                                 // Keep the last rendered card until a valid
                                 // empty snapshot explicitly replaces it.
                             } else if (!(card.available || card.campaignCount > 0)) {
-                                sponsorCard.visibility = android.view.View.GONE
-                                sponsorDestination = ""
-                                sponsorAnimated = false
-                                sponsorCampaignCount = 0
-                                sponsorBackgroundImage.visibility = android.view.View.GONE
+                                showEmptySponsorCard()
                             } else {
                                 sponsorAnimated = card.animated
                                 sponsorCampaignCount = card.campaignCount
@@ -667,8 +683,11 @@ class MainActivity : AppCompatActivity() {
                                 sponsorMessage.gravity = textGravity
                                 val imageScale = card.imageScale.coerceIn(50, 160)
                                 sponsorImage.layoutParams = sponsorImage.layoutParams.apply {
-                                    height = (120 * imageScale / 100f).toInt()
+                                    height = (192 * resources.displayMetrics.density).toInt()
                                 }
+                                val imageScaleFactor = imageScale / 160f
+                                sponsorImage.scaleX = imageScaleFactor
+                                sponsorImage.scaleY = imageScaleFactor
                                 sponsorImage.scaleType = if (card.imageFit == 1) {
                                     android.widget.ImageView.ScaleType.CENTER_CROP
                                 } else {
@@ -713,11 +732,7 @@ class MainActivity : AppCompatActivity() {
                                 sponsorPollFailureLogged = true
                                 Log.w("FCAE_VPN", "Sponsor UI update failed", error)
                             }
-                            sponsorCard.visibility = android.view.View.GONE
-                            sponsorDestination = ""
-                            sponsorAnimated = false
-                            sponsorCampaignCount = 0
-                            sponsorBackgroundImage.visibility = android.view.View.GONE
+                            showEmptySponsorCard()
                         } finally {
                             sponsorPollBusy.set(false)
                         }
@@ -771,6 +786,7 @@ class MainActivity : AppCompatActivity() {
         sponsorBackgroundImage = findViewById(R.id.sponsorBackgroundImage)
         sponsorMessage = findViewById(R.id.sponsorMessage)
         sponsorTitle = findViewById(R.id.sponsorTitle)
+        showEmptySponsorCard()
         findViewById<android.view.View>(R.id.sponsorRefresh).setOnClickListener {
             try { NativeEngine.nativeSponsorRefreshManifestNowAsync() } catch (_: Throwable) {}
             handler.removeCallbacks(sponsorManifestRefresh)
@@ -2843,15 +2859,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showConnectionInfoDialog() {
         val endpointText = peerText.text?.toString()?.trim().orEmpty()
-        val status = statusText.text?.toString()?.trim().orEmpty().ifEmpty { "UNKNOWN" }
-        val details = buildString {
-            append("Status: ").append(status)
-            if (endpointText.isNotEmpty()) {
-                append("\n\n").append(endpointText)
-            } else {
-                append("\n\nNo active tunnel endpoints.")
-            }
-        }
+        val details = endpointText.ifEmpty { "No endpoint details available." }
         val density = resources.displayMetrics.density
         val body = TextView(this).apply {
             text = details
@@ -2859,7 +2867,13 @@ class MainActivity : AppCompatActivity() {
             textSize = 14f
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
-            setPadding((24 * density).toInt(), (8 * density).toInt(), (24 * density).toInt(), 0)
+            setBackgroundResource(R.drawable.home_details_card)
+            setPadding(
+                (16 * density).toInt(),
+                (16 * density).toInt(),
+                (16 * density).toInt(),
+                (16 * density).toInt(),
+            )
         }
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Connection info")
