@@ -10,9 +10,9 @@ Acceptance is discretionary. Do not send payment until the campaign, dates, crea
 
 An application must provide:
 
-- sponsor name and campaign title;
+- sponsor name and an optional campaign title;
 - HTTPS destination URL;
-- an optional short message and/or final image or animated GIF;
+- an optional short message and/or final image or animated GIF; a campaign may be media-only, text-only, or use both;
 - optional presentation preferences: background image, title/message/card colors, title/message X/Y positions, image fit, icon scale, and background scale;
 - requested start and end dates;
 - confirmation that the applicant owns or is authorized to use every submitted logo, trademark, image, and statement.
@@ -22,10 +22,8 @@ An application must provide:
 FCAE does not accept sponsorship for:
 
 - adult, pornographic, sexually explicit, or NSFW content;
-- gambling, betting, casinos, lotteries, or similar services;
 - malware, spyware, unwanted software, credential theft, or circumvention of security controls;
 - illegal goods, services, or activity;
-- deceptive claims, impersonation, scams, pyramid schemes, or get-rich-quick schemes;
 - misleading financial, investment, medical, health, or security claims;
 - hate, harassment, exploitation, or violent extremist content;
 - political campaigning or targeted political persuasion;
@@ -48,6 +46,7 @@ FCAE does not provide sponsors with device identifiers, user profiles, browsing 
 - Maximum dimensions: 800 × 450 pixels on every platform.
 - Animated GIFs: maximum 120 frames on desktop and 60 on Android.
 - `icon_url` and `background_url` are optional; both accept PNG, JPEG, WebP, or GIF with the same HTTPS, encoded-size, and dimension limits. Animated GIF frames are retained for both the icon and background.
+- `title` is optional and limited to 96 printable characters; an omitted title renders no title text.
 - `message` is optional and limited to 256 printable characters.
 - `title_x`, `title_y`, `message_x`, and `message_y` are integer percentages from 0 through 100, measured from the top-left of the usable card area. Title position defaults to 50,50; message position defaults to 50,72.
 - `title_color`, `message_color`, and `background_color` use `#RRGGBB` or `#AARRGGBB`.

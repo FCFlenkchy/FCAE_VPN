@@ -62,6 +62,7 @@ struct Manifest {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 struct Campaign {
     id: String,
+    #[serde(default)]
     title: String,
     #[serde(default)]
     message: Option<String>,
@@ -715,7 +716,9 @@ fn validate_campaign(c: &Campaign) -> Result<(), String> {
     if c.id.is_empty() || c.id.len() > 64 || !c.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         return Err("invalid sponsor id".into());
     }
-    if c.title.is_empty() || c.title.len() > 96
+    // A campaign may be media-only. An omitted or empty title is valid as
+    // long as a supplied title remains within the printable-text limit.
+    if c.title.len() > 96
         || !c.title.chars().all(|character| !character.is_control())
     {
         return Err("sponsor title must use printable text".into());

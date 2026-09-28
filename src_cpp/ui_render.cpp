@@ -1863,7 +1863,7 @@ void render_ui() {
                 const bool sponsor_has_content = s_sponsor.available;
                 const char* sponsor_destination = sponsor_has_content
                     ? s_sponsor.destination_url : sponsor_policy;
-                const char* sponsor_title = sponsor_has_content && s_sponsor.title[0] != '\0'
+                const char* sponsor_title = sponsor_has_content
                     ? s_sponsor.title : "Become a sponsor";
                 const char* sponsor_message = sponsor_has_content
                     ? s_sponsor.message : "Want to become a sponsor? Click me";

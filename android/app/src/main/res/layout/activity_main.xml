@@ -1132,9 +1132,9 @@
                     android:paddingEnd="4dp">
 
                     <TextView
-                        android:layout_width="0dp"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
+                        android:minWidth="72dp"
                         android:letterSpacing="0.12"
                         android:text="SPONSORS"
                         android:textColor="#FF8DB8FF"
@@ -1143,14 +1143,18 @@
 
                     <TextView
                         android:id="@+id/sponsorPolicyLink"
-                        android:layout_width="wrap_content"
+                        android:layout_width="0dp"
                         android:layout_height="32dp"
-                        android:gravity="center"
+                        android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:gravity="center|end"
+                        android:maxLines="1"
                         android:paddingStart="6dp"
                         android:paddingEnd="6dp"
+                        android:singleLine="true"
                         android:text="Want to become a sponsor? Click me"
                         android:textColor="#FF60A5FA"
-                        android:textSize="10sp" />
+                        android:textSize="9sp" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/sponsorRefresh"
@@ -1174,6 +1178,7 @@
                     android:id="@+id/sponsorCard"
                     android:layout_width="match_parent"
                     android:layout_height="140dp"
+                    android:layout_marginTop="8dp"
                     android:background="@drawable/sponsor_card"
                     android:clickable="true"
                     android:elevation="3dp"
