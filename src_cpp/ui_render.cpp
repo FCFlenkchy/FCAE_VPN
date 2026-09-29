@@ -2037,7 +2037,7 @@ void render_ui() {
                         icon_center_x - icon_half_w,
                         icon_center_y - icon_half_h));
                     const ImVec2 image_pos = ImGui::GetCursorScreenPos();
-                    ImGui::Image(texture, size, uv0, uv1,
+                    ImGui::ImageWithBg(texture, size, uv0, uv1, ImVec4(0, 0, 0, 0),
                         ImVec4(1, 1, 1, (float)s_sponsor.icon_opacity / 100.0f));
                     const ImVec2 after_image = ImGui::GetCursorScreenPos();
                     ImGui::SetCursorScreenPos(image_pos);

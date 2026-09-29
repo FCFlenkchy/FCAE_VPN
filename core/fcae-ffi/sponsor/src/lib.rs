@@ -86,9 +86,10 @@ const MAX_TOTAL_DECODED_BYTES: usize = 192 * 1024 * 1024;
 /// Decoded bytes a single card may retain.
 const CAMPAIGN_DECODED_BYTES: usize = MAX_TOTAL_DECODED_BYTES / 2;
 /// Ceiling for the on-disk sponsor cache. Only re-derivable files are swept to
-/// stay under it (decoded sidecars, superseded fallbacks, clips for cards that
-/// are not on screen); a current asset is never deleted.
-const MAX_CACHE_BYTES: u64 = 192 * 1024 * 1024;
+/// stay under it (decoded sidecars, parked clips); a current asset is never
+/// deleted. Sized so a whole manifest fits with its encoded assets and its
+/// decoded sidecars at once.
+const MAX_CACHE_BYTES: u64 = 768 * 1024 * 1024;
 /// How often the media worker re-checks that ceiling. A manifest arrives every
 /// 12 hours and pins one fallback per plane per campaign, so a long session
 /// needs its own pass over the tree.
@@ -1991,14 +1992,23 @@ fn migrate_legacy_cache(cache_dir: &Path, campaign: &Campaign) {
         if url.is_none() {
             continue;
         }
-        let old = cache_dir.join(legacy_cache_name_for(campaign, url, kind));
         let new = cache_dir.join(current);
-        move_cache_file(&old, &new);
-        move_cache_file(&old.with_extension("decoded"), &new.with_extension("decoded"));
+        // Flat <id>-<url hash> files at the cache root.
+        let flat = cache_dir.join(legacy_cache_name_for(campaign, url, kind));
+        move_cache_file(&flat, &new);
+        move_cache_file(&flat.with_extension("decoded"), &new.with_extension("decoded"));
+        // Url-hashed entries under a per-kind directory; newest wins.
+        if !new.is_file() {
+            let hashed_dir = cache_dir.join("campaigns").join(&campaign.id).join(kind);
+            if let Some(hashed) = newest_file_with_extension(&hashed_dir, kind) {
+                move_cache_file(&hashed, &new);
+                move_cache_file(&hashed.with_extension("decoded"), &new.with_extension("decoded"));
+            }
+        }
     }
 }
 
-/// Planes of one campaign with the file the manifest currently points at.
+/// Planes of one campaign with each plane's id-keyed cache file.
 fn campaign_planes(cache_dir: &Path, campaign: &Campaign) -> [(&'static str, Option<PathBuf>); 3] {
     [
         ("media", campaign.icon_url.as_ref().map(|_| cache_dir.join(cache_name(campaign)))),
@@ -2060,12 +2070,9 @@ fn sweep_cache_periodically(cache_dir: &Path, campaigns: &[Campaign], visible: &
     sweep_cache_to_limit(cache_dir, campaigns, visible);
 }
 
-/// Eviction order once the tree outgrows [`MAX_CACHE_BYTES`]: sidecars of
-/// parked cards go first because a decode rebuilds them, then stale encoded
-/// fallbacks, then parked clips. A visible card's current asset is never a
-/// candidate. Sidecars are never deleted outside this pressure path --
-/// dropping them early forces a full re-decode the next time the campaign
-/// rotates back into the window.
+/// Eviction order once the tree outgrows [`MAX_CACHE_BYTES`]: parked sidecars,
+/// then parked audio clips, then sidecars of visible cards. A visible card's
+/// encoded asset is never a candidate.
 fn sweep_cache_to_limit(cache_dir: &Path, campaigns: &[Campaign], visible: &[String]) {
     let root = cache_dir.join("campaigns");
     let mut over = directory_bytes(&root).saturating_sub(MAX_CACHE_BYTES);
@@ -2077,25 +2084,21 @@ fn sweep_cache_to_limit(cache_dir: &Path, campaigns: &[Campaign], visible: &[Str
         let on_screen = visible.iter().any(|id| id == &campaign.id);
         for (kind, current) in campaign_planes(cache_dir, campaign) {
             let Some(current) = current else { continue; };
-            let current = current.file_name().map(|name| name.to_os_string());
-            let Ok(entries) = fs::read_dir(cache_dir.join("campaigns").join(&campaign.id).join(kind)) else {
-                continue;
+            let mut push = |path: &Path, priority: u8| {
+                let Ok(metadata) = fs::metadata(path) else { return; };
+                candidates.push((
+                    priority,
+                    metadata.modified().unwrap_or(UNIX_EPOCH),
+                    metadata.len(),
+                    path.to_path_buf(),
+                ));
             };
-            for path in entries.flatten().map(|entry| entry.path()) {
-                let decoded = path.extension().and_then(|value| value.to_str()) == Some("decoded");
-                let is_current = !decoded && path.file_name().map(|name| name.to_os_string()) == current;
-                let priority = match (on_screen, decoded, is_current) {
-                    (false, true, _) => 0,
-                    (false, false, false) => 1,
-                    (false, false, true) if kind == "audio" => 2,
-                    (true, true, _) => 3,
-                    _ => continue,
-                };
-                let modified = fs::metadata(&path)
-                    .and_then(|metadata| metadata.modified())
-                    .unwrap_or(UNIX_EPOCH);
-                let length = fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(0);
-                candidates.push((priority, modified, length, path));
+            let sidecar = decoded_cache_path(&current);
+            if sidecar.is_file() {
+                push(&sidecar, if on_screen { 3 } else { 0 });
+            }
+            if !on_screen && kind == "audio" && current.is_file() {
+                push(&current, 2);
             }
         }
     }
@@ -2128,36 +2131,31 @@ fn prune_cache(cache_dir: &Path, campaigns: &[Campaign], visible: &[String]) {
             let _ = write_atomic_preserving_old(&campaign_dir.join("campaign.json"), &json);
         }
 
-        // Keep the current URL and one newest fallback in each asset directory.
-        for (kind, current) in campaign_planes(cache_dir, campaign) {
-            let kind_dir = campaign_dir.join(kind);
-            let mut encoded = fs::read_dir(&kind_dir).ok().into_iter().flatten().flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().and_then(|value| value.to_str()) == Some(kind))
-                .collect::<Vec<_>>();
-            encoded.sort_by_key(|path| fs::metadata(path)
-                .and_then(|metadata| metadata.modified()).unwrap_or(UNIX_EPOCH));
-            encoded.reverse();
-            let mut kept_fallback = false;
-            for path in encoded {
-                if current.as_ref() == Some(&path) {
+        // One encoded entry and one sidecar per plane at fixed paths; drop
+        // everything else, including entries of the old url-hashed layouts.
+        let mut keep: HashSet<PathBuf> = HashSet::from([campaign_dir.join("campaign.json")]);
+        for (_, plane) in campaign_planes(cache_dir, campaign) {
+            let Some(plane) = plane else { continue; };
+            keep.insert(plane.clone());
+            keep.insert(decoded_cache_path(&plane));
+        }
+        if let Ok(entries) = fs::read_dir(&campaign_dir) {
+            for path in entries.flatten().map(|entry| entry.path()) {
+                if keep.contains(&path) {
                     continue;
                 }
-                if current.is_some() && !kept_fallback {
-                    kept_fallback = true;
-                    continue;
+                if path.is_dir() {
+                    let _ = fs::remove_dir_all(path);
+                } else {
+                    let _ = fs::remove_file(path);
                 }
-                let _ = fs::remove_file(&path);
-                let _ = fs::remove_file(path.with_extension("decoded"));
             }
-            if let Ok(entries) = fs::read_dir(&kind_dir) {
-                for path in entries.flatten().map(|entry| entry.path()) {
-                    if path.extension().and_then(|value| value.to_str()) == Some("decoded")
-                        && !path.with_extension(kind).is_file()
-                    {
-                        let _ = fs::remove_file(path);
-                    }
-                }
+        }
+        for (_, plane) in campaign_planes(cache_dir, campaign) {
+            let Some(plane) = plane else { continue; };
+            let sidecar = decoded_cache_path(&plane);
+            if sidecar.is_file() && !plane.is_file() {
+                let _ = fs::remove_file(sidecar);
             }
         }
     }
@@ -2350,12 +2348,23 @@ fn load_campaign_payload(
     }
 }
 
+fn newest_file_with_extension(dir: &Path, extension: &str) -> Option<PathBuf> {
+    let mut candidates = fs::read_dir(dir).ok()?.flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some(extension))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|path| fs::metadata(path)
+        .and_then(|metadata| metadata.modified()).unwrap_or(UNIX_EPOCH));
+    candidates.pop()
+}
+
 fn find_cached_payload(exclude: &Path) -> Option<PathBuf> {
     let parent = exclude.parent()?;
-    let extension = exclude.extension()?;
+    let extension = exclude.extension()?.to_str()?;
     let mut candidates = fs::read_dir(parent).ok()?.flatten()
         .map(|entry| entry.path())
-        .filter(|path| path != exclude && path.extension() == Some(extension))
+        .filter(|path| path != exclude
+            && path.extension().and_then(|value| value.to_str()) == Some(extension))
         .collect::<Vec<_>>();
     candidates.sort_by_key(|path| fs::metadata(path)
         .and_then(|metadata| metadata.modified()).unwrap_or(UNIX_EPOCH));
@@ -3225,11 +3234,11 @@ fn url_hash(url: Option<&str>) -> u64 {
     hash
 }
 
-fn cache_name_for(campaign: &Campaign, url: Option<&str>, kind: &str) -> PathBuf {
+/// One cache entry per campaign per plane, keyed by campaign ID.
+fn cache_name_for(campaign: &Campaign, kind: &str) -> PathBuf {
     PathBuf::from("campaigns")
         .join(&campaign.id)
-        .join(kind)
-        .join(format!("{:016x}.{kind}", url_hash(url)))
+        .join(format!("{0}.{0}", kind))
 }
 
 fn legacy_cache_name_for(campaign: &Campaign, url: Option<&str>, suffix: &str) -> String {
@@ -3237,15 +3246,15 @@ fn legacy_cache_name_for(campaign: &Campaign, url: Option<&str>, suffix: &str) -
 }
 
 fn cache_name(campaign: &Campaign) -> PathBuf {
-    cache_name_for(campaign, campaign.icon_url.as_deref(), "media")
+    cache_name_for(campaign, "media")
 }
 
 fn background_cache_name(campaign: &Campaign) -> PathBuf {
-    cache_name_for(campaign, campaign.background_url.as_deref(), "background")
+    cache_name_for(campaign, "background")
 }
 
 fn audio_cache_name(campaign: &Campaign) -> PathBuf {
-    cache_name_for(campaign, campaign.audio_url.as_deref(), "audio")
+    cache_name_for(campaign, "audio")
 }
 
 fn download_media(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
@@ -3546,6 +3555,33 @@ mod tests {
         assert!(
             !root.join("campaigns").join("vanished").exists(),
             "a campaign removed from the manifest loses its cache entirely"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_hashed_entries_migrate_to_the_id_keyed_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "fcae-sponsor-migrate-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let campaign = test_campaign_with_media("legacy");
+        let old_dir = root.join("campaigns").join("legacy").join("media");
+        let _ = fs::create_dir_all(&old_dir);
+        fs::write(old_dir.join("0123456789abcdef.media"), b"encoded")
+            .expect("a legacy asset");
+        fs::write(old_dir.join("0123456789abcdef.decoded"), b"frames")
+            .expect("a legacy sidecar");
+        prune_cache(&root, &[campaign.clone()], &["legacy".to_string()]);
+        let asset = campaign_planes(&root, &campaign)
+            .into_iter()
+            .find_map(|(kind, path)| (kind == "media").then_some(path))
+            .expect("the media plane");
+        assert!(asset.is_file(), "the legacy entry moves to the id-keyed path");
+        assert!(
+            decoded_cache_path(&asset).is_file(),
+            "its decoded sidecar moves with it"
         );
         let _ = fs::remove_dir_all(&root);
     }
