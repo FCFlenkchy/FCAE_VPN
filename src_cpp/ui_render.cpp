@@ -107,13 +107,17 @@ static void poll_sponsor() {
         || info.height != s_sponsor.height;
     const bool background_shape_changed = info.background_width != s_sponsor.background_width
         || info.background_height != s_sponsor.background_height;
-    if (card_available && info.generation != s_sponsor_logged_generation) {
-        s_sponsor_logged_generation = info.generation;
+    // Bits above the frame indices identify the card itself: keyed on those, a
+    // GIF/video card logs once when it is published instead of adding a line to
+    // the log panel on every one of its animation frames.
+    const uint64_t sponsor_card = info.generation >> 24;
+    if (card_available && sponsor_card != s_sponsor_logged_generation) {
+        s_sponsor_logged_generation = sponsor_card;
         char message[192];
         snprintf(message, sizeof(message),
-                 "[sponsor] UI frame available=%s: id=%s generation=%llu campaigns=%u rgba=%u",
+                 "[sponsor] UI card available=%s: id=%s card=%llu campaigns=%u rgba=%u",
                  info.available ? "true" : "inferred",
-                 info.id, (unsigned long long)info.generation,
+                 info.id, (unsigned long long)sponsor_card,
                  info.campaign_count, info.rgba_size);
         g_app.add_log(FCAE_LOG_INFO, message);
     }
@@ -182,15 +186,35 @@ static ImVec4 sponsor_color(uint32_t packed, ImVec4 fallback) {
         ((packed >> 24) & 0xFF) / 255.0f);
 }
 
+// A card text position is the horizontal centre of the block, measured with the
+// font and wrap width in use and clamped so a manifest position can never push
+// text outside the card. `y` stays the top edge of the block.
+static ImVec2 sponsor_text_origin(
+        const char* text, float content_width, unsigned x_percent, float y) {
+    const ImVec2 size = ImGui::CalcTextSize(text, nullptr, false, content_width);
+    const float anchor = content_width
+        * std::clamp((float)x_percent / 100.0f, 0.0f, 1.0f);
+    return ImVec2(
+        std::clamp(anchor - size.x * 0.5f, 0.0f, std::max(0.0f, content_width - size.x)),
+        y);
+}
+
 // What the last painted frame looked like / when it was painted.
 static uint64_t s_painted_sig = 0;
 static bool s_log_scroll_pending = false;
 static bool     s_painted_once = false;
 static double   s_last_paint_t = 0.0;
 
+// The UI frame clock is hardcoded at 60 FPS on every platform: frames are
+// paced by this interval and never by a content-derived timeout, so GIF/video
+// sponsor frames, the connect spinner, a blinking caret and an idle window all
+// advance at the same fixed rate.
+static constexpr unsigned kUiFrameRate = 60;
+static constexpr unsigned kUiFrameIntervalMs = 1000 / kUiFrameRate;
+static constexpr double kUiFrameSeconds = 1.0 / kUiFrameRate;
+
 // UI state that keeps needing frames on its own.
 static bool s_busy_anim = false;      // connect/scan spinner is on screen
-static bool s_text_input = false;     // a text field is focused (blinking caret)
 
 // The native runtime and config are initialized off the render thread. The UI
 // never enters an FFI-backed code path until the release-store publishes all
@@ -331,12 +355,6 @@ static uint64_t ui_content_signature() {
     return h;
 }
 
-/// True while the engine is running in any live state — the only time the
-/// telemetry numbers (and therefore the painted content) can move on their own.
-static bool ui_stats_live() {
-    return g_app.ffi_state.load() != FCAE_STATE_DISCONNECTED || g_app.start_busy.load();
-}
-
 /// Pull telemetry from the FFI when due: once per second, matching the
 /// engine's 1 s rate window — the published rates are bytes-per-second
 /// measured over exactly that window, so faster polling would only repaint
@@ -398,32 +416,21 @@ bool ui_should_render(bool interacting) {
     // Spinner/connect animation is running: it moves on its own.
     if (s_busy_anim) return true;
 
-    // Nothing changed since the last painted frame → the frame would be
-    // pixel-identical, so skip it and let the platform go back to sleep.
-    if (s_painted_once && ui_content_signature() == s_painted_sig) {
-        // …except for the few things that tick slowly on their own:
-        // Animated sponsor frames are decoded in memory; poll at the native
-        // display cadence instead of the old 100 ms GIF cadence so video does
-        // not appear slow or miss its replay timing.
-        const double sponsor_period = s_sponsor.animated ? (1.0 / 60.0)
-            : (s_sponsor.campaign_count > 1 ? 0.25 : 0.0);
-        const double period = sponsor_period > 0.0 ? sponsor_period
-            : ((s_update_in_progress || s_text_input) ? 0.5 : 0.0);
-        if (period <= 0.0 || now - s_last_paint_t < period) return false;
+    // Nothing changed since the last painted frame: hold the repaint to the
+    // next hardcoded 60 FPS frame boundary instead of waiting for a
+    // content-derived timeout. A changed frame is still painted immediately
+    // and stays capped by the platform's own 60 FPS frame interval.
+    if (s_painted_once && ui_content_signature() == s_painted_sig
+            && now - s_last_paint_t < kUiFrameSeconds) {
+        return false;
     }
     return true;
 }
 
 unsigned ui_sleep_ms() {
-    if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Starting)
-        return 50;                           // notice completion promptly without spinning
-    if (s_busy_anim) return 16;              // connect spinner: keep it smooth
-    if (s_sponsor.animated) return 16;       // GIF/video frame timing
-    if (s_sponsor.campaign_count > 1) return 250; // five-second local rotation
-    if (s_update_in_progress) return 250;    // "Checking... (Ns)" counter
-    if (s_text_input) return 250;            // caret blink in a focused field
-    if (ui_stats_live()) return 1000;        // counters/state refresh once a second
-    return 1000;                             // idle: poll the engine once a second
+    // Hardcoded 60 FPS: the platform waits exactly one frame interval and never
+    // a content-derived timeout.
+    return kUiFrameIntervalMs;
 }
 
 void ui_note_frame_drawn() {
@@ -910,7 +917,6 @@ void ui_frame() {
     const RuntimeInitState init = s_runtime_init.load(std::memory_order_acquire);
     if (init != RuntimeInitState::Ready) {
         render_startup_shell(init == RuntimeInitState::Failed);
-        s_text_input = false;
         s_busy_anim = false;
         s_painted_once = true;
         s_last_paint_t = ui_now_seconds();
@@ -923,11 +929,8 @@ void ui_frame() {
 
     render_ui();
 
-    // Bookkeeping for the render gate (ui_should_render/ui_sleep_ms):
-    //  - a focused text field needs ~2 Hz frames so the caret keeps blinking,
-    //  - the connect/scan spinner animates on its own and wants smooth frames.
-    const ImGuiIO& io = ImGui::GetIO();
-    s_text_input = io.WantTextInput;
+    // The connect/scan spinner keeps requesting frames while it moves; every
+    // other repaint is paced by the fixed 60 FPS clock in ui_should_render().
     const int st = g_app.ffi_state.load();
     s_busy_anim = g_app.start_busy.load()
                || st == FCAE_STATE_PROVISIONING
@@ -1925,9 +1928,12 @@ void render_ui() {
                 ImTextureID background_texture = ImTextureID{};
                 if (!s_sponsor_rgba.empty() && s_sponsor.width > 0 && s_sponsor.height > 0
                         && s_sponsor_loaded_foreground_generation != 0) {
+                    // Key each texture on the plane it holds, not on the whole
+                    // card: while a GIF/video background advances at 60 FPS an
+                    // unchanged icon must not be re-uploaded every frame.
                     texture = sponsor_texture_update(
                         s_sponsor_rgba.data(), (int)s_sponsor.width, (int)s_sponsor.height,
-                        s_sponsor_loaded_foreground_generation, 0);
+                        s_sponsor_loaded_foreground_generation & ~kSponsorBackgroundFrameMask, 0);
                 }
                 if (!s_sponsor_background_rgba.empty() && s_sponsor.background_width > 0
                         && s_sponsor.background_height > 0
@@ -1935,7 +1941,7 @@ void render_ui() {
                     background_texture = sponsor_texture_update(
                         s_sponsor_background_rgba.data(), (int)s_sponsor.background_width,
                         (int)s_sponsor.background_height,
-                        s_sponsor_loaded_background_generation, 1);
+                        s_sponsor_loaded_background_generation & ~kSponsorForegroundFrameMask, 1);
                 }
                 const float icon_scale = std::clamp(
                     (float)s_sponsor.icon_scale / 100.0f, 0.5f, 1.6f);
@@ -2046,25 +2052,26 @@ void render_ui() {
                     const ImVec2 content_max = ImGui::GetWindowContentRegionMax();
                     const float content_width = content_max.x - content_min.x;
                     const float content_height = content_max.y - content_min.y;
-                    const float title_x = content_width * (float)s_sponsor.title_x / 100.0f;
                     const float title_y = content_height * (float)s_sponsor.title_y / 100.0f;
                     const ImVec4 title_color = sponsor_color(s_sponsor.title_color,
                         ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                     if (!sponsor_has_content) ImGui::SetWindowFontScale(1.35f);
                     ImGui::PushStyleColor(ImGuiCol_Text, title_color);
-                    ImGui::SetCursorPos(ImVec2(title_x, title_y));
+                    const ImVec2 title_origin = sponsor_text_origin(
+                        sponsor_title, content_width, s_sponsor.title_x, title_y);
+                    ImGui::SetCursorPos(title_origin);
                     ImGui::PushTextWrapPos(content_width);
                     ImGui::TextUnformatted(sponsor_title);
                     ImGui::PopTextWrapPos();
                     ImGui::PopStyleColor();
                     if (!sponsor_has_content) ImGui::SetWindowFontScale(1.0f);
                     if (sponsor_message[0] != '\0') {
-                        const float message_x = content_width * (float)s_sponsor.message_x / 100.0f;
                         const float message_y = content_height * (float)s_sponsor.message_y / 100.0f;
                         const ImVec4 message_color = sponsor_color(s_sponsor.message_color,
                             ImVec4(0.85f, 0.91f, 1.0f, 1.0f));
                         ImGui::PushStyleColor(ImGuiCol_Text, message_color);
-                        ImGui::SetCursorPos(ImVec2(message_x, message_y));
+                        ImGui::SetCursorPos(sponsor_text_origin(
+                            sponsor_message, content_width, s_sponsor.message_x, message_y));
                         ImGui::PushTextWrapPos(content_width);
                         ImGui::TextWrapped("%s", sponsor_message);
                         ImGui::PopTextWrapPos();

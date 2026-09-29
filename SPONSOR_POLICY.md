@@ -50,7 +50,7 @@ FCAE does not provide sponsors with device identifiers, user profiles, browsing 
 - `title` is optional and limited to 96 printable characters; an omitted title renders no title text.
 - `message` is optional and limited to 256 printable characters.
 - `icon_x` and `icon_y` are optional integer percentages from 0 through 100 for the foreground icon center; they default to 50,25.
-- `title_x`, `title_y`, `message_x`, and `message_y` are integer percentages from 0 through 100, measured from the top-left of the usable card area. Title position defaults to 50,50; message position defaults to 50,72.
+- `title_x` and `message_x` are integer percentages from 0 through 100 for the horizontal centre of the title and message blocks; the block is clamped so its text always stays inside the card. `title_y` and `message_y` are integer percentages from 0 through 100 measured from the top of the usable card area. Title position defaults to 50,50; message position defaults to 50,72.
 - `duration_seconds` is optional, defaults to 10, and accepts 1 through 3600 seconds.
 - `title_color`, `message_color`, and `background_color` use `#RRGGBB` or `#AARRGGBB`.
 - `image_fit` is `contain` or `cover`; it defaults to `contain`.

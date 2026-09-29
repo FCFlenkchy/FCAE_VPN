@@ -94,7 +94,6 @@ class MainActivity : AppCompatActivity() {
     private var sponsorBackgroundBitmap: android.graphics.Bitmap? = null
     private var sponsorConnected = false
     private var sponsorCampaignCount = 0
-    private var sponsorAnimated = false
     // The high portion of the native generation identifies the campaign and
     // published metadata; the lower 24 bits are reserved for animation frame
     // changes. Avoid relayout/recoloring the card on every decoded frame.
@@ -649,6 +648,30 @@ class MainActivity : AppCompatActivity() {
         return bitmap
     }
 
+    // Uploads one sponsor media plane into its ImageView.
+    //
+    // The view is the source of truth for what it currently displays. A plane
+    // whose media was briefly absent (a rotation that outran the refresh
+    // worker) clears the drawable while the recycled Bitmap instance stays
+    // cached; a later GIF/video frame with those same dimensions then reuses
+    // the instance, so comparing the previous field instead of the drawable
+    // left the icon and background invisible for the rest of the campaign.
+    private fun showSponsorBitmap(
+        view: android.widget.ImageView,
+        cached: android.graphics.Bitmap?,
+        width: Int,
+        height: Int,
+        rgba: ByteArray,
+    ): android.graphics.Bitmap? {
+        val bitmap = bitmapFromRgba(cached, width, height, rgba) ?: return cached
+        if ((view.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap !== bitmap) {
+            view.setImageBitmap(bitmap)
+        }
+        view.visibility = android.view.View.VISIBLE
+        view.invalidate()
+        return bitmap
+    }
+
     private fun positionSponsorText(
         titleX: Int,
         titleY: Int,
@@ -661,23 +684,34 @@ class MainActivity : AppCompatActivity() {
         val safeMessageX = messageX.coerceIn(0, 100)
         val safeMessageY = messageY.coerceIn(0, 100)
         val messageVisible = sponsorMessage.visibility == android.view.View.VISIBLE
+        val textKey = "${sponsorTitle.text}|${sponsorMessage.text}"
         sponsorTextBlock.post {
             val cardWidth = sponsorCard.width
             val cardHeight = sponsorCard.height
             if (cardWidth <= 0 || cardHeight <= 0) return@post
-            val key = "$safeTitleX:$safeTitleY:$safeMessageX:$safeMessageY:$messageVisible:${cardWidth}x$cardHeight"
+            val key = "$safeTitleX:$safeTitleY:$safeMessageX:$safeMessageY:$messageVisible:${cardWidth}x$cardHeight:$textKey"
             if (key == sponsorTextLayoutKey) return@post
 
-            fun applyPosition(view: android.view.View, x: Int, y: Int) {
+            // A card position is the horizontal centre of the text block. The
+            // labels span the whole card and centre their own text, so the box
+            // is sized to the measured line and shifted so that centre lands on
+            // the requested percentage, clamped to keep the text inside the
+            // card: the previous box that started at the position pushed every
+            // centered card (and the "Become a sponsor" card) off-centre.
+            fun applyCentre(view: android.widget.TextView, x: Int, y: Int) {
                 val params = (view.layoutParams as? android.widget.FrameLayout.LayoutParams)
                     ?: android.widget.FrameLayout.LayoutParams(
                         android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
                         android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
                     )
-                val left = (cardWidth * x / 100f).toInt().coerceIn(0, cardWidth - 1)
-                params.width = (cardWidth - left).coerceAtLeast(1)
+                val widestLine = view.text.split('\n')
+                    .maxOfOrNull { view.paint.measureText(it) } ?: 0f
+                val boxWidth = kotlin.math.ceil(widestLine).toInt()
+                    .coerceIn(1, cardWidth)
+                params.width = boxWidth
                 params.height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-                params.leftMargin = left
+                params.leftMargin = (cardWidth * x / 100f - boxWidth / 2f).toInt()
+                    .coerceIn(0, cardWidth - boxWidth)
                 params.topMargin = (cardHeight * y / 100f).toInt().coerceIn(0, cardHeight - 1)
                 params.rightMargin = 0
                 params.bottomMargin = 0
@@ -685,8 +719,8 @@ class MainActivity : AppCompatActivity() {
                 view.layoutParams = params
             }
 
-            applyPosition(sponsorTitle, safeTitleX, safeTitleY)
-            applyPosition(sponsorMessage, safeMessageX, safeMessageY)
+            applyCentre(sponsorTitle, safeTitleX, safeTitleY)
+            applyCentre(sponsorMessage, safeMessageX, safeMessageY)
             sponsorTextLayoutKey = key
         }
     }
@@ -744,7 +778,6 @@ class MainActivity : AppCompatActivity() {
     private fun showEmptySponsorCard() {
         sponsorDestination = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md"
         sponsorCampaignCount = 0
-        sponsorAnimated = false
         sponsorStaticToken = -1L
         sponsorGeneration = -1L
         sponsorTitle.text = "Become a sponsor"
@@ -799,7 +832,6 @@ class MainActivity : AppCompatActivity() {
                                 val staticToken = card.generation ushr 24
                                 if (staticToken != sponsorStaticToken) {
                                     sponsorCampaignCount = card.campaignCount
-                                    sponsorAnimated = card.animated
                                     val titleColor = if (card.titleColor != 0) card.titleColor else Color.WHITE
                                     val messageColor = if (card.messageColor != 0) card.messageColor else Color.parseColor("#FFD8E7FF")
                                     val cardColor = if (card.cardColor != 0) card.cardColor else Color.parseColor("#FF142A44")
@@ -852,32 +884,25 @@ class MainActivity : AppCompatActivity() {
                                         sponsorGeneration,
                                     )
                                     if (card.rgba.isNotEmpty()) {
-                                        val previousBitmap = sponsorBitmap
-                                        val bitmap = bitmapFromRgba(sponsorBitmap, card.width, card.height, card.rgba)
-                                        if (bitmap != null) {
-                                            sponsorBitmap = bitmap
-                                            if (previousBitmap !== bitmap) sponsorImage.setImageBitmap(bitmap)
-                                            sponsorImage.visibility = android.view.View.VISIBLE
-                                            sponsorImage.invalidate()
-                                        }
+                                        sponsorBitmap = showSponsorBitmap(
+                                            sponsorImage,
+                                            sponsorBitmap,
+                                            card.width,
+                                            card.height,
+                                            card.rgba,
+                                        )
                                     } else if (foregroundChanged && (card.width <= 0 || card.height <= 0)) {
                                         sponsorImage.setImageDrawable(null)
                                         sponsorImage.visibility = android.view.View.GONE
                                     }
                                     if (card.backgroundRgba.isNotEmpty()) {
-                                        val previousBackground = sponsorBackgroundBitmap
-                                        val background = bitmapFromRgba(
+                                        sponsorBackgroundBitmap = showSponsorBitmap(
+                                            sponsorBackgroundImage,
                                             sponsorBackgroundBitmap,
                                             card.backgroundWidth,
                                             card.backgroundHeight,
                                             card.backgroundRgba,
                                         )
-                                        if (background != null) {
-                                            sponsorBackgroundBitmap = background
-                                            if (previousBackground !== background) sponsorBackgroundImage.setImageBitmap(background)
-                                            sponsorBackgroundImage.visibility = android.view.View.VISIBLE
-                                            sponsorBackgroundImage.invalidate()
-                                        }
                                     } else if (backgroundChanged
                                         && (card.backgroundWidth <= 0 || card.backgroundHeight <= 0)
                                     ) {
@@ -901,13 +926,9 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            val delay = when {
-                sponsorCard.visibility != android.view.View.VISIBLE -> 500L
-                sponsorAnimated -> 16L
-                sponsorCampaignCount > 0 -> 250L
-                else -> 500L
-            }
-            handler.postDelayed(this, delay)
+            // Hardcoded 60 FPS: the card is redrawn on the same interval
+            // whether it is animating, static or empty.
+            handler.postDelayed(this, SPONSOR_FRAME_INTERVAL_MS)
         }
     }
 
@@ -3780,6 +3801,9 @@ class MainActivity : AppCompatActivity() {
         const val EXTRA_TRIGGER_CONNECT = "com.fc.fcaevpn.TRIGGER_CONNECT"
 
         private const val POLL_INTERVAL_MS = 1000L
+        // Sponsor card frames are paced by this hardcoded 60 FPS interval on
+        // every device instead of the previous content-dependent delay ladder.
+        private const val SPONSOR_FRAME_INTERVAL_MS = 16L
         // ~70+ log messages on screen. Psiphon's JSON notices average
         // 150-350 chars, so 8000 showed only ~20-30 lines and older lines
         // (handshake, CandidateServers) scrolled away before the connect

@@ -816,11 +816,17 @@ fn publish_media(campaigns: &[Campaign], ready: Vec<ReadyCampaign>) -> bool {
     true
 }
 
+/// Publishes what the decoded cache already holds and decodes nothing itself.
+///
+/// Called from the app-launch path -- Android's `nativeSponsorInit` on the UI
+/// thread, the desktop's first sponsor poll on the render thread -- so a plane
+/// whose sidecar is missing or stale must not turn app start into an MP4/GIF
+/// decode of up to a few hundred frames. Those planes are left to the refresh
+/// worker, which decodes on its own thread.
 fn refresh_cached_media_sync() {
     if MEDIA_BUSY.swap(true, Ordering::AcqRel) {
         return;
     }
-    STATE.lock().media_retry_after = Instant::now() + Duration::from_secs(30);
     let (campaigns, cache_dir, previous, target_id) = {
         let state = STATE.lock();
         let target_id = state.campaigns.get(state.current_campaign)
@@ -832,14 +838,29 @@ fn refresh_cached_media_sync() {
         &cache_dir,
         &previous,
         false,
+        false,
         target_id.as_deref(),
     );
     let ready_count = ready.len();
     let applied = publish_media(&campaigns, ready);
     MEDIA_BUSY.store(false, Ordering::Release);
     if applied {
-        log::debug!("[sponsor] published synchronous cached media ({} active campaigns)", ready_count);
-        preload_next_media_async();
+        log::debug!("[sponsor] published cached media ({} active campaigns)", ready_count);
+        // The worker owns the retry backoff, so clear the clock here so the
+        // decode of anything the sidecars did not cover starts now rather than
+        // on the next backoff expiry -- and start it for the card that is on
+        // screen, not for the preload: a launch must show its campaign first.
+        let current_missing = {
+            let mut state = STATE.lock();
+            state.media_retry_after = Instant::now();
+            let index = state.current_campaign;
+            ready_needs_media(&mut state, index)
+        };
+        if current_missing {
+            refresh_cached_media_async();
+        } else {
+            preload_next_media_async();
+        }
     }
 }
 
@@ -883,6 +904,7 @@ fn refresh_media_target_async(allow_disconnected: bool, requested_target: Option
             &cache_dir,
             &previous,
             !allow_disconnected,
+            true,
             target_id.as_deref(),
         );
         let ready_count = ready.len();
@@ -1455,6 +1477,7 @@ fn prepare_media(
     cache_dir: &Path,
     previous: &[ReadyCampaign],
     allow_network: bool,
+    decode_missing: bool,
     target_id: Option<&str>,
 ) -> Vec<ReadyCampaign> {
     let network_client = (allow_network
@@ -1492,11 +1515,23 @@ fn prepare_media(
                 Some(payload) => (
                     payload.media.and_then(|payload| {
                         let url = campaign.icon_url.as_deref()?;
-                        decode_media(campaign, url, payload, network_client.as_ref())
+                        decode_media(
+                            campaign,
+                            url,
+                            payload,
+                            network_client.as_ref(),
+                            decode_missing,
+                        )
                     }),
                     payload.background.and_then(|payload| {
                         let url = campaign.background_url.as_deref()?;
-                        decode_background(campaign, url, payload, network_client.as_ref())
+                        decode_background(
+                            campaign,
+                            url,
+                            payload,
+                            network_client.as_ref(),
+                            decode_missing,
+                        )
                     }),
                     payload.audio,
                 ),
@@ -1504,12 +1539,16 @@ fn prepare_media(
             };
             let media_loaded = media.is_some();
             let background_loaded = background.is_some();
-            if campaign.icon_url.is_some() && !media_loaded && candidate.frames.is_empty()
+            // Only a real decode attempt can fail a plane: a hydration pass that
+            // deliberately skipped it must neither warn nor spend the
+            // once-per-plane failure report.
+            if decode_missing && campaign.icon_url.is_some() && !media_loaded
+                && candidate.frames.is_empty()
                 && note_plane_failure(&campaign.id, "media")
             {
                 log::warn!("[sponsor] campaign {} icon unavailable; using fallback", campaign.id);
             }
-            if campaign.background_url.is_some() && !background_loaded
+            if decode_missing && campaign.background_url.is_some() && !background_loaded
                     && candidate.background_frames.is_empty()
                     && candidate.background_rgba.is_empty()
                     && note_plane_failure(&campaign.id, "background")
@@ -1715,9 +1754,15 @@ fn decoded_cache_path(path: &Path) -> PathBuf {
 /// loaded the whole file into a buffer and then copied every frame out of it,
 /// which peaked at twice the retained pixels for no benefit: the file is
 /// already an offset-addressable frame list.
+/// The reader keeps the retention budget the decoder uses, but folds an
+/// animation that no longer fits instead of rejecting the file: a sidecar
+/// written under a larger budget keeps its whole timeline (each dropped frame's
+/// display time is added to the one before it, exactly as `compact_video_frames`
+/// does while decoding) rather than being deleted and re-decoded on the next
+/// app start -- a re-decode that would otherwise run on the caller's thread.
 fn decoded_ready_from_cache(campaign: &Campaign, path: &Path) -> Option<ReadyCampaign> {
     let length = fs::metadata(path).ok()?.len();
-    if length < 16 || length > (MAX_DECODED_BYTES.saturating_add(MAX_FRAMES * 8 + 32)) as u64 {
+    if length < 16 || length > MAX_TOTAL_DECODED_BYTES as u64 {
         let _ = fs::remove_file(path);
         return None;
     }
@@ -1733,27 +1778,38 @@ fn decoded_ready_from_cache(campaign: &Campaign, path: &Path) -> Option<ReadyCam
     let width = read_u32(&mut reader)?;
     let height = read_u32(&mut reader)?;
     let frame_count = read_u32(&mut reader)? as usize;
-    if frame_count == 0 || frame_count > MAX_FRAMES
-        || validate_dimensions(width, height, frame_count).is_err()
-    {
+    if frame_count == 0 || validate_dimensions(width, height, 1).is_err() {
         let _ = fs::remove_file(path);
         return None;
     }
     let frame_bytes = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
-    let mut frames = Vec::with_capacity(frame_count);
-    let mut decoded_total = 0usize;
-    for _ in 0..frame_count {
-        let delay = read_u32(&mut reader)?.clamp(20, 10_000);
-        let size = read_u32(&mut reader)? as usize;
-        if size != frame_bytes || decoded_total.checked_add(size)? > MAX_DECODED_BYTES {
-            let _ = fs::remove_file(path);
-            return None;
+    let parsed = (|| -> Option<Vec<Frame>> {
+        let mut frames = Vec::with_capacity(frame_count.min(MAX_FRAMES));
+        let mut decoded_total = 0usize;
+        for _ in 0..frame_count {
+            let delay = read_u32(&mut reader)?.clamp(20, 10_000);
+            let size = read_u32(&mut reader)? as usize;
+            if size != frame_bytes {
+                return None;
+            }
+            let mut rgba = vec![0u8; size];
+            reader.read_exact(&mut rgba).ok()?;
+            frames.push(Frame { rgba: Arc::new(rgba), delay: Duration::from_millis(delay as u64) });
+            decoded_total = decoded_total.saturating_add(size);
+            while (frames.len() > MAX_FRAMES || decoded_total > MAX_DECODED_BYTES)
+                && frames.len() > 1
+            {
+                compact_video_frames(&mut frames, &mut decoded_total);
+            }
         }
-        let mut rgba = vec![0u8; size];
-        reader.read_exact(&mut rgba).ok()?;
-        decoded_total += size;
-        frames.push(Frame { rgba: Arc::new(rgba), delay: Duration::from_millis(delay as u64) });
-    }
+        Some(frames)
+    })();
+    let Some(frames) = parsed else {
+        // Truncated or corrupt: worthless either way, and the encoded entry is
+        // untouched so the campaign can be decoded again from it.
+        let _ = fs::remove_file(path);
+        return None;
+    };
     Some(ReadyCampaign {
         campaign: campaign.clone(),
         width,
@@ -1893,7 +1949,14 @@ fn decode_media(
     url: &str,
     payload: MediaPayload,
     client: Option<&reqwest::blocking::Client>,
+    decode_missing: bool,
 ) -> Option<ReadyCampaign> {
+    if !decode_missing {
+        // Cache-only hydration: the decoded sidecar is the whole answer. A
+        // plane that has none keeps whatever the card already shows and is
+        // decoded by the refresh worker, never by the app-launch caller.
+        return decoded_ready_from_cache(campaign, &decoded_cache_path(&payload.path));
+    }
     let still_image = image_header(&payload.path, payload.bytes.as_deref())
         .is_some_and(|header| image::guess_format(&header).is_ok());
     if still_image {
@@ -2185,8 +2248,9 @@ fn decode_background(
     url: &str,
     payload: MediaPayload,
     client: Option<&reqwest::blocking::Client>,
+    decode_missing: bool,
 ) -> Option<BackgroundImage> {
-    let decoded = decode_media(campaign, url, payload, client)?;
+    let decoded = decode_media(campaign, url, payload, client, decode_missing)?;
     if decoded.frames.is_empty() { return None; }
     Some(BackgroundImage {
         width: decoded.width,

@@ -1024,9 +1024,13 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
         env->DeleteLocalRef(cls);
         return nullptr;
     }
-    if (info.available && g_sponsor_logged_generation.exchange(info.generation) != info.generation) {
-        LOGI("Sponsor frame available: id=%s generation=%llu campaigns=%u rgba=%u",
-             info.id, (unsigned long long)info.generation, info.campaign_count, info.rgba_size);
+    // Bits above the frame indices identify the card itself: keyed on those,
+    // an animated card logs once when it is published instead of writing a
+    // logcat line for every one of its frames.
+    const uint64_t sponsor_card = info.generation >> 24;
+    if (info.available && g_sponsor_logged_generation.exchange(sponsor_card) != sponsor_card) {
+        LOGI("Sponsor card available: id=%s card=%llu campaigns=%u rgba=%u",
+             info.id, (unsigned long long)sponsor_card, info.campaign_count, info.rgba_size);
     }
     const uint64_t previous_generation = static_cast<uint64_t>(knownGeneration);
     const bool copyForeground = info.available
