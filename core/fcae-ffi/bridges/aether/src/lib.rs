@@ -2,12 +2,13 @@
 
 mod rates;
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Once};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use fcae_abi::{FcaeState, FcaeTorMode};
@@ -17,8 +18,46 @@ use fcae_runtime::backend::{
 use fcae_runtime::config::{env_compat, SessionConfig};
 use fcae_runtime::error::{CoreError, Result};
 use fcae_runtime::telemetry::TelemetrySink;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
+
+/// Budget of one SOCKS greeting probe. Long enough for a loaded device, short
+/// enough that the 100 ms readiness loop stays responsive.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(400);
+/// How long a listener left behind by a previous session may take to disappear
+/// before a start is refused instead of racing it.
+const RELEASE_GRACE: Duration = Duration::from_millis(1_500);
+/// Hard cap on a job that was cancelled but never acknowledged it.
+const TEARDOWN_BUDGET: Duration = Duration::from_secs(5);
+/// Upper bound on `drain()`, which the session worker runs before its runtime
+/// is destroyed and which must not hold a disconnect open indefinitely.
+const DRAIN_BUDGET: Duration = Duration::from_secs(3);
+const REAP_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Jobs the engine still owns.
+///
+/// The engine's runtime is process-global and is never shut down, so a job that
+/// is merely cancelled -- or a start that was cancelled before it could return a
+/// handle -- keeps running and keeps its SOCKS and HTTP listeners bound. Every
+/// job this bridge starts is registered here first, so `drain()` and the
+/// teardown reaper can finish what a cancelled start or an impatient caller
+/// left behind. The entry is dropped only once the listener is provably gone.
+static LIVE_JOBS: LazyLock<Mutex<HashMap<u64, SocketAddr>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct PendingTeardown {
+    job: u64,
+    addr: SocketAddr,
+    deadline: Instant,
+}
+
+static PENDING: LazyLock<Mutex<Vec<PendingTeardown>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+/// Wakes the reaper. The thread has to poll (a listener only proves its release
+/// by failing a probe), but it must not tick while there is nothing to reap:
+/// the engine runtime outlives every session, so a busy loop here would run for
+/// the life of the process.
+static WORK: LazyLock<Condvar> = LazyLock::new(Condvar::new);
+static REAPER: Once = Once::new();
 
 pub fn register() {
     fcae_runtime::registry::register(fcae_abi::FcaeBackend::Aether, || Arc::new(AetherBackend));
@@ -41,45 +80,68 @@ impl Backend for AetherBackend {
     }
 
     async fn start(&self, cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
-        let cfg = cx.config.clone();
+        let mut cfg = cx.config.clone();
         if cfg.tor.is_enabled() && !cfg!(feature = "tor") {
             return Err(CoreError::InvalidConfig(format!(
                 "tor mode `{}` was requested but this build has no tor support",
                 tor_mode_label(cfg.tor.mode)
             )));
         }
+        // The engine always binds a SOCKS listener. Port 0 would hand it an
+        // ephemeral port that nothing can name -- not even this bridge -- so
+        // the readiness probe below could never succeed; reserve a loopback
+        // port and let the engine bind that one.
+        if cfg.tor.mode != FcaeTorMode::Only && cfg.socks_port == 0 {
+            cfg.socks_port = free_loopback_port()?;
+        }
 
         env_compat::apply(&cfg);
+        pin_engine_stats_interval();
         cx.report(FcaeState::Scanning, "Establishing tunnel…");
 
-        let job = ffi_start()?;
+        // Validate every address before the engine is asked to do anything,
+        // so a bad configuration cannot leave a running job behind.
         let engine_socks = if cfg.tor.mode == FcaeTorMode::Only {
-            local_dial_addr(cfg.tor.bind.as_deref().ok_or_else(|| {
-                CoreError::InvalidConfig("tor is enabled but no bind address was provided".into())
-            })?)?
+            local_dial_addr(tor_bind(&cfg)?)?
         } else {
-            format!("127.0.0.1:{}", cfg.socks_port)
-                .parse()
-                .map_err(|e| CoreError::InvalidConfig(format!("bad socks address: {e}")))?
+            loopback_socks(cfg.socks_port)?
         };
         let socks_addr = if cfg.tor.mode == FcaeTorMode::Chain {
-            local_dial_addr(cfg.tor.bind.as_deref().ok_or_else(|| {
-                CoreError::InvalidConfig("tor is enabled but no bind address was provided".into())
-            })?)?
+            local_dial_addr(tor_bind(&cfg)?)?
         } else {
             engine_socks
         };
 
+        // A start that was dropped before it could return a handle -- the
+        // supervisor's start budget, a disconnect during the handshake, or the
+        // retry after one of those -- leaves a live job behind that nothing
+        // else ever cancels, and that job keeps its SOCKS and HTTP listeners
+        // bound. Start by retiring everything this bridge opened before: the
+        // session worker is the only caller, so nothing in the registry is
+        // owned by a live handle at this point.
+        retire_outstanding_jobs();
+        wait_for_release(socks_addr, RELEASE_GRACE).await;
+        if socks_listening(socks_addr).await {
+            return Err(CoreError::StartFailed(format!(
+                "{socks_addr} is still answering, so Aether cannot bind its SOCKS listener; \
+                 another program holds that port, or a previous session has not released it"
+            )));
+        }
+
         cx.report(FcaeState::Connecting, "Establishing tunnel…");
+        let job = ffi_start()?;
+        LIVE_JOBS.lock().insert(job, socks_addr);
+
         let timeout = if cfg.tor.is_enabled() { cfg.tor_start_timeout() } else { cfg.start_timeout() };
-        let ready = if cfg.tor.is_enabled() {
-            wait_for_socks(socks_addr, timeout, job).await?
-        } else {
-            wait_for_listener(socks_addr, timeout, job).await?
+        let ready = match wait_for_socks(socks_addr, timeout, job).await {
+            Ok(ready) => ready,
+            Err(error) => {
+                retire_job(job, socks_addr);
+                return Err(error);
+            }
         };
         if !ready {
-            ffi_cancel(job);
-            ffi_free(job);
+            retire_job(job, socks_addr);
             return Err(CoreError::StartFailed(format!(
                 "Aether did not open its SOCKS listener on {socks_addr} within {timeout:?}"
             )));
@@ -98,6 +160,69 @@ impl Backend for AetherBackend {
             job,
             stopped: AtomicBool::new(false),
         }))
+    }
+
+    /// Reached after a cancelled start that never returned a handle, and after
+    /// every normal session end. No job may outlive the session: the engine
+    /// runtime is never shut down, so a survivor would hold the SOCKS and HTTP
+    /// ports for the life of the process and every later connect would fail to
+    /// bind them.
+    async fn drain(&self) {
+        retire_outstanding_jobs();
+        let deadline = tokio::time::Instant::now() + DRAIN_BUDGET;
+        while tokio::time::Instant::now() < deadline && !PENDING.lock().is_empty() {
+            tokio::time::sleep(REAP_INTERVAL).await;
+        }
+        let remaining = PENDING.lock().len();
+        if remaining != 0 {
+            log::warn!(
+                "[aether] {remaining} engine job(s) had not released their listeners when the session ended"
+            );
+        }
+    }
+}
+
+/// Cancels every job this bridge opened and never handed to a handle.
+fn retire_outstanding_jobs() {
+    let outstanding: Vec<(u64, SocketAddr)> = LIVE_JOBS.lock().drain().collect();
+    for (job, addr) in outstanding {
+        log::debug!("[aether] retiring job {job} left behind by a cancelled start");
+        retire_job(job, addr);
+    }
+}
+
+fn tor_bind(cfg: &SessionConfig) -> Result<&str> {
+    cfg.tor.bind.as_deref().ok_or_else(|| {
+        CoreError::InvalidConfig("tor is enabled but no bind address was provided".into())
+    })
+}
+
+fn loopback_socks(port: u16) -> Result<SocketAddr> {
+    format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|e| CoreError::InvalidConfig(format!("bad socks address: {e}")))
+}
+
+/// A concrete loopback port for the engine's own listener when the session
+/// asked for none. The engine binds one either way; the difference is that
+/// this one can be dialled, so readiness stays observable.
+fn free_loopback_port() -> Result<u16> {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .and_then(|listener| listener.local_addr())
+        .map(|addr| addr.port())
+        .map_err(|e| {
+            CoreError::StartFailed(format!("no free loopback port for Aether's SOCKS listener: {e}"))
+        })
+}
+
+/// The engine spawns its own traffic reporter on every core start and its
+/// runtime is never torn down, so each reconnect would add another periodic
+/// counter line for the life of the process. Statistics stay enabled -- the UI
+/// reads them through `counters()` -- but the engine's own reporter is pinned
+/// to its maximum interval.
+fn pin_engine_stats_interval() {
+    if std::env::var_os("AETHER_STATS_SECS").is_none() {
+        std::env::set_var("AETHER_STATS_SECS", "86400");
     }
 }
 
@@ -135,15 +260,107 @@ fn ffi_poll(job: u64) -> std::result::Result<Option<std::result::Result<(), Stri
 fn ffi_cancel(job: u64) { let _ = ffi_reply(aether_engine::ffi::aether_job_cancel(job)); }
 fn ffi_free(job: u64) { let _ = ffi_reply(aether_engine::ffi::aether_job_free(job)); }
 
-async fn wait_for_listener(addr: SocketAddr, timeout: Duration, job: u64) -> Result<bool> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if let Some(result) = ffi_poll(job).map_err(CoreError::StartFailed)? {
-            return result.map(|_| false).map_err(CoreError::StartFailed);
+/// Cancels a job and hands it to the reaper, which keeps polling until the
+/// engine reports it finished and its listener stops answering. Freeing the
+/// job instead would drop the engine's registry entry while the task behind it
+/// still owns the ports.
+fn retire_job(job: u64, addr: SocketAddr) {
+    LIVE_JOBS.lock().remove(&job);
+    ffi_cancel(job);
+    queue_pending(job, addr);
+}
+
+fn queue_pending(job: u64, addr: SocketAddr) {
+    ensure_reaper();
+    {
+        let mut pending = PENDING.lock();
+        if pending.iter().any(|entry| entry.job == job) { return; }
+        pending.push(PendingTeardown {
+            job,
+            addr,
+            deadline: Instant::now() + TEARDOWN_BUDGET,
+        });
+    }
+    WORK.notify_one();
+}
+
+fn release_pending(job: u64) {
+    PENDING.lock().retain(|entry| entry.job != job);
+    ffi_free(job);
+}
+
+fn ensure_reaper() {
+    REAPER.call_once(|| {
+        if std::thread::Builder::new()
+            .name("fcae-aether-teardown".into())
+            .spawn(reap_loop)
+            .is_err()
+        {
+            // No thread: the job is still cancelled, and the next drain or
+            // start re-queues it, so nothing is lost -- only delayed.
+            log::warn!("[aether] no teardown thread; a cancelled job is freed on the next session");
         }
-        if probe_listener(addr).await { return Ok(true); }
-        if tokio::time::Instant::now() >= deadline { return Ok(false); }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    });
+}
+
+/// Parked until teardown work is queued, then polls it at `REAP_INTERVAL`
+/// until every queued job has provably released its listener.
+fn reap_loop() {
+    loop {
+        let mut pending = PENDING.lock();
+        while pending.is_empty() {
+            WORK.wait(&mut pending);
+        }
+        drop(pending);
+        loop {
+            reap_finished_jobs();
+            let mut pending = PENDING.lock();
+            if pending.is_empty() { break; }
+            WORK.wait_for(&mut pending, REAP_INTERVAL);
+        }
+    }
+}
+
+/// Drives every queued job to a proven release. A probe can take
+/// `PROBE_TIMEOUT`, so the queue is snapshotted and each entry is finished
+/// outside the lock: the session thread queues teardown work here while it is
+/// shutting down and must never wait behind a probe.
+fn reap_finished_jobs() {
+    let now = Instant::now();
+    let snapshot: Vec<(u64, SocketAddr, Instant)> = {
+        let pending = PENDING.lock();
+        pending.iter().map(|entry| (entry.job, entry.addr, entry.deadline)).collect()
+    };
+    for (job, addr, deadline) in snapshot {
+        let stopped = match ffi_poll(job) {
+            Ok(Some(_)) => true,
+            // The engine's cancel is a watch channel, so the flag stays set and
+            // a task that was busy when it was raised observes it on its next
+            // poll. One cancel is enough; from here the reaper only has to wait
+            // for the listener to stop answering.
+            Ok(None) => false,
+            Err(_) => {
+                release_pending(job);
+                continue;
+            }
+        };
+        if stopped && !socks_probe(addr, PROBE_TIMEOUT) {
+            log::debug!("[aether] job {job} released {addr}");
+            release_pending(job);
+            continue;
+        }
+        if now < deadline { continue; }
+        if stopped {
+            // The listener outlived its task, or a later session rebound the
+            // address before this job was reaped. Either way it is not ours.
+            log::debug!("[aether] job {job} ended while {addr} still answers");
+        } else {
+            log::warn!(
+                "[aether] job {job} did not acknowledge the cancel within {:?}; it may still hold {addr}",
+                TEARDOWN_BUDGET
+            );
+        }
+        release_pending(job);
     }
 }
 
@@ -153,27 +370,38 @@ async fn wait_for_socks(addr: SocketAddr, timeout: Duration, job: u64) -> Result
         if let Some(result) = ffi_poll(job).map_err(CoreError::StartFailed)? {
             return result.map(|_| false).map_err(CoreError::StartFailed);
         }
-        if socks5_greeting(addr).await { return Ok(true); }
+        if socks_listening(addr).await { return Ok(true); }
         if tokio::time::Instant::now() >= deadline { return Ok(false); }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-async fn probe_listener(addr: SocketAddr) -> bool {
-    tokio::task::spawn_blocking(move || TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok())
-        .await.unwrap_or(false)
+async fn wait_for_release(addr: SocketAddr, budget: Duration) {
+    let deadline = tokio::time::Instant::now() + budget;
+    while socks_listening(addr).await {
+        if tokio::time::Instant::now() >= deadline { return; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
-async fn socks5_greeting(addr: SocketAddr) -> bool {
-    tokio::task::spawn_blocking(move || {
-        let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else { return false; };
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-        let mut reply = [0u8; 2];
-        stream.write_all(&[0x05, 0x01, 0x00]).is_ok()
-            && stream.read_exact(&mut reply).is_ok()
-            && reply == [0x05, 0x00]
-    }).await.unwrap_or(false)
+fn socks_probe(addr: SocketAddr, timeout: Duration) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, timeout) else { return false; };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    let mut reply = [0u8; 2];
+    stream.write_all(&[0x05, 0x01, 0x00]).is_ok()
+        && stream.read_exact(&mut reply).is_ok()
+        && reply == [0x05, 0x00]
+}
+
+/// Completes a SOCKS5 greeting rather than a bare TCP connect. A socket that is
+/// bound but not serving -- a stale listener from a session that has not
+/// finished tearing down, or an unrelated process -- is not an endpoint that
+/// can carry traffic, and must not be reported as a connected tunnel.
+async fn socks_listening(addr: SocketAddr) -> bool {
+    tokio::task::spawn_blocking(move || socks_probe(addr, PROBE_TIMEOUT))
+        .await
+        .unwrap_or(false)
 }
 
 fn local_dial_addr(bound: &str) -> Result<SocketAddr> {
@@ -216,10 +444,19 @@ impl BackendHandle for AetherHandle {
     async fn wait(&self) -> Result<()> {
         let mut was_up = true;
         loop {
-            if let Some(result) = ffi_poll(self.job).map_err(CoreError::Internal)? {
-                return result.map_err(CoreError::Internal);
+            if self.stopped.load(Ordering::Acquire) { return Ok(()); }
+            match ffi_poll(self.job) {
+                Ok(Some(result)) => return result.map_err(CoreError::Internal),
+                Ok(None) => {}
+                // The job is freed as soon as its teardown is proven, so a
+                // missing entry after a stop is this handle's own success
+                // rather than a tunnel failure to report to the UI.
+                Err(error) => {
+                    if self.stopped.load(Ordering::Acquire) { return Ok(()); }
+                    return Err(CoreError::Internal(error));
+                }
             }
-            let up = probe_listener(self.socks_addr).await;
+            let up = socks_listening(self.socks_addr).await;
             if up != was_up {
                 was_up = up;
                 self.sink.set_state(
@@ -233,13 +470,24 @@ impl BackendHandle for AetherHandle {
 
     async fn stop(&self, timeout: Duration) -> Result<()> {
         if self.stopped.swap(true, Ordering::AcqRel) { return Ok(()); }
-        ffi_cancel(self.job);
+        let (job, addr) = (self.job, self.socks_addr);
+        ffi_cancel(job);
         let deadline = tokio::time::Instant::now() + timeout;
         while tokio::time::Instant::now() < deadline {
-            if ffi_poll(self.job).ok().flatten().is_some() { break; }
+            if ffi_poll(job).ok().flatten().is_some() { break; }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        ffi_free(self.job);
+        if ffi_poll(job).ok().flatten().is_some() && !socks_listening(addr).await {
+            LIVE_JOBS.lock().remove(&job);
+            ffi_free(job);
+            return Ok(());
+        }
+        // The engine has not dropped the task that owns the listeners within
+        // the caller's budget. The reaper finishes the job off this thread, so
+        // the disconnect stays instant while the ports are still guaranteed to
+        // be free before the next connect tries to bind them.
+        log::debug!("[aether] {addr} not released within {timeout:?}; finishing in the background");
+        retire_job(job, addr);
         Ok(())
     }
 

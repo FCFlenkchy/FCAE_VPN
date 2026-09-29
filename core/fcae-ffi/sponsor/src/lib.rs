@@ -7,7 +7,7 @@ use yscv_video::Mp4VideoReader;
 use std::{
     collections::HashSet,
     fs,
-    io::{BufReader, Cursor, Read},
+    io::{BufReader, BufWriter, Cursor, Read, Write},
     path::{Path, PathBuf},
     sync::{
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
@@ -52,14 +52,20 @@ const VIDEO_MAX_HEIGHT: u32 = 270;
 // Decode enough source samples to cover normal short sponsor clips, but do not
 // let a long or malicious MP4 turn startup into an unbounded decode.
 const MAX_VIDEO_INPUT_FRAMES: usize = 300;
+// One retained animation frame at the decode canvas size. Retention is a byte
+// budget rather than a frame count so the two can never drift apart: every
+// frame kept past MAX_FRAMES is merged into its predecessor by
+// `compact_video_frames`, which preserves the clip's total duration while the
+// per-poll frame copy stays proportional to the card that draws it.
+const VIDEO_FRAME_BYTES: usize = (VIDEO_MAX_WIDTH as usize) * (VIDEO_MAX_HEIGHT as usize) * 4;
 #[cfg(target_os = "android")]
-const MAX_FRAMES: usize = 60;
-#[cfg(not(target_os = "android"))]
-const MAX_FRAMES: usize = 120;
-#[cfg(target_os = "android")]
-const MAX_DECODED_BYTES: usize = 16 * 1024 * 1024;
+const MAX_DECODED_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(target_os = "android")]
+const MAX_FRAMES: usize = MAX_DECODED_BYTES / VIDEO_FRAME_BYTES;
+#[cfg(not(target_os = "android"))]
+const MAX_FRAMES: usize = 120;
 // Allow both GIF demos to retain their background frames even when the same
 // source asset is used by more than one campaign, while keeping a finite
 // aggregate decoded-memory ceiling.
@@ -174,7 +180,11 @@ struct ReadyCampaign {
 
 struct MediaPayload {
     path: PathBuf,
-    bytes: Vec<u8>,
+    // Encoded bytes that are already in memory: a fresh download, or a cached
+    // still image that the image decoder needs as a buffer. Video is decoded
+    // straight from `path`, so a cached MP4 is never pulled into the heap only
+    // to be handed to a file reader.
+    bytes: Option<Vec<u8>>,
     cached: bool,
     // If the current URL's cache entry is corrupt or a refresh fails, retain
     // the last valid entry for this campaign as a decoding fallback.
@@ -246,6 +256,14 @@ struct State {
     next_campaign: Option<usize>,
     random_state: u64,
     manifest_checked_at: u64,
+    // (campaign id, clip present) for the last audio probe. The card is polled
+    // at frame rate while it animates, so re-`stat`ing the clip on every poll
+    // is pure syscall traffic; only the transition needs to touch the disk.
+    audio_probe: Option<(String, bool)>,
+    // "<campaign>:<plane>" entries whose failure has already been reported.
+    // Rotation re-checks a campaign whose asset never arrives, so without this
+    // an unreachable URL would warn on every rotation forever.
+    warned_media: HashSet<String>,
     // Prevent a failed media request from being retried once per UI poll;
     // successful publishing clears the backoff immediately.
     media_retry_after: Instant,
@@ -264,6 +282,8 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
         .unwrap_or_default()
         .as_nanos() as u64 ^ std::process::id() as u64,
     manifest_checked_at: 0,
+    audio_probe: None,
+    warned_media: HashSet::new(),
     media_retry_after: Instant::now(),
     last_error: String::new(),
 }));
@@ -285,6 +305,7 @@ static AUDIO_CONTROLLER: Lazy<Mutex<AudioController>> = Lazy::new(|| {
     Mutex::new(AudioController {
         sender: None,
         campaign_id: None,
+        active: false,
     })
 });
 static GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -323,6 +344,9 @@ enum AudioCommand {
 struct AudioController {
     sender: Option<Sender<AudioCommand>>,
     campaign_id: Option<String>,
+    // True while the worker is believed to hold a sink, so a muted card does
+    // not enqueue a Stop command on every UI poll.
+    active: bool,
 }
 
 fn audio_requested() -> bool {
@@ -388,7 +412,7 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                 next_sink.append(source.repeat_infinite());
                 next_sink.play();
                 sink = Some(next_sink);
-                log::info!("[sponsor] playing looping cached audio {}", path.display());
+                log::debug!("[sponsor] playing looping cached audio {}", path.display());
             }
             Ok(AudioCommand::Stop) => {
                 sink.take();
@@ -447,7 +471,7 @@ pub fn load_cached_manifest() {
         };
     }
     if let Some(campaigns) = campaigns {
-        log::info!("[sponsor] loaded cached manifest ({} active campaigns)", campaigns.len());
+        log::debug!("[sponsor] loaded cached manifest ({} active campaigns)", campaigns.len());
         apply_campaigns(campaigns);
         // Rehydrate local media before publishing the first UI snapshot. This
         // never downloads, so a restart shows the cached GIF/image immediately
@@ -465,6 +489,10 @@ pub fn set_proxy(proxy: Option<String>) {
 fn stop_audio() {
     let mut controller = AUDIO_CONTROLLER.lock();
     controller.campaign_id = None;
+    if !controller.active {
+        return;
+    }
+    controller.active = false;
     if let Some(sender) = controller.sender.as_ref() {
         let _ = sender.send(AudioCommand::Stop);
     }
@@ -474,9 +502,12 @@ pub fn set_audio_enabled(enabled: bool) {
     AUDIO_ENABLED.store(enabled, Ordering::Release);
     if !enabled {
         stop_audio();
-    } else if CONNECTED.load(Ordering::Acquire) {
-        // Audio is deliberately lazy: enabling the card control is the first
-        // point at which the current campaign's audio may be downloaded.
+        return;
+    }
+    // Audio is deliberately lazy: enabling the card control is the first point
+    // at which the current campaign's audio may be downloaded.
+    STATE.lock().audio_probe = None;
+    if CONNECTED.load(Ordering::Acquire) {
         refresh_media_async();
     } else {
         refresh_cached_media_async();
@@ -499,6 +530,12 @@ fn start_audio_for_campaign(campaign_id: &str) {
         stop_audio();
         return;
     }
+    // The visible campaign usually stays put for seconds while the card is
+    // polled every frame, so answer the common case from the controller and
+    // only touch the cache when the clip has to be (re)started.
+    if AUDIO_CONTROLLER.lock().campaign_id.as_deref() == Some(campaign_id) {
+        return;
+    }
     let path = {
         let state = STATE.lock();
         let campaign = state.campaigns.iter().find(|campaign|
@@ -507,18 +544,13 @@ fn start_audio_for_campaign(campaign_id: &str) {
             state.cache_dir.join(audio_cache_name(campaign))
         }))
     };
-    let Some(path) = path.filter(|path| {
-        path.is_file()
-            && fs::metadata(path)
-                .map(|metadata| metadata.len() <= MAX_MEDIA_BYTES as u64)
-                .unwrap_or(false)
-    }) else {
+    let Some(path) = path.filter(|path| cached_media_file_is_valid(path)) else {
         stop_audio();
         return;
     };
     let mut controller = AUDIO_CONTROLLER.lock();
-    // Start one looping sink per visible campaign. Do not replace it on every
-    // polling tick; rotation or an explicit disable/re-enable starts it again.
+    // A poll that lost the race against another one may have started this
+    // campaign's sink already; keep one looping sink per visible campaign.
     if controller.campaign_id.as_deref() == Some(campaign_id) {
         return;
     }
@@ -529,6 +561,7 @@ fn start_audio_for_campaign(campaign_id: &str) {
         return;
     }
     controller.campaign_id = Some(campaign_id.to_string());
+    controller.active = true;
 }
 
 pub fn set_connected(connected: bool) {
@@ -563,13 +596,19 @@ fn audio_needs_refresh() -> bool {
 }
 
 fn media_needs_refresh() -> bool {
-    let state = STATE.lock();
-    [Some(state.current_campaign), state.next_campaign]
+    let mut state = STATE.lock();
+    let (current, next) = (state.current_campaign, state.next_campaign);
+    if [Some(current), next]
         .into_iter()
         .flatten()
-        .any(|index| state.ready.get(index)
-            .map(|ready| ready_needs_media(ready, &state.cache_dir))
-            .unwrap_or(true))
+        .any(|index| index >= state.ready.len())
+    {
+        return true;
+    }
+    if ready_needs_media(&mut state, current) {
+        return true;
+    }
+    next.is_some_and(|index| ready_needs_media(&mut state, index))
 }
 
 pub fn manifest_refresh_remaining_secs() -> u64 {
@@ -678,14 +717,21 @@ fn refresh_manifest_async_inner(force: bool) {
     if MANIFEST_BUSY.swap(true, Ordering::AcqRel) {
         if force {
             MANIFEST_FORCE_PENDING.store(true, Ordering::Release);
-            log::info!("[sponsor] queued explicit refresh behind the active fetch");
+            log::debug!("[sponsor] queued explicit refresh behind the active fetch");
         }
         return;
     }
+    // The one schedule-driven message the sponsor keeps at info level: a
+    // manifest refresh is the only sponsor activity worth a normal-run line
+    // (per-card media work, rotation and audio are debug noise at UI cadence).
+    log::info!(
+        "[sponsor] refreshing manifest ({})",
+        if force { "manual request" } else { "12-hour schedule" }
+    );
     thread::spawn(|| {
         match fetch_manifest() {
             Ok(json) => {
-                log::info!("[sponsor] manifest response received ({} bytes)", json.len());
+                log::debug!("[sponsor] manifest response received ({} bytes)", json.len());
                 if let Err(error) = set_manifest_json(&json) {
                     log::warn!("[sponsor] manifest rejected: {error}");
                     STATE.lock().last_error = error;
@@ -761,9 +807,8 @@ fn publish_media(campaigns: &[Campaign], ready: Vec<ReadyCampaign>) -> bool {
         plan_next_campaign(&mut state);
     }
     trim_ready_window(&mut state);
-    let current_needs_media = state.ready.get(state.current_campaign)
-        .map(|ready| ready_needs_media(ready, &state.cache_dir))
-        .unwrap_or(false);
+    let current = state.current_campaign;
+    let current_needs_media = ready_needs_media(&mut state, current);
     if !current_needs_media {
         state.media_retry_after = Instant::now();
     }
@@ -793,7 +838,7 @@ fn refresh_cached_media_sync() {
     let applied = publish_media(&campaigns, ready);
     MEDIA_BUSY.store(false, Ordering::Release);
     if applied {
-        log::info!("[sponsor] published synchronous cached media ({} active campaigns)", ready_count);
+        log::debug!("[sponsor] published synchronous cached media ({} active campaigns)", ready_count);
         preload_next_media_async();
     }
 }
@@ -808,12 +853,12 @@ fn refresh_media_async_inner(allow_disconnected: bool) {
 
 fn preload_next_media_async() {
     let target_id = {
-        let state = STATE.lock();
+        let mut state = STATE.lock();
         let Some(next) = state.next_campaign else { return; };
-        let Some(ready) = state.ready.get(next) else { return; };
-        if !ready_needs_media(ready, &state.cache_dir) {
+        if !ready_needs_media(&mut state, next) {
             return;
         }
+        let Some(ready) = state.ready.get(next) else { return; };
         ready.campaign.id.clone()
     };
     refresh_media_target_async(!CONNECTED.load(Ordering::Acquire), Some(target_id));
@@ -849,15 +894,14 @@ fn refresh_media_target_async(allow_disconnected: bool, requested_target: Option
         };
         MEDIA_BUSY.store(false, Ordering::Release);
         if applied {
-            log::info!("[sponsor] published media refresh ({} active campaigns)", ready_count);
+            log::debug!("[sponsor] published media refresh ({} active campaigns)", ready_count);
             let (current_id, current_needs_media) = {
-                let state = STATE.lock();
-                let current = state.ready.get(state.current_campaign);
-                (
-                    current.map(|ready| ready.campaign.id.clone()),
-                    current.map(|ready| ready_needs_media(ready, &state.cache_dir))
-                        .unwrap_or(false),
-                )
+                let mut state = STATE.lock();
+                let index = state.current_campaign;
+                let current = state.ready.get(index)
+                    .map(|ready| ready.campaign.id.clone());
+                let needs = ready_needs_media(&mut state, index);
+                (current, needs)
             };
             if current_needs_media && current_id.as_deref() != target_id.as_deref() {
                 // Rotation can overtake a slow decode. Prioritize the newly
@@ -870,7 +914,7 @@ fn refresh_media_target_async(allow_disconnected: bool, requested_target: Option
                 refresh_media_async();
             }
         } else if CONNECTED.load(Ordering::Acquire) {
-            log::info!("[sponsor] discarded stale media refresh; scheduling another pass");
+            log::debug!("[sponsor] discarded stale media refresh; scheduling another pass");
             refresh_media_async();
         } else if !allow_disconnected {
             refresh_cached_media_async();
@@ -955,6 +999,17 @@ fn frame_index_at(frames: &[Frame], elapsed: Duration) -> usize {
     frames.len() - 1
 }
 
+/// True the first time a plane failure is reported; false while it keeps
+/// failing. The flag re-arms as soon as the plane loads, so one unreachable
+/// URL costs one line instead of one per rotation.
+fn note_plane_failure(campaign_id: &str, plane: &str) -> bool {
+    STATE.lock().warned_media.insert(format!("{campaign_id}:{plane}"))
+}
+
+fn clear_plane_failure(campaign_id: &str, plane: &str) {
+    STATE.lock().warned_media.remove(&format!("{campaign_id}:{plane}"));
+}
+
 fn cached_media_file_is_valid(path: &Path) -> bool {
     path.is_file()
         && fs::metadata(path)
@@ -962,14 +1017,40 @@ fn cached_media_file_is_valid(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
-fn ready_needs_media(ready: &ReadyCampaign, cache_dir: &Path) -> bool {
-    (ready.campaign.icon_url.is_some() && ready.frames.is_empty())
-        || (ready.campaign.background_url.is_some()
-            && ready.background_frames.is_empty()
-            && ready.background_rgba.is_empty())
-        || (audio_requested()
-            && ready.campaign.audio_url.is_some()
-            && !cached_media_file_is_valid(&cache_dir.join(audio_cache_name(&ready.campaign))))
+/// True while this card still has nothing to fetch: a URL with no decoded
+/// plane, or a requested clip that is not on disk yet. Asked once per UI poll,
+/// so the answered case is memoised instead of `stat`ed again.
+fn ready_needs_media(state: &mut State, index: usize) -> bool {
+    let missing_plane = state.ready.get(index).is_some_and(|ready| {
+        (ready.campaign.icon_url.is_some() && ready.frames.is_empty())
+            || (ready.campaign.background_url.is_some()
+                && ready.background_frames.is_empty()
+                && ready.background_rgba.is_empty())
+    });
+    missing_plane || !audio_settled(state, index)
+}
+
+fn audio_settled(state: &mut State, index: usize) -> bool {
+    if !audio_requested() {
+        return true;
+    }
+    let Some(ready) = state.ready.get(index) else {
+        return true;
+    };
+    if ready.campaign.audio_url.is_none() {
+        return true;
+    }
+    // A positive probe is reused for as long as this campaign stays loaded: the
+    // clip only changes when a publish replaces its URL or cache entry.
+    if state.audio_probe.as_ref().is_some_and(|(id, present)| {
+        *present && *id == ready.campaign.id
+    }) {
+        return true;
+    }
+    let cached = cached_media_file_is_valid(&state.cache_dir.join(audio_cache_name(&ready.campaign)));
+    let campaign_id = ready.campaign.id.clone();
+    state.audio_probe = Some((campaign_id, cached));
+    cached
 }
 
 pub fn current_frame() -> Option<SponsorFrame> {
@@ -993,10 +1074,7 @@ pub fn current_frame() -> Option<SponsorFrame> {
         state.current_campaign %= ready_count;
         let campaign_index = state.current_campaign;
         let within = state.rotation_started.elapsed();
-        let needs_media = ready_needs_media(
-            &state.ready[campaign_index],
-            &state.cache_dir,
-        );
+        let needs_media = ready_needs_media(&mut state, campaign_index);
         let should_refresh = needs_media && Instant::now() >= state.media_retry_after;
         if should_refresh {
             state.media_retry_after = Instant::now() + Duration::from_secs(30);
@@ -1426,16 +1504,22 @@ fn prepare_media(
             };
             let media_loaded = media.is_some();
             let background_loaded = background.is_some();
-            if campaign.icon_url.is_some() && !media_loaded && candidate.frames.is_empty() {
+            if campaign.icon_url.is_some() && !media_loaded && candidate.frames.is_empty()
+                && note_plane_failure(&campaign.id, "media")
+            {
                 log::warn!("[sponsor] campaign {} icon unavailable; using fallback", campaign.id);
             }
             if campaign.background_url.is_some() && !background_loaded
                     && candidate.background_frames.is_empty()
-                    && candidate.background_rgba.is_empty() {
+                    && candidate.background_rgba.is_empty()
+                    && note_plane_failure(&campaign.id, "background")
+            {
                 log::warn!("[sponsor] campaign {} background unavailable; using card color", campaign.id);
             }
+            if media_loaded { clear_plane_failure(&campaign.id, "media"); }
+            if background_loaded { clear_plane_failure(&campaign.id, "background"); }
             if media_loaded || background_loaded {
-                log::info!("[sponsor] campaign {} media ready (decoded on demand)", campaign.id);
+                log::debug!("[sponsor] campaign {} media ready (decoded on demand)", campaign.id);
             }
             if let Some(media) = media {
                 candidate.width = media.width;
@@ -1459,7 +1543,9 @@ fn prepare_media(
             > MAX_TOTAL_DECODED_BYTES
         {
             if background_bytes != 0 {
-                log::warn!("[sponsor] campaign {} background exceeds the decoded-size budget; using card color", campaign.id);
+                if note_plane_failure(&campaign.id, "background-budget") {
+                    log::warn!("[sponsor] campaign {} background exceeds the decoded-size budget; using card color", campaign.id);
+                }
                 candidate.background_frames.clear();
                 candidate.background_width = 0;
                 candidate.background_height = 0;
@@ -1472,7 +1558,9 @@ fn prepare_media(
             decoded_total += retained_bytes;
             ready.push(candidate);
         } else {
-            log::warn!("[sponsor] campaign {} media exceeds the decoded-size budget; using text fallback", campaign.id);
+            if note_plane_failure(&campaign.id, "media-budget") {
+                log::warn!("[sponsor] campaign {} media exceeds the decoded-size budget; using text fallback", campaign.id);
+            }
             ready.push(empty_ready(campaign));
         }
     }
@@ -1491,7 +1579,6 @@ fn load_campaign_payload(
         campaign.icon_url.as_deref(),
         cache_dir.join(cache_name(campaign)),
         cache_dir,
-        &campaign.id,
         "media",
         client,
     )).flatten();
@@ -1499,7 +1586,6 @@ fn load_campaign_payload(
         campaign.background_url.as_deref(),
         cache_dir.join(background_cache_name(campaign)),
         cache_dir,
-        &campaign.id,
         "background",
         client,
     )).flatten();
@@ -1507,7 +1593,6 @@ fn load_campaign_payload(
         campaign.audio_url.as_deref(),
         cache_dir.join(audio_cache_name(campaign)),
         cache_dir,
-        &campaign.id,
         "audio",
         client,
     )).flatten();
@@ -1530,48 +1615,71 @@ fn find_cached_payload(exclude: &Path) -> Option<PathBuf> {
     candidates.pop()
 }
 
-fn write_atomic_preserving_old(path: &Path, bytes: &[u8]) -> bool {
-    let Some(parent) = path.parent() else { return false; };
-    if fs::create_dir_all(parent).is_err() { return false; }
+fn staging_path(path: &Path, kind: &str) -> Option<PathBuf> {
+    let parent = path.parent()?;
     let filename = path.file_name().and_then(|name| name.to_str()).unwrap_or("media");
-    let tmp = parent.join(format!(".{filename}.download.tmp"));
-    if fs::write(&tmp, bytes).is_err() { return false; }
-    if fs::rename(&tmp, path).is_ok() { return true; }
+    Some(parent.join(format!(".{filename}.{kind}.tmp")))
+}
 
-    // Windows cannot rename over an existing file. Move the old valid entry
-    // aside only after the new bytes are safely on disk, and restore it if the
-    // replacement fails. The temporary names include the complete cache
-    // filename so concurrent media/decoded writes cannot collide.
-    let backup = parent.join(format!(".{filename}.previous.tmp"));
+/// Renames a fully written staging file over `path`. Windows cannot rename over
+/// an existing file, so the old valid entry is moved aside only after the new
+/// bytes are on disk and restored when the replacement fails. The staging name
+/// carries the complete cache filename, so concurrent media writes and decoded
+/// writes can never collide.
+fn install_cache_file(tmp: &Path, path: &Path) -> bool {
+    if fs::rename(tmp, path).is_ok() { return true; }
+    let Some(backup) = staging_path(path, "previous") else { return false; };
     let had_old = path.exists() && fs::rename(path, &backup).is_ok();
-    let replaced = fs::rename(&tmp, path).is_ok();
-    if replaced {
+    if fs::rename(tmp, path).is_ok() {
         if had_old { let _ = fs::remove_file(backup); }
         true
     } else {
         if had_old { let _ = fs::rename(backup, path); }
-        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(tmp);
         false
     }
+}
+
+fn write_atomic_preserving_old(path: &Path, bytes: &[u8]) -> bool {
+    let Some(parent) = path.parent() else { return false; };
+    if fs::create_dir_all(parent).is_err() { return false; }
+    let Some(tmp) = staging_path(path, "download") else { return false; };
+    if fs::write(&tmp, bytes).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return false;
+    }
+    install_cache_file(&tmp, path)
+}
+
+/// Bounded read of a cache entry. A corrupt or hostile file cannot pull an
+/// unbounded buffer into the heap.
+fn read_encoded(path: &Path) -> Option<Vec<u8>> {
+    let length = fs::metadata(path).ok()?.len();
+    if length > MAX_MEDIA_BYTES as u64 { return None; }
+    fs::read(path).ok()
 }
 
 fn load_payload(
     url: Option<&str>,
     path: PathBuf,
     cache_dir: &Path,
-    _campaign_id: &str,
     suffix: &str,
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<MediaPayload> {
     let url = url?;
     let _ = fs::create_dir_all(cache_dir);
     let fallback = find_cached_payload(&path);
-    if let Ok(bytes) = fs::read(&path) {
-        if bytes.len() <= MAX_MEDIA_BYTES {
-            return Some(MediaPayload { path, bytes, cached: true, fallback });
+    match fs::metadata(&path) {
+        // Cached entries are handled by path: only the still-image decoder
+        // needs a buffer, and it asks for one when it runs.
+        Ok(metadata) if metadata.len() <= MAX_MEDIA_BYTES as u64 => {
+            return Some(MediaPayload { path, bytes: None, cached: true, fallback });
         }
-        log::warn!("[sponsor] ignoring oversized cached {} media: {} bytes", suffix, bytes.len());
-        let _ = fs::remove_file(&path);
+        Ok(metadata) => {
+            log::warn!("[sponsor] ignoring oversized cached {} media: {} bytes", suffix, metadata.len());
+            let _ = fs::remove_file(&path);
+        }
+        Err(_) => {}
     }
     if CONNECTED.load(Ordering::Acquire) {
         if let Some(client) = client {
@@ -1580,22 +1688,22 @@ fn load_payload(
                 // process exit during GIF frame expansion must not lose a valid
                 // download; decode_payload removes it later only if invalid.
                 let cached = write_atomic_preserving_old(&path, &bytes);
-                return Some(MediaPayload { path, bytes, cached, fallback });
+                return Some(MediaPayload { path, bytes: Some(bytes), cached, fallback });
             }
         }
     }
-    fallback.and_then(|path| {
-        let bytes = fs::read(&path).ok()?;
-        if bytes.len() > MAX_MEDIA_BYTES {
-            log::warn!("[sponsor] ignoring oversized fallback {} media: {} bytes", suffix, bytes.len());
-            return None;
-        }
-        Some(MediaPayload {
+    fallback.and_then(|path| match fs::metadata(&path) {
+        Ok(metadata) if metadata.len() <= MAX_MEDIA_BYTES as u64 => Some(MediaPayload {
             path,
-            bytes,
+            bytes: None,
             cached: true,
             fallback: None,
-        })
+        }),
+        Ok(metadata) => {
+            log::warn!("[sponsor] ignoring oversized fallback {} media: {} bytes", suffix, metadata.len());
+            None
+        }
+        Err(_) => None,
     })
 }
 
@@ -1603,22 +1711,28 @@ fn decoded_cache_path(path: &Path) -> PathBuf {
     path.with_extension("decoded")
 }
 
+/// Reads the decoded-frame cache a frame at a time. The previous version
+/// loaded the whole file into a buffer and then copied every frame out of it,
+/// which peaked at twice the retained pixels for no benefit: the file is
+/// already an offset-addressable frame list.
 fn decoded_ready_from_cache(campaign: &Campaign, path: &Path) -> Option<ReadyCampaign> {
-    let bytes = fs::read(path).ok()?;
-    if bytes.len() > MAX_DECODED_BYTES.saturating_add(MAX_FRAMES * 8 + 32)
-        || bytes.len() < 16
-        // FDV2 invalidates the old 800x450 video cache after the bounded
-        // video decode canvas changed; stale large frames would defeat the
-        // rendering-performance fix.
-        || &bytes[0..4] != b"FDV2"
-    {
+    let length = fs::metadata(path).ok()?.len();
+    if length < 16 || length > (MAX_DECODED_BYTES.saturating_add(MAX_FRAMES * 8 + 32)) as u64 {
         let _ = fs::remove_file(path);
         return None;
     }
-    let mut cursor = Cursor::new(&bytes[4..]);
-    let width = read_u32(&mut cursor)?;
-    let height = read_u32(&mut cursor)?;
-    let frame_count = read_u32(&mut cursor)? as usize;
+    let mut reader = BufReader::new(fs::File::open(path).ok()?);
+    let mut magic = [0u8; 4];
+    // FDV2 invalidates the old 800x450 video cache after the bounded video
+    // decode canvas changed; stale large frames would defeat the rendering
+    // performance fix.
+    if reader.read_exact(&mut magic).is_err() || &magic != b"FDV2" {
+        let _ = fs::remove_file(path);
+        return None;
+    }
+    let width = read_u32(&mut reader)?;
+    let height = read_u32(&mut reader)?;
+    let frame_count = read_u32(&mut reader)? as usize;
     if frame_count == 0 || frame_count > MAX_FRAMES
         || validate_dimensions(width, height, frame_count).is_err()
     {
@@ -1629,14 +1743,14 @@ fn decoded_ready_from_cache(campaign: &Campaign, path: &Path) -> Option<ReadyCam
     let mut frames = Vec::with_capacity(frame_count);
     let mut decoded_total = 0usize;
     for _ in 0..frame_count {
-        let delay = read_u32(&mut cursor)?.clamp(20, 10_000);
-        let size = read_u32(&mut cursor)? as usize;
+        let delay = read_u32(&mut reader)?.clamp(20, 10_000);
+        let size = read_u32(&mut reader)? as usize;
         if size != frame_bytes || decoded_total.checked_add(size)? > MAX_DECODED_BYTES {
             let _ = fs::remove_file(path);
             return None;
         }
         let mut rgba = vec![0u8; size];
-        cursor.read_exact(&mut rgba).ok()?;
+        reader.read_exact(&mut rgba).ok()?;
         decoded_total += size;
         frames.push(Frame { rgba: Arc::new(rgba), delay: Duration::from_millis(delay as u64) });
     }
@@ -1665,12 +1779,15 @@ fn decoded_ready_from_cache(campaign: &Campaign, path: &Path) -> Option<ReadyCam
     })
 }
 
-fn read_u32(cursor: &mut Cursor<&[u8]>) -> Option<u32> {
+fn read_u32(reader: &mut impl Read) -> Option<u32> {
     let mut bytes = [0u8; 4];
-    cursor.read_exact(&mut bytes).ok()?;
+    reader.read_exact(&mut bytes).ok()?;
     Some(u32::from_le_bytes(bytes))
 }
 
+/// Writes the decoded-frame cache straight to the staging file. Serialising
+/// into a `Vec` first held a second copy of every frame, which on Android was
+/// the largest single allocation of a sponsor refresh.
 fn write_decoded_cache(path: &Path, decoded: &ReadyCampaign) {
     let frame_bytes = decoded.frames.iter()
         .map(|frame| frame.rgba.len())
@@ -1680,17 +1797,30 @@ fn write_decoded_cache(path: &Path, decoded: &ReadyCampaign) {
     {
         return;
     }
-    let mut bytes = Vec::with_capacity(16 + frame_bytes + decoded.frames.len() * 8);
-    bytes.extend_from_slice(b"FDV2");
-    bytes.extend_from_slice(&decoded.width.to_le_bytes());
-    bytes.extend_from_slice(&decoded.height.to_le_bytes());
-    bytes.extend_from_slice(&(decoded.frames.len() as u32).to_le_bytes());
-    for frame in &decoded.frames {
-        bytes.extend_from_slice(&(frame.delay.as_millis() as u32).clamp(20, 10_000).to_le_bytes());
-        bytes.extend_from_slice(&(frame.rgba.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(frame.rgba.as_slice());
+    let Some(parent) = path.parent() else { return; };
+    if fs::create_dir_all(parent).is_err() { return; }
+    let Some(tmp) = staging_path(path, "decoded") else { return; };
+    let written = (|| -> std::io::Result<()> {
+        let mut out = BufWriter::with_capacity(
+            64 * 1024,
+            fs::File::create(&tmp)?,
+        );
+        out.write_all(b"FDV2")?;
+        out.write_all(&decoded.width.to_le_bytes())?;
+        out.write_all(&decoded.height.to_le_bytes())?;
+        out.write_all(&(decoded.frames.len() as u32).to_le_bytes())?;
+        for frame in &decoded.frames {
+            out.write_all(&(frame.delay.as_millis() as u32).clamp(20, 10_000).to_le_bytes())?;
+            out.write_all(&(frame.rgba.len() as u32).to_le_bytes())?;
+            out.write_all(frame.rgba.as_slice())?;
+        }
+        out.flush()
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+        return;
     }
-    let _ = write_atomic_preserving_old(path, &bytes);
+    let _ = install_cache_file(&tmp, path);
 }
 
 fn decode_payload(
@@ -1699,15 +1829,20 @@ fn decode_payload(
     payload: MediaPayload,
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<ReadyCampaign> {
-    let MediaPayload { path, mut bytes, mut cached, fallback } = payload;
+    let MediaPayload { path, bytes, mut cached, fallback } = payload;
     let decoded_path = decoded_cache_path(&path);
     if let Some(decoded) = decoded_ready_from_cache(campaign, &decoded_path) {
         return Some(decoded);
     }
-    let mut decoded = decode(campaign.clone(), &bytes).ok();
+    // Still images are the only format decoded from a buffer; a cached one is
+    // read back here rather than being held by the caller for the whole pass.
+    let Some(mut encoded) = bytes.or_else(|| read_encoded(&path)) else {
+        return None;
+    };
+    let mut decoded = decode(campaign.clone(), &encoded).ok();
     if decoded.is_none() {
         if let Some(fallback_path) = fallback {
-            if let Ok(fallback_bytes) = fs::read(&fallback_path) {
+            if let Some(fallback_bytes) = read_encoded(&fallback_path) {
                 if let Some(fallback_decoded) = decode(campaign.clone(), &fallback_bytes).ok() {
                     if cached { let _ = fs::remove_file(&path); }
                     return Some(fallback_decoded);
@@ -1722,12 +1857,12 @@ fn decode_payload(
         }
         if !CONNECTED.load(Ordering::Acquire) { return None; }
         let client = client?;
-        bytes = download_media(client, url).ok()?;
+        encoded = download_media(client, url).ok()?;
         cached = false;
-        decoded = decode(campaign.clone(), &bytes).ok();
+        decoded = decode(campaign.clone(), &encoded).ok();
     }
     if let Some(decoded) = decoded {
-        if !cached { let _ = write_atomic_preserving_old(&path, &bytes); }
+        if !cached { let _ = write_atomic_preserving_old(&path, &encoded); }
         write_decoded_cache(&decoded_path, &decoded);
         Some(decoded)
     } else {
@@ -1737,16 +1872,49 @@ fn decode_payload(
     }
 }
 
+/// Identifier bytes, from the payload when it is in memory or from a bounded
+/// header read otherwise. Reading 32 bytes instead of the whole file keeps a
+/// cached MP4 out of the heap: the video reader opens it by path anyway.
+const SNIFF_BYTES: usize = 32;
+
+fn image_header(path: &Path, bytes: Option<&[u8]>) -> Option<Vec<u8>> {
+    if let Some(bytes) = bytes {
+        return Some(bytes[..bytes.len().min(SNIFF_BYTES)].to_vec());
+    }
+    let mut header = vec![0u8; SNIFF_BYTES];
+    let mut file = fs::File::open(path).ok()?;
+    let read = file.read(&mut header).ok()?;
+    header.truncate(read);
+    Some(header)
+}
+
 fn decode_media(
     campaign: &Campaign,
     url: &str,
     payload: MediaPayload,
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<ReadyCampaign> {
-    if image::guess_format(&payload.bytes).is_ok() {
+    let still_image = image_header(&payload.path, payload.bytes.as_deref())
+        .is_some_and(|header| image::guess_format(&header).is_ok());
+    if still_image {
         decode_payload(campaign, url, payload, client)
     } else {
         decode_video_payload(campaign, url, payload, client)
+    }
+}
+
+/// One warning key per cache plane (`media`, `background`, `audio`), read from
+/// `campaigns/<id>/<plane>/<hash>.<plane>`. A plane that stays broken -- a
+/// damaged cache entry, an unsupported profile -- is reported once instead of
+/// on every rotation that retries it.
+fn plane_key(path: &Path) -> &'static str {
+    let plane = path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str());
+    match plane {
+        Some("background") => "background",
+        Some("audio") => "audio",
+        _ => "media",
     }
 }
 
@@ -1758,20 +1926,31 @@ fn decode_video_payload(
 ) -> Option<ReadyCampaign> {
     let MediaPayload { path, bytes, cached, fallback } = payload;
     let decoded_path = decoded_cache_path(&path);
+    let warning_tag = plane_key(&path);
     if let Some(decoded) = decoded_ready_from_cache(campaign, &decoded_path) {
         return Some(decoded);
     }
 
     // Video readers operate on a bounded file path. The encoded cache is
     // written before this function in the normal path; retry the write when a
-    // platform could not atomically install a newly downloaded file.
-    if !path.exists() && !write_atomic_preserving_old(&path, &bytes) {
-        return None;
+    // platform could not atomically install a newly downloaded file, and drop
+    // the in-memory copy as soon as the reader can open the file itself.
+    if !path.exists() {
+        let Some(encoded) = bytes.as_ref() else { return None; };
+        if !write_atomic_preserving_old(&path, encoded) {
+            return None;
+        }
     }
+    // Decoding allocates the frames that get retained, so the encoded copy
+    // must not sit in the heap across it: on Android a downloaded MP4 is up to
+    // 15 MiB that the file reader never needs.
+    drop(bytes);
     let mut decoded = match decode_video_file(campaign.clone(), &path) {
         Ok(decoded) => Some(decoded),
         Err(error) => {
-            log::warn!("[sponsor] video decode failed ({}): {error}", path.display());
+            if note_plane_failure(&campaign.id, warning_tag) {
+                log::warn!("[sponsor] video decode failed ({}): {error}", path.display());
+            }
             None
         }
     };
@@ -1780,14 +1959,17 @@ fn decode_video_payload(
             decoded = match decode_video_file(campaign.clone(), &fallback_path) {
                 Ok(decoded) => Some(decoded),
                 Err(error) => {
-                    log::warn!(
-                        "[sponsor] cached video fallback decode failed ({}): {error}",
-                        fallback_path.display()
-                    );
+                    if note_plane_failure(&campaign.id, warning_tag) {
+                        log::warn!(
+                            "[sponsor] cached video fallback decode failed ({}): {error}",
+                            fallback_path.display()
+                        );
+                    }
                     None
                 }
             };
             if decoded.is_some() {
+                clear_plane_failure(&campaign.id, warning_tag);
                 return decoded;
             }
             // Preserve the previous encoded entry even when this refresh
@@ -1808,12 +1990,15 @@ fn decode_video_payload(
         decoded = match decode_video_file(campaign.clone(), &path) {
             Ok(decoded) => Some(decoded),
             Err(error) => {
-                log::warn!("[sponsor] refreshed video decode failed ({}): {error}", path.display());
+                if note_plane_failure(&campaign.id, warning_tag) {
+                    log::warn!("[sponsor] refreshed video decode failed ({}): {error}", path.display());
+                }
                 None
             }
         };
     }
     if let Some(decoded) = decoded {
+        clear_plane_failure(&campaign.id, warning_tag);
         write_decoded_cache(&decoded_path, &decoded);
         Some(decoded)
     } else {
@@ -1948,10 +2133,13 @@ fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, S
         if total_bytes.saturating_add(rgba_size) > MAX_DECODED_BYTES {
             break;
         }
-        let mut rgba = Vec::with_capacity(rgba_size);
-        for pixel in rgb.chunks_exact(3) {
-            rgba.extend_from_slice(pixel);
-            rgba.push(0xFF);
+        // One exact allocation and a slice copy per pixel: the previous
+        // `extend_from_slice` + `push` pair re-checked the capacity on every
+        // pixel and could not be vectorised, which showed up as decode CPU on
+        // the frames that are converted before every refresh.
+        let mut rgba = vec![0xFFu8; rgba_size];
+        for (dst, src) in rgba.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
+            dst[..3].copy_from_slice(src);
         }
         let delay_us = previous_timestamp
             .and_then(|previous| frame.timestamp_us.checked_sub(previous))
