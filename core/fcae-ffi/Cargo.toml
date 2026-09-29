@@ -3,7 +3,8 @@
 #
 # Lives under core/fcae-ffi/ as an isolated workspace so its release profile
 # and dependency graph remain independent from the application front ends.
-# Aether is consumed through the pinned root-level submodule.
+# Aether is consumed through the pinned core/aether submodule, whose crate
+# manifest sits at core/aether/aether/Cargo.toml.
 members = [
     "abi",
     "runtime",
@@ -16,7 +17,7 @@ members = [
     "bridges/zeptun",
     "bridges/hev-socks5-tunnel",
 ]
-exclude = ["../../aether/aether"]
+exclude = ["../aether/aether"]
 resolver = "2"
 
 [workspace.package]
@@ -35,7 +36,7 @@ fcae-bridge-aether = { path = "bridges/aether" }
 fcae-bridge-psiphon = { path = "bridges/psiphon" }
 fcae-bridge-zeptun = { path = "bridges/zeptun" }
 fcae-bridge-hev-socks5-tunnel = { path = "bridges/hev-socks5-tunnel" }
-aether-engine = { package = "aether", path = "../../aether/aether" }
+aether-engine = { package = "aether", path = "../aether/aether" }
 
 
 anyhow = "1"
