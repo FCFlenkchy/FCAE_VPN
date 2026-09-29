@@ -7,7 +7,7 @@ use yscv_video::Mp4VideoReader;
 use std::{
     collections::HashSet,
     fs,
-    io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, Write},
+    io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
@@ -37,7 +37,9 @@ const MAX_VIDEO_SOURCE_WIDTH: u32 = 1920;
 const MAX_VIDEO_SOURCE_HEIGHT: u32 = 1080;
 const MAX_VIDEO_SOURCE_PIXELS: u64 =
     MAX_VIDEO_SOURCE_WIDTH as u64 * MAX_VIDEO_SOURCE_HEIGHT as u64;
-/// Playback pacing for all animated sponsor media: 30 fps on every platform.
+/// Pacing cap for animated sponsor media: 30 fps on every platform. Slower
+/// native rates play at their own delays; faster ones are slowed to this.
+/// Also the fallback when a container yields no usable rate.
 const FRAME_DELAY_US: u64 = 33_333;
 /// Retained per-frame delay bounds, shared by the decode paths and the decoded
 /// sidecar format. The floor matches the UI's 60 Hz poll: a shorter delay
@@ -443,6 +445,7 @@ pub fn initialize_android_context(
 enum AudioCommand {
     Play { path: PathBuf, request: u64, epoch: u64 },
     Stop,
+    Release,
 }
 
 /// A clip that is not cached yet is re-probed at this rate while its card is
@@ -603,6 +606,14 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                 sink.take();
                 idle_since.get_or_insert_with(Instant::now);
             }
+            Ok(AudioCommand::Release) => {
+                // Explicit retract (sound toggled off, UI hidden): hand the
+                // device back now instead of riding out the idle window.
+                set_audio_status(0);
+                sink.take();
+                stream.take();
+                idle_since = None;
+            }
             Err(RecvTimeoutError::Timeout) => {
                 // Idle release: the device is dropped only after a quiet
                 // stretch, so a rotation gap or a quick toggle never pays for
@@ -710,6 +721,16 @@ pub fn set_proxy(proxy: Option<String>) {
     *SPONSOR_PROXY.write() = proxy;
 }
 
+/// Retract and hand the output device back at once: for an explicit
+/// sound-off and a hidden UI, where nothing plays until re-enabled.
+fn stop_audio_and_release() {
+    stop_audio();
+    let controller = AUDIO_CONTROLLER.lock();
+    if let Some(sender) = controller.sender.as_ref() {
+        let _ = sender.send(AudioCommand::Release);
+    }
+}
+
 fn stop_audio() {
     let mut controller = AUDIO_CONTROLLER.lock();
     // The card poll calls this every frame while audio is not requested; once
@@ -758,7 +779,7 @@ pub fn set_audio_enabled(enabled: bool) {
     AUDIO_ENABLED.store(enabled, Ordering::Release);
     persist_audio_enabled(enabled);
     if !enabled {
-        stop_audio();
+        stop_audio_and_release();
         return;
     }
     // The previous disable answered or retracted whatever was outstanding;
@@ -790,7 +811,7 @@ pub fn audio_enabled() -> bool {
 pub fn set_ui_active(active: bool) {
     let was = SPONSOR_UI_ACTIVE.swap(active, Ordering::AcqRel);
     if !active {
-        stop_audio();
+        stop_audio_and_release();
     } else if !was && (media_needs_refresh() || audio_needs_refresh()) {
         // Passes do not run while the UI is hidden, so the card may be stale
         // by the time it returns: catch up before the first poll draws it.
@@ -2458,7 +2479,7 @@ fn decoded_ready_from_cache(campaign: &Campaign, path: &Path) -> Option<ReadyCam
     }
     let mut reader = BufReader::new(fs::File::open(path).ok()?);
     let mut magic = [0u8; 4];
-    if reader.read_exact(&mut magic).is_err() || &magic != b"FDV4" {
+    if reader.read_exact(&mut magic).is_err() || &magic != b"FDV5" {
         let _ = fs::remove_file(path);
         return None;
     }
@@ -2534,7 +2555,7 @@ fn write_decoded_cache(path: &Path, decoded: &ReadyCampaign) {
             64 * 1024,
             fs::File::create(&tmp)?,
         );
-        out.write_all(b"FDV4")?;
+        out.write_all(b"FDV5")?;
         out.write_all(&decoded.width.to_le_bytes())?;
         out.write_all(&decoded.height.to_le_bytes())?;
         out.write_all(&(decoded.frames.len() as u32).to_le_bytes())?;
@@ -2947,11 +2968,130 @@ fn admit_frames(candidate: &mut ReadyCampaign, budget: usize) -> usize {
     icon + background
 }
 
+/// 30 fps cap: slower native rates are kept, faster ones are slowed to
+/// [`FRAME_DELAY_US`], which also covers containers with no usable rate.
+fn capped_frame_delay_us(source_delay_us: Option<u64>) -> u64 {
+    source_delay_us.unwrap_or(FRAME_DELAY_US).max(FRAME_DELAY_US)
+}
+
+/// Box header at `offset`: fourcc and full box size, resolving the size-0
+/// (box extends to end of file) and size-1 (64-bit largesize) forms.
+fn read_box_header<R: Read + Seek>(
+    reader: &mut R,
+    offset: u64,
+    end: u64,
+) -> Option<([u8; 4], u64)> {
+    let mut header = [0u8; 8];
+    reader.seek(SeekFrom::Start(offset)).ok()?;
+    reader.read_exact(&mut header).ok()?;
+    let mut size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as u64;
+    if size == 1 {
+        let mut large = [0u8; 8];
+        reader.read_exact(&mut large).ok()?;
+        size = u64::from_be_bytes(large);
+    } else if size == 0 {
+        size = end.saturating_sub(offset);
+    }
+    if size < 8 {
+        return None;
+    }
+    let mut kind = [0u8; 4];
+    kind.copy_from_slice(&header[4..8]);
+    Some((kind, size))
+}
+
+/// Per-frame presentation delay of an MP4, from the `moov/mvhd` duration and
+/// timescale divided by the sample count; `None` when the container carries
+/// no usable rate. The decoder itself reports no timestamps.
+fn mp4_frame_delay_us(path: &Path, sample_count: usize) -> Option<u64> {
+    if sample_count == 0 {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    mp4_frame_delay_us_from(&mut file, sample_count)
+}
+
+fn mp4_frame_delay_us_from<R: Read + Seek>(reader: &mut R, sample_count: usize) -> Option<u64> {
+    if sample_count == 0 {
+        return None;
+    }
+    let file_len = reader.seek(SeekFrom::End(0)).ok()?;
+    let mut pos = 0u64;
+    for _ in 0..64 {
+        if pos + 8 > file_len {
+            break;
+        }
+        let (kind, size) = read_box_header(reader, pos, file_len)?;
+        if pos.checked_add(size).is_none_or(|end| end > file_len) {
+            break;
+        }
+        if kind == *b"moov" {
+            let moov_end = pos + size;
+            let mut child = pos + 8;
+            for _ in 0..256 {
+                if child + 8 > moov_end {
+                    break;
+                }
+                let (child_kind, child_size) = read_box_header(reader, child, moov_end)?;
+                if child.checked_add(child_size).is_none_or(|end| end > moov_end) {
+                    break;
+                }
+                if child_kind == *b"mvhd" {
+                    return mvhd_frame_delay_us(reader, child, child_size, sample_count);
+                }
+                child += child_size;
+            }
+            return None;
+        }
+        pos += size;
+    }
+    None
+}
+
+fn mvhd_frame_delay_us<R: Read + Seek>(
+    reader: &mut R,
+    box_offset: u64,
+    box_size: u64,
+    sample_count: usize,
+) -> Option<u64> {
+    // FullBox payload; version 1 stores 64-bit times, version 0 stores 32-bit.
+    let mut head = [0u8; 4];
+    reader.seek(SeekFrom::Start(box_offset + 8)).ok()?;
+    reader.read_exact(&mut head).ok()?;
+    let (scale_at, duration_at, duration_len) = if head[0] == 1 {
+        (box_offset + 28, box_offset + 32, 8usize)
+    } else {
+        (box_offset + 20, box_offset + 24, 4usize)
+    };
+    if box_size < (duration_at + duration_len as u64 - box_offset) {
+        return None;
+    }
+    let mut scale_bytes = [0u8; 4];
+    reader.seek(SeekFrom::Start(scale_at)).ok()?;
+    reader.read_exact(&mut scale_bytes).ok()?;
+    let timescale = u32::from_be_bytes(scale_bytes);
+    let mut duration_bytes = [0u8; 8];
+    reader.seek(SeekFrom::Start(duration_at)).ok()?;
+    reader
+        .read_exact(&mut duration_bytes[8 - duration_len..])
+        .ok()?;
+    let duration = u64::from_be_bytes(duration_bytes);
+    if timescale == 0 || duration == 0 {
+        return None;
+    }
+    let duration_us = (duration as u128) * 1_000_000 / (timescale as u128);
+    let per_frame_us = duration_us / (sample_count as u128);
+    let per_frame_us = u64::try_from(per_frame_us).ok()?;
+    Some(per_frame_us.clamp(1_000, 1_000_000))
+}
+
 fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, String> {
     // MP4 is the portable sponsor-video format. The reader is pure Rust and
     // does not require FFmpeg or a platform media framework.
     let mut reader = Mp4VideoReader::open(path).map_err(|error| error.to_string())?;
-    let frame_delay = Duration::from_micros(FRAME_DELAY_US);
+    let frame_delay = Duration::from_micros(capped_frame_delay_us(
+        mp4_frame_delay_us(path, reader.nal_count()),
+    ));
     let mut frames = Vec::new();
     let mut total_bytes = 0usize;
     let mut compacted = false;
@@ -3166,6 +3306,15 @@ fn decode_stream<R: BufRead + Seek>(
             if frame.buffer().width() != source_width || frame.buffer().height() != source_height {
                 return Err("inconsistent GIF frame dimensions".into());
             }
+            let (numer, denom) = frame.delay().numer_denom_ms();
+            // Round to the nearest millisecond before clamping: truncation
+            // biased every sub-millisecond remainder toward faster playback.
+            let millis = if denom == 0 {
+                100
+            } else {
+                let exact = (numer as u64 + (denom as u64 / 2)) / denom as u64;
+                exact.clamp(MIN_FRAME_DELAY_MS, MAX_FRAME_DELAY_MS)
+            };
             // Every frame is retained at the card canvas, so a GIF costs what a
             // video costs and the budget below buys frames instead of pixels.
             let (frame_width, frame_height, rgba) = canvas_rgba(frame.into_buffer());
@@ -3189,7 +3338,7 @@ fn decode_stream<R: BufRead + Seek>(
             total_bytes += rgba_size;
             frames.push(Frame {
                 rgba: Arc::new(rgba),
-                delay: Duration::from_micros(FRAME_DELAY_US),
+                delay: Duration::from_micros((millis * 1_000).max(FRAME_DELAY_US)),
             });
         }
         if frames.is_empty() {
