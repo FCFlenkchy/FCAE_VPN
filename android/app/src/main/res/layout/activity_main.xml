@@ -1183,8 +1183,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="match_parent"
                         android:contentDescription=""
-                        android:scaleType="centerCrop"
-                        android:alpha="0.42" />
+                        android:scaleType="centerCrop" />
 
                     <ImageView
                         android:id="@+id/sponsorImage"

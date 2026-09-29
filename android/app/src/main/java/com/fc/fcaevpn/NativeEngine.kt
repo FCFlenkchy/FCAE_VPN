@@ -274,6 +274,9 @@ class FcaeSponsorInfo(
     @JvmField var iconX: Int = 50,
     @JvmField var iconY: Int = 25,
     @JvmField var durationSeconds: Int = 10,
+    @JvmField var iconOpacity: Int = 100,
+    @JvmField var backgroundOpacity: Int = 42,
+    @JvmField var backgroundColorOpacity: Int = 100,
     @JvmField var generation: Long = 0,
     @JvmField var rgba: ByteArray = byteArrayOf(),
     @JvmField var backgroundRgba: ByteArray = byteArrayOf()

@@ -104,6 +104,12 @@ const DEFAULT_MESSAGE_X: u8 = 50;
 const DEFAULT_MESSAGE_Y: u8 = 72;
 const DEFAULT_ICON_SCALE: u32 = 100;
 const DEFAULT_BACKGROUND_SCALE: u32 = 100;
+// Opacity defaults preserve the look campaigns shipped with before the fields
+// existed: the icon fully opaque, the background plane dimmed to sit behind
+// the text, and the card color applied as-is.
+const DEFAULT_ICON_OPACITY: u8 = 100;
+const DEFAULT_BACKGROUND_OPACITY: u8 = 42;
+const DEFAULT_BACKGROUND_COLOR_OPACITY: u8 = 100;
 const DEFAULT_DURATION_SECONDS: u32 = 10;
 const MAX_DURATION_SECONDS: u32 = 3_600;
 // Keep the current campaign visible for ten seconds before rotating.
@@ -150,6 +156,15 @@ struct Campaign {
     icon_scale: Option<u32>,
     #[serde(default)]
     background_scale: Option<u32>,
+    /// Foreground icon opacity percent, 0..=100.
+    #[serde(default)]
+    icon_opacity: Option<u32>,
+    /// Background media opacity percent, 0..=100.
+    #[serde(default)]
+    background_opacity: Option<u32>,
+    /// Extra opacity percent applied to `background_color`, 0..=100.
+    #[serde(default)]
+    background_color_opacity: Option<u32>,
     #[serde(default)]
     icon_x: Option<u32>,
     #[serde(default)]
@@ -191,6 +206,8 @@ struct ReadyCampaign {
     title_color: u32,
     message_color: u32,
     card_color: u32,
+    /// Extra opacity percent applied to the card color, 0..=100.
+    background_color_opacity: u8,
     icon_x: u8,
     icon_y: u8,
     duration_seconds: u32,
@@ -201,6 +218,10 @@ struct ReadyCampaign {
     image_fit: u8,
     icon_scale: u32,
     background_scale: u32,
+    /// Foreground icon opacity percent, 0..=100.
+    icon_opacity: u8,
+    /// Background media plane opacity percent, 0..=100.
+    background_opacity: u8,
 }
 
 struct MediaPayload {
@@ -270,6 +291,9 @@ pub struct SponsorFrame {
     pub image_fit: u8,
     pub icon_scale: u32,
     pub background_scale: u32,
+    pub icon_opacity: u8,
+    pub background_opacity: u8,
+    pub background_color_opacity: u8,
     pub generation: u64,
 }
 
@@ -377,10 +401,11 @@ static AUDIO_ENABLED: AtomicBool = AtomicBool::new(false);
 // the worker instead of being played, so a command that loses the race with a
 // Stop can never be heard.
 static AUDIO_EPOCH: AtomicU64 = AtomicU64::new(0);
-// Audio is allowed only while a client UI owns the sponsor card. Android
-// toggles this from Activity onResume/onPause; desktop keeps it active while
-// the ImGui window is rendering and clears it during shutdown.
-static AUDIO_UI_ACTIVE: AtomicBool = AtomicBool::new(false);
+// Sponsors only do work while a client UI owns the card. Android toggles
+// this from Activity onResume/onPause; desktop keeps it active while the
+// ImGui window is rendering and clears it during shutdown. While it is false
+// the engine neither plays audio nor spends decode passes in the background.
+static SPONSOR_UI_ACTIVE: AtomicBool = AtomicBool::new(false);
 static AUDIO_CONTROLLER: Lazy<Mutex<AudioController>> = Lazy::new(|| {
     Mutex::new(AudioController {
         sender: None,
@@ -479,7 +504,7 @@ struct AudioController {
 
 fn audio_requested() -> bool {
     AUDIO_ENABLED.load(Ordering::Acquire)
-        && AUDIO_UI_ACTIVE.load(Ordering::Acquire)
+        && SPONSOR_UI_ACTIVE.load(Ordering::Acquire)
 }
 
 fn audio_worker(receiver: Receiver<AudioCommand>) {
@@ -764,10 +789,18 @@ pub fn audio_enabled() -> bool {
     AUDIO_ENABLED.load(Ordering::Acquire)
 }
 
-pub fn set_audio_ui_active(active: bool) {
-    AUDIO_UI_ACTIVE.store(active, Ordering::Release);
+pub fn set_ui_active(active: bool) {
+    let was = SPONSOR_UI_ACTIVE.swap(active, Ordering::AcqRel);
     if !active {
         stop_audio();
+    } else if !was && (media_needs_refresh() || audio_needs_refresh()) {
+        // Passes do not run while the UI is hidden, so the card may be stale
+        // by the time it returns: catch up before the first poll draws it.
+        if CONNECTED.load(Ordering::Acquire) {
+            refresh_media_async();
+        } else {
+            refresh_cached_media_async();
+        }
     }
 }
 
@@ -1211,6 +1244,12 @@ fn preload_next_media_async() {
 }
 
 fn refresh_media_target_async(allow_disconnected: bool, requested_target: Option<String>) {
+    // The card is only visible to a live UI; decoding while it is hidden just
+    // burns CPU and battery for frames nobody will see. The activation edge of
+    // `set_ui_active` re-arms a pass, so nothing is lost by skipping here.
+    if !SPONSOR_UI_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
     if !allow_disconnected && !CONNECTED.load(Ordering::Acquire) {
         return;
     }
@@ -1267,11 +1306,11 @@ fn refresh_media_target_async(allow_disconnected: bool, requested_target: Option
             refresh_cached_media_async();
         }
         // A published pass is the only thing that grows the cache, so it is
-        // also the right place to notice that the tree outgrew its ceiling --
-        // and the moment the window moved, so frames of cards that left it
-        // are dropped instead of piling up across rotations.
+        // also the right place to notice that the tree outgrew its ceiling.
+        // Sidecars of parked cards stay on disk until real pressure evicts
+        // them: re-decoding them on every rotation back into the window was
+        // both the slow pass and the missing-plane regression.
         let visible = visible_ids(&STATE.lock());
-        drop_out_of_window_sidecars(&cache_dir, &campaigns, &visible);
         sweep_cache_periodically(&cache_dir, &campaigns, &visible);
     });
 }
@@ -1689,6 +1728,9 @@ pub fn current_frame() -> Option<SponsorFrame> {
             image_fit: ready.image_fit,
             icon_scale: ready.icon_scale,
             background_scale: ready.background_scale,
+            icon_opacity: ready.icon_opacity,
+            background_opacity: ready.background_opacity,
+            background_color_opacity: ready.background_color_opacity,
             generation,
         }, should_refresh, rotated)
     };
@@ -1854,6 +1896,12 @@ fn media_scale_value(value: Option<u32>, default: u32) -> u32 {
     value.filter(|scale| (50..=160).contains(scale)).unwrap_or(default)
 }
 
+/// Opacity percent clamped into range: an omitted or out-of-range value falls
+/// back to the plane's default instead of failing the manifest.
+fn opacity_value(value: Option<u32>, default: u8) -> u8 {
+    value.filter(|opacity| *opacity <= 100).unwrap_or(default as u32) as u8
+}
+
 fn valid_image_fit(value: &str) -> bool {
     matches!(value, "contain" | "cover")
 }
@@ -1888,6 +1936,12 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
         image_fit: image_fit_value(campaign.image_fit.as_deref()),
         icon_scale: media_scale_value(campaign.icon_scale, DEFAULT_ICON_SCALE),
         background_scale: media_scale_value(campaign.background_scale, DEFAULT_BACKGROUND_SCALE),
+        icon_opacity: opacity_value(campaign.icon_opacity, DEFAULT_ICON_OPACITY),
+        background_opacity: opacity_value(campaign.background_opacity, DEFAULT_BACKGROUND_OPACITY),
+        background_color_opacity: opacity_value(
+            campaign.background_color_opacity,
+            DEFAULT_BACKGROUND_COLOR_OPACITY,
+        ),
     }
 }
 
@@ -2006,32 +2060,12 @@ fn sweep_cache_periodically(cache_dir: &Path, campaigns: &[Campaign], visible: &
     sweep_cache_to_limit(cache_dir, campaigns, visible);
 }
 
-/// Deletes the decoded frame sidecars of campaigns outside the two-card
-/// window. The decoded frames are the heavy part of the cache and exist only
-/// to make a card's next rotation instant; outside the window they are
-/// re-derivable junk, dropped here and re-read from the retained encoded
-/// asset if the campaign ever comes back (which is also why the encoded file
-/// itself is kept: nothing is ever re-downloaded).
-fn drop_out_of_window_sidecars(cache_dir: &Path, campaigns: &[Campaign], visible: &[String]) {
-    for campaign in campaigns {
-        if visible.iter().any(|id| id == &campaign.id) {
-            continue;
-        }
-        for (kind, _) in campaign_planes(cache_dir, campaign) {
-            let Ok(entries) = fs::read_dir(
-                cache_dir.join("campaigns").join(&campaign.id).join(kind),
-            ) else {
-                continue;
-            };
-            for path in entries.flatten().map(|entry| entry.path()) {
-                if path.extension().and_then(|value| value.to_str()) == Some("decoded") {
-                    let _ = fs::remove_file(path);
-                }
-            }
-        }
-    }
-}
-
+/// Eviction order once the tree outgrows [`MAX_CACHE_BYTES`]: sidecars of
+/// parked cards go first because a decode rebuilds them, then stale encoded
+/// fallbacks, then parked clips. A visible card's current asset is never a
+/// candidate. Sidecars are never deleted outside this pressure path --
+/// dropping them early forces a full re-decode the next time the campaign
+/// rotates back into the window.
 fn sweep_cache_to_limit(cache_dir: &Path, campaigns: &[Campaign], visible: &[String]) {
     let root = cache_dir.join("campaigns");
     let mut over = directory_bytes(&root).saturating_sub(MAX_CACHE_BYTES);
@@ -2151,7 +2185,6 @@ fn prune_cache(cache_dir: &Path, campaigns: &[Campaign], visible: &[String]) {
     }
 
     remove_staging_files(cache_dir);
-    drop_out_of_window_sidecars(cache_dir, campaigns, visible);
     sweep_cache_to_limit(cache_dir, campaigns, visible);
 }
 
@@ -2801,6 +2834,9 @@ fn decoded_plane(campaign: Campaign, width: u32, height: u32, frames: Vec<Frame>
         image_fit: 0,
         icon_scale: DEFAULT_ICON_SCALE,
         background_scale: DEFAULT_BACKGROUND_SCALE,
+        icon_opacity: DEFAULT_ICON_OPACITY,
+        background_opacity: DEFAULT_BACKGROUND_OPACITY,
+        background_color_opacity: DEFAULT_BACKGROUND_COLOR_OPACITY,
     }
 }
 
@@ -3152,6 +3188,9 @@ fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, S
         image_fit: 0,
         icon_scale: DEFAULT_ICON_SCALE,
         background_scale: DEFAULT_BACKGROUND_SCALE,
+        icon_opacity: DEFAULT_ICON_OPACITY,
+        background_opacity: DEFAULT_BACKGROUND_OPACITY,
+        background_color_opacity: DEFAULT_BACKGROUND_COLOR_OPACITY,
     })
 }
 
@@ -3472,15 +3511,16 @@ mod tests {
     }
 
     #[test]
-    fn out_of_window_sidecars_are_dropped_but_encoded_assets_are_kept() {
+    fn parked_sidecars_survive_prune_and_vanished_campaigns_do_not() {
         let root = std::env::temp_dir().join(format!(
             "fcae-sponsor-sidecar-test-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
-        let keep = test_campaign_with_media("keep");
-        let gone = test_campaign_with_media("gone");
-        for campaign in [&keep, &gone] {
+        let visible = test_campaign_with_media("visible");
+        let parked = test_campaign_with_media("parked");
+        let vanished = test_campaign_with_media("vanished");
+        for campaign in [&visible, &parked, &vanished] {
             for (_, path) in campaign_planes(&root, campaign) {
                 let Some(path) = path else { continue; };
                 let _ = fs::create_dir_all(path.parent().expect("a plane directory"));
@@ -3488,22 +3528,24 @@ mod tests {
                 fs::write(decoded_cache_path(&path), b"frames").expect("a decoded sidecar");
             }
         }
-        drop_out_of_window_sidecars(&root, &[keep.clone(), gone.clone()], &["keep".to_string()]);
+        prune_cache(&root, &[visible.clone(), parked.clone()], &["visible".to_string()]);
         let plane = |campaign: &Campaign| {
             campaign_planes(&root, campaign)
                 .into_iter()
                 .find_map(|(_, path)| path)
                 .expect("a media plane")
         };
-        let (keep_asset, gone_asset) = (plane(&keep), plane(&gone));
+        for campaign in [&visible, &parked] {
+            let asset = plane(campaign);
+            assert!(asset.is_file(), "a manifest campaign keeps its encoded asset");
+            assert!(
+                decoded_cache_path(&asset).is_file(),
+                "a parked campaign keeps its sidecar so its next rotation stays instant"
+            );
+        }
         assert!(
-            decoded_cache_path(&keep_asset).is_file(),
-            "the visible card keeps its decoded frames"
-        );
-        assert!(gone_asset.is_file(), "a parked card's encoded asset stays cached");
-        assert!(
-            !decoded_cache_path(&gone_asset).is_file(),
-            "a parked card's decoded frames are dropped"
+            !root.join("campaigns").join("vanished").exists(),
+            "a campaign removed from the manifest loses its cache entirely"
         );
         let _ = fs::remove_dir_all(&root);
     }

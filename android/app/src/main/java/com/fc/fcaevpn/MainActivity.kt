@@ -835,12 +835,14 @@ class MainActivity : AppCompatActivity() {
         sponsorMessage.setTextColor(Color.parseColor("#FFD8E7FF"))
         sponsorCard.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FF142A44"))
         sponsorImage.setImageDrawable(null)
+        sponsorImage.imageAlpha = 255
         sponsorImage.scaleX = 1f
         sponsorImage.scaleY = 1f
         sponsorImage.visibility = android.view.View.GONE
         positionSponsorIcon(50, 25, 100)
         applySponsorIcon(100)
         sponsorBackgroundImage.setImageDrawable(null)
+        sponsorBackgroundImage.imageAlpha = 107
         sponsorBackgroundImage.scaleX = 1f
         sponsorBackgroundImage.scaleY = 1f
         sponsorBackgroundImage.visibility = android.view.View.GONE
@@ -886,7 +888,16 @@ class MainActivity : AppCompatActivity() {
                                     sponsorMessage.setTextColor(messageColor)
                                     sponsorTitle.textSize = 16f
                                     sponsorMessage.textSize = 14f
-                                    sponsorCard.backgroundTintList = ColorStateList.valueOf(cardColor)
+                                    val cardAlpha =
+                                        ((cardColor ushr 24) * card.backgroundColorOpacity / 100)
+                                            .coerceIn(0, 255)
+                                    sponsorCard.backgroundTintList = ColorStateList.valueOf(
+                                        (cardColor and 0x00FFFFFF) or (cardAlpha shl 24)
+                                    )
+                                    sponsorImage.imageAlpha =
+                                        (card.iconOpacity * 255 / 100).coerceIn(0, 255)
+                                    sponsorBackgroundImage.imageAlpha =
+                                        (card.backgroundOpacity * 255 / 100).coerceIn(0, 255)
                                     val iconScale = card.iconScale.coerceIn(50, 160)
                                     val backgroundScale = card.backgroundScale.coerceIn(50, 160)
                                     applySponsorIcon(iconScale)

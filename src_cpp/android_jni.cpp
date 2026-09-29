@@ -1117,6 +1117,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     const jfieldID fidIconX = getField("iconX", "I");
     const jfieldID fidIconY = getField("iconY", "I");
     const jfieldID fidDurationSeconds = getField("durationSeconds", "I");
+    const jfieldID fidIconOpacity = getField("iconOpacity", "I");
+    const jfieldID fidBackgroundOpacity = getField("backgroundOpacity", "I");
+    const jfieldID fidBackgroundColorOpacity = getField("backgroundColorOpacity", "I");
     const jfieldID fidGeneration = getField("generation", "J");
     const jfieldID fidRgba = getField("rgba", "[B");
     const jfieldID fidBackgroundRgba = getField("backgroundRgba", "[B");
@@ -1127,6 +1130,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
             || !fidTitleColor || !fidMessageColor || !fidTitleX
             || !fidTitleY || !fidMessageX || !fidMessageY || !fidIconScale
             || !fidBackgroundScale || !fidIconX || !fidIconY || !fidDurationSeconds
+            || !fidIconOpacity || !fidBackgroundOpacity || !fidBackgroundColorOpacity
             || !fidGeneration || !fidRgba
             || !fidBackgroundRgba) {
         env->DeleteLocalRef(rgba);
@@ -1181,6 +1185,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     env->SetIntField(obj, fidIconY, (jint)info.icon_y);
     env->SetIntField(obj, fidDurationSeconds,
                      (jint)(info.duration_seconds > 0 ? info.duration_seconds : 10));
+    env->SetIntField(obj, fidIconOpacity, (jint)info.icon_opacity);
+    env->SetIntField(obj, fidBackgroundOpacity, (jint)info.background_opacity);
+    env->SetIntField(obj, fidBackgroundColorOpacity, (jint)info.background_color_opacity);
     env->SetLongField(obj, fidGeneration, (jlong)info.generation);
     env->SetObjectField(obj, fidRgba, rgba);
     env->SetObjectField(obj, fidBackgroundRgba, backgroundRgba);

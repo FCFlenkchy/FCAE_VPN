@@ -1957,8 +1957,9 @@ void render_ui() {
                 // media changes are drawn inside it and cannot reflow the UI.
                 constexpr float sponsor_card_height = 140.0f;
                 constexpr float sponsor_media_height = 70.0f;
-                const ImVec4 card_color = sponsor_color(s_sponsor.card_color,
+                ImVec4 card_color = sponsor_color(s_sponsor.card_color,
                     ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
+                card_color.w *= (float)s_sponsor.background_color_opacity / 100.0f;
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
                 ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.49f, 0.76f, 1.0f));
                 ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
@@ -1982,7 +1983,8 @@ void render_ui() {
                         ImVec2(scaled_min.x + scaled_size.x,
                                scaled_min.y + scaled_size.y),
                         ImVec2(0, 0), ImVec2(1, 1),
-                        ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, 0.42f)));
+                        ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1,
+                            (float)s_sponsor.background_opacity / 100.0f)));
                 }
                 {
                     if (texture) {
@@ -2035,7 +2037,8 @@ void render_ui() {
                         icon_center_x - icon_half_w,
                         icon_center_y - icon_half_h));
                     const ImVec2 image_pos = ImGui::GetCursorScreenPos();
-                    ImGui::Image(texture, size, uv0, uv1);
+                    ImGui::Image(texture, size, uv0, uv1,
+                        ImVec4(1, 1, 1, (float)s_sponsor.icon_opacity / 100.0f));
                     const ImVec2 after_image = ImGui::GetCursorScreenPos();
                     ImGui::SetCursorScreenPos(image_pos);
                     ImGui::InvisibleButton("##sponsor_card_touch", size);

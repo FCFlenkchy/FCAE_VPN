@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 16
+#define FCAE_ABI_VERSION 17
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -408,6 +408,9 @@ typedef struct {
     uint8_t  icon_x; /* foreground icon center X percentage, 0..100 */
     uint8_t  icon_y; /* foreground icon center Y percentage, 0..100 */
     uint32_t duration_seconds; /* campaign duration, 1..3600 seconds */
+    uint8_t  icon_opacity;            /* foreground icon opacity, 0..100    */
+    uint8_t  background_opacity;      /* background media opacity, 0..100   */
+    uint8_t  background_color_opacity; /* extra card-color opacity, 0..100  */
 } FcaeSponsorInfo;
 
 /* ── Callbacks ─────────────────────────────────────────────────────── */
