@@ -7,7 +7,7 @@ use yscv_video::Mp4VideoReader;
 use std::{
     collections::HashSet,
     fs,
-    io::{BufReader, BufWriter, Cursor, Read, Seek, Write},
+    io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, Write},
     path::{Path, PathBuf},
     sync::{
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
@@ -415,15 +415,16 @@ const AUDIO_ANSWER_DEADLINE: Duration = Duration::from_secs(5);
 /// "audio sometimes loads, sometimes not" half of the card.
 #[derive(Clone, Copy, Default)]
 struct AudioStatus {
-    /// Request the worker last finished with; 0 while idle.
+    /// Request the worker last finished with -- played, silent, or failed --
+    /// and 0 while nothing has been handled. The outcome is deliberately not
+    /// kept: the poll only needs to know that this clip will not answer again.
     request: u64,
-    playing: bool,
 }
 
 static AUDIO_STATUS: Lazy<Mutex<AudioStatus>> = Lazy::new(|| Mutex::new(AudioStatus::default()));
 
-fn set_audio_status(request: u64, playing: bool) {
-    *AUDIO_STATUS.lock() = AudioStatus { request, playing };
+fn set_audio_status(request: u64) {
+    AUDIO_STATUS.lock().request = request;
 }
 
 // cpal's CoreAudio stream is intentionally kept on its owning thread: on
@@ -471,7 +472,7 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                 // potentially expensive decoder setup so muted audio is never
                 // read/decoded or attached to an output sink.
                 if !audio_requested() {
-                    set_audio_status(request, false);
+                    set_audio_status(request);
                     sink.take();
                     stream.take();
                     continue;
@@ -494,13 +495,13 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                         // The decoder decides what is playable. A video whose
                         // container carries no track lands here too, and is
                         // answered once so it is never decoded again.
-                        set_audio_status(request, false);
+                        set_audio_status(request);
                         report_audio_failure(&mut reported, &path, &error.to_string());
                         continue;
                     }
                 };
                 if !audio_requested() {
-                    set_audio_status(request, false);
+                    set_audio_status(request);
                     stream.take();
                     continue;
                 }
@@ -509,13 +510,13 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                         Ok(output) => stream = Some(output),
                         Err(error) => {
                             log::warn!("[sponsor] audio output stream unavailable: {error}");
-                            set_audio_status(request, false);
+                            set_audio_status(request);
                             continue;
                         }
                     }
                 }
                 if !audio_requested() {
-                    set_audio_status(request, false);
+                    set_audio_status(request);
                     stream.take();
                     continue;
                 }
@@ -526,11 +527,11 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                 next_sink.append(source.repeat_infinite());
                 next_sink.play();
                 sink = Some(next_sink);
-                set_audio_status(request, true);
+                set_audio_status(request);
                 log::debug!("[sponsor] playing looping cached audio {}", path.display());
             }
             Ok(AudioCommand::Stop) => {
-                set_audio_status(0, false);
+                set_audio_status(0);
                 sink.take();
                 // Release the platform output device as well. Mute therefore
                 // leaves no decoder, sink, or audio device retained.
