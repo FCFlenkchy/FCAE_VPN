@@ -73,16 +73,16 @@ const MAX_INPUT_FRAMES: usize = 300;
 #[cfg(target_os = "android")]
 const MAX_DECODED_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
-const MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
-// Allow several animated campaigns to retain their planes while keeping a
-// finite aggregate decoded-memory ceiling. Two cards can be on screen (the
-// visible one and the prepared next), and each of them is admitted against
-// half of this number -- CAMPAIGN_DECODED_BYTES -- so the working set always
-// fits without one campaign evicting another.
+const MAX_DECODED_BYTES: usize = 48 * 1024 * 1024;
+// Aggregate decoded-memory ceiling. The retention window holds exactly one
+// fully decoded card (the visible one); the prepared next card keeps only a
+// one-frame preview per plane and is hydrated from its decoded sidecar on
+// rotation. Each card is admitted against half of this number --
+// CAMPAIGN_DECODED_BYTES -- which therefore covers one card's two planes.
 #[cfg(target_os = "android")]
 const MAX_TOTAL_DECODED_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
-const MAX_TOTAL_DECODED_BYTES: usize = 256 * 1024 * 1024;
+const MAX_TOTAL_DECODED_BYTES: usize = 192 * 1024 * 1024;
 /// Decoded bytes a single card may retain.
 const CAMPAIGN_DECODED_BYTES: usize = MAX_TOTAL_DECODED_BYTES / 2;
 /// Ceiling for the on-disk sponsor cache. Only re-derivable files are swept to
@@ -180,6 +180,11 @@ struct ReadyCampaign {
     height: u32,
     frames: Vec<Frame>,
     background_frames: Vec<Frame>,
+    /// True while only the first frame of each plane is retained. The card
+    /// renders that preview immediately on rotation; the full animation is
+    /// re-read from the decoded sidecar on demand, so at most one card's
+    /// frames are resident at a time.
+    preview_only: bool,
     background_width: u32,
     background_height: u32,
     background_rgba: Arc<Vec<u8>>,
@@ -363,8 +368,15 @@ impl Drop for MediaSlot {
     }
 }
 // Sponsor audio is muted by default; the attached text control explicitly
-// enables it and the setting lasts only for the running client process.
+// enables it. The choice is persisted next to the manifest so a restart keeps
+// the user's decision instead of silently resetting it -- the "works once,
+// then the sound is gone again" complaint.
 static AUDIO_ENABLED: AtomicBool = AtomicBool::new(false);
+// Every retraction of audio (mute, backgrounding, campaign rotation) bumps
+// this generation. A queued Play carrying an older generation is dropped by
+// the worker instead of being played, so a command that loses the race with a
+// Stop can never be heard.
+static AUDIO_EPOCH: AtomicU64 = AtomicU64::new(0);
 // Audio is allowed only while a client UI owns the sponsor card. Android
 // toggles this from Activity onResume/onPause; desktop keeps it active while
 // the ImGui window is rendering and clears it during shutdown.
@@ -406,7 +418,7 @@ pub fn initialize_android_context(
 }
 
 enum AudioCommand {
-    Play { path: PathBuf, request: u64 },
+    Play { path: PathBuf, request: u64, epoch: u64 },
     Stop,
 }
 
@@ -467,8 +479,13 @@ fn audio_requested() -> bool {
 fn audio_worker(receiver: Receiver<AudioCommand>) {
     // Open lazily on the first Play command. In particular, this happens
     // after the Android JNI bridge has initialized ndk-context, rather than
-    // while the worker is being created during UI startup. The stream is
-    // dropped on Stop so mute/backgrounding releases the output device too.
+    // while the worker is being created during UI startup.
+    //
+    // The output stream survives Stop: vendor AAudio implementations are
+    // unreliable about reopening a released device, and a mute only needs the
+    // decoder and sink gone -- not the stream. Mute therefore leaves no
+    // decoded audio attached to the device, while un-mute never depends on a
+    // second device acquisition.
     let mut stream = None;
     let mut sink: Option<Sink> = None;
     // Files whose decoder had nothing to play. A video without an audio track
@@ -477,15 +494,15 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
     let mut reported: HashSet<PathBuf> = HashSet::new();
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
-            Ok(AudioCommand::Play { path, request }) => {
-                // Muting or backgrounding can race a queued Play command.
-                // Check before opening the file, then check again after the
-                // potentially expensive decoder setup so muted audio is never
-                // read/decoded or attached to an output sink.
-                if !audio_requested() {
-                    set_audio_status(request);
+            Ok(AudioCommand::Play { path, request, epoch }) => {
+                // A Stop sent after this Play (mute, backgrounding, or the
+                // card rotating) has already bumped the epoch: drop the
+                // command unanswered instead of playing a clip whose card is
+                // gone. Re-check at every gate, including the last one before
+                // attaching the sink, so a mute that lands mid-decode is
+                // honored too.
+                if epoch != AUDIO_EPOCH.load(Ordering::Acquire) || !audio_requested() {
                     sink.take();
-                    stream.take();
                     continue;
                 }
                 sink.take();
@@ -511,27 +528,26 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                         continue;
                     }
                 };
-                if !audio_requested() {
-                    set_audio_status(request);
-                    stream.take();
+                if epoch != AUDIO_EPOCH.load(Ordering::Acquire) || !audio_requested() {
                     continue;
                 }
                 if stream.is_none() {
                     match OutputStreamBuilder::open_default_stream() {
                         Ok(output) => stream = Some(output),
                         Err(error) => {
+                            // Left unanswered: the controller resends after the
+                            // answer deadline, which retries the device open.
+                            // Answering here would latch the failure and the
+                            // clip would stay silent for the whole campaign.
                             log::warn!("[sponsor] audio output stream unavailable: {error}");
-                            set_audio_status(request);
                             continue;
                         }
                     }
                 }
-                if !audio_requested() {
-                    set_audio_status(request);
-                    stream.take();
+                let Some(output) = stream.as_ref() else { continue; };
+                if epoch != AUDIO_EPOCH.load(Ordering::Acquire) || !audio_requested() {
                     continue;
                 }
-                let Some(output) = stream.as_ref() else { continue; };
                 let next_sink = Sink::connect_new(output.mixer());
                 // A single source is attached once and repeats at the source
                 // level, so it does not depend on UI polling cadence.
@@ -543,10 +559,9 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
             }
             Ok(AudioCommand::Stop) => {
                 set_audio_status(0);
+                // The sink drop stops playback and releases the decoder. The
+                // stream stays for the next Play (see above).
                 sink.take();
-                // Release the platform output device as well. Mute therefore
-                // leaves no decoder, sink, or audio device retained.
-                stream.take();
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -602,6 +617,10 @@ pub fn set_cache_dir(path: impl Into<PathBuf>) {
 
 pub fn load_cached_manifest() {
     let cache_dir = STATE.lock().cache_dir.clone();
+    // Both embedding clients route their startup through here (Android via
+    // set_cache_dir, desktop via the first sponsor poll), so this is the one
+    // place the persisted audio choice is restored.
+    load_audio_enabled();
     let json = fs::read(cache_dir.join("manifest.json")).ok();
     let campaigns = json.as_deref().and_then(|body| parse_manifest(body).ok());
     let timestamp = fs::read_to_string(cache_dir.join("manifest.timestamp"))
@@ -641,6 +660,14 @@ pub fn set_proxy(proxy: Option<String>) {
 
 fn stop_audio() {
     let mut controller = AUDIO_CONTROLLER.lock();
+    // The card poll calls this every frame while audio is not requested; once
+    // everything is retracted there is nothing to bump or send.
+    if !controller.active && controller.request == 0 && controller.campaign_id.is_none() {
+        return;
+    }
+    // Bump before the command: a Play already queued for the worker becomes
+    // stale the moment this returns, even if the Stop is processed after it.
+    AUDIO_EPOCH.fetch_add(1, Ordering::AcqRel);
     controller.campaign_id = None;
     controller.clip = None;
     controller.request = 0;
@@ -654,11 +681,45 @@ fn stop_audio() {
     }
 }
 
+/// The persisted audio choice lives beside the manifest: one file, written
+/// only when the user toggles the control, read once when the cache dir is
+/// resolved. A missing or unreadable file is the muted default, never an
+/// error.
+fn audio_pref_path() -> PathBuf {
+    STATE.lock().cache_dir.join("audio.enabled")
+}
+
+fn persist_audio_enabled(enabled: bool) {
+    let path = audio_pref_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, if enabled { "1\n" } else { "0\n" });
+}
+
+fn load_audio_enabled() {
+    let contents = fs::read_to_string(audio_pref_path()).unwrap_or_default();
+    AUDIO_ENABLED.store(contents.trim() == "1", Ordering::Release);
+}
+
 pub fn set_audio_enabled(enabled: bool) {
     AUDIO_ENABLED.store(enabled, Ordering::Release);
+    persist_audio_enabled(enabled);
     if !enabled {
         stop_audio();
         return;
+    }
+    // The previous disable answered or retracted whatever was outstanding;
+    // start from a clean controller so the next poll issues a fresh Play
+    // instead of trusting a stale "answered" status.
+    AUDIO_EPOCH.fetch_add(1, Ordering::AcqRel);
+    {
+        let mut controller = AUDIO_CONTROLLER.lock();
+        controller.campaign_id = None;
+        controller.clip = None;
+        controller.request = 0;
+        controller.retry_at = None;
+        controller.active = false;
     }
     // Audio is deliberately lazy: enabling the card control is the first point
     // at which the current campaign's audio may be downloaded.
@@ -732,18 +793,30 @@ fn start_audio_for_campaign(campaign_id: &str) {
         // A clip that never arrived is re-resolved; a request the worker never
         // answered is resent.
     } else {
+        // The card rotated. The worker loops the previous clip until it is
+        // replaced, and a card without audio would never replace it -- so the
+        // old clip is retracted explicitly before the new one is resolved.
+        // Bumping the epoch also discards any Play still queued for the old
+        // card.
+        AUDIO_EPOCH.fetch_add(1, Ordering::AcqRel);
+        if controller.active {
+            if let Some(sender) = controller.sender.as_ref() {
+                let _ = sender.send(AudioCommand::Stop);
+            }
+        }
         controller.campaign_id = Some(campaign_id.to_string());
         controller.clip = None;
         controller.request = 0;
         controller.retry_at = None;
         controller.active = false;
     }
+    let epoch = AUDIO_EPOCH.load(Ordering::Acquire);
     let resolved = audio_source_path_for(campaign_id);
     if resolved.as_deref() == controller.clip.as_deref() && controller.request != 0 {
         // Same clip, still unanswered: resend it rather than re-resolve.
         let request = controller.request;
         if let Some(sender) = controller.sender.as_ref() {
-            if sender.send(AudioCommand::Play { path: controller.clip.clone().unwrap(), request }).is_ok() {
+            if sender.send(AudioCommand::Play { path: controller.clip.clone().unwrap(), request, epoch }).is_ok() {
                 controller.retry_at = Some(Instant::now() + AUDIO_ANSWER_DEADLINE);
                 return;
             }
@@ -763,7 +836,7 @@ fn start_audio_for_campaign(campaign_id: &str) {
     let Some(sender) = audio_sender(&mut controller) else { return; };
     controller.serial = controller.serial.saturating_add(1).max(1);
     let request = controller.serial;
-    if sender.send(AudioCommand::Play { path: path.clone(), request }).is_err() {
+    if sender.send(AudioCommand::Play { path: path.clone(), request, epoch }).is_err() {
         controller.sender = None;
         controller.active = false;
         return;
@@ -1330,14 +1403,45 @@ fn plan_next_campaign(state: &mut State) {
     };
 }
 
+/// Keeps exactly one decoded frame of each plane of a card. The preview is
+/// what the card shows the instant it rotates in; the full animation is
+/// re-read from the decoded sidecar on demand, so resident memory holds one
+/// card's frames plus one card's previews instead of two full cards.
+fn demote_to_preview(ready: &mut ReadyCampaign) {
+    if ready.preview_only {
+        return;
+    }
+    // A card whose planes already fit in one frame has nothing to hand back,
+    // and stays fully resident without ever needing a hydration pass.
+    if ready.frames.len() <= 1 && ready.background_frames.len() <= 1 {
+        return;
+    }
+    ready.frames.truncate(1);
+    ready.background_frames.truncate(1);
+    if let Some(first) = ready.background_frames.first() {
+        ready.background_rgba = first.rgba.clone();
+    }
+    ready.preview_only = true;
+}
+
+/// True while the visible card still holds only its one-frame preview and its
+/// full planes must be hydrated from the decoded sidecar.
+fn current_is_preview(state: &State) -> bool {
+    state.ready.get(state.current_campaign).is_some_and(|ready| ready.preview_only)
+}
+
 fn trim_ready_window(state: &mut State) {
     let current = state.current_campaign;
     let next = state.next_campaign;
     for (index, ready) in state.ready.iter_mut().enumerate() {
-        if index != current && Some(index) != next
-            && (!ready.frames.is_empty()
-                || !ready.background_frames.is_empty()
-                || !ready.background_rgba.is_empty())
+        if index == current {
+            continue;
+        }
+        if Some(index) == next {
+            demote_to_preview(ready);
+        } else if !ready.frames.is_empty()
+            || !ready.background_frames.is_empty()
+            || !ready.background_rgba.is_empty()
         {
             *ready = empty_ready(&ready.campaign);
         }
@@ -1365,7 +1469,18 @@ pub fn next_campaign() {
         let mut state = STATE.lock();
         advance_campaign(&mut state);
     }
-    preload_next_media_async();
+    hydrate_or_preload_after_advance();
+}
+
+/// The card that just rotated in holds one-frame previews of its planes; its
+/// full animation is re-read from the decoded sidecar before anything else is
+/// prepared. A card that rotated in already decoded simply preloads the next.
+fn hydrate_or_preload_after_advance() {
+    if current_is_preview(&STATE.lock()) {
+        refresh_cached_media_async();
+    } else {
+        preload_next_media_async();
+    }
 }
 
 fn frame_index_at(frames: &[Frame], elapsed: Duration) -> usize {
@@ -1469,10 +1584,15 @@ pub fn current_frame() -> Option<SponsorFrame> {
         let campaign_index = state.current_campaign;
         let within = state.rotation_started.elapsed();
         let needs_media = ready_needs_media(&mut state, campaign_index);
+        // A card that rotated in as previews needs one hydration pass over its
+        // decoded sidecars, retried through the same backoff as a missing
+        // plane until the full frames are resident.
+        let needs_hydration = state.ready[campaign_index].preview_only;
         // The backoff is armed by the pass that actually starts, never here: a
         // request that loses the race for the media thread must not park the
         // visible card's media for a full retry interval.
-        let should_refresh = needs_media && Instant::now() >= state.media_retry_after;
+        let should_refresh =
+            (needs_media || needs_hydration) && Instant::now() >= state.media_retry_after;
         let frame_index = frame_index_at(&state.ready[campaign_index].frames, within);
         let background_frame_index =
             frame_index_at(&state.ready[campaign_index].background_frames, within);
@@ -1549,7 +1669,7 @@ pub fn current_frame() -> Option<SponsorFrame> {
         }
     }
     if rotated {
-        preload_next_media_async();
+        hydrate_or_preload_after_advance();
     }
     start_audio_for_campaign(&frame.id);
     Some(frame)
@@ -1717,6 +1837,7 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
         height: 0,
         frames: Vec::new(),
         background_frames: Vec::new(),
+        preview_only: false,
         background_width: 0,
         background_height: 0,
         background_rgba: Arc::new(Vec::new()),
@@ -1740,6 +1861,7 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
 
 fn fallback_ready(previous: &ReadyCampaign, campaign: &Campaign) -> ReadyCampaign {
     let mut fallback = empty_ready(campaign);
+    fallback.preview_only = previous.preview_only;
     if campaign.icon_url.is_some() && !previous.frames.is_empty() {
         fallback.width = previous.width;
         fallback.height = previous.height;
@@ -2073,6 +2195,10 @@ fn prepare_media(
                 candidate.background_rgba = candidate.background_frames.first()
                     .map(|frame| frame.rgba.clone())
                     .unwrap_or_default();
+            }
+            // Freshly decoded planes replace whatever preview the card held.
+            if media_loaded || background_loaded {
+                candidate.preview_only = false;
             }
         }
 
@@ -2598,6 +2724,7 @@ fn decoded_plane(campaign: Campaign, width: u32, height: u32, frames: Vec<Frame>
         width,
         height,
         frames,
+        preview_only: false,
         background_frames: Vec::new(),
         background_width: 0,
         background_height: 0,
@@ -2948,6 +3075,7 @@ fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, S
         width,
         height,
         frames,
+        preview_only: false,
         background_frames: Vec::new(),
         background_width: 0,
         background_height: 0,
@@ -3236,6 +3364,79 @@ mod tests {
         assert_eq!(mp4_frame_delay_us_from(&mut Cursor::new(file), 300), None);
         assert_eq!(mp4_frame_delay_us_from(&mut Cursor::new(Vec::<u8>::new()), 300), None);
         assert_eq!(mp4_frame_delay_us_from(&mut Cursor::new(mp4_with_mvhd(0, 1000, 10_000)), 0), None);
+    }
+
+    fn test_campaign(id: &str) -> Campaign {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "destination_url": "https://example.com",
+        }))
+        .expect("a minimal campaign")
+    }
+
+    fn test_frames(count: usize) -> Vec<Frame> {
+        (0..count)
+            .map(|index| Frame {
+                rgba: Arc::new(vec![index as u8; 64]),
+                delay: Duration::from_millis(40),
+            })
+            .collect()
+    }
+
+    fn test_state(ready: Vec<ReadyCampaign>, current: usize, next: Option<usize>) -> State {
+        State {
+            campaigns: Vec::new(),
+            ready,
+            cache_dir: PathBuf::new(),
+            rotation_started: Instant::now(),
+            current_campaign: current,
+            next_campaign: next,
+            random_state: 0,
+            manifest_checked_at: 0,
+            audio_probe: None,
+            warned_media: HashSet::new(),
+            media_retry_after: Instant::now(),
+            card_text: None,
+            manifest_json: None,
+            last_error: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_demoted_card_keeps_exactly_one_frame_per_plane() {
+        let mut ready = empty_ready(&test_campaign("preview"));
+        ready.frames = test_frames(3);
+        ready.background_frames = test_frames(2);
+        ready.background_rgba = Arc::new(vec![9u8; 64]);
+        demote_to_preview(&mut ready);
+        assert!(ready.preview_only);
+        assert_eq!(ready.frames.len(), 1, "the icon keeps its first frame");
+        assert_eq!(ready.background_frames.len(), 1, "the background keeps its first frame");
+        assert_eq!(
+            ready.background_rgba.as_slice(),
+            ready.background_frames[0].rgba.as_slice(),
+            "the still mirror follows the preview frame"
+        );
+        demote_to_preview(&mut ready);
+        assert_eq!(ready.frames.len(), 1, "demoting twice changes nothing");
+    }
+
+    #[test]
+    fn the_retention_window_keeps_one_full_card_and_one_preview() {
+        let mut visible = empty_ready(&test_campaign("visible"));
+        visible.frames = test_frames(5);
+        let mut prepared = empty_ready(&test_campaign("prepared"));
+        prepared.background_frames = test_frames(4);
+        prepared.background_rgba = prepared.background_frames[0].rgba.clone();
+        let mut parked = empty_ready(&test_campaign("parked"));
+        parked.frames = test_frames(3);
+        let mut state = test_state(vec![visible, prepared, parked], 0, Some(1));
+        trim_ready_window(&mut state);
+        assert_eq!(state.ready[0].frames.len(), 5, "the visible card keeps its full animation");
+        assert!(state.ready[1].preview_only, "the next card is a preview");
+        assert_eq!(state.ready[1].background_frames.len(), 1);
+        assert!(!state.ready[2].preview_only);
+        assert!(state.ready[2].frames.is_empty(), "cards outside the window keep no pixels");
     }
 
     #[test]

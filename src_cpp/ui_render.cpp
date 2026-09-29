@@ -75,6 +75,11 @@ static bool sponsor_background_changed(uint64_t current, uint64_t previous) {
 static bool s_sponsor_started = false;
 static uint64_t s_sponsor_logged_generation = 0;
 static std::chrono::steady_clock::time_point s_sponsor_manifest_check = {};
+// Window visibility owns the sponsor audio gate. The sponsor poll reapplies
+// this flag instead of forcing it true, so a hidden window keeps retracting
+// the clip (previously the next poll re-activated audio immediately after a
+// minimize, and sponsor sound kept looping while the window was gone).
+static std::atomic<bool> s_ui_window_visible{true};
 
 static void poll_sponsor() {
     const auto now = std::chrono::steady_clock::now();
@@ -82,7 +87,7 @@ static void poll_sponsor() {
         fcae_sponsor_load_cache();
         s_sponsor_started = true;
     }
-    fcae_sponsor_set_ui_active(true);
+    fcae_sponsor_set_ui_active(s_ui_window_visible.load());
     fcae_sponsor_set_connected(g_app.ffi_state.load() == FCAE_STATE_CONNECTED);
     if (now >= s_sponsor_manifest_check) {
         const uint64_t remaining = fcae_sponsor_manifest_refresh_remaining_secs();
@@ -389,6 +394,7 @@ void ui_request_redraw() {
 }
 
 void ui_set_window_visible(bool visible) {
+    s_ui_window_visible.store(visible);
     fcae_sponsor_set_ui_active(visible);
 }
 
