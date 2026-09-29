@@ -13,7 +13,6 @@ use std::{
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Once,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -291,7 +290,7 @@ static AUDIO_CONTROLLER: Lazy<Mutex<AudioController>> = Lazy::new(|| {
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(target_os = "android")]
-static ANDROID_CONTEXT_INIT: Once = Once::new();
+static ANDROID_CONTEXT_INIT: std::sync::Once = std::sync::Once::new();
 
 /// CPAL's Android AAudio backend needs the JavaVM and a long-lived Android
 /// Context when it is used from a JNI-loaded Rust static library. ndk-glue
