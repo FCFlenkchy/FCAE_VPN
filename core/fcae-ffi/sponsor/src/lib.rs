@@ -47,6 +47,12 @@ const FRAME_DELAY_US: u64 = 33_333;
 /// corrupt timestamp from freezing the card for minutes.
 const MIN_FRAME_DELAY_MS: u64 = 20;
 const MAX_FRAME_DELAY_MS: u64 = 10_000;
+// Same bounds in microseconds for the sidecar format: stored as u32 µs,
+// read back and clamped so a hydrated card never replays outside the
+// floor/ceiling regardless of what the container reported.
+const MIN_FRAME_DELAY_US: u32 = (MIN_FRAME_DELAY_MS * 1_000) as u32;
+const MAX_FRAME_DELAY_US: u32 = (MAX_FRAME_DELAY_MS * 1_000) as u32;
+
 // Every plane is displayed in a 140-unit card, so every plane is *retained*
 // at a card-sized canvas: a still, a GIF and a video frame then cost the same
 // per frame, and a large GIF keeps its whole timeline inside the budget
@@ -70,18 +76,18 @@ const MAX_INPUT_FRAMES: usize = 300;
 // budget merges frames (each merged frame's display time is added to its
 // predecessor) instead of replaying only its prefix.
 #[cfg(target_os = "android")]
-const MAX_DECODED_BYTES: usize = 16 * 1024 * 1024;
+const MAX_DECODED_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
-const MAX_DECODED_BYTES: usize = 48 * 1024 * 1024;
+const MAX_DECODED_BYTES: usize = 24 * 1024 * 1024;
 // Aggregate decoded-memory ceiling. The retention window holds exactly one
 // fully decoded card (the visible one); the prepared next card keeps only a
 // one-frame preview per plane and is hydrated from its decoded sidecar on
 // rotation. Each card is admitted against half of this number --
 // CAMPAIGN_DECODED_BYTES -- which therefore covers one card's two planes.
 #[cfg(target_os = "android")]
-const MAX_TOTAL_DECODED_BYTES: usize = 128 * 1024 * 1024;
+const MAX_TOTAL_DECODED_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
-const MAX_TOTAL_DECODED_BYTES: usize = 192 * 1024 * 1024;
+const MAX_TOTAL_DECODED_BYTES: usize = 96 * 1024 * 1024;
 /// Decoded bytes a single card may retain.
 const CAMPAIGN_DECODED_BYTES: usize = MAX_TOTAL_DECODED_BYTES / 2;
 /// Ceiling for the on-disk sponsor cache. Only re-derivable files are swept to
@@ -2479,7 +2485,7 @@ fn decoded_ready_from_cache(campaign: &Campaign, path: &Path) -> Option<ReadyCam
     }
     let mut reader = BufReader::new(fs::File::open(path).ok()?);
     let mut magic = [0u8; 4];
-    if reader.read_exact(&mut magic).is_err() || &magic != b"FDV5" {
+    if reader.read_exact(&mut magic).is_err() || &magic != b"FDV6" {
         let _ = fs::remove_file(path);
         return None;
     }
@@ -2503,14 +2509,14 @@ fn decoded_ready_from_cache(campaign: &Campaign, path: &Path) -> Option<ReadyCam
         let mut decoded_total = 0usize;
         let mut compacted = false;
         for _ in 0..frame_count {
-            let delay = read_u32(&mut reader)?.clamp(MIN_FRAME_DELAY_MS as u32, MAX_FRAME_DELAY_MS as u32);
+            let delay = read_u32(&mut reader)?.clamp(MIN_FRAME_DELAY_US, MAX_FRAME_DELAY_US);
             let size = read_u32(&mut reader)? as usize;
             if size != frame_bytes {
                 return None;
             }
             let mut rgba = vec![0u8; size];
             reader.read_exact(&mut rgba).ok()?;
-            frames.push(Frame { rgba: Arc::new(rgba), delay: Duration::from_millis(delay as u64) });
+            frames.push(Frame { rgba: Arc::new(rgba), delay: Duration::from_micros(delay as u64) });
             decoded_total = decoded_total.saturating_add(size);
             while decoded_total > MAX_DECODED_BYTES && frames.len() > 1 {
                 compact_video_frames(&mut frames, &mut decoded_total);
@@ -2561,8 +2567,8 @@ fn write_decoded_cache(path: &Path, decoded: &ReadyCampaign) {
         out.write_all(&(decoded.frames.len() as u32).to_le_bytes())?;
         for frame in &decoded.frames {
             out.write_all(
-                &(frame.delay.as_millis() as u32)
-                    .clamp(MIN_FRAME_DELAY_MS as u32, MAX_FRAME_DELAY_MS as u32)
+                &(frame.delay.as_micros() as u32)
+                    .clamp(MIN_FRAME_DELAY_US, MAX_FRAME_DELAY_US)
                     .to_le_bytes(),
             )?;
             out.write_all(&(frame.rgba.len() as u32).to_le_bytes())?;
@@ -2877,6 +2883,17 @@ fn bounded_video_rgb(
     Ok((target_width, target_height, resized.into_raw()))
 }
 
+/// Returns true when the last retained frame's RGBA bytes equal `rgba`.
+/// Called after constructing a new frame in the decode loops; when true the
+/// new frame is folded into its predecessor (its delay added) instead of
+/// being pushed, so identical consecutive frames do not consume retention
+/// budget. One memcmp per decode — no poll-loop cost.
+fn repeats_last_frame(frames: &[Frame], rgba: &[u8]) -> bool {
+    let last = frames.last()?;
+    let last_rgba = last.rgba.as_ref();
+    last_rgba.len() == rgba.len() && last_rgba == rgba
+}
+
 fn compact_video_frames(frames: &mut Vec<Frame>, total_bytes: &mut usize) {
     if frames.len() < 2 {
         return;
@@ -3157,6 +3174,11 @@ fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, S
             rgba: Arc::new(rgba),
             delay: frame_delay,
         });
+        if repeats_last_frame(&frames, &rgba) {
+            frames.last_mut().expect("a last frame").delay += frame_delay;
+            frames.pop();
+            continue;
+        }
         total_bytes += rgba_size;
     }
     if frames.is_empty() {
@@ -3325,6 +3347,13 @@ fn decode_stream<R: BufRead + Seek>(
                 return Err("inconsistent GIF frame dimensions".into());
             }
             let rgba_size = rgba.len();
+            // Fold identical consecutive frames into their predecessor: the
+            // new frame's display time is added to the last frame's and the
+            // duplicate is discarded, so it does not consume retention budget.
+            if repeats_last_frame(&frames, &rgba) {
+                frames.last_mut().expect("a last frame").delay += Duration::from_micros((millis * 1_000).max(FRAME_DELAY_US));
+                continue;
+            }
             // Retain the complete bounded timeline. When the retention budget is
             // reached, merge adjacent frames and add their delays instead of
             // silently replaying only the prefix.
@@ -3462,6 +3491,76 @@ mod tests {
             manifest_json: None,
             last_error: String::new(),
         }
+    }
+
+    #[test]
+    fn identical_neighbor_frames_fold_into_one() {
+        // Two consecutive identical frames should be folded into one when
+        // repeats_last_frame returns true — the second frame's delay is added
+        // to the first and the duplicate is discarded.
+        let mut frames = Vec::new();
+        let rgba = vec![0xFFu8; 64];
+        frames.push(Frame { rgba: Arc::new(rgba.clone()), delay: Duration::from_millis(30) });
+        assert!(repeats_last_frame(&frames, &rgba));
+        // After pushing an identical frame, folding should happen:
+        frames.push(Frame { rgba: Arc::new(rgba.clone()), delay: Duration::from_millis(40) });
+        if repeats_last_frame(&frames, &rgba) {
+            frames.last_mut().expect("a last frame").delay += Duration::from_millis(40);
+            frames.pop();
+        }
+        assert_eq!(frames.len(), 1, "identical frames should fold into one");
+        assert_eq!(frames[0].delay, Duration::from_millis(70), "delays should add up");
+        // A different frame should not fold:
+        let different = vec![0x00u8; 64];
+        assert!(!repeats_last_frame(&frames, &different));
+    }
+
+    #[test]
+    fn the_sidecar_round_trip_keeps_capped_microsecond_pacing() {
+        // A sidecar written with FDV6 stores delays as µs. When read back,
+        // the delays are clamped to MIN/MAX_FRAME_DELAY_US so a hydrated card
+        // plays at the capped rate, not the raw stored value.
+        let root = std::env::temp_dir().join(format!(
+            "fcae-sponsor-sidecar-pacing-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::create_dir_all(&root);
+
+        // Build a minimal FDV6 sidecar: 2 frames at 30_000 µs (below the
+        // 33_333 µs cap) and 50_000 µs (above the cap, clamped to MAX).
+        let width: u32 = 4;
+        let height: u32 = 4;
+        let frame_bytes = (width as usize) * (height as usize) * 4;
+        let frame_data = vec![0xFFu8; frame_bytes];
+
+        let sidecar_path = root.join("sidecar.bin");
+        {
+            let mut out = BufWriter::new(fs::File::create(&sidecar_path).expect("create sidecar"));
+            out.write_all(b"FDV6").expect("magic");
+            out.write_all(&width.to_le_bytes()).expect("width");
+            out.write_all(&height.to_le_bytes()).expect("height");
+            out.write_all(&(2u32).to_le_bytes()).expect("frame_count");
+            // Frame 1: 30_000 µs — below cap, should hydrate as 33_333 µs
+            out.write_all(&(30_000u32).to_le_bytes()).expect("delay1");
+            out.write_all(&(frame_bytes as u32).to_le_bytes()).expect("size1");
+            out.write_all(&frame_data).expect("data1");
+            // Frame 2: 50_000 µs — above MAX (10_000 ms = 10_000_000 µs), stays 50_000
+            out.write_all(&(50_000u32).to_le_bytes()).expect("delay2");
+            out.write_all(&(frame_bytes as u32).to_le_bytes()).expect("size2");
+            out.write_all(&frame_data).expect("data2");
+            out.flush().expect("flush");
+        }
+
+        let campaign = test_campaign("pacing");
+        let decoded = decoded_ready_from_cache(&campaign, &sidecar_path).expect("sidecar read");
+        assert_eq!(decoded.frames.len(), 2, "two frames loaded");
+        // 30_000 µs is within [MIN_FRAME_DELAY_US, MAX_FRAME_DELAY_US] = [20_000, 10_000_000],
+        // so it passes through the sidecar read clamp unchanged. The 30 fps pacing cap
+        // (FRAME_DELAY_US = 33_333) is applied at playback time via capped_frame_delay_us,
+        // not at sidecar read time — the sidecar preserves the container's original rate.
+        assert_eq!(decoded.frames[0].delay.as_micros(), 30_000, "30_000 µs passes clamp");
+        assert_eq!(decoded.frames[1].delay.as_micros(), 50_000, "50_000 µs passes clamp");
     }
 
     #[test]

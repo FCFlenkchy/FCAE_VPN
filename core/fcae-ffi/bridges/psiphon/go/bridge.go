@@ -569,10 +569,24 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	// there; psiRunning above makes us refuse it earlier and more clearly.
 	err := psi.Start(cfg, embeddedList, "", &psiProvider{}, useBinder != 0, false, false)
 	if err != nil {
+		// psi.Start() is called without psiMu held (see above). On failure it
+		// may have launched controller goroutines that must be stopped, but
+		// psi_stop() wants psiMu — so drop the lock first, stop, then reseat
+		// the state under the lock. This is the same shape as the success path
+		// in psi_stop() itself.
 		psiMu.Lock()
 		psiRunning = false
 		psiState = psiStateStopped
+		psiSocksPort = 0
+		psiHttpPort = 0
+		psiTunnelCount = 0
+		psiHaveRegion = false
 		psiMu.Unlock()
+
+		// Stop the controller goroutine that psi.Start() may have launched.
+		// psi.Stop() blocks until the controller has finished.
+		psi.Stop()
+
 		psiEmit(psiLogError, "[psiphon] start failed: %v", err)
 		return -3
 	}
