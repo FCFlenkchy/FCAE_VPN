@@ -430,6 +430,12 @@ const AUDIO_PROBE_INTERVAL: Duration = Duration::from_secs(1);
 /// cannot tell a slow decode from a request that outlived a mute, and one
 /// resend is cheaper than a clip that never starts.
 const AUDIO_ANSWER_DEADLINE: Duration = Duration::from_secs(5);
+/// How long the output device may sit idle after the last clip before it is
+/// released. An open AAudio/WASAPI stream keeps its output route active --
+/// visibly "using the speaker" on Android even while muted -- so a muted
+/// client must hand the device back. Five seconds keeps fast rotations and
+/// quick re-enables on the already-open device while a real mute releases it.
+const AUDIO_STREAM_IDLE_LIMIT: Duration = Duration::from_secs(5);
 /// Worker feedback for the card poll.
 ///
 /// Without it the poll cannot tell "this file has no audio" (stop asking) from
@@ -481,13 +487,17 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
     // after the Android JNI bridge has initialized ndk-context, rather than
     // while the worker is being created during UI startup.
     //
-    // The output stream survives Stop: vendor AAudio implementations are
-    // unreliable about reopening a released device, and a mute only needs the
-    // decoder and sink gone -- not the stream. Mute therefore leaves no
-    // decoded audio attached to the device, while un-mute never depends on a
-    // second device acquisition.
+    // The stream survives a Stop only for a short idle window: fast
+    // rotations and quick mute/unmute toggles stay on the already-open
+    // device (vendor AAudio implementations are unreliable about reopening a
+    // released one), but once nothing has played for AUDIO_STREAM_IDLE_LIMIT
+    // the stream is dropped so the output route is handed back -- a muted
+    // client must not keep holding the speaker.
     let mut stream = None;
     let mut sink: Option<Sink> = None;
+    // Set whenever the stream exists but nothing is attached to it; cleared
+    // the moment a clip starts.
+    let mut idle_since: Option<Instant> = None;
     // Files whose decoder had nothing to play. A video without an audio track
     // is a normal campaign, not a fault, and it is re-offered on every
     // rotation: report each file once so the log stays quiet.
@@ -503,6 +513,7 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                 // honored too.
                 if epoch != AUDIO_EPOCH.load(Ordering::Acquire) || !audio_requested() {
                     sink.take();
+                    idle_since.get_or_insert_with(Instant::now);
                     continue;
                 }
                 sink.take();
@@ -514,6 +525,7 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                         // probes for it again) while a real decode failure is
                         // answered as final below.
                         report_audio_failure(&mut reported, &path, &error.to_string());
+                        idle_since.get_or_insert_with(Instant::now);
                         continue;
                     }
                 };
@@ -525,10 +537,12 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                         // answered once so it is never decoded again.
                         set_audio_status(request);
                         report_audio_failure(&mut reported, &path, &error.to_string());
+                        idle_since.get_or_insert_with(Instant::now);
                         continue;
                     }
                 };
                 if epoch != AUDIO_EPOCH.load(Ordering::Acquire) || !audio_requested() {
+                    idle_since.get_or_insert_with(Instant::now);
                     continue;
                 }
                 if stream.is_none() {
@@ -546,6 +560,7 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                 }
                 let Some(output) = stream.as_ref() else { continue; };
                 if epoch != AUDIO_EPOCH.load(Ordering::Acquire) || !audio_requested() {
+                    idle_since.get_or_insert_with(Instant::now);
                     continue;
                 }
                 let next_sink = Sink::connect_new(output.mixer());
@@ -554,16 +569,30 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                 next_sink.append(source.repeat_infinite());
                 next_sink.play();
                 sink = Some(next_sink);
+                idle_since = None;
                 set_audio_status(request);
                 log::debug!("[sponsor] playing looping cached audio {}", path.display());
             }
             Ok(AudioCommand::Stop) => {
                 set_audio_status(0);
-                // The sink drop stops playback and releases the decoder. The
-                // stream stays for the next Play (see above).
+                // The sink drop stops playback and releases the decoder; the
+                // idle clock decides when the device itself is handed back.
                 sink.take();
+                idle_since.get_or_insert_with(Instant::now);
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                // Idle release: the device is dropped only after a quiet
+                // stretch, so a rotation gap or a quick toggle never pays for
+                // a device reopen it did not need.
+                if stream.is_some()
+                    && sink.is_none()
+                    && idle_since.is_some_and(|since| since.elapsed() >= AUDIO_STREAM_IDLE_LIMIT)
+                {
+                    stream.take();
+                    idle_since = None;
+                    log::debug!("[sponsor] released idle audio output device");
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -1238,8 +1267,11 @@ fn refresh_media_target_async(allow_disconnected: bool, requested_target: Option
             refresh_cached_media_async();
         }
         // A published pass is the only thing that grows the cache, so it is
-        // also the right place to notice that the tree outgrew its ceiling.
+        // also the right place to notice that the tree outgrew its ceiling --
+        // and the moment the window moved, so frames of cards that left it
+        // are dropped instead of piling up across rotations.
         let visible = visible_ids(&STATE.lock());
+        drop_out_of_window_sidecars(&cache_dir, &campaigns, &visible);
         sweep_cache_periodically(&cache_dir, &campaigns, &visible);
     });
 }
@@ -1974,6 +2006,32 @@ fn sweep_cache_periodically(cache_dir: &Path, campaigns: &[Campaign], visible: &
     sweep_cache_to_limit(cache_dir, campaigns, visible);
 }
 
+/// Deletes the decoded frame sidecars of campaigns outside the two-card
+/// window. The decoded frames are the heavy part of the cache and exist only
+/// to make a card's next rotation instant; outside the window they are
+/// re-derivable junk, dropped here and re-read from the retained encoded
+/// asset if the campaign ever comes back (which is also why the encoded file
+/// itself is kept: nothing is ever re-downloaded).
+fn drop_out_of_window_sidecars(cache_dir: &Path, campaigns: &[Campaign], visible: &[String]) {
+    for campaign in campaigns {
+        if visible.iter().any(|id| id == &campaign.id) {
+            continue;
+        }
+        for (kind, _) in campaign_planes(cache_dir, campaign) {
+            let Ok(entries) = fs::read_dir(
+                cache_dir.join("campaigns").join(&campaign.id).join(kind),
+            ) else {
+                continue;
+            };
+            for path in entries.flatten().map(|entry| entry.path()) {
+                if path.extension().and_then(|value| value.to_str()) == Some("decoded") {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+    }
+}
+
 fn sweep_cache_to_limit(cache_dir: &Path, campaigns: &[Campaign], visible: &[String]) {
     let root = cache_dir.join("campaigns");
     let mut over = directory_bytes(&root).saturating_sub(MAX_CACHE_BYTES);
@@ -2093,6 +2151,7 @@ fn prune_cache(cache_dir: &Path, campaigns: &[Campaign], visible: &[String]) {
     }
 
     remove_staging_files(cache_dir);
+    drop_out_of_window_sidecars(cache_dir, campaigns, visible);
     sweep_cache_to_limit(cache_dir, campaigns, visible);
 }
 
@@ -3374,6 +3433,16 @@ mod tests {
         .expect("a minimal campaign")
     }
 
+    fn test_campaign_with_media(id: &str) -> Campaign {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "destination_url": "https://example.com",
+            "icon_url": "https://example.com/icon.png",
+            "background_url": "https://example.com/background.mp4",
+        }))
+        .expect("a campaign with media planes")
+    }
+
     fn test_frames(count: usize) -> Vec<Frame> {
         (0..count)
             .map(|index| Frame {
@@ -3400,6 +3469,43 @@ mod tests {
             manifest_json: None,
             last_error: String::new(),
         }
+    }
+
+    #[test]
+    fn out_of_window_sidecars_are_dropped_but_encoded_assets_are_kept() {
+        let root = std::env::temp_dir().join(format!(
+            "fcae-sponsor-sidecar-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let keep = test_campaign_with_media("keep");
+        let gone = test_campaign_with_media("gone");
+        for campaign in [&keep, &gone] {
+            for (_, path) in campaign_planes(&root, campaign) {
+                let Some(path) = path else { continue; };
+                let _ = fs::create_dir_all(path.parent().expect("a plane directory"));
+                fs::write(&path, b"encoded").expect("an encoded asset");
+                fs::write(decoded_cache_path(&path), b"frames").expect("a decoded sidecar");
+            }
+        }
+        drop_out_of_window_sidecars(&root, &[keep.clone(), gone.clone()], &["keep".to_string()]);
+        let plane = |campaign: &Campaign| {
+            campaign_planes(&root, campaign)
+                .into_iter()
+                .find_map(|(_, path)| path)
+                .expect("a media plane")
+        };
+        let (keep_asset, gone_asset) = (plane(&keep), plane(&gone));
+        assert!(
+            decoded_cache_path(&keep_asset).is_file(),
+            "the visible card keeps its decoded frames"
+        );
+        assert!(gone_asset.is_file(), "a parked card's encoded asset stays cached");
+        assert!(
+            !decoded_cache_path(&gone_asset).is_file(),
+            "a parked card's decoded frames are dropped"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
