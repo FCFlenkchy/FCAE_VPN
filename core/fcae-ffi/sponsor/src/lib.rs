@@ -7,7 +7,7 @@ use yscv_video::Mp4VideoReader;
 use std::{
     collections::HashSet,
     fs,
-    io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, Write},
     path::{Path, PathBuf},
     sync::{
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
@@ -37,11 +37,8 @@ const MAX_VIDEO_SOURCE_WIDTH: u32 = 1920;
 const MAX_VIDEO_SOURCE_HEIGHT: u32 = 1080;
 const MAX_VIDEO_SOURCE_PIXELS: u64 =
     MAX_VIDEO_SOURCE_WIDTH as u64 * MAX_VIDEO_SOURCE_HEIGHT as u64;
-/// Pacing for an MP4 whose presentation duration cannot be read from the
-/// container: 30 fps, the nominal rate of sponsor clips. The decoder itself
-/// reports no timestamps, so without a container duration every frame would
-/// collapse to the delay floor and the clip would race at 50 fps.
-const DEFAULT_VIDEO_FRAME_DELAY_US: u64 = 33_333;
+/// Playback pacing for all animated sponsor media: 30 fps on every platform.
+const FRAME_DELAY_US: u64 = 33_333;
 /// Retained per-frame delay bounds, shared by the decode paths and the decoded
 /// sidecar format. The floor matches the UI's 60 Hz poll: a shorter delay
 /// cannot be presented and only costs decode bytes. The ceiling stops a
@@ -805,29 +802,13 @@ pub fn set_ui_active(active: bool) {
     }
 }
 
-/// The clip a campaign plays while its card is visible.
-///
-/// An explicit `audio_url` wins. Otherwise the campaign's own media is handed
-/// over as-is: a video carries its soundtrack in the same cache entry that the
-/// card already renders, so there is no second download and no track probe --
-/// the audio decoder reads whatever is in the file. Only planes the image
-/// decoder can identify (still or GIF) are skipped, because those never carry
-/// audio.
+/// The cached clip of a campaign that declares an `audio_url`.
 fn audio_source_path(state: &State, campaign: &Campaign) -> Option<PathBuf> {
-    if campaign.audio_url.is_some() {
-        return Some(state.cache_dir.join(audio_cache_name(campaign)));
-    }
-    [background_cache_name(campaign), cache_name(campaign)]
-        .into_iter()
-        .map(|name| state.cache_dir.join(name))
-        .find(|path| media_carries_audio(path))
+    campaign.audio_url
+        .as_ref()
+        .map(|_| state.cache_dir.join(audio_cache_name(campaign)))
 }
 
-fn media_carries_audio(path: &Path) -> bool {
-    cached_media_file_is_valid(path)
-        && image_header(path, None)
-            .is_some_and(|header| image::guess_format(&header).is_err())
-}
 
 /// Start, keep, or retry the clip of the visible campaign.
 ///
@@ -2477,11 +2458,7 @@ fn decoded_ready_from_cache(campaign: &Campaign, path: &Path) -> Option<ReadyCam
     }
     let mut reader = BufReader::new(fs::File::open(path).ok()?);
     let mut magic = [0u8; 4];
-    // FDV3 invalidates caches written before container-based video pacing:
-    // their frames carry fabricated delays (a multi-second first frame) that
-    // made clips crawl on playback, so they are re-decoded from the encoded
-    // entry instead of replayed.
-    if reader.read_exact(&mut magic).is_err() || &magic != b"FDV3" {
+    if reader.read_exact(&mut magic).is_err() || &magic != b"FDV4" {
         let _ = fs::remove_file(path);
         return None;
     }
@@ -2557,7 +2534,7 @@ fn write_decoded_cache(path: &Path, decoded: &ReadyCampaign) {
             64 * 1024,
             fs::File::create(&tmp)?,
         );
-        out.write_all(b"FDV3")?;
+        out.write_all(b"FDV4")?;
         out.write_all(&decoded.width.to_le_bytes())?;
         out.write_all(&decoded.height.to_le_bytes())?;
         out.write_all(&(decoded.frames.len() as u32).to_le_bytes())?;
@@ -2970,137 +2947,11 @@ fn admit_frames(candidate: &mut ReadyCampaign, budget: usize) -> usize {
     icon + background
 }
 
-/// Box header at `offset`: fourcc and full box size, resolving the size-0
-/// (box extends to end of file) and size-1 (64-bit largesize) forms.
-fn read_box_header<R: Read + Seek>(
-    reader: &mut R,
-    offset: u64,
-    end: u64,
-) -> Option<([u8; 4], u64)> {
-    let mut header = [0u8; 8];
-    reader.seek(SeekFrom::Start(offset)).ok()?;
-    reader.read_exact(&mut header).ok()?;
-    let mut size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as u64;
-    if size == 1 {
-        let mut large = [0u8; 8];
-        reader.read_exact(&mut large).ok()?;
-        size = u64::from_be_bytes(large);
-    } else if size == 0 {
-        size = end.saturating_sub(offset);
-    }
-    if size < 8 {
-        return None;
-    }
-    let mut kind = [0u8; 4];
-    kind.copy_from_slice(&header[4..8]);
-    Some((kind, size))
-}
-
-/// Presentation duration of one MP4 video frame, in microseconds.
-///
-/// The pure-Rust decoder emits every frame with a zero timestamp (the MP4
-/// reader parses the sample table but not `stts`), so pacing derived from
-/// those timestamps is fiction: every frame collapses to the delay floor and
-/// the clip plays at the wrong speed. `moov/mvhd` carries the presentation
-/// duration and timescale; divided by the video sample count it yields the
-/// clip's true uniform frame period. The walk is a handful of bounded seeks
-/// over box headers -- no box body is read into memory.
-fn mp4_frame_delay_us(path: &Path, sample_count: usize) -> Option<u64> {
-    if sample_count == 0 {
-        return None;
-    }
-    let mut file = fs::File::open(path).ok()?;
-    mp4_frame_delay_us_from(&mut file, sample_count)
-}
-
-fn mp4_frame_delay_us_from<R: Read + Seek>(reader: &mut R, sample_count: usize) -> Option<u64> {
-    if sample_count == 0 {
-        return None;
-    }
-    let file_len = reader.seek(SeekFrom::End(0)).ok()?;
-    let mut pos = 0u64;
-    for _ in 0..64 {
-        if pos + 8 > file_len {
-            break;
-        }
-        let (kind, size) = read_box_header(reader, pos, file_len)?;
-        if pos.checked_add(size).is_none_or(|end| end > file_len) {
-            break;
-        }
-        if kind == *b"moov" {
-            let moov_end = pos + size;
-            let mut child = pos + 8;
-            for _ in 0..256 {
-                if child + 8 > moov_end {
-                    break;
-                }
-                let (child_kind, child_size) = read_box_header(reader, child, moov_end)?;
-                if child.checked_add(child_size).is_none_or(|end| end > moov_end) {
-                    break;
-                }
-                if child_kind == *b"mvhd" {
-                    return mvhd_frame_delay_us(reader, child, child_size, sample_count);
-                }
-                child += child_size;
-            }
-            return None;
-        }
-        pos += size;
-    }
-    None
-}
-
-fn mvhd_frame_delay_us<R: Read + Seek>(
-    reader: &mut R,
-    box_offset: u64,
-    box_size: u64,
-    sample_count: usize,
-) -> Option<u64> {
-    // FullBox payload: version(1) + flags(3). Version 0 stores 32-bit
-    // creation/modification times, version 1 stores 64-bit times, before the
-    // 32-bit timescale and the duration.
-    let mut head = [0u8; 4];
-    reader.seek(SeekFrom::Start(box_offset + 8)).ok()?;
-    reader.read_exact(&mut head).ok()?;
-    let (scale_at, duration_at, duration_len) = if head[0] == 1 {
-        (box_offset + 28, box_offset + 32, 8usize)
-    } else {
-        (box_offset + 20, box_offset + 24, 4usize)
-    };
-    if box_size < (duration_at + duration_len as u64 - box_offset) {
-        return None;
-    }
-    let mut scale_bytes = [0u8; 4];
-    reader.seek(SeekFrom::Start(scale_at)).ok()?;
-    reader.read_exact(&mut scale_bytes).ok()?;
-    let timescale = u32::from_be_bytes(scale_bytes);
-    let mut duration_bytes = [0u8; 8];
-    reader.seek(SeekFrom::Start(duration_at)).ok()?;
-    reader
-        .read_exact(&mut duration_bytes[8 - duration_len..])
-        .ok()?;
-    let duration = u64::from_be_bytes(duration_bytes);
-    if timescale == 0 || duration == 0 {
-        return None;
-    }
-    let duration_us = (duration as u128) * 1_000_000 / (timescale as u128);
-    let per_frame_us = duration_us / (sample_count as u128);
-    // Anything outside one millisecond to one second per frame is a container
-    // defect; the caller falls back to the nominal sponsor rate.
-    let per_frame_us = u64::try_from(per_frame_us).ok()?;
-    Some(per_frame_us.clamp(1_000, 1_000_000))
-}
-
 fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, String> {
     // MP4 is the portable sponsor-video format. The reader is pure Rust and
     // does not require FFmpeg or a platform media framework.
     let mut reader = Mp4VideoReader::open(path).map_err(|error| error.to_string())?;
-    // One uniform delay for the whole clip, resolved from the container before
-    // the first frame is decoded: constant pacing loops cleanly and costs no
-    // per-frame timestamp arithmetic.
-    let frame_delay = Duration::from_micros(
-        mp4_frame_delay_us(path, reader.nal_count()).unwrap_or(DEFAULT_VIDEO_FRAME_DELAY_US),
-    );
+    let frame_delay = Duration::from_micros(FRAME_DELAY_US);
     let mut frames = Vec::new();
     let mut total_bytes = 0usize;
     let mut compacted = false;
@@ -3315,15 +3166,6 @@ fn decode_stream<R: BufRead + Seek>(
             if frame.buffer().width() != source_width || frame.buffer().height() != source_height {
                 return Err("inconsistent GIF frame dimensions".into());
             }
-            let (numer, denom) = frame.delay().numer_denom_ms();
-            // Round to the nearest millisecond before clamping: truncation
-            // biased every sub-millisecond remainder toward faster playback.
-            let millis = if denom == 0 {
-                100
-            } else {
-                let exact = (numer as u64 + (denom as u64 / 2)) / denom as u64;
-                exact.clamp(MIN_FRAME_DELAY_MS, MAX_FRAME_DELAY_MS)
-            };
             // Every frame is retained at the card canvas, so a GIF costs what a
             // video costs and the budget below buys frames instead of pixels.
             let (frame_width, frame_height, rgba) = canvas_rgba(frame.into_buffer());
@@ -3347,7 +3189,7 @@ fn decode_stream<R: BufRead + Seek>(
             total_bytes += rgba_size;
             frames.push(Frame {
                 rgba: Arc::new(rgba),
-                delay: Duration::from_millis(millis),
+                delay: Duration::from_micros(FRAME_DELAY_US),
             });
         }
         if frames.is_empty() {
@@ -3426,52 +3268,6 @@ fn client() -> Result<reqwest::blocking::Client, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn mp4_with_mvhd(version: u8, timescale: u32, duration: u64) -> Vec<u8> {
-        let mut mvhd: Vec<u8> = Vec::new();
-        let duration_len = if version == 1 { 8usize } else { 4usize };
-        let pre_scale = if version == 1 { 16usize } else { 8usize };
-        let body_len = 4 + pre_scale + 4 + duration_len;
-        mvhd.extend_from_slice(&((body_len + 8) as u32).to_be_bytes());
-        mvhd.extend_from_slice(b"mvhd");
-        mvhd.push(version);
-        mvhd.extend_from_slice(&[0u8; 3]);
-        mvhd.extend_from_slice(&vec![0u8; pre_scale]);
-        mvhd.extend_from_slice(&timescale.to_be_bytes());
-        mvhd.extend_from_slice(&duration.to_be_bytes()[8 - duration_len..]);
-        let mut moov: Vec<u8> = Vec::new();
-        moov.extend_from_slice(&((mvhd.len() + 8) as u32).to_be_bytes());
-        moov.extend_from_slice(b"moov");
-        moov.extend_from_slice(&mvhd);
-        let mut file: Vec<u8> = Vec::new();
-        file.extend_from_slice(&16u32.to_be_bytes());
-        file.extend_from_slice(b"ftyp");
-        file.extend_from_slice(&[0u8; 8]);
-        file.extend_from_slice(&moov);
-        file
-    }
-
-    #[test]
-    fn mp4_presentation_duration_paces_video_frames() {
-        // 10 s presentation at 300 samples: the decoder's own timestamps are
-        // always zero, so pacing must come from the container.
-        let file = mp4_with_mvhd(0, 1000, 10_000);
-        assert_eq!(
-            mp4_frame_delay_us_from(&mut Cursor::new(file), 300),
-            Some(33_333),
-        );
-        // Version-1 boxes carry 64-bit times: 1 s at 30 samples.
-        let file = mp4_with_mvhd(1, 600, 600);
-        assert_eq!(
-            mp4_frame_delay_us_from(&mut Cursor::new(file), 30),
-            Some(33_333),
-        );
-        // A defect the parser must refuse instead of pacing with.
-        let file = mp4_with_mvhd(0, 0, 10_000);
-        assert_eq!(mp4_frame_delay_us_from(&mut Cursor::new(file), 300), None);
-        assert_eq!(mp4_frame_delay_us_from(&mut Cursor::new(Vec::<u8>::new()), 300), None);
-        assert_eq!(mp4_frame_delay_us_from(&mut Cursor::new(mp4_with_mvhd(0, 1000, 10_000)), 0), None);
-    }
 
     fn test_campaign(id: &str) -> Campaign {
         serde_json::from_value(serde_json::json!({
