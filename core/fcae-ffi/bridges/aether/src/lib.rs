@@ -5,7 +5,7 @@ mod rates;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Once};
 use std::time::{Duration, Instant};
@@ -33,6 +33,12 @@ const TEARDOWN_BUDGET: Duration = Duration::from_secs(5);
 /// is destroyed and which must not hold a disconnect open indefinitely.
 const DRAIN_BUDGET: Duration = Duration::from_secs(3);
 const REAP_INTERVAL: Duration = Duration::from_millis(50);
+/// Upper bound on the carrier endpoints handed to the TUN bridge. Each one
+/// costs a host route; the engine's own cache keeps eight.
+const MAX_BYPASS_PEERS: usize = 12;
+/// Failed liveness greetings before the session is told the tunnel dropped.
+/// One is a probe racing an engine-side reconnect, not a dead tunnel.
+const LIVENESS_MISSES: u32 = 2;
 
 /// Jobs the engine still owns.
 ///
@@ -150,6 +156,14 @@ impl Backend for AetherBackend {
         let baseline = aether_engine::stats::snapshot();
         let baseline_rx = baseline.down;
         let baseline_tx = baseline.up;
+        let peers = carrier_peers(&cfg);
+        if !peers.is_empty() {
+            log::debug!(
+                "[aether] {} carrier endpoint(s) kept off the tunnel: {:?}",
+                peers.len(),
+                peers
+            );
+        }
         Ok(Box::new(AetherHandle {
             rates: Mutex::new(rates::RateMeter::new(baseline)),
             baseline_rx,
@@ -158,6 +172,7 @@ impl Backend for AetherBackend {
             socks_addr,
             sink: cx.telemetry,
             job,
+            peers,
             stopped: AtomicBool::new(false),
         }))
     }
@@ -223,6 +238,92 @@ fn free_loopback_port() -> Result<u16> {
 fn pin_engine_stats_interval() {
     if std::env::var_os("AETHER_STATS_SECS").is_none() {
         std::env::set_var("AETHER_STATS_SECS", "86400");
+    }
+}
+
+/// Carrier endpoints this session's engine may dial, most likely first.
+///
+/// The TUN bridge installs a bypass route per entry so the engine's own
+/// transport never rides the device it carries: an established socket keeps
+/// the physical route only until the routing table changes, and a TUN
+/// pause/start rewrites it -- which is how stopping the TUN used to take
+/// Aether's carrier down with it. Sources, in order: the peer the session
+/// pinned, then the engine's `lastconn` sibling file (`peer` plus its
+/// `recent` ring). That file is read once the readiness probe has confirmed
+/// the SOCKS listener, and the engine records the gateway it dialled *before*
+/// it binds that listener -- so even a first session publishes the endpoint it
+/// is actually using.
+fn carrier_peers(cfg: &SessionConfig) -> Vec<IpAddr> {
+    let mut peers = Vec::new();
+    if let Some(forced) = cfg.force_peer.as_deref().and_then(parse_peer_ip) {
+        peers.push(forced);
+    }
+    if !cfg.config_path.is_empty() {
+        for peer in lastconn_peers(&cfg.config_path) {
+            if !peers.contains(&peer) {
+                peers.push(peer);
+            }
+        }
+    }
+    peers.truncate(MAX_BYPASS_PEERS);
+    peers
+}
+
+/// `host:port` or a bare address; a host route does not care about the port.
+fn parse_peer_ip(text: &str) -> Option<IpAddr> {
+    let text = text.trim();
+    if let Ok(addr) = text.parse::<SocketAddr>() {
+        return Some(addr.ip());
+    }
+    text.parse::<IpAddr>().ok()
+}
+
+fn lastconn_peers(config_path: &str) -> Vec<IpAddr> {
+    let Ok(text) = std::fs::read_to_string(lastconn_path(config_path)) else {
+        return Vec::new();
+    };
+    let mut peers = Vec::new();
+    for entry in quoted_strings(&text) {
+        if let Some(ip) = parse_peer_ip(&entry) {
+            if !peers.contains(&ip) {
+                peers.push(ip);
+            }
+        }
+    }
+    peers.truncate(MAX_BYPASS_PEERS);
+    peers
+}
+
+/// The engine stores `peer = "..."` plus a `recent = [ ... ]` ring, so every
+/// quoted string is a candidate endpoint and only whole-address strings pass
+/// [`parse_peer_ip`]. A stale, truncated or hand-edited file therefore reads as
+/// "no known peers" instead of refusing a session.
+fn quoted_strings(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('"') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('"') else { break };
+        out.push(after[..end].to_string());
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// `<stem>-lastconn.<ext>` next to the engine's identity file, matching the
+/// engine's own `derive_sibling_path`. Kept local so this crate does not have
+/// to depend on the engine's path helper.
+fn lastconn_path(config_path: &str) -> String {
+    let dir_end = config_path
+        .rfind(|c| c == '/' || c == '\\')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    match config_path[dir_end..].rfind('.') {
+        Some(relative) => {
+            let dot = dir_end + relative;
+            format!("{}-lastconn{}", &config_path[..dot], &config_path[dot..])
+        }
+        None => format!("{config_path}-lastconn"),
     }
 }
 
@@ -423,6 +524,10 @@ struct AetherHandle {
     socks_addr: SocketAddr,
     sink: TelemetrySink,
     job: u64,
+    /// Carrier endpoints the engine may dial. Handed to the TUN bridge so it
+    /// can bypass them: this traffic is the tunnel's own transport, and a
+    /// packet that enters the device it carries never comes out.
+    peers: Vec<IpAddr>,
     stopped: AtomicBool,
 }
 
@@ -435,7 +540,9 @@ impl BackendHandle for AetherHandle {
         Endpoints {
             socks: Some(self.socks_addr),
             http: (http_port != 0).then(|| format!("127.0.0.1:{http_port}").parse().ok()).flatten(),
-            peer_ip: None,
+            peer_ip: (!self.peers.is_empty()).then(|| {
+                self.peers.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")
+            }),
             udp: true,
             psiphon_dns: false,
         }
@@ -443,6 +550,7 @@ impl BackendHandle for AetherHandle {
 
     async fn wait(&self) -> Result<()> {
         let mut was_up = true;
+        let mut misses = 0u32;
         loop {
             if self.stopped.load(Ordering::Acquire) { return Ok(()); }
             match ffi_poll(self.job) {
@@ -457,12 +565,25 @@ impl BackendHandle for AetherHandle {
                 }
             }
             let up = socks_listening(self.socks_addr).await;
-            if up != was_up {
-                was_up = up;
-                self.sink.set_state(
-                    if up { FcaeState::Connected } else { FcaeState::Reconnecting },
-                    if up { "Tunnel reconnected".into() } else { "Tunnel dropped; reconnecting…".into() },
-                );
+            if up {
+                misses = 0;
+                if !was_up {
+                    was_up = true;
+                    self.sink
+                        .set_state(FcaeState::Connected, "Tunnel reconnected".into());
+                }
+            } else {
+                misses = misses.saturating_add(1);
+                // The engine re-dials its carrier on its own; reporting a drop
+                // after a single unanswered greeting would flinch the status
+                // line and, on Android, make the host re-dial a live session.
+                if was_up && misses >= LIVENESS_MISSES {
+                    was_up = false;
+                    self.sink.set_state(
+                        FcaeState::Reconnecting,
+                        "Tunnel dropped; reconnecting…".into(),
+                    );
+                }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -510,5 +631,50 @@ fn tor_mode_label(mode: FcaeTorMode) -> &'static str {
         FcaeTorMode::Chain => "chain",
         FcaeTorMode::Reverse => "reverse",
         FcaeTorMode::Only => "only",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("fcae-lastconn-{tag}-{}.toml", std::process::id()))
+    }
+
+    #[test]
+    fn a_peer_reads_with_or_without_its_port() {
+        assert_eq!(parse_peer_ip("162.159.192.1:443"), Some(IpAddr::from([162, 159, 192, 1])));
+        assert_eq!(parse_peer_ip(" 188.114.96.1 "), Some(IpAddr::from([188, 114, 96, 1])));
+        assert_eq!(
+            parse_peer_ip("[2001:db8::1]:443"),
+            Some("2001:db8::1".parse().expect("a literal address"))
+        );
+        assert_eq!(parse_peer_ip("not-an-address"), None);
+        assert_eq!(parse_peer_ip(""), None);
+    }
+
+    #[test]
+    fn the_ring_is_read_from_the_engines_own_file() {
+        let path = scratch("ring");
+        std::fs::write(
+            &path,
+            "peer = \"162.159.192.1:443\"\nprofile = \"gfw\"\ncarrier = \"masque-h3\"\nrecent = [\"188.114.96.1:443\", \"162.159.192.1:443\", \"bogus\"]\n",
+        )
+        .expect("write the engine's file");
+        let peers = lastconn_peers(&path.to_string_lossy());
+        assert_eq!(
+            peers,
+            vec![IpAddr::from([162, 159, 192, 1]), IpAddr::from([188, 114, 96, 1])]
+        );
+        let _ = std::fs::remove_file(&path);
+        assert!(lastconn_peers(&path.to_string_lossy()).is_empty());
+    }
+
+    #[test]
+    fn the_sibling_path_follows_the_engines_layout() {
+        assert_eq!(lastconn_path("aether.toml"), "aether-lastconn.toml");
+        assert_eq!(lastconn_path("/var/lib/fcae/warp.json"), "/var/lib/fcae/warp-lastconn.json");
+        assert_eq!(lastconn_path("identity"), "identity-lastconn");
     }
 }

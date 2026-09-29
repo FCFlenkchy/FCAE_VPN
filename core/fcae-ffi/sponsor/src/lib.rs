@@ -361,6 +361,10 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
     // dropped on Stop so mute/backgrounding releases the output device too.
     let mut stream = None;
     let mut sink: Option<Sink> = None;
+    // Files whose decoder had nothing to play. A video without an audio track
+    // is a normal campaign, not a fault, and it is re-offered on every
+    // rotation: report each file once so the log stays quiet.
+    let mut reported: HashSet<PathBuf> = HashSet::new();
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(AudioCommand::Play { path }) => {
@@ -377,14 +381,14 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
                 let file = match fs::File::open(&path) {
                     Ok(file) => file,
                     Err(error) => {
-                        log::warn!("[sponsor] audio cache open failed ({}): {error}", path.display());
+                        report_audio_failure(&mut reported, &path, &error.to_string());
                         continue;
                     }
                 };
                 let source = match AudioDecoder::try_from(BufReader::new(file)) {
                     Ok(source) => source,
                     Err(error) => {
-                        log::warn!("[sponsor] audio decode failed ({}): {error}", path.display());
+                        report_audio_failure(&mut reported, &path, &error.to_string());
                         continue;
                     }
                 };
@@ -423,6 +427,26 @@ fn audio_worker(receiver: Receiver<AudioCommand>) {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+/// Report a plane that produced no audio exactly once.
+///
+/// The decoder decides what is playable, never a pre-flight probe: an explicit
+/// `audio_url` that fails is worth a warning, while a video whose container
+/// carries no track is a normal campaign and stays on debug. The set is capped
+/// so a long-lived process cannot accumulate paths for media no longer cached.
+fn report_audio_failure(reported: &mut HashSet<PathBuf>, path: &Path, error: &str) {
+    if reported.len() > 64 {
+        reported.clear();
+    }
+    if !reported.insert(path.to_path_buf()) {
+        return;
+    }
+    if plane_key(path) == "audio" {
+        log::warn!("[sponsor] audio decode failed ({}): {error}", path.display());
+    } else {
+        log::debug!("[sponsor] media has no playable audio ({}): {error}", path.display());
     }
 }
 
@@ -525,6 +549,30 @@ pub fn set_audio_ui_active(active: bool) {
     }
 }
 
+/// The clip a campaign plays while its card is visible.
+///
+/// An explicit `audio_url` wins. Otherwise the campaign's own media is handed
+/// over as-is: a video carries its soundtrack in the same cache entry that the
+/// card already renders, so there is no second download and no track probe --
+/// the audio decoder reads whatever is in the file. Only planes the image
+/// decoder can identify (still or GIF) are skipped, because those never carry
+/// audio.
+fn audio_source_path(state: &State, campaign: &Campaign) -> Option<PathBuf> {
+    if campaign.audio_url.is_some() {
+        return Some(state.cache_dir.join(audio_cache_name(campaign)));
+    }
+    [background_cache_name(campaign), cache_name(campaign)]
+        .into_iter()
+        .map(|name| state.cache_dir.join(name))
+        .find(|path| media_carries_audio(path))
+}
+
+fn media_carries_audio(path: &Path) -> bool {
+    cached_media_file_is_valid(path)
+        && image_header(path, None)
+            .is_some_and(|header| image::guess_format(&header).is_err())
+}
+
 fn start_audio_for_campaign(campaign_id: &str) {
     if !audio_requested() {
         stop_audio();
@@ -538,11 +586,9 @@ fn start_audio_for_campaign(campaign_id: &str) {
     }
     let path = {
         let state = STATE.lock();
-        let campaign = state.campaigns.iter().find(|campaign|
-            campaign.id == campaign_id);
-        campaign.and_then(|campaign| campaign.audio_url.as_ref().map(|_| {
-            state.cache_dir.join(audio_cache_name(campaign))
-        }))
+        state.campaigns.iter()
+            .find(|campaign| campaign.id == campaign_id)
+            .and_then(|campaign| audio_source_path(&state, campaign))
     };
     let Some(path) = path.filter(|path| cached_media_file_is_valid(path)) else {
         stop_audio();

@@ -28,8 +28,10 @@ pub struct TunUndo {
     #[cfg(windows)]
     pub windows: Option<fcae_runtime::windows_tun::TunGuard>,
     pub device_name: String,
-    /// Host route we added for the tunnel endpoint, to be deleted.
-    pub peer_route: Option<String>,
+    /// Host routes we added for the tunnel endpoints, to be deleted. The
+    /// carrier may dial any of them, and every one of them has to stay off
+    /// the device it carries.
+    pub peer_routes: Vec<String>,
     /// Interfaces whose DNS we overrode, with their previous servers.
     pub dns_backup: Vec<(String, Vec<String>)>,
     /// DNS host routes installed through the Linux TUN interface.
@@ -255,10 +257,11 @@ fn configure_linux(cfg: &SessionConfig, peer_ip: Option<&str>, undo: &mut TunUnd
     }
     run("ip", &["link", "set", "dev", name, "mtu", &cfg.tun.mtu.to_string(), "up"]);
 
-    if let Some(peer) = peer_ip {
-        if let Some(gw) = default_gateway_linux() {
-            if run("ip", &["route", "add", &format!("{peer}/32"), "via", &gw]) {
-                undo.peer_route = Some(peer.to_string());
+    if let Some(gw) = default_gateway_linux() {
+        for peer in fcae_runtime::backend::bypass_peers(peer_ip) {
+            let prefix = format!("{peer}/{}", if peer.is_ipv4() { 32 } else { 128 });
+            if run("ip", &["route", "add", &prefix, "via", &gw]) {
+                undo.peer_routes.push(prefix);
             }
         }
     }
@@ -293,8 +296,8 @@ fn restore_linux(undo: &TunUndo) {
         run("ip", &["route", "del", "0.0.0.0/1", "dev", name]);
         run("ip", &["route", "del", "128.0.0.0/1", "dev", name]);
     }
-    if let Some(peer) = &undo.peer_route {
-        run("ip", &["route", "del", &format!("{peer}/32")]);
+    for prefix in &undo.peer_routes {
+        run("ip", &["route", "del", prefix]);
     }
     // resolvectl reverts automatically when the link disappears, but be
     // explicit in case the device lingers. Absent method means DNS was never
@@ -317,10 +320,11 @@ fn configure_macos(cfg: &SessionConfig, peer_ip: Option<&str>, undo: &mut TunUnd
     run("ifconfig", &[&name, ip, ip, "up"]);
     run("ifconfig", &[&name, "mtu", &cfg.tun.mtu.to_string()]);
 
-    if let Some(peer) = peer_ip {
-        if let Some(gw) = default_gateway_macos() {
-            if run("route", &["add", "-host", peer, &gw]) {
-                undo.peer_route = Some(peer.to_string());
+    if let Some(gw) = default_gateway_macos() {
+        for peer in fcae_runtime::backend::bypass_peers(peer_ip) {
+            let peer = peer.to_string();
+            if run("route", &["add", "-host", &peer, &gw]) {
+                undo.peer_routes.push(peer);
             }
         }
     }
@@ -389,7 +393,7 @@ fn restore_macos(undo: &TunUndo) {
         run("route", &["delete", "-net", "0.0.0.0/1"]);
         run("route", &["delete", "-net", "128.0.0.0/1"]);
     }
-    if let Some(peer) = &undo.peer_route {
+    for peer in &undo.peer_routes {
         run("route", &["delete", "-host", peer]);
     }
     for (service, servers) in &undo.dns_backup {
@@ -422,7 +426,8 @@ mod tests {
             device_name: cfg.tun.name.clone(),
             ..Default::default()
         };
-        assert!(undo.peer_route.is_none());
+        // A device that has not been configured yet owes no bypass routes.
+        assert!(undo.peer_routes.is_empty());
         assert!(!undo.default_route);
     }
 }

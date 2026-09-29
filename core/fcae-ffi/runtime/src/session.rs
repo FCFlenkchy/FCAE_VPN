@@ -25,6 +25,17 @@ use crate::error::{CoreError, Result};
 use crate::registry;
 use crate::telemetry::{TelemetryCell, TelemetrySink};
 
+/// Grace period after a TUN pause/resume during which health checks are
+/// skipped. The device is being torn down or rebuilt and the platform routes
+/// are moving with it, so a probe inside this window says nothing about the
+/// tunnel that carries it. Pausing the data plane must never be able to end
+/// the session -- that is what a stop/start button in TUN mode means.
+const TUN_SETTLE: Duration = Duration::from_secs(5);
+/// Consecutive failed health ticks before the TUN data plane counts as dead.
+/// One failure is a rebuild in flight, not a dropped tunnel; a device that is
+/// really gone fails every tick and still reconnects within a few seconds.
+const TUN_HEALTH_FAIL_TICKS: u32 = 3;
+
 /// Hook that raises a TUN device on top of a backend's SOCKS endpoint.
 ///
 /// The supervisor stays independent of the tun2socks bridge crate (which
@@ -132,6 +143,9 @@ pub struct Supervisor {
     tun_paused: Arc<AtomicBool>,
     tun_control: Arc<Mutex<()>>,
     live_tun: Arc<Mutex<Option<LiveTun>>>,
+    /// Deadline of the current TUN transition window ([`TUN_SETTLE`]); health
+    /// checks stay out of it so a rebuild cannot be mistaken for a drop.
+    tun_settle: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl Supervisor {
@@ -144,7 +158,14 @@ impl Supervisor {
             tun_paused: Arc::new(AtomicBool::new(false)),
             tun_control: Arc::new(Mutex::new(())),
             live_tun: Arc::new(Mutex::new(None)),
+            tun_settle: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Open (or extend) the transition window that keeps TUN health checks
+    /// quiet while the data plane is being rebuilt.
+    fn hold_tun_settle(&self) {
+        *self.tun_settle.lock() = Some(std::time::Instant::now() + TUN_SETTLE);
     }
 
     pub fn telemetry(&self) -> &Arc<TelemetryCell> {
@@ -257,6 +278,7 @@ impl Supervisor {
         let tun_paused = self.tun_paused.clone();
         let tun_control = self.tun_control.clone();
         let live_tun = self.live_tun.clone();
+        let tun_settle = self.tun_settle.clone();
 
         let thread = std::thread::Builder::new()
             .name("fcae-session".into())
@@ -289,6 +311,7 @@ impl Supervisor {
                         tun_paused,
                         tun_control,
                         live_tun,
+                        tun_settle,
                     ))
                 }));
 
@@ -413,6 +436,7 @@ impl Supervisor {
         if self.tun_paused.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.hold_tun_settle();
         self.cfg.tun_bridge.stop(self.cfg.stop_timeout);
     }
 
@@ -428,14 +452,24 @@ impl Supervisor {
         if !self.tun_paused.load(Ordering::SeqCst) {
             return Ok(());
         }
+        // Without a stored live session there is nothing to re-raise the
+        // device on. Clearing the pause flag anyway would hand the session a
+        // data plane that is not running: the next health tick would then end
+        // it -- and with it the backend and its tunnel -- which is exactly the
+        // "starting the TUN disconnected Aether" failure. Stay paused and
+        // report; a session that is gone is the caller's to reconnect.
         let live = self.live_tun.lock().clone();
-        if let Some(live) = live.filter(|live| live.config.is_tun()) {
-            self.cfg.tun_bridge.start(&live.config, &live.endpoints)?;
-        }
+        let Some(live) = live.filter(|live| live.config.is_tun()) else {
+            return Err(CoreError::Internal(
+                "no live session to re-raise the TUN data plane on".into(),
+            ));
+        };
+        self.cfg.tun_bridge.start(&live.config, &live.endpoints)?;
         if self.stopping.load(Ordering::SeqCst) || !self.is_running() {
             self.cfg.tun_bridge.stop(self.cfg.stop_timeout);
             return Err(CoreError::Internal("session stopped during TUN resume".into()));
         }
+        self.hold_tun_settle();
         self.tun_paused.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -473,6 +507,7 @@ async fn run_session(
     tun_paused: Arc<AtomicBool>,
     tun_control: Arc<Mutex<()>>,
     live_tun: Arc<Mutex<Option<LiveTun>>>,
+    tun_settle: Arc<Mutex<Option<std::time::Instant>>>,
 ) -> Result<()> {
     let _live_guard = LiveGuard {
         live: live_tun.clone(),
@@ -545,8 +580,13 @@ async fn run_session(
 
         // `handle` needs no `mut` (only `endpoints` below is reassigned).
         let mut endpoints = handle.endpoints();
-        if let Some(peer) = &endpoints.peer_ip {
-            sink.set_peer(peer.clone());
+        if let Some(peers) = &endpoints.peer_ip {
+            // The host shows one peer: the first is the endpoint the backend
+            // dialled, the rest are bypass candidates for the TUN bridge.
+            let display = peers.split(',').next().unwrap_or(peers).trim();
+            if !display.is_empty() {
+                sink.set_peer(display.to_string());
+            }
         }
 
         // Egress "Psiphon through the tunnel": Aether is up; start Psiphon
@@ -601,7 +641,15 @@ async fn run_session(
                 endpoints: endpoints.clone(),
             });
             if config.is_tun() && !cancel.is_cancelled() && !tun_paused.load(Ordering::SeqCst) {
-                tun_bridge.start(&config, &endpoints)
+                let started = tun_bridge.start(&config, &endpoints);
+                if started.is_ok() {
+                    // A device that was just raised is not yet proof of a
+                    // working data plane: its routes are still being
+                    // installed, so hold the settle window and let the first
+                    // health ticks land inside it.
+                    *tun_settle.lock() = Some(std::time::Instant::now() + TUN_SETTLE);
+                }
+                started
             } else {
                 Ok(())
             }
@@ -641,7 +689,7 @@ async fn run_session(
                     tokio::select! { r = handle.wait() => r, r = psi.wait() => r }
                 } else { handle.wait().await }
             } => r,
-            result = pump_counters(&*handle, &sink, &config, &*tun_bridge, &tun_paused, &tun_control, &endpoints) => result,
+            result = pump_counters(&*handle, &sink, &config, &*tun_bridge, &tun_paused, &tun_control, &tun_settle, &endpoints) => result,
         };
 
         // Tunnel ended. Set reconnecting state immediately so the UI doesn't
@@ -747,6 +795,7 @@ async fn backoff(cancel: &CancelToken, attempt: u32) -> std::ops::ControlFlow<()
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn pump_counters(
     handle: &dyn BackendHandle,
     sink: &TelemetrySink,
@@ -754,24 +803,54 @@ async fn pump_counters(
     tun: &dyn TunBridge,
     paused: &AtomicBool,
     control: &Mutex<()>,
+    settle: &Mutex<Option<std::time::Instant>>,
     endpoints: &Endpoints,
 ) -> Result<()> {
+    #[cfg(not(windows))]
+    let _ = endpoints;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut unhealthy: u32 = 0;
     loop {
         tick.tick().await;
         sink.set_counters(handle.counters());
         let Some(_control) = control.try_lock() else { continue; };
-        if cfg.is_tun() && !paused.load(Ordering::SeqCst) {
-            let health = tun.check_health(cfg);
-            if !paused.load(Ordering::SeqCst) { health?; }
-            #[cfg(windows)]
-            if handle.endpoints().peer_ip != endpoints.peer_ip {
-                return Err(CoreError::Internal("outer endpoint changed; reconnecting TUN with fresh routes".into()));
-            }
+        if !cfg.is_tun() {
+            continue;
         }
-        #[cfg(not(windows))]
-        let _ = endpoints;
+        // Paused and mid-transition are both "device down by request": the
+        // backend is fine and must not be re-dialled because of it.
+        if paused.load(Ordering::SeqCst) || in_tun_settle(settle) {
+            unhealthy = 0;
+            continue;
+        }
+        if let Err(error) = tun.check_health(cfg) {
+            unhealthy += 1;
+            if unhealthy >= TUN_HEALTH_FAIL_TICKS {
+                return Err(error);
+            }
+            log::debug!(
+                "[session] TUN health check failed ({unhealthy}/{TUN_HEALTH_FAIL_TICKS}): {error}"
+            );
+            continue;
+        }
+        unhealthy = 0;
+        // A pause can land while the (possibly slow) health call runs; the
+        // re-check keeps Windows route comparison out of that window too.
+        if paused.load(Ordering::SeqCst) {
+            continue;
+        }
+        #[cfg(windows)]
+        if handle.endpoints().peer_ip != endpoints.peer_ip {
+            return Err(CoreError::Internal("outer endpoint changed; reconnecting TUN with fresh routes".into()));
+        }
     }
+}
+
+/// True while the TUN data plane is inside its post-transition grace window.
+fn in_tun_settle(settle: &Mutex<Option<std::time::Instant>>) -> bool {
+    settle
+        .lock()
+        .is_some_and(|deadline| std::time::Instant::now() < deadline)
 }
 
 #[cfg(test)]
@@ -1125,6 +1204,9 @@ mod tests {
 
     #[test]
     fn health_checks_skip_tun_transitions_but_detect_real_failures() {
+        // A transition (control held, or the settle window) never blames the
+        // data plane; a device that fails every tick still ends the session,
+        // so recovery from a genuinely dead TUN is unchanged.
         use std::sync::atomic::AtomicUsize;
 
         struct UnhealthyBridge(AtomicUsize);
@@ -1151,22 +1233,35 @@ mod tests {
             .build()
             .unwrap();
 
+        let settle = Mutex::new(None);
         {
             let _transition = control.lock();
             let result = runtime.block_on(async {
                 tokio::time::timeout(Duration::from_millis(10), pump_counters(
-                    &handle, &sink, &cfg, &bridge, &paused, &control, &endpoints,
+                    &handle, &sink, &cfg, &bridge, &paused, &control, &settle, &endpoints,
                 )).await
             });
             assert!(result.is_err());
             assert_eq!(bridge.0.load(Ordering::SeqCst), 0);
         }
 
+        {
+            *settle.lock() = Some(std::time::Instant::now() + TUN_SETTLE);
+            let result = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_millis(300), pump_counters(
+                    &handle, &sink, &cfg, &bridge, &paused, &control, &settle, &endpoints,
+                )).await
+            });
+            assert!(result.is_err(), "settle window must outlast the probe");
+            assert_eq!(bridge.0.load(Ordering::SeqCst), 0);
+        }
+
+        *settle.lock() = None;
         let result = runtime.block_on(pump_counters(
-            &handle, &sink, &cfg, &bridge, &paused, &control, &endpoints,
+            &handle, &sink, &cfg, &bridge, &paused, &control, &settle, &endpoints,
         ));
         assert!(result.is_err());
-        assert_eq!(bridge.0.load(Ordering::SeqCst), 1);
+        assert!(bridge.0.load(Ordering::SeqCst) >= TUN_HEALTH_FAIL_TICKS as usize);
     }
 
     #[test]

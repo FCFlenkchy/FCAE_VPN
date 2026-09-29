@@ -6,7 +6,7 @@
 //! needs to know about TUN, telemetry plumbing, or the C ABI — the supervisor
 //! layers those on top of whatever endpoint the backend reports.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -148,8 +148,11 @@ pub struct Endpoints {
     /// Local SOCKS5 address the TUN bridge (and apps) should dial.
     pub socks: Option<SocketAddr>,
     pub http: Option<SocketAddr>,
-    /// Public IP of the selected server, excluded from TUN routes to avoid a
-    /// routing loop.
+    /// Public IPs of the servers this session may dial, excluded from TUN
+    /// routes to avoid a routing loop (see `tun2socks::platform` and
+    /// `windows_tun`). A backend whose carrier can move between endpoints --
+    /// Aether's gateway scanner -- publishes every candidate as a
+    /// comma-separated list; a single-endpoint backend publishes one address.
     pub peer_ip: Option<String>,
     /// Whether the SOCKS endpoint carries UDP (UDP ASSOCIATE). Psiphon's
     /// local SOCKS is CONNECT-only; Aether handles its own Tor/WARP DNS and
@@ -158,6 +161,24 @@ pub struct Endpoints {
     /// Use the native Psiphon UDP gateway with its transparent DNS flag.
     /// No public DoH provider or direct DNS fallback is attempted.
     pub psiphon_dns: bool,
+}
+
+/// Addresses a TUN bridge must keep off its own device, parsed from
+/// [`Endpoints::peer_ip`].
+///
+/// The list can come from a file the backend's engine maintains, so entries
+/// that are not usable remote unicast addresses are dropped instead of failing
+/// the session: a stale endpoint may cost a bypass route, never a connect.
+pub fn bypass_peers(peer_ip: Option<&str>) -> Vec<IpAddr> {
+    let mut peers: Vec<IpAddr> = Vec::new();
+    for entry in peer_ip.unwrap_or_default().split(',') {
+        let Ok(ip) = entry.trim().parse::<IpAddr>() else { continue };
+        if ip.is_unspecified() || ip.is_multicast() || ip.is_loopback() || peers.contains(&ip) {
+            continue;
+        }
+        peers.push(ip);
+    }
+    peers
 }
 
 impl Endpoints {
@@ -228,4 +249,22 @@ pub trait Backend: Send + Sync {
     async fn drain(&self) {}
 
     fn recover_stale_state(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bypass_peers_keeps_usable_remote_addresses_only() {
+        let parsed = bypass_peers(Some(
+            "162.159.192.1, 188.114.96.1:443, 162.159.192.1, 0.0.0.0, 127.0.0.1, 224.0.0.1, junk",
+        ));
+        assert_eq!(
+            parsed,
+            vec![IpAddr::from([162, 159, 192, 1]), IpAddr::from([188, 114, 96, 1])]
+        );
+        assert!(bypass_peers(None).is_empty());
+        assert!(bypass_peers(Some("")).is_empty());
+    }
 }

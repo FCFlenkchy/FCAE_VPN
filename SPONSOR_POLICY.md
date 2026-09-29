@@ -43,6 +43,7 @@ FCAE does not provide sponsors with device identifiers, user profiles, browsing 
 - HTTPS only.
 - PNG, JPEG, WebP, GIF, or MP4 video for `icon_url` and `background_url`.
 - `audio_url` is optional and supports audio formats understood by the Rust decoder, including MP3, WAV, Ogg, and FLAC.
+- A campaign without `audio_url` plays the soundtrack of its own media instead: an MP4 `background_url` or `icon_url` is handed to the decoder as it is cached, with no separate download and no audio-track probe. A file with no audio track is silent by design; a plane the image decoder can identify (still image or GIF) is skipped. `audio_url` always wins when both are present.
 - Maximum encoded size: 15 MiB per icon, background, or audio asset.
 - Maximum dimensions: 800 × 450 pixels on every platform.
 - Animated GIFs: maximum 120 frames on desktop and 60 on Android; MP4 video is retained up to the same bounded frame and decoded-byte budgets.

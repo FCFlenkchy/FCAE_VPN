@@ -106,10 +106,15 @@ pub fn validate_backend(cfg: &SessionConfig, _peer: Option<&str>) -> Result<()> 
     Ok(())
 }
 
+/// One carrier endpoint with the physical route it must keep using.
+struct PeerBypass {
+    peer: IpAddr,
+    luid: NET_LUID_LH,
+    next_hop: IpAddr,
+}
+
 pub struct TunGuard {
-    peer: Option<IpAddr>,
-    physical_luid: Option<NET_LUID_LH>,
-    physical_next_hop: Option<IpAddr>,
+    peers: Vec<PeerBypass>,
     routes: Vec<MIB_IPFORWARD_ROW2>,
     addresses: Vec<MIB_UNICASTIPADDRESS_ROW>,
     interfaces: Vec<InterfaceChange>,
@@ -125,12 +130,12 @@ impl std::fmt::Debug for TunGuard {
 impl TunGuard {
     pub fn configure(cfg: &SessionConfig, peer: Option<&str>) -> Result<Self> {
         validate_backend(cfg, peer)?;
-        let parsed_peer = peer.map(|text| text.parse::<IpAddr>().map_err(|_| CoreError::InvalidConfig("invalid outer endpoint IP".into()))).transpose()?;
-        if let Some(ip) = parsed_peer {
-            if ip.is_unspecified() || ip.is_multicast() || ip.is_loopback() {
-                return Err(CoreError::InvalidConfig("outer endpoint is not a remote IP".into()));
-            }
-        }
+        // Every endpoint the carrier may dial gets a host route through the
+        // physical interface: the tunnel's own transport must never be
+        // captured by the device it carries. This is what keeps a TUN
+        // pause/start -- which rewrites the routing table -- from resetting the
+        // carrier's route into the tunnel and killing the session.
+        let peers = crate::backend::bypass_peers(peer);
 
         let address4 = prefix(&cfg.tun.ipv4, AF_INET)?;
         let address6 = cfg.tun.ipv6.as_deref().map(|s| prefix(s, AF_INET6)).transpose()?;
@@ -139,11 +144,28 @@ impl TunGuard {
         }
         let servers = crate::tun_dns::servers(cfg)?;
         let (luid, index, guid) = adapter(&cfg.tun.name)?;
-        let mut guard = Self { peer: parsed_peer, physical_luid: None, physical_next_hop: None, routes: Vec::with_capacity(5), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None };
-        if let Some(peer) = parsed_peer {
-            let physical = best_route(peer)?;
+        let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None };
+        for (position, peer) in peers.into_iter().enumerate() {
+            // The endpoint the engine was told to use must be kept off the
+            // device or the session flaps, so that one still fails loudly.
+            // Candidates from the engine's own cache are advisory: a stale
+            // one that this machine cannot route, or that already resolves
+            // through our device, is skipped rather than failing the connect.
+            let pinned = position == 0 && cfg.force_peer.is_some();
+            let physical = match best_route(peer) {
+                Ok(physical) => physical,
+                Err(error) if pinned => return Err(error),
+                Err(error) => {
+                    log::debug!("[tun] no physical route for cached outer endpoint {peer}: {error}");
+                    continue;
+                }
+            };
             if unsafe { physical.InterfaceLuid.Value == luid.Value } {
-                return Err(CoreError::Internal("outer endpoint already routes through FCAE; disconnect the stale tunnel before reconnecting".into()));
+                if pinned {
+                    return Err(CoreError::Internal("outer endpoint already routes through FCAE; disconnect the stale tunnel before reconnecting".into()));
+                }
+                log::warn!("[tun] cached outer endpoint {peer} already routes through FCAE; skipping its bypass");
+                continue;
             }
             let mut bypass = MIB_IPFORWARD_ROW2::default();
             unsafe { InitializeIpForwardEntry(&mut bypass); }
@@ -155,8 +177,7 @@ impl TunGuard {
             bypass.Metric = 0;
             bypass.Protocol = MIB_IPPROTO_NETMGMT;
             guard.add_route(bypass, true)?;
-            guard.physical_luid = Some(physical.InterfaceLuid);
-            guard.physical_next_hop = Some(ip_of(&physical.NextHop));
+            guard.peers.push(PeerBypass { peer, luid: physical.InterfaceLuid, next_hop: ip_of(&physical.NextHop) });
         }
 
         guard.configure_interface(luid, AF_INET, cfg.tun.mtu)?;
@@ -176,26 +197,25 @@ impl TunGuard {
             row.Protocol = MIB_IPPROTO_NETMGMT;
             guard.add_route(row, false)?;
         }
-        if let Some(peer) = parsed_peer {
-            let current = best_route(peer)?;
-            if let (Some(expected_luid), Some(expected_hop)) = (guard.physical_luid, guard.physical_next_hop) {
-                if unsafe { current.InterfaceLuid.Value != expected_luid.Value } || ip_of(&current.NextHop) != expected_hop {
-                    return Err(CoreError::Internal("outer endpoint bypass verification failed".into()));
-                }
+        for bypass in &guard.peers {
+            let current = best_route(bypass.peer)?;
+            if unsafe { current.InterfaceLuid.Value != bypass.luid.Value } || ip_of(&current.NextHop) != bypass.next_hop {
+                return Err(CoreError::Internal("outer endpoint bypass verification failed".into()));
             }
         }
         guard.dns = Some(DnsGuard::apply_to(guid, &servers)?);
-        log::info!("[tun] Windows routing ready: interface {index}, outer endpoint {parsed_peer:?}");
+        log::info!(
+            "[tun] Windows routing ready: interface {index}, outer endpoint(s) {:?}",
+            guard.peers.iter().map(|bypass| bypass.peer).collect::<Vec<_>>()
+        );
         Ok(guard)
     }
 
     pub fn check_health(&self) -> Result<()> {
-        if let Some(peer) = self.peer {
-            let current = best_route(peer)?;
-            if let (Some(expected_luid), Some(expected_hop)) = (self.physical_luid, self.physical_next_hop) {
-                if unsafe { current.InterfaceLuid.Value != expected_luid.Value } || ip_of(&current.NextHop) != expected_hop {
-                    return Err(CoreError::Internal("outer endpoint route changed; reconnect required".into()));
-                }
+        for bypass in &self.peers {
+            let current = best_route(bypass.peer)?;
+            if unsafe { current.InterfaceLuid.Value != bypass.luid.Value } || ip_of(&current.NextHop) != bypass.next_hop {
+                return Err(CoreError::Internal("outer endpoint route changed; reconnect required".into()));
             }
         }
         for owned in &self.routes {

@@ -1472,12 +1472,21 @@ public class FCAEVpnService extends VpnService {
             // A pause can land while the connect is still running. Resuming
             // then would raise an interface over a session with no data plane
             // — exactly the TUN-before-connected order this service avoids —
-            // so only a session that reached CONNECTED (its TUN plane was up,
-            // and pause keeps the session there) takes the fast path. Anything
+            // so the fast path is for a session that is known live: it reports
+            // CONNECTED, or it is paused (only a live session can be). Anything
             // else reconnects, which is connected-first by construction.
+            //
+            // The pause flag, not the status word, settles the paused case: a
+            // paused session is live by construction -- nothing stopped the
+            // tunnel that carries it -- while its status word may legitimately
+            // have left CONNECTED on a carrier reconnect inside the engine.
+            // Reconnecting from here is what made Stop then Start tear the
+            // tunnel down and re-dial it.
+            boolean sessionPaused = false;
+            try { sessionPaused = NativeEngine.nativeTunPaused(); } catch (Exception ignored) {}
             int state = 5;
             try { state = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
-            if (state != 4) {
+            if (!sessionPaused && state != 4) {
                 Log.w(TAG, "resumeVpn: session is not connected (state " + state
                         + "); full start");
                 handler.post(() -> {
