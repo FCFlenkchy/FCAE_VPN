@@ -934,6 +934,7 @@ pub mod env_compat {
         // deliberately fixed at info; this only controls how chatty the
         // aether engine itself is.
         set("AETHER_LOG_LEVEL", Some(cfg.engine_log.as_str()));
+        flag("AETHER_STATS", true);
 
         // Listeners.
         //

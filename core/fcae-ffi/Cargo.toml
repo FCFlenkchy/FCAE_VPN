@@ -1,10 +1,9 @@
 [workspace]
 # Global FFI layer for FCAE VPN.
 #
-# Lives under core/fcae-ffi/ (its own workspace) for the same reason the old
-# core/Aether workspace existed: path deps reach into core/quiche, which has
-# its own workspace and inherits `edition`/`license` from it. Nesting a
-# workspace here keeps those inherits intact.
+# Lives under core/fcae-ffi/ as an isolated workspace so its release profile
+# and dependency graph remain independent from the application front ends.
+# Aether is consumed through the pinned root-level submodule.
 members = [
     "abi",
     "runtime",
@@ -17,7 +16,7 @@ members = [
     "bridges/zeptun",
     "bridges/hev-socks5-tunnel",
 ]
-exclude = ["../Aether", "../quiche"]
+exclude = ["../../aether/aether"]
 resolver = "2"
 
 [workspace.package]
@@ -36,7 +35,7 @@ fcae-bridge-aether = { path = "bridges/aether" }
 fcae-bridge-psiphon = { path = "bridges/psiphon" }
 fcae-bridge-zeptun = { path = "bridges/zeptun" }
 fcae-bridge-hev-socks5-tunnel = { path = "bridges/hev-socks5-tunnel" }
-aether-engine = { path = "../Aether" }
+aether-engine = { package = "aether", path = "../../aether/aether" }
 
 
 anyhow = "1"

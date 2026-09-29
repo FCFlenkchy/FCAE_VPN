@@ -52,7 +52,7 @@ pub enum FcaeState {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FcaeBackend {
-    /// Cloudflare WARP / MASQUE engine (`core/Aether`).
+    /// Cloudflare WARP / MASQUE engine (`aether` submodule).
     Aether = 0,
     /// Psiphon tunnel core. Reserved; `fcae_start` returns
     /// [`FcaeStatus::BackendUnavailable`] until the backend is compiled in.
