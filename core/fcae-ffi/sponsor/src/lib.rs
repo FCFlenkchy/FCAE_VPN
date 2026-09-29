@@ -2,7 +2,7 @@ use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat};
 use once_cell::sync::Lazy;
 use parking_lot::{Mutex, RwLock};
 use rodio::{Decoder as AudioDecoder, OutputStreamBuilder, Sink, Source};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use yscv_video::Mp4VideoReader;
 use std::{
     collections::HashSet,
@@ -92,7 +92,7 @@ struct Manifest {
     sponsors: Vec<Campaign>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct Campaign {
     id: String,
     #[serde(default)]
@@ -242,6 +242,9 @@ struct State {
     cache_dir: PathBuf,
     rotation_started: Instant,
     current_campaign: usize,
+    // The next card is selected early so its media can be prepared while the
+    // current card is visible. Only this two-card window retains decoded pixels.
+    next_campaign: Option<usize>,
     random_state: u64,
     manifest_checked_at: u64,
     // Prevent a failed media request from being retried once per UI poll;
@@ -256,6 +259,7 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
     cache_dir: default_cache_dir(),
     rotation_started: Instant::now(),
     current_campaign: 0,
+    next_campaign: None,
     random_state: SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -561,15 +565,12 @@ fn audio_needs_refresh() -> bool {
 
 fn media_needs_refresh() -> bool {
     let state = STATE.lock();
-    let Some(campaign) = state.campaigns.get(state.current_campaign) else {
-        return false;
-    };
-    let Some(existing) = state.ready.iter().find(|ready|
-        ready.campaign.id == campaign.id) else { return true; };
-    (campaign.icon_url.is_some() && existing.frames.is_empty())
-        || (campaign.background_url.is_some()
-            && existing.background_frames.is_empty()
-            && existing.background_rgba.is_empty())
+    [Some(state.current_campaign), state.next_campaign]
+        .into_iter()
+        .flatten()
+        .any(|index| state.ready.get(index)
+            .map(|ready| ready_needs_media(ready, &state.cache_dir))
+            .unwrap_or(true))
 }
 
 pub fn manifest_refresh_remaining_secs() -> u64 {
@@ -652,6 +653,8 @@ fn apply_campaigns(campaigns: Vec<Campaign>) -> bool {
         .map(|campaign| campaign.id.clone());
     let selected_campaign_changed = previous_selected_id != selected_campaign_id;
     state.campaigns = campaigns.clone();
+    plan_next_campaign(&mut state);
+    trim_ready_window(&mut state);
     state.last_error.clear();
     state.media_retry_after = Instant::now();
     state.rotation_started = Instant::now();
@@ -755,13 +758,16 @@ fn publish_media(campaigns: &[Campaign], ready: Vec<ReadyCampaign>) -> bool {
     } else {
         state.current_campaign % ready_count
     };
+    if state.next_campaign.is_none_or(|next| next >= ready_count || next == state.current_campaign) {
+        plan_next_campaign(&mut state);
+    }
+    trim_ready_window(&mut state);
     let current_needs_media = state.ready.get(state.current_campaign)
         .map(|ready| ready_needs_media(ready, &state.cache_dir))
         .unwrap_or(false);
     if !current_needs_media {
         state.media_retry_after = Instant::now();
     }
-    state.rotation_started = Instant::now();
     GENERATION.fetch_add(1, Ordering::Relaxed);
     true
 }
@@ -789,6 +795,7 @@ fn refresh_cached_media_sync() {
     MEDIA_BUSY.store(false, Ordering::Release);
     if applied {
         log::info!("[sponsor] published synchronous cached media ({} active campaigns)", ready_count);
+        preload_next_media_async();
     }
 }
 
@@ -797,6 +804,23 @@ fn refresh_cached_media_async() {
 }
 
 fn refresh_media_async_inner(allow_disconnected: bool) {
+    refresh_media_target_async(allow_disconnected, None);
+}
+
+fn preload_next_media_async() {
+    let target_id = {
+        let state = STATE.lock();
+        let Some(next) = state.next_campaign else { return; };
+        let Some(ready) = state.ready.get(next) else { return; };
+        if !ready_needs_media(ready, &state.cache_dir) {
+            return;
+        }
+        ready.campaign.id.clone()
+    };
+    refresh_media_target_async(!CONNECTED.load(Ordering::Acquire), Some(target_id));
+}
+
+fn refresh_media_target_async(allow_disconnected: bool, requested_target: Option<String>) {
     if (!allow_disconnected && !CONNECTED.load(Ordering::Acquire))
         || MEDIA_BUSY.swap(true, Ordering::AcqRel)
     {
@@ -805,8 +829,8 @@ fn refresh_media_async_inner(allow_disconnected: bool) {
     STATE.lock().media_retry_after = Instant::now() + Duration::from_secs(30);
     let (campaigns, cache_dir, previous, target_id) = {
         let state = STATE.lock();
-        let target_id = state.campaigns.get(state.current_campaign)
-            .map(|campaign| campaign.id.clone());
+        let target_id = requested_target.or_else(|| state.campaigns.get(state.current_campaign)
+            .map(|campaign| campaign.id.clone()));
         (state.campaigns.clone(), state.cache_dir.clone(), state.ready.clone(), target_id)
     };
     thread::spawn(move || {
@@ -827,8 +851,22 @@ fn refresh_media_async_inner(allow_disconnected: bool) {
         MEDIA_BUSY.store(false, Ordering::Release);
         if applied {
             log::info!("[sponsor] published media refresh ({} active campaigns)", ready_count);
-            // If the offline pass finished after a reconnect, follow it with
-            // one tunnel-backed pass so uncached media is downloaded too.
+            let (current_id, current_needs_media) = {
+                let state = STATE.lock();
+                let current = state.ready.get(state.current_campaign);
+                (
+                    current.map(|ready| ready.campaign.id.clone()),
+                    current.map(|ready| ready_needs_media(ready, &state.cache_dir))
+                        .unwrap_or(false),
+                )
+            };
+            if current_needs_media && current_id.as_deref() != target_id.as_deref() {
+                // Rotation can overtake a slow decode. Prioritize the newly
+                // visible card instead of finishing an obsolete preload.
+                refresh_media_async();
+            } else if !current_needs_media {
+                preload_next_media_async();
+            }
             if allow_disconnected && CONNECTED.load(Ordering::Acquire) {
                 refresh_media_async();
             }
@@ -836,8 +874,6 @@ fn refresh_media_async_inner(allow_disconnected: bool) {
             log::info!("[sponsor] discarded stale media refresh; scheduling another pass");
             refresh_media_async();
         } else if !allow_disconnected {
-            // The tunnel may have closed while downloading. Rehydrate any
-            // validated cache files without touching the network.
             refresh_cached_media_async();
         }
     });
@@ -852,26 +888,54 @@ fn next_random(state: &mut State) -> u64 {
     value
 }
 
-fn advance_campaign(state: &mut State) {
+fn plan_next_campaign(state: &mut State) {
     let count = state.ready.len();
-    if count <= 1 {
+    state.next_campaign = match count {
+        0 | 1 => None,
+        2 => Some((state.current_campaign + 1) % 2),
+        _ => {
+            let choice = next_random(state) as usize % (count - 1);
+            Some(if choice >= state.current_campaign { choice + 1 } else { choice })
+        }
+    };
+}
+
+fn trim_ready_window(state: &mut State) {
+    let current = state.current_campaign;
+    let next = state.next_campaign;
+    for (index, ready) in state.ready.iter_mut().enumerate() {
+        if index != current && Some(index) != next
+            && (!ready.frames.is_empty()
+                || !ready.background_frames.is_empty()
+                || !ready.background_rgba.is_empty())
+        {
+            *ready = empty_ready(&ready.campaign);
+        }
+    }
+}
+
+fn advance_campaign(state: &mut State) {
+    if state.ready.len() <= 1 {
         state.current_campaign = 0;
+        state.next_campaign = None;
         return;
     }
-    state.current_campaign = if count == 2 {
-        (state.current_campaign + 1) % 2
-    } else {
-        // Xorshift64 chooses among every campaign except the one on screen.
-        let choice = next_random(state) as usize % (count - 1);
-        if choice >= state.current_campaign { choice + 1 } else { choice }
-    };
+    if state.next_campaign.is_none() {
+        plan_next_campaign(state);
+    }
+    state.current_campaign = state.next_campaign.take().unwrap_or(0);
+    plan_next_campaign(state);
+    trim_ready_window(state);
     state.rotation_started = Instant::now();
     GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn next_campaign() {
-    let mut state = STATE.lock();
-    advance_campaign(&mut state);
+    {
+        let mut state = STATE.lock();
+        advance_campaign(&mut state);
+    }
+    preload_next_media_async();
 }
 
 fn frame_index_at(frames: &[Frame], elapsed: Duration) -> usize {
@@ -910,7 +974,7 @@ fn ready_needs_media(ready: &ReadyCampaign, cache_dir: &Path) -> bool {
 }
 
 pub fn current_frame() -> Option<SponsorFrame> {
-    let (frame, should_refresh) = {
+    let (frame, should_refresh, rotated) = {
         let mut state = STATE.lock();
         if state.ready.is_empty() {
             drop(state);
@@ -921,9 +985,9 @@ pub fn current_frame() -> Option<SponsorFrame> {
             .map(|campaign| campaign.duration_seconds)
             .filter(|duration| *duration > 0)
             .unwrap_or(DEFAULT_DURATION_SECONDS);
-        if state.ready.len() > 1
-            && state.rotation_started.elapsed() >= Duration::from_secs(current_duration as u64)
-        {
+        let rotated = state.ready.len() > 1
+            && state.rotation_started.elapsed() >= Duration::from_secs(current_duration as u64);
+        if rotated {
             advance_campaign(&mut state);
         }
         let ready_count = state.ready.len();
@@ -983,7 +1047,7 @@ pub fn current_frame() -> Option<SponsorFrame> {
             icon_scale: ready.icon_scale,
             background_scale: ready.background_scale,
             generation,
-        }, should_refresh)
+        }, should_refresh, rotated)
     };
 
     if should_refresh {
@@ -992,6 +1056,9 @@ pub fn current_frame() -> Option<SponsorFrame> {
         } else {
             refresh_cached_media_async();
         }
+    }
+    if rotated {
+        preload_next_media_async();
     }
     start_audio_for_campaign(&frame.id);
     Some(frame)
@@ -1204,63 +1271,103 @@ fn fallback_ready(previous: &ReadyCampaign, campaign: &Campaign) -> ReadyCampaig
     fallback
 }
 
+fn move_cache_file(old: &Path, new: &Path) {
+    if !old.is_file() || new.exists() {
+        return;
+    }
+    if let Some(parent) = new.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if fs::rename(old, new).is_err() && fs::copy(old, new).is_ok() {
+        let _ = fs::remove_file(old);
+    }
+}
+
+fn migrate_legacy_cache(cache_dir: &Path, campaign: &Campaign) {
+    for (url, kind, current) in [
+        (campaign.icon_url.as_deref(), "media", cache_name(campaign)),
+        (campaign.background_url.as_deref(), "background", background_cache_name(campaign)),
+        (campaign.audio_url.as_deref(), "audio", audio_cache_name(campaign)),
+    ] {
+        if url.is_none() {
+            continue;
+        }
+        let old = cache_dir.join(legacy_cache_name_for(campaign, url, kind));
+        let new = cache_dir.join(current);
+        move_cache_file(&old, &new);
+        move_cache_file(&old.with_extension("decoded"), &new.with_extension("decoded"));
+    }
+}
+
 fn prune_cache(cache_dir: &Path, campaigns: &[Campaign]) {
-    let _ = fs::create_dir_all(cache_dir);
-    // Keep the current URL and one previous version for each active campaign.
-    // A changed URL gets a new entry while the old entry remains available as
-    // a bounded fallback if the new download fails.
-    let active_prefixes: Vec<String> = campaigns.iter()
-        .map(|campaign| format!("{}-", campaign.id))
-        .collect();
-    if let Ok(entries) = fs::read_dir(cache_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let media_cache = name.ends_with(".media")
-                || name.ends_with(".background")
-                || name.ends_with(".audio")
-                || name.ends_with(".decoded");
-            let belongs_to_active_campaign = active_prefixes.iter()
-                .any(|prefix| name.starts_with(prefix));
-            if media_cache && !belongs_to_active_campaign {
-                let _ = fs::remove_file(entry.path());
+    let campaigns_root = cache_dir.join("campaigns");
+    let _ = fs::create_dir_all(&campaigns_root);
+    let active: HashSet<&str> = campaigns.iter().map(|campaign| campaign.id.as_str()).collect();
+
+    for campaign in campaigns {
+        migrate_legacy_cache(cache_dir, campaign);
+        let campaign_dir = campaigns_root.join(&campaign.id);
+        let _ = fs::create_dir_all(&campaign_dir);
+        if let Ok(json) = serde_json::to_vec(campaign) {
+            let _ = write_atomic_preserving_old(&campaign_dir.join("campaign.json"), &json);
+        }
+
+        // Keep the current URL and one newest fallback in each asset directory.
+        for (kind, current) in [
+            ("media", campaign.icon_url.as_ref().map(|_| cache_dir.join(cache_name(campaign)))),
+            ("background", campaign.background_url.as_ref().map(|_| cache_dir.join(background_cache_name(campaign)))),
+            ("audio", campaign.audio_url.as_ref().map(|_| cache_dir.join(audio_cache_name(campaign)))),
+        ] {
+            let kind_dir = campaign_dir.join(kind);
+            let mut encoded = fs::read_dir(&kind_dir).ok().into_iter().flatten().flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|value| value.to_str()) == Some(kind))
+                .collect::<Vec<_>>();
+            encoded.sort_by_key(|path| fs::metadata(path)
+                .and_then(|metadata| metadata.modified()).unwrap_or(UNIX_EPOCH));
+            encoded.reverse();
+            let mut kept_fallback = false;
+            for path in encoded {
+                if current.as_ref() == Some(&path) {
+                    continue;
+                }
+                if current.is_some() && !kept_fallback {
+                    kept_fallback = true;
+                    continue;
+                }
+                let _ = fs::remove_file(&path);
+                let _ = fs::remove_file(path.with_extension("decoded"));
+            }
+            if let Ok(entries) = fs::read_dir(&kind_dir) {
+                for path in entries.flatten().map(|entry| entry.path()) {
+                    if path.extension().and_then(|value| value.to_str()) == Some("decoded")
+                        && !path.with_extension(kind).is_file()
+                    {
+                        let _ = fs::remove_file(path);
+                    }
+                }
             }
         }
     }
 
-    for campaign in campaigns {
-        for (suffix, current_name) in [
-            ("media", campaign.icon_url.as_ref().map(|_| cache_name(campaign))),
-            ("background", campaign.background_url.as_ref().map(|_| background_cache_name(campaign))),
-            ("audio", campaign.audio_url.as_ref().map(|_| audio_cache_name(campaign))),
-        ] {
-            let prefix = format!("{}-", campaign.id);
-            let mut candidates = Vec::new();
-            if let Ok(entries) = fs::read_dir(cache_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.starts_with(&prefix) && name.ends_with(&format!(".{suffix}")) {
-                        candidates.push(path);
-                    }
-                }
+    if let Ok(entries) = fs::read_dir(&campaigns_root) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
+                && !active.contains(entry.file_name().to_string_lossy().as_ref())
+            {
+                let _ = fs::remove_dir_all(entry.path());
             }
-            candidates.sort_by_key(|path| {
-                fs::metadata(path).and_then(|metadata| metadata.modified())
-                    .unwrap_or(UNIX_EPOCH)
-            });
-            candidates.reverse();
-            let mut kept_fallback = false;
-            for path in candidates {
-                let is_current = current_name.as_ref().map_or(false, |name|
-                    path.file_name().and_then(|value| value.to_str()) == Some(name.as_str()));
-                if is_current {
-                    continue;
-                }
-                if current_name.is_some() && !kept_fallback {
-                    kept_fallback = true;
-                } else {
-                    let _ = fs::remove_file(path);
-                }
+        }
+    }
+
+    // Flat media files belong to the pre-directory cache format. Current files
+    // were migrated above; obsolete and inactive entries can now be discarded.
+    if let Ok(entries) = fs::read_dir(cache_dir) {
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if matches!(path.extension().and_then(|value| value.to_str()),
+                Some("media" | "background" | "audio" | "decoded"))
+            {
+                let _ = fs::remove_file(path);
             }
         }
     }
@@ -1281,21 +1388,17 @@ fn prepare_media(
             || (audio_requested() && campaign.audio_url.is_some())
     })).then(|| client().ok()).flatten();
 
-    // Decode and cache only the campaign that is currently visible. Inactive
-    // campaigns stay lightweight until rotation reaches them; this prevents a
-    // manifest refresh from blocking the first useful frame on unrelated
-    // downloads while preserving every existing encoded/decoded cache entry.
+    // Decode exactly one requested campaign per pass. The visible card is
+    // published first; a second pass then prepares the already-selected next
+    // card without retaining pixels for the rest of the manifest.
     let mut ready = Vec::with_capacity(campaigns.len());
     let mut decoded_total = 0usize;
     for campaign in campaigns {
         let is_target = target_id == Some(campaign.id.as_str());
         let previous = previous.iter().find(|existing|
             existing.campaign.id == campaign.id);
-        // Preserve every previously decoded campaign while refreshing one
-        // target. A manifest refresh must not turn the other cards into
-        // text-only placeholders just because their duplicate/shared asset
-        // URLs were not decoded in this pass; the old pixels remain a valid
-        // fallback until that campaign is visited and its new media is ready.
+        // Preserve the two-card working set while replacing one target. The
+        // publication step drops pixels outside the current/next window.
         let mut candidate = previous
             .map_or_else(|| empty_ready(campaign), |existing| fallback_ready(existing, campaign));
 
@@ -1416,24 +1519,16 @@ fn load_campaign_payload(
     }
 }
 
-fn find_cached_payload(
-    cache_dir: &Path,
-    campaign_id: &str,
-    suffix: &str,
-    exclude: &Path,
-) -> Option<PathBuf> {
-    let prefix = format!("{}-", campaign_id);
-    fs::read_dir(cache_dir).ok()?.flatten().find_map(|entry| {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if path.as_path() == exclude
-            || !name.starts_with(&prefix)
-            || !name.ends_with(&format!(".{suffix}"))
-        {
-            return None;
-        }
-        Some(path)
-    })
+fn find_cached_payload(exclude: &Path) -> Option<PathBuf> {
+    let parent = exclude.parent()?;
+    let extension = exclude.extension()?;
+    let mut candidates = fs::read_dir(parent).ok()?.flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path != exclude && path.extension() == Some(extension))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|path| fs::metadata(path)
+        .and_then(|metadata| metadata.modified()).unwrap_or(UNIX_EPOCH));
+    candidates.pop()
 }
 
 fn write_atomic_preserving_old(path: &Path, bytes: &[u8]) -> bool {
@@ -1465,13 +1560,13 @@ fn load_payload(
     url: Option<&str>,
     path: PathBuf,
     cache_dir: &Path,
-    campaign_id: &str,
+    _campaign_id: &str,
     suffix: &str,
     client: Option<&reqwest::blocking::Client>,
 ) -> Option<MediaPayload> {
     let url = url?;
     let _ = fs::create_dir_all(cache_dir);
-    let fallback = find_cached_payload(cache_dir, campaign_id, suffix, &path);
+    let fallback = find_cached_payload(&path);
     if let Ok(bytes) = fs::read(&path) {
         if bytes.len() <= MAX_MEDIA_BYTES {
             return Some(MediaPayload { path, bytes, cached: true, fallback });
@@ -1919,26 +2014,35 @@ struct BackgroundImage {
     frames: Vec<Frame>,
 }
 
-fn cache_name_for(campaign: &Campaign, url: Option<&str>, suffix: &str) -> String {
-    // Use a stable hash so cache filenames remain identical across process
-    // restarts and unchanged campaign URLs can be reused.
+fn url_hash(url: Option<&str>) -> u64 {
     let mut hash = 14695981039346656037u64;
     for byte in url.unwrap_or_default().as_bytes() {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(1099511628211u64);
     }
-    format!("{}-{:016x}.{}", campaign.id, hash, suffix)
+    hash
 }
 
-fn cache_name(campaign: &Campaign) -> String {
+fn cache_name_for(campaign: &Campaign, url: Option<&str>, kind: &str) -> PathBuf {
+    PathBuf::from("campaigns")
+        .join(&campaign.id)
+        .join(kind)
+        .join(format!("{:016x}.{kind}", url_hash(url)))
+}
+
+fn legacy_cache_name_for(campaign: &Campaign, url: Option<&str>, suffix: &str) -> String {
+    format!("{}-{:016x}.{suffix}", campaign.id, url_hash(url))
+}
+
+fn cache_name(campaign: &Campaign) -> PathBuf {
     cache_name_for(campaign, campaign.icon_url.as_deref(), "media")
 }
 
-fn background_cache_name(campaign: &Campaign) -> String {
+fn background_cache_name(campaign: &Campaign) -> PathBuf {
     cache_name_for(campaign, campaign.background_url.as_deref(), "background")
 }
 
-fn audio_cache_name(campaign: &Campaign) -> String {
+fn audio_cache_name(campaign: &Campaign) -> PathBuf {
     cache_name_for(campaign, campaign.audio_url.as_deref(), "audio")
 }
 
