@@ -14,5 +14,5 @@
 	path = src_cpp/imgui
 	url = https://github.com/ocornut/imgui.git
 [submodule "aether"]
-	path = aether
+	path = core/aether
 	url = https://github.com/CluvexStudio/aether.git
