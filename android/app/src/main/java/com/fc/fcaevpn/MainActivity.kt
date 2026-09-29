@@ -100,6 +100,8 @@ class MainActivity : AppCompatActivity() {
     private var sponsorStaticToken = -1L
     private var sponsorAudioUiEnabled: Boolean? = null
     private var sponsorAudioUiVisible = false
+    private var sponsorAudioUiKnown = false
+    private var sponsorTextRequestKey = ""
     private val sponsorPollBusy = AtomicBoolean(false)
     @Volatile private var sponsorPollFailureLogged = false
     private lateinit var spinnerProtocol: Spinner
@@ -685,6 +687,13 @@ class MainActivity : AppCompatActivity() {
         val safeMessageY = messageY.coerceIn(0, 100)
         val messageVisible = sponsorMessage.visibility == android.view.View.VISIBLE
         val textKey = "${sponsorTitle.text}|${sponsorMessage.text}"
+        // The request is what the poll can compare without a layout pass -- the
+        // card's own size is part of it, so a resize still re-lays the text out
+        // -- and the posted block keeps comparing the measured box.
+        val requestKey = "${sponsorCard.width}x${sponsorCard.height}:" +
+            "$safeTitleX:$safeTitleY:$safeMessageX:$safeMessageY:$messageVisible:$textKey"
+        if (requestKey == sponsorTextRequestKey) return
+        sponsorTextRequestKey = requestKey
         sponsorTextBlock.post {
             val cardWidth = sponsorCard.width
             val cardHeight = sponsorCard.height
@@ -725,21 +734,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun positionSponsorIcon(iconX: Int, iconY: Int) {
+    /**
+     * Place the icon's centre at (iconX, iconY) in percent of the card.
+     *
+     * The view is the 70-unit media band the design uses, and `icon_scale`
+     * grows the whole band about its centre, so the *drawn* box is what has to
+     * stay on the card: centring the view at the requested point and clamping
+     * its drawn box inside the card makes `icon_x`/`icon_y` mean what the
+     * manifest says at every position -- the previous clamp on the view's own
+     * top edge pinned anything below the band to the card's bottom edge and
+     * let a scaled icon hang off the top of it.
+     */
+    private fun positionSponsorIcon(iconX: Int, iconY: Int, iconScale: Int) {
         if (!::sponsorCard.isInitialized || !::sponsorImage.isInitialized) return
         val safeX = iconX.coerceIn(0, 100)
         val safeY = iconY.coerceIn(0, 100)
+        val scale = iconScale.coerceIn(50, 160) / 100f
         sponsorCard.post {
             val cardWidth = sponsorCard.width
             val cardHeight = sponsorCard.height
             if (cardWidth <= 0 || cardHeight <= 0) return@post
             val iconHeight = (70 * resources.displayMetrics.density).toInt()
+            val drawnWidth = cardWidth * scale
+            val drawnHeight = iconHeight * scale
+            val centerX = clampSponsorCentre(cardWidth * safeX / 100f, drawnWidth, cardWidth)
+            val centerY = clampSponsorCentre(cardHeight * safeY / 100f, drawnHeight, cardHeight)
             val params = (sponsorImage.layoutParams as? android.widget.FrameLayout.LayoutParams)
                 ?: android.widget.FrameLayout.LayoutParams(cardWidth, iconHeight)
             params.width = cardWidth
             params.height = iconHeight
-            params.leftMargin = (cardWidth * safeX / 100f - cardWidth / 2f).toInt()
-            params.topMargin = (cardHeight * safeY / 100f - iconHeight / 2f).toInt()
+            params.leftMargin = (centerX - cardWidth / 2f).toInt()
+            params.topMargin = (centerY - iconHeight / 2f).toInt()
             params.rightMargin = 0
             params.bottomMargin = 0
             params.gravity = android.view.Gravity.TOP or android.view.Gravity.START
@@ -747,7 +772,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateSponsorAudioToggle(visible: Boolean) {
+    private fun clampSponsorCentre(desired: Float, drawn: Float, extent: Int): Float {
+        val half = drawn / 2f
+        if (half * 2f >= extent) return extent / 2f
+        return desired.coerceIn(half, extent - half)
+    }
+
+    private fun applySponsorIcon(iconScale: Int) {
+        if (!::sponsorImage.isInitialized) return
+        val scale = iconScale.coerceIn(50, 160) / 100f
+        sponsorImage.scaleX = scale
+        sponsorImage.scaleY = scale
+    }
+
+    /**
+     * Show the card's sound control.
+     *
+     * The poll runs at display cadence, so the native preference is read only
+     * when [refresh] is set (a new card, or the button itself); the button is
+     * the only thing in this process that changes it, which keeps a JNI call
+     * out of every frame.
+     */
+    private fun updateSponsorAudioToggle(visible: Boolean, refresh: Boolean = false) {
         if (!::sponsorAudioToggle.isInitialized || !::sponsorAudioSlot.isInitialized) return
         if (sponsorAudioUiVisible != visible) {
             sponsorAudioUiVisible = visible
@@ -758,20 +804,20 @@ class MainActivity : AppCompatActivity() {
             return
         }
         sponsorAudioToggle.visibility = android.view.View.VISIBLE
+        if (!refresh && sponsorAudioUiKnown) return
         val enabled = try {
             NativeEngine.nativeSponsorAudioEnabled()
         } catch (_: Throwable) {
             false
         }
-        // The animation poll runs at display cadence. Do not rewrite the
-        // button text on every frame when the preference is unchanged.
+        sponsorAudioUiKnown = true
         if (sponsorAudioUiEnabled == enabled) return
         sponsorAudioUiEnabled = enabled
-        sponsorAudioToggle.text = if (enabled) "Mute" else "Unmute"
+        sponsorAudioToggle.text = if (enabled) "Sound on" else "Sound off"
         sponsorAudioToggle.contentDescription = if (enabled) {
-            "Mute sponsor audio"
+            "Turn sponsor sound off"
         } else {
-            "Unmute sponsor audio"
+            "Turn sponsor sound on"
         }
     }
 
@@ -792,7 +838,8 @@ class MainActivity : AppCompatActivity() {
         sponsorImage.scaleX = 1f
         sponsorImage.scaleY = 1f
         sponsorImage.visibility = android.view.View.GONE
-        positionSponsorIcon(50, 25)
+        positionSponsorIcon(50, 25, 100)
+        applySponsorIcon(100)
         sponsorBackgroundImage.setImageDrawable(null)
         sponsorBackgroundImage.scaleX = 1f
         sponsorBackgroundImage.scaleY = 1f
@@ -842,13 +889,8 @@ class MainActivity : AppCompatActivity() {
                                     sponsorCard.backgroundTintList = ColorStateList.valueOf(cardColor)
                                     val iconScale = card.iconScale.coerceIn(50, 160)
                                     val backgroundScale = card.backgroundScale.coerceIn(50, 160)
-                                    sponsorImage.layoutParams = sponsorImage.layoutParams.apply {
-                                        height = (70 * resources.displayMetrics.density).toInt()
-                                    }
-                                    val iconScaleFactor = iconScale / 100f
-                                    sponsorImage.scaleX = iconScaleFactor
-                                    sponsorImage.scaleY = iconScaleFactor
-                                    positionSponsorIcon(card.iconX, card.iconY)
+                                    applySponsorIcon(iconScale)
+                                    positionSponsorIcon(card.iconX, card.iconY, iconScale)
                                     val backgroundScaleFactor = backgroundScale / 100f
                                     sponsorBackgroundImage.scaleX = backgroundScaleFactor
                                     sponsorBackgroundImage.scaleY = backgroundScaleFactor
@@ -912,7 +954,7 @@ class MainActivity : AppCompatActivity() {
                                     sponsorGeneration = card.generation
                                 }
                                 sponsorCard.visibility = android.view.View.VISIBLE
-                                updateSponsorAudioToggle(true)
+                                updateSponsorAudioToggle(true, refresh = true)
                             }
                         } catch (error: Throwable) {
                             if (!sponsorPollFailureLogged) {
@@ -976,7 +1018,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 NativeEngine.nativeSponsorSetAudioEnabled(!enabled)
             } catch (_: Throwable) {}
-            updateSponsorAudioToggle(true)
+            updateSponsorAudioToggle(true, refresh = true)
         }
         sponsorImage = findViewById(R.id.sponsorImage)
         sponsorBackgroundImage = findViewById(R.id.sponsorBackgroundImage)

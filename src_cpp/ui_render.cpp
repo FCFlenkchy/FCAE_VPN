@@ -2010,13 +2010,24 @@ void render_ui() {
                         }
                     }
                     const ImVec2 icon_area = ImGui::GetContentRegionAvail();
-                    const float icon_center_x = icon_area.x
-                        * std::clamp((float)s_sponsor.icon_x / 100.0f, 0.0f, 1.0f);
-                    const float icon_center_y = icon_area.y
-                        * std::clamp((float)s_sponsor.icon_y / 100.0f, 0.0f, 1.0f);
+                    // Centre the drawn box on the requested point, then slide it
+                    // back inside the card. Without the clamp an icon at the
+                    // extremes of icon_x/icon_y was drawn half outside the card,
+                    // and a scaled one could leave it entirely -- the same bug
+                    // the Android card had.
+                    const float icon_half_w = size.x * 0.5f;
+                    const float icon_half_h = size.y * 0.5f;
+                    const auto sponsor_icon_center = [](float extent, float half, float percent) {
+                        if (half * 2.0f >= extent) return extent * 0.5f;
+                        return std::clamp(extent * percent, half, extent - half);
+                    };
+                    const float icon_center_x = sponsor_icon_center(icon_area.x, icon_half_w,
+                        std::clamp((float)s_sponsor.icon_x / 100.0f, 0.0f, 1.0f));
+                    const float icon_center_y = sponsor_icon_center(icon_area.y, icon_half_h,
+                        std::clamp((float)s_sponsor.icon_y / 100.0f, 0.0f, 1.0f));
                     ImGui::SetCursorPos(ImVec2(
-                        icon_center_x - size.x * 0.5f,
-                        icon_center_y - size.y * 0.5f));
+                        icon_center_x - icon_half_w,
+                        icon_center_y - icon_half_h));
                     const ImVec2 image_pos = ImGui::GetCursorScreenPos();
                     ImGui::Image(texture, size, uv0, uv1);
                     const ImVec2 after_image = ImGui::GetCursorScreenPos();
@@ -2093,7 +2104,7 @@ void render_ui() {
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive,
                         ImVec4(0.08f, 0.30f, 0.50f, 1.0f));
                     const bool clicked = ImGui::Button(
-                        audio_enabled ? "Mute" : "Unmute", ImVec2(72.0f, 26.0f));
+                        audio_enabled ? "Sound on" : "Sound off", ImVec2(72.0f, 26.0f));
                     ImGui::PopStyleColor(3);
                     if (clicked) {
                         fcae_sponsor_set_audio_enabled(!audio_enabled);
@@ -2101,7 +2112,7 @@ void render_ui() {
                     }
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip(audio_enabled
-                            ? "Mute sponsor audio" : "Unmute sponsor audio");
+                            ? "Turn sponsor sound off" : "Turn sponsor sound on");
                 }
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor(2);
