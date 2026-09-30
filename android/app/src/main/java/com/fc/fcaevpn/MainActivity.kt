@@ -80,7 +80,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
     private lateinit var sponsorCard: android.view.View
-    private lateinit var sponsorAudioSlot: android.view.View
     private lateinit var sponsorAudioToggle: MaterialButton
     private lateinit var sponsorImage: android.widget.ImageView
     private lateinit var sponsorBackgroundImage: android.widget.ImageView
@@ -794,10 +793,10 @@ class MainActivity : AppCompatActivity() {
      * out of every frame.
      */
     private fun updateSponsorAudioToggle(visible: Boolean, refresh: Boolean = false) {
-        if (!::sponsorAudioToggle.isInitialized || !::sponsorAudioSlot.isInitialized) return
+        if (!::sponsorAudioToggle.isInitialized) return
         if (sponsorAudioUiVisible != visible) {
             sponsorAudioUiVisible = visible
-            sponsorAudioSlot.visibility = if (visible) android.view.View.VISIBLE else android.view.View.GONE
+            sponsorAudioToggle.visibility = if (visible) android.view.View.VISIBLE else android.view.View.GONE
         }
         if (!visible) {
             sponsorAudioToggle.visibility = android.view.View.GONE
@@ -1021,7 +1020,6 @@ class MainActivity : AppCompatActivity() {
         layoutTunPauseResume = findViewById(R.id.layoutTunPauseResume)
         btnCheckUpdates = findViewById(R.id.btnCheckUpdates)
         sponsorCard = findViewById(R.id.sponsorCard)
-        sponsorAudioSlot = findViewById(R.id.sponsorAudioSlot)
         sponsorAudioToggle = findViewById(R.id.sponsorAudioToggle)
         sponsorAudioToggle.setOnClickListener {
             val enabled = try {
@@ -2777,7 +2775,7 @@ class MainActivity : AppCompatActivity() {
                             showUpdateResult { showUpdateDialog(info) }
                         }
                         info.decodeFailed -> {
-                            styleUpdateButton("ATTENTION", Color.WHITE, COLOR_UPDATE_ATTENTION)
+                            styleUpdateButton("ATTENTION", COLOR_UPDATE_ATTENTION)
                             updateAvailableInfo = info
                             showUpdateResult { showDecodeFailureDialog(info) }
                         }

@@ -1126,7 +1126,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:minWidth="72dp"
+                        android:minWidth="64dp"
                         android:letterSpacing="0.12"
                         android:text="SPONSORS"
                         android:textColor="#FF8DB8FF"
@@ -1141,8 +1141,8 @@
                         android:ellipsize="end"
                         android:gravity="center|end"
                         android:maxLines="1"
-                        android:paddingStart="6dp"
-                        android:paddingEnd="6dp"
+                        android:paddingStart="4dp"
+                        android:paddingEnd="4dp"
                         android:singleLine="true"
                         android:text="Want to become a sponsor? Click me"
                         android:textColor="#FF60A5FA"
@@ -1164,6 +1164,29 @@
                         android:text="↻"
                         android:textColor="#FF60A5FA"
                         android:textSize="18sp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/sponsorAudioToggle"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:layout_marginStart="4dp"
+                        android:alpha="0.95"
+                        android:contentDescription="Turn sponsor sound on"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:minWidth="0dp"
+                        android:minHeight="0dp"
+                        android:padding="0dp"
+                        android:visibility="gone"
+                        app:cornerRadius="14dp"
+                        app:backgroundTint="#FF334155"
+                        app:icon="@drawable/ic_volume_off"
+                        app:iconGravity="textStart"
+                        app:iconPadding="0dp"
+                        app:iconSize="16dp"
+                        app:iconTint="#FFF1F7FF" />
                 </LinearLayout>
 
                 <FrameLayout
@@ -1220,39 +1243,6 @@
                             android:textStyle="bold" />
 
                     </FrameLayout>
-                </FrameLayout>
-
-                <!-- Keep the card at full opacity and put the audio affordance
-                     in its own small row, attached immediately below it. -->
-                <FrameLayout
-                    android:id="@+id/sponsorAudioSlot"
-                    android:layout_width="match_parent"
-                    android:layout_height="32dp"
-                    android:layout_gravity="end"
-                    android:layout_marginTop="2dp"
-                    android:visibility="gone">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/sponsorAudioToggle"
-                        android:layout_width="32dp"
-                        android:layout_height="32dp"
-                        android:layout_gravity="top|end"
-                        android:alpha="0.95"
-                        android:contentDescription="Turn sponsor sound on"
-                        android:insetLeft="0dp"
-                        android:insetTop="0dp"
-                        android:insetRight="0dp"
-                        android:insetBottom="0dp"
-                        android:minWidth="0dp"
-                        android:minHeight="0dp"
-                        android:padding="0dp"
-                        app:cornerRadius="16dp"
-                        app:backgroundTint="#FF334155"
-                        app:icon="@drawable/ic_volume_off"
-                        app:iconGravity="textStart"
-                        app:iconPadding="0dp"
-                        app:iconSize="16dp"
-                        app:iconTint="#FFF1F7FF" />
                 </FrameLayout>
 
             </LinearLayout>

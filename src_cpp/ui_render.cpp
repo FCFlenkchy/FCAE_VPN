@@ -1898,8 +1898,8 @@ void render_ui() {
     {
         const float avail_w = ImGui::GetContentRegionAvail().x;
         const bool use_columns = (avail_w >= 540.0f);
-        const float left_w = use_columns ? 260.0f : avail_w;
-        const float right_w = use_columns ? (avail_w - left_w - 16.0f) : avail_w;
+        const float left_w = use_columns ? 210.0f : avail_w;
+        const float right_w = use_columns ? (avail_w - left_w - 14.0f) : avail_w;
 
         ImGui::BeginGroup(); // Left column: Stats
         {
@@ -1940,27 +1940,73 @@ void render_ui() {
         ImGui::EndGroup();
 
         if (use_columns) {
-            ImGui::SameLine(0, 16.0f);
+            ImGui::SameLine(0, 14.0f);
         } else {
             ImGui::Spacing();
         }
 
-        ImGui::BeginGroup(); // Right column: Sponsor Card
+        ImGui::BeginGroup(); // Right column: Sponsor Section
         {
-            ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSOR");
-            ImGui::SameLine(0, 6);
-            if (ImGui::SmallButton("↻##sponsor_refresh")) {
+            const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
+            const bool sponsor_has_content = s_sponsor.available;
+            const char* sponsor_destination = sponsor_has_content ? s_sponsor.destination_url : sponsor_policy;
+            const char* sponsor_title = sponsor_has_content ? s_sponsor.title : "Become a sponsor";
+            const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Want to become a sponsor? Click me";
+
+            // ── Single Header Row: SPONSORS | Link | [↻] [🔊] ──
+            ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORS");
+
+            ImGui::SameLine(0, 8);
+            if (ImGui::TextLink("Want to become a sponsor? Click me")) {
+                open_link(sponsor_policy);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", sponsor_policy);
+
+            const float btn_size = 20.0f;
+            const float total_btn_w = btn_size * 2.0f + 6.0f;
+            const float start_x = ImGui::GetCursorPosX();
+            const float avail_w_row = ImGui::GetContentRegionAvail().x;
+            if (avail_w_row > total_btn_w) {
+                ImGui::SameLine(start_x + avail_w_row - total_btn_w);
+            } else {
+                ImGui::SameLine(0, 6);
+            }
+
+            // ↻ Refresh Button (Custom vector drawing, no font missing-glyph '?')
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btn_size * 0.5f);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.25f, 0.33f, 0.90f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.35f, 0.45f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.20f, 0.28f, 1.0f));
+            if (ImGui::Button("##sponsor_refresh", ImVec2(btn_size, btn_size))) {
                 fcae_sponsor_refresh_manifest_now_async();
                 ui_request_redraw();
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Refresh sponsor manifest");
+            {
+                const ImVec2 rmin = ImGui::GetItemRectMin();
+                const ImVec2 rmax = ImGui::GetItemRectMax();
+                ImDrawList* draw = ImGui::GetWindowDrawList();
+                const float rcx = (rmin.x + rmax.x) * 0.5f;
+                const float rcy = (rmin.y + rmax.y) * 0.5f;
+                const float rad = 4.5f;
+                const ImU32 ic_col = IM_COL32(240, 245, 255, 240);
+                draw->PathArcTo(ImVec2(rcx, rcy), rad, 0.5f, 5.5f, 16);
+                draw->PathStroke(ic_col, 0, 1.4f);
+                const float arrow_x = rcx + rad * cosf(0.5f);
+                const float arrow_y = rcy + rad * sinf(0.5f);
+                draw->AddTriangleFilled(
+                    ImVec2(arrow_x - 3.0f, arrow_y - 2.5f),
+                    ImVec2(arrow_x + 2.5f, arrow_y - 0.5f),
+                    ImVec2(arrow_x - 0.5f, arrow_y + 3.0f),
+                    ic_col);
+            }
+            ImGui::PopStyleColor(3);
 
-            const bool sponsor_has_content = s_sponsor.available;
+            // 🔊 Audio Toggle Button
             const bool audio_enabled = fcae_sponsor_audio_enabled();
-            const float btn_size = 20.0f;
-            ImGui::SameLine(0, 8);
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btn_size * 0.5f);
+            ImGui::SameLine(0, 6);
             if (audio_enabled) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.10f, 0.38f, 0.62f, 0.95f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.16f, 0.52f, 0.78f, 1.0f));
@@ -2015,11 +2061,7 @@ void render_ui() {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(audio_enabled ? "Turn sponsor sound off" : "Turn sponsor sound on");
 
-            const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
-            const char* sponsor_destination = sponsor_has_content ? s_sponsor.destination_url : sponsor_policy;
-            const char* sponsor_title = sponsor_has_content ? s_sponsor.title : "Become a sponsor";
-            const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Want to become a sponsor? Click me";
-
+            // ── Sponsor Card ──
             ImTextureID texture = ImTextureID{};
             ImTextureID background_texture = ImTextureID{};
             if (!s_sponsor_rgba.empty() && s_sponsor.width > 0 && s_sponsor.height > 0

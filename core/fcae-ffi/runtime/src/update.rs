@@ -79,9 +79,42 @@ pub type VersionInfo = Vec<ReleaseEntry>;
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReleaseEntry {
     pub version: String,
+    #[serde(alias = "release_date", default)]
     pub date: String,
+    #[serde(alias = "release_notes", default)]
     pub notes: String,
+    #[serde(alias = "download_url", default)]
     pub url: String,
+    #[serde(rename = "type", default)]
+    pub entry_type: Option<String>,
+}
+
+/// Parse manifest JSON with graceful fallbacks:
+/// 1. Array of releases (`[ { ... } ]`)
+/// 2. Single release object (`{ "type": "release", "version": "...", ... }`)
+/// 3. Object with container field (`{ "releases": [ ... ] }` or `{ "versions": [ ... ] }`)
+fn parse_manifest_json(text: &str) -> Result<VersionInfo, serde_json::Error> {
+    if let Ok(list) = serde_json::from_str::<Vec<ReleaseEntry>>(text) {
+        if !list.is_empty() {
+            return Ok(list);
+        }
+    }
+    if let Ok(single) = serde_json::from_str::<ReleaseEntry>(text) {
+        if !single.version.is_empty() {
+            return Ok(vec![single]);
+        }
+    }
+    #[derive(Deserialize)]
+    struct Wrapper {
+        #[serde(alias = "versions", alias = "data")]
+        releases: Vec<ReleaseEntry>,
+    }
+    if let Ok(w) = serde_json::from_str::<Wrapper>(text) {
+        if !w.releases.is_empty() {
+            return Ok(w.releases);
+        }
+    }
+    serde_json::from_str::<Vec<ReleaseEntry>>(text)
 }
 
 fn validate(releases: &[ReleaseEntry]) -> Result<(), UpdateError> {
@@ -232,7 +265,7 @@ async fn fetch_latest_version() -> Result<VersionInfo, UpdateError> {
         .text()
         .await
         .map_err(|e| network(format!("Failed to read version.json body: {e}")))?;
-    let info: VersionInfo = serde_json::from_str(&text)
+    let info = parse_manifest_json(&text)
         .map_err(|e| UpdateError::decode(e, &text))?;
 
     validate(&info)?;
@@ -302,7 +335,7 @@ pub fn check_from_json(current_version: &str, json: &str, include_prereleases: b
 
 /// Decode + compare without touching the state machine.
 fn check_json(current: &str, json: &str, include_prereleases: bool) -> Result<UpdateResult, UpdateError> {
-    let info: VersionInfo = serde_json::from_str(json)
+    let info: VersionInfo = parse_manifest_json(json)
         .map_err(|e| UpdateError::decode(e, json))?;
     compare_versions(current, &info, include_prereleases)
 }
@@ -586,6 +619,23 @@ mod tests {
         assert!(!check_json("v1.3.5-prerelease", &json, true).unwrap().update_available);
         assert!(!check_json("1.3.5_pre-release+local", &json, true).unwrap().update_available);
         assert!(!check_json("1.3.1", &json, false).unwrap().update_available);
+    }
+
+    #[test]
+    fn single_object_and_alias_fallbacks() {
+        let single_json = r#"{
+            "type": "release",
+            "version": "1.3.5.5",
+            "release_date": "2026-09-23",
+            "release_notes": "a lot of bug fixes",
+            "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/1.3.5.5"
+        }"#;
+        let r = check_json("1.3.1", single_json, false).unwrap();
+        assert!(r.update_available);
+        assert_eq!(r.latest_version, "1.3.5.5");
+        assert_eq!(r.release_date, "2026-09-23");
+        assert_eq!(r.release_notes, "a lot of bug fixes");
+        assert_eq!(r.download_url, "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/1.3.5.5");
     }
 
     #[test]
