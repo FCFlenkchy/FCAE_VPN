@@ -2561,7 +2561,7 @@ fn write_decoded_cache(path: &Path, decoded: &ReadyCampaign) {
             64 * 1024,
             fs::File::create(&tmp)?,
         );
-        out.write_all(b"FDV5")?;
+        out.write_all(b"FDV6")?;
         out.write_all(&decoded.width.to_le_bytes())?;
         out.write_all(&decoded.height.to_le_bytes())?;
         out.write_all(&(decoded.frames.len() as u32).to_le_bytes())?;
@@ -2889,9 +2889,12 @@ fn bounded_video_rgb(
 /// being pushed, so identical consecutive frames do not consume retention
 /// budget. One memcmp per decode — no poll-loop cost.
 fn repeats_last_frame(frames: &[Frame], rgba: &[u8]) -> bool {
-    let last = frames.last()?;
-    let last_rgba = last.rgba.as_ref();
-    last_rgba.len() == rgba.len() && last_rgba == rgba
+    if let Some(last) = frames.last() {
+        let last_rgba = last.rgba.as_ref();
+        last_rgba.len() == rgba.len() && last_rgba == rgba
+    } else {
+        false
+    }
 }
 
 fn compact_video_frames(frames: &mut Vec<Frame>, total_bytes: &mut usize) {
@@ -3170,15 +3173,17 @@ fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, S
         for (dst, src) in rgba.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
             dst[..3].copy_from_slice(src);
         }
+        // Check for repetition before consuming rgba into an Arc: folding
+        // identical neighbors extends the predecessor's display time instead
+        // of allocating a second copy.
+        if repeats_last_frame(&frames, &rgba) {
+            frames.last_mut().expect("a last frame").delay += frame_delay;
+            continue;
+        }
         frames.push(Frame {
             rgba: Arc::new(rgba),
             delay: frame_delay,
         });
-        if repeats_last_frame(&frames, &rgba) {
-            frames.last_mut().expect("a last frame").delay += frame_delay;
-            frames.pop();
-            continue;
-        }
         total_bytes += rgba_size;
     }
     if frames.is_empty() {
