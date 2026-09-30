@@ -888,8 +888,10 @@ class MainActivity : AppCompatActivity() {
                                     val cardColor = if (card.cardColor != 0) card.cardColor else Color.parseColor("#FF142A44")
                                     sponsorTitle.setTextColor(titleColor)
                                     sponsorMessage.setTextColor(messageColor)
-                                    sponsorTitle.textSize = 16f
-                                    sponsorMessage.textSize = 14f
+                                    val titleScale = (if (card.titleScale != 0) card.titleScale else 100).coerceIn(50, 200)
+                                    val messageScale = (if (card.messageScale != 0) card.messageScale else 100).coerceIn(50, 200)
+                                    sponsorTitle.textSize = 16f * (titleScale / 100f)
+                                    sponsorMessage.textSize = 14f * (messageScale / 100f)
                                     val cardAlpha =
                                         ((cardColor ushr 24) * card.backgroundColorOpacity / 100)
                                             .coerceIn(0, 255)

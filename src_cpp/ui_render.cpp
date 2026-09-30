@@ -1353,12 +1353,38 @@ void render_ui() {
                                                 : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
                            "%s  |  %s", fcae_display_version(),
                            build_is_prerelease() ? "pre-release" : "release");
-        ImGui::SameLine(ImGui::GetWindowWidth() - 36.0f);
-        if (ImGui::SmallButton("(i)")) s_about_popup_open = true;
+
+        const float about_btn_size = 20.0f;
+        const float avail_w_title = ImGui::GetContentRegionAvail().x;
+        if (avail_w_title > about_btn_size) {
+            ImGui::SameLine(0.0f, avail_w_title - about_btn_size);
+        } else {
+            ImGui::SameLine(0.0f, 8.0f);
+        }
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, about_btn_size * 0.5f);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.25f, 0.33f, 0.85f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.38f, 0.52f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.20f, 0.28f, 1.0f));
+        if (ImGui::Button("##about_btn", ImVec2(about_btn_size, about_btn_size))) {
+            s_about_popup_open = true;
+        }
         if (ImGui::IsItemHovered()) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             ImGui::SetTooltip("About FCAE VPN");
         }
+        {
+            const ImVec2 bmin = ImGui::GetItemRectMin();
+            const ImVec2 bmax = ImGui::GetItemRectMax();
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const float cx = (bmin.x + bmax.x) * 0.5f;
+            const float cy = (bmin.y + bmax.y) * 0.5f;
+            const ImU32 ic_col = IM_COL32(230, 240, 255, 240);
+            draw->AddCircle(ImVec2(cx, cy), 6.5f, ic_col, 20, 1.3f);
+            draw->AddCircleFilled(ImVec2(cx, cy - 3.2f), 1.1f, ic_col);
+            draw->AddLine(ImVec2(cx, cy - 0.8f), ImVec2(cx, cy + 3.8f), ic_col, 1.4f);
+        }
+        ImGui::PopStyleColor(3);
+        ImGui::PopStyleVar();
 
         ImGui::Spacing();
 
@@ -1958,7 +1984,6 @@ void render_ui() {
             const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Want to become a sponsor? Click me";
 
             // ── Single Header Row: SPONSORS | Link | [↻] [🔊] ──
-            const float header_start_x = ImGui::GetCursorPosX();
             ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORS");
 
             ImGui::SameLine(0, 8);
@@ -1970,7 +1995,12 @@ void render_ui() {
 
             const float btn_size = 20.0f;
             const float total_btn_w = btn_size * 2.0f + 6.0f;
-            ImGui::SameLine(header_start_x + card_w - total_btn_w);
+            const float avail_w_row = ImGui::GetContentRegionAvail().x;
+            if (avail_w_row > total_btn_w + 6.0f) {
+                ImGui::SameLine(0.0f, avail_w_row - total_btn_w);
+            } else {
+                ImGui::SameLine(0.0f, 6.0f);
+            }
 
             // ↻ Refresh Button (Custom vector drawing, no font missing-glyph '?')
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btn_size * 0.5f);
@@ -2079,8 +2109,10 @@ void render_ui() {
             }
             const float icon_scale = std::clamp((float)s_sponsor.icon_scale / 100.0f, 0.5f, 1.6f);
             const float background_scale = std::clamp((float)s_sponsor.background_scale / 100.0f, 0.5f, 1.6f);
-            constexpr float sponsor_card_height = 76.0f;
-            constexpr float sponsor_media_height = 42.0f;
+            const float title_scale = std::clamp((float)(s_sponsor.title_scale ? s_sponsor.title_scale : 100) / 100.0f, 0.5f, 2.0f);
+            const float message_scale = std::clamp((float)(s_sponsor.message_scale ? s_sponsor.message_scale : 100) / 100.0f, 0.5f, 2.0f);
+            constexpr float sponsor_card_height = 80.0f;
+            constexpr float sponsor_media_height = 44.0f;
             ImVec4 card_color = sponsor_color(s_sponsor.card_color, ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
             card_color.w *= (float)s_sponsor.background_color_opacity / 100.0f;
             ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
@@ -2187,20 +2219,25 @@ void render_ui() {
                 const float title_y = content_height * (float)s_sponsor.title_y / 100.0f;
                 const ImVec4 title_color = sponsor_color(s_sponsor.title_color, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_Text, title_color);
-                const ImVec2 title_origin = sponsor_text_origin(sponsor_title, content_width, s_sponsor.title_x, title_y);
+                ImGui::SetWindowFontScale(title_scale);
+                const ImVec2 title_origin = sponsor_text_origin(sponsor_title, content_width / title_scale, s_sponsor.title_x, title_y);
                 ImGui::SetCursorPos(title_origin);
                 ImGui::PushTextWrapPos(content_width);
                 ImGui::TextUnformatted(sponsor_title);
                 ImGui::PopTextWrapPos();
+                ImGui::SetWindowFontScale(1.0f);
                 ImGui::PopStyleColor();
                 if (sponsor_message[0] != '\0') {
                     const float message_y = content_height * (float)s_sponsor.message_y / 100.0f;
                     const ImVec4 message_color = sponsor_color(s_sponsor.message_color, ImVec4(0.85f, 0.91f, 1.0f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_Text, message_color);
-                    ImGui::SetCursorPos(sponsor_text_origin(sponsor_message, content_width, s_sponsor.message_x, message_y));
+                    ImGui::SetWindowFontScale(message_scale);
+                    const ImVec2 msg_origin = sponsor_text_origin(sponsor_message, content_width / message_scale, s_sponsor.message_x, message_y);
+                    ImGui::SetCursorPos(msg_origin);
                     ImGui::PushTextWrapPos(content_width);
                     ImGui::TextWrapped("%s", sponsor_message);
                     ImGui::PopTextWrapPos();
+                    ImGui::SetWindowFontScale(1.0f);
                     ImGui::PopStyleColor();
                 }
             } else {

@@ -936,6 +936,8 @@ struct SponsorInfoFieldCache {
     jfieldID fidMessageY = nullptr;
     jfieldID fidIconScale = nullptr;
     jfieldID fidBackgroundScale = nullptr;
+    jfieldID fidTitleScale = nullptr;
+    jfieldID fidMessageScale = nullptr;
     jfieldID fidIconX = nullptr;
     jfieldID fidIconY = nullptr;
     jfieldID fidDurationSeconds = nullptr;
@@ -986,6 +988,8 @@ struct SponsorInfoFieldCache {
         fidMessageY = getField("messageY", "I");
         fidIconScale = getField("iconScale", "I");
         fidBackgroundScale = getField("backgroundScale", "I");
+        fidTitleScale = getField("titleScale", "I");
+        fidMessageScale = getField("messageScale", "I");
         fidIconX = getField("iconX", "I");
         fidIconY = getField("iconY", "I");
         fidDurationSeconds = getField("durationSeconds", "I");
@@ -1250,6 +1254,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     env->SetIntField(obj, g_sponsor_fields.fidMessageY, (jint)info.message_y);
     env->SetIntField(obj, g_sponsor_fields.fidIconScale, (jint)info.icon_scale);
     env->SetIntField(obj, g_sponsor_fields.fidBackgroundScale, (jint)info.background_scale);
+    env->SetIntField(obj, g_sponsor_fields.fidTitleScale, (jint)info.title_scale);
+    env->SetIntField(obj, g_sponsor_fields.fidMessageScale, (jint)info.message_scale);
     env->SetIntField(obj, g_sponsor_fields.fidIconX, (jint)info.icon_x);
     env->SetIntField(obj, g_sponsor_fields.fidIconY, (jint)info.icon_y);
     env->SetIntField(obj, g_sponsor_fields.fidDurationSeconds,

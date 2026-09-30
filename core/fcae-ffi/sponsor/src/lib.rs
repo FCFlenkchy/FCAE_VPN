@@ -110,6 +110,8 @@ const DEFAULT_MESSAGE_X: u8 = 50;
 const DEFAULT_MESSAGE_Y: u8 = 72;
 const DEFAULT_ICON_SCALE: u32 = 100;
 const DEFAULT_BACKGROUND_SCALE: u32 = 100;
+const DEFAULT_TITLE_SCALE: u32 = 100;
+const DEFAULT_MESSAGE_SCALE: u32 = 100;
 // Opacity defaults preserve the look campaigns shipped with before the fields
 // existed: the icon fully opaque, the background plane dimmed to sit behind
 // the text, and the card color applied as-is.
@@ -158,10 +160,14 @@ struct Campaign {
     message_y: Option<u32>,
     #[serde(default)]
     image_fit: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "icon_size", alias = "icon_size_percent", alias = "icon_scale_percent", alias = "image_size")]
     icon_scale: Option<u32>,
-    #[serde(default)]
+    #[serde(default, alias = "background_size", alias = "bg_size", alias = "bg_scale", alias = "background_scale_percent")]
     background_scale: Option<u32>,
+    #[serde(default, alias = "title_size", alias = "title_font_scale", alias = "title_font_size", alias = "title_scale_percent")]
+    title_scale: Option<u32>,
+    #[serde(default, alias = "message_size", alias = "message_font_scale", alias = "message_font_size", alias = "message_scale_percent")]
+    message_scale: Option<u32>,
     /// Foreground icon opacity percent, 0..=100.
     #[serde(default)]
     icon_opacity: Option<u32>,
@@ -224,6 +230,8 @@ struct ReadyCampaign {
     image_fit: u8,
     icon_scale: u32,
     background_scale: u32,
+    title_scale: u32,
+    message_scale: u32,
     /// Foreground icon opacity percent, 0..=100.
     icon_opacity: u8,
     /// Background media plane opacity percent, 0..=100.
@@ -297,6 +305,8 @@ pub struct SponsorFrame {
     pub image_fit: u8,
     pub icon_scale: u32,
     pub background_scale: u32,
+    pub title_scale: u32,
+    pub message_scale: u32,
     pub icon_opacity: u8,
     pub background_opacity: u8,
     pub background_color_opacity: u8,
@@ -1744,6 +1754,8 @@ pub fn current_frame() -> Option<SponsorFrame> {
             image_fit: ready.image_fit,
             icon_scale: ready.icon_scale,
             background_scale: ready.background_scale,
+            title_scale: ready.title_scale,
+            message_scale: ready.message_scale,
             icon_opacity: ready.icon_opacity,
             background_opacity: ready.background_opacity,
             background_color_opacity: ready.background_color_opacity,
@@ -1841,6 +1853,14 @@ fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
                 log::warn!("[sponsor] campaign {} has invalid background scale; using 100 percent", campaign.id);
                 campaign.background_scale = None;
             }
+            if campaign.title_scale.is_some_and(|scale| !(50..=200).contains(&scale)) {
+                log::warn!("[sponsor] campaign {} has invalid title scale; using 100 percent", campaign.id);
+                campaign.title_scale = None;
+            }
+            if campaign.message_scale.is_some_and(|scale| !(50..=200).contains(&scale)) {
+                log::warn!("[sponsor] campaign {} has invalid message scale; using 100 percent", campaign.id);
+                campaign.message_scale = None;
+            }
             if campaign.duration_seconds.is_some_and(|duration|
                 !(1..=MAX_DURATION_SECONDS).contains(&duration))
             {
@@ -1912,6 +1932,10 @@ fn media_scale_value(value: Option<u32>, default: u32) -> u32 {
     value.filter(|scale| (50..=160).contains(scale)).unwrap_or(default)
 }
 
+fn text_scale_value(value: Option<u32>, default: u32) -> u32 {
+    value.filter(|scale| (50..=200).contains(scale)).unwrap_or(default)
+}
+
 /// Opacity percent clamped into range: an omitted or out-of-range value falls
 /// back to the plane's default instead of failing the manifest.
 fn opacity_value(value: Option<u32>, default: u8) -> u8 {
@@ -1952,6 +1976,8 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
         image_fit: image_fit_value(campaign.image_fit.as_deref()),
         icon_scale: media_scale_value(campaign.icon_scale, DEFAULT_ICON_SCALE),
         background_scale: media_scale_value(campaign.background_scale, DEFAULT_BACKGROUND_SCALE),
+        title_scale: text_scale_value(campaign.title_scale, DEFAULT_TITLE_SCALE),
+        message_scale: text_scale_value(campaign.message_scale, DEFAULT_MESSAGE_SCALE),
         icon_opacity: opacity_value(campaign.icon_opacity, DEFAULT_ICON_OPACITY),
         background_opacity: opacity_value(campaign.background_opacity, DEFAULT_BACKGROUND_OPACITY),
         background_color_opacity: opacity_value(
@@ -2854,6 +2880,8 @@ fn decoded_plane(campaign: Campaign, width: u32, height: u32, frames: Vec<Frame>
         image_fit: 0,
         icon_scale: DEFAULT_ICON_SCALE,
         background_scale: DEFAULT_BACKGROUND_SCALE,
+        title_scale: DEFAULT_TITLE_SCALE,
+        message_scale: DEFAULT_MESSAGE_SCALE,
         icon_opacity: DEFAULT_ICON_OPACITY,
         background_opacity: DEFAULT_BACKGROUND_OPACITY,
         background_color_opacity: DEFAULT_BACKGROUND_COLOR_OPACITY,
@@ -3222,6 +3250,8 @@ fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, S
         image_fit: 0,
         icon_scale: DEFAULT_ICON_SCALE,
         background_scale: DEFAULT_BACKGROUND_SCALE,
+        title_scale: DEFAULT_TITLE_SCALE,
+        message_scale: DEFAULT_MESSAGE_SCALE,
         icon_opacity: DEFAULT_ICON_OPACITY,
         background_opacity: DEFAULT_BACKGROUND_OPACITY,
         background_color_opacity: DEFAULT_BACKGROUND_COLOR_OPACITY,
@@ -3799,5 +3829,22 @@ mod tests {
         // A window already in the past schedules nothing further.
         schedule_expiry(&[campaign(None, Some(now.saturating_sub(1)))]);
         assert_eq!(NEXT_EXPIRY.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn size_and_scale_aliases_parse_correctly() {
+        let json = serde_json::json!({
+            "id": "test-aliases",
+            "destination_url": "https://example.com",
+            "icon_size": 120,
+            "background_size": 130,
+            "title_size": 140,
+            "message_size": 150,
+        });
+        let c: Campaign = serde_json::from_value(json).expect("valid campaign with aliases");
+        assert_eq!(c.icon_scale, Some(120));
+        assert_eq!(c.background_scale, Some(130));
+        assert_eq!(c.title_scale, Some(140));
+        assert_eq!(c.message_scale, Some(150));
     }
 }

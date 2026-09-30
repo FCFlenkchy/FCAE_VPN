@@ -271,6 +271,8 @@ class FcaeSponsorInfo(
     @JvmField var messageY: Int = 72,
     @JvmField var iconScale: Int = 100,
     @JvmField var backgroundScale: Int = 100,
+    @JvmField var titleScale: Int = 100,
+    @JvmField var messageScale: Int = 100,
     @JvmField var iconX: Int = 50,
     @JvmField var iconY: Int = 25,
     @JvmField var durationSeconds: Int = 10,

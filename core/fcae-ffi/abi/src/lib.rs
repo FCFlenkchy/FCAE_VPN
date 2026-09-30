@@ -589,6 +589,10 @@ pub struct FcaeSponsorInfo {
     pub icon_scale: u32,
     /// Background image scale percentage, constrained to 50..=160.
     pub background_scale: u32,
+    /// Title text scale percentage, constrained to 50..=200.
+    pub title_scale: u32,
+    /// Message text scale percentage, constrained to 50..=200.
+    pub message_scale: u32,
     /// Foreground icon center X percentage of the card, 0..=100.
     pub icon_x: u8,
     /// Foreground icon center Y percentage of the card, 0..=100.

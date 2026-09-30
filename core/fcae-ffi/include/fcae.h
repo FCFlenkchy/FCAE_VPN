@@ -405,6 +405,8 @@ typedef struct {
     uint8_t  message_y;   /* percentage of available card height, 0..100 */
     uint32_t icon_scale;   /* percentage, 50..160 */
     uint32_t background_scale; /* percentage, 50..160 */
+    uint32_t title_scale;  /* percentage, 50..200, default 100 */
+    uint32_t message_scale; /* percentage, 50..200, default 100 */
     uint8_t  icon_x; /* foreground icon center X percentage, 0..100 */
     uint8_t  icon_y; /* foreground icon center Y percentage, 0..100 */
     uint32_t duration_seconds; /* campaign duration, 1..3600 seconds */

@@ -64,7 +64,8 @@ FCAE keeps the sponsor cache small and self-cleaning, and never at the user's ex
 - `duration_seconds` is optional, defaults to 10, and accepts 1 through 3600 seconds.
 - `title_color`, `message_color`, and `background_color` use `#RRGGBB` or `#AARRGGBB`.
 - `image_fit` is `contain` or `cover`; it defaults to `contain`.
-- `icon_scale` and `background_scale` are percentages from 50 through 160 and default to 100. The scaled art is kept inside the card: a larger icon is clamped to the card's edges instead of being cut off.
+- `icon_scale` and `background_scale` are percentages from 50 through 160 and default to 100 (also supporting aliases `icon_size` / `background_size`). The scaled art is kept inside the card: a larger icon is clamped to the card's edges instead of being cut off.
+- `title_scale` and `message_scale` are percentages from 50 through 200 and default to 100 (also supporting aliases `title_size` / `message_size`), scaling the text cleanly within the card layout.
 - `icon_x` and `icon_y` place the icon's centre; the icon is clamped inside the card, so the extremes of the range anchor it to the card's edge.
 - Invalid presentation values are ignored and replaced with safe defaults.
 
