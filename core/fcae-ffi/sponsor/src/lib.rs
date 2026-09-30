@@ -818,13 +818,20 @@ pub fn set_ui_active(active: bool) {
     let was = SPONSOR_UI_ACTIVE.swap(active, Ordering::AcqRel);
     if !active {
         stop_audio_and_release();
-    } else if !was && (media_needs_refresh() || audio_needs_refresh()) {
-        // Passes do not run while the UI is hidden, so the card may be stale
-        // by the time it returns: catch up before the first poll draws it.
-        if CONNECTED.load(Ordering::Acquire) {
-            refresh_media_async();
-        } else {
-            refresh_cached_media_async();
+        let mut state = STATE.lock();
+        for ready in state.ready.iter_mut() {
+            demote_to_preview(ready);
+        }
+    } else if !was {
+        let is_prev = current_is_preview(&STATE.lock());
+        if is_prev || media_needs_refresh() || audio_needs_refresh() {
+            // Passes do not run while the UI is hidden, so the card may be stale
+            // by the time it returns: catch up before the first poll draws it.
+            if CONNECTED.load(Ordering::Acquire) {
+                refresh_media_async();
+            } else {
+                refresh_cached_media_async();
+            }
         }
     }
 }
