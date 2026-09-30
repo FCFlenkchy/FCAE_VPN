@@ -979,9 +979,9 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            val hasActiveAnimation = (sponsorGeneration and 0xFFFFFFL) != 0L
-            val pollDelay = if (hasActiveAnimation) SPONSOR_FRAME_INTERVAL_MS else 1000L
-            handler.postDelayed(this, pollDelay)
+            // Hardcoded 30 FPS: the card is redrawn on the same interval
+            // whether it is animating, static or empty.
+            handler.postDelayed(this, SPONSOR_FRAME_INTERVAL_MS)
         }
     }
 
@@ -3857,9 +3857,9 @@ class MainActivity : AppCompatActivity() {
         const val EXTRA_TRIGGER_CONNECT = "com.fc.fcaevpn.TRIGGER_CONNECT"
 
         private const val POLL_INTERVAL_MS = 1000L
-        // Sponsor card frames are paced by this hardcoded 60 FPS interval on
-        // every device instead of the previous content-dependent delay ladder.
-        private const val SPONSOR_FRAME_INTERVAL_MS = 16L
+        // Sponsor card frames are paced by this hardcoded 30 FPS interval on
+        // every device to match the sponsor engine's 30 FPS cap.
+        private const val SPONSOR_FRAME_INTERVAL_MS = 33L
         // ~70+ log messages on screen. Psiphon's JSON notices average
         // 150-350 chars, so 8000 showed only ~20-30 lines and older lines
         // (handshake, CandidateServers) scrolled away before the connect

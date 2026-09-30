@@ -210,11 +210,11 @@ static bool s_log_scroll_pending = false;
 static bool     s_painted_once = false;
 static double   s_last_paint_t = 0.0;
 
-// The UI frame clock is hardcoded at 60 FPS on every platform: frames are
+// The UI frame clock is hardcoded at 30 FPS on every platform: frames are
 // paced by this interval and never by a content-derived timeout, so GIF/video
 // sponsor frames, the connect spinner, a blinking caret and an idle window all
-// advance at the same fixed rate.
-static constexpr unsigned kUiFrameRate = 60;
+// advance at the same fixed rate matching the sponsor engine.
+static constexpr unsigned kUiFrameRate = 30;
 static constexpr unsigned kUiFrameIntervalMs = 1000 / kUiFrameRate;
 static constexpr double kUiFrameSeconds = 1.0 / kUiFrameRate;
 
@@ -422,20 +422,20 @@ bool ui_should_render(bool interacting) {
     // Spinner/connect animation is running: it moves on its own.
     if (s_busy_anim) return true;
 
-    // Nothing changed since the last painted frame: skip repaint when idle.
-    if (s_painted_once && ui_content_signature() == s_painted_sig) {
+    // Nothing changed since the last painted frame: hold the repaint to the
+    // next hardcoded 30 FPS frame boundary instead of waiting for a
+    // content-derived timeout. A changed frame is still painted immediately
+    // and stays capped by the platform's own 30 FPS frame interval.
+    if (s_painted_once && ui_content_signature() == s_painted_sig
+            && now - s_last_paint_t < kUiFrameSeconds) {
         return false;
     }
     return true;
 }
 
 unsigned ui_sleep_ms() {
-    if (s_busy_anim || g_app.redraw_requested.load() || s_log_scroll_pending) {
-        return kUiFrameIntervalMs;
-    }
-    if (s_painted_once && ui_content_signature() == s_painted_sig) {
-        return 50;
-    }
+    // Hardcoded 30 FPS: the platform waits exactly one frame interval and never
+    // a content-derived timeout.
     return kUiFrameIntervalMs;
 }
 

@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
     // thread while idle, and a frame is painted only when something actually
     // changed (stats/logs/transient text) or the user is interacting.
     auto last_frame_time = std::chrono::steady_clock::now();
-    constexpr auto min_frame_interval = std::chrono::milliseconds(16);   // ~60 FPS cap
+    constexpr auto min_frame_interval = std::chrono::milliseconds(33);   // ~30 FPS cap
     constexpr double interaction_tail  = 0.7;
     double last_event_time = -1e9;                                       // monotonic seconds (glfwGetTime)
     bool minimized = false;

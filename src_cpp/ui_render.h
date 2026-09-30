@@ -424,15 +424,16 @@ void ui_shutdown();
 void render_ui();
 void log_callback(FcaeLogLevel level, const char* message, void* user_data);
 
-// ── Fixed 60 FPS rendering ───────────────────────────────────────────────
-// Frames are paced by a hardcoded 60 FPS clock on every platform: the window
+// ── Fixed 30 FPS rendering ───────────────────────────────────────────────
+// Frames are paced by a hardcoded 30 FPS clock on every platform: the window
 // is repainted on that cadence whether or not the painted content changed, so
 // animation timing (sponsor GIF/video frames, spinners, caret blink) never
-// depends on what is on screen. Platform main loops call ui_should_render()
-// before each frame and sleep for ui_sleep_ms().
+// depends on what is on screen, matching the sponsor engine rate. Platform
+// main loops call ui_should_render() before each frame and sleep for
+// ui_sleep_ms().
 
 /// Should the platform paint a frame now?
-/// Polls telemetry when due and returns true on the 60 FPS frame boundary, or
+/// Polls telemetry when due and returns true on the 30 FPS frame boundary, or
 /// immediately for a pending redraw request, a running connect spinner, or
 /// while `interacting` is true.
 bool ui_should_render(bool interacting);
@@ -441,7 +442,7 @@ bool ui_should_render(bool interacting);
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot);
 
 /// How long (ms) the platform waits before calling ui_should_render() again.
-/// Always one 60 FPS frame interval.
+/// Always one 30 FPS frame interval (~33ms).
 unsigned ui_sleep_ms();
 
 /// Request one extra repaint (call from window event handlers).

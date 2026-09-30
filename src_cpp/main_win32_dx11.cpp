@@ -276,7 +276,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     auto last_input_time = last_frame_time;
     POINT last_mouse_pos = {};
     bool have_mouse_pos = false;
-    constexpr auto min_frame_interval = std::chrono::milliseconds(16);   // ~60 FPS cap
+    constexpr auto min_frame_interval = std::chrono::milliseconds(33);   // ~30 FPS cap
     constexpr auto interaction_tail   = std::chrono::milliseconds(700);  // smooth for this long after the last input
 
     while (!done && g_app.running.load()) {

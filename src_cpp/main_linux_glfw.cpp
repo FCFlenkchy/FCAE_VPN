@@ -177,7 +177,7 @@ int main(int argc, char** argv) {
     // window therefore costs ~0% CPU instead of a full-frame repaint every
     // second, and events that change nothing no longer force frames either.
     auto last_frame_time = std::chrono::steady_clock::now();
-    constexpr auto min_frame_interval = std::chrono::milliseconds(16);   // ~60 FPS cap
+    constexpr auto min_frame_interval = std::chrono::milliseconds(33);   // ~30 FPS cap
     constexpr double interaction_tail  = 0.7;                            // smooth for this long after the last event
     double last_event_time = -1e9;                                       // monotonic seconds (glfwGetTime)
     bool minimized = false;
