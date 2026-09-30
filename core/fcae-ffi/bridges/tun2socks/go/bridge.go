@@ -46,6 +46,7 @@ import (
 	"net/url"
 	"strconv"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1154,6 +1155,9 @@ func t2s_start(device *C.char, proxy *C.char, mtu C.int, loglevel *C.char,
 		return -1
 	}
 
+	debug.SetGCPercent(50)
+	debug.SetMemoryLimit(48 * 1024 * 1024)
+
 	key := &engine.Key{
 		Device:   C.GoString(device),
 		Proxy:    C.GoString(proxy),
@@ -1245,6 +1249,7 @@ func t2s_stop() C.int {
         if fdDevice != nil { stopFD() } else { _ = engine.Stop() }
 	}()
 	running = false
+	debug.FreeOSMemory()
 	emit(logInfo, "[bridge] tun2socks stopped")
 	return 0
 }

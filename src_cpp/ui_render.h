@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <vector>
+#include <deque>
 #include <string>
 #include <atomic>
 #include <mutex>
@@ -139,7 +140,7 @@ struct AppState {
     double last_telem_t = 0.0;
 
     mutable std::mutex logs_mutex;
-    std::vector<std::pair<int, std::string>> logs;
+    std::deque<std::pair<int, std::string>> logs;
     int  max_logs    = 200;
     bool auto_scroll = true;
     uint64_t logs_revision = 0; // guarded by logs_mutex, including ring eviction
@@ -161,9 +162,8 @@ struct AppState {
         std::lock_guard<std::mutex> lock(logs_mutex);
         logs.emplace_back(level, std::move(s));
         ++logs_revision;
-        if ((int)logs.size() > max_logs) {
-            const int drop = (int)logs.size() - max_logs;
-            logs.erase(logs.begin(), logs.begin() + drop);
+        while ((int)logs.size() > max_logs) {
+            logs.pop_front();
         }
     }
 
@@ -188,7 +188,7 @@ struct AppState {
     std::vector<std::pair<int, std::string>> copy_logs(uint64_t& revision) const {
         std::lock_guard<std::mutex> lock(logs_mutex);
         revision = logs_revision;
-        return logs;
+        return std::vector<std::pair<int, std::string>>(logs.begin(), logs.end());
     }
 
     /// Build a session config.

@@ -857,48 +857,177 @@ Java_com_fc_fcaevpn_NativeEngine_nativeCheckForUpdates(JNIEnv* env, jclass, jstr
          includePrereleases == JNI_TRUE ? "on" : "off");
 }
 
+struct UpdateInfoFieldCache {
+    std::atomic<bool> initialized{false};
+    std::mutex init_mu;
+    jclass cls = nullptr;
+    jfieldID fid_available = nullptr;
+    jfieldID fid_inProgress = nullptr;
+    jfieldID fid_done = nullptr;
+    jfieldID fid_latest = nullptr;
+    jfieldID fid_notes = nullptr;
+    jfieldID fid_dl = nullptr;
+    jfieldID fid_status = nullptr;
+    jfieldID fid_isPre = nullptr;
+    jfieldID fid_date = nullptr;
+    jfieldID fid_errKind = nullptr;
+    jfieldID fid_raw = nullptr;
+
+    bool ensure(JNIEnv* env) {
+        if (initialized.load(std::memory_order_acquire)) return cls != nullptr;
+        std::lock_guard<std::mutex> lock(init_mu);
+        if (initialized.load(std::memory_order_relaxed)) return cls != nullptr;
+
+        jclass localCls = env->FindClass("com/fc/fcaevpn/FcaeUpdateInfo");
+        if (!localCls) {
+            initialized.store(true, std::memory_order_release);
+            return false;
+        }
+        cls = (jclass)env->NewGlobalRef(localCls);
+        env->DeleteLocalRef(localCls);
+
+        const auto getField = [env, this](const char* name, const char* signature) -> jfieldID {
+            return env->ExceptionCheck() ? nullptr : env->GetFieldID(cls, name, signature);
+        };
+        fid_available = getField("updateAvailable", "Z");
+        fid_inProgress = getField("checkInProgress", "Z");
+        fid_done = getField("checkDone", "Z");
+        fid_latest = getField("latestVersion", "Ljava/lang/String;");
+        fid_notes = getField("releaseNotes", "Ljava/lang/String;");
+        fid_dl = getField("downloadUrl", "Ljava/lang/String;");
+        fid_status = getField("statusMessage", "Ljava/lang/String;");
+        fid_isPre = getField("isPrerelease", "Z");
+        fid_date = getField("releaseDate", "Ljava/lang/String;");
+        fid_errKind = getField("errorKind", "I");
+        fid_raw = getField("rawBody", "Ljava/lang/String;");
+
+        initialized.store(true, std::memory_order_release);
+        return cls != nullptr;
+    }
+};
+
+static UpdateInfoFieldCache g_update_fields;
+
+struct SponsorInfoFieldCache {
+    std::atomic<bool> initialized{false};
+    std::mutex init_mu;
+    jclass cls = nullptr;
+    jfieldID fidAvailable = nullptr;
+    jfieldID fidId = nullptr;
+    jfieldID fidTitle = nullptr;
+    jfieldID fidMessage = nullptr;
+    jfieldID fidDestination = nullptr;
+    jfieldID fidWidth = nullptr;
+    jfieldID fidHeight = nullptr;
+    jfieldID fidCampaignCount = nullptr;
+    jfieldID fidAnimated = nullptr;
+    jfieldID fidBackgroundWidth = nullptr;
+    jfieldID fidBackgroundHeight = nullptr;
+    jfieldID fidTextColor = nullptr;
+    jfieldID fidCardColor = nullptr;
+    jfieldID fidTextX = nullptr;
+    jfieldID fidTextY = nullptr;
+    jfieldID fidImageFit = nullptr;
+    jfieldID fidTitleColor = nullptr;
+    jfieldID fidMessageColor = nullptr;
+    jfieldID fidTitleX = nullptr;
+    jfieldID fidTitleY = nullptr;
+    jfieldID fidMessageX = nullptr;
+    jfieldID fidMessageY = nullptr;
+    jfieldID fidIconScale = nullptr;
+    jfieldID fidBackgroundScale = nullptr;
+    jfieldID fidIconX = nullptr;
+    jfieldID fidIconY = nullptr;
+    jfieldID fidDurationSeconds = nullptr;
+    jfieldID fidIconOpacity = nullptr;
+    jfieldID fidBackgroundOpacity = nullptr;
+    jfieldID fidBackgroundColorOpacity = nullptr;
+    jfieldID fidGeneration = nullptr;
+    jfieldID fidRgba = nullptr;
+    jfieldID fidBackgroundRgba = nullptr;
+
+    bool ensure(JNIEnv* env) {
+        if (initialized.load(std::memory_order_acquire)) return cls != nullptr;
+        std::lock_guard<std::mutex> lock(init_mu);
+        if (initialized.load(std::memory_order_relaxed)) return cls != nullptr;
+
+        jclass localCls = env->FindClass("com/fc/fcaevpn/FcaeSponsorInfo");
+        if (!localCls) {
+            initialized.store(true, std::memory_order_release);
+            return false;
+        }
+        cls = (jclass)env->NewGlobalRef(localCls);
+        env->DeleteLocalRef(localCls);
+
+        const auto getField = [env, this](const char* name, const char* signature) -> jfieldID {
+            return env->ExceptionCheck() ? nullptr : env->GetFieldID(cls, name, signature);
+        };
+        fidAvailable = getField("available", "Z");
+        fidId = getField("id", "Ljava/lang/String;");
+        fidTitle = getField("title", "Ljava/lang/String;");
+        fidMessage = getField("message", "Ljava/lang/String;");
+        fidDestination = getField("destinationUrl", "Ljava/lang/String;");
+        fidWidth = getField("width", "I");
+        fidHeight = getField("height", "I");
+        fidCampaignCount = getField("campaignCount", "I");
+        fidAnimated = getField("animated", "Z");
+        fidBackgroundWidth = getField("backgroundWidth", "I");
+        fidBackgroundHeight = getField("backgroundHeight", "I");
+        fidTextColor = getField("textColor", "I");
+        fidCardColor = getField("cardColor", "I");
+        fidTextX = getField("textX", "I");
+        fidTextY = getField("textY", "I");
+        fidImageFit = getField("imageFit", "I");
+        fidTitleColor = getField("titleColor", "I");
+        fidMessageColor = getField("messageColor", "I");
+        fidTitleX = getField("titleX", "I");
+        fidTitleY = getField("titleY", "I");
+        fidMessageX = getField("messageX", "I");
+        fidMessageY = getField("messageY", "I");
+        fidIconScale = getField("iconScale", "I");
+        fidBackgroundScale = getField("backgroundScale", "I");
+        fidIconX = getField("iconX", "I");
+        fidIconY = getField("iconY", "I");
+        fidDurationSeconds = getField("durationSeconds", "I");
+        fidIconOpacity = getField("iconOpacity", "I");
+        fidBackgroundOpacity = getField("backgroundOpacity", "I");
+        fidBackgroundColorOpacity = getField("backgroundColorOpacity", "I");
+        fidGeneration = getField("generation", "J");
+        fidRgba = getField("rgba", "[B");
+        fidBackgroundRgba = getField("backgroundRgba", "[B");
+
+        initialized.store(true, std::memory_order_release);
+        return cls != nullptr;
+    }
+};
+
+static SponsorInfoFieldCache g_sponsor_fields;
+
 extern "C" JNIEXPORT jobject JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativePollUpdate(JNIEnv* env, jclass) {
     ensure_init();
 
-    jclass cls = env->FindClass("com/fc/fcaevpn/FcaeUpdateInfo");
-    if (!cls) return nullptr;
+    if (!g_update_fields.ensure(env)) return nullptr;
 
-    jfieldID fid_available = env->GetFieldID(cls, "updateAvailable", "Z");
-    jfieldID fid_inProgress = env->GetFieldID(cls, "checkInProgress", "Z");
-    jfieldID fid_done = env->GetFieldID(cls, "checkDone", "Z");
-    jfieldID fid_latest = env->GetFieldID(cls, "latestVersion", "Ljava/lang/String;");
-    jfieldID fid_notes = env->GetFieldID(cls, "releaseNotes", "Ljava/lang/String;");
-    jfieldID fid_dl = env->GetFieldID(cls, "downloadUrl", "Ljava/lang/String;");
-    jfieldID fid_status = env->GetFieldID(cls, "statusMessage", "Ljava/lang/String;");
-    jfieldID fid_isPre = env->GetFieldID(cls, "isPrerelease", "Z");
-    jfieldID fid_date = env->GetFieldID(cls, "releaseDate", "Ljava/lang/String;");
-    jfieldID fid_errKind = env->GetFieldID(cls, "errorKind", "I");
-    jfieldID fid_raw = env->GetFieldID(cls, "rawBody", "Ljava/lang/String;");
-
-    jobject obj = env->AllocObject(cls);
-    if (!obj) {
-        env->DeleteLocalRef(cls);
-        return nullptr;
-    }
+    jobject obj = env->AllocObject(g_update_fields.cls);
+    if (!obj) return nullptr;
 
     FcaeUpdateInfo info = {};
     info.struct_size = sizeof(info);
     info.abi_version = FCAE_ABI_VERSION;
     fcae_poll_update(&info);
 
-    env->SetBooleanField(obj, fid_available, info.update_available ? JNI_TRUE : JNI_FALSE);
-    env->SetBooleanField(obj, fid_inProgress, info.check_in_progress ? JNI_TRUE : JNI_FALSE);
-    env->SetBooleanField(obj, fid_done, info.check_done ? JNI_TRUE : JNI_FALSE);
-    env->SetObjectField(obj, fid_latest, env->NewStringUTF(info.latest_version));
-    env->SetObjectField(obj, fid_notes, env->NewStringUTF(info.release_notes));
-    env->SetObjectField(obj, fid_dl, env->NewStringUTF(info.download_url));
-    env->SetObjectField(obj, fid_status, env->NewStringUTF(info.status_message));
-    env->SetBooleanField(obj, fid_isPre, info.is_prerelease ? JNI_TRUE : JNI_FALSE);
-    env->SetObjectField(obj, fid_date, env->NewStringUTF(info.release_date));
-    env->SetIntField(obj, fid_errKind, (jint)info.error_kind);
-    env->SetObjectField(obj, fid_raw, env->NewStringUTF(info.raw_body));
-    env->DeleteLocalRef(cls);
+    env->SetBooleanField(obj, g_update_fields.fid_available, info.update_available ? JNI_TRUE : JNI_FALSE);
+    env->SetBooleanField(obj, g_update_fields.fid_inProgress, info.check_in_progress ? JNI_TRUE : JNI_FALSE);
+    env->SetBooleanField(obj, g_update_fields.fid_done, info.check_done ? JNI_TRUE : JNI_FALSE);
+    env->SetObjectField(obj, g_update_fields.fid_latest, env->NewStringUTF(info.latest_version));
+    env->SetObjectField(obj, g_update_fields.fid_notes, env->NewStringUTF(info.release_notes));
+    env->SetObjectField(obj, g_update_fields.fid_dl, env->NewStringUTF(info.download_url));
+    env->SetObjectField(obj, g_update_fields.fid_status, env->NewStringUTF(info.status_message));
+    env->SetBooleanField(obj, g_update_fields.fid_isPre, info.is_prerelease ? JNI_TRUE : JNI_FALSE);
+    env->SetObjectField(obj, g_update_fields.fid_date, env->NewStringUTF(info.release_date));
+    env->SetIntField(obj, g_update_fields.fid_errKind, (jint)info.error_kind);
+    env->SetObjectField(obj, g_update_fields.fid_raw, env->NewStringUTF(info.raw_body));
 
     return obj;
 }
@@ -1009,10 +1138,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeSponsorNext(JNIEnv*, jclass) {
 extern "C" JNIEXPORT jobject JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong knownGeneration) {
     ensure_init();
-    jclass cls = env->FindClass("com/fc/fcaevpn/FcaeSponsorInfo");
-    if (!cls) return nullptr;
-    jobject obj = env->AllocObject(cls);
-    if (!obj) { env->DeleteLocalRef(cls); return nullptr; }
+    if (!g_sponsor_fields.ensure(env)) return nullptr;
+    jobject obj = env->AllocObject(g_sponsor_fields.cls);
+    if (!obj) return nullptr;
 
     FcaeSponsorInfo info = {};
     info.struct_size = sizeof(info);
@@ -1021,7 +1149,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     if (pollStatus != FCAE_OK) {
         LOGE("Sponsor poll failed: status=%d", (int)pollStatus);
         env->DeleteLocalRef(obj);
-        env->DeleteLocalRef(cls);
         return nullptr;
     }
     // Bits above the frame indices identify the card itself: keyed on those,
@@ -1044,7 +1171,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
         if (rgba) env->DeleteLocalRef(rgba);
         if (backgroundRgba) env->DeleteLocalRef(backgroundRgba);
         env->DeleteLocalRef(obj);
-        env->DeleteLocalRef(cls);
         return nullptr;
     }
     if (copyForeground && info.rgba_size) {
@@ -1053,7 +1179,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
             env->DeleteLocalRef(rgba);
             env->DeleteLocalRef(backgroundRgba);
             env->DeleteLocalRef(obj);
-            env->DeleteLocalRef(cls);
             return nullptr;
         }
         const FcaeStatus copied = fcae_sponsor_copy_rgba(
@@ -1063,7 +1188,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
             env->DeleteLocalRef(rgba);
             env->DeleteLocalRef(backgroundRgba);
             env->DeleteLocalRef(obj);
-            env->DeleteLocalRef(cls);
             return nullptr;
         }
     }
@@ -1073,7 +1197,6 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
             env->DeleteLocalRef(rgba);
             env->DeleteLocalRef(backgroundRgba);
             env->DeleteLocalRef(obj);
-            env->DeleteLocalRef(cls);
             return nullptr;
         }
         const FcaeStatus copied = fcae_sponsor_copy_background_rgba(
@@ -1083,64 +1206,11 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
             env->DeleteLocalRef(rgba);
             env->DeleteLocalRef(backgroundRgba);
             env->DeleteLocalRef(obj);
-            env->DeleteLocalRef(cls);
             return nullptr;
         }
     }
-    const auto getField = [env, cls](const char* name, const char* signature) -> jfieldID {
-        return env->ExceptionCheck() ? nullptr : env->GetFieldID(cls, name, signature);
-    };
-    const jfieldID fidAvailable = getField("available", "Z");
-    const jfieldID fidId = getField("id", "Ljava/lang/String;");
-    const jfieldID fidTitle = getField("title", "Ljava/lang/String;");
-    const jfieldID fidMessage = getField("message", "Ljava/lang/String;");
-    const jfieldID fidDestination = getField("destinationUrl", "Ljava/lang/String;");
-    const jfieldID fidWidth = getField("width", "I");
-    const jfieldID fidHeight = getField("height", "I");
-    const jfieldID fidCampaignCount = getField("campaignCount", "I");
-    const jfieldID fidAnimated = getField("animated", "Z");
-    const jfieldID fidBackgroundWidth = getField("backgroundWidth", "I");
-    const jfieldID fidBackgroundHeight = getField("backgroundHeight", "I");
-    const jfieldID fidTextColor = getField("textColor", "I");
-    const jfieldID fidCardColor = getField("cardColor", "I");
-    const jfieldID fidTextX = getField("textX", "I");
-    const jfieldID fidTextY = getField("textY", "I");
-    const jfieldID fidImageFit = getField("imageFit", "I");
-    const jfieldID fidTitleColor = getField("titleColor", "I");
-    const jfieldID fidMessageColor = getField("messageColor", "I");
-    const jfieldID fidTitleX = getField("titleX", "I");
-    const jfieldID fidTitleY = getField("titleY", "I");
-    const jfieldID fidMessageX = getField("messageX", "I");
-    const jfieldID fidMessageY = getField("messageY", "I");
-    const jfieldID fidIconScale = getField("iconScale", "I");
-    const jfieldID fidBackgroundScale = getField("backgroundScale", "I");
-    const jfieldID fidIconX = getField("iconX", "I");
-    const jfieldID fidIconY = getField("iconY", "I");
-    const jfieldID fidDurationSeconds = getField("durationSeconds", "I");
-    const jfieldID fidIconOpacity = getField("iconOpacity", "I");
-    const jfieldID fidBackgroundOpacity = getField("backgroundOpacity", "I");
-    const jfieldID fidBackgroundColorOpacity = getField("backgroundColorOpacity", "I");
-    const jfieldID fidGeneration = getField("generation", "J");
-    const jfieldID fidRgba = getField("rgba", "[B");
-    const jfieldID fidBackgroundRgba = getField("backgroundRgba", "[B");
-    if (env->ExceptionCheck() || !fidAvailable || !fidId || !fidTitle || !fidMessage
-            || !fidDestination || !fidWidth || !fidHeight || !fidCampaignCount
-            || !fidAnimated || !fidBackgroundWidth || !fidBackgroundHeight
-            || !fidTextColor || !fidCardColor || !fidTextX || !fidTextY || !fidImageFit
-            || !fidTitleColor || !fidMessageColor || !fidTitleX
-            || !fidTitleY || !fidMessageX || !fidMessageY || !fidIconScale
-            || !fidBackgroundScale || !fidIconX || !fidIconY || !fidDurationSeconds
-            || !fidIconOpacity || !fidBackgroundOpacity || !fidBackgroundColorOpacity
-            || !fidGeneration || !fidRgba
-            || !fidBackgroundRgba) {
-        env->DeleteLocalRef(rgba);
-        env->DeleteLocalRef(backgroundRgba);
-        env->DeleteLocalRef(obj);
-        env->DeleteLocalRef(cls);
-        return nullptr;
-    }
     const auto newString = [env](const char* value) -> jstring {
-        return env->ExceptionCheck() ? nullptr : env->NewStringUTF(value);
+        return (value && value[0]) ? env->NewStringUTF(value) : env->NewStringUTF("");
     };
     jstring id = newString(info.id);
     jstring title = newString(info.title);
@@ -1154,50 +1224,48 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
         env->DeleteLocalRef(rgba);
         env->DeleteLocalRef(backgroundRgba);
         env->DeleteLocalRef(obj);
-        env->DeleteLocalRef(cls);
         return nullptr;
     }
-    env->SetBooleanField(obj, fidAvailable, info.available ? JNI_TRUE : JNI_FALSE);
-    env->SetObjectField(obj, fidId, id);
-    env->SetObjectField(obj, fidTitle, title);
-    env->SetObjectField(obj, fidMessage, message);
-    env->SetObjectField(obj, fidDestination, destination);
-    env->SetIntField(obj, fidWidth, (jint)info.width);
-    env->SetIntField(obj, fidHeight, (jint)info.height);
-    env->SetIntField(obj, fidCampaignCount, (jint)info.campaign_count);
-    env->SetBooleanField(obj, fidAnimated, info.animated ? JNI_TRUE : JNI_FALSE);
-    env->SetIntField(obj, fidBackgroundWidth, (jint)info.background_width);
-    env->SetIntField(obj, fidBackgroundHeight, (jint)info.background_height);
-    env->SetIntField(obj, fidTextColor, (jint)info.text_color);
-    env->SetIntField(obj, fidCardColor, (jint)info.card_color);
-    env->SetIntField(obj, fidTextX, (jint)info.text_x);
-    env->SetIntField(obj, fidTextY, (jint)info.text_y);
-    env->SetIntField(obj, fidImageFit, (jint)info.image_fit);
-    env->SetIntField(obj, fidTitleColor, (jint)info.title_color);
-    env->SetIntField(obj, fidMessageColor, (jint)info.message_color);
-    env->SetIntField(obj, fidTitleX, (jint)info.title_x);
-    env->SetIntField(obj, fidTitleY, (jint)info.title_y);
-    env->SetIntField(obj, fidMessageX, (jint)info.message_x);
-    env->SetIntField(obj, fidMessageY, (jint)info.message_y);
-    env->SetIntField(obj, fidIconScale, (jint)info.icon_scale);
-    env->SetIntField(obj, fidBackgroundScale, (jint)info.background_scale);
-    env->SetIntField(obj, fidIconX, (jint)info.icon_x);
-    env->SetIntField(obj, fidIconY, (jint)info.icon_y);
-    env->SetIntField(obj, fidDurationSeconds,
+    env->SetBooleanField(obj, g_sponsor_fields.fidAvailable, info.available ? JNI_TRUE : JNI_FALSE);
+    env->SetObjectField(obj, g_sponsor_fields.fidId, id);
+    env->SetObjectField(obj, g_sponsor_fields.fidTitle, title);
+    env->SetObjectField(obj, g_sponsor_fields.fidMessage, message);
+    env->SetObjectField(obj, g_sponsor_fields.fidDestination, destination);
+    env->SetIntField(obj, g_sponsor_fields.fidWidth, (jint)info.width);
+    env->SetIntField(obj, g_sponsor_fields.fidHeight, (jint)info.height);
+    env->SetIntField(obj, g_sponsor_fields.fidCampaignCount, (jint)info.campaign_count);
+    env->SetBooleanField(obj, g_sponsor_fields.fidAnimated, info.animated ? JNI_TRUE : JNI_FALSE);
+    env->SetIntField(obj, g_sponsor_fields.fidBackgroundWidth, (jint)info.background_width);
+    env->SetIntField(obj, g_sponsor_fields.fidBackgroundHeight, (jint)info.background_height);
+    env->SetIntField(obj, g_sponsor_fields.fidTextColor, (jint)info.text_color);
+    env->SetIntField(obj, g_sponsor_fields.fidCardColor, (jint)info.card_color);
+    env->SetIntField(obj, g_sponsor_fields.fidTextX, (jint)info.text_x);
+    env->SetIntField(obj, g_sponsor_fields.fidTextY, (jint)info.text_y);
+    env->SetIntField(obj, g_sponsor_fields.fidImageFit, (jint)info.image_fit);
+    env->SetIntField(obj, g_sponsor_fields.fidTitleColor, (jint)info.title_color);
+    env->SetIntField(obj, g_sponsor_fields.fidMessageColor, (jint)info.message_color);
+    env->SetIntField(obj, g_sponsor_fields.fidTitleX, (jint)info.title_x);
+    env->SetIntField(obj, g_sponsor_fields.fidTitleY, (jint)info.title_y);
+    env->SetIntField(obj, g_sponsor_fields.fidMessageX, (jint)info.message_x);
+    env->SetIntField(obj, g_sponsor_fields.fidMessageY, (jint)info.message_y);
+    env->SetIntField(obj, g_sponsor_fields.fidIconScale, (jint)info.icon_scale);
+    env->SetIntField(obj, g_sponsor_fields.fidBackgroundScale, (jint)info.background_scale);
+    env->SetIntField(obj, g_sponsor_fields.fidIconX, (jint)info.icon_x);
+    env->SetIntField(obj, g_sponsor_fields.fidIconY, (jint)info.icon_y);
+    env->SetIntField(obj, g_sponsor_fields.fidDurationSeconds,
                      (jint)(info.duration_seconds > 0 ? info.duration_seconds : 10));
-    env->SetIntField(obj, fidIconOpacity, (jint)info.icon_opacity);
-    env->SetIntField(obj, fidBackgroundOpacity, (jint)info.background_opacity);
-    env->SetIntField(obj, fidBackgroundColorOpacity, (jint)info.background_color_opacity);
-    env->SetLongField(obj, fidGeneration, (jlong)info.generation);
-    env->SetObjectField(obj, fidRgba, rgba);
-    env->SetObjectField(obj, fidBackgroundRgba, backgroundRgba);
+    env->SetIntField(obj, g_sponsor_fields.fidIconOpacity, (jint)info.icon_opacity);
+    env->SetIntField(obj, g_sponsor_fields.fidBackgroundOpacity, (jint)info.background_opacity);
+    env->SetIntField(obj, g_sponsor_fields.fidBackgroundColorOpacity, (jint)info.background_color_opacity);
+    env->SetLongField(obj, g_sponsor_fields.fidGeneration, (jlong)info.generation);
+    env->SetObjectField(obj, g_sponsor_fields.fidRgba, rgba);
+    env->SetObjectField(obj, g_sponsor_fields.fidBackgroundRgba, backgroundRgba);
     env->DeleteLocalRef(id);
     env->DeleteLocalRef(title);
     env->DeleteLocalRef(message);
     env->DeleteLocalRef(destination);
     env->DeleteLocalRef(rgba);
     env->DeleteLocalRef(backgroundRgba);
-    env->DeleteLocalRef(cls);
     return env->ExceptionCheck() ? nullptr : obj;
 }
 

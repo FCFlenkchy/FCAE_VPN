@@ -1331,13 +1331,15 @@ mod ffi {
         if PSI_RTT_PROBE_ACTIVE.swap(true, Relaxed) {
             return;
         }
-        PSI_RTT_NEXT_PROBE_SECS.store(now + 2, Relaxed);
-        std::thread::spawn(move || {
-            if let Some(ms) = probe_rtt_once(port) {
-                PSI_RTT_MS.store(ms, Relaxed);
-            }
-            PSI_RTT_PROBE_ACTIVE.store(false, Relaxed);
-        });
+        PSI_RTT_NEXT_PROBE_SECS.store(now + 4, Relaxed);
+        let _ = std::thread::Builder::new()
+            .name("fcae-psi-rtt".into())
+            .spawn(move || {
+                if let Some(ms) = probe_rtt_once(port) {
+                    PSI_RTT_MS.store(ms, Relaxed);
+                }
+                PSI_RTT_PROBE_ACTIVE.store(false, Relaxed);
+            });
     }
 
     /// Cumulative tunneled bytes from the shim's BytesTransferred notices.

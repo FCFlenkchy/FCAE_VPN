@@ -283,9 +283,10 @@ impl Supervisor {
         let thread = std::thread::Builder::new()
             .name("fcae-session".into())
             .spawn(move || {
+                let workers = if cfg!(target_os = "android") { 2 } else { 4 };
                 let rt = match tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
-                    .worker_threads(4)
+                    .worker_threads(workers)
                     .thread_name("fcae-worker")
                     .build()
                 {
