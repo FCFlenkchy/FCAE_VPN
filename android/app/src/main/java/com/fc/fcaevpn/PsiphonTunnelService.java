@@ -412,7 +412,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // begins every start by stopping the previous instance, so re-entering
     // while a controller is mid-boot kills it (a tight
     // "starting tunnel -> stopping Psiphon library" loop).
-    private volatile boolean startInFlight;
+    private static volatile boolean startInFlight;
     private volatile boolean psiphonUp;
     private volatile boolean handshakeConnected;
     private volatile boolean handshakeRegion;
