@@ -1630,8 +1630,9 @@ void render_ui() {
 
         // ── Check for Updates button ────────────────────────────
         {
-            float btn_width = 130.0f;
+            float btn_width = 136.0f;
             ImGui::SameLine(0, 12);
+            ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
             FcaeUpdateInfo info = {};
             info.struct_size = sizeof(info);
             info.abi_version = FCAE_ABI_VERSION;
@@ -1721,6 +1722,7 @@ void render_ui() {
                     s_check_start_time = std::chrono::steady_clock::now();
                 }
             }
+            ImGui::PopStyleVar(); // Pop ButtonTextAlign
 
             // Update popup modal
             if (s_update_popup_open) {
@@ -1898,8 +1900,10 @@ void render_ui() {
     {
         const float avail_w = ImGui::GetContentRegionAvail().x;
         const bool use_columns = (avail_w >= 540.0f);
-        const float left_w = use_columns ? 210.0f : avail_w;
-        const float right_w = use_columns ? (avail_w - left_w - 14.0f) : avail_w;
+        const float left_w = use_columns ? 230.0f : avail_w;
+        // Sponsor card width: fixed clean compact width on desktop, aligned to right edge
+        const float card_w = use_columns ? std::min(380.0f, std::max(280.0f, avail_w - left_w - 24.0f)) : avail_w;
+        const float sponsor_offset_x = use_columns ? (avail_w - card_w) : 0.0f;
 
         ImGui::BeginGroup(); // Left column: Stats
         {
@@ -1922,7 +1926,7 @@ void render_ui() {
 
             ImGui::Spacing();
             char rtt_buf[24];
-            snprintf(rtt_buf, sizeof(rtt_buf), "Ping: %ums",
+            snprintf(rtt_buf, sizeof(rtt_buf), "%ums",
                      telem.state == FCAE_STATE_CONNECTED ? telem.rtt_ms : 0u);
             ImGui::TextColored(ImVec4(0.70f, 0.90f, 0.70f, 1.0f), "%s", rtt_buf);
             ImGui::SameLine(0, 10);
@@ -1940,7 +1944,7 @@ void render_ui() {
         ImGui::EndGroup();
 
         if (use_columns) {
-            ImGui::SameLine(0, 14.0f);
+            ImGui::SameLine(sponsor_offset_x);
         } else {
             ImGui::Spacing();
         }
@@ -1954,6 +1958,7 @@ void render_ui() {
             const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Want to become a sponsor? Click me";
 
             // ── Single Header Row: SPONSORS | Link | [↻] [🔊] ──
+            const float header_start_x = ImGui::GetCursorPosX();
             ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORS");
 
             ImGui::SameLine(0, 8);
@@ -1965,13 +1970,7 @@ void render_ui() {
 
             const float btn_size = 20.0f;
             const float total_btn_w = btn_size * 2.0f + 6.0f;
-            const float start_x = ImGui::GetCursorPosX();
-            const float avail_w_row = ImGui::GetContentRegionAvail().x;
-            if (avail_w_row > total_btn_w) {
-                ImGui::SameLine(start_x + avail_w_row - total_btn_w);
-            } else {
-                ImGui::SameLine(0, 6);
-            }
+            ImGui::SameLine(header_start_x + card_w - total_btn_w);
 
             // ↻ Refresh Button (Custom vector drawing, no font missing-glyph '?')
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btn_size * 0.5f);
@@ -2087,7 +2086,7 @@ void render_ui() {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
             ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.49f, 0.76f, 1.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
-            ImGui::BeginChild("##sponsor_card", ImVec2(right_w, sponsor_card_height),
+            ImGui::BeginChild("##sponsor_card", ImVec2(card_w, sponsor_card_height),
                 ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
 
             if (background_texture) {
@@ -2173,7 +2172,7 @@ void render_ui() {
                         : "Click to open sponsor website");
                 ImGui::SetCursorScreenPos(after_image);
             } else {
-                const ImVec2 card_size(right_w, 48.0f);
+                const ImVec2 card_size(card_w, sponsor_card_height);
                 ImGui::InvisibleButton("##sponsor_card_touch", card_size);
                 if (ImGui::IsItemClicked() && strncmp(sponsor_destination, "https://", 8) == 0)
                     open_link(sponsor_destination);
@@ -2183,23 +2182,39 @@ void render_ui() {
             const ImVec2 content_max = ImGui::GetWindowContentRegionMax();
             const float content_width = content_max.x - content_min.x;
             const float content_height = content_max.y - content_min.y;
-            const float title_y = content_height * (float)s_sponsor.title_y / 100.0f;
-            const ImVec4 title_color = sponsor_color(s_sponsor.title_color, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_Text, title_color);
-            const ImVec2 title_origin = sponsor_text_origin(sponsor_title, content_width, s_sponsor.title_x, title_y);
-            ImGui::SetCursorPos(title_origin);
-            ImGui::PushTextWrapPos(content_width);
-            ImGui::TextUnformatted(sponsor_title);
-            ImGui::PopTextWrapPos();
-            ImGui::PopStyleColor();
-            if (sponsor_message[0] != '\0') {
-                const float message_y = content_height * (float)s_sponsor.message_y / 100.0f;
-                const ImVec4 message_color = sponsor_color(s_sponsor.message_color, ImVec4(0.85f, 0.91f, 1.0f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_Text, message_color);
-                ImGui::SetCursorPos(sponsor_text_origin(sponsor_message, content_width, s_sponsor.message_x, message_y));
+
+            if (sponsor_has_content) {
+                const float title_y = content_height * (float)s_sponsor.title_y / 100.0f;
+                const ImVec4 title_color = sponsor_color(s_sponsor.title_color, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, title_color);
+                const ImVec2 title_origin = sponsor_text_origin(sponsor_title, content_width, s_sponsor.title_x, title_y);
+                ImGui::SetCursorPos(title_origin);
                 ImGui::PushTextWrapPos(content_width);
-                ImGui::TextWrapped("%s", sponsor_message);
+                ImGui::TextUnformatted(sponsor_title);
                 ImGui::PopTextWrapPos();
+                ImGui::PopStyleColor();
+                if (sponsor_message[0] != '\0') {
+                    const float message_y = content_height * (float)s_sponsor.message_y / 100.0f;
+                    const ImVec4 message_color = sponsor_color(s_sponsor.message_color, ImVec4(0.85f, 0.91f, 1.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, message_color);
+                    ImGui::SetCursorPos(sponsor_text_origin(sponsor_message, content_width, s_sponsor.message_x, message_y));
+                    ImGui::PushTextWrapPos(content_width);
+                    ImGui::TextWrapped("%s", sponsor_message);
+                    ImGui::PopTextWrapPos();
+                    ImGui::PopStyleColor();
+                }
+            } else {
+                // Default sponsor placeholder cleanly centered
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.80f, 0.90f, 1.0f, 1.0f));
+                const ImVec2 title_origin = sponsor_text_origin("Become a sponsor", content_width, 50, 16.0f);
+                ImGui::SetCursorPos(title_origin);
+                ImGui::TextUnformatted("Become a sponsor");
+                ImGui::PopStyleColor();
+
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.65f, 0.95f, 1.0f));
+                const ImVec2 msg_origin = sponsor_text_origin("Click to learn more", content_width, 50, 42.0f);
+                ImGui::SetCursorPos(msg_origin);
+                ImGui::TextUnformatted("Click to learn more");
                 ImGui::PopStyleColor();
             }
             ImGui::EndChild();
