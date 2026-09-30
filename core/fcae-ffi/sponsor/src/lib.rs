@@ -3320,75 +3320,97 @@ fn decode_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, String>
     decode_stream(campaign, format, BufReader::new(file))
 }
 
+fn decode_animation_frames<I>(
+    campaign: Campaign,
+    source_width: u32,
+    source_height: u32,
+    frames_iter: I,
+    format_name: &'static str,
+) -> Result<ReadyCampaign, String>
+where
+    I: Iterator<Item = Result<image::Frame, image::ImageError>>,
+{
+    validate_dimensions(source_width, source_height, 1)?;
+    let mut frames = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut compacted = false;
+    let mut width = 0u32;
+    let mut height = 0u32;
+    for (source_index, frame) in frames_iter.enumerate() {
+        if source_index >= MAX_INPUT_FRAMES { break; }
+        let frame = frame.map_err(|e| e.to_string())?;
+        if frame.buffer().width() != source_width || frame.buffer().height() != source_height {
+            return Err(format!("inconsistent {format_name} frame dimensions"));
+        }
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        // Round to the nearest millisecond before clamping: truncation
+        // biased every sub-millisecond remainder toward faster playback.
+        let millis = if denom == 0 {
+            100
+        } else {
+            let exact = (numer as u64 + (denom as u64 / 2)) / denom as u64;
+            exact.clamp(MIN_FRAME_DELAY_MS, MAX_FRAME_DELAY_MS)
+        };
+        // Every frame is retained at the card canvas, so a GIF/WebP costs what a
+        // video costs and the budget below buys frames instead of pixels.
+        let (frame_width, frame_height, rgba) = canvas_rgba(frame.into_buffer());
+        if frames.is_empty() {
+            width = frame_width;
+            height = frame_height;
+        } else if frame_width != width || frame_height != height {
+            return Err(format!("inconsistent {format_name} frame dimensions"));
+        }
+        let rgba_size = rgba.len();
+        // Fold identical consecutive frames into their predecessor: the
+        // new frame's display time is added to the last frame's and the
+        // duplicate is discarded, so it does not consume retention budget.
+        if repeats_last_frame(&frames, &rgba) {
+            frames.last_mut().expect("a last frame").delay += Duration::from_micros((millis * 1_000).max(FRAME_DELAY_US));
+            continue;
+        }
+        // Retain the complete bounded timeline. When the retention budget is
+        // reached, merge adjacent frames and add their delays instead of
+        // silently replaying only the prefix.
+        while total_bytes.saturating_add(rgba_size) > MAX_DECODED_BYTES && frames.len() > 1 {
+            compact_video_frames(&mut frames, &mut total_bytes);
+            compacted = true;
+        }
+        if total_bytes.saturating_add(rgba_size) > MAX_DECODED_BYTES {
+            break;
+        }
+        total_bytes += rgba_size;
+        frames.push(Frame {
+            rgba: Arc::new(rgba),
+            delay: Duration::from_micros((millis * 1_000).max(FRAME_DELAY_US)),
+        });
+    }
+    if frames.is_empty() {
+        return Err(format!("invalid {format_name} frame count"));
+    }
+    if compacted {
+        rebalance_delays(&mut frames);
+    }
+    Ok(decoded_plane(campaign, width, height, frames))
+}
+
 fn decode_stream<R: BufRead + Seek>(
     campaign: Campaign,
     format: ImageFormat,
-    reader: R,
+    mut reader: R,
 ) -> Result<ReadyCampaign, String> {
     if format == ImageFormat::Gif {
         let decoder = image::codecs::gif::GifDecoder::new(reader).map_err(|e| e.to_string())?;
         let (source_width, source_height) = decoder.dimensions();
-        validate_dimensions(source_width, source_height, 1)?;
-        let mut frames = Vec::new();
-        let mut total_bytes = 0usize;
-        let mut compacted = false;
-        let mut width = 0u32;
-        let mut height = 0u32;
-        for (source_index, frame) in decoder.into_frames().enumerate() {
-            if source_index >= MAX_INPUT_FRAMES { break; }
-            let frame = frame.map_err(|e| e.to_string())?;
-            if frame.buffer().width() != source_width || frame.buffer().height() != source_height {
-                return Err("inconsistent GIF frame dimensions".into());
-            }
-            let (numer, denom) = frame.delay().numer_denom_ms();
-            // Round to the nearest millisecond before clamping: truncation
-            // biased every sub-millisecond remainder toward faster playback.
-            let millis = if denom == 0 {
-                100
-            } else {
-                let exact = (numer as u64 + (denom as u64 / 2)) / denom as u64;
-                exact.clamp(MIN_FRAME_DELAY_MS, MAX_FRAME_DELAY_MS)
-            };
-            // Every frame is retained at the card canvas, so a GIF costs what a
-            // video costs and the budget below buys frames instead of pixels.
-            let (frame_width, frame_height, rgba) = canvas_rgba(frame.into_buffer());
-            if frames.is_empty() {
-                width = frame_width;
-                height = frame_height;
-            } else if frame_width != width || frame_height != height {
-                return Err("inconsistent GIF frame dimensions".into());
-            }
-            let rgba_size = rgba.len();
-            // Fold identical consecutive frames into their predecessor: the
-            // new frame's display time is added to the last frame's and the
-            // duplicate is discarded, so it does not consume retention budget.
-            if repeats_last_frame(&frames, &rgba) {
-                frames.last_mut().expect("a last frame").delay += Duration::from_micros((millis * 1_000).max(FRAME_DELAY_US));
-                continue;
-            }
-            // Retain the complete bounded timeline. When the retention budget is
-            // reached, merge adjacent frames and add their delays instead of
-            // silently replaying only the prefix.
-            while total_bytes.saturating_add(rgba_size) > MAX_DECODED_BYTES && frames.len() > 1 {
-                compact_video_frames(&mut frames, &mut total_bytes);
-                compacted = true;
-            }
-            if total_bytes.saturating_add(rgba_size) > MAX_DECODED_BYTES {
-                break;
-            }
-            total_bytes += rgba_size;
-            frames.push(Frame {
-                rgba: Arc::new(rgba),
-                delay: Duration::from_micros((millis * 1_000).max(FRAME_DELAY_US)),
-            });
+        return decode_animation_frames(campaign, source_width, source_height, decoder.into_frames(), "GIF");
+    }
+
+    if format == ImageFormat::WebP {
+        let decoder = image::codecs::webp::WebPDecoder::new(&mut reader).map_err(|e| e.to_string())?;
+        if decoder.has_animation() {
+            let (source_width, source_height) = decoder.dimensions();
+            return decode_animation_frames(campaign, source_width, source_height, decoder.into_frames(), "WebP");
         }
-        if frames.is_empty() {
-            return Err("invalid GIF frame count".into());
-        }
-        if compacted {
-            rebalance_delays(&mut frames);
-        }
-        return Ok(decoded_plane(campaign, width, height, frames));
+        reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     }
 
     if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP) {
