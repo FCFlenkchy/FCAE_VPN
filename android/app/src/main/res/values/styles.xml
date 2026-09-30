@@ -32,4 +32,24 @@
         <!-- System bars stay dark with light icons (API 23+, minSdk 26). -->
         <item name="android:windowLightStatusBar">false</item>
     </style>
+
+    <!-- Round icon button shared by About, sponsor refresh and sponsor audio;
+         mirrors the desktop round_icon_button (20px circle, #334155 fill). -->
+    <style name="Widget.FCAEVPN.IconButton" parent="Widget.MaterialComponents.Button.UnelevatedButton">
+        <item name="android:layout_width">28dp</item>
+        <item name="android:layout_height">28dp</item>
+        <item name="android:insetLeft">0dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetRight">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:padding">0dp</item>
+        <item name="cornerRadius">14dp</item>
+        <item name="backgroundTint">#FF334155</item>
+        <item name="iconGravity">textStart</item>
+        <item name="iconPadding">0dp</item>
+        <item name="iconSize">16dp</item>
+        <item name="iconTint">#FFF1F7FF</item>
+    </style>
 </resources>

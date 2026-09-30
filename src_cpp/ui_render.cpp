@@ -191,17 +191,38 @@ static ImVec4 sponsor_color(uint32_t packed, ImVec4 fallback) {
         ((packed >> 24) & 0xFF) / 255.0f);
 }
 
-// A card text position is the horizontal centre of the block, measured with the
-// font and wrap width in use and clamped so a manifest position can never push
-// text outside the card. `y` stays the top edge of the block.
-static ImVec2 sponsor_text_origin(
-        const char* text, float content_width, unsigned x_percent, float y) {
-    const ImVec2 size = ImGui::CalcTextSize(text, nullptr, false, content_width);
-    const float anchor = content_width
-        * std::clamp((float)x_percent / 100.0f, 0.0f, 1.0f);
-    return ImVec2(
-        std::clamp(anchor - size.x * 0.5f, 0.0f, std::max(0.0f, content_width - size.x)),
-        y);
+// Sponsor text coordinates share Android's contract: x_percent is the horizontal
+// centre and top_y the top edge of the text block, both relative to the whole
+// card, with every wrapped line centred inside the block.
+static void draw_sponsor_text(const char* text, const ImVec2& card, float inset,
+                              unsigned x_percent, float top_y, float scale, const ImVec4& color) {
+    if (!text || !*text) return;
+    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * scale);
+    ImFont* const font = ImGui::GetFont();
+    const float size = ImGui::GetFontSize();
+    const float wrap_w = std::max(1.0f, card.x - inset * 2.0f);
+    const char* const end = text + strlen(text);
+    const ImVec2 block = font->CalcTextSizeA(size, FLT_MAX, wrap_w, text, end);
+    const float anchor_x = card.x * std::clamp((float)x_percent / 100.0f, 0.0f, 1.0f);
+    const ImVec2 win = ImGui::GetWindowPos();
+    const float left = win.x + std::clamp(anchor_x - block.x * 0.5f, inset,
+                                          std::max(inset, card.x - inset - block.x));
+    float y = win.y + std::clamp(top_y, 0.0f, std::max(0.0f, card.y - block.y));
+    ImDrawList* const draw = ImGui::GetWindowDrawList();
+    const ImU32 col = ImGui::GetColorU32(color);
+    for (const char* s = text; s < end; y += size) {
+        const char* line_end = static_cast<const char*>(memchr(s, '\n', (size_t)(end - s)));
+        if (!line_end) line_end = end;
+        const char* const wrap = font->CalcWordWrapPosition(size, s, line_end, wrap_w);
+        const char* visible_end = wrap;
+        while (visible_end > s && (visible_end[-1] == ' ' || visible_end[-1] == '\t')) --visible_end;
+        const float line_w = font->CalcTextSizeA(size, FLT_MAX, 0.0f, s, visible_end).x;
+        draw->AddText(font, size, ImVec2(left + (block.x - line_w) * 0.5f, y), col, s, visible_end);
+        s = wrap;
+        while (s < line_end && (*s == ' ' || *s == '\t')) ++s;
+        if (s == line_end && line_end < end) ++s;
+    }
+    ImGui::PopFont();
 }
 
 // What the last painted frame looked like / when it was painted.
@@ -776,6 +797,80 @@ static void same_line_right_aligned(float right_edge_x, float item_w, float min_
     ImGui::SameLine(0.0f, 0.0f);
     const float gap = right_edge_x - item_w - ImGui::GetCursorScreenPos().x;
     ImGui::SameLine(0.0f, gap > min_spacing ? gap : min_spacing);
+}
+
+enum class UiIcon : uint8_t { Info, Refresh, SoundOn, SoundOff };
+
+static constexpr float kIconButtonSize = 20.0f;
+
+// Shared by the About and sponsor buttons so they match Android's round icon
+// buttons. Geometry is snapped to whole pixels: strokes centred on pixel edges
+// were smeared across two columns and shimmered next to the crisp UI text.
+// The button is vertically centred on the text line it follows.
+static bool round_icon_button(const char* id, UiIcon icon, bool toggled, const char* tooltip) {
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY()
+        + std::floor((ImGui::GetTextLineHeight() - kIconButtonSize) * 0.5f));
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(kIconButtonSize, kIconButtonSize));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool held = ImGui::IsItemActive();
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    ImGui::SetItemTooltip("%s", tooltip);
+
+    const ImVec4 base = toggled ? ImVec4(0.102f, 0.380f, 0.620f, 1.0f)
+                                : ImVec4(0.200f, 0.255f, 0.333f, 1.0f);
+    const float tint = held ? -0.04f : hovered ? 0.06f : 0.0f;
+    const ImU32 bg = ImGui::GetColorU32(ImVec4(base.x + tint, base.y + tint, base.z + tint, 1.0f));
+    const ImU32 fg = IM_COL32(241, 247, 255, 255);
+    const float cx = std::floor(pos.x) + kIconButtonSize * 0.5f;
+    const float cy = std::floor(pos.y) + kIconButtonSize * 0.5f;
+    ImDrawList* const draw = ImGui::GetWindowDrawList();
+    draw->AddCircleFilled(ImVec2(cx, cy), kIconButtonSize * 0.5f, bg, 32);
+
+    switch (icon) {
+    case UiIcon::Info:
+        draw->AddRectFilled(ImVec2(cx - 1.0f, cy - 6.0f), ImVec2(cx + 1.0f, cy - 4.0f), fg);
+        draw->AddRectFilled(ImVec2(cx - 1.0f, cy - 2.0f), ImVec2(cx + 1.0f, cy + 6.0f), fg);
+        break;
+    case UiIcon::Refresh: {
+        constexpr float kPi = 3.14159265f;
+        constexpr float kRadius = 5.5f;
+        constexpr float kGapCentre = -kPi * 0.25f;
+        constexpr float kGapHalf = 0.5f;
+        const float a0 = kGapCentre + kGapHalf;
+        const float a1 = kGapCentre - kGapHalf + kPi * 2.0f;
+        draw->PathArcTo(ImVec2(cx, cy), kRadius, a0, a1, 24);
+        draw->PathStroke(fg, ImDrawFlags_None, 1.5f);
+        const ImVec2 n(cosf(a1), sinf(a1));
+        const ImVec2 t(-n.y, n.x);
+        const ImVec2 e(cx + n.x * kRadius, cy + n.y * kRadius);
+        draw->AddTriangleFilled(ImVec2(e.x + n.x * 3.0f, e.y + n.y * 3.0f),
+                                ImVec2(e.x + t.x * 3.5f, e.y + t.y * 3.5f),
+                                ImVec2(e.x - n.x * 3.0f, e.y - n.y * 3.0f), fg);
+        break;
+    }
+    case UiIcon::SoundOn:
+    case UiIcon::SoundOff: {
+        const float ox = icon == UiIcon::SoundOn ? cx - 2.0f : cx;
+        draw->AddRectFilled(ImVec2(ox - 5.0f, cy - 2.0f), ImVec2(ox - 2.0f, cy + 2.0f), fg);
+        const ImVec2 cone[4] = {
+            ImVec2(ox - 2.0f, cy - 2.0f), ImVec2(ox + 2.0f, cy - 5.0f),
+            ImVec2(ox + 2.0f, cy + 5.0f), ImVec2(ox - 2.0f, cy + 2.0f),
+        };
+        draw->AddConvexPolyFilled(cone, 4, fg);
+        if (icon == UiIcon::SoundOn) {
+            draw->PathArcTo(ImVec2(ox + 2.0f, cy), 3.5f, -0.9f, 0.9f, 8);
+            draw->PathStroke(fg, ImDrawFlags_None, 1.5f);
+            draw->PathArcTo(ImVec2(ox + 2.0f, cy), 6.5f, -0.8f, 0.8f, 10);
+            draw->PathStroke(fg, ImDrawFlags_None, 1.5f);
+        } else {
+            draw->AddLine(ImVec2(cx - 5.0f, cy - 5.0f), ImVec2(cx + 5.0f, cy + 5.0f),
+                          IM_COL32(239, 68, 68, 255), 1.5f);
+        }
+        break;
+    }
+    }
+    return clicked;
 }
 
 static void fmt_bytes(char* buf, size_t len, uint64_t b) {
@@ -1377,32 +1472,9 @@ void render_ui() {
                            "%s  |  %s", fcae_display_version(),
                            build_is_prerelease() ? "pre-release" : "release");
 
-        const float about_btn_size = 20.0f;
-        same_line_right_aligned(title_right_x, about_btn_size, 8.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, about_btn_size * 0.5f);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.25f, 0.33f, 0.85f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.38f, 0.52f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.20f, 0.28f, 1.0f));
-        if (ImGui::Button("##about_btn", ImVec2(about_btn_size, about_btn_size))) {
+        same_line_right_aligned(title_right_x, kIconButtonSize, 8.0f);
+        if (round_icon_button("##about_btn", UiIcon::Info, false, "About FCAE VPN"))
             s_about_popup_open = true;
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            ImGui::SetTooltip("About FCAE VPN");
-        }
-        {
-            const ImVec2 bmin = ImGui::GetItemRectMin();
-            const ImVec2 bmax = ImGui::GetItemRectMax();
-            ImDrawList* draw = ImGui::GetWindowDrawList();
-            const float cx = (bmin.x + bmax.x) * 0.5f;
-            const float cy = (bmin.y + bmax.y) * 0.5f;
-            const ImU32 ic_col = IM_COL32(230, 240, 255, 240);
-            draw->AddCircle(ImVec2(cx, cy), 6.5f, ic_col, 20, 1.3f);
-            draw->AddCircleFilled(ImVec2(cx, cy - 3.2f), 1.1f, ic_col);
-            draw->AddLine(ImVec2(cx, cy - 0.8f), ImVec2(cx, cy + 3.8f), ic_col, 1.4f);
-        }
-        ImGui::PopStyleColor(3);
-        ImGui::PopStyleVar();
 
         ImGui::Spacing();
 
@@ -1999,7 +2071,7 @@ void render_ui() {
             const bool sponsor_has_content = s_sponsor.available;
             const char* sponsor_destination = sponsor_has_content ? s_sponsor.destination_url : sponsor_policy;
             const char* sponsor_title = sponsor_has_content ? s_sponsor.title : "Become a sponsor";
-            const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Want to become a sponsor? Click me";
+            const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Click to learn more";
 
             // ── Single Header Row: SPONSORS | Link | [↻] [🔊] ──
             const float sponsor_right_x = ImGui::GetCursorScreenPos().x + card_w;
@@ -2012,97 +2084,19 @@ void render_ui() {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", sponsor_policy);
 
-            const float btn_size = 20.0f;
-            const float total_btn_w = btn_size * 2.0f + 6.0f;
-            same_line_right_aligned(sponsor_right_x, total_btn_w, 6.0f);
-
-            // ↻ Refresh Button (Custom vector drawing, no font missing-glyph '?')
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btn_size * 0.5f);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.25f, 0.33f, 0.90f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.35f, 0.45f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.20f, 0.28f, 1.0f));
-            if (ImGui::Button("##sponsor_refresh", ImVec2(btn_size, btn_size))) {
+            same_line_right_aligned(sponsor_right_x, kIconButtonSize * 2.0f + 6.0f, 6.0f);
+            if (round_icon_button("##sponsor_refresh", UiIcon::Refresh, false, "Refresh sponsor manifest")) {
                 fcae_sponsor_refresh_manifest_now_async();
                 ui_request_redraw();
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Refresh sponsor manifest");
-            {
-                const ImVec2 rmin = ImGui::GetItemRectMin();
-                const ImVec2 rmax = ImGui::GetItemRectMax();
-                ImDrawList* draw = ImGui::GetWindowDrawList();
-                const float rcx = (rmin.x + rmax.x) * 0.5f;
-                const float rcy = (rmin.y + rmax.y) * 0.5f;
-                const float rad = 4.5f;
-                const ImU32 ic_col = IM_COL32(240, 245, 255, 240);
-                draw->PathArcTo(ImVec2(rcx, rcy), rad, 0.5f, 5.5f, 16);
-                draw->PathStroke(ic_col, 0, 1.4f);
-                const float arrow_x = rcx + rad * cosf(0.5f);
-                const float arrow_y = rcy + rad * sinf(0.5f);
-                draw->AddTriangleFilled(
-                    ImVec2(arrow_x - 3.0f, arrow_y - 2.5f),
-                    ImVec2(arrow_x + 2.5f, arrow_y - 0.5f),
-                    ImVec2(arrow_x - 0.5f, arrow_y + 3.0f),
-                    ic_col);
-            }
-            ImGui::PopStyleColor(3);
-
-            // 🔊 Audio Toggle Button
             const bool audio_enabled = fcae_sponsor_audio_enabled();
-            ImGui::SameLine(0, 6);
-            if (audio_enabled) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.10f, 0.38f, 0.62f, 0.95f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.16f, 0.52f, 0.78f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.08f, 0.30f, 0.50f, 1.0f));
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.25f, 0.33f, 0.90f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.35f, 0.45f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.20f, 0.28f, 1.0f));
-            }
-            const bool audio_clicked = ImGui::Button("##sponsor_audio", ImVec2(btn_size, btn_size));
-            const ImVec2 bmin = ImGui::GetItemRectMin();
-            const ImVec2 bmax = ImGui::GetItemRectMax();
-            ImDrawList* draw = ImGui::GetWindowDrawList();
-            const float cx = (bmin.x + bmax.x) * 0.5f;
-            const float cy = (bmin.y + bmax.y) * 0.5f;
-            const ImU32 ic_col = IM_COL32(240, 245, 255, 240);
-            if (audio_enabled) {
-                draw->AddRectFilled(ImVec2(cx - 5.0f, cy - 2.0f), ImVec2(cx - 2.5f, cy + 2.0f), ic_col, 0.5f);
-                const ImVec2 cone[3] = {
-                    ImVec2(cx - 2.5f, cy - 2.0f),
-                    ImVec2(cx + 1.0f, cy - 4.5f),
-                    ImVec2(cx + 1.0f, cy + 4.5f)
-                };
-                draw->AddTriangleFilled(cone[0], cone[1], cone[2], ic_col);
-                draw->AddTriangleFilled(cone[0], cone[2], ImVec2(cx - 2.5f, cy + 2.0f), ic_col);
-                draw->AddBezierCubic(
-                    ImVec2(cx + 3.0f, cy - 3.0f),
-                    ImVec2(cx + 5.0f, cy - 1.0f),
-                    ImVec2(cx + 5.0f, cy + 1.0f),
-                    ImVec2(cx + 3.0f, cy + 3.0f),
-                    ic_col, 1.2f);
-            } else {
-                draw->AddRectFilled(ImVec2(cx - 4.0f, cy - 2.0f), ImVec2(cx - 1.5f, cy + 2.0f), ic_col, 0.5f);
-                const ImVec2 cone[3] = {
-                    ImVec2(cx - 1.5f, cy - 2.0f),
-                    ImVec2(cx + 2.0f, cy - 4.5f),
-                    ImVec2(cx + 2.0f, cy + 4.5f)
-                };
-                draw->AddTriangleFilled(cone[0], cone[1], cone[2], ic_col);
-                draw->AddTriangleFilled(cone[0], cone[2], ImVec2(cx - 1.5f, cy + 2.0f), ic_col);
-                draw->AddLine(
-                    ImVec2(cx - 5.0f, cy - 5.0f),
-                    ImVec2(cx + 5.0f, cy + 5.0f),
-                    IM_COL32(239, 68, 68, 240), 1.4f);
-            }
-            ImGui::PopStyleColor(3);
-            ImGui::PopStyleVar();
-            if (audio_clicked) {
+            ImGui::SameLine(0.0f, 6.0f);
+            if (round_icon_button("##sponsor_audio", audio_enabled ? UiIcon::SoundOn : UiIcon::SoundOff,
+                                  audio_enabled,
+                                  audio_enabled ? "Turn sponsor sound off" : "Turn sponsor sound on")) {
                 fcae_sponsor_set_audio_enabled(!audio_enabled);
                 ui_request_redraw();
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(audio_enabled ? "Turn sponsor sound off" : "Turn sponsor sound on");
 
             // ── Sponsor Card ──
             ImTextureID texture = ImTextureID{};
@@ -2224,49 +2218,22 @@ void render_ui() {
                     open_link(sponsor_destination);
             }
 
-            const ImVec2 content_min = ImGui::GetWindowContentRegionMin();
-            const ImVec2 content_max = ImGui::GetWindowContentRegionMax();
-            const float content_width = content_max.x - content_min.x;
-            const float content_height = content_max.y - content_min.y;
-
+            const ImVec2 text_card(card_w, sponsor_card_height);
+            const float text_inset = ImGui::GetStyle().WindowPadding.x;
             if (sponsor_has_content) {
-                const float title_y = content_height * (float)s_sponsor.title_y / 100.0f;
-                const ImVec4 title_color = sponsor_color(s_sponsor.title_color, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_Text, title_color);
-                ImGui::SetWindowFontScale(title_scale);
-                const ImVec2 title_origin = sponsor_text_origin(sponsor_title, content_width / title_scale, s_sponsor.title_x, title_y);
-                ImGui::SetCursorPos(title_origin);
-                ImGui::PushTextWrapPos(content_width);
-                ImGui::TextUnformatted(sponsor_title);
-                ImGui::PopTextWrapPos();
-                ImGui::SetWindowFontScale(1.0f);
-                ImGui::PopStyleColor();
-                if (sponsor_message[0] != '\0') {
-                    const float message_y = content_height * (float)s_sponsor.message_y / 100.0f;
-                    const ImVec4 message_color = sponsor_color(s_sponsor.message_color, ImVec4(0.85f, 0.91f, 1.0f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, message_color);
-                    ImGui::SetWindowFontScale(message_scale);
-                    const ImVec2 msg_origin = sponsor_text_origin(sponsor_message, content_width / message_scale, s_sponsor.message_x, message_y);
-                    ImGui::SetCursorPos(msg_origin);
-                    ImGui::PushTextWrapPos(content_width);
-                    ImGui::TextWrapped("%s", sponsor_message);
-                    ImGui::PopTextWrapPos();
-                    ImGui::SetWindowFontScale(1.0f);
-                    ImGui::PopStyleColor();
-                }
+                draw_sponsor_text(sponsor_title, text_card, text_inset, s_sponsor.title_x,
+                    text_card.y * (float)s_sponsor.title_y / 100.0f, title_scale,
+                    sponsor_color(s_sponsor.title_color, ImVec4(1.0f, 1.0f, 1.0f, 1.0f)));
+                draw_sponsor_text(sponsor_message, text_card, text_inset, s_sponsor.message_x,
+                    text_card.y * (float)s_sponsor.message_y / 100.0f, message_scale,
+                    sponsor_color(s_sponsor.message_color, ImVec4(0.85f, 0.91f, 1.0f, 1.0f)));
             } else {
-                // Default sponsor placeholder cleanly centered
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.80f, 0.90f, 1.0f, 1.0f));
-                const ImVec2 title_origin = sponsor_text_origin("Become a sponsor", content_width, 50, 16.0f);
-                ImGui::SetCursorPos(title_origin);
-                ImGui::TextUnformatted("Become a sponsor");
-                ImGui::PopStyleColor();
-
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.65f, 0.95f, 1.0f));
-                const ImVec2 msg_origin = sponsor_text_origin("Click to learn more", content_width, 50, 42.0f);
-                ImGui::SetCursorPos(msg_origin);
-                ImGui::TextUnformatted("Click to learn more");
-                ImGui::PopStyleColor();
+                const float line_h = ImGui::GetFontSize();
+                const float top = (text_card.y - line_h * 3.0f) * 0.5f;
+                draw_sponsor_text(sponsor_title, text_card, text_inset, 50, top, 1.0f,
+                    ImVec4(0.80f, 0.90f, 1.0f, 1.0f));
+                draw_sponsor_text(sponsor_message, text_card, text_inset, 50, top + line_h * 2.0f, 1.0f,
+                    ImVec4(0.45f, 0.65f, 0.95f, 1.0f));
             }
             ImGui::EndChild();
             ImGui::PopStyleVar();

@@ -830,7 +830,7 @@ class MainActivity : AppCompatActivity() {
         sponsorGeneration = -1L
         sponsorTitle.text = "Become a sponsor"
         sponsorTitle.textSize = 20f
-        sponsorMessage.text = "Want to become a sponsor? Click me"
+        sponsorMessage.text = "Click to learn more"
         sponsorMessage.textSize = 14f
         sponsorMessage.visibility = android.view.View.VISIBLE
         sponsorTitle.setTextColor(Color.WHITE)
@@ -1424,7 +1424,7 @@ class MainActivity : AppCompatActivity() {
             text = "$displayVersion  |  ${if (buildIsPrerelease) "pre-release" else "release"}"
             setTextColor(Color.parseColor(if (buildIsPrerelease) "#FFF0B429" else "#FF8A93A6"))
         }
-        findViewById<TextView>(R.id.aboutButton).setOnClickListener { showAboutDialog() }
+        findViewById<android.view.View>(R.id.aboutButton).setOnClickListener { showAboutDialog() }
 
         // Mode changes only update which controls are applicable.
         spinnerMode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {

@@ -34,17 +34,11 @@
                 android:textSize="24sp"
                 android:textStyle="bold" />
 
-            <TextView
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/aboutButton"
-                android:layout_width="36dp"
-                android:layout_height="36dp"
-                android:clickable="true"
+                style="@style/Widget.FCAEVPN.IconButton"
                 android:contentDescription="About FCAE VPN"
-                android:focusable="true"
-                android:gravity="center"
-                android:text="ⓘ"
-                android:textColor="#FF9AA3B5"
-                android:textSize="22sp" />
+                app:icon="@drawable/ic_info" />
         </LinearLayout>
 
         <LinearLayout
@@ -1154,43 +1148,17 @@
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/sponsorRefresh"
-                        style="@style/Widget.MaterialComponents.Button.TextButton"
-                        android:layout_width="32dp"
-                        android:layout_height="32dp"
-                        android:background="@drawable/rounded_rectangle"
+                        style="@style/Widget.FCAEVPN.IconButton"
                         android:contentDescription="Refresh sponsor manifest"
-                        android:gravity="center"
-                        android:insetTop="0dp"
-                        android:insetBottom="0dp"
-                        android:minWidth="0dp"
-                        android:minHeight="0dp"
-                        android:padding="0dp"
-                        android:text="↻"
-                        android:textColor="#FF60A5FA"
-                        android:textSize="18sp" />
+                        app:icon="@drawable/ic_refresh" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/sponsorAudioToggle"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:layout_marginStart="4dp"
-                        android:alpha="0.95"
+                        style="@style/Widget.FCAEVPN.IconButton"
+                        android:layout_marginStart="6dp"
                         android:contentDescription="Turn sponsor sound on"
-                        android:insetLeft="0dp"
-                        android:insetTop="0dp"
-                        android:insetRight="0dp"
-                        android:insetBottom="0dp"
-                        android:minWidth="0dp"
-                        android:minHeight="0dp"
-                        android:padding="0dp"
                         android:visibility="gone"
-                        app:cornerRadius="14dp"
-                        app:backgroundTint="#FF334155"
-                        app:icon="@drawable/ic_volume_off"
-                        app:iconGravity="textStart"
-                        app:iconPadding="0dp"
-                        app:iconSize="16dp"
-                        app:iconTint="#FFF1F7FF" />
+                        app:icon="@drawable/ic_volume_off" />
                 </LinearLayout>
 
                 <FrameLayout
