@@ -770,6 +770,14 @@ void log_callback(FcaeLogLevel level, const char* message, void* user_data) {
     if (g_app.logging_enabled) g_app.add_log((int)level, message);
 }
 
+// GetContentRegionAvail() after an item reports the next line's width, so
+// right alignment must be measured from the previous item's end instead.
+static void same_line_right_aligned(float right_edge_x, float item_w, float min_spacing) {
+    ImGui::SameLine(0.0f, 0.0f);
+    const float gap = right_edge_x - item_w - ImGui::GetCursorScreenPos().x;
+    ImGui::SameLine(0.0f, gap > min_spacing ? gap : min_spacing);
+}
+
 static void fmt_bytes(char* buf, size_t len, uint64_t b) {
     if (b >= 1073741824ULL) snprintf(buf, len, "%.2f GB", (double)b / 1073741824.0);
     else if (b >= 1048576ULL) snprintf(buf, len, "%.2f MB", (double)b / 1048576.0);
@@ -1357,6 +1365,7 @@ void render_ui() {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 10));
 
+        const float title_right_x = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
         ImVec4 sc = state_color(cur);
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
         ImGui::Text("FCAE VPN");
@@ -1369,12 +1378,7 @@ void render_ui() {
                            build_is_prerelease() ? "pre-release" : "release");
 
         const float about_btn_size = 20.0f;
-        const float avail_w_title = ImGui::GetContentRegionAvail().x;
-        if (avail_w_title > about_btn_size) {
-            ImGui::SameLine(0.0f, avail_w_title - about_btn_size);
-        } else {
-            ImGui::SameLine(0.0f, 8.0f);
-        }
+        same_line_right_aligned(title_right_x, about_btn_size, 8.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, about_btn_size * 0.5f);
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.25f, 0.33f, 0.85f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.38f, 0.52f, 1.0f));
@@ -1998,6 +2002,7 @@ void render_ui() {
             const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Want to become a sponsor? Click me";
 
             // ── Single Header Row: SPONSORS | Link | [↻] [🔊] ──
+            const float sponsor_right_x = ImGui::GetCursorScreenPos().x + card_w;
             ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORS");
 
             ImGui::SameLine(0, 8);
@@ -2009,12 +2014,7 @@ void render_ui() {
 
             const float btn_size = 20.0f;
             const float total_btn_w = btn_size * 2.0f + 6.0f;
-            const float avail_w_row = ImGui::GetContentRegionAvail().x;
-            if (avail_w_row > total_btn_w + 6.0f) {
-                ImGui::SameLine(0.0f, avail_w_row - total_btn_w);
-            } else {
-                ImGui::SameLine(0.0f, 6.0f);
-            }
+            same_line_right_aligned(sponsor_right_x, total_btn_w, 6.0f);
 
             // ↻ Refresh Button (Custom vector drawing, no font missing-glyph '?')
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btn_size * 0.5f);
