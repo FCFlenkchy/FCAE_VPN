@@ -294,20 +294,20 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeRegisterVpnService(JNIEnv* env, jobject
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_fc_fcaevpn_FCAEVpnService_nativeUnregisterVpnService(JNIEnv* env, jclass) {
-    fcae_set_tun_fd_provider(nullptr);
-    fcae_set_psiphon_protect(nullptr);
-    fcae_set_psiphon_network_callbacks(nullptr, nullptr, nullptr);
+Java_com_fc_fcaevpn_FCAEVpnService_nativeUnregisterVpnService(JNIEnv* env, jobject thiz) {
     std::lock_guard<std::mutex> lock(g_protect_mu);
-    if (g_vpn_service) {
+    if (g_vpn_service && (!thiz || env->IsSameObject(g_vpn_service, thiz))) {
         env->DeleteGlobalRef(g_vpn_service);
         g_vpn_service = nullptr;
+        g_protect_mid = nullptr;
+        g_establish_mid = nullptr;
+        g_dns_mid = nullptr;
+        g_connectivity_mid = nullptr;
+        g_network_id_mid = nullptr;
+        fcae_set_tun_fd_provider(nullptr);
+        fcae_set_psiphon_protect(nullptr);
+        fcae_set_psiphon_network_callbacks(nullptr, nullptr, nullptr);
     }
-    g_protect_mid = nullptr;
-    g_establish_mid = nullptr;
-    g_dns_mid = nullptr;
-    g_connectivity_mid = nullptr;
-    g_network_id_mid = nullptr;
 }
 
 static void push_log_line(char prefix, const char* message, bool truncate = true) {

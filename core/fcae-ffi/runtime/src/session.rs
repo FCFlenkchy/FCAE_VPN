@@ -599,7 +599,7 @@ async fn run_session(
         // and the next connect failed with "already running" (which is how
         // the unused-variable warning earned its keep as a real leak).
         let mut psi_handle: Option<Box<dyn BackendHandle>> = None;
-        if config.psiphon.through_tunnel {
+        if config.psiphon.through_tunnel && config.backend != FcaeBackend::Psiphon {
             let psi_start = tokio::select! {
                 biased;
                 carrier = handle.wait() => {

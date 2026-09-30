@@ -712,9 +712,9 @@ public class ProxyNotification extends Service {
      */
     public static boolean stopForModeSwitch() {
         ProxyNotification current = instance;
-        if (current == null || !current.sessionRequested) return false;
+        if (current == null) return false;
         Runnable stop = () -> {
-            if (instance == current && current.sessionRequested) {
+            if (instance == current) {
                 current.stopProxyForModeSwitch();
             }
         };

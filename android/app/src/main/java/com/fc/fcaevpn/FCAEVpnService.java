@@ -545,7 +545,7 @@ public class FCAEVpnService extends VpnService {
     // Hands this VpnService to the native side so Psiphon's own sockets can be
     // excluded from the tunnel via protect(fd).
     private native void nativeRegisterVpnService();
-    private static native void nativeUnregisterVpnService();
+    private native void nativeUnregisterVpnService();
     public static native long[] nativeGetTrafficStats();
 
     public static boolean disconnectNow() {

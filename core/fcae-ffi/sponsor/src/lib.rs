@@ -61,35 +61,35 @@ const MAX_FRAME_DELAY_US: u32 = (MAX_FRAME_DELAY_MS * 1_000) as u32;
 // The accepted *source* size is still 800x450 (MAX_WIDTH/MAX_HEIGHT); only the
 // retained pixels are bounded.
 #[cfg(target_os = "android")]
-const MEDIA_MAX_WIDTH: u32 = 360;
+const MEDIA_MAX_WIDTH: u32 = 320;
 #[cfg(target_os = "android")]
-const MEDIA_MAX_HEIGHT: u32 = 202;
+const MEDIA_MAX_HEIGHT: u32 = 180;
 #[cfg(not(target_os = "android"))]
-const MEDIA_MAX_WIDTH: u32 = 480;
+const MEDIA_MAX_WIDTH: u32 = 400;
 #[cfg(not(target_os = "android"))]
-const MEDIA_MAX_HEIGHT: u32 = 270;
+const MEDIA_MAX_HEIGHT: u32 = 225;
 // Decode enough source samples to cover normal short sponsor clips, but do not
 // let a long or malicious animation turn startup into an unbounded decode.
-const MAX_INPUT_FRAMES: usize = 300;
+const MAX_INPUT_FRAMES: usize = 180;
 // Retention is a byte budget and nothing else -- no parallel frame count that
 // could merge a small animation the budget could have kept. A clip over the
 // budget merges frames (each merged frame's display time is added to its
 // predecessor) instead of replaying only its prefix.
 #[cfg(target_os = "android")]
-const MAX_DECODED_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DECODED_BYTES: usize = 6 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
-const MAX_DECODED_BYTES: usize = 24 * 1024 * 1024;
+const MAX_DECODED_BYTES: usize = 12 * 1024 * 1024;
 // Aggregate decoded-memory ceiling. The retention window holds exactly one
 // fully decoded card (the visible one); the prepared next card keeps only a
 // one-frame preview per plane and is hydrated from its decoded sidecar on
 // rotation. Each card is admitted against half of this number --
 // CAMPAIGN_DECODED_BYTES -- which therefore covers one card's two planes.
 #[cfg(target_os = "android")]
-const MAX_TOTAL_DECODED_BYTES: usize = 64 * 1024 * 1024;
+const MAX_TOTAL_DECODED_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
-const MAX_TOTAL_DECODED_BYTES: usize = 96 * 1024 * 1024;
+const MAX_TOTAL_DECODED_BYTES: usize = 32 * 1024 * 1024;
 /// Decoded bytes a single card may retain.
-const CAMPAIGN_DECODED_BYTES: usize = MAX_TOTAL_DECODED_BYTES / 2;
+const CAMPAIGN_DECODED_BYTES: usize = MAX_DECODED_BYTES;
 /// Ceiling for the on-disk sponsor cache. Only re-derivable files are swept to
 /// stay under it (decoded sidecars, parked clips); a current asset is never
 /// deleted. Sized so a whole manifest fits with its encoded assets and its

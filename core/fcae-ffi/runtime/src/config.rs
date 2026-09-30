@@ -778,6 +778,9 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             )))
         }
     };
+    if cfg.backend == FcaeBackend::Psiphon {
+        cfg.psiphon.through_tunnel = false;
+    }
     let psiphon_exit = cfg.backend == FcaeBackend::Psiphon || cfg.psiphon.through_tunnel;
     cfg.tun = TunConfig {
         engine: match raw.tun_engine {

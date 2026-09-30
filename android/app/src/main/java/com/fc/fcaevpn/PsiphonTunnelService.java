@@ -518,7 +518,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             return START_NOT_STICKY;
         }
         {
-            proxyOwner = OWNER_PROXY.equals(intent.getStringExtra(EXTRA_OWNER));
+            String owner = intent.getStringExtra(EXTRA_OWNER);
+            if (owner != null) {
+                proxyOwner = OWNER_PROXY.equals(owner);
+            } else {
+                proxyOwner = !FCAEVpnService.sessionActive() && ProxyNotification.sessionActive();
+            }
             String r = intent.getStringExtra("psiphonRegion");
             region = r == null ? "" : r.trim();
             transport = intent.getIntExtra("psiphonTransport", 0);

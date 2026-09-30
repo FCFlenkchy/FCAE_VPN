@@ -979,9 +979,9 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            // Hardcoded 60 FPS: the card is redrawn on the same interval
-            // whether it is animating, static or empty.
-            handler.postDelayed(this, SPONSOR_FRAME_INTERVAL_MS)
+            val hasActiveAnimation = (sponsorGeneration and 0xFFFFFFL) != 0L
+            val pollDelay = if (hasActiveAnimation) SPONSOR_FRAME_INTERVAL_MS else 1000L
+            handler.postDelayed(this, pollDelay)
         }
     }
 
@@ -1041,6 +1041,8 @@ class MainActivity : AppCompatActivity() {
             try { NativeEngine.nativeSponsorRefreshManifestNowAsync() } catch (_: Throwable) {}
             handler.removeCallbacks(sponsorManifestRefresh)
             handler.post(sponsorManifestRefresh)
+            handler.removeCallbacks(sponsorPoll)
+            handler.post(sponsorPoll)
         }
         sponsorCard.setOnClickListener {
             sponsorDestination.takeIf { it.startsWith("https://") }?.let(::openExternal)
@@ -1066,6 +1068,8 @@ class MainActivity : AppCompatActivity() {
                 android.view.MotionEvent.ACTION_UP -> {
                     if (sponsorSwiped) {
                         try { NativeEngine.nativeSponsorNext() } catch (_: Throwable) {}
+                        handler.removeCallbacks(sponsorPoll)
+                        handler.post(sponsorPoll)
                     } else {
                         view.performClick()
                     }
@@ -2688,15 +2692,13 @@ class MainActivity : AppCompatActivity() {
 
         val issued = FCAEVpnService.stateGeneration()
         val epoch = connectionEpoch
-        val psiphonBooting = pendingPsiSocks == 0 && isPsiphonSelected()
         Thread({
             if (currentMode == 1) {
                 val hadVpnService = FCAEVpnService.disconnectIfCurrent(issued)
-                if (!hadVpnService && !psiphonBooting) {
+                if (!hadVpnService) {
                     stopUnownedNative(issued, epoch)
                     ProxyNotification.notifyCleanupComplete(this)
                 }
-                if (psiphonBooting) disconnectProxyFromUi(issued, epoch)
             } else {
                 disconnectProxyFromUi(issued, epoch)
             }
@@ -2715,6 +2717,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun disconnectProxyFromUi(issued: Long, epoch: Long) {
         if (ProxyNotification.disconnectFromUiIfCurrent(issued)) return
+        if (!ProxyNotification.isAlive() && !ProxyNotification.sessionActive()) return
         val stop = Intent(this, ProxyNotification::class.java)
             .setAction(ProxyNotification.ACTION_DISCONNECT)
             .putExtra(ProxyNotification.EXTRA_EXPECT_GENERATION, issued)

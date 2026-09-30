@@ -422,20 +422,20 @@ bool ui_should_render(bool interacting) {
     // Spinner/connect animation is running: it moves on its own.
     if (s_busy_anim) return true;
 
-    // Nothing changed since the last painted frame: hold the repaint to the
-    // next hardcoded 60 FPS frame boundary instead of waiting for a
-    // content-derived timeout. A changed frame is still painted immediately
-    // and stays capped by the platform's own 60 FPS frame interval.
-    if (s_painted_once && ui_content_signature() == s_painted_sig
-            && now - s_last_paint_t < kUiFrameSeconds) {
+    // Nothing changed since the last painted frame: skip repaint when idle.
+    if (s_painted_once && ui_content_signature() == s_painted_sig) {
         return false;
     }
     return true;
 }
 
 unsigned ui_sleep_ms() {
-    // Hardcoded 60 FPS: the platform waits exactly one frame interval and never
-    // a content-derived timeout.
+    if (s_busy_anim || g_app.drag.active || g_app.popup.kind != PopupKind::None) {
+        return kUiFrameIntervalMs;
+    }
+    if (s_painted_once && ui_content_signature() == s_painted_sig) {
+        return 50;
+    }
     return kUiFrameIntervalMs;
 }
 
