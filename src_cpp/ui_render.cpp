@@ -430,7 +430,7 @@ bool ui_should_render(bool interacting) {
 }
 
 unsigned ui_sleep_ms() {
-    if (s_busy_anim || g_app.drag.active || g_app.popup.kind != PopupKind::None) {
+    if (s_busy_anim || g_app.redraw_requested.load() || s_log_scroll_pending) {
         return kUiFrameIntervalMs;
     }
     if (s_painted_once && ui_content_signature() == s_painted_sig) {
