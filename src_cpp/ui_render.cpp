@@ -396,6 +396,14 @@ void ui_request_redraw() {
 void ui_set_window_visible(bool visible) {
     s_ui_window_visible.store(visible);
     fcae_sponsor_set_ui_active(visible);
+    if (!visible) {
+        s_sponsor_rgba.clear();
+        s_sponsor_rgba.shrink_to_fit();
+        s_sponsor_background_rgba.clear();
+        s_sponsor_background_rgba.shrink_to_fit();
+        s_sponsor_loaded_foreground_generation = 0;
+        s_sponsor_loaded_background_generation = 0;
+    }
 }
 
 bool ui_should_render(bool interacting) {
@@ -949,6 +957,12 @@ void ui_frame() {
 
 void ui_shutdown() {
     fcae_sponsor_set_ui_active(false);
+    s_sponsor_rgba.clear();
+    s_sponsor_rgba.shrink_to_fit();
+    s_sponsor_background_rgba.clear();
+    s_sponsor_background_rgba.shrink_to_fit();
+    s_sponsor_loaded_foreground_generation = 0;
+    s_sponsor_loaded_background_generation = 0;
     // Initialization may still own AppState and the runtime. Join it before
     // teardown so neither configuration state nor FFI lifetime can race exit.
     if (s_runtime_init_thread.joinable()) s_runtime_init_thread.join();

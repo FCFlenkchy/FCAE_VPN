@@ -1342,6 +1342,9 @@ pub extern "C" fn fcae_sponsor_set_connected(connected: bool) {
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_set_ui_active(active: bool) {
+    if !active {
+        *SPONSOR_FRAME.lock() = None;
+    }
     fcae_sponsor::set_ui_active(active);
 }
 

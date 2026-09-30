@@ -836,6 +836,8 @@ class MainActivity : AppCompatActivity() {
         sponsorTitle.setTextColor(Color.WHITE)
         sponsorMessage.setTextColor(Color.parseColor("#FFD8E7FF"))
         sponsorCard.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FF142A44"))
+        sponsorBitmap?.recycle()
+        sponsorBitmap = null
         sponsorImage.setImageDrawable(null)
         sponsorImage.imageAlpha = 255
         sponsorImage.scaleX = 1f
@@ -843,6 +845,8 @@ class MainActivity : AppCompatActivity() {
         sponsorImage.visibility = android.view.View.GONE
         positionSponsorIcon(50, 25, 100)
         applySponsorIcon(100)
+        sponsorBackgroundBitmap?.recycle()
+        sponsorBackgroundBitmap = null
         sponsorBackgroundImage.setImageDrawable(null)
         sponsorBackgroundImage.imageAlpha = 107
         sponsorBackgroundImage.scaleX = 1f
@@ -1698,6 +1702,14 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         try { NativeEngine.nativeSponsorSetUiActive(false) } catch (_: Throwable) {}
+        sponsorBitmap?.recycle()
+        sponsorBitmap = null
+        sponsorBackgroundBitmap?.recycle()
+        sponsorBackgroundBitmap = null
+        if (::sponsorImage.isInitialized) sponsorImage.setImageDrawable(null)
+        if (::sponsorBackgroundImage.isInitialized) sponsorBackgroundImage.setImageDrawable(null)
+        sponsorGeneration = -1L
+        sponsorStaticToken = -1L
         inForeground = false
         logTouchActive = false
         // Keyboard gone, cursor gone with it.
@@ -1988,7 +2000,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        try { NativeEngine.nativeSponsorSetUiActive(false) } catch (_: Throwable) {}
+        sponsorBitmap?.recycle()
+        sponsorBitmap = null
+        sponsorBackgroundBitmap?.recycle()
+        sponsorBackgroundBitmap = null
+        if (::sponsorImage.isInitialized) sponsorImage.setImageDrawable(null)
+        if (::sponsorBackgroundImage.isInitialized) sponsorBackgroundImage.setImageDrawable(null)
         handler.removeCallbacks(poll)
+        handler.removeCallbacks(sponsorPoll)
+        handler.removeCallbacks(sponsorManifestRefresh)
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
         if (isFinishing && !isChangingConfigurations
             && !FCAEVpnService.sessionActive() && !ProxyNotification.sessionActive()) {

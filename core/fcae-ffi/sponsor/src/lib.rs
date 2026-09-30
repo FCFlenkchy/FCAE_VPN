@@ -829,8 +829,12 @@ pub fn set_ui_active(active: bool) {
     if !active {
         stop_audio_and_release();
         let mut state = STATE.lock();
+        state.card_text = None;
         for ready in state.ready.iter_mut() {
-            demote_to_preview(ready);
+            ready.frames.clear();
+            ready.background_frames.clear();
+            ready.background_rgba = Arc::new(Vec::new());
+            ready.preview_only = true;
         }
     } else if !was {
         let is_prev = current_is_preview(&STATE.lock());
@@ -1524,7 +1528,7 @@ fn demote_to_preview(ready: &mut ReadyCampaign) {
 /// True while the visible card still holds only its one-frame preview and its
 /// full planes must be hydrated from the decoded sidecar.
 fn current_is_preview(state: &State) -> bool {
-    state.ready.get(state.current_campaign).is_some_and(|ready| ready.preview_only)
+    state.ready.get(state.current_campaign).is_some_and(|ready| ready.preview_only || ready.frames.is_empty())
 }
 
 fn trim_ready_window(state: &mut State) {
