@@ -2749,5 +2749,3 @@ void render_ui() {
     ImGui::PopStyleVar(2);
     ImGui::End();
 }
-
-}
