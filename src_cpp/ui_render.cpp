@@ -1353,37 +1353,17 @@ void render_ui() {
                                                 : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
                            "%s  |  %s", fcae_display_version(),
                            build_is_prerelease() ? "pre-release" : "release");
-        ImGui::SameLine(0, 10);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.75f, 0.80f, 1.0f));
-        ImGui::Text("|");
-        ImGui::PopStyleColor();
-        ImGui::SameLine(ImGui::GetWindowWidth() - 42.0f);
+        ImGui::SameLine(ImGui::GetWindowWidth() - 36.0f);
         if (ImGui::SmallButton("(i)")) s_about_popup_open = true;
         if (ImGui::IsItemHovered()) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             ImGui::SetTooltip("About FCAE VPN");
         }
-        ImGui::SameLine(0, 10);
+
+        ImGui::Spacing();
+
         bool tun_paused = false;
         try { tun_paused = fcae_tun_paused(); } catch (...) {}
-        ImGui::PushStyleColor(ImGuiCol_Text, sc);
-        // If errored and we have an error message, show it instead of just "ERROR"
-        if (errored && telem.last_error[0]) {
-            ImGui::Text("ERROR: %s", telem.last_error);
-        } else {
-            // Stop only turns the TUN interface off; the status keeps
-            // showing the live session state while paused.
-            ImGui::Text("%s", state_label(cur));
-        }
-        ImGui::PopStyleColor();
-
-        if (busy) { ImGui::SameLine(0, 8); draw_spinner(7.0f, 14, 7.0f); }
-
-        if (!narrow) {
-            ImGui::SameLine(0, 16);
-        } else {
-            ImGui::Spacing();
-        }
 
         ImVec4 btn = (connected || busy) ? ImVec4(0.70f, 0.18f, 0.18f, 1.0f) : ImVec4(0.12f, 0.55f, 0.18f, 1.0f);
         ImVec4 btn_h(btn.x + 0.08f, btn.y + 0.08f, btn.z + 0.08f, 1.0f);
@@ -1391,9 +1371,9 @@ void render_ui() {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btn_h);
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(btn.x - 0.05f, btn.y - 0.05f, btn.z - 0.05f, 1.0f));
 
-        float btn_w = narrow ? (ImGui::GetContentRegionAvail().x - 72.0f) : 140.0f;
+        float btn_w = narrow ? (ImGui::GetContentRegionAvail().x - 72.0f) : 130.0f;
         bool show_disconnect = connected || busy || tun_paused;
-        if (ImGui::Button(show_disconnect ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 34))) {
+        if (ImGui::Button(show_disconnect ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 32))) {
             if (connected || busy || errored || tun_paused) {
                 g_app.start_busy.store(false);
                 // Cut the data plane on this click before thread scheduling can
@@ -1599,7 +1579,7 @@ void render_ui() {
                 ImGui::PushStyleColor(ImGuiCol_Button, start_col);
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, start_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(start_col.x - 0.05f, start_col.y - 0.05f, start_col.z - 0.05f, 1.0f));
-                if (ImGui::Button(" START ", ImVec2(80, 26))) {
+                if (ImGui::Button(" START ", ImVec2(70, 32))) {
                     std::thread([] {
                         if (fcae_resume_tun() != FCAE_OK) {
                             g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
@@ -1614,7 +1594,7 @@ void render_ui() {
                 ImGui::PushStyleColor(ImGuiCol_Button, stop_col);
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, stop_h);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(stop_col.x - 0.05f, stop_col.y - 0.05f, stop_col.z - 0.05f, 1.0f));
-                if (ImGui::Button(" STOP ", ImVec2(80, 26))) {
+                if (ImGui::Button(" STOP ", ImVec2(70, 32))) {
                     std::thread([] {
                         if (fcae_pause_tun() != FCAE_OK) {
                             g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
@@ -1627,57 +1607,61 @@ void render_ui() {
         }
 
         ImGui::SameLine(0, 6);
-        if (ImGui::Button("Save", ImVec2(60, 34))) {
+        if (ImGui::Button("Save", ImVec2(54, 32))) {
             save_config();
         }
 
+        ImGui::SameLine(0, 10);
+        ImGui::PushStyleColor(ImGuiCol_Text, sc);
+        if (errored && telem.last_error[0]) {
+            ImGui::Text("ERROR: %s", telem.last_error);
+        } else {
+            ImGui::Text("%s", state_label(cur));
+        }
+        ImGui::PopStyleColor();
+
+        if (busy) { ImGui::SameLine(0, 8); draw_spinner(7.0f, 14, 7.0f); }
 
         if (g_app.save_status[0]) {
-            ImGui::SameLine(0, 6);
+            ImGui::SameLine(0, 8);
             ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", g_app.save_status);
             g_app.save_status[0] = '\0';
         }
 
-        ImGui::Spacing();
-        // ── Check for Updates button (centered) ─────────────────────
+        // ── Check for Updates button ────────────────────────────
         {
-            float btn_width = 136.0f;
-            float avail = ImGui::GetContentRegionAvail().x;
-            ImGui::SetCursorPosX((avail - btn_width) * 0.5f);
-        FcaeUpdateInfo info = {};
-        info.struct_size = sizeof(info);
-        info.abi_version = FCAE_ABI_VERSION;
-        bool done = (fcae_poll_update(&info) == FCAE_OK);
-        // The render gate watches this so the "Checking... (Ns)" counter keeps
-        // ticking (1 Hz) even when the user is not touching the window.
-        s_update_in_progress = info.check_in_progress;
-        snprintf(s_update_date, sizeof(s_update_date), "%s", info.release_date);
+            float btn_width = 130.0f;
+            ImGui::SameLine(0, 12);
+            FcaeUpdateInfo info = {};
+            info.struct_size = sizeof(info);
+            info.abi_version = FCAE_ABI_VERSION;
+            bool done = (fcae_poll_update(&info) == FCAE_OK);
+            s_update_in_progress = info.check_in_progress;
+            snprintf(s_update_date, sizeof(s_update_date), "%s", info.release_date);
 
-        if (info.check_in_progress) {
-            // Safety timeout: if check takes >15s, show timeout message
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - s_check_start_time).count();
-            if (elapsed > 15) {
-                // Show timeout — the FFI check_in_progress is stuck, but we override the display.
-                const bool new_result = !s_update_checked;
-                s_update_checked = true;
-                if (new_result) s_update_error_popup_open = true;
-                s_update_available = false;
-                s_update_error_kind = FCAE_UPDATE_ERROR_NETWORK;
-                snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.14f, 0.14f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.76f, 0.19f, 0.19f, 1.0f));
-                if (ImGui::Button("Check Timed Out", ImVec2(btn_width, 28)))
-                    s_update_error_popup_open = true;
-                ImGui::PopStyleColor(2);
-            } else {
-                char checking_label[32];
-                snprintf(checking_label, sizeof(checking_label), "Checking... %llds", (long long)elapsed);
-                ImGui::BeginDisabled();
-                ImGui::Button(checking_label, ImVec2(btn_width, 28));
-                ImGui::EndDisabled();
-            }
-        } else if (done && info.update_available) {
+            if (info.check_in_progress) {
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - s_check_start_time).count();
+                if (elapsed > 15) {
+                    const bool new_result = !s_update_checked;
+                    s_update_checked = true;
+                    if (new_result) s_update_error_popup_open = true;
+                    s_update_available = false;
+                    s_update_error_kind = FCAE_UPDATE_ERROR_NETWORK;
+                    snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.14f, 0.14f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.76f, 0.19f, 0.19f, 1.0f));
+                    if (ImGui::Button("Check Timed Out", ImVec2(btn_width, 32)))
+                        s_update_error_popup_open = true;
+                    ImGui::PopStyleColor(2);
+                } else {
+                    char checking_label[32];
+                    snprintf(checking_label, sizeof(checking_label), "Checking... %llds", (long long)elapsed);
+                    ImGui::BeginDisabled();
+                    ImGui::Button(checking_label, ImVec2(btn_width, 32));
+                    ImGui::EndDisabled();
+                }
+            } else if (done && info.update_available) {
                 const bool new_result = !s_update_checked;
                 s_update_available = true;
                 s_update_checked = true;
@@ -1690,8 +1674,7 @@ void render_ui() {
 
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
-                const char* label = "Update Available!";
-                if (ImGui::Button(label, ImVec2(btn_width, 28))) {
+                if (ImGui::Button("Update Available!", ImVec2(btn_width, 32))) {
                     s_update_popup_open = true;
                 }
                 ImGui::PopStyleColor(2);
@@ -1704,12 +1687,9 @@ void render_ui() {
                 snprintf(s_update_raw_body, sizeof(s_update_raw_body), "%s", info.raw_body);
                 if (s_update_error_kind == FCAE_UPDATE_ERROR_DECODE) {
                     if (new_result) s_update_decode_popup_open = true;
-                    // The manifest itself is broken: the release pipeline's
-                    // problem, not the network's, so it is raised loudly and
-                    // the click shows what the server sent.
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.78f, 0.16f, 0.16f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.22f, 0.22f, 1.0f));
-                    if (ImGui::Button("ATTENTION!", ImVec2(btn_width, 28)))
+                    if (ImGui::Button("ATTENTION!", ImVec2(btn_width, 32)))
                         s_update_decode_popup_open = true;
                     ImGui::PopStyleColor(2);
                 } else {
@@ -1721,7 +1701,7 @@ void render_ui() {
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                         failed ? ImVec4(0.76f, 0.19f, 0.19f, 1.0f)
                                : ImVec4(0.16f, 0.60f, 0.26f, 1.0f));
-                    if (ImGui::Button(failed ? "Check Failed" : "Up to Date", ImVec2(btn_width, 28))) {
+                    if (ImGui::Button(failed ? "Check Failed" : "Up to Date", ImVec2(btn_width, 32))) {
                         if (failed) {
                             s_update_error_popup_open = true;
                         } else {
@@ -1734,7 +1714,7 @@ void render_ui() {
                     ImGui::PopStyleColor(2);
                 }
             } else {
-                if (ImGui::Button("Check for Updates", ImVec2(btn_width, 28))) {
+                if (ImGui::Button("Check for Updates", ImVec2(btn_width, 32))) {
                     fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
                     s_update_checked = false;
                     s_update_available = false;
@@ -1765,7 +1745,6 @@ void render_ui() {
                 }
                 ImGui::Spacing();
                 if (s_update_dl_url[0]) {
-                    // Defense-in-depth on top of the FFI-side prefix check.
                     const std::string url = s_update_dl_url;
                     const bool looks_safe =
                         url.rfind("https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/", 0) == 0
@@ -1818,7 +1797,6 @@ void render_ui() {
                 ImGui::Spacing();
                 ImGui::Text("Raw response:");
                 if (s_update_raw_body[0]) {
-                    // Read-only editor: scrollable and selectable in place.
                     ImGui::InputTextMultiline("##update_raw_body", s_update_raw_body,
                         sizeof(s_update_raw_body), ImVec2(540, 220), ImGuiInputTextFlags_ReadOnly);
                 } else {
@@ -1910,290 +1888,283 @@ void render_ui() {
                     ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
             }
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORS");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("↻")) {
-                fcae_sponsor_refresh_manifest_now_async();
-                ui_request_redraw();
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Refresh sponsor manifest");
-            const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
-            {
-                const bool sponsor_has_content = s_sponsor.available;
-                const char* sponsor_destination = sponsor_has_content
-                    ? s_sponsor.destination_url : sponsor_policy;
-                const char* sponsor_title = sponsor_has_content
-                    ? s_sponsor.title : "Become a sponsor";
-                const char* sponsor_message = sponsor_has_content
-                    ? s_sponsor.message : "Want to become a sponsor? Click me";
-                ImTextureID texture = ImTextureID{};
-                ImTextureID background_texture = ImTextureID{};
-                if (!s_sponsor_rgba.empty() && s_sponsor.width > 0 && s_sponsor.height > 0
-                        && s_sponsor_loaded_foreground_generation != 0) {
-                    // Key each texture on the plane it holds, not on the whole
-                    // card: while a GIF/video background advances at 60 FPS an
-                    // unchanged icon must not be re-uploaded every frame.
-                    texture = sponsor_texture_update(
-                        s_sponsor_rgba.data(), (int)s_sponsor.width, (int)s_sponsor.height,
-                        s_sponsor_loaded_foreground_generation & ~kSponsorBackgroundFrameMask, 0);
-                }
-                if (!s_sponsor_background_rgba.empty() && s_sponsor.background_width > 0
-                        && s_sponsor.background_height > 0
-                        && s_sponsor_loaded_background_generation != 0) {
-                    background_texture = sponsor_texture_update(
-                        s_sponsor_background_rgba.data(), (int)s_sponsor.background_width,
-                        (int)s_sponsor.background_height,
-                        s_sponsor_loaded_background_generation & ~kSponsorForegroundFrameMask, 1);
-                }
-                const float icon_scale = std::clamp(
-                    (float)s_sponsor.icon_scale / 100.0f, 0.5f, 1.6f);
-                const float background_scale = std::clamp(
-                    (float)s_sponsor.background_scale / 100.0f, 0.5f, 1.6f);
-                // Keep the native sponsor card fixed at 140 units. Text and
-                // media changes are drawn inside it and cannot reflow the UI.
-                constexpr float sponsor_card_height = 140.0f;
-                constexpr float sponsor_media_height = 70.0f;
-                ImVec4 card_color = sponsor_color(s_sponsor.card_color,
-                    ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
-                card_color.w *= (float)s_sponsor.background_color_opacity / 100.0f;
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
-                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.49f, 0.76f, 1.0f));
-                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-                ImGui::BeginChild("##sponsor_card", ImVec2(0, sponsor_card_height),
-                    ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
-                if (background_texture) {
-                    const ImVec2 background_min = ImGui::GetCursorScreenPos();
-                    const ImVec2 background_size = ImGui::GetContentRegionAvail();
-                    const float cover_scale = std::max(
-                        background_size.x / (float)s_sponsor.background_width,
-                        background_size.y / (float)s_sponsor.background_height)
-                        * background_scale;
-                    const ImVec2 scaled_size(
-                        s_sponsor.background_width * cover_scale,
-                        s_sponsor.background_height * cover_scale);
-                    const ImVec2 scaled_min(
-                        background_min.x + (background_size.x - scaled_size.x) * 0.5f,
-                        background_min.y + (background_size.y - scaled_size.y) * 0.5f);
-                    ImGui::GetWindowDrawList()->AddImage(
-                        background_texture, scaled_min,
-                        ImVec2(scaled_min.x + scaled_size.x,
-                               scaled_min.y + scaled_size.y),
-                        ImVec2(0, 0), ImVec2(1, 1),
-                        ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1,
-                            (float)s_sponsor.background_opacity / 100.0f)));
-                }
-                {
-                    if (texture) {
-                    const float box_w = std::min(320.0f, ImGui::GetContentRegionAvail().x);
-                    const float box_h = sponsor_media_height;
-                    ImVec2 size(box_w, box_h);
-                    ImVec2 uv0(0, 0);
-                    ImVec2 uv1(1, 1);
-                    if (s_sponsor.image_fit == 0) {
-                        const float scale = std::min(box_w / (float)s_sponsor.width,
-                                                     box_h / (float)s_sponsor.height)
-                            * icon_scale;
-                        size = ImVec2((float)s_sponsor.width * scale,
-                                      (float)s_sponsor.height * scale);
-                        if (size.x > box_w || size.y > box_h) {
-                            const float fit = std::min(box_w / size.x, box_h / size.y);
-                            size.x *= fit;
-                            size.y *= fit;
-                        }
-                    } else {
-                        const float image_ratio = (float)s_sponsor.width / (float)s_sponsor.height;
-                        const float box_ratio = box_w / box_h;
-                        if (image_ratio > box_ratio) {
-                            const float crop = 1.0f - box_ratio / image_ratio;
-                            uv0.x = crop * 0.5f;
-                            uv1.x = 1.0f - crop * 0.5f;
-                        } else {
-                            const float crop = 1.0f - image_ratio / box_ratio;
-                            uv0.y = crop * 0.5f;
-                            uv1.y = 1.0f - crop * 0.5f;
-                        }
-                    }
-                    const ImVec2 icon_area = ImGui::GetContentRegionAvail();
-                    // Centre the drawn box on the requested point, then slide it
-                    // back inside the card. Without the clamp an icon at the
-                    // extremes of icon_x/icon_y was drawn half outside the card,
-                    // and a scaled one could leave it entirely -- the same bug
-                    // the Android card had.
-                    const float icon_half_w = size.x * 0.5f;
-                    const float icon_half_h = size.y * 0.5f;
-                    const auto sponsor_icon_center = [](float extent, float half, float percent) {
-                        if (half * 2.0f >= extent) return extent * 0.5f;
-                        return std::clamp(extent * percent, half, extent - half);
-                    };
-                    const float icon_center_x = sponsor_icon_center(icon_area.x, icon_half_w,
-                        std::clamp((float)s_sponsor.icon_x / 100.0f, 0.0f, 1.0f));
-                    const float icon_center_y = sponsor_icon_center(icon_area.y, icon_half_h,
-                        std::clamp((float)s_sponsor.icon_y / 100.0f, 0.0f, 1.0f));
-                    ImGui::SetCursorPos(ImVec2(
-                        icon_center_x - icon_half_w,
-                        icon_center_y - icon_half_h));
-                    const ImVec2 image_pos = ImGui::GetCursorScreenPos();
-                    ImGui::ImageWithBg(texture, size, uv0, uv1, ImVec4(0, 0, 0, 0),
-                        ImVec4(1, 1, 1, (float)s_sponsor.icon_opacity / 100.0f));
-                    const ImVec2 after_image = ImGui::GetCursorScreenPos();
-                    ImGui::SetCursorScreenPos(image_pos);
-                    ImGui::InvisibleButton("##sponsor_card_touch", size);
-                    static bool sponsor_dragged = false;
-                    if (ImGui::IsItemActivated()) sponsor_dragged = false;
-                    if (ImGui::IsItemActive() && s_sponsor.campaign_count > 1
-                            && std::abs(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x) >= 36.0f)
-                        sponsor_dragged = true;
-                    if (ImGui::IsItemDeactivated()) {
-                        if (sponsor_dragged) {
-                            fcae_sponsor_next();
-                        } else if (strncmp(sponsor_destination, "https://", 8) == 0) {
-                            open_link(sponsor_destination);
-                        }
-                        sponsor_dragged = false;
-                    }
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip(s_sponsor.campaign_count > 1
-                            ? "Click to open, drag to change sponsor"
-                            : "Click to open sponsor website");
-                    ImGui::SetCursorScreenPos(after_image);
-                    } else {
-                        const ImVec2 card_size(std::min(320.0f, ImGui::GetContentRegionAvail().x), 64.0f);
-                        ImGui::SetCursorPosX(ImGui::GetCursorPosX()
-                            + (ImGui::GetContentRegionAvail().x - card_size.x) * 0.5f);
-                        ImGui::InvisibleButton("##sponsor_card_touch", card_size);
-                        if (ImGui::IsItemClicked() && strncmp(sponsor_destination, "https://", 8) == 0)
-                            open_link(sponsor_destination);
-                    }
-                    const ImVec2 content_min = ImGui::GetWindowContentRegionMin();
-                    const ImVec2 content_max = ImGui::GetWindowContentRegionMax();
-                    const float content_width = content_max.x - content_min.x;
-                    const float content_height = content_max.y - content_min.y;
-                    const float title_y = content_height * (float)s_sponsor.title_y / 100.0f;
-                    const ImVec4 title_color = sponsor_color(s_sponsor.title_color,
-                        ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                    if (!sponsor_has_content) ImGui::SetWindowFontScale(1.35f);
-                    ImGui::PushStyleColor(ImGuiCol_Text, title_color);
-                    const ImVec2 title_origin = sponsor_text_origin(
-                        sponsor_title, content_width, s_sponsor.title_x, title_y);
-                    ImGui::SetCursorPos(title_origin);
-                    ImGui::PushTextWrapPos(content_width);
-                    ImGui::TextUnformatted(sponsor_title);
-                    ImGui::PopTextWrapPos();
-                    ImGui::PopStyleColor();
-                    if (!sponsor_has_content) ImGui::SetWindowFontScale(1.0f);
-                    if (sponsor_message[0] != '\0') {
-                        const float message_y = content_height * (float)s_sponsor.message_y / 100.0f;
-                        const ImVec4 message_color = sponsor_color(s_sponsor.message_color,
-                            ImVec4(0.85f, 0.91f, 1.0f, 1.0f));
-                        ImGui::PushStyleColor(ImGuiCol_Text, message_color);
-                        ImGui::SetCursorPos(sponsor_text_origin(
-                            sponsor_message, content_width, s_sponsor.message_x, message_y));
-                        ImGui::PushTextWrapPos(content_width);
-                        ImGui::TextWrapped("%s", sponsor_message);
-                        ImGui::PopTextWrapPos();
-                        ImGui::PopStyleColor();
-                    }
-                ImGui::EndChild();
-                if (sponsor_has_content) {
-                    // Keep the 140-unit sponsor card fully opaque and put the
-                    // text control in a tiny attached row below it, outside
-                    // the media/text hit regions.
-                    const bool audio_enabled = fcae_sponsor_audio_enabled();
-                    const float audio_x = std::max(
-                        0.0f, ImGui::GetContentRegionAvail().x - 72.0f);
-                    ImGui::SetCursorPos(ImVec2(audio_x, ImGui::GetCursorPosY() + 2.0f));
-                    ImGui::PushStyleColor(ImGuiCol_Button,
-                        ImVec4(0.10f, 0.38f, 0.62f, 0.95f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                        ImVec4(0.16f, 0.52f, 0.78f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-                        ImVec4(0.08f, 0.30f, 0.50f, 1.0f));
-                    const bool clicked = ImGui::Button(
-                        audio_enabled ? "Sound on" : "Sound off", ImVec2(72.0f, 26.0f));
-                    ImGui::PopStyleColor(3);
-                    if (clicked) {
-                        fcae_sponsor_set_audio_enabled(!audio_enabled);
-                        ui_request_redraw();
-                    }
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip(audio_enabled
-                            ? "Turn sponsor sound off" : "Turn sponsor sound on");
-                }
-                ImGui::PopStyleVar();
-                ImGui::PopStyleColor(2);
-            }
-            if (ImGui::TextLink("Want to become a sponsor? Click me")) open_link(sponsor_policy);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", sponsor_policy);
         }
 
         ImGui::PopStyleVar(2);
     }
 
-    // Error message is now shown inline in the status bar above (avoids double display)
-
+    // ── 2. TRAFFIC STATS + SPONSORS (SIDE BY SIDE ROW) ────────────────────
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-
-    // ── 2. TRAFFIC STATS ─────────────────────────────────────────────────
     {
-        char total_buf[32], rate_buf[32];
+        const float avail_w = ImGui::GetContentRegionAvail().x;
+        const bool use_columns = (avail_w >= 540.0f);
+        const float left_w = use_columns ? 260.0f : avail_w;
+        const float right_w = use_columns ? (avail_w - left_w - 16.0f) : avail_w;
 
-        if (narrow) {
-            ImGui::TextColored(ImVec4(0.30f, 0.80f, 1.00f, 1.0f), "Download");
+        ImGui::BeginGroup(); // Left column: Stats
+        {
+            char total_buf[32], rate_buf[32];
+            ImGui::TextColored(ImVec4(0.30f, 0.80f, 1.00f, 1.0f), "Download:");
+            ImGui::SameLine(0, 6);
             fmt_bytes(total_buf, sizeof(total_buf), telem.total_rx);
+            ImGui::Text("%s", total_buf);
+            ImGui::SameLine(0, 6);
             fmt_rate(rate_buf, sizeof(rate_buf), telem.rx_bytes_sec);
-            ImGui::Text("%s  %s", total_buf, rate_buf);
+            ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "(%s)", rate_buf);
 
-            ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "Upload");
+            ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "Upload:  ");
+            ImGui::SameLine(0, 6);
             fmt_bytes(total_buf, sizeof(total_buf), telem.total_tx);
+            ImGui::Text("%s", total_buf);
+            ImGui::SameLine(0, 6);
             fmt_rate(rate_buf, sizeof(rate_buf), telem.tx_bytes_sec);
-            ImGui::Text("%s  %s", total_buf, rate_buf);
+            ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "(%s)", rate_buf);
+
+            ImGui::Spacing();
+            char rtt_buf[24];
+            snprintf(rtt_buf, sizeof(rtt_buf), "Ping: %ums",
+                     telem.state == FCAE_STATE_CONNECTED ? telem.rtt_ms : 0u);
+            ImGui::TextColored(ImVec4(0.70f, 0.90f, 0.70f, 1.0f), "%s", rtt_buf);
+            ImGui::SameLine(0, 10);
+            if (ImGui::SmallButton("INFO")) {
+                s_connection_info_popup_open = true;
+                ui_request_redraw();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Show connection details");
+
+            if (telem.status_message[0] && telem.state == FCAE_STATE_CONNECTED) {
+                ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.60f, 1.0f), "%s", telem.status_message);
+            }
+        }
+        ImGui::EndGroup();
+
+        if (use_columns) {
+            ImGui::SameLine(0, 16.0f);
         } else {
-            ImGui::TextColored(ImVec4(0.30f, 0.80f, 1.00f, 1.0f), "Download");
-            ImGui::SameLine(0, 12);
-            fmt_bytes(total_buf, sizeof(total_buf), telem.total_rx);
-            ImGui::Text("%s", total_buf);
-            ImGui::SameLine(0, 12);
-            fmt_rate(rate_buf, sizeof(rate_buf), telem.rx_bytes_sec);
-            ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "%s", rate_buf);
-
-            ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.20f, 1.0f), "Upload  ");
-            ImGui::SameLine(0, 12);
-            fmt_bytes(total_buf, sizeof(total_buf), telem.total_tx);
-            ImGui::Text("%s", total_buf);
-            ImGui::SameLine(0, 12);
-            fmt_rate(rate_buf, sizeof(rate_buf), telem.tx_bytes_sec);
-            ImGui::TextColored(ImVec4(0.50f, 0.50f, 0.55f, 1.0f), "%s", rate_buf);
+            ImGui::Spacing();
         }
 
-        ImGui::Spacing();
-        // The reading itself, bare, in the same shape the Android surfaces use:
-        // no label and no placeholder, just the number and its unit. Outside
-        // CONNECTED there is no live measurement (the engine keeps the previous
-        // session's rtt_ms, and a stale number must not pass for a live one), so
-        // the slot reads 0ms.
-        char rtt_buf[24];
-        snprintf(rtt_buf, sizeof(rtt_buf), "%ums",
-                 telem.state == FCAE_STATE_CONNECTED ? telem.rtt_ms : 0u);
-        // Peer and local listener details live behind INFO so the home view
-        // stays compact while the complete diagnostic block remains one tap
-        // away, matching the Android surface.
-        ImGui::TextWrapped("%s", rtt_buf);
-        if (ImGui::SmallButton("INFO")) {
-            s_connection_info_popup_open = true;
-            ui_request_redraw();
+        ImGui::BeginGroup(); // Right column: Sponsor Card
+        {
+            ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSOR");
+            ImGui::SameLine(0, 6);
+            if (ImGui::SmallButton("↻##sponsor_refresh")) {
+                fcae_sponsor_refresh_manifest_now_async();
+                ui_request_redraw();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Refresh sponsor manifest");
+
+            const bool sponsor_has_content = s_sponsor.available;
+            const bool audio_enabled = fcae_sponsor_audio_enabled();
+            const float btn_size = 20.0f;
+            ImGui::SameLine(0, 8);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btn_size * 0.5f);
+            if (audio_enabled) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.10f, 0.38f, 0.62f, 0.95f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.16f, 0.52f, 0.78f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.08f, 0.30f, 0.50f, 1.0f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.25f, 0.33f, 0.90f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.35f, 0.45f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.20f, 0.28f, 1.0f));
+            }
+            const bool audio_clicked = ImGui::Button("##sponsor_audio", ImVec2(btn_size, btn_size));
+            const ImVec2 bmin = ImGui::GetItemRectMin();
+            const ImVec2 bmax = ImGui::GetItemRectMax();
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const float cx = (bmin.x + bmax.x) * 0.5f;
+            const float cy = (bmin.y + bmax.y) * 0.5f;
+            const ImU32 ic_col = IM_COL32(240, 245, 255, 240);
+            if (audio_enabled) {
+                draw->AddRectFilled(ImVec2(cx - 5.0f, cy - 2.0f), ImVec2(cx - 2.5f, cy + 2.0f), ic_col, 0.5f);
+                const ImVec2 cone[3] = {
+                    ImVec2(cx - 2.5f, cy - 2.0f),
+                    ImVec2(cx + 1.0f, cy - 4.5f),
+                    ImVec2(cx + 1.0f, cy + 4.5f)
+                };
+                draw->AddTriangleFilled(cone[0], cone[1], cone[2], ic_col);
+                draw->AddTriangleFilled(cone[0], cone[2], ImVec2(cx - 2.5f, cy + 2.0f), ic_col);
+                draw->AddBezierCubic(
+                    ImVec2(cx + 3.0f, cy - 3.0f),
+                    ImVec2(cx + 5.0f, cy - 1.0f),
+                    ImVec2(cx + 5.0f, cy + 1.0f),
+                    ImVec2(cx + 3.0f, cy + 3.0f),
+                    ic_col, 1.2f);
+            } else {
+                draw->AddRectFilled(ImVec2(cx - 4.0f, cy - 2.0f), ImVec2(cx - 1.5f, cy + 2.0f), ic_col, 0.5f);
+                const ImVec2 cone[3] = {
+                    ImVec2(cx - 1.5f, cy - 2.0f),
+                    ImVec2(cx + 2.0f, cy - 4.5f),
+                    ImVec2(cx + 2.0f, cy + 4.5f)
+                };
+                draw->AddTriangleFilled(cone[0], cone[1], cone[2], ic_col);
+                draw->AddTriangleFilled(cone[0], cone[2], ImVec2(cx - 1.5f, cy + 2.0f), ic_col);
+                draw->AddLine(
+                    ImVec2(cx - 5.0f, cy - 5.0f),
+                    ImVec2(cx + 5.0f, cy + 5.0f),
+                    IM_COL32(239, 68, 68, 240), 1.4f);
+            }
+            ImGui::PopStyleColor(3);
+            ImGui::PopStyleVar();
+            if (audio_clicked) {
+                fcae_sponsor_set_audio_enabled(!audio_enabled);
+                ui_request_redraw();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(audio_enabled ? "Turn sponsor sound off" : "Turn sponsor sound on");
+
+            const char* sponsor_policy = "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
+            const char* sponsor_destination = sponsor_has_content ? s_sponsor.destination_url : sponsor_policy;
+            const char* sponsor_title = sponsor_has_content ? s_sponsor.title : "Become a sponsor";
+            const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Want to become a sponsor? Click me";
+
+            ImTextureID texture = ImTextureID{};
+            ImTextureID background_texture = ImTextureID{};
+            if (!s_sponsor_rgba.empty() && s_sponsor.width > 0 && s_sponsor.height > 0
+                    && s_sponsor_loaded_foreground_generation != 0) {
+                texture = sponsor_texture_update(
+                    s_sponsor_rgba.data(), (int)s_sponsor.width, (int)s_sponsor.height,
+                    s_sponsor_loaded_foreground_generation & ~kSponsorBackgroundFrameMask, 0);
+            }
+            if (!s_sponsor_background_rgba.empty() && s_sponsor.background_width > 0
+                    && s_sponsor.background_height > 0
+                    && s_sponsor_loaded_background_generation != 0) {
+                background_texture = sponsor_texture_update(
+                    s_sponsor_background_rgba.data(), (int)s_sponsor.background_width,
+                    (int)s_sponsor.background_height,
+                    s_sponsor_loaded_background_generation & ~kSponsorForegroundFrameMask, 1);
+            }
+            const float icon_scale = std::clamp((float)s_sponsor.icon_scale / 100.0f, 0.5f, 1.6f);
+            const float background_scale = std::clamp((float)s_sponsor.background_scale / 100.0f, 0.5f, 1.6f);
+            constexpr float sponsor_card_height = 76.0f;
+            constexpr float sponsor_media_height = 42.0f;
+            ImVec4 card_color = sponsor_color(s_sponsor.card_color, ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
+            card_color.w *= (float)s_sponsor.background_color_opacity / 100.0f;
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.49f, 0.76f, 1.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+            ImGui::BeginChild("##sponsor_card", ImVec2(right_w, sponsor_card_height),
+                ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
+
+            if (background_texture) {
+                const ImVec2 background_min = ImGui::GetCursorScreenPos();
+                const ImVec2 background_size = ImGui::GetContentRegionAvail();
+                const float cover_scale = std::max(
+                    background_size.x / (float)s_sponsor.background_width,
+                    background_size.y / (float)s_sponsor.background_height) * background_scale;
+                const ImVec2 scaled_size(
+                    s_sponsor.background_width * cover_scale,
+                    s_sponsor.background_height * cover_scale);
+                const ImVec2 scaled_min(
+                    background_min.x + (background_size.x - scaled_size.x) * 0.5f,
+                    background_min.y + (background_size.y - scaled_size.y) * 0.5f);
+                ImGui::GetWindowDrawList()->AddImage(
+                    background_texture, scaled_min,
+                    ImVec2(scaled_min.x + scaled_size.x, scaled_min.y + scaled_size.y),
+                    ImVec2(0, 0), ImVec2(1, 1),
+                    ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, (float)s_sponsor.background_opacity / 100.0f)));
+            }
+
+            if (texture) {
+                const float box_w = std::min(200.0f, ImGui::GetContentRegionAvail().x);
+                const float box_h = sponsor_media_height;
+                ImVec2 size(box_w, box_h);
+                ImVec2 uv0(0, 0);
+                ImVec2 uv1(1, 1);
+                if (s_sponsor.image_fit == 0) {
+                    const float scale = std::min(box_w / (float)s_sponsor.width, box_h / (float)s_sponsor.height) * icon_scale;
+                    size = ImVec2((float)s_sponsor.width * scale, (float)s_sponsor.height * scale);
+                    if (size.x > box_w || size.y > box_h) {
+                        const float fit = std::min(box_w / size.x, box_h / size.y);
+                        size.x *= fit;
+                        size.y *= fit;
+                    }
+                } else {
+                    const float image_ratio = (float)s_sponsor.width / (float)s_sponsor.height;
+                    const float box_ratio = box_w / box_h;
+                    if (image_ratio > box_ratio) {
+                        const float crop = 1.0f - box_ratio / image_ratio;
+                        uv0.x = crop * 0.5f;
+                        uv1.x = 1.0f - crop * 0.5f;
+                    } else {
+                        const float crop = 1.0f - image_ratio / box_ratio;
+                        uv0.y = crop * 0.5f;
+                        uv1.y = 1.0f - crop * 0.5f;
+                    }
+                }
+                const ImVec2 icon_area = ImGui::GetContentRegionAvail();
+                const float icon_half_w = size.x * 0.5f;
+                const float icon_half_h = size.y * 0.5f;
+                const auto sponsor_icon_center = [](float extent, float half, float percent) {
+                    if (half * 2.0f >= extent) return extent * 0.5f;
+                    return std::clamp(extent * percent, half, extent - half);
+                };
+                const float icon_center_x = sponsor_icon_center(icon_area.x, icon_half_w,
+                    std::clamp((float)s_sponsor.icon_x / 100.0f, 0.0f, 1.0f));
+                const float icon_center_y = sponsor_icon_center(icon_area.y, icon_half_h,
+                    std::clamp((float)s_sponsor.icon_y / 100.0f, 0.0f, 1.0f));
+                ImGui::SetCursorPos(ImVec2(icon_center_x - icon_half_w, icon_center_y - icon_half_h));
+                const ImVec2 image_pos = ImGui::GetCursorScreenPos();
+                ImGui::ImageWithBg(texture, size, uv0, uv1, ImVec4(0, 0, 0, 0),
+                    ImVec4(1, 1, 1, (float)s_sponsor.icon_opacity / 100.0f));
+                const ImVec2 after_image = ImGui::GetCursorScreenPos();
+                ImGui::SetCursorScreenPos(image_pos);
+                ImGui::InvisibleButton("##sponsor_card_touch", size);
+                static bool sponsor_dragged = false;
+                if (ImGui::IsItemActivated()) sponsor_dragged = false;
+                if (ImGui::IsItemActive() && s_sponsor.campaign_count > 1
+                        && std::abs(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x) >= 36.0f)
+                    sponsor_dragged = true;
+                if (ImGui::IsItemDeactivated()) {
+                    if (sponsor_dragged) {
+                        fcae_sponsor_next();
+                    } else if (strncmp(sponsor_destination, "https://", 8) == 0) {
+                        open_link(sponsor_destination);
+                    }
+                    sponsor_dragged = false;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(s_sponsor.campaign_count > 1
+                        ? "Click to open, drag to change sponsor"
+                        : "Click to open sponsor website");
+                ImGui::SetCursorScreenPos(after_image);
+            } else {
+                const ImVec2 card_size(right_w, 48.0f);
+                ImGui::InvisibleButton("##sponsor_card_touch", card_size);
+                if (ImGui::IsItemClicked() && strncmp(sponsor_destination, "https://", 8) == 0)
+                    open_link(sponsor_destination);
+            }
+
+            const ImVec2 content_min = ImGui::GetWindowContentRegionMin();
+            const ImVec2 content_max = ImGui::GetWindowContentRegionMax();
+            const float content_width = content_max.x - content_min.x;
+            const float content_height = content_max.y - content_min.y;
+            const float title_y = content_height * (float)s_sponsor.title_y / 100.0f;
+            const ImVec4 title_color = sponsor_color(s_sponsor.title_color, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, title_color);
+            const ImVec2 title_origin = sponsor_text_origin(sponsor_title, content_width, s_sponsor.title_x, title_y);
+            ImGui::SetCursorPos(title_origin);
+            ImGui::PushTextWrapPos(content_width);
+            ImGui::TextUnformatted(sponsor_title);
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+            if (sponsor_message[0] != '\0') {
+                const float message_y = content_height * (float)s_sponsor.message_y / 100.0f;
+                const ImVec4 message_color = sponsor_color(s_sponsor.message_color, ImVec4(0.85f, 0.91f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, message_color);
+                ImGui::SetCursorPos(sponsor_text_origin(sponsor_message, content_width, s_sponsor.message_x, message_y));
+                ImGui::PushTextWrapPos(content_width);
+                ImGui::TextWrapped("%s", sponsor_message);
+                ImGui::PopTextWrapPos();
+                ImGui::PopStyleColor();
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(2);
         }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Show connection details");
-        // The state line owns the connect phase ("CONNECTING", nothing
-        // else — same as the Psiphon paths and the Android UI); the
-        // engine's sub-message is connected-state telemetry only.
-        if (telem.status_message[0] && telem.state == FCAE_STATE_CONNECTED) {
-            ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.60f, 1.0f), "%s", telem.status_message);
-        }
+        ImGui::EndGroup();
     }
 
     if (s_connection_info_popup_open) {
@@ -2374,38 +2345,10 @@ void render_ui() {
             }
             ImGui::Spacing();
             ImGui::InputTextWithHint("##force_peer", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));
-            ImGui::InputText("Identity file (aether.toml)", g_app.config_path, sizeof(g_app.config_path));
-            ImGui::TextDisabled("UI settings: FCAE_VPN.cfg (next to app). Identity: Cloudflare device certs.");
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Sysprofile (performance tuning)");
             const char* sysprofiles[] = { "Auto", "Low", "Medium", "High" };
             ImGui::Combo("Sysprofile", &g_app.sys_profile, sysprofiles, 4);
-
-            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Text("Backends in this build");
-            // Queried from the core rather than hardcoded here, so a build
-            // without psiphon-live says so instead of the UI quietly implying
-            // the backend works.
-            {
-                uint32_t n = fcae_backend_count();
-                for (uint32_t i = 0; i < n; ++i) {
-                    FcaeBackendInfo bi;
-                    memset(&bi, 0, sizeof(bi));
-                    bi.struct_size = (uint32_t)sizeof(bi);
-                    bi.abi_version = FCAE_ABI_VERSION;
-                    if (fcae_backend_info(i, &bi) != FCAE_OK) continue;
-
-                    if (bi.available) {
-                        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
-                                           "  %s - ready", bi.display_name);
-                    } else {
-                        ImGui::TextColored(ImVec4(0.70f, 0.70f, 0.75f, 1.0f),
-                                           "  %s - unavailable", bi.display_name);
-                        if (bi.unavailable_reason[0] && ImGui::IsItemHovered())
-                            ImGui::SetTooltip("%s", bi.unavailable_reason);
-                    }
-                }
-            }
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Engine log level");

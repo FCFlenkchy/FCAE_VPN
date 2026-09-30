@@ -813,11 +813,14 @@ class MainActivity : AppCompatActivity() {
         sponsorAudioUiKnown = true
         if (sponsorAudioUiEnabled == enabled) return
         sponsorAudioUiEnabled = enabled
-        sponsorAudioToggle.text = if (enabled) "Sound on" else "Sound off"
-        sponsorAudioToggle.contentDescription = if (enabled) {
-            "Turn sponsor sound off"
+        if (enabled) {
+            sponsorAudioToggle.setIconResource(R.drawable.ic_volume_up)
+            sponsorAudioToggle.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FF1A619E"))
+            sponsorAudioToggle.contentDescription = "Turn sponsor sound off"
         } else {
-            "Turn sponsor sound on"
+            sponsorAudioToggle.setIconResource(R.drawable.ic_volume_off)
+            sponsorAudioToggle.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FF334155"))
+            sponsorAudioToggle.contentDescription = "Turn sponsor sound on"
         }
     }
 
