@@ -149,6 +149,16 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // startup therefore continues while the UI is backgrounded.
     public static void pollChainedRequest(Context context) {
         Context app = context.getApplicationContext();
+        // While a start is in flight, the AAR's startTunneling() internally
+        // stops any previous instance. Calling nativePsiphonAttachRequest()
+        // during this window generates a new request ID that triggers a
+        // stopBound/startBound cycle, which creates a tight
+        // "starting tunnel -> stopping Psiphon library" loop. Skip the
+        // poll until the start completes.
+        if (startInFlight) {
+            scheduleChainedPoll(app);
+            return;
+        }
         try {
             if (!attachReceiverRegistered) {
                 android.content.IntentFilter filter = new android.content.IntentFilter();
