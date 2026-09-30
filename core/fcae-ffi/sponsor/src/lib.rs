@@ -2815,7 +2815,7 @@ fn canvas_rgba(image: image::RgbaImage) -> (u32, u32, Vec<u8>) {
         &image,
         target_width,
         target_height,
-        image::imageops::FilterType::Triangle,
+        image::imageops::FilterType::Nearest,
     );
     (target_width, target_height, resized.into_raw())
 }
@@ -2878,7 +2878,7 @@ fn bounded_video_rgb(
         &image,
         target_width,
         target_height,
-        image::imageops::FilterType::Triangle,
+        image::imageops::FilterType::Nearest,
     );
     Ok((target_width, target_height, resized.into_raw()))
 }
