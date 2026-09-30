@@ -49,7 +49,7 @@
         <item name="backgroundTint">#FF334155</item>
         <item name="iconGravity">textStart</item>
         <item name="iconPadding">0dp</item>
-        <item name="iconSize">16dp</item>
-        <item name="iconTint">#FFF1F7FF</item>
+        <item name="iconSize">28dp</item>
+        <item name="iconTint">@null</item>
     </style>
 </resources>

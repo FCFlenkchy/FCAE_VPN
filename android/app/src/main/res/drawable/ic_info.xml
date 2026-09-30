@@ -1,9 +1,10 @@
+<!-- Desktop round_icon_button geometry: 20x20 viewport = the whole button. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="24dp"
-    android:height="24dp"
-    android:viewportWidth="24"
-    android:viewportHeight="24">
+    android:width="20dp"
+    android:height="20dp"
+    android:viewportWidth="20"
+    android:viewportHeight="20">
     <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M10.5,4.5h3v3h-3zM10.5,10.5h3v9h-3z" />
+        android:fillColor="#FFF1F7FF"
+        android:pathData="M9,4h2v2h-2zM9,8h2v8h-2z" />
 </vector>
