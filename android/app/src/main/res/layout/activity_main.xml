@@ -38,6 +38,7 @@
                 android:id="@+id/aboutButton"
                 style="@style/Widget.FCAEVPN.IconButton"
                 android:contentDescription="About FCAE VPN"
+                app:backgroundTint="@android:color/transparent"
                 app:icon="@drawable/ic_info" />
         </LinearLayout>
 

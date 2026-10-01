@@ -806,7 +806,8 @@ static constexpr float kIconButtonSize = 20.0f;
 // Shared by the About and sponsor buttons so they match Android's round icon
 // buttons. Geometry is snapped to whole pixels: strokes centred on pixel edges
 // were smeared across two columns and shimmered next to the crisp UI text.
-// The button is vertically centred on the text line it follows.
+// The button is vertically centred on the text line it follows. Info is the
+// only outlined variant: a white ring around the glyph instead of the fill.
 static bool round_icon_button(const char* id, UiIcon icon, bool toggled, const char* tooltip) {
     ImGui::SetCursorPosY(ImGui::GetCursorPosY()
         + std::floor((ImGui::GetTextLineHeight() - kIconButtonSize) * 0.5f));
@@ -817,20 +818,29 @@ static bool round_icon_button(const char* id, UiIcon icon, bool toggled, const c
     if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     ImGui::SetItemTooltip("%s", tooltip);
 
-    const ImVec4 base = toggled ? ImVec4(0.102f, 0.380f, 0.620f, 1.0f)
-                                : ImVec4(0.200f, 0.255f, 0.333f, 1.0f);
-    const float tint = held ? -0.04f : hovered ? 0.06f : 0.0f;
-    const ImU32 bg = ImGui::GetColorU32(ImVec4(base.x + tint, base.y + tint, base.z + tint, 1.0f));
     const ImU32 fg = IM_COL32(241, 247, 255, 255);
     const float cx = std::floor(pos.x) + kIconButtonSize * 0.5f;
     const float cy = std::floor(pos.y) + kIconButtonSize * 0.5f;
     ImDrawList* const draw = ImGui::GetWindowDrawList();
-    draw->AddCircleFilled(ImVec2(cx, cy), kIconButtonSize * 0.5f, bg, 32);
+    if (icon == UiIcon::Info) {
+        constexpr float kRingWidth = 1.5f;
+        constexpr float kRingRadius = kIconButtonSize * 0.5f - kRingWidth * 0.5f;
+        if (hovered || held)
+            draw->AddCircleFilled(ImVec2(cx, cy), kRingRadius - kRingWidth * 0.5f,
+                                  IM_COL32(255, 255, 255, held ? 46 : 26), 32);
+        draw->AddCircle(ImVec2(cx, cy), kRingRadius, fg, 32, kRingWidth);
+    } else {
+        const ImVec4 base = toggled ? ImVec4(0.102f, 0.380f, 0.620f, 1.0f)
+                                    : ImVec4(0.200f, 0.255f, 0.333f, 1.0f);
+        const float tint = held ? -0.04f : hovered ? 0.06f : 0.0f;
+        draw->AddCircleFilled(ImVec2(cx, cy), kIconButtonSize * 0.5f,
+            ImGui::GetColorU32(ImVec4(base.x + tint, base.y + tint, base.z + tint, 1.0f)), 32);
+    }
 
     switch (icon) {
     case UiIcon::Info:
-        draw->AddRectFilled(ImVec2(cx - 1.0f, cy - 6.0f), ImVec2(cx + 1.0f, cy - 4.0f), fg);
-        draw->AddRectFilled(ImVec2(cx - 1.0f, cy - 2.0f), ImVec2(cx + 1.0f, cy + 6.0f), fg);
+        draw->AddRectFilled(ImVec2(cx - 1.0f, cy - 5.0f), ImVec2(cx + 1.0f, cy - 3.0f), fg);
+        draw->AddRectFilled(ImVec2(cx - 1.0f, cy - 1.0f), ImVec2(cx + 1.0f, cy + 5.0f), fg);
         break;
     case UiIcon::Refresh: {
         constexpr float kPi = 3.14159265f;
