@@ -994,7 +994,9 @@ pub mod env_compat {
 
         // Obfuscation.
         set("AETHER_NOIZE", Some(&cfg.obfuscation.noize_profile));
-        flag("AETHER_MASQUE_HTTP2", cfg.obfuscation.h2_enabled);
+        // Always explicit: unset, the engine asks for the MASQUE transport on
+        // stdin whenever the host was started from a terminal.
+        set("AETHER_MASQUE_HTTP2", Some(if cfg.obfuscation.h2_enabled { "1" } else { "0" }));
         set("AETHER_ECH", cfg.obfuscation.ech_enabled.then_some("auto"));
         if cfg.obfuscation.fragment_enabled {
             let (lo, hi) = cfg.obfuscation.frag_size;

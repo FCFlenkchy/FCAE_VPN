@@ -135,6 +135,12 @@ class MainActivity : AppCompatActivity() {
     private var applyingRegionList = false
     private var pendingRegionCodes: List<String>? = null
     private lateinit var switchEch: SwitchMaterial
+    private lateinit var switchFragment: SwitchMaterial
+    private lateinit var layoutFragment: android.view.View
+    private lateinit var editFragMinSize: android.widget.EditText
+    private lateinit var editFragMaxSize: android.widget.EditText
+    private lateinit var editFragMinDelay: android.widget.EditText
+    private lateinit var editFragMaxDelay: android.widget.EditText
     private lateinit var switchQuick: SwitchMaterial
     private lateinit var switchLan: SwitchMaterial
     private lateinit var switchLogging: SwitchMaterial
@@ -1159,6 +1165,15 @@ class MainActivity : AppCompatActivity() {
         editPsiphonSocksPort = findViewById(R.id.editPsiphonSocksPort)
         editPsiphonHttpPort = findViewById(R.id.editPsiphonHttpPort)
         switchEch = findViewById(R.id.switchEch)
+        switchFragment = findViewById(R.id.switchFragment)
+        layoutFragment = findViewById(R.id.layoutFragment)
+        editFragMinSize = findViewById(R.id.editFragMinSize)
+        editFragMaxSize = findViewById(R.id.editFragMaxSize)
+        editFragMinDelay = findViewById(R.id.editFragMinDelay)
+        editFragMaxDelay = findViewById(R.id.editFragMaxDelay)
+        switchFragment.setOnCheckedChangeListener { _, on ->
+            layoutFragment.visibility = if (on) android.view.View.VISIBLE else android.view.View.GONE
+        }
         switchQuick = findViewById(R.id.switchQuick)
         switchLan = findViewById(R.id.switchLan)
         switchLogging = findViewById(R.id.switchLogging)
@@ -2257,6 +2272,11 @@ class MainActivity : AppCompatActivity() {
             putString("psiphonHttpPort", editPsiphonHttpPort.text.toString().trim())
             putBoolean("h2", h2FromSelection())
             putBoolean("ech", switchEch.isChecked)
+            putBoolean("fragment", switchFragment.isChecked)
+            putString("fragMinSize", editFragMinSize.text.toString().trim())
+            putString("fragMaxSize", editFragMaxSize.text.toString().trim())
+            putString("fragMinDelay", editFragMinDelay.text.toString().trim())
+            putString("fragMaxDelay", editFragMaxDelay.text.toString().trim())
             putBoolean("quick", switchQuick.isChecked)
             putBoolean("lan", switchLan.isChecked)
             putBoolean("logging", switchLogging.isChecked)
@@ -2352,6 +2372,11 @@ class MainActivity : AppCompatActivity() {
         )
         spinnerPsiphonTransport.setSelection(prefs.getInt("psiphonTransport", 0).coerceIn(0, 23))
         switchEch.isChecked = prefs.getBoolean("ech", true)
+        editFragMinSize.setText(prefs.getString("fragMinSize", "16"))
+        editFragMaxSize.setText(prefs.getString("fragMaxSize", "32"))
+        editFragMinDelay.setText(prefs.getString("fragMinDelay", "2"))
+        editFragMaxDelay.setText(prefs.getString("fragMaxDelay", "10"))
+        switchFragment.isChecked = prefs.getBoolean("fragment", false)
         switchQuick.isChecked = prefs.getBoolean("quick", false)
         switchLan.isChecked = prefs.getBoolean("lan", false)
         switchLogging.isChecked = prefs.getBoolean("logging", true)
@@ -2383,6 +2408,31 @@ class MainActivity : AppCompatActivity() {
         if (!isTunModeSelected()) return 1500
         val text = editTunMtu.text.toString().trim()
         return if (text.isNotEmpty() && text.all { it in '0'..'9' }) text.toIntOrNull() ?: -1 else -1
+    }
+
+    private fun fragmentValue(field: android.widget.EditText): Int =
+        field.text.toString().trim().toIntOrNull() ?: -1
+
+    private fun fragmentRangesValid(): Boolean {
+        if (!switchFragment.isChecked) return true
+        val minSize = fragmentValue(editFragMinSize)
+        val maxSize = fragmentValue(editFragMaxSize)
+        val minDelay = fragmentValue(editFragMinDelay)
+        val maxDelay = fragmentValue(editFragMaxDelay)
+        editFragMinSize.error = if (minSize !in 8..64) "Use 8..64 bytes" else null
+        editFragMaxSize.error = when {
+            maxSize !in 16..128 -> "Use 16..128 bytes"
+            minSize in 8..64 && maxSize < minSize -> "Must be at least the minimum"
+            else -> null
+        }
+        editFragMinDelay.error = if (minDelay !in 0..20) "Use 0..20 ms" else null
+        editFragMaxDelay.error = when {
+            maxDelay !in 1..50 -> "Use 1..50 ms"
+            minDelay in 0..20 && maxDelay < minDelay -> "Must be at least the minimum"
+            else -> null
+        }
+        return listOf(editFragMinSize, editFragMaxSize, editFragMinDelay, editFragMaxDelay)
+            .all { it.error == null }
     }
 
     private fun usesTun2socksSettings(): Boolean =
@@ -2432,6 +2482,7 @@ class MainActivity : AppCompatActivity() {
         }
         editTunMtu.error = if (tunMtuBytes() !in 1280..9000) "Enter 1280..9000 bytes" else null
         if (!buffersValid || editTunMtu.error != null) return
+        if (!fragmentRangesValid()) return
         if (switchTorHttp.isChecked && (editTorHttpPort.text.toString().toIntOrNull() ?: 0) !in 1..65535) {
             editTorHttpPort.error = "Use a port from 1 to 65535"
             return
@@ -2577,6 +2628,11 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("quickReconnect", switchQuick.isChecked)
         i.putExtra("h2Enabled", h2FromSelection())
         i.putExtra("echEnabled", switchEch.isChecked)
+        i.putExtra("fragmentEnabled", switchFragment.isChecked)
+        i.putExtra("fragMinSize", fragmentValue(editFragMinSize))
+        i.putExtra("fragMaxSize", fragmentValue(editFragMaxSize))
+        i.putExtra("fragMinDelay", fragmentValue(editFragMinDelay))
+        i.putExtra("fragMaxDelay", fragmentValue(editFragMaxDelay))
         i.putExtra("lanSharing", switchLan.isChecked)
         i.putExtra("configPath", filesDir.resolve("aether.toml").absolutePath)
         i.putExtra("sni", editSni.text.toString().trim())
@@ -2641,6 +2697,11 @@ class MainActivity : AppCompatActivity() {
         val quick = switchQuick.isChecked
         val h2 = h2FromSelection()
         val ech = switchEch.isChecked
+        val fragment = switchFragment.isChecked
+        val fragMinSize = fragmentValue(editFragMinSize)
+        val fragMaxSize = fragmentValue(editFragMaxSize)
+        val fragMinDelay = fragmentValue(editFragMinDelay)
+        val fragMaxDelay = fragmentValue(editFragMaxDelay)
         val lan = switchLan.isChecked
         val sni = editSni.text.toString().trim()
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
@@ -2698,11 +2759,11 @@ class MainActivity : AppCompatActivity() {
                     ipVersion = ipVersion,
                     quickReconnect = quick,
                     noizeProfile = noizeProfile,
-                    fragmentEnabled = false,
-                    fragMinSize = 16,
-                    fragMaxSize = 32,
-                    fragMinDelay = 2,
-                    fragMaxDelay = 10,
+                    fragmentEnabled = fragment,
+                    fragMinSize = fragMinSize,
+                    fragMaxSize = fragMaxSize,
+                    fragMinDelay = fragMinDelay,
+                    fragMaxDelay = fragMaxDelay,
                     socksPort = socksPort,
                     httpPort = httpPort,
                     forcePeer = forcePeer,

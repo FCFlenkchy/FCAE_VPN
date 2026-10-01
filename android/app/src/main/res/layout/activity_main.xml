@@ -628,6 +628,152 @@
                 android:background="#FF1E1E2C"
                 android:popupBackground="#FF1E1E2C" />
 
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchFragment"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="TLS fragmentation"
+                android:textColor="#FFE8ECF4" />
+
+            <LinearLayout
+                android:id="@+id/layoutFragment"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:labelFor="@id/editFragMinSize"
+                            android:text="Chunk min (B)"
+                            android:textColor="#FF9AA3B5"
+                            android:textSize="13sp" />
+                        <EditText
+                            android:id="@+id/editFragMinSize"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:layout_marginTop="4dp"
+                            android:background="#FF1E1E2C"
+                            android:hint="16"
+                            android:inputType="number"
+                            android:maxLength="3"
+                            android:padding="12dp"
+                            android:singleLine="true"
+                            android:text="16"
+                            android:textColor="#FFE8ECF4"
+                            android:textColorHint="#FF6B7280"
+                            android:textSize="14sp" />
+                    </LinearLayout>
+                    <Space
+                        android:layout_width="12dp"
+                        android:layout_height="0dp" />
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:labelFor="@id/editFragMaxSize"
+                            android:text="Chunk max (B)"
+                            android:textColor="#FF9AA3B5"
+                            android:textSize="13sp" />
+                        <EditText
+                            android:id="@+id/editFragMaxSize"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:layout_marginTop="4dp"
+                            android:background="#FF1E1E2C"
+                            android:hint="32"
+                            android:inputType="number"
+                            android:maxLength="3"
+                            android:padding="12dp"
+                            android:singleLine="true"
+                            android:text="32"
+                            android:textColor="#FFE8ECF4"
+                            android:textColorHint="#FF6B7280"
+                            android:textSize="14sp" />
+                    </LinearLayout>
+                </LinearLayout>
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:labelFor="@id/editFragMinDelay"
+                            android:text="Delay min (ms)"
+                            android:textColor="#FF9AA3B5"
+                            android:textSize="13sp" />
+                        <EditText
+                            android:id="@+id/editFragMinDelay"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:layout_marginTop="4dp"
+                            android:background="#FF1E1E2C"
+                            android:hint="2"
+                            android:inputType="number"
+                            android:maxLength="3"
+                            android:padding="12dp"
+                            android:singleLine="true"
+                            android:text="2"
+                            android:textColor="#FFE8ECF4"
+                            android:textColorHint="#FF6B7280"
+                            android:textSize="14sp" />
+                    </LinearLayout>
+                    <Space
+                        android:layout_width="12dp"
+                        android:layout_height="0dp" />
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:labelFor="@id/editFragMaxDelay"
+                            android:text="Delay max (ms)"
+                            android:textColor="#FF9AA3B5"
+                            android:textSize="13sp" />
+                        <EditText
+                            android:id="@+id/editFragMaxDelay"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:layout_marginTop="4dp"
+                            android:background="#FF1E1E2C"
+                            android:hint="10"
+                            android:inputType="number"
+                            android:maxLength="3"
+                            android:padding="12dp"
+                            android:singleLine="true"
+                            android:text="10"
+                            android:textColor="#FFE8ECF4"
+                            android:textColorHint="#FF6B7280"
+                            android:textSize="14sp" />
+                    </LinearLayout>
+                </LinearLayout>
+            </LinearLayout>
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

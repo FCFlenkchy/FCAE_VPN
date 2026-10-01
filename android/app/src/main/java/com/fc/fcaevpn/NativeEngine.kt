@@ -179,13 +179,11 @@ object NativeEngine {
             ipVersion = session.getIntExtra("ipVersion", 4),
             quickReconnect = session.getBooleanExtra("quickReconnect", false),
             noizeProfile = session.getStringExtra("noizeProfile").orEmpty().ifEmpty { "balanced" },
-            // Fragmentation is a UI-only knob in this build: keep the values
-            // MainActivity's worker passes so both paths describe one session.
-            fragmentEnabled = false,
-            fragMinSize = 16,
-            fragMaxSize = 32,
-            fragMinDelay = 2,
-            fragMaxDelay = 10,
+            fragmentEnabled = session.getBooleanExtra("fragmentEnabled", false),
+            fragMinSize = session.getIntExtra("fragMinSize", 16),
+            fragMaxSize = session.getIntExtra("fragMaxSize", 32),
+            fragMinDelay = session.getIntExtra("fragMinDelay", 2),
+            fragMaxDelay = session.getIntExtra("fragMaxDelay", 10),
             socksPort = if (mode == 1 && socks == 0) 1819 else socks,
             httpPort = session.getIntExtra("httpPort", 1820),
             forcePeer = session.getStringExtra("forcePeer").orEmpty(),

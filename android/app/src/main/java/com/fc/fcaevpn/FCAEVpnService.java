@@ -995,6 +995,11 @@ public class FCAEVpnService extends VpnService {
         final boolean quick   = intent.getBooleanExtra("quickReconnect", false);
         final boolean h2      = intent.getBooleanExtra("h2Enabled", true);
         final boolean ech     = intent.getBooleanExtra("echEnabled", true);
+        final boolean fragment = intent.getBooleanExtra("fragmentEnabled", false);
+        final int fragMinSize  = intent.getIntExtra("fragMinSize", 16);
+        final int fragMaxSize  = intent.getIntExtra("fragMaxSize", 32);
+        final int fragMinDelay = intent.getIntExtra("fragMinDelay", 2);
+        final int fragMaxDelay = intent.getIntExtra("fragMaxDelay", 10);
         final boolean lan     = intent.getBooleanExtra("lanSharing", false);
         final int socks       = intent.getIntExtra("socksPort", 1819);
         // TUN's SOCKS listener is an internal tun2socks bridge. It is not the
@@ -1108,7 +1113,8 @@ public class FCAEVpnService extends VpnService {
                 boolean ok = NativeEngine.nativeStart(
                     protocol, mode, lan, scanMode,
                     ipVersion, quick, noizeVal,
-                    false, 16, 32, 2, 10, socksPortForMode, http,
+                    fragment, fragMinSize, fragMaxSize, fragMinDelay, fragMaxDelay,
+                    socksPortForMode, http,
                     peerVal, cfgPath, h2, ech,
                     sniVal, sysProfile,
                     teamVal, tokenVal, emailVal, routesVal, routesIVal,
@@ -1707,6 +1713,11 @@ public class FCAEVpnService extends VpnService {
         putBool(e, i, "quickReconnect", false);
         putBool(e, i, "h2Enabled", true);
         putBool(e, i, "echEnabled", true);
+        putBool(e, i, "fragmentEnabled", false);
+        putInt(e, i, "fragMinSize", 16);
+        putInt(e, i, "fragMaxSize", 32);
+        putInt(e, i, "fragMinDelay", 2);
+        putInt(e, i, "fragMaxDelay", 10);
         putBool(e, i, "lanSharing", false);
         putInt(e, i, "socksPort", 1819);
         putInt(e, i, "httpPort", 1820);
@@ -1756,6 +1767,11 @@ public class FCAEVpnService extends VpnService {
         copyBool(p, i, "quickReconnect", false);
         copyBool(p, i, "h2Enabled", true);
         copyBool(p, i, "echEnabled", true);
+        copyBool(p, i, "fragmentEnabled", false);
+        copyInt(p, i, "fragMinSize", 16);
+        copyInt(p, i, "fragMaxSize", 32);
+        copyInt(p, i, "fragMinDelay", 2);
+        copyInt(p, i, "fragMaxDelay", 10);
         copyBool(p, i, "lanSharing", false);
         copyInt(p, i, "socksPort", 1819);
         copyInt(p, i, "httpPort", 1820);
