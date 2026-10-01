@@ -806,8 +806,8 @@ static constexpr float kIconButtonSize = 20.0f;
 // Shared by the About and sponsor buttons so they match Android's round icon
 // buttons. Geometry is snapped to whole pixels: strokes centred on pixel edges
 // were smeared across two columns and shimmered next to the crisp UI text.
-// The button is vertically centred on the text line it follows. Info is the
-// only outlined variant: a white ring around the glyph instead of the fill.
+// The button is vertically centred on the text line it follows. Info adds a
+// white ring on top of the shared fill.
 static bool round_icon_button(const char* id, UiIcon icon, bool toggled, const char* tooltip) {
     ImGui::SetCursorPosY(ImGui::GetCursorPosY()
         + std::floor((ImGui::GetTextLineHeight() - kIconButtonSize) * 0.5f));
@@ -822,19 +822,14 @@ static bool round_icon_button(const char* id, UiIcon icon, bool toggled, const c
     const float cx = std::floor(pos.x) + kIconButtonSize * 0.5f;
     const float cy = std::floor(pos.y) + kIconButtonSize * 0.5f;
     ImDrawList* const draw = ImGui::GetWindowDrawList();
+    const ImVec4 base = toggled ? ImVec4(0.102f, 0.380f, 0.620f, 1.0f)
+                                : ImVec4(0.200f, 0.255f, 0.333f, 1.0f);
+    const float tint = held ? -0.04f : hovered ? 0.06f : 0.0f;
+    draw->AddCircleFilled(ImVec2(cx, cy), kIconButtonSize * 0.5f,
+        ImGui::GetColorU32(ImVec4(base.x + tint, base.y + tint, base.z + tint, 1.0f)), 32);
     if (icon == UiIcon::Info) {
         constexpr float kRingWidth = 1.5f;
-        constexpr float kRingRadius = kIconButtonSize * 0.5f - kRingWidth * 0.5f;
-        if (hovered || held)
-            draw->AddCircleFilled(ImVec2(cx, cy), kRingRadius - kRingWidth * 0.5f,
-                                  IM_COL32(255, 255, 255, held ? 46 : 26), 32);
-        draw->AddCircle(ImVec2(cx, cy), kRingRadius, fg, 32, kRingWidth);
-    } else {
-        const ImVec4 base = toggled ? ImVec4(0.102f, 0.380f, 0.620f, 1.0f)
-                                    : ImVec4(0.200f, 0.255f, 0.333f, 1.0f);
-        const float tint = held ? -0.04f : hovered ? 0.06f : 0.0f;
-        draw->AddCircleFilled(ImVec2(cx, cy), kIconButtonSize * 0.5f,
-            ImGui::GetColorU32(ImVec4(base.x + tint, base.y + tint, base.z + tint, 1.0f)), 32);
+        draw->AddCircle(ImVec2(cx, cy), kIconButtonSize * 0.5f - kRingWidth * 0.5f, fg, 32, kRingWidth);
     }
 
     switch (icon) {
@@ -2083,8 +2078,21 @@ void render_ui() {
             const char* sponsor_title = sponsor_has_content ? s_sponsor.title : "Become a sponsor";
             const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Click to learn more";
 
-            // ── Single Header Row: SPONSORS | Link | [↻] [🔊] ──
-            const float sponsor_right_x = ImGui::GetCursorScreenPos().x + card_w;
+            // ── Header bar: SPONSORS | Link | [↻] [🔊] ──
+            // Mirrors Android's 38dp rounded_rectangle row: #171A26 fill,
+            // 1px #292D3D border, 10/4 horizontal padding, 8px gap to the card.
+            constexpr float kHeaderPadV = 4.0f;
+            constexpr float kHeaderHeight = kIconButtonSize + kHeaderPadV * 2.0f;
+            constexpr float kHeaderRounding = kHeaderHeight * 12.0f / 38.0f;
+            const ImVec2 cursor = ImGui::GetCursorScreenPos();
+            const ImVec2 header_min(std::floor(cursor.x), std::floor(cursor.y));
+            const ImVec2 header_max(header_min.x + card_w, header_min.y + kHeaderHeight);
+            ImDrawList* const header_draw = ImGui::GetWindowDrawList();
+            header_draw->AddRectFilled(header_min, header_max, IM_COL32(23, 26, 38, 255), kHeaderRounding);
+            header_draw->AddRect(header_min, header_max, IM_COL32(41, 45, 61, 255), kHeaderRounding, 0, 1.0f);
+            const float sponsor_right_x = header_max.x - 4.0f;
+            ImGui::SetCursorScreenPos(ImVec2(header_min.x + 10.0f, header_min.y + kHeaderPadV
+                - std::floor((ImGui::GetTextLineHeight() - kIconButtonSize) * 0.5f)));
             ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORS");
 
             ImGui::SameLine(0, 8);
@@ -2107,6 +2115,7 @@ void render_ui() {
                 fcae_sponsor_set_audio_enabled(!audio_enabled);
                 ui_request_redraw();
             }
+            ImGui::SetCursorScreenPos(ImVec2(header_min.x, header_max.y + 8.0f));
 
             // ── Sponsor Card ──
             ImTextureID texture = ImTextureID{};
