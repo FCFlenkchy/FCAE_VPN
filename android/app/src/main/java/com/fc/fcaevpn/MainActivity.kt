@@ -87,6 +87,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sponsorMessage: android.widget.TextView
     private lateinit var sponsorTitle: TextView
     private var sponsorTextLayoutKey = ""
+    private var sponsorIconRequestKey = ""
+    private var sponsorIconLayoutKey = ""
     private var sponsorGeneration = -1L
     private var sponsorDestination = ""
     private var sponsorBitmap: android.graphics.Bitmap? = null
@@ -736,26 +738,30 @@ class MainActivity : AppCompatActivity() {
     /**
      * Place the icon's centre at (iconX, iconY) in percent of the card.
      *
-     * The view is the 70-unit media band the design uses, and `icon_scale`
-     * grows the whole band about its centre, so the *drawn* box is what has to
-     * stay on the card: centring the view at the requested point and clamping
-     * its drawn box inside the card makes `icon_x`/`icon_y` mean what the
-     * manifest says at every position -- the previous clamp on the view's own
-     * top edge pinned anything below the band to the card's bottom edge and
-     * let a scaled icon hang off the top of it.
+     * The view is the card-wide 70-unit media band and `icon_scale` grows it
+     * about its centre, but the clamp must use the picture actually drawn in
+     * it: a contained logo is narrower than the band, and clamping the band
+     * pinned every icon at scale >= 100 to the centre whatever `icon_x` said.
      */
-    private fun positionSponsorIcon(iconX: Int, iconY: Int, iconScale: Int) {
+    private fun positionSponsorIcon(iconX: Int, iconY: Int, iconScale: Int, imageFit: Int, sourceWidth: Int, sourceHeight: Int) {
         if (!::sponsorCard.isInitialized || !::sponsorImage.isInitialized) return
         val safeX = iconX.coerceIn(0, 100)
         val safeY = iconY.coerceIn(0, 100)
         val scale = iconScale.coerceIn(50, 160) / 100f
+        val requestKey = "${sponsorCard.width}x${sponsorCard.height}:$safeX:$safeY:$scale:$imageFit:${sourceWidth}x$sourceHeight"
+        if (requestKey == sponsorIconRequestKey) return
+        sponsorIconRequestKey = requestKey
         sponsorCard.post {
             val cardWidth = sponsorCard.width
             val cardHeight = sponsorCard.height
             if (cardWidth <= 0 || cardHeight <= 0) return@post
+            val key = "$safeX:$safeY:$scale:$imageFit:${sourceWidth}x$sourceHeight:${cardWidth}x$cardHeight"
+            if (key == sponsorIconLayoutKey) return@post
             val iconHeight = (70 * resources.displayMetrics.density).toInt()
-            val drawnWidth = cardWidth * scale
-            val drawnHeight = iconHeight * scale
+            val fit = if (imageFit == 1 || sourceWidth <= 0 || sourceHeight <= 0) 0f
+                else minOf(cardWidth / sourceWidth.toFloat(), iconHeight / sourceHeight.toFloat())
+            val drawnWidth = (if (fit > 0f) sourceWidth * fit else cardWidth.toFloat()) * scale
+            val drawnHeight = (if (fit > 0f) sourceHeight * fit else iconHeight.toFloat()) * scale
             val centerX = clampSponsorCentre(cardWidth * safeX / 100f, drawnWidth, cardWidth)
             val centerY = clampSponsorCentre(cardHeight * safeY / 100f, drawnHeight, cardHeight)
             val params = (sponsorImage.layoutParams as? android.widget.FrameLayout.LayoutParams)
@@ -768,6 +774,7 @@ class MainActivity : AppCompatActivity() {
             params.bottomMargin = 0
             params.gravity = android.view.Gravity.TOP or android.view.Gravity.START
             sponsorImage.layoutParams = params
+            sponsorIconLayoutKey = key
         }
     }
 
@@ -843,7 +850,7 @@ class MainActivity : AppCompatActivity() {
         sponsorImage.scaleX = 1f
         sponsorImage.scaleY = 1f
         sponsorImage.visibility = android.view.View.GONE
-        positionSponsorIcon(50, 25, 100)
+        positionSponsorIcon(50, 25, 100, 0, 0, 0)
         applySponsorIcon(100)
         sponsorBackgroundBitmap?.recycle()
         sponsorBackgroundBitmap = null
@@ -909,7 +916,6 @@ class MainActivity : AppCompatActivity() {
                                     val iconScale = card.iconScale.coerceIn(50, 160)
                                     val backgroundScale = card.backgroundScale.coerceIn(50, 160)
                                     applySponsorIcon(iconScale)
-                                    positionSponsorIcon(card.iconX, card.iconY, iconScale)
                                     val backgroundScaleFactor = backgroundScale / 100f
                                     sponsorBackgroundImage.scaleX = backgroundScaleFactor
                                     sponsorBackgroundImage.scaleY = backgroundScaleFactor
@@ -972,6 +978,7 @@ class MainActivity : AppCompatActivity() {
                                     }
                                     sponsorGeneration = card.generation
                                 }
+                                positionSponsorIcon(card.iconX, card.iconY, card.iconScale, card.imageFit, card.width, card.height)
                                 sponsorCard.visibility = android.view.View.VISIBLE
                                 updateSponsorAudioToggle(true, refresh = true)
                             }

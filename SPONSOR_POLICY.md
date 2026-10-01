@@ -1,6 +1,6 @@
 # FCAE Sponsorship Policy
 
-FCAE may show a small, clearly labeled **Sponsored** card in the application. Sponsorship does not imply that a sponsor controls FCAE, its networking behavior, or its development decisions.
+FCAE may show a small sponsor card under the **SPONSORS** header of the application. Sponsorship does not imply that a sponsor controls FCAE, its networking behavior, or its development decisions.
 
 ## Applying
 
@@ -8,14 +8,23 @@ To discuss a sponsorship, campaign availability, or payment, contact **[@mronoob
 
 Acceptance is discretionary. Do not send payment until the campaign, dates, creative, price, and payment method have been agreed through the official contact. Payment does not guarantee approval, continued placement, or endorsement, and no third party is authorized to collect sponsorship payments on FCAE's behalf unless this policy is updated to identify them.
 
-An application must provide:
+### Required in every application
 
-- sponsor name and an optional campaign title;
+- sponsor name;
 - HTTPS destination URL;
-- an optional short message and/or final image, animated GIF, or MP4 video; a campaign may be media-only, text-only, or use both;
-- optional audio narration or sound and presentation preferences: background image/video, title/message/card colors, title/message X/Y positions, image fit, icon scale, and background scale;
 - requested start and end dates;
-- confirmation that the applicant owns or is authorized to use every submitted logo, trademark, image, and statement.
+- confirmation that the applicant owns or is authorized to use every submitted logo, trademark, image, sound, and statement.
+
+### Optional
+
+Everything else is optional. A campaign may be text-only, media-only, or both:
+
+- campaign title and short message;
+- icon (foreground art) and background, each a still image, animated GIF, or MP4 video;
+- audio narration or sound;
+- presentation preferences: colors, positions, sizes, opacity, image fit, and display time.
+
+Every supported option is listed in the [field reference](#field-reference). For the best result, read [Recommended: put your text in your media](#recommended-put-your-text-in-your-media) before preparing creative.
 
 ## Content that is not accepted
 
@@ -32,77 +41,214 @@ FCAE does not accept sponsorship for:
 
 FCAE may reject or remove any campaign that creates legal, security, privacy, reputational, or user-safety concerns.
 
-## Privacy and presentation
-
-Sponsor cards are rendered by FCAE rather than arbitrary HTML or JavaScript. The icon and background are optional; a card can use a short message with explicit title/message X/Y positions, and FCAE falls back to a safe title/message card when either resource is absent, rejected, corrupt, or unavailable. Sponsors may provide an optional `background_url`, `audio_url`, `title_color`, `message_color`, and `background_color`, plus `title_x`, `title_y`, `message_x`, `message_y`, `image_fit`, `icon_scale`, and `background_scale` presentation preferences. `icon_url` and `background_url` may contain still images, animated GIFs, or MP4 video; video is decoded to bounded frames by the same native media path. Audio is off by default and the card's own "Sound on"/"Sound off" control enables it: the clip it plays is the campaign's `audio_url` or, when there is none, the soundtrack of the campaign's own MP4, so enabling sound never triggers a second download and FCAE never probes a file for an audio track. A media file with no audio is simply silent. A clip that is still being cached starts as soon as it lands, and one whose decode fails is retried on the rotation after it. These controls style the native card only; sponsors cannot supply HTML, JavaScript, fonts, or arbitrary layout code. Native clients reserve a fixed 140-unit sponsor card (140dp on Android and 140px on desktop) so missing media or different icon/background scales do not reflow the surrounding interface. The sponsor manifest and external `icon_url`/`background_url`/`audio_url` resources are fetched only after FCAE reports that the VPN is connected, and only through the connected session's local tunnel proxy. If no tunnel proxy is available, FCAE does not fetch them; previously cached manifest/media remain usable offline and are not deleted on disconnect. Each active campaign has an isolated cache directory named after its validated manifest ID, containing its campaign metadata and separate media, background, and audio directories. Encoded media is cached for active campaigns. Decoded pixels are retained only for the visible campaign and the already-selected next campaign; the next card is prepared in the background before rotation, and older decoded pixels are released. Every plane -- still, GIF, or video frame -- is retained at a card-sized canvas, so the memory budget decides animation smoothness rather than whether a card has media at all: a clip that would exceed the budget is merged into fewer, longer frames that keep its full duration, and the icon is always served before the background. Audio is downloaded lazily only after the user enables it. Destination URLs are never prefetched by FCAE; they are handed to the external browser only after an explicit user click. The small GitHub manifest uses a persisted Unix timestamp and automatic refreshes occur no more than once every 12 hours. An explicit user press of the sponsor refresh button may request an immediate refresh while the VPN is connected. Opening and closing the client UI does not reset the automatic interval; the last valid cached manifest remains available if a refresh fails. `starts_at` and `ends_at` are honored while the client runs: a campaign whose window closes is removed with its cached media at that moment -- and one whose window opens gets its turn -- instead of waiting for the next refresh. Campaigns rotate locally every ten seconds and users may swipe or drag the card to move to another sponsor; neither action generates an impression request. With two active campaigns FCAE alternates between them. With three or more, FCAE chooses randomly without immediately repeating the card already shown. A single campaign remains in place.
-
-FCAE does not provide sponsors with device identifiers, user profiles, browsing activity, impression reports, or click reports. Destination links open in the user's external browser. The destination site is governed by its own privacy practices.
-
-## Cache lifecycle
-
-FCAE keeps the sponsor cache small and self-cleaning, and never at the user's expense:
-
-- A campaign that leaves the manifest, or whose `ends_at` passes, has its whole cache directory (encoded media, decoded sidecars, metadata) deleted on the spot; disabled or never-started campaigns are not cached at all.
-- Within a campaign, only the URL the manifest currently points at plus one newest fallback per plane is kept; older entries and their decoded sidecars are removed on every accepted manifest.
-- Decoded sidecars are re-derivable, so they are discarded first when the cache is over its ceiling, followed by fallback copies and the clips of cards that are not on screen. Assets of the card being shown are never deleted: a missing asset is far more expensive than a few megabytes on disk.
-- Interrupted writes are staged in `.<name>.<kind>.tmp` files and swept on every manifest pass, so a crash cannot leave partial files behind.
-- The whole tree is capped at 192 MiB; campaign media is capped at 15 MiB per asset and unlimited campaigns are not accepted (32 active campaigns maximum).
-
-## Media requirements
-
-- HTTPS only.
-- PNG, JPEG, WebP, GIF, or MP4 video for `icon_url` and `background_url`.
-- `audio_url` is optional and supports audio formats understood by the Rust decoder, including MP3, WAV, Ogg, and FLAC.
-- A campaign without `audio_url` plays the soundtrack of its own media instead: an MP4 `background_url` or `icon_url` is handed to the decoder as it is cached, with no separate download and no audio-track probe. A file with no audio track is silent by design; a plane the image decoder can identify (still image or GIF) is skipped. `audio_url` always wins when both are present.
-- Maximum encoded size: 15 MiB per icon, background, or audio asset.
-- Maximum dimensions: 800 × 450 pixels on every platform.
-- Animated GIFs and MP4 video retain up to 300 decoded source frames and are then merged down to the decoded-byte budget (16 MiB per plane on Android, 64 MiB elsewhere, so roughly 57 retained frames per plane on Android and 129 on desktop); merging preserves the clip's total duration, so a long animation plays coarser rather than disappearing. The icon is served first, then the background.
-- `icon_url` and `background_url` are optional and accept PNG, JPEG, WebP, GIF, or MP4 with the same HTTPS, encoded-size, and dimension limits. Animated GIF and video frames are retained for both the icon and background.
-- `title` is optional and limited to 96 printable characters; an omitted title renders no title text.
-- `message` is optional and limited to 256 printable characters.
-- `title_x` and `message_x` are integer percentages from 0 through 100 for the horizontal centre of the title and message blocks; the block is clamped so its text always stays inside the card. `title_y` and `message_y` are integer percentages from 0 through 100 measured from the top of the usable card area. Title position defaults to 50,50; message position defaults to 50,72.
-- `duration_seconds` is optional, defaults to 10, and accepts 1 through 3600 seconds.
-- `title_color`, `message_color`, and `background_color` use `#RRGGBB` or `#AARRGGBB`.
-- `image_fit` is `contain` or `cover`; it defaults to `contain`.
-- `icon_scale` and `background_scale` are percentages from 50 through 160 and default to 100 (also supporting aliases `icon_size` / `background_size`). The scaled art is kept inside the card: a larger icon is clamped to the card's edges instead of being cut off.
-- `title_scale` and `message_scale` are percentages from 50 through 200 and default to 100 (also supporting aliases `title_size` / `message_size`), scaling the text cleanly within the card layout.
-- `icon_x` and `icon_y` place the icon's centre; the icon is clamped inside the card, so the extremes of the range anchor it to the card's edge.
-- Invalid presentation values are ignored and replaced with safe defaults.
-
 ## Manifest format
 
-Production entries are stored in `sponsors.json`:
+Campaigns are published in [`sponsors.json`](sponsors.json) as a `sponsors` array. The smallest valid campaign is:
 
 ```json
 {
   "sponsors": [
     {
       "id": "example-2026",
-      "title": "Example Sponsor",
-      "message": "A short optional sponsor message.",
-      "icon_url": "https://cdn.example.com/fcae/example.webp",
-      "background_url": "https://cdn.example.com/fcae/example-background.mp4",
-      "audio_url": "https://cdn.example.com/fcae/example.mp3",
-      "title_color": "#FFFFFFFF",
-      "message_color": "#FFD8E7FF",
-      "background_color": "#FF142A44",
-      "title_x": 50,
-      "title_y": 60,
-      "message_x": 50,
-      "message_y": 70,
-      "image_fit": "contain",
-      "icon_scale": 100,
-      "background_scale": 100,
-      "icon_x": 50,
-      "icon_y": 25,
-      "duration_seconds": 10,
-      "destination_url": "https://example.com/",
-      "enabled": true,
-      "starts_at": 1790812800,
-      "ends_at": 1793491199
+      "destination_url": "https://example.com/"
     }
   ]
 }
 ```
 
-`message`, `icon_url`, `background_url`, `audio_url`, and dates are optional. Dates are Unix timestamps in UTC. A campaign must retain a title and HTTPS destination. `starts_at` is optional and delays campaign eligibility until its Unix timestamp. Removing a campaign from the manifest causes FCAE to remove its cached icon/background/audio media on the next successful refresh.
+A full campaign using every supported field:
+
+```json
+{
+  "sponsors": [
+    {
+      "id": "example-2026",
+      "destination_url": "https://example.com/",
+      "enabled": true,
+      "starts_at": 1790812800,
+      "ends_at": 1793491199,
+      "duration_seconds": 10,
+
+      "title": "Example Sponsor",
+      "message": "A short optional sponsor message.",
+      "title_color": "#FFFFFFFF",
+      "message_color": "#FFD8E7FF",
+      "title_x": 50,
+      "title_y": 50,
+      "message_x": 50,
+      "message_y": 72,
+      "title_scale": 100,
+      "message_scale": 100,
+
+      "icon_url": "https://cdn.example.com/fcae/example.webp",
+      "icon_x": 50,
+      "icon_y": 25,
+      "icon_scale": 100,
+      "icon_opacity": 100,
+      "image_fit": "contain",
+
+      "background_url": "https://cdn.example.com/fcae/example-background.mp4",
+      "background_color": "#FF142A44",
+      "background_scale": 100,
+      "background_opacity": 42,
+      "background_color_opacity": 100,
+
+      "audio_url": "https://cdn.example.com/fcae/example.mp3"
+    }
+  ]
+}
+```
+
+### Field reference
+
+Only `id` and `destination_url` are required. An omitted optional field uses its default.
+
+#### Campaign
+
+| Field | Type | Required | Default | Accepted values |
+|---|---|---|---|---|
+| `id` | string | **yes** | — | 1–64 characters: `A–Z`, `a–z`, `0–9`, `-`, `_`. Unique within the manifest. Also names the campaign's cache directory. |
+| `destination_url` | string | **yes** | — | `https://` URL, ASCII, at most 511 characters. Opened in the external browser only when the user clicks. |
+| `enabled` | boolean | no | `true` | `false` keeps the entry in the manifest without showing or caching it. |
+| `starts_at` | integer | no | always eligible | Unix timestamp in seconds, UTC. The campaign appears at this second. |
+| `ends_at` | integer | no | never expires | Unix timestamp in seconds, UTC. The campaign is shown through this second, then removed with its cache. Must be greater than `starts_at`. |
+| `duration_seconds` | integer | no | `10` | 1–3600. How long this card stays on screen before rotating, when two or more campaigns are active. |
+
+#### Text
+
+| Field | Type | Required | Default | Accepted values |
+|---|---|---|---|---|
+| `title` | string | no | no title | At most 96 bytes of UTF-8 (96 Latin characters, about 48 Persian or 32 Chinese characters). No control characters. |
+| `message` | string | no | no message | At most 256 bytes of UTF-8. Line breaks (`\n`) are allowed; other control characters are not. |
+| `title_color` | string | no | `#FFFFFFFF` | `#RRGGBB` or `#AARRGGBB`. |
+| `message_color` | string | no | `#FFD8E7FF` | `#RRGGBB` or `#AARRGGBB`. |
+| `title_x`, `title_y` | integer | no | `50`, `50` | 0–100, percent of the card. X is the horizontal centre of the text block; Y is measured from the top of the usable card area. |
+| `message_x`, `message_y` | integer | no | `50`, `72` | 0–100, as above. |
+| `title_scale` | integer | no | `100` | 50–200 percent of the base title size (16 sp on Android; the UI font size on desktop). Aliases: `title_size`, `title_font_scale`, `title_font_size`, `title_scale_percent`. |
+| `message_scale` | integer | no | `100` | 50–200 percent of the base message size, which is 7/8 of the title's on both platforms (14 sp on Android). Aliases: `message_size`, `message_font_scale`, `message_font_size`, `message_scale_percent`. |
+
+Text blocks are clamped so their text always stays inside the card. The desktop card is shorter than Android's (80 px against 140 dp), so the same scale fills a larger share of it; keep long text at 100 or below.
+
+#### Icon (foreground media)
+
+The icon is fitted into a media band that spans the card's width and is 70 dp tall on Android and 44 px tall on desktop. `image_fit` decides how it fits the band, then `icon_scale` resizes the result.
+
+| Field | Type | Required | Default | Accepted values |
+|---|---|---|---|---|
+| `icon_url` | string | no | no icon | `https://` URL, ASCII, at most 2048 characters. PNG, JPEG, WebP, GIF, or MP4. |
+| `icon_x`, `icon_y` | integer | no | `50`, `25` | 0–100, percent position of the icon's centre. The drawn icon is clamped inside the card, so 0 and 100 anchor it to an edge; an icon wider or taller than the card is centred on that axis. |
+| `icon_scale` | integer | no | `100` | 50–160 percent of the fitted size, in both fit modes. Above 100 the icon grows beyond its band; anything past the card's edge is cut off. Aliases: `icon_size`, `icon_size_percent`, `icon_scale_percent`, `image_size`. |
+| `icon_opacity` | integer | no | `100` | 0–100 percent. |
+| `image_fit` | string | no | `contain` | How the icon fits its box: `contain` shows all of it, `cover` fills the box and crops the overflow. |
+
+#### Background
+
+| Field | Type | Required | Default | Accepted values |
+|---|---|---|---|---|
+| `background_url` | string | no | card color only | `https://` URL, ASCII, at most 2048 characters. PNG, JPEG, WebP, GIF, or MP4. Always fills its area, centred, cropping whatever overflows (the whole card on Android, the card inside its padding on desktop). |
+| `background_color` | string | no | `#FF142A44` | `#RRGGBB` or `#AARRGGBB`. The card's base color. |
+| `background_color_opacity` | integer | no | `100` | 0–100 percent. Multiplies the alpha of `background_color`. |
+| `background_scale` | integer | no | `100` | 50–160 percent. Aliases: `background_size`, `bg_size`, `bg_scale`, `background_scale_percent`. |
+| `background_opacity` | integer | no | `42` | 0–100 percent. The default dims the background so text stays readable. |
+
+#### Audio
+
+| Field | Type | Required | Default | Accepted values |
+|---|---|---|---|---|
+| `audio_url` | string | no | soundtrack of the campaign's MP4, if any | `https://` URL, ASCII, at most 2048 characters. MP3, AAC/M4A, FLAC, WAV, or Ogg Vorbis. |
+
+### Validation
+
+Mistakes in optional presentation fields never take a campaign down. Mistakes in identity, scheduling, or JSON structure reject the whole manifest; clients then keep the last valid cached manifest.
+
+| Problem | Result |
+|---|---|
+| Invalid optional value: out-of-range number, malformed color, unknown `image_fit`, non-HTTPS media URL, over-long `message` | That field alone is ignored and its default is used. |
+| Media that fails to download or decode, or exceeds the media limits | That plane is dropped; the card falls back to its text on `background_color`. |
+| Unknown field names | Ignored. |
+| Missing or invalid `id` or `destination_url`; duplicate `id`; invalid `title`; `starts_at` not before `ends_at` | **Whole manifest rejected.** |
+| Wrong JSON type, such as a quoted number (`"50"`), a negative or fractional number, or `null` for `title` | **Whole manifest rejected.** |
+| More than 32 entries (disabled and expired entries count) or a file larger than 128 KiB | **Whole manifest rejected.** |
+
+Write numbers without quotes, and omit a field instead of setting it to `null`.
+
+## Recommended: put your text in your media
+
+We recommend designing your text into your artwork and leaving `title` and `message` out. FCAE's native text is a fallback, not a design tool:
+
+- **Scripts.** The desktop client draws text with a built-in font that covers basic Latin only. Persian, Arabic, Chinese, emoji, and right-to-left text do not display correctly there. Text inside an image or video looks the same on every platform.
+- **Consistency.** Native text uses a different font, size, and line wrapping on Android and desktop. Artwork keeps your typeface, colors, and layout exactly as designed.
+- **Branding.** Logos, custom fonts, and styled headlines are only possible in media.
+
+### How to do it
+
+1. Use `background_url` for the artwork, because the background covers the largest area of the card. The icon band is short (44 px on desktop, 70 dp on Android), so it suits a logo but not readable text.
+2. Set `"background_opacity": 100`. The default of 42 deliberately dims the background behind native text and would fade your artwork.
+3. Leave out `title` and `message` so native text is not drawn over your artwork.
+4. Set `background_color` to your artwork's dominant color. It is what users see before the media has downloaded.
+
+### Designing the artwork
+
+The card is a wide strip whose shape differs by platform: 140 dp tall and the screen width minus 40 dp on Android (about 320 × 140 dp, 2.3 : 1, on a typical phone), 80 px tall and 280–380 px wide on desktop, where the background sits inside the card's padding in an area of about 340 × 48 px (7 : 1). The background is centred and cropped to fit, so the edges may be cut off.
+
+- Design at **800 × 300 px** (MP4 may be larger and is downscaled).
+- Keep all text and logos inside the **centre 680 × 110 px**. That area is visible on every platform; the rest may be cropped.
+- Use bold lettering at least **40 px tall** in the 800 × 300 design, with strong contrast. The desktop card shows the artwork at well under half size, and Android keeps media at 320 × 180 px to save memory, so fine detail softens.
+- For animation, prefer MP4 over GIF: it is far smaller for the same quality and is less likely to be merged into coarser frames.
+
+A media-first campaign looks like this:
+
+```json
+{
+  "id": "example-2026",
+  "destination_url": "https://example.com/",
+  "background_url": "https://cdn.example.com/fcae/example-800x300.mp4",
+  "background_opacity": 100,
+  "background_color": "#FF0B1F3A",
+  "starts_at": 1790812800,
+  "ends_at": 1793491199
+}
+```
+
+**Trade-off.** Media is downloaded only while the VPN is connected and is cached after that. Until the first download finishes, or if the file fails to decode, a card without `title` or `message` shows only `background_color`. If you want text in that case too, add a short Latin-script `title` and leave room for it in your artwork at its position (`title_x`, `title_y`).
+
+## Media requirements
+
+| | Icon and background | Audio |
+|---|---|---|
+| Transport | HTTPS only; redirects must stay HTTPS, at most 3 | same |
+| Formats | PNG, JPEG, WebP, GIF, MP4 | MP3, AAC/M4A, FLAC, WAV, Ogg Vorbis |
+| Maximum file size | 15 MiB per asset | 15 MiB |
+| Maximum dimensions | Still images and GIFs: 800 × 450 px. MP4: 1920 × 1080 px, downscaled on decode. | — |
+
+- All media is downscaled to the card canvas it is shown in (400 × 225 on desktop, 320 × 180 on Android). Larger sources gain nothing on screen.
+- Animated GIF and MP4 decode at most 180 source frames and play at no more than 30 fps; each frame is shown for 20 ms to 10 s.
+- Each card retains at most 6 MiB (Android) or 12 MiB (desktop) of decoded frames across its icon and background. A longer animation is merged into fewer, longer frames that keep its full duration, so it plays coarser instead of disappearing. The icon is decoded before the background.
+- Without `audio_url`, a campaign's MP4 icon or background soundtrack is played instead, with no separate download. Media without an audio track is silent. When both exist, `audio_url` wins.
+
+## Presentation
+
+- Sponsor cards are drawn natively by FCAE. Sponsors cannot supply HTML, JavaScript, fonts, or layout code; the fields above are the complete list of what can be customized.
+- The card has a fixed height (140 dp on Android, 80 px on desktop), so missing media or different scales never move the rest of the interface.
+- With one active campaign it stays in place. With two, they alternate. With three or more, FCAE picks randomly without repeating the card just shown. Each card stays for its `duration_seconds`; users may also swipe or drag to the next card.
+- `starts_at` and `ends_at` are honored while the client runs: a campaign appears and disappears at those moments without waiting for a manifest refresh.
+- Audio is off by default. It plays only after the user turns on the card's sound control, and is downloaded only at that point.
+
+## Privacy
+
+- The manifest and all sponsor media are fetched only while the VPN is connected, and only through the connected session's local tunnel proxy. Without a tunnel proxy, nothing is fetched; cached content stays usable offline.
+- The manifest is refreshed automatically at most once every 12 hours, tracked by a persisted timestamp that survives restarts. Pressing the sponsor refresh button requests an immediate refresh while connected.
+- Destination URLs are never prefetched. They open in the user's external browser only after an explicit click, and the destination site is governed by its own privacy practices.
+- Showing, rotating, or swiping a card sends no request. FCAE does not provide sponsors with device identifiers, user profiles, browsing activity, impression reports, or click reports.
+
+## Cache lifecycle
+
+FCAE keeps the sponsor cache small and self-cleaning, and never at the user's expense:
+
+- Each active campaign has its own cache directory, named after its `id`, holding its metadata and separate media, background, and audio directories. Disabled and not-yet-started campaigns are not cached.
+- A campaign that leaves the manifest, or whose `ends_at` passes, has its whole cache directory deleted immediately.
+- Within a campaign, only the asset the manifest currently points at plus one newest fallback per plane is kept. Older copies and their decoded sidecars are removed on every accepted manifest.
+- Decoded pixels are held in memory only for the visible card and the already-selected next card, which is prepared in the background before rotation.
+- When the cache exceeds its ceiling, decoded sidecars are discarded first (they can be re-derived), then fallback copies and clips of cards not on screen. Assets of the card being shown are never deleted.
+- Interrupted writes are staged in `.<name>.<kind>.tmp` files and swept on every manifest pass, so a crash cannot leave partial files behind.
+- The whole cache is capped at 768 MiB.

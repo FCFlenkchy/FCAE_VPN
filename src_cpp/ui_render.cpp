@@ -2141,7 +2141,10 @@ void render_ui() {
             const float icon_scale = std::clamp((float)s_sponsor.icon_scale / 100.0f, 0.5f, 1.6f);
             const float background_scale = std::clamp((float)s_sponsor.background_scale / 100.0f, 0.5f, 1.6f);
             const float title_scale = std::clamp((float)(s_sponsor.title_scale ? s_sponsor.title_scale : 100) / 100.0f, 0.5f, 2.0f);
-            const float message_scale = std::clamp((float)(s_sponsor.message_scale ? s_sponsor.message_scale : 100) / 100.0f, 0.5f, 2.0f);
+            // Android's 16sp title / 14sp message hierarchy.
+            constexpr float kSponsorMessageFontRatio = 14.0f / 16.0f;
+            const float message_scale = kSponsorMessageFontRatio
+                * std::clamp((float)(s_sponsor.message_scale ? s_sponsor.message_scale : 100) / 100.0f, 0.5f, 2.0f);
             constexpr float sponsor_card_height = 80.0f;
             constexpr float sponsor_media_height = 44.0f;
             ImVec4 card_color = sponsor_color(s_sponsor.card_color, ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
@@ -2172,50 +2175,51 @@ void render_ui() {
             }
 
             if (texture) {
-                const float box_w = std::min(200.0f, ImGui::GetContentRegionAvail().x);
-                const float box_h = sponsor_media_height;
-                ImVec2 size(box_w, box_h);
+                const ImVec2 icon_origin = ImGui::GetCursorScreenPos();
+                const ImVec2 icon_area = ImGui::GetContentRegionAvail();
+                const ImVec2 band(icon_area.x, sponsor_media_height);
+                const ImVec2 source((float)s_sponsor.width, (float)s_sponsor.height);
+                ImVec2 size = band;
                 ImVec2 uv0(0, 0);
                 ImVec2 uv1(1, 1);
                 if (s_sponsor.image_fit == 0) {
-                    const float scale = std::min(box_w / (float)s_sponsor.width, box_h / (float)s_sponsor.height) * icon_scale;
-                    size = ImVec2((float)s_sponsor.width * scale, (float)s_sponsor.height * scale);
-                    if (size.x > box_w || size.y > box_h) {
-                        const float fit = std::min(box_w / size.x, box_h / size.y);
-                        size.x *= fit;
-                        size.y *= fit;
-                    }
+                    const float fit = std::min(band.x / source.x, band.y / source.y);
+                    size = ImVec2(source.x * fit, source.y * fit);
                 } else {
-                    const float image_ratio = (float)s_sponsor.width / (float)s_sponsor.height;
-                    const float box_ratio = box_w / box_h;
-                    if (image_ratio > box_ratio) {
-                        const float crop = 1.0f - box_ratio / image_ratio;
-                        uv0.x = crop * 0.5f;
-                        uv1.x = 1.0f - crop * 0.5f;
+                    const float image_ratio = source.x / source.y;
+                    const float band_ratio = band.x / band.y;
+                    if (image_ratio > band_ratio) {
+                        const float crop = (1.0f - band_ratio / image_ratio) * 0.5f;
+                        uv0.x = crop;
+                        uv1.x = 1.0f - crop;
                     } else {
-                        const float crop = 1.0f - image_ratio / box_ratio;
-                        uv0.y = crop * 0.5f;
-                        uv1.y = 1.0f - crop * 0.5f;
+                        const float crop = (1.0f - image_ratio / band_ratio) * 0.5f;
+                        uv0.y = crop;
+                        uv1.y = 1.0f - crop;
                     }
                 }
-                const ImVec2 icon_area = ImGui::GetContentRegionAvail();
-                const float icon_half_w = size.x * 0.5f;
-                const float icon_half_h = size.y * 0.5f;
-                const auto sponsor_icon_center = [](float extent, float half, float percent) {
-                    if (half * 2.0f >= extent) return extent * 0.5f;
-                    return std::clamp(extent * percent, half, extent - half);
+                size.x *= icon_scale;
+                size.y *= icon_scale;
+                const auto sponsor_icon_center = [](float extent, float drawn, float percent) {
+                    if (drawn >= extent) return extent * 0.5f;
+                    return std::clamp(extent * percent, drawn * 0.5f, extent - drawn * 0.5f);
                 };
-                const float icon_center_x = sponsor_icon_center(icon_area.x, icon_half_w,
-                    std::clamp((float)s_sponsor.icon_x / 100.0f, 0.0f, 1.0f));
-                const float icon_center_y = sponsor_icon_center(icon_area.y, icon_half_h,
-                    std::clamp((float)s_sponsor.icon_y / 100.0f, 0.0f, 1.0f));
-                ImGui::SetCursorPos(ImVec2(icon_center_x - icon_half_w, icon_center_y - icon_half_h));
-                const ImVec2 image_pos = ImGui::GetCursorScreenPos();
-                ImGui::ImageWithBg(texture, size, uv0, uv1, ImVec4(0, 0, 0, 0),
-                    ImVec4(1, 1, 1, (float)s_sponsor.icon_opacity / 100.0f));
-                const ImVec2 after_image = ImGui::GetCursorScreenPos();
-                ImGui::SetCursorScreenPos(image_pos);
-                ImGui::InvisibleButton("##sponsor_card_touch", size);
+                const ImVec2 icon_min(
+                    icon_origin.x + sponsor_icon_center(icon_area.x, size.x,
+                        std::clamp((float)s_sponsor.icon_x / 100.0f, 0.0f, 1.0f)) - size.x * 0.5f,
+                    icon_origin.y + sponsor_icon_center(icon_area.y, size.y,
+                        std::clamp((float)s_sponsor.icon_y / 100.0f, 0.0f, 1.0f)) - size.y * 0.5f);
+                const ImVec2 icon_max(icon_min.x + size.x, icon_min.y + size.y);
+                ImGui::GetWindowDrawList()->AddImage(texture, icon_min, icon_max, uv0, uv1,
+                    ImGui::GetColorU32(ImVec4(1, 1, 1, (float)s_sponsor.icon_opacity / 100.0f)));
+                // The hit box is the visible part only, so an oversized icon
+                // never grows the card's scrollable content.
+                const ImVec2 hit_min(std::max(icon_min.x, icon_origin.x), std::max(icon_min.y, icon_origin.y));
+                const ImVec2 hit_max(std::min(icon_max.x, icon_origin.x + icon_area.x),
+                                     std::min(icon_max.y, icon_origin.y + icon_area.y));
+                ImGui::SetCursorScreenPos(hit_min);
+                ImGui::InvisibleButton("##sponsor_card_touch",
+                    ImVec2(std::max(1.0f, hit_max.x - hit_min.x), std::max(1.0f, hit_max.y - hit_min.y)));
                 static bool sponsor_dragged = false;
                 if (ImGui::IsItemActivated()) sponsor_dragged = false;
                 if (ImGui::IsItemActive() && s_sponsor.campaign_count > 1
@@ -2233,7 +2237,6 @@ void render_ui() {
                     ImGui::SetTooltip(s_sponsor.campaign_count > 1
                         ? "Click to open, drag to change sponsor"
                         : "Click to open sponsor website");
-                ImGui::SetCursorScreenPos(after_image);
             } else {
                 const ImVec2 card_size(card_w, sponsor_card_height);
                 ImGui::InvisibleButton("##sponsor_card_touch", card_size);
@@ -2255,7 +2258,7 @@ void render_ui() {
                 const float top = (text_card.y - line_h * 3.0f) * 0.5f;
                 draw_sponsor_text(sponsor_title, text_card, text_inset, 50, top, 1.0f,
                     ImVec4(0.80f, 0.90f, 1.0f, 1.0f));
-                draw_sponsor_text(sponsor_message, text_card, text_inset, 50, top + line_h * 2.0f, 1.0f,
+                draw_sponsor_text(sponsor_message, text_card, text_inset, 50, top + line_h * 2.0f, kSponsorMessageFontRatio,
                     ImVec4(0.45f, 0.65f, 0.95f, 1.0f));
             }
             ImGui::EndChild();
