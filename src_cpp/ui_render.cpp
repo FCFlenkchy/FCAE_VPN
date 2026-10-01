@@ -191,6 +191,12 @@ static ImVec4 sponsor_color(uint32_t packed, ImVec4 fallback) {
         ((packed >> 24) & 0xFF) / 255.0f);
 }
 
+static ImVec4 sponsor_color(uint32_t packed, ImVec4 fallback, uint8_t opacity) {
+    ImVec4 color = sponsor_color(packed, fallback);
+    color.w *= (float)opacity / 100.0f;
+    return color;
+}
+
 // Sponsor text coordinates share Android's contract: x_percent is the horizontal
 // centre and top_y the top edge of the text block, both relative to the whole
 // card, with every wrapped line centred inside the block.
@@ -2185,8 +2191,8 @@ void render_ui() {
             // text all span the whole card rather than a padded inner area.
             constexpr float sponsor_media_height = sponsor_card_height * 70.0f / 140.0f;
             constexpr float kSponsorTextInset = 8.0f;
-            ImVec4 card_color = sponsor_color(s_sponsor.card_color, ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
-            card_color.w *= (float)s_sponsor.background_color_opacity / 100.0f;
+            const ImVec4 card_color = sponsor_color(s_sponsor.card_color, ImVec4(0.08f, 0.13f, 0.22f, 1.0f),
+                s_sponsor.background_color_opacity);
             ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
             ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.49f, 0.76f, 1.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
@@ -2293,9 +2299,9 @@ void render_ui() {
                     s_sponsor.message_x, text_card.y * (float)s_sponsor.message_y / 100.0f, message_scale);
                 separate_sponsor_text(title, message, text_card.y, 2.0f);
                 draw_sponsor_text(title, text_origin,
-                    sponsor_color(s_sponsor.title_color, ImVec4(1.0f, 1.0f, 1.0f, 1.0f)));
+                    sponsor_color(s_sponsor.title_color, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), s_sponsor.title_opacity));
                 draw_sponsor_text(message, text_origin,
-                    sponsor_color(s_sponsor.message_color, ImVec4(0.85f, 0.91f, 1.0f, 1.0f)));
+                    sponsor_color(s_sponsor.message_color, ImVec4(0.85f, 0.91f, 1.0f, 1.0f), s_sponsor.message_opacity));
             } else {
                 const float line_h = ImGui::GetFontSize();
                 const float top = (text_card.y - line_h * 3.0f) * 0.5f;

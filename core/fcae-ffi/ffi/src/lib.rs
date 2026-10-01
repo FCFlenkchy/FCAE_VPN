@@ -1434,6 +1434,8 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.icon_opacity = frame.icon_opacity;
             out.background_opacity = frame.background_opacity;
             out.background_color_opacity = frame.background_color_opacity;
+            out.title_opacity = frame.title_opacity;
+            out.message_opacity = frame.message_opacity;
             let mut slot = SPONSOR_FRAME.lock();
             *slot = fcae_sponsor::ui_active().then_some(frame);
         } else {
@@ -1468,6 +1470,8 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.icon_opacity = 100;
             out.background_opacity = 42;
             out.background_color_opacity = 100;
+            out.title_opacity = 100;
+            out.message_opacity = 100;
             fill(&mut out.id, "");
             fill(&mut out.title, "");
             fill(&mut out.message, "");

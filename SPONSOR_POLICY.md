@@ -43,7 +43,7 @@ FCAE may reject or remove any campaign that creates legal, security, privacy, re
 
 ## Manifest format
 
-Campaigns are published in [`sponsors.json`](sponsors.json) as a `sponsors` array. The smallest valid campaign is:
+Campaigns are published in [`sponsors.json`](sponsors.json) as a `sponsors` array. While no campaign is active, the clients show a built-in demo card that links to this policy; it ships inside the app, so it needs no network request. The smallest valid campaign is:
 
 ```json
 {
@@ -73,6 +73,8 @@ A full campaign using every supported field:
       "message": "A short optional sponsor message.",
       "title_color": "#FFFFFFFF",
       "message_color": "#FFD8E7FF",
+      "title_opacity": 100,
+      "message_opacity": 100,
       "title_x": 50,
       "title_y": 50,
       "message_x": 50,
@@ -122,6 +124,8 @@ Only `id` and `destination_url` are required. An omitted optional field uses its
 | `message` | string | no | no message | At most 256 bytes of UTF-8. Line breaks (`\n`) are allowed; other control characters are not. |
 | `title_color` | string | no | `#FFFFFFFF` | `#RRGGBB` or `#AARRGGBB`. |
 | `message_color` | string | no | `#FFD8E7FF` | `#RRGGBB` or `#AARRGGBB`. |
+| `title_opacity` | integer | no | `100` | 0–100 percent. Multiplies the alpha of `title_color`. |
+| `message_opacity` | integer | no | `100` | 0–100 percent. Multiplies the alpha of `message_color`. |
 | `title_x`, `title_y` | integer | no | `50`, `50` | 0–100, percent of the card. X is the horizontal centre of the text block; Y is measured from the top of the usable card area. |
 | `message_x`, `message_y` | integer | no | `50`, `72` | 0–100, as above. |
 | `title_scale` | integer | no | `100` | 50–200 percent of the base title size (16 sp on Android; the UI font size on desktop). Aliases: `title_size`, `title_font_scale`, `title_font_size`, `title_scale_percent`. |

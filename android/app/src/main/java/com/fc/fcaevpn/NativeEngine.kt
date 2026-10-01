@@ -280,6 +280,8 @@ class FcaeSponsorInfo(
     @JvmField var iconOpacity: Int = 100,
     @JvmField var backgroundOpacity: Int = 42,
     @JvmField var backgroundColorOpacity: Int = 100,
+    @JvmField var titleOpacity: Int = 100,
+    @JvmField var messageOpacity: Int = 100,
     @JvmField var generation: Long = 0,
     @JvmField var rgba: ByteArray = byteArrayOf(),
     @JvmField var backgroundRgba: ByteArray = byteArrayOf()

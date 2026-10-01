@@ -20,6 +20,10 @@ use std::{
 
 pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/FCFlenkchy/FCAE_VPN/main/sponsors.json";
+const SPONSOR_POLICY_URL: &str =
+    "https://github.com/FCFlenkchy/FCAE_VPN/blob/main/SPONSOR_POLICY.md";
+const DEMO_CARD_ID: &str = "fcae-sponsor-demo";
+static DEMO_CARD_PNG: &[u8] = include_bytes!("../assets/sponsor_demo.png");
 const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 // Each foreground icon, optional background, or optional audio clip may use up
 // to 15 MiB on disk. Decoded frame and aggregate budgets below still bound
@@ -118,6 +122,8 @@ const DEFAULT_MESSAGE_SCALE: u32 = 100;
 const DEFAULT_ICON_OPACITY: u8 = 100;
 const DEFAULT_BACKGROUND_OPACITY: u8 = 42;
 const DEFAULT_BACKGROUND_COLOR_OPACITY: u8 = 100;
+const DEFAULT_TITLE_OPACITY: u8 = 100;
+const DEFAULT_MESSAGE_OPACITY: u8 = 100;
 const DEFAULT_DURATION_SECONDS: u32 = 10;
 const MAX_DURATION_SECONDS: u32 = 3_600;
 // Keep the current campaign visible for ten seconds before rotating.
@@ -177,6 +183,12 @@ struct Campaign {
     /// Extra opacity percent applied to `background_color`, 0..=100.
     #[serde(default)]
     background_color_opacity: Option<u32>,
+    /// Extra opacity percent applied to `title_color`, 0..=100.
+    #[serde(default)]
+    title_opacity: Option<u32>,
+    /// Extra opacity percent applied to `message_color`, 0..=100.
+    #[serde(default)]
+    message_opacity: Option<u32>,
     #[serde(default)]
     icon_x: Option<u32>,
     #[serde(default)]
@@ -236,6 +248,8 @@ struct ReadyCampaign {
     icon_opacity: u8,
     /// Background media plane opacity percent, 0..=100.
     background_opacity: u8,
+    title_opacity: u8,
+    message_opacity: u8,
 }
 
 struct MediaPayload {
@@ -310,6 +324,8 @@ pub struct SponsorFrame {
     pub icon_opacity: u8,
     pub background_opacity: u8,
     pub background_color_opacity: u8,
+    pub title_opacity: u8,
+    pub message_opacity: u8,
     pub generation: u64,
 }
 
@@ -440,6 +456,22 @@ static AUDIO_CONTROLLER: Lazy<Mutex<AudioController>> = Lazy::new(|| {
     })
 });
 static GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Shown whenever no campaign is ready. Bundled so it costs no request and
+/// still appears where the manifest host is blocked.
+struct DemoCard {
+    width: u32,
+    height: u32,
+    rgba: Arc<Vec<u8>>,
+}
+
+static DEMO_CARD: Lazy<Mutex<Option<Option<DemoCard>>>> = Lazy::new(|| Mutex::new(None));
+static DEMO_CARD_TEXT: Lazy<CardText> = Lazy::new(|| CardText {
+    id: Arc::from(DEMO_CARD_ID),
+    title: Arc::from(""),
+    message: Arc::from(""),
+    destination_url: Arc::from(SPONSOR_POLICY_URL),
+});
 
 #[cfg(target_os = "android")]
 static ANDROID_CONTEXT_INIT: std::sync::Once = std::sync::Once::new();
@@ -1618,6 +1650,7 @@ pub fn release_media() {
     retain_hidden_frames(&mut state);
     GENERATION.fetch_add(1, Ordering::Relaxed);
     drop(state);
+    *DEMO_CARD.lock() = None;
     release_freed_memory();
 }
 
@@ -1792,7 +1825,7 @@ pub fn current_frame() -> Option<SponsorFrame> {
         if state.ready.is_empty() {
             drop(state);
             stop_audio();
-            return None;
+            return demo_frame();
         }
         let current_duration = state.ready.get(state.current_campaign)
             .map(|campaign| campaign.duration_seconds)
@@ -1891,6 +1924,8 @@ pub fn current_frame() -> Option<SponsorFrame> {
             icon_opacity: ready.icon_opacity,
             background_opacity: ready.background_opacity,
             background_color_opacity: ready.background_color_opacity,
+            title_opacity: ready.title_opacity,
+            message_opacity: ready.message_opacity,
             generation,
         }, should_refresh, rotated)
     };
@@ -1907,6 +1942,61 @@ pub fn current_frame() -> Option<SponsorFrame> {
     }
     start_audio_for_campaign(&frame.id);
     Some(frame)
+}
+
+fn decode_demo_card() -> Option<DemoCard> {
+    let image = image::load_from_memory_with_format(DEMO_CARD_PNG, ImageFormat::Png)
+        .map_err(|error| log::error!("[sponsor] built-in demo card is not decodable: {error}"))
+        .ok()?
+        .into_rgba8();
+    let (width, height) = canvas_dimensions(image.width(), image.height());
+    let rgba = image::imageops::resize(&image, width, height, image::imageops::FilterType::Triangle)
+        .into_raw();
+    Some(DemoCard { width, height, rgba: Arc::new(rgba) })
+}
+
+fn demo_frame() -> Option<SponsorFrame> {
+    let (width, height, background_rgba) = {
+        let mut slot = DEMO_CARD.lock();
+        let card = slot.get_or_insert_with(decode_demo_card).as_ref()?;
+        (card.width, card.height, card.rgba.clone())
+    };
+    let text = &*DEMO_CARD_TEXT;
+    Some(SponsorFrame {
+        id: text.id.clone(),
+        title: text.title.clone(),
+        message: text.message.clone(),
+        destination_url: text.destination_url.clone(),
+        width: 0,
+        height: 0,
+        campaign_count: 1,
+        animated: false,
+        rgba: Arc::default(),
+        background_width: width,
+        background_height: height,
+        background_rgba,
+        title_color: DEFAULT_TITLE_COLOR,
+        message_color: DEFAULT_MESSAGE_COLOR,
+        card_color: DEFAULT_CARD_COLOR,
+        icon_x: DEFAULT_ICON_X,
+        icon_y: DEFAULT_ICON_Y,
+        duration_seconds: DEFAULT_DURATION_SECONDS,
+        title_x: DEFAULT_TITLE_X,
+        title_y: DEFAULT_TITLE_Y,
+        message_x: DEFAULT_MESSAGE_X,
+        message_y: DEFAULT_MESSAGE_Y,
+        image_fit: 0,
+        icon_scale: DEFAULT_ICON_SCALE,
+        background_scale: DEFAULT_BACKGROUND_SCALE,
+        title_scale: DEFAULT_TITLE_SCALE,
+        message_scale: DEFAULT_MESSAGE_SCALE,
+        icon_opacity: DEFAULT_ICON_OPACITY,
+        background_opacity: 100,
+        background_color_opacity: DEFAULT_BACKGROUND_COLOR_OPACITY,
+        title_opacity: DEFAULT_TITLE_OPACITY,
+        message_opacity: DEFAULT_MESSAGE_OPACITY,
+        generation: (GENERATION.load(Ordering::Relaxed) << 32) | (1 << 31),
+    })
 }
 
 pub fn last_error() -> String { STATE.lock().last_error.clone() }
@@ -2116,6 +2206,8 @@ fn empty_ready(campaign: &Campaign) -> ReadyCampaign {
             campaign.background_color_opacity,
             DEFAULT_BACKGROUND_COLOR_OPACITY,
         ),
+        title_opacity: opacity_value(campaign.title_opacity, DEFAULT_TITLE_OPACITY),
+        message_opacity: opacity_value(campaign.message_opacity, DEFAULT_MESSAGE_OPACITY),
     }
 }
 
@@ -3017,6 +3109,8 @@ fn decoded_plane(campaign: Campaign, width: u32, height: u32, frames: Vec<Frame>
         icon_opacity: DEFAULT_ICON_OPACITY,
         background_opacity: DEFAULT_BACKGROUND_OPACITY,
         background_color_opacity: DEFAULT_BACKGROUND_COLOR_OPACITY,
+        title_opacity: DEFAULT_TITLE_OPACITY,
+        message_opacity: DEFAULT_MESSAGE_OPACITY,
     }
 }
 
@@ -3387,6 +3481,8 @@ fn decode_video_file(campaign: Campaign, path: &Path) -> Result<ReadyCampaign, S
         icon_opacity: DEFAULT_ICON_OPACITY,
         background_opacity: DEFAULT_BACKGROUND_OPACITY,
         background_color_opacity: DEFAULT_BACKGROUND_COLOR_OPACITY,
+        title_opacity: DEFAULT_TITLE_OPACITY,
+        message_opacity: DEFAULT_MESSAGE_OPACITY,
     })
 }
 

@@ -626,6 +626,11 @@ class MainActivity : AppCompatActivity() {
         try { NativeEngine.nativeSponsorRefreshManifestAsync() } catch (_: Throwable) {}
     }
 
+    private fun withSponsorOpacity(color: Int, opacity: Int): Int {
+        val alpha = ((color ushr 24) * opacity.coerceIn(0, 100) / 100)
+        return (color and 0x00FFFFFF) or (alpha shl 24)
+    }
+
     private fun sponsorForegroundChanged(current: Long, previous: Long): Boolean {
         return ((current xor previous) and 0xFFFL.inv()) != 0L
     }
@@ -926,17 +931,14 @@ class MainActivity : AppCompatActivity() {
                                     val titleColor = if (card.titleColor != 0) card.titleColor else Color.WHITE
                                     val messageColor = if (card.messageColor != 0) card.messageColor else Color.parseColor("#FFD8E7FF")
                                     val cardColor = if (card.cardColor != 0) card.cardColor else Color.parseColor("#FF142A44")
-                                    sponsorTitle.setTextColor(titleColor)
-                                    sponsorMessage.setTextColor(messageColor)
+                                    sponsorTitle.setTextColor(withSponsorOpacity(titleColor, card.titleOpacity))
+                                    sponsorMessage.setTextColor(withSponsorOpacity(messageColor, card.messageOpacity))
                                     val titleScale = (if (card.titleScale != 0) card.titleScale else 100).coerceIn(50, 200)
                                     val messageScale = (if (card.messageScale != 0) card.messageScale else 100).coerceIn(50, 200)
                                     sponsorTitle.textSize = 16f * (titleScale / 100f)
                                     sponsorMessage.textSize = 14f * (messageScale / 100f)
-                                    val cardAlpha =
-                                        ((cardColor ushr 24) * card.backgroundColorOpacity / 100)
-                                            .coerceIn(0, 255)
                                     sponsorCard.backgroundTintList = ColorStateList.valueOf(
-                                        (cardColor and 0x00FFFFFF) or (cardAlpha shl 24)
+                                        withSponsorOpacity(cardColor, card.backgroundColorOpacity)
                                     )
                                     sponsorImage.imageAlpha =
                                         (card.iconOpacity * 255 / 100).coerceIn(0, 255)

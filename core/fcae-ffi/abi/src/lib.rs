@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 17;
+pub const FCAE_ABI_VERSION: u32 = 18;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
@@ -605,6 +605,10 @@ pub struct FcaeSponsorInfo {
     pub background_opacity: u8,
     /// Extra opacity percent applied to `card_color`, 0..=100.
     pub background_color_opacity: u8,
+    /// Extra opacity percent applied to `title_color`, 0..=100.
+    pub title_opacity: u8,
+    /// Extra opacity percent applied to `message_color`, 0..=100.
+    pub message_opacity: u8,
 }
 
 // ── Callbacks ───────────────────────────────────────────────────────────

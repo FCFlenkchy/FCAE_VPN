@@ -944,6 +944,8 @@ struct SponsorInfoFieldCache {
     jfieldID fidIconOpacity = nullptr;
     jfieldID fidBackgroundOpacity = nullptr;
     jfieldID fidBackgroundColorOpacity = nullptr;
+    jfieldID fidTitleOpacity = nullptr;
+    jfieldID fidMessageOpacity = nullptr;
     jfieldID fidGeneration = nullptr;
     jfieldID fidRgba = nullptr;
     jfieldID fidBackgroundRgba = nullptr;
@@ -996,6 +998,8 @@ struct SponsorInfoFieldCache {
         fidIconOpacity = getField("iconOpacity", "I");
         fidBackgroundOpacity = getField("backgroundOpacity", "I");
         fidBackgroundColorOpacity = getField("backgroundColorOpacity", "I");
+        fidTitleOpacity = getField("titleOpacity", "I");
+        fidMessageOpacity = getField("messageOpacity", "I");
         fidGeneration = getField("generation", "J");
         fidRgba = getField("rgba", "[B");
         fidBackgroundRgba = getField("backgroundRgba", "[B");
@@ -1269,6 +1273,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativePollSponsor(JNIEnv* env, jclass, jlong kn
     env->SetIntField(obj, g_sponsor_fields.fidIconOpacity, (jint)info.icon_opacity);
     env->SetIntField(obj, g_sponsor_fields.fidBackgroundOpacity, (jint)info.background_opacity);
     env->SetIntField(obj, g_sponsor_fields.fidBackgroundColorOpacity, (jint)info.background_color_opacity);
+    env->SetIntField(obj, g_sponsor_fields.fidTitleOpacity, (jint)info.title_opacity);
+    env->SetIntField(obj, g_sponsor_fields.fidMessageOpacity, (jint)info.message_opacity);
     env->SetLongField(obj, g_sponsor_fields.fidGeneration, (jlong)info.generation);
     env->SetObjectField(obj, g_sponsor_fields.fidRgba, rgba);
     env->SetObjectField(obj, g_sponsor_fields.fidBackgroundRgba, backgroundRgba);
