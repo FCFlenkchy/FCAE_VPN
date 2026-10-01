@@ -336,9 +336,9 @@ struct State {
     ready: Vec<ReadyCampaign>,
     cache_dir: PathBuf,
     rotation_started: Instant,
-    // Set while the UI is hidden: rotation is paused, so the user returns to
-    // the card they left instead of one that rotated in unseen.
-    hidden_since: Option<Instant>,
+    // Position in the visible card while the UI is hidden. The rotation clock
+    // is frozen there, so the user returns to the card and frame they left.
+    paused_at: Option<Duration>,
     current_campaign: usize,
     // The next card is selected early so its media can be prepared while the
     // current card is visible. Only this two-card window retains decoded pixels.
@@ -371,7 +371,7 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
     ready: Vec::new(),
     cache_dir: default_cache_dir(),
     rotation_started: Instant::now(),
-    hidden_since: None,
+    paused_at: None,
     current_campaign: 0,
     next_campaign: None,
     random_state: SystemTime::now()
@@ -829,34 +829,41 @@ pub fn audio_enabled() -> bool {
 }
 
 pub fn set_ui_active(active: bool) {
+    // The desktop reasserts visibility on every poll; a shown UI never holds a
+    // frozen clock, so there is nothing to do.
+    if active && SPONSOR_UI_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    // The flag and the frozen clock change under one lock, so racing hide and
+    // show calls can never leave a visible UI with its rotation paused.
+    let mut state = STATE.lock();
     let was = SPONSOR_UI_ACTIVE.swap(active, Ordering::AcqRel);
     if !active {
-        stop_audio_and_release();
-        let mut state = STATE.lock();
         state.card_text = None;
-        state.hidden_since.get_or_insert_with(Instant::now);
-        let current = state.current_campaign;
-        let elapsed = state.rotation_started.elapsed();
-        if let Some(ready) = state.ready.get_mut(current) {
-            retain_visible_frame(ready, elapsed);
+        if state.paused_at.is_none() {
+            state.paused_at = Some(state.rotation_started.elapsed());
         }
-        trim_ready_window(&mut state);
-    } else if !was {
-        let is_prev = {
-            let mut state = STATE.lock();
-            if let Some(hidden) = state.hidden_since.take() {
-                state.rotation_started += hidden.elapsed();
-            }
-            current_is_preview(&state)
-        };
-        if is_prev || media_needs_refresh() || audio_needs_refresh() {
-            // Passes do not run while the UI is hidden, so the card may be stale
-            // by the time it returns: catch up before the first poll draws it.
-            if CONNECTED.load(Ordering::Acquire) {
-                refresh_media_async();
-            } else {
-                refresh_cached_media_async();
-            }
+        retain_hidden_frames(&mut state);
+        drop(state);
+        stop_audio_and_release();
+        if was {
+            thread::spawn(release_freed_memory);
+        }
+        return;
+    }
+    if let Some(elapsed) = state.paused_at.take() {
+        let now = Instant::now();
+        state.rotation_started = now.checked_sub(elapsed).unwrap_or(now);
+    }
+    let is_prev = current_is_preview(&state);
+    drop(state);
+    if !was && (is_prev || media_needs_refresh() || audio_needs_refresh()) {
+        // Passes do not run while the UI is hidden, so the card may be stale
+        // by the time it returns: catch up before the first poll draws it.
+        if CONNECTED.load(Ordering::Acquire) {
+            refresh_media_async();
+        } else {
+            refresh_cached_media_async();
         }
     }
 }
@@ -1092,7 +1099,7 @@ fn apply_campaigns(campaigns: Vec<Campaign>) -> bool {
     trim_ready_window(&mut state);
     state.last_error.clear();
     state.media_retry_after = Instant::now();
-    state.rotation_started = Instant::now();
+    restart_rotation(&mut state);
     GENERATION.fetch_add(1, Ordering::Relaxed);
     let visible = visible_ids(&state);
     schedule_expiry(&campaigns);
@@ -1206,6 +1213,7 @@ fn publish_media(campaigns: &[Campaign], ready: Vec<ReadyCampaign>) -> bool {
         plan_next_campaign(&mut state);
     }
     trim_ready_window(&mut state);
+    retain_hidden_frames(&mut state);
     let current = state.current_campaign;
     let current_needs_media = ready_needs_media(&mut state, current);
     if !current_needs_media {
@@ -1312,6 +1320,7 @@ fn refresh_media_target_async(allow_disconnected: bool, requested_target: Option
             true,
             target_id.as_deref(),
         );
+        drop(previous);
         let ready_count = ready.len();
         let connected = CONNECTED.load(Ordering::Acquire);
         let applied = if allow_disconnected || connected {
@@ -1320,6 +1329,11 @@ fn refresh_media_target_async(allow_disconnected: bool, requested_target: Option
             false
         };
         drop(_slot);
+        // The UI hid while this pass ran: the frames it copied are only freed
+        // now, after the release that ran when the UI hid.
+        if !SPONSOR_UI_ACTIVE.load(Ordering::Acquire) {
+            release_freed_memory();
+        }
         if applied {
             log::debug!("[sponsor] published media refresh ({} active campaigns)", ready_count);
             let (current_id, current_needs_media) = {
@@ -1432,7 +1446,7 @@ fn drop_campaigns(is_active: &dyn Fn(&str) -> bool) -> bool {
         // The visible card was the one that expired. Its successor inherits the
         // rotation clock, so it starts a full turn here instead of rotating
         // away on the next poll.
-        state.rotation_started = Instant::now();
+        restart_rotation(&mut state);
     }
     state.next_campaign = if count == 0 {
         None
@@ -1553,6 +1567,64 @@ fn retain_visible_frame(ready: &mut ReadyCampaign, elapsed: Duration) {
     }
 }
 
+/// Starts the visible card's turn now. A hidden UI's frozen clock restarts at
+/// the card's beginning too, instead of resuming into the future.
+fn restart_rotation(state: &mut State) {
+    state.rotation_started = Instant::now();
+    if state.paused_at.is_some() {
+        state.paused_at = Some(Duration::ZERO);
+    }
+}
+
+fn card_elapsed(state: &State) -> Duration {
+    state.paused_at.unwrap_or_else(|| state.rotation_started.elapsed())
+}
+
+/// While the UI is hidden the visible card holds one still per plane and every
+/// other card holds nothing. Re-applied on publication, because a pass that
+/// was already running when the UI hid publishes the full frames it copied.
+fn retain_hidden_frames(state: &mut State) {
+    let Some(elapsed) = state.paused_at else { return };
+    let current = state.current_campaign;
+    if let Some(ready) = state.ready.get_mut(current) {
+        retain_visible_frame(ready, elapsed);
+    }
+    let next = state.next_campaign.take();
+    trim_ready_window(state);
+    state.next_campaign = next;
+}
+
+/// Hands pages of freed frames back to the OS. The allocators keep freed
+/// blocks of this size cached in the process, so without it a hidden UI's
+/// released frames would still count as resident memory.
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> std::os::raw::c_int;
+        }
+        // SAFETY: glibc entry point without preconditions.
+        unsafe { malloc_trim(0) };
+    }
+    #[cfg(target_os = "android")]
+    {
+        extern "C" {
+            fn mallopt(param: std::os::raw::c_int, value: std::os::raw::c_int) -> std::os::raw::c_int;
+        }
+        const M_PURGE: std::os::raw::c_int = -101;
+        // SAFETY: bionic entry point; unknown parameters are rejected with 0.
+        unsafe { mallopt(M_PURGE, 0) };
+    }
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // SAFETY: a null zone asks every zone to release its free pages.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    }
+}
+
 /// True while the visible card still holds only its one-frame preview and its
 /// full planes must be hydrated from the decoded sidecar.
 fn current_is_preview(state: &State) -> bool {
@@ -1589,7 +1661,7 @@ fn advance_campaign(state: &mut State) {
     state.current_campaign = state.next_campaign.take().unwrap_or(0);
     plan_next_campaign(state);
     trim_ready_window(state);
-    state.rotation_started = Instant::now();
+    restart_rotation(state);
     GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -1700,7 +1772,7 @@ pub fn current_frame() -> Option<SponsorFrame> {
             .filter(|duration| *duration > 0)
             .unwrap_or(DEFAULT_DURATION_SECONDS);
         let rotated = state.ready.len() > 1
-            && state.hidden_since.is_none()
+            && state.paused_at.is_none()
             && state.rotation_started.elapsed() >= Duration::from_secs(current_duration as u64);
         if rotated {
             // The card that just came up has had no media pass of its own yet:
@@ -1712,7 +1784,7 @@ pub fn current_frame() -> Option<SponsorFrame> {
         let ready_count = state.ready.len();
         state.current_campaign %= ready_count;
         let campaign_index = state.current_campaign;
-        let within = state.rotation_started.elapsed();
+        let within = card_elapsed(&state);
         let needs_media = ready_needs_media(&mut state, campaign_index);
         // A card that rotated in as previews needs one hydration pass over its
         // decoded sidecars, retried through the same backoff as a missing
@@ -3577,7 +3649,7 @@ mod tests {
             ready,
             cache_dir: PathBuf::new(),
             rotation_started: Instant::now(),
-            hidden_since: None,
+            paused_at: None,
             current_campaign: current,
             next_campaign: next,
             random_state: 0,
@@ -3745,6 +3817,54 @@ mod tests {
         );
         demote_to_preview(&mut ready);
         assert_eq!(ready.frames.len(), 1, "demoting twice changes nothing");
+    }
+
+    #[test]
+    fn a_publish_while_hidden_keeps_one_still_and_nothing_else() {
+        let mut ready: Vec<_> = ["a", "b", "c"].iter().map(|id| {
+            let mut ready = empty_ready(&test_campaign(id));
+            ready.frames = test_frames(3);
+            ready.background_frames = test_frames(4);
+            ready.background_rgba = ready.background_frames[0].rgba.clone();
+            ready
+        }).collect();
+        ready[1].preview_only = false;
+        let mut state = test_state(ready, 1, Some(2));
+        state.paused_at = Some(Duration::from_millis(90));
+        // What a pass that was running when the UI hid publishes: full planes.
+        retain_hidden_frames(&mut state);
+        assert_eq!(state.ready[1].frames.len(), 1);
+        assert_eq!(state.ready[1].frames[0].rgba[0], 2, "the still on screen is kept");
+        assert_eq!(state.ready[1].background_frames.len(), 1);
+        assert!(state.ready[1].preview_only, "the animation is hydrated on return");
+        for index in [0, 2] {
+            assert!(state.ready[index].frames.is_empty());
+            assert!(state.ready[index].background_frames.is_empty());
+            assert!(state.ready[index].background_rgba.is_empty());
+        }
+        assert_eq!(state.next_campaign, Some(2), "the planned rotation survives");
+    }
+
+    #[test]
+    fn a_visible_ui_publish_is_not_trimmed_to_a_still() {
+        let mut ready = empty_ready(&test_campaign("a"));
+        ready.frames = test_frames(3);
+        let mut state = test_state(vec![ready], 0, None);
+        retain_hidden_frames(&mut state);
+        assert_eq!(state.ready[0].frames.len(), 3);
+    }
+
+    #[test]
+    fn a_rotation_restart_while_hidden_resumes_at_the_card_start() {
+        let mut state = test_state(Vec::new(), 0, None);
+        state.paused_at = Some(Duration::from_secs(7));
+        restart_rotation(&mut state);
+        assert_eq!(state.paused_at, Some(Duration::ZERO), "the frozen clock restarts with the card");
+        assert_eq!(card_elapsed(&state), Duration::ZERO);
+        state.paused_at = None;
+        restart_rotation(&mut state);
+        assert_eq!(state.paused_at, None, "a visible UI keeps a running clock");
+        assert!(card_elapsed(&state) < Duration::from_secs(1));
     }
 
     #[test]

@@ -844,8 +844,6 @@ static constexpr float kIconButtonSize = 20.0f;
 // The button is vertically centred on the text line it follows. Info adds a
 // white ring on top of the shared fill.
 static bool round_icon_button(const char* id, UiIcon icon, bool toggled, const char* tooltip) {
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY()
-        + std::floor((ImGui::GetTextLineHeight() - kIconButtonSize) * 0.5f));
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     const bool clicked = ImGui::InvisibleButton(id, ImVec2(kIconButtonSize, kIconButtonSize));
     const bool hovered = ImGui::IsItemHovered();
@@ -1513,6 +1511,8 @@ void render_ui() {
                            build_is_prerelease() ? "pre-release" : "release");
 
         same_line_right_aligned(title_right_x, kIconButtonSize, 8.0f);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY()
+            + std::floor((ImGui::GetTextLineHeight() - kIconButtonSize) * 0.5f));
         if (round_icon_button("##about_btn", UiIcon::Info, false, "About FCAE VPN"))
             s_about_popup_open = true;
 

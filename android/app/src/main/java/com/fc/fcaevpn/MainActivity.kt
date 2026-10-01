@@ -99,6 +99,7 @@ class MainActivity : AppCompatActivity() {
     // published metadata; the lower 24 bits are reserved for animation frame
     // changes. Avoid relayout/recoloring the card on every decoded frame.
     private var sponsorStaticToken = -1L
+    private var holdsSponsorUi = false
     private var sponsorAudioUiEnabled: Boolean? = null
     private var sponsorAudioUiVisible = false
     private var sponsorAudioUiKnown = false
@@ -1735,7 +1736,7 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
         // The card keeps the one still it is showing (one bitmap per plane);
         // native releases every other frame and pauses rotation until resume.
-        try { NativeEngine.nativeSponsorSetUiActive(false) } catch (_: Throwable) {}
+        releaseSponsorUi()
         inForeground = false
         logTouchActive = false
         // Keyboard gone, cursor gone with it.
@@ -1882,7 +1883,7 @@ class MainActivity : AppCompatActivity() {
         catch (_: Throwable) {}
         handleWidgetIntent(intent)
         inForeground = true
-        try { NativeEngine.nativeSponsorSetUiActive(true) } catch (_: Throwable) {}
+        holdSponsorUi()
         handler.removeCallbacks(sponsorPoll)
         handler.post(sponsorPoll)
         handler.removeCallbacks(sponsorManifestRefresh)
@@ -2025,8 +2026,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // The native card has one process-wide visibility flag, but two instances
+    // overlap whenever a new one opens: the old one is stopped and destroyed
+    // after the new one resumed. Only the last visible instance hides it.
+    private fun holdSponsorUi() {
+        if (!holdsSponsorUi) {
+            holdsSponsorUi = true
+            visibleSponsorUis++
+        }
+        try { NativeEngine.nativeSponsorSetUiActive(true) } catch (_: Throwable) {}
+    }
+
+    private fun releaseSponsorUi() {
+        if (!holdsSponsorUi) return
+        holdsSponsorUi = false
+        if (--visibleSponsorUis == 0) {
+            try { NativeEngine.nativeSponsorSetUiActive(false) } catch (_: Throwable) {}
+        }
+    }
+
     override fun onDestroy() {
-        try { NativeEngine.nativeSponsorSetUiActive(false) } catch (_: Throwable) {}
+        releaseSponsorUi()
         sponsorBitmap?.recycle()
         sponsorBitmap = null
         sponsorBackgroundBitmap?.recycle()
@@ -3910,6 +3930,8 @@ class MainActivity : AppCompatActivity() {
         // Sponsor card frames are paced by this hardcoded 30 FPS interval on
         // every device to match the sponsor engine's 30 FPS cap.
         private const val SPONSOR_FRAME_INTERVAL_MS = 33L
+        // Resumed instances holding the native sponsor card visible; main thread only.
+        private var visibleSponsorUis = 0
         // ~70+ log messages on screen. Psiphon's JSON notices average
         // 150-350 chars, so 8000 showed only ~20-30 lines and older lines
         // (handshake, CandidateServers) scrolled away before the connect
