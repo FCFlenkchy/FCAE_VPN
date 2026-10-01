@@ -2090,25 +2090,29 @@ void render_ui() {
             ImDrawList* const header_draw = ImGui::GetWindowDrawList();
             header_draw->AddRectFilled(header_min, header_max, IM_COL32(23, 26, 38, 255), kHeaderRounding);
             header_draw->AddRect(header_min, header_max, IM_COL32(41, 45, 61, 255), kHeaderRounding, 0, 1.0f);
-            const float sponsor_right_x = header_max.x - 4.0f;
-            ImGui::SetCursorScreenPos(ImVec2(header_min.x + 10.0f, header_min.y + kHeaderPadV
-                - std::floor((ImGui::GetTextLineHeight() - kIconButtonSize) * 0.5f)));
+            // Items are placed explicitly: this group opens on the left column's
+            // SameLine, so flow layout would snap them to that line's y.
+            const float header_text_y = header_min.y + std::floor((kHeaderHeight - ImGui::GetTextLineHeight()) * 0.5f);
+            const float header_button_y = header_min.y + kHeaderPadV;
+            const float audio_x = header_max.x - 4.0f - kIconButtonSize;
+            const float refresh_x = audio_x - 6.0f - kIconButtonSize;
+            ImGui::SetCursorScreenPos(ImVec2(header_min.x + 10.0f, header_text_y));
             ImGui::TextColored(ImVec4(0.55f, 0.72f, 1.0f, 1.0f), "SPONSORS");
 
-            ImGui::SameLine(0, 8);
+            ImGui::SetCursorScreenPos(ImVec2(ImGui::GetItemRectMax().x + 8.0f, header_text_y));
             if (ImGui::TextLink("Want to become a sponsor? Click me")) {
                 open_link(sponsor_policy);
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", sponsor_policy);
 
-            same_line_right_aligned(sponsor_right_x, kIconButtonSize * 2.0f + 6.0f, 6.0f);
+            ImGui::SetCursorScreenPos(ImVec2(refresh_x, header_button_y));
             if (round_icon_button("##sponsor_refresh", UiIcon::Refresh, false, "Refresh sponsor manifest")) {
                 fcae_sponsor_refresh_manifest_now_async();
                 ui_request_redraw();
             }
             const bool audio_enabled = fcae_sponsor_audio_enabled();
-            ImGui::SameLine(0.0f, 6.0f);
+            ImGui::SetCursorScreenPos(ImVec2(audio_x, header_button_y));
             if (round_icon_button("##sponsor_audio", audio_enabled ? UiIcon::SoundOn : UiIcon::SoundOff,
                                   audio_enabled,
                                   audio_enabled ? "Turn sponsor sound off" : "Turn sponsor sound on")) {
