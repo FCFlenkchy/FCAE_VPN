@@ -194,33 +194,74 @@ static ImVec4 sponsor_color(uint32_t packed, ImVec4 fallback) {
 // Sponsor text coordinates share Android's contract: x_percent is the horizontal
 // centre and top_y the top edge of the text block, both relative to the whole
 // card, with every wrapped line centred inside the block.
-static void draw_sponsor_text(const char* text, const ImVec2& card, float inset,
-                              unsigned x_percent, float top_y, float scale, const ImVec4& color) {
-    if (!text || !*text) return;
+struct SponsorText {
+    const char* text = nullptr;
+    const char* end = nullptr;
+    float scale = 1.0f;
+    float size = 0.0f;
+    float wrap_w = 0.0f;
+    ImVec2 block{};
+    ImVec2 pos{};
+};
+
+static SponsorText layout_sponsor_text(const char* text, const ImVec2& card, float inset,
+                                       unsigned x_percent, float top_y, float scale) {
+    SponsorText t;
+    if (!text || !*text) return t;
+    t.text = text;
+    t.end = text + strlen(text);
+    t.scale = scale;
     ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * scale);
-    ImFont* const font = ImGui::GetFont();
-    const float size = ImGui::GetFontSize();
-    const float wrap_w = std::max(1.0f, card.x - inset * 2.0f);
-    const char* const end = text + strlen(text);
-    const ImVec2 block = font->CalcTextSizeA(size, FLT_MAX, wrap_w, text, end);
+    t.size = ImGui::GetFontSize();
+    t.wrap_w = std::max(1.0f, card.x - inset * 2.0f);
+    t.block = ImGui::GetFont()->CalcTextSizeA(t.size, FLT_MAX, t.wrap_w, t.text, t.end);
+    ImGui::PopFont();
     const float anchor_x = card.x * std::clamp((float)x_percent / 100.0f, 0.0f, 1.0f);
-    const ImVec2 win = ImGui::GetWindowPos();
-    const float left = win.x + std::clamp(anchor_x - block.x * 0.5f, inset,
-                                          std::max(inset, card.x - inset - block.x));
-    float y = win.y + std::clamp(top_y, 0.0f, std::max(0.0f, card.y - block.y));
+    t.pos.x = std::clamp(anchor_x - t.block.x * 0.5f, inset, std::max(inset, card.x - inset - t.block.x));
+    t.pos.y = std::clamp(top_y, 0.0f, std::max(0.0f, card.y - t.block.y));
+    return t;
+}
+
+// Title and message are placed independently, so positions meant for a taller
+// card can stack them on top of each other. When the blocks collide the lower
+// one moves below the upper one, and both are lifted to stay on the card.
+// Android's positionSponsorText applies the same rule.
+static void separate_sponsor_text(SponsorText& title, SponsorText& message, float card_h, float gap) {
+    if (!title.text || !message.text) return;
+    const bool overlap_x = title.pos.x < message.pos.x + message.block.x
+        && message.pos.x < title.pos.x + title.block.x;
+    const bool overlap_y = title.pos.y < message.pos.y + message.block.y + gap
+        && message.pos.y < title.pos.y + title.block.y + gap;
+    if (!overlap_x || !overlap_y) return;
+    SponsorText& upper = message.pos.y < title.pos.y ? message : title;
+    SponsorText& lower = &upper == &title ? message : title;
+    lower.pos.y = upper.pos.y + upper.block.y + gap;
+    const float overflow = lower.pos.y + lower.block.y - card_h;
+    if (overflow > 0.0f) {
+        upper.pos.y = std::max(0.0f, upper.pos.y - overflow);
+        lower.pos.y = upper.pos.y + upper.block.y + gap;
+    }
+}
+
+static void draw_sponsor_text(const SponsorText& t, const ImVec2& origin, const ImVec4& color) {
+    if (!t.text) return;
+    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * t.scale);
+    ImFont* const font = ImGui::GetFont();
     ImDrawList* const draw = ImGui::GetWindowDrawList();
     const ImU32 col = ImGui::GetColorU32(color);
-    for (const char* s = text; s < end; y += size) {
-        const char* line_end = static_cast<const char*>(memchr(s, '\n', (size_t)(end - s)));
-        if (!line_end) line_end = end;
-        const char* const wrap = font->CalcWordWrapPosition(size, s, line_end, wrap_w);
+    const float left = origin.x + t.pos.x;
+    float y = origin.y + t.pos.y;
+    for (const char* s = t.text; s < t.end; y += t.size) {
+        const char* line_end = static_cast<const char*>(memchr(s, '\n', (size_t)(t.end - s)));
+        if (!line_end) line_end = t.end;
+        const char* const wrap = font->CalcWordWrapPosition(t.size, s, line_end, t.wrap_w);
         const char* visible_end = wrap;
         while (visible_end > s && (visible_end[-1] == ' ' || visible_end[-1] == '\t')) --visible_end;
-        const float line_w = font->CalcTextSizeA(size, FLT_MAX, 0.0f, s, visible_end).x;
-        draw->AddText(font, size, ImVec2(left + (block.x - line_w) * 0.5f, y), col, s, visible_end);
+        const float line_w = font->CalcTextSizeA(t.size, FLT_MAX, 0.0f, s, visible_end).x;
+        draw->AddText(font, t.size, ImVec2(left + (t.block.x - line_w) * 0.5f, y), col, s, visible_end);
         s = wrap;
         while (s < line_end && (*s == ' ' || *s == '\t')) ++s;
-        if (s == line_end && line_end < end) ++s;
+        if (s == line_end && line_end < t.end) ++s;
     }
     ImGui::PopFont();
 }
@@ -414,17 +455,11 @@ void ui_request_redraw() {
     g_app.redraw_requested.store(true);
 }
 
+// A hidden window keeps the one still per plane it is showing; the engine
+// releases every other frame and pauses rotation until the window returns.
 void ui_set_window_visible(bool visible) {
     s_ui_window_visible.store(visible);
     fcae_sponsor_set_ui_active(visible);
-    if (!visible) {
-        s_sponsor_rgba.clear();
-        s_sponsor_rgba.shrink_to_fit();
-        s_sponsor_background_rgba.clear();
-        s_sponsor_background_rgba.shrink_to_fit();
-        s_sponsor_loaded_foreground_generation = 0;
-        s_sponsor_loaded_background_generation = 0;
-    }
 }
 
 bool ui_should_render(bool interacting) {
@@ -2146,32 +2181,37 @@ void render_ui() {
             const float message_scale = kSponsorMessageFontRatio
                 * std::clamp((float)(s_sponsor.message_scale ? s_sponsor.message_scale : 100) / 100.0f, 0.5f, 2.0f);
             constexpr float sponsor_card_height = 80.0f;
-            constexpr float sponsor_media_height = 44.0f;
+            // Android's card: the icon band is 70 of 140dp, and media, icon and
+            // text all span the whole card rather than a padded inner area.
+            constexpr float sponsor_media_height = sponsor_card_height * 70.0f / 140.0f;
+            constexpr float kSponsorTextInset = 8.0f;
             ImVec4 card_color = sponsor_color(s_sponsor.card_color, ImVec4(0.08f, 0.13f, 0.22f, 1.0f));
             card_color.w *= (float)s_sponsor.background_color_opacity / 100.0f;
             ImGui::PushStyleColor(ImGuiCol_ChildBg, card_color);
             ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.49f, 0.76f, 1.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
             ImGui::BeginChild("##sponsor_card", ImVec2(card_w, sponsor_card_height),
                 ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
 
             if (background_texture) {
-                const ImVec2 background_min = ImGui::GetCursorScreenPos();
-                const ImVec2 background_size = ImGui::GetContentRegionAvail();
-                const float cover_scale = std::max(
-                    background_size.x / (float)s_sponsor.background_width,
-                    background_size.y / (float)s_sponsor.background_height) * background_scale;
-                const ImVec2 scaled_size(
-                    s_sponsor.background_width * cover_scale,
-                    s_sponsor.background_height * cover_scale);
-                const ImVec2 scaled_min(
-                    background_min.x + (background_size.x - scaled_size.x) * 0.5f,
-                    background_min.y + (background_size.y - scaled_size.y) * 0.5f);
-                ImGui::GetWindowDrawList()->AddImage(
-                    background_texture, scaled_min,
-                    ImVec2(scaled_min.x + scaled_size.x, scaled_min.y + scaled_size.y),
-                    ImVec2(0, 0), ImVec2(1, 1),
-                    ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, (float)s_sponsor.background_opacity / 100.0f)));
+                const ImVec2 card_min = ImGui::GetCursorScreenPos();
+                const ImVec2 card_size = ImGui::GetContentRegionAvail();
+                const ImVec2 source((float)s_sponsor.background_width, (float)s_sponsor.background_height);
+                const float cover = std::max(card_size.x / source.x, card_size.y / source.y) * background_scale;
+                const ImVec2 drawn(source.x * cover, source.y * cover);
+                // Overflow is cropped through the UVs rather than drawn past the
+                // card, so a filling background shares the card's rounded corners.
+                const ImVec2 visible(std::min(drawn.x, card_size.x), std::min(drawn.y, card_size.y));
+                const ImVec2 uv_min((1.0f - visible.x / drawn.x) * 0.5f, (1.0f - visible.y / drawn.y) * 0.5f);
+                const ImVec2 image_min(card_min.x + (card_size.x - visible.x) * 0.5f,
+                                       card_min.y + (card_size.y - visible.y) * 0.5f);
+                const bool fills_card = visible.x >= card_size.x && visible.y >= card_size.y;
+                ImGui::GetWindowDrawList()->AddImageRounded(background_texture, image_min,
+                    ImVec2(image_min.x + visible.x, image_min.y + visible.y),
+                    uv_min, ImVec2(1.0f - uv_min.x, 1.0f - uv_min.y),
+                    ImGui::GetColorU32(ImVec4(1, 1, 1, (float)s_sponsor.background_opacity / 100.0f)),
+                    fills_card ? ImGui::GetStyle().ChildRounding : 0.0f);
             }
 
             if (texture) {
@@ -2245,24 +2285,27 @@ void render_ui() {
             }
 
             const ImVec2 text_card(card_w, sponsor_card_height);
-            const float text_inset = ImGui::GetStyle().WindowPadding.x;
+            const ImVec2 text_origin = ImGui::GetWindowPos();
             if (sponsor_has_content) {
-                draw_sponsor_text(sponsor_title, text_card, text_inset, s_sponsor.title_x,
-                    text_card.y * (float)s_sponsor.title_y / 100.0f, title_scale,
+                SponsorText title = layout_sponsor_text(sponsor_title, text_card, kSponsorTextInset,
+                    s_sponsor.title_x, text_card.y * (float)s_sponsor.title_y / 100.0f, title_scale);
+                SponsorText message = layout_sponsor_text(sponsor_message, text_card, kSponsorTextInset,
+                    s_sponsor.message_x, text_card.y * (float)s_sponsor.message_y / 100.0f, message_scale);
+                separate_sponsor_text(title, message, text_card.y, 2.0f);
+                draw_sponsor_text(title, text_origin,
                     sponsor_color(s_sponsor.title_color, ImVec4(1.0f, 1.0f, 1.0f, 1.0f)));
-                draw_sponsor_text(sponsor_message, text_card, text_inset, s_sponsor.message_x,
-                    text_card.y * (float)s_sponsor.message_y / 100.0f, message_scale,
+                draw_sponsor_text(message, text_origin,
                     sponsor_color(s_sponsor.message_color, ImVec4(0.85f, 0.91f, 1.0f, 1.0f)));
             } else {
                 const float line_h = ImGui::GetFontSize();
                 const float top = (text_card.y - line_h * 3.0f) * 0.5f;
-                draw_sponsor_text(sponsor_title, text_card, text_inset, 50, top, 1.0f,
-                    ImVec4(0.80f, 0.90f, 1.0f, 1.0f));
-                draw_sponsor_text(sponsor_message, text_card, text_inset, 50, top + line_h * 2.0f, kSponsorMessageFontRatio,
-                    ImVec4(0.45f, 0.65f, 0.95f, 1.0f));
+                draw_sponsor_text(layout_sponsor_text(sponsor_title, text_card, kSponsorTextInset, 50, top, 1.0f),
+                    text_origin, ImVec4(0.80f, 0.90f, 1.0f, 1.0f));
+                draw_sponsor_text(layout_sponsor_text(sponsor_message, text_card, kSponsorTextInset, 50,
+                    top + line_h * 2.0f, kSponsorMessageFontRatio), text_origin, ImVec4(0.45f, 0.65f, 0.95f, 1.0f));
             }
             ImGui::EndChild();
-            ImGui::PopStyleVar();
+            ImGui::PopStyleVar(2);
             ImGui::PopStyleColor(2);
         }
         ImGui::EndGroup();

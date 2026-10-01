@@ -127,11 +127,11 @@ Only `id` and `destination_url` are required. An omitted optional field uses its
 | `title_scale` | integer | no | `100` | 50–200 percent of the base title size (16 sp on Android; the UI font size on desktop). Aliases: `title_size`, `title_font_scale`, `title_font_size`, `title_scale_percent`. |
 | `message_scale` | integer | no | `100` | 50–200 percent of the base message size, which is 7/8 of the title's on both platforms (14 sp on Android). Aliases: `message_size`, `message_font_scale`, `message_font_size`, `message_scale_percent`. |
 
-Text blocks are clamped so their text always stays inside the card. The desktop card is shorter than Android's (80 px against 140 dp), so the same scale fills a larger share of it; keep long text at 100 or below.
+Text blocks are clamped so their text always stays inside the card. If the title and message would overlap, the lower one is moved just below the upper one, and both are lifted if needed to stay on the card. The desktop card is shorter than Android's (80 px against 140 dp), so the same scale fills a larger share of it; keep long text at 100 or below.
 
 #### Icon (foreground media)
 
-The icon is fitted into a media band that spans the card's width and is 70 dp tall on Android and 44 px tall on desktop. `image_fit` decides how it fits the band, then `icon_scale` resizes the result.
+The icon is fitted into a media band that spans the card's width and is half the card's height: 70 dp on Android and 40 px on desktop. `image_fit` decides how it fits the band, then `icon_scale` resizes the result.
 
 | Field | Type | Required | Default | Accepted values |
 |---|---|---|---|---|
@@ -145,7 +145,7 @@ The icon is fitted into a media band that spans the card's width and is 70 dp ta
 
 | Field | Type | Required | Default | Accepted values |
 |---|---|---|---|---|
-| `background_url` | string | no | card color only | `https://` URL, ASCII, at most 2048 characters. PNG, JPEG, WebP, GIF, or MP4. Always fills its area, centred, cropping whatever overflows (the whole card on Android, the card inside its padding on desktop). |
+| `background_url` | string | no | card color only | `https://` URL, ASCII, at most 2048 characters. PNG, JPEG, WebP, GIF, or MP4. Always fills the whole card, centred, cropping whatever overflows. |
 | `background_color` | string | no | `#FF142A44` | `#RRGGBB` or `#AARRGGBB`. The card's base color. |
 | `background_color_opacity` | integer | no | `100` | 0–100 percent. Multiplies the alpha of `background_color`. |
 | `background_scale` | integer | no | `100` | 50–160 percent. Aliases: `background_size`, `bg_size`, `bg_scale`, `background_scale_percent`. |
@@ -182,18 +182,18 @@ We recommend designing your text into your artwork and leaving `title` and `mess
 
 ### How to do it
 
-1. Use `background_url` for the artwork, because the background covers the largest area of the card. The icon band is short (44 px on desktop, 70 dp on Android), so it suits a logo but not readable text.
+1. Use `background_url` for the artwork, because the background covers the largest area of the card. The icon band is short (40 px on desktop, 70 dp on Android), so it suits a logo but not readable text.
 2. Set `"background_opacity": 100`. The default of 42 deliberately dims the background behind native text and would fade your artwork.
 3. Leave out `title` and `message` so native text is not drawn over your artwork.
 4. Set `background_color` to your artwork's dominant color. It is what users see before the media has downloaded.
 
 ### Designing the artwork
 
-The card is a wide strip whose shape differs by platform: 140 dp tall and the screen width minus 40 dp on Android (about 320 × 140 dp, 2.3 : 1, on a typical phone), 80 px tall and 280–380 px wide on desktop, where the background sits inside the card's padding in an area of about 340 × 48 px (7 : 1). The background is centred and cropped to fit, so the edges may be cut off.
+The card is a wide strip whose shape differs by platform: 140 dp tall and the screen width minus 40 dp on Android (about 320 × 140 dp, 2.3 : 1, on a typical phone), 80 px tall and 280–380 px wide on desktop (3.5–4.75 : 1). The background is centred and cropped to fit, so the edges may be cut off.
 
 - Design at **800 × 300 px** (MP4 may be larger and is downscaled).
-- Keep all text and logos inside the **centre 680 × 110 px**. That area is visible on every platform; the rest may be cropped.
-- Use bold lettering at least **40 px tall** in the 800 × 300 design, with strong contrast. The desktop card shows the artwork at well under half size, and Android keeps media at 320 × 180 px to save memory, so fine detail softens.
+- Keep all text and logos inside the **centre 680 × 160 px**. That area is visible on every platform; the rest may be cropped.
+- Use bold lettering at least **40 px tall** in the 800 × 300 design, with strong contrast. The desktop card shows the artwork at about a third to a half of its size, and Android keeps media at 320 × 180 px to save memory, so fine detail softens.
 - For animation, prefer MP4 over GIF: it is far smaller for the same quality and is less likely to be merged into coarser frames.
 
 A media-first campaign looks like this:
@@ -232,6 +232,7 @@ A media-first campaign looks like this:
 - The card has a fixed height (140 dp on Android, 80 px on desktop), so missing media or different scales never move the rest of the interface.
 - With one active campaign it stays in place. With two, they alternate. With three or more, FCAE picks randomly without repeating the card just shown. Each card stays for its `duration_seconds`; users may also swipe or drag to the next card.
 - `starts_at` and `ends_at` are honored while the client runs: a campaign appears and disappears at those moments without waiting for a manifest refresh.
+- When the app is minimized or in the background, the card keeps the still it was showing and rotation pauses; every other decoded frame is released. Animation resumes when the app returns.
 - Audio is off by default. It plays only after the user turns on the card's sound control, and is downloaded only at that point.
 
 ## Privacy

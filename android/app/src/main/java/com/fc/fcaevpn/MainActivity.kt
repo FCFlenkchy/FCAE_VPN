@@ -687,7 +687,7 @@ class MainActivity : AppCompatActivity() {
         val safeMessageX = messageX.coerceIn(0, 100)
         val safeMessageY = messageY.coerceIn(0, 100)
         val messageVisible = sponsorMessage.visibility == android.view.View.VISIBLE
-        val textKey = "${sponsorTitle.text}|${sponsorMessage.text}"
+        val textKey = "${sponsorTitle.textSize}:${sponsorTitle.text}|${sponsorMessage.textSize}:${sponsorMessage.text}"
         // The request is what the poll can compare without a layout pass -- the
         // card's own size is part of it, so a resize still re-lays the text out
         // -- and the posted block keeps comparing the measured box.
@@ -705,32 +705,57 @@ class MainActivity : AppCompatActivity() {
             // A card position is the horizontal centre of the text block. The
             // labels span the whole card and centre their own text, so the box
             // is sized to the measured line and shifted so that centre lands on
-            // the requested percentage, clamped to keep the text inside the
-            // card: the previous box that started at the position pushed every
-            // centered card (and the "Become a sponsor" card) off-centre.
-            fun applyCentre(view: android.widget.TextView, x: Int, y: Int) {
+            // the requested percentage, clamped to keep the whole block inside
+            // the card.
+            fun place(view: android.widget.TextView, x: Int, y: Int): android.graphics.Rect {
+                val widestLine = view.text.split('\n')
+                    .maxOfOrNull { view.paint.measureText(it) } ?: 0f
+                val boxWidth = kotlin.math.ceil(widestLine).toInt().coerceIn(1, cardWidth)
+                view.measure(
+                    android.view.View.MeasureSpec.makeMeasureSpec(boxWidth, android.view.View.MeasureSpec.EXACTLY),
+                    android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED),
+                )
+                val left = (cardWidth * x / 100f - boxWidth / 2f).toInt().coerceIn(0, cardWidth - boxWidth)
+                val top = (cardHeight * y / 100f).toInt().coerceIn(0, maxOf(0, cardHeight - view.measuredHeight))
+                return android.graphics.Rect(left, top, left + boxWidth, top + view.measuredHeight)
+            }
+
+            fun applyBox(view: android.widget.TextView, box: android.graphics.Rect) {
                 val params = (view.layoutParams as? android.widget.FrameLayout.LayoutParams)
                     ?: android.widget.FrameLayout.LayoutParams(
                         android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
                         android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
                     )
-                val widestLine = view.text.split('\n')
-                    .maxOfOrNull { view.paint.measureText(it) } ?: 0f
-                val boxWidth = kotlin.math.ceil(widestLine).toInt()
-                    .coerceIn(1, cardWidth)
-                params.width = boxWidth
+                params.width = box.width()
                 params.height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-                params.leftMargin = (cardWidth * x / 100f - boxWidth / 2f).toInt()
-                    .coerceIn(0, cardWidth - boxWidth)
-                params.topMargin = (cardHeight * y / 100f).toInt().coerceIn(0, cardHeight - 1)
+                params.leftMargin = box.left
+                params.topMargin = box.top
                 params.rightMargin = 0
                 params.bottomMargin = 0
                 params.gravity = android.view.Gravity.TOP or android.view.Gravity.START
                 view.layoutParams = params
             }
 
-            applyCentre(sponsorTitle, safeTitleX, safeTitleY)
-            applyCentre(sponsorMessage, safeMessageX, safeMessageY)
+            val title = place(sponsorTitle, safeTitleX, safeTitleY)
+            val message = place(sponsorMessage, safeMessageX, safeMessageY)
+            // Same rule as the desktop card: colliding blocks are stacked, the
+            // lower one below the upper one, and both lifted to stay on the card.
+            if (messageVisible && sponsorTitle.text.isNotEmpty()) {
+                val gap = (2 * resources.displayMetrics.density).toInt()
+                val overlapX = title.left < message.right && message.left < title.right
+                val overlapY = title.top < message.bottom + gap && message.top < title.bottom + gap
+                if (overlapX && overlapY) {
+                    val (upper, lower) = if (message.top < title.top) message to title else title to message
+                    lower.offsetTo(lower.left, upper.bottom + gap)
+                    val overflow = lower.bottom - cardHeight
+                    if (overflow > 0) {
+                        upper.offsetTo(upper.left, maxOf(0, upper.top - overflow))
+                        lower.offsetTo(lower.left, upper.bottom + gap)
+                    }
+                }
+            }
+            applyBox(sponsorTitle, title)
+            applyBox(sponsorMessage, message)
             sponsorTextLayoutKey = key
         }
     }
@@ -1708,15 +1733,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        // The card keeps the one still it is showing (one bitmap per plane);
+        // native releases every other frame and pauses rotation until resume.
         try { NativeEngine.nativeSponsorSetUiActive(false) } catch (_: Throwable) {}
-        sponsorBitmap?.recycle()
-        sponsorBitmap = null
-        sponsorBackgroundBitmap?.recycle()
-        sponsorBackgroundBitmap = null
-        if (::sponsorImage.isInitialized) sponsorImage.setImageDrawable(null)
-        if (::sponsorBackgroundImage.isInitialized) sponsorBackgroundImage.setImageDrawable(null)
-        sponsorGeneration = -1L
-        sponsorStaticToken = -1L
         inForeground = false
         logTouchActive = false
         // Keyboard gone, cursor gone with it.

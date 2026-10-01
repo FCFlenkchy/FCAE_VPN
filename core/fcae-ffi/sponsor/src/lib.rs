@@ -336,6 +336,9 @@ struct State {
     ready: Vec<ReadyCampaign>,
     cache_dir: PathBuf,
     rotation_started: Instant,
+    // Set while the UI is hidden: rotation is paused, so the user returns to
+    // the card they left instead of one that rotated in unseen.
+    hidden_since: Option<Instant>,
     current_campaign: usize,
     // The next card is selected early so its media can be prepared while the
     // current card is visible. Only this two-card window retains decoded pixels.
@@ -368,6 +371,7 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
     ready: Vec::new(),
     cache_dir: default_cache_dir(),
     rotation_started: Instant::now(),
+    hidden_since: None,
     current_campaign: 0,
     next_campaign: None,
     random_state: SystemTime::now()
@@ -830,14 +834,21 @@ pub fn set_ui_active(active: bool) {
         stop_audio_and_release();
         let mut state = STATE.lock();
         state.card_text = None;
-        for ready in state.ready.iter_mut() {
-            ready.frames.clear();
-            ready.background_frames.clear();
-            ready.background_rgba = Arc::new(Vec::new());
-            ready.preview_only = true;
+        state.hidden_since.get_or_insert_with(Instant::now);
+        let current = state.current_campaign;
+        let elapsed = state.rotation_started.elapsed();
+        if let Some(ready) = state.ready.get_mut(current) {
+            retain_visible_frame(ready, elapsed);
         }
+        trim_ready_window(&mut state);
     } else if !was {
-        let is_prev = current_is_preview(&STATE.lock());
+        let is_prev = {
+            let mut state = STATE.lock();
+            if let Some(hidden) = state.hidden_since.take() {
+                state.rotation_started += hidden.elapsed();
+            }
+            current_is_preview(&state)
+        };
         if is_prev || media_needs_refresh() || audio_needs_refresh() {
             // Passes do not run while the UI is hidden, so the card may be stale
             // by the time it returns: catch up before the first poll draws it.
@@ -1525,6 +1536,23 @@ fn demote_to_preview(ready: &mut ReadyCampaign) {
     ready.preview_only = true;
 }
 
+/// Keeps only the frame on screen of each plane, so a hidden UI holds one
+/// still per plane and shows exactly that still again the moment it returns;
+/// the animation is hydrated from the decoded sidecar afterwards.
+fn retain_visible_frame(ready: &mut ReadyCampaign, elapsed: Duration) {
+    for frames in [&mut ready.frames, &mut ready.background_frames] {
+        if frames.len() > 1 {
+            let visible = frame_index_at(frames, elapsed);
+            frames.swap(0, visible);
+            frames.truncate(1);
+            ready.preview_only = true;
+        }
+    }
+    if let Some(first) = ready.background_frames.first() {
+        ready.background_rgba = first.rgba.clone();
+    }
+}
+
 /// True while the visible card still holds only its one-frame preview and its
 /// full planes must be hydrated from the decoded sidecar.
 fn current_is_preview(state: &State) -> bool {
@@ -1672,6 +1700,7 @@ pub fn current_frame() -> Option<SponsorFrame> {
             .filter(|duration| *duration > 0)
             .unwrap_or(DEFAULT_DURATION_SECONDS);
         let rotated = state.ready.len() > 1
+            && state.hidden_since.is_none()
             && state.rotation_started.elapsed() >= Duration::from_secs(current_duration as u64);
         if rotated {
             // The card that just came up has had no media pass of its own yet:
@@ -3548,6 +3577,7 @@ mod tests {
             ready,
             cache_dir: PathBuf::new(),
             rotation_started: Instant::now(),
+            hidden_since: None,
             current_campaign: current,
             next_campaign: next,
             random_state: 0,
@@ -3715,6 +3745,21 @@ mod tests {
         );
         demote_to_preview(&mut ready);
         assert_eq!(ready.frames.len(), 1, "demoting twice changes nothing");
+    }
+
+    #[test]
+    fn a_hidden_card_keeps_the_frame_on_screen() {
+        let mut ready = empty_ready(&test_campaign("hidden"));
+        ready.frames = test_frames(3);
+        ready.background_frames = test_frames(4);
+        // 40 ms per frame: 90 ms in, frame 2 of each plane is on screen.
+        retain_visible_frame(&mut ready, Duration::from_millis(90));
+        assert!(ready.preview_only, "the animation is hydrated again on return");
+        assert_eq!(ready.frames.len(), 1);
+        assert_eq!(ready.frames[0].rgba[0], 2, "the icon keeps the visible frame");
+        assert_eq!(ready.background_frames.len(), 1);
+        assert_eq!(ready.background_frames[0].rgba[0], 2, "the background keeps the visible frame");
+        assert_eq!(ready.background_rgba.as_slice(), ready.background_frames[0].rgba.as_slice());
     }
 
     #[test]
