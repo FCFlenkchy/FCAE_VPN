@@ -339,6 +339,7 @@ struct State {
     // Position in the visible card while the UI is hidden. The rotation clock
     // is frozen there, so the user returns to the card and frame they left.
     paused_at: Option<Duration>,
+    media_released: bool,
     current_campaign: usize,
     // The next card is selected early so its media can be prepared while the
     // current card is visible. Only this two-card window retains decoded pixels.
@@ -372,6 +373,7 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
     cache_dir: default_cache_dir(),
     rotation_started: Instant::now(),
     paused_at: None,
+    media_released: false,
     current_campaign: 0,
     next_campaign: None,
     random_state: SystemTime::now()
@@ -851,6 +853,7 @@ pub fn set_ui_active(active: bool) {
         }
         return;
     }
+    state.media_released = false;
     if let Some(elapsed) = state.paused_at.take() {
         let now = Instant::now();
         state.rotation_started = now.checked_sub(elapsed).unwrap_or(now);
@@ -1585,13 +1588,37 @@ fn card_elapsed(state: &State) -> Duration {
 /// was already running when the UI hid publishes the full frames it copied.
 fn retain_hidden_frames(state: &mut State) {
     let Some(elapsed) = state.paused_at else { return };
-    let current = state.current_campaign;
-    if let Some(ready) = state.ready.get_mut(current) {
-        retain_visible_frame(ready, elapsed);
+    let keep = (!state.media_released).then_some(state.current_campaign);
+    for (index, ready) in state.ready.iter_mut().enumerate() {
+        if Some(index) == keep {
+            retain_visible_frame(ready, elapsed);
+        } else if !ready.frames.is_empty()
+            || !ready.background_frames.is_empty()
+            || !ready.background_rgba.is_empty()
+        {
+            *ready = empty_ready(&ready.campaign);
+        }
     }
-    let next = state.next_campaign.take();
-    trim_ready_window(state);
-    state.next_campaign = next;
+}
+
+pub fn ui_active() -> bool {
+    SPONSOR_UI_ACTIVE.load(Ordering::Acquire)
+}
+
+/// Drops the still a hidden UI keeps, once no UI is left to show it or the OS
+/// asks for memory. The next activation decodes the card again from cache.
+pub fn release_media() {
+    let mut state = STATE.lock();
+    if SPONSOR_UI_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    state.paused_at.get_or_insert(Duration::ZERO);
+    state.media_released = true;
+    state.card_text = None;
+    retain_hidden_frames(&mut state);
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+    drop(state);
+    release_freed_memory();
 }
 
 /// Hands pages of freed frames back to the OS. The allocators keep freed
@@ -3650,6 +3677,7 @@ mod tests {
             cache_dir: PathBuf::new(),
             rotation_started: Instant::now(),
             paused_at: None,
+            media_released: false,
             current_campaign: current,
             next_campaign: next,
             random_state: 0,

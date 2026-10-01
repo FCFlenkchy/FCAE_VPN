@@ -7,12 +7,25 @@
 #define GL_SILENCE_DEPRECATION
 #define GL_GLEXT_PROTOTYPES 1
 #include <GLFW/glfw3.h>
+#define GLFW_EXPOSE_NATIVE_COCOA
+#include <GLFW/glfw3native.h>
+#include <objc/message.h>
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
 #include "ui_render.h"
+
+// Minimized, hidden with the app (Cmd+H), on another Space or fully covered:
+// NSWindow reports all of them through its occlusion state.
+static bool window_hidden(GLFWwindow* window) {
+    if (glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE) return true;
+    constexpr unsigned long kOcclusionStateVisible = 1UL << 1;
+    static const SEL occlusion_state = sel_registerName("occlusionState");
+    const auto send = reinterpret_cast<unsigned long (*)(id, SEL)>(objc_msgSend);
+    return (send(glfwGetCocoaWindow(window), occlusion_state) & kOcclusionStateVisible) == 0;
+}
 
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
     static GLuint textures[2] = {};
@@ -130,15 +143,15 @@ int main(int argc, char** argv) {
     constexpr auto min_frame_interval = std::chrono::milliseconds(33);   // ~30 FPS cap
     constexpr double interaction_tail  = 0.7;
     double last_event_time = -1e9;                                       // monotonic seconds (glfwGetTime)
-    bool minimized = false;
+    bool hidden = false;
     bool sponsor_window_visible = false;
 
     while (!glfwWindowShouldClose(window) && g_app.running.load()) {
-        minimized = glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
+        hidden = window_hidden(window);
         const double t_before = glfwGetTime();
         bool interacting = (t_before - last_event_time) < interaction_tail;
 
-        double timeout = minimized ? 1.0
+        double timeout = hidden ? 1.0
                        : interacting ? min_frame_interval.count() / 1000.0
                        : (double)ui_sleep_ms() / 1000.0;
         glfwWaitEventsTimeout(timeout);
@@ -149,8 +162,8 @@ int main(int argc, char** argv) {
         if (t - t_before < timeout - 0.005) last_event_time = t;
         interacting = (t - last_event_time) < interaction_tail;
 
-        minimized = glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
-        if (minimized) {
+        hidden = window_hidden(window);
+        if (hidden) {
             if (sponsor_window_visible) {
                 ui_set_window_visible(false);
                 sponsor_window_visible = false;

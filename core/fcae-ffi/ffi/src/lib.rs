@@ -1342,10 +1342,20 @@ pub extern "C" fn fcae_sponsor_set_connected(connected: bool) {
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_set_ui_active(active: bool) {
+    // Held across the switch so a poll that read its frame before the UI hid
+    // cannot store it afterwards.
+    let mut frame = SPONSOR_FRAME.lock();
     if !active {
-        *SPONSOR_FRAME.lock() = None;
+        *frame = None;
     }
     fcae_sponsor::set_ui_active(active);
+}
+
+#[no_mangle]
+pub extern "C" fn fcae_sponsor_release_media() {
+    let mut frame = SPONSOR_FRAME.lock();
+    *frame = None;
+    fcae_sponsor::release_media();
 }
 
 #[no_mangle]
@@ -1424,7 +1434,8 @@ pub unsafe extern "C" fn fcae_sponsor_poll(out: *mut FcaeSponsorInfo) -> FcaeSta
             out.icon_opacity = frame.icon_opacity;
             out.background_opacity = frame.background_opacity;
             out.background_color_opacity = frame.background_color_opacity;
-            *SPONSOR_FRAME.lock() = Some(frame);
+            let mut slot = SPONSOR_FRAME.lock();
+            *slot = fcae_sponsor::ui_active().then_some(frame);
         } else {
             out.width = 0;
             out.height = 0;

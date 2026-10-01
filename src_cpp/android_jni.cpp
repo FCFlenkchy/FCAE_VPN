@@ -1078,6 +1078,12 @@ Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetUiActive(JNIEnv*, jclass, jbool
     fcae_sponsor_set_ui_active(active == JNI_TRUE);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeSponsorReleaseMedia(JNIEnv*, jclass) {
+    ensure_init();
+    fcae_sponsor_release_media();
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeSponsorSetManifest(JNIEnv* env, jclass, jstring json) {
     ensure_init();

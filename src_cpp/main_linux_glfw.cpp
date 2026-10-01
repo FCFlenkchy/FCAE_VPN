@@ -61,6 +61,12 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
     return (ImTextureID)(intptr_t)texture;
 }
 
+// Minimized, or unmapped by the window manager on another workspace.
+static bool window_hidden(GLFWwindow* window) {
+    return glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE
+        || glfwGetWindowAttrib(window, GLFW_VISIBLE) == GLFW_FALSE;
+}
+
 static void glfw_error_callback(int error, const char* description) {
     fprintf(stderr, "GLFW Error %d: %s\n", error, description);
 }
@@ -180,17 +186,17 @@ int main(int argc, char** argv) {
     constexpr auto min_frame_interval = std::chrono::milliseconds(33);   // ~30 FPS cap
     constexpr double interaction_tail  = 0.7;                            // smooth for this long after the last event
     double last_event_time = -1e9;                                       // monotonic seconds (glfwGetTime)
-    bool minimized = false;
+    bool hidden = false;
     bool sponsor_window_visible = false;
 
     while (!glfwWindowShouldClose(window) && g_app.running.load()) {
-        minimized = glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
+        hidden = window_hidden(window);
         const double t_before = glfwGetTime();
         bool interacting = (t_before - last_event_time) < interaction_tail;
 
         // Wait for events: ~60 FPS while interacting, slower when idle (the
         // engine poll still runs, see ui_sleep_ms()).
-        double timeout = minimized ? 1.0
+        double timeout = hidden ? 1.0
                        : interacting ? min_frame_interval.count() / 1000.0
                        : (double)ui_sleep_ms() / 1000.0;
         glfwWaitEventsTimeout(timeout);
@@ -204,8 +210,8 @@ int main(int argc, char** argv) {
         if (t - t_before < timeout - 0.005) last_event_time = t;
         interacting = (t - last_event_time) < interaction_tail;
 
-        minimized = glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
-        if (minimized) {
+        hidden = window_hidden(window);
+        if (hidden) {
             if (sponsor_window_visible) {
                 ui_set_window_visible(false);
                 sponsor_window_visible = false;

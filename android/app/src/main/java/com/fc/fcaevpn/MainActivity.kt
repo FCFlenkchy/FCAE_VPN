@@ -100,6 +100,7 @@ class MainActivity : AppCompatActivity() {
     // changes. Avoid relayout/recoloring the card on every decoded frame.
     private var sponsorStaticToken = -1L
     private var holdsSponsorUi = false
+    private var sponsorVisible = false
     private var sponsorAudioUiEnabled: Boolean? = null
     private var sponsorAudioUiVisible = false
     private var sponsorAudioUiKnown = false
@@ -188,7 +189,12 @@ class MainActivity : AppCompatActivity() {
     private val buildIsPrerelease = BuildConfig.IS_PRERELEASE
     private val displayVersion = BuildConfig.APP_VERSION.substringBefore("_pre-release")
 
-    private val bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+    // One serial worker that exits when idle, so a destroyed Activity leaves
+    // no thread behind.
+    private val bgExecutor = java.util.concurrent.ThreadPoolExecutor(
+        0, 1, 30L, java.util.concurrent.TimeUnit.SECONDS,
+        java.util.concurrent.LinkedBlockingQueue(),
+    ) { r ->
         val t = Thread(r, "bgExecutor")
         t.isDaemon = true
         t
@@ -654,12 +660,8 @@ class MainActivity : AppCompatActivity() {
 
     // Uploads one sponsor media plane into its ImageView.
     //
-    // The view is the source of truth for what it currently displays. A plane
-    // whose media was briefly absent (a rotation that outran the refresh
-    // worker) clears the drawable while the recycled Bitmap instance stays
-    // cached; a later GIF/video frame with those same dimensions then reuses
-    // the instance, so comparing the previous field instead of the drawable
-    // left the icon and background invisible for the rest of the campaign.
+    // The view is the source of truth for what it currently displays: a cached
+    // Bitmap the view no longer shows is attached again before it is drawn.
     private fun showSponsorBitmap(
         view: android.widget.ImageView,
         cached: android.graphics.Bitmap?,
@@ -892,7 +894,7 @@ class MainActivity : AppCompatActivity() {
 
     private val sponsorPoll = object : Runnable {
         override fun run() {
-            if (!inForeground || !::sponsorCard.isInitialized) return
+            if (!sponsorVisible || !::sponsorCard.isInitialized) return
             if (sponsorPollBusy.compareAndSet(false, true)) {
                 val knownGeneration = sponsorGeneration
                 bgExecutor.execute {
@@ -909,6 +911,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     handler.post {
                         try {
+                            if (isDestroyed) return@post
                             val card = info
                             if (card == null) {
                                 // A failed native poll is not a manifest result.
@@ -987,6 +990,8 @@ class MainActivity : AppCompatActivity() {
                                     } else if (foregroundChanged && (card.width <= 0 || card.height <= 0)) {
                                         sponsorImage.setImageDrawable(null)
                                         sponsorImage.visibility = android.view.View.GONE
+                                        sponsorBitmap?.recycle()
+                                        sponsorBitmap = null
                                     }
                                     if (card.backgroundRgba.isNotEmpty()) {
                                         sponsorBackgroundBitmap = showSponsorBitmap(
@@ -1001,6 +1006,8 @@ class MainActivity : AppCompatActivity() {
                                     ) {
                                         sponsorBackgroundImage.setImageDrawable(null)
                                         sponsorBackgroundImage.visibility = android.view.View.GONE
+                                        sponsorBackgroundBitmap?.recycle()
+                                        sponsorBackgroundBitmap = null
                                     }
                                     sponsorGeneration = card.generation
                                 }
@@ -1734,9 +1741,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        // The card keeps the one still it is showing (one bitmap per plane);
-        // native releases every other frame and pauses rotation until resume.
-        releaseSponsorUi()
         inForeground = false
         logTouchActive = false
         // Keyboard gone, cursor gone with it.
@@ -1745,7 +1749,6 @@ class MainActivity : AppCompatActivity() {
         // TextView updates have nothing to draw into, and the notification
         // already carries the "still connected" signal.
         handler.removeCallbacks(poll)
-        handler.removeCallbacks(sponsorPoll)
         handler.removeCallbacks(sponsorManifestRefresh)
         saveSettings()
     }
@@ -1874,6 +1877,29 @@ class MainActivity : AppCompatActivity() {
         // exit armed by an earlier notification/widget/tile disconnect; cleanup
         // continues, but it must not kill this newly visible Activity.
         ProcessExit.cancel()
+        // Paused but on screen (split screen, a dialog on top) the card keeps
+        // animating; only a stopped UI is hidden.
+        sponsorVisible = true
+        holdSponsorUi()
+        handler.removeCallbacks(sponsorPoll)
+        handler.post(sponsorPoll)
+    }
+
+    override fun onStop() {
+        sponsorVisible = false
+        handler.removeCallbacks(sponsorPoll)
+        releaseSponsorUi()
+        super.onStop()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND
+            && !sponsorVisible && visibleSponsorUis == 0
+        ) {
+            releaseSponsorMedia(true)
+        }
     }
 
     override fun onResume() {
@@ -1883,9 +1909,6 @@ class MainActivity : AppCompatActivity() {
         catch (_: Throwable) {}
         handleWidgetIntent(intent)
         inForeground = true
-        holdSponsorUi()
-        handler.removeCallbacks(sponsorPoll)
-        handler.post(sponsorPoll)
         handler.removeCallbacks(sponsorManifestRefresh)
         handler.post(sponsorManifestRefresh)
         if (isPsiphonSelected() || isEgressPsiphon()) {
@@ -2045,14 +2068,25 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onDestroy() {
-        releaseSponsorUi()
+    // No visible UI is left to show the kept still: the bitmaps and the native
+    // frames go, and the next start decodes the card again from cache.
+    private fun releaseSponsorMedia(releaseNative: Boolean) {
+        if (::sponsorImage.isInitialized) sponsorImage.setImageDrawable(null)
+        if (::sponsorBackgroundImage.isInitialized) sponsorBackgroundImage.setImageDrawable(null)
         sponsorBitmap?.recycle()
         sponsorBitmap = null
         sponsorBackgroundBitmap?.recycle()
         sponsorBackgroundBitmap = null
-        if (::sponsorImage.isInitialized) sponsorImage.setImageDrawable(null)
-        if (::sponsorBackgroundImage.isInitialized) sponsorBackgroundImage.setImageDrawable(null)
+        sponsorGeneration = -1L
+        sponsorStaticToken = -1L
+        if (releaseNative && visibleSponsorUis == 0) {
+            try { NativeEngine.nativeSponsorReleaseMedia() } catch (_: Throwable) {}
+        }
+    }
+
+    override fun onDestroy() {
+        releaseSponsorUi()
+        releaseSponsorMedia(!isChangingConfigurations)
         handler.removeCallbacks(poll)
         handler.removeCallbacks(sponsorPoll)
         handler.removeCallbacks(sponsorManifestRefresh)

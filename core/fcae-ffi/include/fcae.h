@@ -605,6 +605,7 @@ void fcae_sponsor_set_connected(bool connected);
 void fcae_sponsor_set_audio_enabled(bool enabled);
 bool fcae_sponsor_audio_enabled(void);
 void fcae_sponsor_next(void);
+void fcae_sponsor_release_media(void);
 FcaeStatus fcae_sponsor_set_cache_dir(const char *path);
 
 /* Poll current locally rotating card. FCAE_OK with available=false means hidden. */
