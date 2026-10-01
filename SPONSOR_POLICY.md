@@ -33,10 +33,8 @@ FCAE does not accept sponsorship for:
 - adult, pornographic, sexually explicit, or NSFW content;
 - malware, spyware, unwanted software, credential theft, or circumvention of security controls;
 - illegal goods, services, or activity;
-- misleading financial, investment, medical, health, or security claims;
 - hate, harassment, exploitation, or violent extremist content;
 - political campaigning or targeted political persuasion;
-- tracking pixels, fingerprinting, hidden analytics, redirects intended to identify users, or URLs containing per-user identifiers;
 - content that infringes copyright, trademark, privacy, publicity, or other third-party rights.
 
 FCAE may reject or remove any campaign that creates legal, security, privacy, reputational, or user-safety concerns.
