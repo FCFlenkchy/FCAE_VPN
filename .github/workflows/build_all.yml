@@ -42,6 +42,7 @@ jobs:
       version_full: ${{ steps.version.outputs.version_full }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
       macos_version: ${{ steps.version.outputs.macos_version }}
+      android_version_code: ${{ steps.android.outputs.version_code }}
     steps:
       - name: validate version and channel
         id: version
@@ -70,6 +71,23 @@ jobs:
             core.setOutput('is_prerelease', pre ? 'true' : 'false');
             core.setOutput('macos_version', match[1].split('.').slice(0, 3).join('.'));
             core.info(`Release version: ${versionClean} (full: ${versionFull}, prerelease: ${pre})`);
+
+      - name: resolve android versionCode
+        id: android
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'build_all.yml',
+              status: 'success',
+              created: '>=2026-10-02T05:10:00Z',
+              per_page: 1,
+            });
+            const code = data.total_count + 2;
+            core.setOutput('version_code', String(code));
+            core.info(`Android versionCode: ${code}`);
 
   build-hev-windows:
     name: hev-socks5-tunnel engine DLL (windows)
@@ -211,6 +229,7 @@ jobs:
     env:
       FCAE_VERSION: ${{ needs.prepare.outputs.version_full }}
       FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
+      FCAE_ANDROID_VERSION_CODE: ${{ needs.prepare.outputs.android_version_code }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:

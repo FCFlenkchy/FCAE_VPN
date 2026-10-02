@@ -59,6 +59,10 @@ val appVersion = when {
     else -> "${selectedVersion.text}_pre-release"
 }
 
+val androidVersionCode = System.getenv("FCAE_ANDROID_VERSION_CODE")?.takeIf { it.isNotBlank() }?.let {
+    requireNotNull(it.toIntOrNull()?.takeIf { code -> code in 1..2_100_000_000 }) { "Invalid FCAE_ANDROID_VERSION_CODE: $it" }
+} ?: 1
+
 android {
     namespace = "com.fc.fcaevpn"
     compileSdk = 36
@@ -71,7 +75,7 @@ android {
         // where libaaudio is absent and configureCMakeRelease fails.
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
+        versionCode = androidVersionCode
         versionName = appVersion
         resourceConfigurations += "en"
 
