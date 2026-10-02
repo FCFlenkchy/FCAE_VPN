@@ -389,28 +389,34 @@ public class ProxyNotification extends Service {
 
         // A description on the intent means a surface without an Activity is
         // asking for this session (the widget). MainActivity's own ACTION_START
-        // carries none: it starts the engine itself, from its live views.
-        // Headless CONNECT starts this owner without extras so the widget tap
-        // can startForegroundService in the same frame; the saved session is
-        // loaded here, after the foreground notification is up.
+        // carries no description: it starts the engine itself, from its live
+        // views, racing this start. Only a start with no extras at all is
+        // headless CONNECT, whose saved session is loaded here, after the
+        // foreground notification is up; recalling one for MainActivity's start
+        // made its freshly started engine look like a session already up.
         Intent session = intent;
-        if (!session.hasExtra("protocol")) {
+        android.os.Bundle extras = intent.getExtras();
+        if (extras == null || extras.isEmpty()) {
             Intent recalled = FCAEVpnService.recalledSession(this);
             if (recalled != null && recalled.hasExtra("protocol")) session = recalled;
         }
         final boolean described = session.hasExtra("protocol");
         psiTelemetry = session.getBooleanExtra("psiphonThroughTunnel", false);
+        // The stats tick is the only proxy-mode poller of the chained Psiphon
+        // attach request, so every live session needs it, including one this
+        // start leaves untouched.
+        handler.removeCallbacks(statsRunnable);
         if (described && engineAlive()) {
             // Already up (second tap, stale widget, redelivery). The TUN owner
             // ignores a start on a live tunnel for the same reason: rebuilding
             // the session under it would drop everything in flight.
             Log.i(TAG, "Start ignored: session already up");
             showNotification(VpnNotification.zeroTrafficText(), BUTTONS_RUNNING);
+            handler.post(statsRunnable);
             return START_STICKY;
         }
 
         showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
-        handler.removeCallbacks(statsRunnable);
         handler.postDelayed(statsRunnable, 2000L);
 
         if (described && session.getIntExtra("backend", 0) == 1) {
