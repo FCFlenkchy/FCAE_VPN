@@ -767,19 +767,20 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     }
 
         /**
-         * Replay a START that was parked because a teardown was in flight (the
-         * session switch: stopBound() then startBound()). Queued so it runs only
-         * after the in-flight start task has fully exited — otherwise the switch's
-         * START lands on a stopping instance and is silently dropped.
+         * Settle a teardown: runs only after the in-flight start task has fully
+         * exited, then clears {@code stopping} and replays a START parked
+         * meanwhile (the session switch: stopBound() then startBound()). The
+         * flag is cleared even with nothing parked: a START delivered after
+         * this point, including the switch's own when the stop settled first,
+         * must start, not park on an instance that will never replay it.
          */
     private void scheduleRestartReplay() {
         libraryWorker.execute(() -> logHandler.post(() -> {
             if (destroyed) return;
+            stopping = false;
             Intent restart = pendingStart;
             pendingStart = null;
-            if (restart == null) return;
-            stopping = false;
-            onStartCommand(restart, 0, 0);
+            if (restart != null) onStartCommand(restart, 0, 0);
         }));
     }
 

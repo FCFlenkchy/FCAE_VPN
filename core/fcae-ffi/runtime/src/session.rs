@@ -35,6 +35,10 @@ const TUN_SETTLE: Duration = Duration::from_secs(5);
 /// One failure is a rebuild in flight, not a dropped tunnel; a device that is
 /// really gone fails every tick and still reconnects within a few seconds.
 const TUN_HEALTH_FAIL_TICKS: u32 = 3;
+/// How often the session samples the carrier's link state while chained.
+const CARRIER_POLL: Duration = Duration::from_millis(500);
+/// Margin past the chained Psiphon backend's own start deadline.
+const CHAIN_START_GRACE: Duration = Duration::from_secs(10);
 
 /// Hook that raises a TUN device on top of a backend's SOCKS endpoint.
 ///
@@ -678,19 +682,65 @@ async fn run_session(
         );
 
         // Pump counters into telemetry while we wait for the tunnel to end.
-        let outcome = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                tun_bridge.stop(stop_timeout);
-                stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
-                return Ok(());
+        //
+        // The carrier re-dials on its own without `wait` returning. A chained
+        // Psiphon exit has nothing to dial through meanwhile, so it is stopped
+        // when the carrier drops and started again once it is back, instead
+        // of churning against a dead upstream. The TUN stays up across the gap.
+        let chained = psi_handle.is_some();
+        let carrier_ended = handle.wait();
+        let pump = pump_counters(&*handle, &sink, &config, &*tun_bridge, &tun_paused, &tun_control, &tun_settle, &endpoints);
+        tokio::pin!(carrier_ended, pump);
+        let mut carrier_up = true;
+        let outcome = loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    tun_bridge.stop(stop_timeout);
+                    stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
+                    return Ok(());
+                }
+                r = &mut carrier_ended => break r,
+                r = exit_ended(&psi_handle) => break r,
+                up = carrier_changed(&*handle, carrier_up), if chained => {
+                    carrier_up = up;
+                    if !up {
+                        if let Some(psi) = psi_handle.take() {
+                            log::info!("[session] carrier dropped; stopping the Psiphon exit");
+                            let _ = psi.stop(stop_timeout).await;
+                        }
+                        continue;
+                    }
+                    log::info!("[session] carrier is back; restarting the Psiphon exit");
+                    let restarted = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            tun_bridge.stop(stop_timeout);
+                            stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
+                            return Ok(());
+                        }
+                        r = &mut carrier_ended => break r,
+                        r = start_psiphon_through_tunnel(&config, &handle.endpoints(), &sink, &cancel) => r,
+                    };
+                    match restarted {
+                        Ok(psi) if psi.endpoints().socks == endpoints.socks => {
+                            psi_handle = Some(psi);
+                            sink.set_state(
+                                FcaeState::Connected,
+                                format!("Connected ({} {})", exit_name(&config),
+                                    if config.mode == FcaeMode::Tun { "TUN" } else { "Proxy" }),
+                            );
+                        }
+                        // The TUN and every client point at the old listener.
+                        Ok(psi) => {
+                            let _ = psi.stop(stop_timeout).await;
+                            break Err(CoreError::Internal("Psiphon exit came back on another port".into()));
+                        }
+                        Err(e) => break Err(e),
+                    }
+                }
+                result = &mut pump => break result,
             }
-            r = async {
-                if let Some(psi) = psi_handle.as_ref() {
-                    tokio::select! { r = handle.wait() => r, r = psi.wait() => r }
-                } else { handle.wait().await }
-            } => r,
-            result = pump_counters(&*handle, &sink, &config, &*tun_bridge, &tun_paused, &tun_control, &tun_settle, &endpoints) => result,
         };
 
         // Tunnel ended. Set reconnecting state immediately so the UI doesn't
@@ -721,6 +771,25 @@ async fn run_session(
         if backoff(&cancel, attempt).await.is_break() {
             return Ok(());
         }
+    }
+}
+
+/// Resolves with the carrier's new link state once it differs from `up`.
+async fn carrier_changed(handle: &dyn BackendHandle, up: bool) -> bool {
+    loop {
+        tokio::time::sleep(CARRIER_POLL).await;
+        let now = handle.carrier_up();
+        if now != up {
+            return now;
+        }
+    }
+}
+
+/// Resolves when the chained exit ends on its own; pending while none runs.
+async fn exit_ended(psi: &Option<Box<dyn BackendHandle>>) -> Result<()> {
+    match psi {
+        Some(psi) => psi.wait().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -761,6 +830,8 @@ async fn start_psiphon_through_tunnel(
         .unwrap_or("{}");
     psi_cfg.psiphon.config_json = Some(crate::config::inject_upstream_proxy_url(json, &url));
 
+    // Past the backend's own deadline, so its error is the one reported.
+    let psi_budget = psi_cfg.start_timeout() + CHAIN_START_GRACE;
     let backend = registry::resolve(FcaeBackend::Psiphon)?;
     sink.set_state(
         FcaeState::Connecting,
@@ -770,7 +841,7 @@ async fn start_psiphon_through_tunnel(
     let handle = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Err(CoreError::StartFailed("chain cancelled".into())),
-        r = tokio::time::timeout(config.start_timeout().max(Duration::from_secs(120)), backend.start(cx)) =>
+        r = tokio::time::timeout(psi_budget, backend.start(cx)) =>
             r.map_err(|_| CoreError::StartFailed("Psiphon exit startup timed out".into()))??,
     };
     log::info!("[session] Psiphon through-tunnel via {url}");

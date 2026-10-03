@@ -210,6 +210,12 @@ pub trait BackendHandle: Send + Sync {
     fn counters(&self) -> Counters {
         Counters::default()
     }
+
+    /// Whether the carrier currently passes traffic. A backend that re-dials
+    /// on its own reports the gap here while `wait` keeps pending.
+    fn carrier_up(&self) -> bool {
+        true
+    }
 }
 
 /// Traffic counters sampled from a backend.

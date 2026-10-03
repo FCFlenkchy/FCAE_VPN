@@ -345,6 +345,11 @@ impl SessionConfig {
 
     /// How long to let a backend reach a usable state before giving up.
     pub fn start_timeout(&self) -> Duration {
+        // Psiphon does not scan; its establishment (server list fetch plus
+        // handshake, possibly through an upstream proxy) has its own budget.
+        if self.backend == FcaeBackend::Psiphon {
+            return PSIPHON_START_TIMEOUT;
+        }
         if self.backend == FcaeBackend::Aether && self.scan_mode == FcaeScanMode::Ironclad {
             return Duration::from_secs(240);
         }
@@ -405,6 +410,8 @@ pub const DEFAULT_TOR_SOCKS_PORT: u16 = 1821;
 /// reconnects) silently broke. 1823/1824 sit after the engine (1819/1820)
 /// and Tor (1821/1822) so the four backends never collide by default.
 pub const DEFAULT_PSIPHON_SOCKS_PORT: u16 = 1823;
+/// Psiphon establishment budget, whatever the WARP scan mode.
+pub const PSIPHON_START_TIMEOUT: Duration = Duration::from_secs(150);
 pub const DEFAULT_PSIPHON_HTTP_PORT: u16 = 1824;
 
 /// Reject two listeners sharing a port, with a message naming both.

@@ -174,6 +174,7 @@ impl Backend for AetherBackend {
             job,
             peers,
             stopped: AtomicBool::new(false),
+            carrier_up: AtomicBool::new(true),
         }))
     }
 
@@ -529,6 +530,8 @@ struct AetherHandle {
     /// packet that enters the device it carries never comes out.
     peers: Vec<IpAddr>,
     stopped: AtomicBool,
+    /// Link state observed by `wait` across engine-side re-dials.
+    carrier_up: AtomicBool,
 }
 
 #[async_trait]
@@ -569,6 +572,7 @@ impl BackendHandle for AetherHandle {
                 misses = 0;
                 if !was_up {
                     was_up = true;
+                    self.carrier_up.store(true, Ordering::Release);
                     self.sink
                         .set_state(FcaeState::Connected, "Tunnel reconnected".into());
                 }
@@ -579,6 +583,7 @@ impl BackendHandle for AetherHandle {
                 // line and, on Android, make the host re-dial a live session.
                 if was_up && misses >= LIVENESS_MISSES {
                     was_up = false;
+                    self.carrier_up.store(false, Ordering::Release);
                     self.sink.set_state(
                         FcaeState::Reconnecting,
                         "Tunnel dropped; reconnecting…".into(),
@@ -587,6 +592,10 @@ impl BackendHandle for AetherHandle {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+    }
+
+    fn carrier_up(&self) -> bool {
+        self.carrier_up.load(Ordering::Acquire)
     }
 
     async fn stop(&self, timeout: Duration) -> Result<()> {
