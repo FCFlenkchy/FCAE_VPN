@@ -712,6 +712,7 @@ async fn run_session(
                         continue;
                     }
                     log::info!("[session] carrier is back; restarting the Psiphon exit");
+                    let carrier = handle.endpoints();
                     let restarted = tokio::select! {
                         biased;
                         _ = cancel.cancelled() => {
@@ -720,7 +721,7 @@ async fn run_session(
                             return Ok(());
                         }
                         r = &mut carrier_ended => break r,
-                        r = start_psiphon_through_tunnel(&config, &handle.endpoints(), &sink, &cancel) => r,
+                        r = start_psiphon_through_tunnel(&config, &carrier, &sink, &cancel) => r,
                     };
                     match restarted {
                         Ok(psi) if psi.endpoints().socks == endpoints.socks => {
