@@ -598,8 +598,11 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
     )
 
     # macOS-specific linker flags
+    # -S/-x drop the debug map (STABS) and local symbols ld64 keeps by default.
     target_link_options(fcaevpn PRIVATE
         -Wl,-dead_strip
+        -Wl,-S
+        -Wl,-x
         -Wl,-rpath,@executable_path/../Frameworks
         -Wl,-rpath,@executable_path
     )
@@ -697,8 +700,11 @@ elseif(UNIX)
     )
 
     # Static toolchain runtime: no libstdc++/libgcc_s dependency at startup.
+    # -s as on Windows: BoringSSL builds itself with -ggdb, and its DWARF alone
+    # is ~23 MB of the shipped binary.
     target_link_options(fcaevpn PRIVATE
         -static-libgcc -static-libstdc++
+        -s
     )
 
 endif()
