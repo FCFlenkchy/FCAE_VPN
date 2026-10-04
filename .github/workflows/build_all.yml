@@ -973,6 +973,24 @@ jobs:
           set(BUILD_TESTING OFF CACHE BOOL "")
           EOF
               export CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_gnu="$tc"
+
+              # The fiat P-256 code in boring-sys 5.2's BoringSSL calls its ADX routines
+              # under __GNUC__ && __x86_64__, which MinGW meets, but those routines are
+              # SysV gas files that Windows builds never assemble: libcrypto ends up with
+              # undefined fiat_p256_adx_mul/sqr. Build from a copy carrying BoringSSL's
+              # upstream guard (ELF/Apple only) until boring-sys ships it.
+              bssl_pkg=$(cargo metadata --format-version 1 --all-features \
+                --manifest-path core/fcae-ffi/Cargo.toml --filter-platform x86_64-pc-windows-gnu \
+                | jq -r '.packages[] | select(.name == "boring-sys") | .manifest_path')
+              bssl="$RUNNER_TEMP/boringssl"
+              rm -rf "$bssl"
+              cp -r "$(dirname "$bssl_pkg")/deps/boringssl" "$bssl"
+              guard='#if !defined(OPENSSL_NO_ASM) && defined(__GNUC__) && defined(__x86_64__)'
+              if grep -qxF "$guard" "$bssl/third_party/fiat/p256_64.h"; then
+                sed -i 's/^#if !defined(OPENSSL_NO_ASM) && defined(__GNUC__) && defined(__x86_64__)$/#if !defined(OPENSSL_NO_ASM) \&\& (defined(__ELF__) || defined(__APPLE__)) \&\& defined(OPENSSL_X86_64)/' \
+                  "$bssl/third_party/fiat/p256_64.h"
+                export BORING_BSSL_SOURCE_PATH_x86_64_pc_windows_gnu="$bssl"
+              fi
             fi
             cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features "$FEATURES"
 
