@@ -135,6 +135,17 @@ class MainActivity : AppCompatActivity() {
     private var applyingRegionList = false
     private var pendingRegionCodes: List<String>? = null
     private lateinit var switchEch: SwitchMaterial
+    private lateinit var layoutEch: android.view.View
+    private lateinit var editEchDns: android.widget.EditText
+    private lateinit var editEchDomain: android.widget.EditText
+    private lateinit var switchFragmentSni: SwitchMaterial
+    private lateinit var layoutGoolInner: android.view.View
+    private lateinit var editGoolInner: android.widget.EditText
+    private lateinit var editEnrollAddress: android.widget.EditText
+    private lateinit var editExitLoc: android.widget.EditText
+    private lateinit var switchTlsVerify: SwitchMaterial
+    private lateinit var switchDisableGrease: SwitchMaterial
+    private lateinit var editTlsCiphers: android.widget.EditText
     private lateinit var switchFragment: SwitchMaterial
     private lateinit var layoutFragment: android.view.View
     private lateinit var editFragMinSize: android.widget.EditText
@@ -1165,6 +1176,20 @@ class MainActivity : AppCompatActivity() {
         editPsiphonSocksPort = findViewById(R.id.editPsiphonSocksPort)
         editPsiphonHttpPort = findViewById(R.id.editPsiphonHttpPort)
         switchEch = findViewById(R.id.switchEch)
+        layoutEch = findViewById(R.id.layoutEch)
+        editEchDns = findViewById(R.id.editEchDns)
+        editEchDomain = findViewById(R.id.editEchDomain)
+        switchEch.setOnCheckedChangeListener { _, on ->
+            layoutEch.visibility = if (on) android.view.View.VISIBLE else android.view.View.GONE
+        }
+        switchFragmentSni = findViewById(R.id.switchFragmentSni)
+        layoutGoolInner = findViewById(R.id.layoutGoolInner)
+        editGoolInner = findViewById(R.id.editGoolInner)
+        editEnrollAddress = findViewById(R.id.editEnrollAddress)
+        editExitLoc = findViewById(R.id.editExitLoc)
+        switchTlsVerify = findViewById(R.id.switchTlsVerify)
+        switchDisableGrease = findViewById(R.id.switchDisableGrease)
+        editTlsCiphers = findViewById(R.id.editTlsCiphers)
         switchFragment = findViewById(R.id.switchFragment)
         layoutFragment = findViewById(R.id.layoutFragment)
         editFragMinSize = findViewById(R.id.editFragMinSize)
@@ -1300,7 +1325,8 @@ class MainActivity : AppCompatActivity() {
         // button, keyboard dismissal, spinner selection) regardless of how
         // the focus was moved.
         val editTexts = listOf(editTunMtu, editSni, editForcePeer, editSocksPort, editHttpPort, editTorHttpPort, editTunTcpSndbuf, editTunTcpRcvbuf,
-            editTeam, editAccessToken, editAccessEmail, editRoutesFile, editRoutesInline)
+            editTeam, editAccessToken, editAccessEmail, editRoutesFile, editRoutesInline,
+            editEchDns, editEchDomain, editGoolInner, editEnrollAddress, editExitLoc, editTlsCiphers)
         for (et in editTexts) {
             et.setOnFocusChangeListener { view, hasFocus ->
                 (view as android.widget.EditText).isCursorVisible = hasFocus
@@ -1319,6 +1345,7 @@ class MainActivity : AppCompatActivity() {
             listOf(
                 "MASQUE (HTTP/3)", "MASQUE (HTTP/2)", "WireGuard", "WARP-in-WARP",
                 "Tor", "Psiphon", "MASQUE-in-MASQUE (HTTP/3)", "MASQUE-in-MASQUE (HTTP/2)",
+                "WARP-in-MASQUE (HTTP/3)", "WARP-in-MASQUE (HTTP/2)",
             ),
         )
         spinnerMode.adapter = ArrayAdapter(
@@ -1514,6 +1541,8 @@ class MainActivity : AppCompatActivity() {
                 // combo; Tor protocol grays the two Tor entries). Do not reset
                 // the combo — restoring protocol restores the pick.
                 applyTorLock()
+                layoutGoolInner.visibility =
+                    if (position in 8..9) android.view.View.VISIBLE else android.view.View.GONE
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
@@ -2287,6 +2316,15 @@ class MainActivity : AppCompatActivity() {
             putBoolean("autoUpdate", switchAutoUpdate.isChecked)
             putBoolean("checkPreReleases", switchPreReleases.isChecked)
             putString("sni", editSni.text.toString().trim())
+            putString("echDns", editEchDns.text.toString().trim())
+            putString("echDomain", editEchDomain.text.toString().trim())
+            putString("goolInner", editGoolInner.text.toString().trim())
+            putString("tlsCiphers", editTlsCiphers.text.toString().trim())
+            putString("enrollAddress", editEnrollAddress.text.toString().trim())
+            putString("exitLoc", editExitLoc.text.toString().trim())
+            putBoolean("tlsVerify", switchTlsVerify.isChecked)
+            putBoolean("disableGrease", switchDisableGrease.isChecked)
+            putBoolean("fragmentSni", switchFragmentSni.isChecked)
             putString("forcePeer", editForcePeer.text.toString().trim())
             putInt("sysprofile", spinnerSysprofile.selectedItemPosition)
             putString("socksPort", editSocksPort.text.toString())
@@ -2387,6 +2425,15 @@ class MainActivity : AppCompatActivity() {
         switchAutoUpdate.isChecked = prefs.getBoolean("autoUpdate", true)
         switchPreReleases.isChecked = prefs.getBoolean("checkPreReleases", false)
         editSni.setText(prefs.getString("sni", ""))
+        editEchDns.setText(prefs.getString("echDns", ""))
+        editEchDomain.setText(prefs.getString("echDomain", ""))
+        editGoolInner.setText(prefs.getString("goolInner", ""))
+        editTlsCiphers.setText(prefs.getString("tlsCiphers", ""))
+        editEnrollAddress.setText(prefs.getString("enrollAddress", ""))
+        editExitLoc.setText(prefs.getString("exitLoc", ""))
+        switchTlsVerify.isChecked = prefs.getBoolean("tlsVerify", false)
+        switchDisableGrease.isChecked = prefs.getBoolean("disableGrease", false)
+        switchFragmentSni.isChecked = prefs.getBoolean("fragmentSni", false)
         editForcePeer.setText(prefs.getString("forcePeer", ""))
         spinnerSysprofile.setSelection(prefs.getInt("sysprofile", 0))
         editSocksPort.setText(prefs.getString("socksPort", "1819"))
@@ -2636,6 +2683,15 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("lanSharing", switchLan.isChecked)
         i.putExtra("configPath", filesDir.resolve("aether.toml").absolutePath)
         i.putExtra("sni", editSni.text.toString().trim())
+        i.putExtra("echDns", editEchDns.text.toString().trim())
+        i.putExtra("echDomain", editEchDomain.text.toString().trim())
+        i.putExtra("goolInner", editGoolInner.text.toString().trim())
+        i.putExtra("tlsCiphers", editTlsCiphers.text.toString().trim())
+        i.putExtra("enrollAddress", editEnrollAddress.text.toString().trim())
+        i.putExtra("exitLoc", editExitLoc.text.toString().trim())
+        i.putExtra("tlsVerify", switchTlsVerify.isChecked)
+        i.putExtra("disableGrease", switchDisableGrease.isChecked)
+        i.putExtra("fragmentSni", switchFragmentSni.isChecked)
         // TUN needs a loopback SOCKS listener internally, but it must not
         // expose the public proxy controls. HTTP proxying is disabled in TUN.
         i.putExtra("socksPort", if (isTunModeSelected() || switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0)
@@ -2704,6 +2760,15 @@ class MainActivity : AppCompatActivity() {
         val fragMaxDelay = fragmentValue(editFragMaxDelay)
         val lan = switchLan.isChecked
         val sni = editSni.text.toString().trim()
+        val echDns = editEchDns.text.toString().trim()
+        val echDomain = editEchDomain.text.toString().trim()
+        val goolInner = editGoolInner.text.toString().trim()
+        val tlsCiphers = editTlsCiphers.text.toString().trim()
+        val enrollAddress = editEnrollAddress.text.toString().trim()
+        val exitLoc = editExitLoc.text.toString().trim()
+        val tlsVerify = switchTlsVerify.isChecked
+        val disableGrease = switchDisableGrease.isChecked
+        val fragmentSni = switchFragmentSni.isChecked
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
         // Extract ALL UI values on the main thread — never read Views from bg.
         val noizeProfile = spinnerNoize.selectedItem.toString()
@@ -2796,6 +2861,15 @@ class MainActivity : AppCompatActivity() {
                     tunEngine = tunEngine,
                     tunMtu = tunMtu,
                     tunDnsServers = tunDnsServers,
+                    echDns = echDns,
+                    echDomain = echDomain,
+                    goolInner = goolInner,
+                    tlsCiphers = tlsCiphers,
+                    enrollAddress = enrollAddress,
+                    exitLoc = exitLoc,
+                    tlsVerify = tlsVerify,
+                    disableGrease = disableGrease,
+                    fragmentSni = fragmentSni,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }
@@ -3784,11 +3858,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Spinner: 0 = MASQUE (HTTP/3), 1 = MASQUE (HTTP/2), 2 = WireGuard,
-    // 3 = WARP-in-WARP -> the core's protocol (0=masque, 1=wg, 2=gool) + h2.
+    // 3 = WARP-in-WARP, 8/9 = WARP-in-MASQUE (HTTP/3 / HTTP/2) -> the core's
+    // protocol (0=masque, 1=wg, 2=gool, 6=warp-in-masque) + h2.
     private fun coreProtocolFromSelection(): Int = when (spinnerProtocol.selectedItemPosition) {
         2 -> 1    // WireGuard
         3 -> 2    // WARP-in-WARP
         6, 7 -> 5 // MASQUE-in-MASQUE
+        8, 9 -> 6 // WARP-in-MASQUE
         4 -> 4    // Tor (FcaeProtocol::Tor; implies tor.mode = Only)
         5 -> 3    // Psiphon picks its own transport (FcaeProtocol::Auto)
         else -> 0 // MASQUE (either HTTP version)
@@ -3979,7 +4055,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun h2FromSelection(): Boolean = spinnerProtocol.selectedItemPosition in listOf(1, 7)
+    private fun h2FromSelection(): Boolean = spinnerProtocol.selectedItemPosition in listOf(1, 7, 9)
 
     /** Old saved prefs keep protocol (0-2) + h2 (bool); map back to the
      *  spinner position so existing configs load unchanged.
@@ -3989,6 +4065,7 @@ class MainActivity : AppCompatActivity() {
     private fun selectionPositionFromPrefs(protocol: Int, h2: Boolean, backend: Int = 0): Int =
         when {
             backend == 1 -> 5          // Psiphon
+            protocol == 6 -> if (h2) 9 else 8
             protocol == 5 -> if (h2) 7 else 6
             protocol == 4 -> 4         // Tor only
             protocol == 0 -> if (h2) 1 else 0

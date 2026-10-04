@@ -398,6 +398,15 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, g_app.force_peer);
     h = fnv_cstr(h, g_app.config_path);
     h = fnv_cstr(h, g_app.sni);
+    h = fnv_cstr(h, g_app.ech_dns);
+    h = fnv_cstr(h, g_app.ech_domain);
+    h = fnv_cstr(h, g_app.gool_inner);
+    h = fnv_cstr(h, g_app.tls_ciphers);
+    h = fnv_cstr(h, g_app.enroll_address);
+    h = fnv_cstr(h, g_app.exit_loc);
+    h = fnv_value(h, g_app.tls_verify);
+    h = fnv_value(h, g_app.disable_grease);
+    h = fnv_value(h, g_app.fragment_sni);
     h = fnv_cstr(h, g_app.team_name);
     h = fnv_cstr(h, g_app.access_token);
     h = fnv_cstr(h, g_app.access_email);
@@ -668,6 +677,15 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "ech_enabled") g_app.ech_enabled = atoi(val.c_str()) != 0;
     else if (key == "sni")
         snprintf(g_app.sni, sizeof(g_app.sni), "%s", val.c_str());
+    else if (key == "ech_dns") snprintf(g_app.ech_dns, sizeof(g_app.ech_dns), "%s", val.c_str());
+    else if (key == "ech_domain") snprintf(g_app.ech_domain, sizeof(g_app.ech_domain), "%s", val.c_str());
+    else if (key == "gool_inner") snprintf(g_app.gool_inner, sizeof(g_app.gool_inner), "%s", val.c_str());
+    else if (key == "tls_ciphers") snprintf(g_app.tls_ciphers, sizeof(g_app.tls_ciphers), "%s", val.c_str());
+    else if (key == "enroll_address") snprintf(g_app.enroll_address, sizeof(g_app.enroll_address), "%s", val.c_str());
+    else if (key == "exit_loc") snprintf(g_app.exit_loc, sizeof(g_app.exit_loc), "%s", val.c_str());
+    else if (key == "tls_verify") g_app.tls_verify = atoi(val.c_str()) != 0;
+    else if (key == "disable_grease") g_app.disable_grease = atoi(val.c_str()) != 0;
+    else if (key == "fragment_sni") g_app.fragment_sni = atoi(val.c_str()) != 0;
     else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
     else if (key == "auto_update_check") g_app.auto_update_check = atoi(val.c_str()) != 0;
@@ -736,6 +754,15 @@ static void save_config() {
     fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled ? 1 : 0);
     fprintf(f, "ech_enabled=%d\n", g_app.ech_enabled ? 1 : 0);
     fprintf(f, "sni=%s\n", g_app.sni);
+    fprintf(f, "ech_dns=%s\n", g_app.ech_dns);
+    fprintf(f, "ech_domain=%s\n", g_app.ech_domain);
+    fprintf(f, "gool_inner=%s\n", g_app.gool_inner);
+    fprintf(f, "tls_ciphers=%s\n", g_app.tls_ciphers);
+    fprintf(f, "enroll_address=%s\n", g_app.enroll_address);
+    fprintf(f, "exit_loc=%s\n", g_app.exit_loc);
+    fprintf(f, "tls_verify=%d\n", g_app.tls_verify ? 1 : 0);
+    fprintf(f, "disable_grease=%d\n", g_app.disable_grease ? 1 : 0);
+    fprintf(f, "fragment_sni=%d\n", g_app.fragment_sni ? 1 : 0);
     fprintf(f, "tun_mtu=%s\n", g_app.tun_mtu);
     fprintf(f, "tun_tcp_sndbuf=%s\n", g_app.tun_tcp_sndbuf);
     fprintf(f, "tun_tcp_rcvbuf=%s\n", g_app.tun_tcp_rcvbuf);
@@ -1646,6 +1673,7 @@ void render_ui() {
                 // Snapshot config + own string storage for the worker thread.
                 struct Owned {
                     std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
+                    std::string ech_dns, ech_domain, gool_inner, tls_ciphers, enroll_address, exit_loc;
                     std::string psi_json, psi_embedded;
                     FcaeConfig c{};
                 };
@@ -1667,6 +1695,12 @@ void render_ui() {
                 o->email = g_app.access_email;
                 o->routes = g_app.routes_file;
                 o->routes_inline = g_app.routes_inline;
+                o->ech_dns = g_app.ech_dns;
+                o->ech_domain = g_app.ech_domain;
+                o->gool_inner = g_app.gool_inner;
+                o->tls_ciphers = g_app.tls_ciphers;
+                o->enroll_address = g_app.enroll_address;
+                o->exit_loc = g_app.exit_loc;
                 o->c = g_app.to_config();
                 // to_config() built the JSON (with the server-entry fields
                 // merged in) into a g_app buffer; snapshot it, and read the
@@ -1709,6 +1743,12 @@ void render_ui() {
                 o->c.zero_trust.access_email   = o->email.empty() ? nullptr : o->email.c_str();
                 o->c.routing.rules_file        = o->routes.empty() ? nullptr : o->routes.c_str();
                 o->c.routing.rules_inline      = o->routes_inline.empty() ? nullptr : o->routes_inline.c_str();
+                o->c.aether.ech_dns            = o->ech_dns.empty() ? nullptr : o->ech_dns.c_str();
+                o->c.aether.ech_domain         = o->ech_domain.empty() ? nullptr : o->ech_domain.c_str();
+                o->c.aether.gool_inner         = o->gool_inner.empty() ? nullptr : o->gool_inner.c_str();
+                o->c.aether.tls_ciphers        = o->tls_ciphers.empty() ? nullptr : o->tls_ciphers.c_str();
+                o->c.aether.enroll_address     = o->enroll_address.empty() ? nullptr : o->enroll_address.c_str();
+                o->c.aether.exit_loc           = o->exit_loc.empty() ? nullptr : o->exit_loc.c_str();
                 o->c.psiphon.config_json          = o->psi_json.c_str();
                 o->c.psiphon.embedded_server_list =
                     o->psi_embedded.empty() ? nullptr : o->psi_embedded.c_str();
@@ -2386,10 +2426,12 @@ void render_ui() {
             // "HTTP/2 Fallback" checkbox). Underlying config keeps the same
             // two fields the FFI always took: protocol (0/1/2) + h2_enabled.
             // idx 0 = MASQUE H3, 1 = MASQUE H2, 2 = WireGuard, 3 = WIW.
+            // idx 8/9 = WARP-in-MASQUE over HTTP/3 / HTTP/2.
             // idx 4 = Tor, 5 = Psiphon. Both are peers of the WARP
             // transports to the user even though internally Tor is an engine
             // egress (tor.mode = Only) and Psiphon is a separate backend.
             int transport = (g_app.backend == 1)  ? 5
+                          : (g_app.protocol == 6) ? (g_app.h2_enabled ? 9 : 8)
                           : (g_app.protocol == 5) ? (g_app.h2_enabled ? 7 : 6)
                           : (g_app.protocol == 4) ? 4
                           : (g_app.protocol == 0) ? (g_app.h2_enabled ? 1 : 0)
@@ -2412,6 +2454,12 @@ void render_ui() {
             if (ImGui::RadioButton("WARP-in-WARP (Gool)", &transport, 3)) {
                 g_app.protocol = 2; g_app.backend = 0;
             }
+            if (ImGui::RadioButton("WARP-in-MASQUE (HTTP/3)", &transport, 8)) {
+                g_app.protocol = 6; g_app.h2_enabled = false; g_app.backend = 0;
+            }
+            if (ImGui::RadioButton("WARP-in-MASQUE (HTTP/2)", &transport, 9)) {
+                g_app.protocol = 6; g_app.h2_enabled = true; g_app.backend = 0;
+            }
             if (ImGui::RadioButton("Tor", &transport, 4)) {
                 // FcaeProtocol::Tor. Do not reset the egress combo — the
                 // Tor entries gray out and "Psiphon through the tunnel"
@@ -2430,7 +2478,22 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Transport Options");
             ImGui::Checkbox("ECH", &g_app.ech_enabled);
+            if (g_app.ech_enabled) {
+                ImGui::PushItemWidth(260);
+                ImGui::InputTextWithHint("ECH resolver", "udp://1.1.1.1 | tcp:// | https:// DoH",
+                                         g_app.ech_dns, sizeof(g_app.ech_dns));
+                ImGui::InputTextWithHint("ECH domain", "cloudflare-ech.com",
+                                         g_app.ech_domain, sizeof(g_app.ech_domain));
+                ImGui::PopItemWidth();
+                ImGui::TextDisabled("Without a usable ECH key the tunnel does not start.");
+            }
             ImGui::Checkbox("Quick Reconnect", &g_app.quick_reconnect);
+            if (g_app.protocol == 6) {
+                ImGui::PushItemWidth(260);
+                ImGui::InputTextWithHint("Inner WireGuard endpoint", "auto (ip:port)",
+                                         g_app.gool_inner, sizeof(g_app.gool_inner));
+                ImGui::PopItemWidth();
+            }
             if (g_app.mode == 0) {
                 ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
                 ImGui::Text("Proxy Ports");
@@ -2735,7 +2798,16 @@ void render_ui() {
                 ImGui::SliderInt("Delay Min (ms)", &g_app.frag_min_delay, 0, 20);
                 ImGui::SliderInt("Delay Max (ms)", &g_app.frag_max_delay, 1, 50);
                 ImGui::PopItemWidth();
+                ImGui::Checkbox("Split inside SNI", &g_app.fragment_sni);
             }
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("TLS Fingerprint");
+            ImGui::Checkbox("Verify TLS certificates", &g_app.tls_verify);
+            ImGui::Checkbox("Disable GREASE", &g_app.disable_grease);
+            ImGui::PushItemWidth(-1);
+            ImGui::InputTextWithHint("##tls_ciphers", "TLS 1.2 ciphers (default: Chrome's)",
+                                     g_app.tls_ciphers, sizeof(g_app.tls_ciphers));
+            ImGui::PopItemWidth();
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
@@ -2757,6 +2829,14 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("MASQUE SNI");
             ImGui::InputText("##sni", g_app.sni, sizeof(g_app.sni));
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("WARP API Address");
+            ImGui::InputTextWithHint("##enroll_address", "default (ip or domain[:port])",
+                                     g_app.enroll_address, sizeof(g_app.enroll_address));
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("Exit Countries");
+            ImGui::InputTextWithHint("##exit_loc", "any (DE,SE accepts / !IR,RU refuses)",
+                                     g_app.exit_loc, sizeof(g_app.exit_loc));
             ImGui::EndChild();
             ImGui::EndTabItem();
         }

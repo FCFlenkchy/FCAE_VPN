@@ -67,6 +67,16 @@ struct AppState {
 
     // MASQUE SNI (empty = default consumer-masque.cloudflareclient.com)
     char sni[128] = {};
+    // Aether engine options (FcaeAether); empty strings take the engine default.
+    char ech_dns[256] = {};
+    char ech_domain[128] = {};
+    char gool_inner[64] = {};
+    char tls_ciphers[512] = {};
+    char enroll_address[128] = {};
+    char exit_loc[128] = {};
+    bool tls_verify = false;
+    bool disable_grease = false;
+    bool fragment_sni = false;
     // TUN DNS servers (comma separated per family). The bridge applies them
     // to the OS when the tunnel comes up and restores on down; defaults
     // mirror the Android VpnService hardcode.
@@ -212,7 +222,7 @@ struct AppState {
         fcae_config_default(&c);
 
         c.backend          = (backend >= 0 && backend <= 1) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
-        c.protocol         = (protocol >= 0 && protocol <= 5) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
+        c.protocol         = (protocol >= 0 && protocol <= 6) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
         // Mode is shared by every protocol/backend: once the UI selects TUN,
         // never let a Psiphon/Tor mapping silently turn it back into Proxy.
         c.mode             = mode == 1 ? FCAE_MODE_TUN : FCAE_MODE_PROXY;
@@ -254,6 +264,15 @@ struct AppState {
         c.obfuscation.frag_max_delay_ms = (uint32_t)frag_max_delay;
         c.obfuscation.h2_enabled       = h2_enabled;
         c.obfuscation.ech_enabled      = ech_enabled;
+        c.aether.ech_dns        = ech_dns[0] ? ech_dns : nullptr;
+        c.aether.ech_domain     = ech_domain[0] ? ech_domain : nullptr;
+        c.aether.gool_inner     = gool_inner[0] ? gool_inner : nullptr;
+        c.aether.tls_ciphers    = tls_ciphers[0] ? tls_ciphers : nullptr;
+        c.aether.enroll_address = enroll_address[0] ? enroll_address : nullptr;
+        c.aether.exit_loc       = exit_loc[0] ? exit_loc : nullptr;
+        c.aether.tls_verify     = tls_verify;
+        c.aether.disable_grease = disable_grease;
+        c.aether.fragment_sni   = fragment_sni;
 
         // Where does this session's traffic end: protocol Psiphon (backend
         // 1) or egress "Psiphon through the tunnel" (tor_mode 3 on a

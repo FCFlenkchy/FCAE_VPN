@@ -1015,6 +1015,15 @@ public class FCAEVpnService extends VpnService {
         final String sni      = intent.getStringExtra("sni");
         final String cfgPath  = (cfg == null || cfg.isEmpty()) ? "aether.toml" : cfg;
         final String sniVal   = (sni == null) ? "" : sni;
+        final String echDns        = orEmpty(intent.getStringExtra("echDns"));
+        final String echDomain     = orEmpty(intent.getStringExtra("echDomain"));
+        final String goolInner     = orEmpty(intent.getStringExtra("goolInner"));
+        final String tlsCiphers    = orEmpty(intent.getStringExtra("tlsCiphers"));
+        final String enrollAddress = orEmpty(intent.getStringExtra("enrollAddress"));
+        final String exitLoc       = orEmpty(intent.getStringExtra("exitLoc"));
+        final boolean tlsVerify     = intent.getBooleanExtra("tlsVerify", false);
+        final boolean disableGrease = intent.getBooleanExtra("disableGrease", false);
+        final boolean fragmentSni   = intent.getBooleanExtra("fragmentSni", false);
         final String noizeVal = (noize == null || noize.isEmpty()) ? "balanced" : noize;
         final String peerVal  = (peer == null) ? "" : peer;
         final int sysProfile  = intent.getIntExtra("sysProfile", 0);
@@ -1122,7 +1131,9 @@ public class FCAEVpnService extends VpnService {
                     backend, torSocksPort, torHttpPort, throughPsiphon,
                     psiphonCfgV, psiphonRegionV, psiphonSocks, psiphonHttp,
                     tunTcpSndbuf, tunTcpRcvbuf, tunTcpAutoTuning, t2sLog, tunEngine, tunMtu,
-                    tunDnsCfgV
+                    tunDnsCfgV,
+                    echDns, echDomain, goolInner, tlsCiphers, enrollAddress, exitLoc,
+                    tlsVerify, disableGrease, fragmentSni
                 );
                 if (ok && throughPsiphon) {
                     // nativeStart creates the Aether attach request. Poll only
@@ -1725,6 +1736,15 @@ public class FCAEVpnService extends VpnService {
         putStr(e, i, "forcePeer");
         putStr(e, i, "configPath");
         putStr(e, i, "sni");
+        putStr(e, i, "echDns");
+        putStr(e, i, "echDomain");
+        putStr(e, i, "goolInner");
+        putStr(e, i, "tlsCiphers");
+        putStr(e, i, "enrollAddress");
+        putStr(e, i, "exitLoc");
+        putBool(e, i, "tlsVerify", false);
+        putBool(e, i, "disableGrease", false);
+        putBool(e, i, "fragmentSni", false);
         putInt(e, i, "sysProfile", 0);
         putStr(e, i, "teamName");
         putStr(e, i, "accessToken");
@@ -1779,6 +1799,15 @@ public class FCAEVpnService extends VpnService {
         copyStr(p, i, "forcePeer");
         copyStr(p, i, "configPath");
         copyStr(p, i, "sni");
+        copyStr(p, i, "echDns");
+        copyStr(p, i, "echDomain");
+        copyStr(p, i, "goolInner");
+        copyStr(p, i, "tlsCiphers");
+        copyStr(p, i, "enrollAddress");
+        copyStr(p, i, "exitLoc");
+        copyBool(p, i, "tlsVerify", false);
+        copyBool(p, i, "disableGrease", false);
+        copyBool(p, i, "fragmentSni", false);
         copyInt(p, i, "sysProfile", 0);
         copyStr(p, i, "teamName");
         copyStr(p, i, "accessToken");
@@ -1818,6 +1847,10 @@ public class FCAEVpnService extends VpnService {
      */
     private void forgetLiveSession() {
         lastStartIntent = null;
+    }
+
+    private static String orEmpty(String s) {
+        return s == null ? "" : s;
     }
 
     private static void putInt(SharedPreferences.Editor e, Intent i, String k, int d) {

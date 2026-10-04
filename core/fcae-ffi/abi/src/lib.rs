@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 18;
+pub const FCAE_ABI_VERSION: u32 = 19;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
@@ -132,7 +132,7 @@ pub struct FcaeTunEngineInfo {
 pub enum FcaeProtocol {
     Masque = 0,
     WireGuard = 1,
-    /// WARP-in-WARP.
+    /// WARP-in-WARP: WireGuard carried inside WireGuard (Aether's classic gool).
     Gool = 2,
     /// Backend picks. Psiphon uses this exclusively.
     Auto = 3,
@@ -147,6 +147,9 @@ pub enum FcaeProtocol {
     Tor = 4,
     /// MASQUE nested inside MASQUE; h2_enabled selects both carriers.
     MasqueInMasque = 5,
+    /// WARP-in-MASQUE: a WireGuard WARP identity registered and carried inside
+    /// a MASQUE tunnel, for a foreign exit. h2_enabled selects the carrier.
+    WarpInMasque = 6,
 }
 
 #[repr(C)]
@@ -478,6 +481,35 @@ pub struct FcaeConfig {
     /// TUN mode. ABI v8: appended after `tun2socks_log_level` so all earlier
     /// offsets hold.
     pub tun_engine: u64,
+    /// Aether engine options. ABI v19: appended so all earlier offsets hold.
+    pub aether: FcaeAether,
+}
+
+/// Aether engine options without a home in the older sub-structs. Every
+/// string is NULL or empty for the engine default.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FcaeAether {
+    /// Resolver of the ECH key lookup: `udp://ip[:port]`, `tcp://ip[:port]`
+    /// or a DoH `https://` URL. Read only with `obfuscation.ech_enabled`.
+    pub ech_dns: *const c_char,
+    /// Domain whose HTTPS record carries the ECH key.
+    pub ech_domain: *const c_char,
+    /// `ip:port` of the WireGuard endpoint WARP-in-MASQUE dials inside the
+    /// tunnel; NULL takes the one its registration names.
+    pub gool_inner: *const c_char,
+    /// OpenSSL-style TLS 1.2 cipher list in place of Chrome's.
+    pub tls_ciphers: *const c_char,
+    /// Address (IP or domain, optional `:port`) the WARP API calls connect to.
+    pub enroll_address: *const c_char,
+    /// Exit-country policy: `DE,SE` accepts only those, `!IR,RU` refuses those.
+    pub exit_loc: *const c_char,
+    /// Verify TLS certificates (off by default in the engine).
+    pub tls_verify: bool,
+    /// Leave GREASE out of the ClientHello.
+    pub disable_grease: bool,
+    /// Split the ClientHello inside the server name when fragmenting.
+    pub fragment_sni: bool,
 }
 
 // ── Telemetry ───────────────────────────────────────────────────────────
@@ -710,6 +742,7 @@ impl_try_from_enum!(FcaeProtocol, {
     Auto = 3,
     Tor = 4,
     MasqueInMasque = 5,
+    WarpInMasque = 6,
 });
 
 impl_try_from_enum!(FcaeMode, {

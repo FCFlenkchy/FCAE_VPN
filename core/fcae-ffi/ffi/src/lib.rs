@@ -421,6 +421,17 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
         tun2socks_log_level: 0,
         // 0 = tun2socks: the long-tested engine stays the default.
         tun_engine: FCAE_TUN_ENGINE_TUN2SOCKS,
+        aether: FcaeAether {
+            ech_dns: std::ptr::null(),
+            ech_domain: std::ptr::null(),
+            gool_inner: std::ptr::null(),
+            tls_ciphers: std::ptr::null(),
+            enroll_address: std::ptr::null(),
+            exit_loc: std::ptr::null(),
+            tls_verify: false,
+            disable_grease: false,
+            fragment_sni: false,
+        },
     });
     FcaeStatus::Ok
 }

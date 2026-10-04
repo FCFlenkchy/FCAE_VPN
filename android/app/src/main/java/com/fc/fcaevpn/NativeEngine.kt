@@ -109,6 +109,16 @@ object NativeEngine {
         // Fed to the core so the in-tunnel Psiphon gateway queries THESE
         // resolvers; the same list also populates the TUN builder.
         tunDnsServers: String,
+        // Aether engine options (FcaeAether); "" takes the engine default.
+        echDns: String,
+        echDomain: String,
+        goolInner: String,
+        tlsCiphers: String,
+        enrollAddress: String,
+        exitLoc: String,
+        tlsVerify: Boolean,
+        disableGrease: Boolean,
+        fragmentSni: Boolean,
     ): Boolean
     @JvmStatic external fun nativePsiphonAttachRequest(): String
     @JvmStatic external fun nativePsiphonAttachComplete(id: Long, socks: Int, http: Int)
@@ -217,7 +227,16 @@ object NativeEngine {
             tunMtu = session.getIntExtra("tunMtu", 1500),
             // TUN DNS is a TUN concern and the VpnService reads it from settings
             // itself; a proxy session has no interface to configure.
-            tunDnsServers = ""
+            tunDnsServers = "",
+            echDns = session.getStringExtra("echDns").orEmpty(),
+            echDomain = session.getStringExtra("echDomain").orEmpty(),
+            goolInner = session.getStringExtra("goolInner").orEmpty(),
+            tlsCiphers = session.getStringExtra("tlsCiphers").orEmpty(),
+            enrollAddress = session.getStringExtra("enrollAddress").orEmpty(),
+            exitLoc = session.getStringExtra("exitLoc").orEmpty(),
+            tlsVerify = session.getBooleanExtra("tlsVerify", false),
+            disableGrease = session.getBooleanExtra("disableGrease", false),
+            fragmentSni = session.getBooleanExtra("fragmentSni", false),
         )
     }
 

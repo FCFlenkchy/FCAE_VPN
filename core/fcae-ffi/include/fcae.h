@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 18
+#define FCAE_ABI_VERSION 19
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -116,13 +116,14 @@ typedef struct {
 typedef enum {
     FCAE_PROTOCOL_MASQUE    = 0,
     FCAE_PROTOCOL_WIREGUARD = 1,
-    FCAE_PROTOCOL_GOOL      = 2,
+    FCAE_PROTOCOL_GOOL      = 2,   /* WARP-in-WARP (classic gool)     */
     FCAE_PROTOCOL_AUTO      = 3,
     /* Tor alone, no WARP underneath. Sugar for tor.mode = FCAE_TOR_ONLY:
      * from the user's point of view it is a peer of MASQUE/WireGuard, while
      * Chain and Reverse remain modifiers on FcaeTor.mode.               */
     FCAE_PROTOCOL_TOR       = 4,
-    FCAE_PROTOCOL_MASQUE_IN_MASQUE = 5
+    FCAE_PROTOCOL_MASQUE_IN_MASQUE = 5,
+    FCAE_PROTOCOL_WARP_IN_MASQUE   = 6   /* WireGuard WARP inside MASQUE   */
 } FcaeProtocol;
 
 typedef enum {
@@ -281,6 +282,19 @@ typedef struct {
     const char     *pt_path;       /* pluggable transport binary, or NULL  */
 } FcaeTor;
 
+/* Aether engine options; NULL/"" strings take the engine default. */
+typedef struct {
+    const char *ech_dns;         /* udp://ip[:port] | tcp://ip[:port] | https:// DoH */
+    const char *ech_domain;      /* domain whose HTTPS record holds the key */
+    const char *gool_inner;      /* WARP-in-MASQUE inner WireGuard ip:port */
+    const char *tls_ciphers;     /* TLS 1.2 cipher list                    */
+    const char *enroll_address;  /* WARP API address, optional :port       */
+    const char *exit_loc;        /* "DE,SE" accept only; "!IR,RU" refuse   */
+    bool        tls_verify;
+    bool        disable_grease;
+    bool        fragment_sni;    /* split the ClientHello inside the SNI   */
+} FcaeAether;
+
 typedef struct {
     uint32_t        struct_size;   /* = sizeof(FcaeConfig)                 */
     uint32_t        abi_version;   /* = FCAE_ABI_VERSION                   */
@@ -320,6 +334,7 @@ typedef struct {
     uint64_t        tor_http_port; /* 0 disables; 1..65535; formerly reserved[3] */
     uint64_t        tun2socks_log_level; /* FcaeT2sLog; 0 = default (silent) */
     uint64_t        tun_engine;      /* FCAE_TUN_ENGINE_*; TUN mode only; ABI v8 */
+    FcaeAether      aether;          /* ABI v19 */
 } FcaeConfig;
 
 /* ── Telemetry ─────────────────────────────────────────────────────── */
@@ -622,4 +637,4 @@ FcaeStatus fcae_sponsor_copy_background_rgba(uint8_t *out, size_t capacity);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x83293041368bc5e3 */
+/* fcae-abi-fingerprint: 0x4de0fdb1ab0f90e6 */

@@ -79,6 +79,20 @@ pub struct RoutingConfig {
     pub block: Vec<String>,
 }
 
+/// Aether engine options projected one-to-one onto its AETHER_* variables.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AetherOptions {
+    pub ech_dns: Option<String>,
+    pub ech_domain: Option<String>,
+    pub gool_inner: Option<String>,
+    pub tls_ciphers: Option<String>,
+    pub enroll_address: Option<String>,
+    pub exit_loc: Option<String>,
+    pub tls_verify: bool,
+    pub disable_grease: bool,
+    pub fragment_sni: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ZeroTrustConfig {
     pub team_name: Option<String>,
@@ -292,6 +306,7 @@ pub struct SessionConfig {
     pub psiphon: PsiphonConfig,
     pub tor: TorConfig,
     pub tun: TunConfig,
+    pub aether: AetherOptions,
 }
 
 impl Default for SessionConfig {
@@ -319,6 +334,7 @@ impl Default for SessionConfig {
             psiphon: PsiphonConfig::default(),
             tor: TorConfig::default(),
             tun: TunConfig::default(),
+            aether: AetherOptions::default(),
         }
     }
 }
@@ -438,6 +454,54 @@ fn check_abi(struct_size: u32, abi_version: u32, expected_size: usize, what: &st
         )));
     }
     Ok(())
+}
+
+/// The engine drops country codes it cannot read, so a typo would quietly
+/// turn the exit filter off; refuse it instead.
+fn valid_exit_loc(spec: &str) -> bool {
+    let codes = spec.strip_prefix('!').unwrap_or(spec);
+    codes.split(',').all(|code| {
+        let code = code.trim();
+        code.len() == 2 && code.bytes().all(|b| b.is_ascii_alphabetic())
+    })
+}
+
+unsafe fn parse_aether(raw: &FcaeAether) -> Result<AetherOptions> {
+    let gool_inner = cstr_opt(raw.gool_inner);
+    if let Some(peer) = gool_inner.as_deref() {
+        if peer.parse::<std::net::SocketAddr>().is_err() {
+            return Err(CoreError::InvalidConfig(format!(
+                "aether.gool_inner={peer:?} is not a valid ip:port"
+            )));
+        }
+    }
+    let ech_dns = cstr_opt(raw.ech_dns);
+    if let Some(dns) = ech_dns.as_deref() {
+        if !["udp://", "tcp://", "https://"].iter().any(|scheme| dns.starts_with(scheme)) {
+            return Err(CoreError::InvalidConfig(format!(
+                "aether.ech_dns={dns:?} must start with udp://, tcp:// or https://"
+            )));
+        }
+    }
+    let exit_loc = cstr_opt(raw.exit_loc);
+    if let Some(spec) = exit_loc.as_deref() {
+        if !valid_exit_loc(spec) {
+            return Err(CoreError::InvalidConfig(format!(
+                "aether.exit_loc={spec:?} must be two-letter country codes, e.g. DE,SE or !IR,RU"
+            )));
+        }
+    }
+    Ok(AetherOptions {
+        ech_dns,
+        ech_domain: cstr_opt(raw.ech_domain),
+        gool_inner,
+        tls_ciphers: cstr_opt(raw.tls_ciphers),
+        enroll_address: cstr_opt(raw.enroll_address),
+        exit_loc,
+        tls_verify: raw.tls_verify,
+        disable_grease: raw.disable_grease,
+        fragment_sni: raw.fragment_sni,
+    })
 }
 
 /// Parse and validate an ABI config struct.
@@ -639,6 +703,8 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         // dialled the underlay directly instead of through Aether.
         through_tunnel: raw._reserved[0] != 0,
     };
+
+    cfg.aether = parse_aether(&raw.aether)?;
 
     // ── Tor ─────────────────────────────────────────────────────────────
     let t = &raw.tor;
@@ -918,7 +984,7 @@ pub mod env_compat {
             // all; the engine still wants a nominal protocol string.
             FcaeProtocol::Masque | FcaeProtocol::Auto | FcaeProtocol::Tor => "masque",
             FcaeProtocol::WireGuard => "wg",
-            FcaeProtocol::Gool => "gool",
+            FcaeProtocol::Gool | FcaeProtocol::WarpInMasque => "gool",
             FcaeProtocol::MasqueInMasque => "mim",
         };
         let scan = match cfg.scan_mode {
@@ -935,6 +1001,13 @@ pub mod env_compat {
         };
 
         set("AETHER_PROTOCOL", Some(protocol));
+        // The engine's bare "gool" is WARP-in-MASQUE; WARP-in-WARP is its
+        // classic mode and has to be asked for.
+        set("AETHER_GOOL_MODE", (cfg.protocol == FcaeProtocol::Gool).then_some("classic"));
+        set(
+            "AETHER_GOOL_INNER",
+            if cfg.protocol == FcaeProtocol::WarpInMasque { cfg.aether.gool_inner.as_deref() } else { None },
+        );
         // Ironclad rides along in AETHER_SCAN, which the engine parses with
         // ScanMode::parse. There is no separate AETHER_VALIDATE.
         set("AETHER_SCAN", Some(scan));
@@ -1004,17 +1077,24 @@ pub mod env_compat {
         // Always explicit: unset, the engine asks for the MASQUE transport on
         // stdin whenever the host was started from a terminal.
         set("AETHER_MASQUE_HTTP2", Some(if cfg.obfuscation.h2_enabled { "1" } else { "0" }));
-        set("AETHER_ECH", cfg.obfuscation.ech_enabled.then_some("auto"));
+        // With ECH on, a failed key lookup stops the session rather than
+        // send the server name in the clear; these say where the key is.
+        let ech = cfg.obfuscation.ech_enabled;
+        set("AETHER_ECH", ech.then_some("auto"));
+        set("AETHER_ECH_DNS", cfg.aether.ech_dns.as_deref().filter(|_| ech));
+        set("AETHER_ECH_DOMAIN", cfg.aether.ech_domain.as_deref().filter(|_| ech));
         if cfg.obfuscation.fragment_enabled {
             let (lo, hi) = cfg.obfuscation.frag_size;
             let (dlo, dhi) = cfg.obfuscation.frag_delay;
             set("AETHER_MASQUE_H2_FRAGMENT", Some("1"));
             set("AETHER_MASQUE_H2_FRAGMENT_SIZE", Some(format!("{lo}-{hi}")));
             set("AETHER_MASQUE_H2_FRAGMENT_DELAY", Some(format!("{dlo}-{dhi}")));
+            set("AETHER_MASQUE_H2_FRAGMENT_SNI", Some(if cfg.aether.fragment_sni { "1" } else { "0" }));
         } else {
             set("AETHER_MASQUE_H2_FRAGMENT", None::<&str>);
             set("AETHER_MASQUE_H2_FRAGMENT_SIZE", None::<&str>);
             set("AETHER_MASQUE_H2_FRAGMENT_DELAY", None::<&str>);
+            set("AETHER_MASQUE_H2_FRAGMENT_SNI", None::<&str>);
         }
 
         // DNS / TLS.
@@ -1027,6 +1107,11 @@ pub mod env_compat {
         // (set above from the same cfg.dns.ip_prefer). AETHER_DNS_IP was a
         // second name for it that nothing reads.
         set("AETHER_TLS_GROUPS", cfg.dns.tls_groups.as_deref());
+        set("AETHER_TLS_CIPHERS", cfg.aether.tls_ciphers.as_deref());
+        flag("AETHER_TLS_VERIFY", cfg.aether.tls_verify);
+        flag("AETHER_DISABLE_GREASE", cfg.aether.disable_grease);
+        set("AETHER_ENROLL_ADDRESS", cfg.aether.enroll_address.as_deref());
+        set("AETHER_EXIT_LOC", cfg.aether.exit_loc.as_deref());
         // Overrides the SNI presented on MASQUE TLS handshakes; empty means
         // the engine's built-in name.
         set("AETHER_SNI", cfg.dns.sni.as_deref());

@@ -24,6 +24,7 @@ FCAE VPN connects to **Cloudflare's WARP network** — the same infrastructure b
    - **MASQUE** — Traffic is encapsulated inside HTTP/3 (QUIC) or HTTP/2 (TLS) sessions using the `CONNECT-IP` method, making it look like normal HTTPS traffic to DPI systems.
    - **WireGuard** — A standard WireGuard UDP tunnel is established directly to the edge node.
    - **WARP-in-WARP (gool)** — Two nested WireGuard tunnels for an additional encryption layer.
+   - **WARP-in-MASQUE** — A WireGuard tunnel carried inside a MASQUE (HTTP/3 or HTTP/2) session, so the outer traffic still looks like HTTPS.
 4. **Local proxy** — The tunnel exposes a local SOCKS5 proxy (port 1819) and HTTP proxy (port 1820). Applications configured to use these proxies route their traffic through the encrypted tunnel to the internet via Cloudflare's network.
 
 All traffic between the client and Cloudflare is encrypted. From Cloudflare onward, traffic exits to the public internet normally.
@@ -75,11 +76,12 @@ All traffic between the client and Cloudflare is encrypted. From Cloudflare onwa
 | **MASQUE (HTTP/2)** | TLS over TCP | Best — looks like HTTPS | Fast | Fallback when QUIC is blocked |
 | **WireGuard** | UDP | Moderate — encrypted but detectable | Fastest | When UDP is allowed |
 | **WARP-in-WARP** | Nested UDP | High — double encryption | Moderate | Extra layer when WG alone is blocked |
+| **WARP-in-MASQUE** | WireGuard inside MASQUE | Best — looks like HTTPS, double encryption | Moderate | Double encryption where only HTTPS gets through |
 
 ## Features
 
 - Automatic endpoint discovery with end-to-end data-plane validation
-- MASQUE (HTTP/3 QUIC / HTTP/2), WireGuard, and WARP-in-WARP (gool) support
+- MASQUE (HTTP/3 QUIC / HTTP/2), WireGuard, WARP-in-WARP (gool) and WARP-in-MASQUE support
 - Traffic obfuscation with configurable profiles
 - Automatic reconnection with quick-reconnect
 - Local SOCKS5 and HTTP proxies
@@ -166,7 +168,7 @@ Open `android/` in Android Studio and build. The Gradle config invokes CMake wit
 
 ## Credits
 
-- **[Aether](https://github.com/CluvexStudio/aether)** — The core censorship circumvention engine by CluvexStudio. Provides MASQUE, WireGuard, and WARP-in-WARP protocols.
+- **[Aether](https://github.com/CluvexStudio/aether)** — The core censorship circumvention engine by CluvexStudio. Provides MASQUE, WireGuard, WARP-in-WARP and WARP-in-MASQUE protocols.
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — Immediate-mode GUI library Used for all native desktop rendering.
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C SOCKS5 tunnel engine, runs in-process.
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — Psiphon tunnel core library.

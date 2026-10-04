@@ -772,6 +772,14 @@
                             android:textSize="14sp" />
                     </LinearLayout>
                 </LinearLayout>
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchFragmentSni"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Split inside SNI"
+                    android:textColor="#FFE0E4EE" />
             </LinearLayout>
 
             <TextView
@@ -992,6 +1000,65 @@
                 android:text="ECH (Encrypted Client Hello)"
                 android:textColor="#FFE0E4EE" />
 
+            <LinearLayout
+                android:id="@+id/layoutEch"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="ECH resolver (optional)"
+                    android:textColor="#FF9AA3B5"
+                    android:textSize="13sp" />
+
+                <EditText
+                    android:id="@+id/editEchDns"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="4dp"
+                    android:background="#FF1E1E2C"
+                    android:hint="udp://1.1.1.1 · tcp:// · https:// DoH"
+                    android:inputType="textUri"
+                    android:padding="12dp"
+                    android:singleLine="true"
+                    android:textColor="#FFE8ECF4"
+                    android:textColorHint="#FF5A6478"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="ECH domain (optional)"
+                    android:textColor="#FF9AA3B5"
+                    android:textSize="13sp" />
+
+                <EditText
+                    android:id="@+id/editEchDomain"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="4dp"
+                    android:background="#FF1E1E2C"
+                    android:hint="cloudflare-ech.com"
+                    android:inputType="textUri"
+                    android:padding="12dp"
+                    android:singleLine="true"
+                    android:textColor="#FFE8ECF4"
+                    android:textColorHint="#FF5A6478"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Without a usable ECH key the tunnel does not start."
+                    android:textColor="#FF6B7280"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
             <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/switchQuick"
                 android:layout_width="match_parent"
@@ -1023,6 +1090,117 @@
                 android:hint="consumer-masque..."
                 android:inputType="textUri"
                 android:padding="12dp"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF5A6478"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:id="@+id/layoutGoolInner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="Inner WireGuard endpoint (optional)"
+                    android:textColor="#FF9AA3B5"
+                    android:textSize="13sp" />
+
+                <EditText
+                    android:id="@+id/editGoolInner"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="4dp"
+                    android:background="#FF1E1E2C"
+                    android:hint="auto (ip:port)"
+                    android:inputType="textUri"
+                    android:padding="12dp"
+                    android:singleLine="true"
+                    android:textColor="#FFE8ECF4"
+                    android:textColorHint="#FF5A6478"
+                    android:textSize="14sp" />
+
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="WARP API address (optional)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editEnrollAddress"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:hint="ip or domain[:port]"
+                android:inputType="textUri"
+                android:padding="12dp"
+                android:singleLine="true"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF5A6478"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Exit countries (optional)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editExitLoc"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:hint="DE,SE accepts · !IR,RU refuses"
+                android:inputType="textCapCharacters"
+                android:padding="12dp"
+                android:singleLine="true"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF5A6478"
+                android:textSize="14sp" />
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchTlsVerify"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Verify TLS certificates"
+                android:textColor="#FFE0E4EE" />
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchDisableGrease"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Disable GREASE"
+                android:textColor="#FFE0E4EE" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="TLS 1.2 ciphers (optional)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/editTlsCiphers"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:hint="default: Chrome's"
+                android:inputType="text"
+                android:padding="12dp"
+                android:singleLine="true"
                 android:textColor="#FFE8ECF4"
                 android:textColorHint="#FF5A6478"
                 android:textSize="14sp" />

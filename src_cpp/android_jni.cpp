@@ -465,7 +465,16 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jint t2sLog,
     jint tunEngine,
     jint tunMtu,
-    jstring tunDnsServers
+    jstring tunDnsServers,
+    jstring echDns,
+    jstring echDomain,
+    jstring goolInner,
+    jstring tlsCiphers,
+    jstring enrollAddress,
+    jstring exitLoc,
+    jboolean tlsVerify,
+    jboolean disableGrease,
+    jboolean fragmentSni
 ) {
     ensure_init();
 
@@ -492,7 +501,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     fcae_config_default(&cfg);
 
     cfg.backend = (backend >= 0 && backend <= 1) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
-    cfg.protocol = (protocol >= 0 && protocol <= 5) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
+    cfg.protocol = (protocol >= 0 && protocol <= 6) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
     // Mode is independent of protocol/backend. The Android UI passes 1 for
     // TUN, and no protocol-specific path may silently turn that into Proxy.
     cfg.mode = mode == 1 ? FCAE_MODE_TUN : FCAE_MODE_PROXY;
@@ -516,6 +525,22 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.obfuscation.ech_enabled       = echEnabled == JNI_TRUE;
 
     cfg.dns.sni = sniOwned.empty() ? nullptr : sniOwned.c_str();
+
+    const std::string echDnsOwned = jstr(env, echDns);
+    const std::string echDomainOwned = jstr(env, echDomain);
+    const std::string goolInnerOwned = jstr(env, goolInner);
+    const std::string tlsCiphersOwned = jstr(env, tlsCiphers);
+    const std::string enrollOwned = jstr(env, enrollAddress);
+    const std::string exitLocOwned = jstr(env, exitLoc);
+    cfg.aether.ech_dns        = echDnsOwned.empty() ? nullptr : echDnsOwned.c_str();
+    cfg.aether.ech_domain     = echDomainOwned.empty() ? nullptr : echDomainOwned.c_str();
+    cfg.aether.gool_inner     = goolInnerOwned.empty() ? nullptr : goolInnerOwned.c_str();
+    cfg.aether.tls_ciphers    = tlsCiphersOwned.empty() ? nullptr : tlsCiphersOwned.c_str();
+    cfg.aether.enroll_address = enrollOwned.empty() ? nullptr : enrollOwned.c_str();
+    cfg.aether.exit_loc       = exitLocOwned.empty() ? nullptr : exitLocOwned.c_str();
+    cfg.aether.tls_verify     = tlsVerify == JNI_TRUE;
+    cfg.aether.disable_grease = disableGrease == JNI_TRUE;
+    cfg.aether.fragment_sni   = fragmentSni == JNI_TRUE;
 
     cfg.zero_trust.team_name    = teamOwned.empty() ? nullptr : teamOwned.c_str();
     cfg.zero_trust.access_token = tokenOwned.empty() ? nullptr : tokenOwned.c_str();
