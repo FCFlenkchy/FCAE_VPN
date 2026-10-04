@@ -186,7 +186,7 @@ impl<'a> CArchive<'a> {
                 Ok(cc.display().to_string())
             }
             Os::Windows if !cfg!(target_os = "windows") => {
-                // Cross-compiling to Windows: MinGW, matching .cargo/config.toml.
+                // Cross-compiling to Windows: MinGW, the x86_64-pc-windows-gnu toolchain.
                 Ok("x86_64-w64-mingw32-gcc".into())
             }
             _ => Ok(std::env::var("CC").unwrap_or_else(|_| "cc".into())),
