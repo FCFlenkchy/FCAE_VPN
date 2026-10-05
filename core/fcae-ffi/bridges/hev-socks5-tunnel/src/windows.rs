@@ -96,12 +96,16 @@ fn load() -> Result<Ffi> {
 }
 
 pub fn unavailable_reason() -> Option<&'static str> {
+    // The UI calls this while rendering the first frame. Loading an MSYS DLL
+    // is not a passive capability check: its process initializers and
+    // msys_dll_init execute native runtime code and a runtime mismatch can
+    // terminate the host process. Only report build-time availability here;
+    // load the bridge on an explicit HEV session start.
     if !cfg!(all(hev_dynamic, wintun_staged)) {
-        return Some("HEV Windows DLL or Wintun not embedded");
+        Some("HEV Windows DLL or Wintun not embedded")
+    } else {
+        None
     }
-    static REASON: OnceLock<std::result::Result<(), String>> = OnceLock::new();
-    let r = REASON.get_or_init(|| load().map(|_| ()).map_err(|e| e.to_string()));
-    r.as_ref().err().map(|s| s.as_str())
 }
 
 pub fn is_supported() -> bool { unavailable_reason().is_none() }
@@ -234,6 +238,9 @@ impl TunBridge for HevSocks5TunnelBridge {
         } else { None };
         let socks = psiphon.as_ref().map(|a| a.endpoint()).unwrap_or(base_socks);
         let fd = cfg.tun.fd.or_else(|| self.android_fd()).unwrap_or(-1);
+        // Resolve the native bridge before changing engine state or spawning a
+        // worker so a missing/incompatible DLL becomes a normal start error.
+        ffi()?;
         let (_, yaml) = generate_config(cfg, socks)?;
         let engine = self.spawn_engine(&yaml, fd)?;
         let exit_code = engine.rc.clone();
