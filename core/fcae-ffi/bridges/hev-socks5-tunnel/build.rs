@@ -18,17 +18,9 @@
 
 use std::path::{Path, PathBuf};
 
-/// Every file the engine DLL needs beside it at load time: the engine itself,
-/// the POSIX-prefix libraries it imports, and the MSYS runtime. The bridge
-/// embeds the whole set in the binary and extracts it as one directory before
-/// loading, so the released app is a single self-contained executable.
-const ENGINE_FILES: [&str; 5] = [
-    "libhev-socks5-tunnel.dll",
-    "libyaml.so",
-    "liblwip.so",
-    "libhev-task-system.so",
-    "msys-2.0.dll",
-];
+/// The Windows job may add compiler/runtime DLLs discovered by `ldd`; the
+/// complete directory is embedded after the engine is built rather than
+/// maintaining a hand-written dependency allowlist.
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(hev_linked)");
@@ -73,19 +65,41 @@ fn main() {
                 Path::new(&std::env::var_os("OUT_DIR").expect("cargo must set OUT_DIR"))
                     .join("engine");
             std::fs::create_dir_all(&out_dir).expect("cannot create OUT_DIR/engine");
-            for name in ENGINE_FILES {
-                let file = engine_dir.join(name);
+            let mut names = Vec::new();
+            for entry in std::fs::read_dir(engine_dir)
+                .unwrap_or_else(|e| panic!("cannot read engine directory {}: {e}", engine_dir.display()))
+            {
+                let entry = entry.expect("cannot inspect staged engine file");
+                let file = entry.path();
                 if !file.is_file() {
-                    panic!(
-                        "the staged engine set is incomplete: {name} is missing next to \
-                         {staged} (the build-hev-windows job ships the complete engine set)"
-                    );
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if Path::new(&name).file_name() != Some(std::ffi::OsStr::new(&name)) {
+                    panic!("invalid staged engine filename: {name}");
                 }
                 fcae_build::rerun_if_changed(&file);
-                std::fs::copy(&file, out_dir.join(name)).unwrap_or_else(|e| {
+                std::fs::copy(&file, out_dir.join(&name)).unwrap_or_else(|e| {
                     panic!("cannot embed {name} from {}: {e}", file.display())
                 });
+                names.push(name);
             }
+            names.sort();
+            if !names.iter().any(|name| name == "libhev-socks5-tunnel.dll")
+                || !names.iter().any(|name| name == "msys-2.0.dll")
+            {
+                panic!("the staged engine set is missing the HEV DLL or MSYS runtime");
+            }
+            let generated = names.iter().map(|name| {
+                format!(
+                    "    ({name:?}, include_bytes!(concat!(env!(\"OUT_DIR\"), \"/engine/{name}\"))),\n"
+                )
+            }).collect::<String>();
+            std::fs::write(
+                Path::new(&std::env::var_os("OUT_DIR").expect("cargo must set OUT_DIR"))
+                    .join("engine_files.rs"),
+                format!("&[\n{generated}]"),
+            ).expect("cannot generate embedded engine file list");
             println!("cargo:rustc-cfg=hev_dynamic");
             fcae_build::note(format!(
                 "hev-socks5-tunnel loads as a DLL in-process on Windows ({staged}); the full \

@@ -19,15 +19,7 @@ const DLL_NAME: &str = "libhev-socks5-tunnel.dll";
 const MSYS_NAME: &str = "msys-2.0.dll";
 
 #[cfg(hev_dynamic)]
-const EMBEDDED: &[(&str, &[u8])] = &[
-    (DLL_NAME, include_bytes!(concat!(env!("OUT_DIR"), "/engine/libhev-socks5-tunnel.dll"))),
-    ("libyaml.so", include_bytes!(concat!(env!("OUT_DIR"), "/engine/libyaml.so"))),
-    ("liblwip.so", include_bytes!(concat!(env!("OUT_DIR"), "/engine/liblwip.so"))),
-    ("libhev-task-system.so", include_bytes!(concat!(env!("OUT_DIR"), "/engine/libhev-task-system.so"))),
-    (MSYS_NAME, include_bytes!(concat!(env!("OUT_DIR"), "/engine/msys-2.0.dll"))),
-    #[cfg(wintun_staged)]
-    ("wintun.dll", include_bytes!(env!("FCAE_HEV_WINTUN_DLL"))),
-];
+const EMBEDDED: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/engine_files.rs"));
 
 type MainFn = unsafe extern "C" fn(*const c_uchar, c_uint, c_int) -> c_int;
 type QuitFn = unsafe extern "C" fn();
