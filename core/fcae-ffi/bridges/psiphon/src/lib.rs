@@ -53,11 +53,13 @@ use fcae_runtime::error::{CoreError, Result};
 #[cfg(all(feature = "enabled", psiphon_linked))]
 static STARTING: AtomicBool = AtomicBool::new(false);
 
-// Keep async teardown owned until the next start. Dropping an awaited start
-// must not lose this handle or allow an old stop to kill a fresh controller.
+// Psiphon shutdown is a native Go call. It must not be owned by the Tokio
+// runtime: dropping a runtime waits for blocking tasks, so a slow Go shutdown
+// could keep the session reaper alive forever. A dedicated thread owns the
+// call, and the next start joins it before starting a new controller.
 #[cfg(all(feature = "enabled", psiphon_linked))]
-static STOP_TASK: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>> =
-    tokio::sync::Mutex::const_new(None);
+static STOP_THREAD: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>> =
+    parking_lot::Mutex::new(None);
 
 
 /// Egress regions reported by the last successful handshake.
@@ -362,11 +364,7 @@ impl Backend for PsiphonBackend {
         // From here on every exit path must clear STARTING.
         let _guard = StartGuard;
         {
-            let mut previous = STOP_TASK.lock().await;
-            if let Some(task) = previous.as_mut() {
-                task.await.map_err(|e| CoreError::Internal(format!("Psiphon cleanup failed: {e}")))?;
-            }
-            *previous = None;
+            ffi::wait_previous_stop().await?;
         }
 
         ffi::install_log_hook()?;
@@ -415,9 +413,7 @@ impl Backend for PsiphonBackend {
         let deadline = std::time::Instant::now() + cx.config.start_timeout();
         let socks_port = loop {
             if cx.cancel.is_cancelled() {
-                tokio::task::spawn_blocking(ffi::stop)
-                    .await
-                    .map_err(|e| CoreError::Internal(format!("psiphon stop task panicked: {e}")))?;
+                ffi::request_stop()?;
                 return Err(CoreError::StartFailed("cancelled".into()));
             }
             if ffi::state() == ffi::STATE_CONNECTED {
@@ -428,9 +424,7 @@ impl Backend for PsiphonBackend {
             }
             if std::time::Instant::now() >= deadline {
                 // Leave nothing running behind a failed start.
-                tokio::task::spawn_blocking(ffi::stop)
-                    .await
-                    .map_err(|e| CoreError::Internal(format!("psiphon stop task panicked: {e}")))?;
+                ffi::request_stop()?;
                 return Err(CoreError::StartFailed(format!(
                     "Psiphon did not establish a tunnel within {:?}",
                     cx.config.start_timeout()
@@ -1253,6 +1247,30 @@ mod ffi {
         unsafe { (s.stop)() };
     }
 
+    pub(super) fn request_stop() -> Result<()> {
+        let mut slot = super::STOP_THREAD.lock();
+        if slot.is_some() {
+            return Ok(());
+        }
+        let thread = std::thread::Builder::new()
+            .name("psiphon-stop".into())
+            .spawn(stop)
+            .map_err(|e| CoreError::Internal(format!("cannot spawn Psiphon stop thread: {e}")))?;
+        *slot = Some(thread);
+        Ok(())
+    }
+
+    pub(super) async fn wait_previous_stop() -> Result<()> {
+        let thread = super::STOP_THREAD.lock().take();
+        let Some(thread) = thread else { return Ok(()); };
+        tokio::task::spawn_blocking(move || {
+            thread.join().map_err(|_| CoreError::Internal("Psiphon stop thread panicked".into()))
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("Psiphon stop waiter panicked: {e}")))??;
+        Ok(())
+    }
+
     pub(super) fn state() -> i32 {
         syms().map(|s| unsafe { (s.state)() }).unwrap_or(STATE_STOPPED)
     }
@@ -1501,12 +1519,10 @@ impl BackendHandle for PsiphonHandle {
         }
         #[cfg(all(feature = "enabled", psiphon_linked))]
         {
-            // Fire-and-forget: psi.Stop joins the whole controller before
-            // returning, which can take seconds -- far too long to block a
-            // disconnect on. The cancel token is already set and `stopped`
-            // makes wait() exit immediately, so the tunnel is down from the
-            // caller's perspective; the blocking stop runs on its own task.
-            *STOP_TASK.lock().await = Some(tokio::task::spawn_blocking(ffi::stop));
+            // Keep the blocking Go shutdown off the Tokio runtime. The
+            // session worker must be able to finish and drop its runtime even
+            // when Psiphon takes time to join its controller goroutines.
+            ffi::request_stop()?;
         }
         Ok(())
     }
