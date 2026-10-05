@@ -23,6 +23,7 @@ static ID3D11ShaderResourceView* g_sponsor_views[2] = {};
 static uint64_t g_sponsor_loaded[2] = {};
 static int g_sponsor_texture_width[2] = {};
 static int g_sponsor_texture_height[2] = {};
+static bool g_imgui_win32_ready = false;
 
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
     const int index = slot == 1 ? 1 : 0;
@@ -76,7 +77,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 static void CleanupDeviceD3D();
 
 static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+    if (g_imgui_win32_ready && ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
         return 1;
 
     switch (msg) {
@@ -155,14 +156,23 @@ static bool CreateDeviceD3D(HWND hWnd) {
     D3D_FEATURE_LEVEL featureLevel;
     const D3D_FEATURE_LEVEL levels[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
 
-    if (D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createDeviceFlags,
-        levels, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext) != S_OK)
-        return false;
-
-    if (!g_pSwapChain || !g_pd3dDevice) {
+    const D3D_DRIVER_TYPE drivers[] = {
+        D3D_DRIVER_TYPE_HARDWARE,
+        D3D_DRIVER_TYPE_WARP,
+        D3D_DRIVER_TYPE_REFERENCE
+    };
+    HRESULT device_result = E_FAIL;
+    for (D3D_DRIVER_TYPE driver : drivers) {
+        device_result = D3D11CreateDeviceAndSwapChain(
+            nullptr, driver, nullptr, createDeviceFlags, levels, 2,
+            D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice,
+            &featureLevel, &g_pd3dDeviceContext);
+        if (SUCCEEDED(device_result) && g_pSwapChain && g_pd3dDevice && g_pd3dDeviceContext)
+            break;
         CleanupDeviceD3D();
-        return false;
     }
+    if (FAILED(device_result) || !g_pSwapChain || !g_pd3dDevice || !g_pd3dDeviceContext)
+        return false;
 
     ID3D11Texture2D* pBackBuffer = nullptr;
     if (SUCCEEDED(g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer))) && pBackBuffer) {
@@ -205,10 +215,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     if (!wc.hIconSm) {
         wc.hIconSm = wc.hIcon;
     }
-    RegisterClassExW(&wc);
+    if (!RegisterClassExW(&wc))
+        return 1;
+
     HWND hWnd = CreateWindowW(wc.lpszClassName, L"FCAE VPN",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         100, 100, 1024, 700, nullptr, nullptr, inst, nullptr);
+    if (!hWnd) {
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return 1;
+    }
 
     // Enable dark title bar on Windows 10/11 (requires 1809+)
     {
@@ -220,9 +236,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
 
     if (!CreateDeviceD3D(hWnd)) { CleanupDeviceD3D(); UnregisterClassW(wc.lpszClassName, wc.hInstance); return 1; }
-
-    ShowWindow(hWnd, SW_SHOWDEFAULT);
-    UpdateWindow(hWnd);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -250,8 +263,21 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     colors[ImGuiCol_TabHovered]      = ImVec4(0.20f, 0.30f, 0.45f, 1.0f);
     colors[ImGuiCol_SliderGrab]      = ImVec4(0.30f, 0.60f, 0.80f, 1.0f);
 
-    ImGui_ImplWin32_Init(hWnd);
-    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+    const bool imgui_win32_initialized = ImGui_ImplWin32_Init(hWnd);
+    const bool imgui_dx11_initialized = imgui_win32_initialized
+        && ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+    if (!imgui_win32_initialized || !imgui_dx11_initialized) {
+        if (imgui_dx11_initialized) ImGui_ImplDX11_Shutdown();
+        if (imgui_win32_initialized) ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        CleanupDeviceD3D();
+        DestroyWindow(hWnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return 1;
+    }
+    g_imgui_win32_ready = true;
+    ShowWindow(hWnd, SW_SHOWDEFAULT);
+    UpdateWindow(hWnd);
 
     ui_init();
 
@@ -386,6 +412,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     ui_shutdown();
 
+    g_imgui_win32_ready = false;
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
