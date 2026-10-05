@@ -2057,12 +2057,14 @@ void render_ui() {
                 ImGui::Separator();
                 ImGui::Spacing();
                 for (const CommunityLink& link : kCommunityLinks) {
+                    ImGui::PushID(link.url);
                     if (ImGui::TextLink(link.label))
                         open_link(link.url);
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("%s", link.url);
                     ImGui::SameLine(96.0f);
                     ImGui::TextDisabled("%s", link.shown);
+                    ImGui::PopID();
                 }
                 ImGui::Spacing();
                 ImGui::Separator();
@@ -2084,9 +2086,9 @@ void render_ui() {
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("%s", kLinkCredits.c_str());
                 ImGui::Spacing();
-                if (ImGui::Button("Telegram")) open_link(kCommunityLinks[0].url);
+                if (ImGui::Button("Telegram##about_telegram_button")) open_link(kCommunityLinks[0].url);
                 ImGui::SameLine();
-                if (ImGui::Button("GitHub")) open_link(kCommunityLinks[1].url);
+                if (ImGui::Button("GitHub##about_github_button")) open_link(kCommunityLinks[1].url);
                 ImGui::SameLine();
                 if (ImGui::Button("Close"))
                     ImGui::CloseCurrentPopup();
