@@ -3674,9 +3674,13 @@ fn decode_stream<R: BufRead + Seek>(
     if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP) {
         return Err("unsupported sponsor media".into());
     }
-    let image: DynamicImage = image::ImageReader::with_format(reader, format)
-        .decode()
-        .map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_WIDTH);
+    limits.max_image_height = Some(MAX_HEIGHT);
+    limits.max_alloc = Some(2 * MAX_DECODED_BYTES as u64);
+    let mut reader = image::ImageReader::with_format(reader, format);
+    reader.limits(limits);
+    let image: DynamicImage = reader.decode().map_err(|e| e.to_string())?;
     let rgba = image.to_rgba8();
     validate_dimensions(rgba.width(), rgba.height(), 1)?;
     let (width, height, raw) = canvas_rgba(rgba);

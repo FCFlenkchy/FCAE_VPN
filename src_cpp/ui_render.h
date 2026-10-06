@@ -195,10 +195,12 @@ struct AppState {
     }
 
     // Capture content and revision together, including same-size replacements.
-    std::vector<std::pair<int, std::string>> copy_logs(uint64_t& revision) const {
+    /// Refresh `out` only when the log changed since `revision`.
+    void sync_logs(uint64_t& revision, std::vector<std::pair<int, std::string>>& out) const {
         std::lock_guard<std::mutex> lock(logs_mutex);
+        if (revision == logs_revision) return;
         revision = logs_revision;
-        return std::vector<std::pair<int, std::string>>(logs.begin(), logs.end());
+        out.assign(logs.begin(), logs.end());
     }
 
     /// Build a session config.
@@ -443,25 +445,23 @@ void ui_shutdown();
 void render_ui();
 void log_callback(FcaeLogLevel level, const char* message, void* user_data);
 
-// ── Fixed 30 FPS rendering ───────────────────────────────────────────────
-// Frames are paced by a hardcoded 30 FPS clock on every platform: the window
-// is repainted on that cadence whether or not the painted content changed, so
-// animation timing (sponsor GIF/video frames, spinners, caret blink) never
-// depends on what is on screen, matching the sponsor engine rate. Platform
-// main loops call ui_should_render() before each frame and sleep for
-// ui_sleep_ms().
+// ── Change-gated rendering ───────────────────────────────────────────────
+// A frame is painted only when its content fingerprint changed, on input, or
+// while something animates (spinner, animated sponsor card, caret). Platform
+// main loops call ui_should_render() before each frame and wait for
+// ui_sleep_ms() in between.
 
 /// Should the platform paint a frame now?
-/// Polls telemetry when due and returns true on the 30 FPS frame boundary, or
-/// immediately for a pending redraw request, a running connect spinner, or
-/// while `interacting` is true.
+/// Polls telemetry and sponsor state when due and returns true when the
+/// painted content would differ, for a pending redraw request, a running
+/// connect spinner, or while `interacting` is true.
 bool ui_should_render(bool interacting);
 
 // Implemented by each desktop renderer (OpenGL or DX11).
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot);
 
-/// How long (ms) the platform waits before calling ui_should_render() again.
-/// Always one 30 FPS frame interval (~33ms).
+/// How long (ms) the platform waits before calling ui_should_render() again:
+/// one 30 FPS frame while animating, longer when idle or unfocused.
 unsigned ui_sleep_ms();
 
 /// Request one extra repaint (call from window event handlers).
@@ -473,6 +473,9 @@ void ui_note_frame_drawn();
 /// Tell the sponsor audio layer whether the native desktop window is visible.
 /// Minimized/hidden windows must not keep media audio alive.
 void ui_set_window_visible(bool visible);
+
+/// Whether the native window has keyboard focus; unfocused windows poll less.
+void ui_set_window_focused(bool focused);
 
 /// Monotonic clock in seconds, shared by the telemetry poll and the render gate.
 double ui_now_seconds();

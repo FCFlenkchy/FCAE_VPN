@@ -333,7 +333,7 @@ impl Backend for PsiphonBackend {
                     Some((false, None)) => {},
                     _ => return Err(CoreError::StartFailed("Android Psiphon exit failed".into())),
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         if socks == 0 {
@@ -430,8 +430,7 @@ impl Backend for PsiphonBackend {
                     cx.config.start_timeout()
                 )));
             }
-            // Cheap state/port getters: cap added readiness latency at 10 ms.
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         };
 
         let found = ffi::regions();

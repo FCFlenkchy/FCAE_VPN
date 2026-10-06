@@ -174,6 +174,7 @@ int main(int argc, char** argv) {
             ui_set_window_visible(true);
             sponsor_window_visible = true;
         }
+        ui_set_window_focused(glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0);
 
         auto now = std::chrono::steady_clock::now();
         if (now - last_frame_time < min_frame_interval) continue;

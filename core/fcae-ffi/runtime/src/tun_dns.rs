@@ -38,7 +38,10 @@ pub fn servers(cfg: &SessionConfig) -> Result<Vec<String>> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn run(program: &str, args: &[&str]) -> Result<String> {
+use crate::unix_tun::{state_path, write_atomic};
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn run(program: &str, args: &[&str]) -> Result<String> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
     let mut child = Command::new(program).args(args).env("LC_ALL", "C")
@@ -109,9 +112,19 @@ fn run_stdin(program: &str, args: &[&str], input: &str) -> Result<String> {
 #[cfg(target_os = "linux")]
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 #[cfg(target_os = "linux")]
-const RESOLV_BACKUP: &str = "/run/fcae-resolv.conf.pre-fcae";
+const LEGACY_RESOLV_BACKUP: &str = "/run/fcae-resolv.conf.pre-fcae";
 #[cfg(target_os = "linux")]
 const RESOLV_MARKER: &str = "# written by FCAE VPN";
+#[cfg(target_os = "linux")]
+const BACKUP_FILE: &str = "resolv.conf";
+#[cfg(target_os = "linux")]
+const BACKUP_LINK: &str = "resolv.conf.link";
+#[cfg(target_os = "linux")]
+const BACKUP_ABSENT: &str = "resolv.conf.absent";
+#[cfg(target_os = "linux")]
+const RESOLVCONF_IFACE: &str = "resolvconf.iface";
+#[cfg(target_os = "macos")]
+const MACOS_BACKUP: &str = "dns-backup";
 
 /// Which resolver manager owns the Linux DNS override. Picked once per
 /// session so [`restore_linux`] undoes exactly what was applied; desktops
@@ -122,45 +135,93 @@ const RESOLV_MARKER: &str = "# written by FCAE VPN";
 pub enum LinuxDns {
     Resolvectl,
     Resolvconf,
-    /// Backup of the previous /etc/resolv.conf, when there was one.
-    ResolvConf(Option<std::path::PathBuf>),
+    /// The previous /etc/resolv.conf is persisted under the state directory.
+    ResolvConf,
 }
 
 #[cfg(target_os = "linux")]
-fn apply_resolv_conf(servers: &[String]) -> Result<Option<std::path::PathBuf>> {
-    let backup = {
-        let old = std::fs::read(RESOLV_CONF).unwrap_or_default();
-        if old
-            .windows(RESOLV_MARKER.len())
-            .any(|w| w == RESOLV_MARKER.as_bytes())
-        {
-            None
-        } else {
-            std::fs::write(RESOLV_BACKUP, &old).map_err(|e| {
-                CoreError::Internal(format!("TUN DNS: cannot back up {RESOLV_CONF}: {e}"))
-            })?;
-            Some(std::path::PathBuf::from(RESOLV_BACKUP))
+fn resolv_conf_is_ours() -> bool {
+    let path = std::path::Path::new(RESOLV_CONF);
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+        && std::fs::read(path).is_ok_and(|old| {
+            old.windows(RESOLV_MARKER.len()).any(|w| w == RESOLV_MARKER.as_bytes())
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn resolv_backup_exists() -> bool {
+    [BACKUP_FILE, BACKUP_LINK, BACKUP_ABSENT].iter().any(|n| state_path(n).exists())
+}
+
+/// Snapshot /etc/resolv.conf as it is: a symlink is kept as a symlink so the
+/// resolver manager behind it keeps ownership after restore.
+#[cfg(target_os = "linux")]
+fn backup_resolv_conf() -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::path::Path::new(RESOLV_CONF);
+    if std::path::Path::new(LEGACY_RESOLV_BACKUP).exists() {
+        write_atomic(&state_path(BACKUP_FILE), &std::fs::read(LEGACY_RESOLV_BACKUP)?)?;
+        return std::fs::remove_file(LEGACY_RESOLV_BACKUP);
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            write_atomic(&state_path(BACKUP_LINK), std::fs::read_link(path)?.as_os_str().as_bytes())
         }
-    };
+        Ok(_) => write_atomic(&state_path(BACKUP_FILE), &std::fs::read(path)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => write_atomic(&state_path(BACKUP_ABSENT), b""),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_resolv_conf(servers: &[String]) -> Result<()> {
+    let fail = |what: &str, e: std::io::Error| CoreError::Internal(format!("TUN DNS: cannot {what} {RESOLV_CONF}: {e}"));
+    if !resolv_backup_exists() {
+        if resolv_conf_is_ours() && !std::path::Path::new(LEGACY_RESOLV_BACKUP).exists() {
+            log::warn!("TUN DNS: {RESOLV_CONF} is a leftover FCAE override with no backup; it is kept as the fallback");
+        } else {
+            backup_resolv_conf().map_err(|e| fail("back up", e))?;
+        }
+    }
     let mut text = String::from(RESOLV_MARKER);
     text.push('\n');
     for server in servers {
         text.push_str(&format!("nameserver {server}\n"));
     }
-    std::fs::write(RESOLV_CONF, text).map_err(|e| {
-        CoreError::Internal(format!("TUN DNS: cannot write {RESOLV_CONF}: {e}"))
-    })?;
-    Ok(backup)
+    write_atomic(std::path::Path::new(RESOLV_CONF), text.as_bytes()).map_err(|e| fail("write", e))
 }
 
+/// Put the persisted /etc/resolv.conf back if the file is still ours; a file
+/// rewritten since by another manager wins and the backup is discarded.
 #[cfg(target_os = "linux")]
-fn restore_resolv_conf(backup: &Option<std::path::PathBuf>) {
-    let r = match backup {
-        Some(backup) => std::fs::rename(backup, RESOLV_CONF),
-        None => std::fs::remove_file(RESOLV_CONF),
-    };
-    if let Err(e) = r {
-        log::warn!("TUN DNS: cannot restore {RESOLV_CONF}: {e}");
+fn restore_resolv_conf() {
+    use std::os::unix::ffi::OsStringExt;
+    if !resolv_backup_exists() {
+        return;
+    }
+    let path = std::path::Path::new(RESOLV_CONF);
+    let restored = (|| -> std::io::Result<()> {
+        if !resolv_conf_is_ours() {
+            return Ok(());
+        }
+        if let Ok(target) = std::fs::read(state_path(BACKUP_LINK)) {
+            let tmp = std::path::PathBuf::from(format!("{RESOLV_CONF}.fcae-tmp"));
+            let _ = std::fs::remove_file(&tmp);
+            std::os::unix::fs::symlink(std::ffi::OsString::from_vec(target), &tmp)?;
+            std::fs::rename(&tmp, path)
+        } else if let Ok(old) = std::fs::read(state_path(BACKUP_FILE)) {
+            write_atomic(path, &old)
+        } else {
+            std::fs::remove_file(path)
+        }
+    })();
+    match restored {
+        Ok(()) => {
+            for name in [BACKUP_FILE, BACKUP_LINK, BACKUP_ABSENT] {
+                let _ = std::fs::remove_file(state_path(name));
+            }
+        }
+        Err(e) => log::warn!("TUN DNS: cannot restore {RESOLV_CONF}: {e}"),
     }
 }
 
@@ -182,17 +243,21 @@ pub fn configure_linux(cfg: &SessionConfig, interface: &str) -> Result<(Vec<Stri
         for server in &servers {
             text.push_str(&format!("nameserver {server}\n"));
         }
+        if let Err(e) = write_atomic(&state_path(RESOLVCONF_IFACE), interface.as_bytes()) {
+            log::warn!("TUN DNS: cannot persist resolvconf state: {e}");
+        }
         run_stdin("resolvconf", &["-a", interface], &text)?;
         LinuxDns::Resolvconf
     } else {
-        LinuxDns::ResolvConf(apply_resolv_conf(&servers)?)
+        apply_resolv_conf(&servers)?;
+        LinuxDns::ResolvConf
     };
     let mut routes = Vec::new();
     let added: Result<()> = (|| {
         for server in &servers {
             let family = if server.contains(':') { "-6" } else { "-4" };
             let prefix = format!("{server}/{}", if family == "-6" { 128 } else { 32 });
-            run("ip", &[family, "route", "add", &prefix, "dev", interface])?;
+            run("ip", &[family, "route", "replace", &prefix, "dev", interface])?;
             routes.push(prefix);
         }
         Ok(())
@@ -216,8 +281,9 @@ pub fn restore_linux(interface: &str, routes: &[String], dns: &LinuxDns) {
             if let Err(e) = run("resolvconf", &["-d", interface]) {
                 log::warn!("{e}");
             }
+            let _ = std::fs::remove_file(state_path(RESOLVCONF_IFACE));
         }
-        LinuxDns::ResolvConf(backup) => restore_resolv_conf(backup),
+        LinuxDns::ResolvConf => restore_resolv_conf(),
     }
     for prefix in routes {
         let family = if prefix.contains(':') { "-6" } else { "-4" };
@@ -227,77 +293,151 @@ pub fn restore_linux(interface: &str, routes: &[String], dns: &LinuxDns) {
     }
 }
 
-pub enum DnsGuard {
+#[cfg(target_os = "macos")]
+fn macos_set_dns(service: &str, servers: &[String]) -> Result<String> {
+    let mut args = vec!["-setdnsservers", service];
+    if servers.is_empty() {
+        args.push("Empty");
+    } else {
+        args.extend(servers.iter().map(String::as_str));
+    }
+    run("networksetup", &args)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_restore(backups: &[(String, Vec<String>)]) {
+    for (service, servers) in backups {
+        if let Err(e) = macos_set_dns(service, servers) {
+            log::warn!("{e}");
+        }
+    }
+    let _ = std::fs::remove_file(state_path(MACOS_BACKUP));
+}
+
+#[cfg(target_os = "macos")]
+fn macos_load_backup() -> Option<Vec<(String, Vec<String>)>> {
+    let text = std::fs::read_to_string(state_path(MACOS_BACKUP)).ok()?;
+    Some(
+        text.lines()
+            .filter_map(|l| l.split_once('\t'))
+            .map(|(service, servers)| (service.to_owned(), servers.split_whitespace().map(str::to_owned).collect()))
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_apply(servers: &[String]) -> Result<Vec<(String, Vec<String>)>> {
+    if let Some(stale) = macos_load_backup() {
+        macos_restore(&stale);
+    }
+    let services = run("networksetup", &["-listallnetworkservices"])?;
+    let mut backups = Vec::new();
+    for name in services.lines().skip(1).map(str::trim).filter(|s| !s.is_empty() && !s.starts_with('*')) {
+        let previous = run("networksetup", &["-getdnsservers", name])?;
+        let addresses = if previous.trim().starts_with("There aren't any DNS Servers set") {
+            Vec::new()
+        } else {
+            previous.split_whitespace().map(|s| s.parse::<IpAddr>().map(|ip| ip.to_string()))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|_| CoreError::Internal(format!("cannot back up DNS for macOS service {name}")))?
+        };
+        backups.push((name.to_owned(), addresses));
+    }
+    if backups.is_empty() {
+        return Err(CoreError::Internal("TUN DNS: no enabled macOS network services".into()));
+    }
+    let text: String = backups.iter().map(|(s, a)| format!("{s}\t{}\n", a.join(" "))).collect();
+    write_atomic(&state_path(MACOS_BACKUP), text.as_bytes())
+        .map_err(|e| CoreError::Internal(format!("TUN DNS: cannot persist the macOS DNS backup: {e}")))?;
+    for (name, _) in &backups {
+        if let Err(e) = macos_set_dns(name, servers) {
+            macos_restore(&backups);
+            return Err(e);
+        }
+    }
+    Ok(backups)
+}
+
+/// Undo DNS state persisted by a session that never restored it. The caller
+/// holds the host state lock.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn recover_locked() {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(iface) = std::fs::read_to_string(state_path(RESOLVCONF_IFACE)) {
+            if have("resolvconf") {
+                let _ = run("resolvconf", &["-d", iface.trim()]);
+            }
+            let _ = std::fs::remove_file(state_path(RESOLVCONF_IFACE));
+        }
+        if resolv_backup_exists() || std::path::Path::new(LEGACY_RESOLV_BACKUP).exists() {
+            if !resolv_backup_exists() {
+                let _ = backup_resolv_conf();
+            }
+            restore_resolv_conf();
+            log::info!("TUN DNS: restored {RESOLV_CONF} after an unclean shutdown");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(stale) = macos_load_backup() {
+        macos_restore(&stale);
+        log::info!("TUN DNS: restored macOS DNS after an unclean shutdown");
+    }
+}
+
+enum Dns {
     None,
-    #[cfg(windows)]
-    Windows(crate::windows_tun::DnsGuard),
     #[cfg(target_os = "linux")]
     Linux(String, Vec<String>, LinuxDns),
     #[cfg(target_os = "macos")]
     MacOs(Vec<(String, Vec<String>)>),
 }
 
+/// System DNS override for one TUN session; dropping it restores the host.
+pub struct DnsGuard {
+    dns: Dns,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    _lock: Option<crate::unix_tun::StateLock>,
+}
+
 impl DnsGuard {
     pub fn apply(cfg: &SessionConfig, interface: &str) -> Result<Self> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if servers(cfg)?.is_empty() { return Ok(Self::None); }
-        #[cfg(target_os = "linux")]
         {
-            let (routes, dns) = configure_linux(cfg, interface)?;
-            return Ok(Self::Linux(interface.into(), routes, dns));
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = interface;
             let servers = servers(cfg)?;
-            let services = run("networksetup", &["-listallnetworkservices"])?;
-            let mut backups = Vec::new();
-            for name in services.lines().skip(1).map(str::trim).filter(|s| !s.is_empty() && !s.starts_with('*')) {
-                let previous = run("networksetup", &["-getdnsservers", name])?;
-                let addresses = if previous.trim().starts_with("There aren't any DNS Servers set") {
-                    Vec::new()
-                } else {
-                    previous.split_whitespace().map(|s| s.parse::<IpAddr>().map(|ip| ip.to_string()))
-                        .collect::<std::result::Result<Vec<_>, _>>()
-                        .map_err(|_| CoreError::Internal(format!("cannot back up DNS for macOS service {name}")))?
-                };
-                backups.push((name.to_owned(), addresses));
+            if servers.is_empty() {
+                return Ok(Self { dns: Dns::None, _lock: None });
             }
-            if backups.is_empty() { return Err(CoreError::Internal("TUN DNS: no enabled macOS network services".into())); }
-            let guard = Self::MacOs(backups);
-            if let Self::MacOs(backups) = &guard {
-                for (name, _) in backups {
-                    let mut args = vec!["-setdnsservers", name.as_str()];
-                    args.extend(servers.iter().map(String::as_str));
-                    run("networksetup", &args)?;
-                }
-            }
-            return Ok(guard);
+            let lock = crate::unix_tun::StateLock::acquire();
+            #[cfg(target_os = "linux")]
+            let dns = {
+                let _ = servers;
+                let (routes, dns) = configure_linux(cfg, interface)?;
+                Dns::Linux(interface.into(), routes, dns)
+            };
+            #[cfg(target_os = "macos")]
+            let dns = {
+                let _ = interface;
+                Dns::MacOs(macos_apply(&servers)?)
+            };
+            Ok(Self { dns, _lock: Some(lock) })
         }
-        #[cfg(windows)]
-        { crate::windows_tun::DnsGuard::apply(cfg, interface).map(Self::Windows) }
-        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-        { let _ = (cfg, interface); Ok(Self::None) }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (cfg, interface);
+            Ok(Self { dns: Dns::None })
+        }
     }
 }
 
 impl Drop for DnsGuard {
     fn drop(&mut self) {
-        match self {
-            Self::None => {},
-            #[cfg(windows)]
-            Self::Windows(_) => {},
+        match &self.dns {
+            Dns::None => {}
             #[cfg(target_os = "linux")]
-            Self::Linux(interface, routes, dns) => restore_linux(interface, routes, dns),
+            Dns::Linux(interface, routes, dns) => restore_linux(interface, routes, dns),
             #[cfg(target_os = "macos")]
-            Self::MacOs(backups) => {
-                for (name, servers) in backups {
-                    let mut args = vec!["-setdnsservers", name.as_str()];
-                    if servers.is_empty() { args.push("Empty"); }
-                    else { args.extend(servers.iter().map(String::as_str)); }
-                    if let Err(e) = run("networksetup", &args) { log::warn!("{e}"); }
-                }
-            }
+            Dns::MacOs(backups) => macos_restore(backups),
         }
     }
 }

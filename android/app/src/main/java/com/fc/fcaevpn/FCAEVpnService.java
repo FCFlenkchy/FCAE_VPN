@@ -425,14 +425,19 @@ public class FCAEVpnService extends VpnService {
             ? null
             : p.getString("tunDnsV6", DEFAULT_TUN_DNS_V6);
         int added = 0;
-        added += addDnsEach(builder, v4);
-        added += addDnsEach(builder, v6);
+        added += addDnsEach(builder, v4, false);
+        added += addDnsEach(builder, v6, true);
         if (added == 0) {
-            addDnsEach(builder, DEFAULT_TUN_DNS_V4);
+            addDnsEach(builder, DEFAULT_TUN_DNS_V4, false);
         }
     }
 
-    private static int addDnsEach(Builder builder, String csv) {
+    /**
+     * A resolver of the other family would silently allow that family on the
+     * interface (VpnService.Builder.allowFamily), so each field only accepts
+     * its own.
+     */
+    private static int addDnsEach(Builder builder, String csv, boolean v6) {
         int added = 0;
         if (csv == null) return 0;
         for (String entry : csv.split(",")) {
@@ -446,6 +451,11 @@ public class FCAEVpnService extends VpnService {
                 s = s.substring(1, s.length() - 4);
             } else if (s.endsWith(":53") && s.indexOf(':') == s.lastIndexOf(':')) {
                 s = s.substring(0, s.length() - 3);
+            }
+            if ((s.indexOf(':') >= 0) != v6) {
+                Log.w(TAG, "skipping " + (v6 ? "IPv4" : "IPv6") + " resolver '" + s + "' in the "
+                    + (v6 ? "IPv6" : "IPv4") + " DNS field");
+                continue;
             }
             try {
                 builder.addDnsServer(s);

@@ -107,6 +107,7 @@ class MainActivity : AppCompatActivity() {
     private var sponsorTextRequestKey = ""
     private val sponsorPollBusy = AtomicBoolean(false)
     @Volatile private var sponsorPollFailureLogged = false
+    private var sponsorAnimated = true
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
     private lateinit var spinnerScan: Spinner
@@ -935,6 +936,9 @@ class MainActivity : AppCompatActivity() {
                         try {
                             if (isDestroyed) return@post
                             val card = info
+                            if (card != null) {
+                                sponsorAnimated = (card.available || card.campaignCount > 0) && card.animated
+                            }
                             if (card == null) {
                                 // A failed native poll is not a manifest result.
                                 // Keep the last rendered card until a valid
@@ -1046,9 +1050,9 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            // Hardcoded 30 FPS: the card is redrawn on the same interval
-            // whether it is animating, static or empty.
-            handler.postDelayed(this, SPONSOR_FRAME_INTERVAL_MS)
+            // Animated cards advance at 30 FPS; static or empty cards only need
+            // to notice rotation and manifest changes.
+            handler.postDelayed(this, if (sponsorAnimated) SPONSOR_FRAME_INTERVAL_MS else SPONSOR_STATIC_INTERVAL_MS)
         }
     }
 
@@ -4104,6 +4108,7 @@ class MainActivity : AppCompatActivity() {
         // Sponsor card frames are paced by this hardcoded 30 FPS interval on
         // every device to match the sponsor engine's 30 FPS cap.
         private const val SPONSOR_FRAME_INTERVAL_MS = 33L
+        private const val SPONSOR_STATIC_INTERVAL_MS = 1_000L
         // Resumed instances holding the native sponsor card visible; main thread only.
         private var visibleSponsorUis = 0
         // ~70+ log messages on screen. Psiphon's JSON notices average

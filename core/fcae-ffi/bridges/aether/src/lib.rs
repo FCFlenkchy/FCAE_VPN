@@ -39,6 +39,13 @@ const MAX_BYPASS_PEERS: usize = 12;
 /// Failed liveness greetings before the session is told the tunnel dropped.
 /// One is a probe racing an engine-side reconnect, not a dead tunnel.
 const LIVENESS_MISSES: u32 = 2;
+/// A greeting only proves the local listener; a carrier that died without
+/// the engine noticing is caught by a CONNECT through the tunnel, issued
+/// only after this long without received bytes.
+const UPSTREAM_IDLE: Duration = Duration::from_secs(15);
+const UPSTREAM_TARGET: [u8; 6] = [1, 1, 1, 1, 0x01, 0xBB];
+const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(8);
+const UPSTREAM_MISSES: u32 = 3;
 
 /// Jobs the engine still owns.
 ///
@@ -496,6 +503,26 @@ fn socks_probe(addr: SocketAddr, timeout: Duration) -> bool {
         && reply == [0x05, 0x00]
 }
 
+async fn upstream_reachable(socks: SocketAddr) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let probe = async {
+        let mut stream = tokio::net::TcpStream::connect(socks).await?;
+        let mut reply = [0u8; 2];
+        stream.write_all(&[0x05, 0x01, 0x00]).await?;
+        stream.read_exact(&mut reply).await?;
+        if reply != [0x05, 0x00] {
+            return Ok(false);
+        }
+        let mut request = vec![0x05, 0x01, 0x00, 0x01];
+        request.extend_from_slice(&UPSTREAM_TARGET);
+        stream.write_all(&request).await?;
+        let mut head = [0u8; 2];
+        stream.read_exact(&mut head).await?;
+        std::io::Result::Ok(head == [0x05, 0x00])
+    };
+    matches!(tokio::time::timeout(UPSTREAM_TIMEOUT, probe).await, Ok(Ok(true)))
+}
+
 /// Completes a SOCKS5 greeting rather than a bare TCP connect. A socket that is
 /// bound but not serving -- a stale listener from a session that has not
 /// finished tearing down, or an unrelated process -- is not an endpoint that
@@ -554,6 +581,9 @@ impl BackendHandle for AetherHandle {
     async fn wait(&self) -> Result<()> {
         let mut was_up = true;
         let mut misses = 0u32;
+        let mut upstream_misses = 0u32;
+        let mut last_rx = aether_engine::stats::snapshot().down;
+        let mut next_probe = tokio::time::Instant::now() + UPSTREAM_IDLE;
         loop {
             if self.stopped.load(Ordering::Acquire) { return Ok(()); }
             match ffi_poll(self.job) {
@@ -567,8 +597,30 @@ impl BackendHandle for AetherHandle {
                     return Err(CoreError::Internal(error));
                 }
             }
-            let up = socks_listening(self.socks_addr).await;
-            if up {
+            let greeting = socks_listening(self.socks_addr).await;
+            let rx = aether_engine::stats::snapshot().down;
+            let now = tokio::time::Instant::now();
+            if rx != last_rx {
+                last_rx = rx;
+                next_probe = now + UPSTREAM_IDLE;
+                upstream_misses = 0;
+            } else if greeting && now >= next_probe {
+                if upstream_reachable(self.socks_addr).await {
+                    upstream_misses = 0;
+                    next_probe = tokio::time::Instant::now() + UPSTREAM_IDLE;
+                } else {
+                    upstream_misses = upstream_misses.saturating_add(1);
+                    next_probe = tokio::time::Instant::now() + Duration::from_secs(5);
+                    if upstream_misses == UPSTREAM_MISSES {
+                        log::warn!("[aether] {UPSTREAM_MISSES} upstream probes failed; carrier is down");
+                    }
+                }
+            }
+            let carrier_dead = upstream_misses >= UPSTREAM_MISSES;
+            if carrier_dead {
+                misses = misses.max(LIVENESS_MISSES - 1);
+            }
+            if greeting && !carrier_dead {
                 misses = 0;
                 if !was_up {
                     was_up = true;

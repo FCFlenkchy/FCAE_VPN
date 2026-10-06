@@ -240,6 +240,9 @@ fn finish(result: Result<UpdateResult, UpdateError>) {
 }
 
 /// Fetch version.json from GitHub (async, non-blocking).
+/// version.json is a few hundred bytes; anything near this is not it.
+const MAX_BODY: usize = 256 * 1024;
+
 async fn fetch_latest_version() -> Result<VersionInfo, UpdateError> {
     let network = |m: String| UpdateError::new(UpdateErrorKind::Network, m);
     let client = reqwest::Client::builder()
@@ -248,7 +251,7 @@ async fn fetch_latest_version() -> Result<VersionInfo, UpdateError> {
         .build()
         .map_err(|e| network(format!("Failed to build HTTP client: {e}")))?;
 
-    let resp = client
+    let mut resp = client
         .get(VERSION_URL)
         .header("User-Agent", "FCAE-VPN/1.0")
         .send()
@@ -261,10 +264,22 @@ async fn fetch_latest_version() -> Result<VersionInfo, UpdateError> {
 
     // Read the body as text first so a decode failure can quote what the
     // server actually returned.
-    let text = resp
-        .text()
+    let too_large = || network(format!("version.json exceeds {} KiB", MAX_BODY / 1024));
+    if resp.content_length().is_some_and(|n| n > MAX_BODY as u64) {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| network(format!("Failed to read version.json body: {e}")))?;
+        .map_err(|e| network(format!("Failed to read version.json body: {e}")))?
+    {
+        if body.len() + chunk.len() > MAX_BODY {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let text = String::from_utf8_lossy(&body);
     let info = parse_manifest_json(&text)
         .map_err(|e| UpdateError::decode(e, &text))?;
 

@@ -196,7 +196,8 @@ impl Supervisor {
         // classic "reconnect leaves DNS pointing at a dead adapter" bug.
         // stop() returns before native cleanup finishes. Reconnect must wait
         // for the background reaper rather than racing that cleanup.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        const DRAIN_BUDGET: Duration = Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + DRAIN_BUDGET;
         let (_control, mut slot) = loop {
             let control = self.tun_control.lock();
             let slot = self.running.lock();
@@ -204,9 +205,9 @@ impl Supervisor {
             drop(slot);
             drop(control);
             if std::time::Instant::now() >= deadline {
-                return Err(CoreError::Timeout(Duration::from_secs(2)));
+                return Err(CoreError::Timeout(DRAIN_BUDGET));
             }
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(10));
         };
         // Reap a session that already ended by itself.
         //

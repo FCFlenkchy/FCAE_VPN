@@ -1,6 +1,7 @@
-//! Zeptun's in-process socks5p adapter. TCP uses strict SOCKS CONNECT;
-//! DNS uses one multiplexed Psiphon UDPGW channel with transparent DNS flags.
-//! No tun2socks engine, direct resolver, or external process is involved.
+//! In-process socks5p adapter shared by the zeptun and hev TUN engines. TCP
+//! uses strict SOCKS CONNECT; DNS uses one multiplexed Psiphon UDPGW channel
+//! with transparent DNS flags. No direct resolver or external process is
+//! involved.
 
 use std::collections::HashMap;
 use std::io;
@@ -31,14 +32,15 @@ fn error(message: &'static str) -> io::Error {
     io::Error::other(message)
 }
 
-pub(crate) struct Adapter {
+pub struct Adapter {
     endpoint: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Adapter {
-    pub(crate) fn start(upstream: SocketAddr, resolvers: Vec<Ipv4Addr>) -> io::Result<Self> {
+    /// `tag` names the owning engine in thread names and logs.
+    pub fn start(tag: &'static str, upstream: SocketAddr, resolvers: Vec<Ipv4Addr>) -> io::Result<Self> {
         if !upstream.ip().is_loopback() || upstream.port() == 0 {
             return Err(error("socks5p requires a loopback Psiphon endpoint"));
         }
@@ -52,13 +54,13 @@ impl Adapter {
             TcpListener::from_std(listener)?
         };
         let (shutdown, stopped) = oneshot::channel();
-        let thread = std::thread::Builder::new().name("hev-socks5p".into()).spawn(move || {
-            runtime.block_on(serve(listener, upstream, resolvers, stopped));
+        let thread = std::thread::Builder::new().name(format!("{tag}-socks5p")).spawn(move || {
+            runtime.block_on(serve(tag, listener, upstream, resolvers, stopped));
         })?;
         Ok(Self { endpoint, shutdown: Some(shutdown), thread: Some(thread) })
     }
 
-    pub(crate) fn endpoint(&self) -> SocketAddr { self.endpoint }
+    pub fn endpoint(&self) -> SocketAddr { self.endpoint }
 }
 
 impl Drop for Adapter {
@@ -68,19 +70,30 @@ impl Drop for Adapter {
     }
 }
 
-async fn serve(listener: TcpListener, upstream: SocketAddr, resolvers: Vec<Ipv4Addr>, mut stopped: oneshot::Receiver<()>) {
+const MAX_CLIENTS: usize = 1024;
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
+
+async fn serve(tag: &'static str, listener: TcpListener, upstream: SocketAddr, resolvers: Vec<Ipv4Addr>, mut stopped: oneshot::Receiver<()>) {
     let gateway = Arc::new(Gateway::new(upstream, resolvers));
     let mut clients = JoinSet::new();
+    let mut backoff = Duration::ZERO;
+    let mut resume: Option<Instant> = None;
     loop {
         tokio::select! {
             _ = &mut stopped => break,
             _ = clients.join_next(), if !clients.is_empty() => {},
-            accepted = listener.accept() => {
+            _ = tokio::time::sleep_until(resume.unwrap_or_else(Instant::now)), if resume.is_some() => resume = None,
+            accepted = listener.accept(), if resume.is_none() => {
                 let (client, peer) = match accepted {
-                    Ok(value) => value,
-                    Err(e) => { log::error!("[hev socks5p] accept failed: {e}"); break; }
+                    Ok(value) => { backoff = Duration::ZERO; value }
+                    Err(e) => {
+                        backoff = (backoff * 2).clamp(Duration::from_millis(10), ACCEPT_BACKOFF_MAX);
+                        resume = Some(Instant::now() + backoff);
+                        log::warn!("[{tag} socks5p] accept failed: {e}; retrying in {backoff:?}");
+                        continue;
+                    }
                 };
-                if !peer.ip().is_loopback() || clients.len() >= 1024 { continue; }
+                if !peer.ip().is_loopback() || clients.len() >= MAX_CLIENTS { continue; }
                 let gateway = Arc::clone(&gateway);
                 clients.spawn(async move { let _ = serve_client(client, gateway).await; });
             }

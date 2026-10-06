@@ -11,7 +11,7 @@ use fcae_runtime::session::TunBridge;
 use fcae_runtime::windows_dll::{EmbeddedFiles, Library};
 use parking_lot::Mutex;
 
-use crate::socks5p;
+use fcae_runtime::socks5p;
 use crate::{generate_config, HevStats};
 
 const RESTART_GRACE: Duration = Duration::from_secs(2);
@@ -234,7 +234,7 @@ impl TunBridge for HevSocks5TunnelBridge {
         let base_socks = endpoints.socks.ok_or_else(|| CoreError::Internal("TUN needs SOCKS endpoint".into()))?;
         let psiphon = if endpoints.psiphon_dns {
             let resolvers = fcae_runtime::tun_dns::psiphon_resolvers(cfg)?;
-            Some(socks5p::Adapter::start(base_socks, resolvers).map_err(|e| CoreError::Internal(format!("hev socks5p: {e}")))?)
+            Some(socks5p::Adapter::start("hev", base_socks, resolvers).map_err(|e| CoreError::Internal(format!("hev socks5p: {e}")))?)
         } else { None };
         let socks = psiphon.as_ref().map(|a| a.endpoint()).unwrap_or(base_socks);
         let fd = cfg.tun.fd.or_else(|| self.android_fd()).unwrap_or(-1);

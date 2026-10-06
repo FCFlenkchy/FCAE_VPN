@@ -9,7 +9,7 @@ use fcae_runtime::error::{CoreError, Result};
 use fcae_runtime::session::TunBridge;
 use parking_lot::Mutex;
 
-use crate::socks5p;
+use fcae_runtime::socks5p;
 use crate::{generate_config, HevStats};
 
 const RESTART_GRACE: Duration = Duration::from_secs(2);
@@ -75,6 +75,21 @@ struct Engine {
 struct Active {
     thread: std::thread::JoinHandle<()>,
     _psiphon: Option<socks5p::Adapter>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    _host: Option<fcae_runtime::unix_tun::TunGuard>,
+}
+
+/// hev addresses and raises its own device but never touches routes or DNS,
+/// so desktop sessions apply them once the device is up.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn configure_host(cfg: &SessionConfig, peer_ip: Option<&str>, #[cfg_attr(target_os = "linux", allow(unused_variables))] before: &[String]) -> Result<fcae_runtime::unix_tun::TunGuard> {
+    const BUDGET: Duration = Duration::from_secs(3);
+    #[cfg(target_os = "linux")]
+    let device = fcae_runtime::unix_tun::wait_for_device(&cfg.tun.name, true, BUDGET).then(|| cfg.tun.name.clone());
+    #[cfg(target_os = "macos")]
+    let device = fcae_runtime::unix_tun::wait_for_new_utun(before, BUDGET);
+    let device = device.ok_or_else(|| CoreError::Internal("hev-socks5-tunnel did not bring its TUN device up".into()))?;
+    fcae_runtime::unix_tun::TunGuard::configure(cfg, &device, peer_ip, false)
 }
 
 pub struct HevSocks5TunnelBridge {
@@ -128,7 +143,7 @@ impl HevSocks5TunnelBridge {
         loop {
             if Self::reap_locked(&mut self.active.lock()) { return true; }
             if Instant::now() >= deadline { return false; }
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -173,14 +188,37 @@ impl TunBridge for HevSocks5TunnelBridge {
         let base_socks = endpoints.socks.ok_or_else(|| CoreError::Internal("TUN requested but the backend exposed no SOCKS endpoint".into()))?;
         let psiphon_adapter = if endpoints.psiphon_dns {
             let resolvers = fcae_runtime::tun_dns::psiphon_resolvers(cfg)?;
-            Some(socks5p::Adapter::start(base_socks, resolvers).map_err(|e| CoreError::Internal(format!("hev socks5p adapter: {e}")))?)
+            Some(socks5p::Adapter::start("hev", base_socks, resolvers).map_err(|e| CoreError::Internal(format!("hev socks5p adapter: {e}")))?)
         } else { None };
         let effective_socks = psiphon_adapter.as_ref().map(|a| a.endpoint()).unwrap_or(base_socks);
         let fd = cfg.tun.fd.or_else(|| self.android_fd()).unwrap_or(-1);
         let (_, yaml) = generate_config(cfg, effective_socks)?;
+        #[cfg(target_os = "macos")]
+        let before = fcae_runtime::unix_tun::utun_devices();
+        #[cfg(target_os = "linux")]
+        let before = Vec::new();
         let engine = self.spawn_engine(&yaml, fd)?;
         let exit_code = engine.rc.clone();
-        *self.active.lock() = Some(Active { thread: engine.thread, _psiphon: psiphon_adapter });
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let host = if fd < 0 {
+            match configure_host(cfg, endpoints.peer_ip.as_deref(), &before) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    self.closing.store(true, Ordering::SeqCst);
+                    self.signal_stop();
+                    *self.active.lock() = Some(Active { thread: engine.thread, _psiphon: psiphon_adapter, _host: None });
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        *self.active.lock() = Some(Active {
+            thread: engine.thread,
+            _psiphon: psiphon_adapter,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            _host: host,
+        });
         if self.active.lock().as_ref().is_some_and(|a| a.thread.is_finished()) {
             return Err(CoreError::Internal(format!("hev-socks5-tunnel exited during startup (code {})", exit_code.load(Ordering::SeqCst))));
         }

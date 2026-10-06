@@ -51,7 +51,7 @@ use fcae_runtime::error::{CoreError, Result};
 use fcae_runtime::session::TunBridge;
 use parking_lot::Mutex;
 
-mod socks5p;
+use fcae_runtime::socks5p;
 
 // Public for the FFI layer's fcae_is_privileged(), which ORs the privilege
 // probe across every TUN bridge linked into the build (see tun2socks).
@@ -454,7 +454,7 @@ impl TunBridge for ZeptunBridge {
             } else {
                 log::info!("[zeptun] socks5p: TUN DNS {:?} through the Psiphon UDP gateway", resolvers);
             }
-            Some(socks5p::Adapter::start(socks, resolvers).map_err(|e| {
+            Some(socks5p::Adapter::start("zeptun", socks, resolvers).map_err(|e| {
                 CoreError::Internal(format!("zeptun socks5p adapter: {e}"))
             })?)
         } else {

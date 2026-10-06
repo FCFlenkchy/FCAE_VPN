@@ -23,7 +23,6 @@ fcae-runtime.workspace = true
 libc.workspace = true
 log.workspace = true
 parking_lot.workspace = true
-tokio.workspace = true
 
 [build-dependencies]
 fcae-build.workspace = true

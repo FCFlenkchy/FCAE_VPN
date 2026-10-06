@@ -302,7 +302,23 @@ type psiNoticeEnvelope struct {
 	Data       json.RawMessage `json:"data"`
 }
 
+// psiCatch turns a panic in upstream code into an error: an unrecovered Go
+// panic aborts the whole host process, UI included.
+func psiCatch(what string, f func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%s panicked: %v", what, r)
+		}
+	}()
+	return f()
+}
+
 func psiHandleNotice(noticeJSON string) {
+	defer func() {
+		if r := recover(); r != nil {
+			psiEmit(psiLogError, "[psiphon] notice handler panicked: %v", r)
+		}
+	}()
 	var n psiNoticeEnvelope
 	if err := json.Unmarshal([]byte(noticeJSON), &n); err != nil {
 		return
@@ -556,7 +572,12 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	}
 	psiMu.Unlock()
 
-	cfg = psiEnsureServerEntrySource(cfg, embeddedList)
+	if err := psiCatch("server entry source", func() error {
+		cfg = psiEnsureServerEntrySource(cfg, embeddedList)
+		return nil
+	}); err != nil {
+		psiEmit(psiLogWarn, "[psiphon] %v", err)
+	}
 
 	// psi.Start() is deliberately called WITHOUT psiMu held.
 	//
@@ -567,7 +588,9 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	// serviced until start had finished on its own. psi.Start() takes its
 	// own controllerMutex upstream, so concurrent entry is still refused
 	// there; psiRunning above makes us refuse it earlier and more clearly.
-	err := psi.Start(cfg, embeddedList, "", &psiProvider{}, useBinder != 0, false, false)
+	err := psiCatch("psi.Start", func() error {
+		return psi.Start(cfg, embeddedList, "", &psiProvider{}, useBinder != 0, false, false)
+	})
 	if err != nil {
 		// psi.Start() is called without psiMu held (see above). On failure it
 		// may have launched controller goroutines that must be stopped, but
@@ -585,7 +608,7 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 
 		// Stop the controller goroutine that psi.Start() may have launched.
 		// psi.Stop() blocks until the controller has finished.
-		psi.Stop()
+		psiStopController()
 
 		psiEmit(psiLogError, "[psiphon] start failed: %v", err)
 		return -3
@@ -685,7 +708,7 @@ func psi_stop() C.int {
 	// psi.Stop() blocks until the controller goroutine has finished, and it
 	// takes psi's own mutex. Calling it while holding psiMu would deadlock
 	// against any notice still in flight.
-	psi.Stop()
+	psiStopController()
 
 	psiMu.Lock()
 	psiState = psiStateStopped
@@ -700,6 +723,12 @@ func psi_stop() C.int {
 
 	psiEmit(psiLogInfo, "[psiphon] controller stopped")
 	return 0
+}
+
+func psiStopController() {
+	if err := psiCatch("psi.Stop", func() error { psi.Stop(); return nil }); err != nil {
+		psiEmit(psiLogError, "[psiphon] %v", err)
+	}
 }
 
 //export psi_state

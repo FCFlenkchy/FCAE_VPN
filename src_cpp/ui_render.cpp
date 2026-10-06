@@ -15,6 +15,7 @@
 #include <shellapi.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
+#include <pwd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -80,6 +81,11 @@ static std::chrono::steady_clock::time_point s_sponsor_manifest_check = {};
 // the clip (previously the next poll re-activated audio immediately after a
 // minimize, and sponsor sound kept looping while the window was gone).
 static std::atomic<bool> s_ui_window_visible{true};
+static std::atomic<bool> s_ui_window_focused{true};
+static int s_sponsor_ui_active_sent = -1;
+static int s_sponsor_connected_sent = -1;
+static std::string s_sponsor_last_error;
+static bool s_tun_paused = false;
 
 static void poll_sponsor() {
     const auto now = std::chrono::steady_clock::now();
@@ -87,8 +93,16 @@ static void poll_sponsor() {
         fcae_sponsor_load_cache();
         s_sponsor_started = true;
     }
-    fcae_sponsor_set_ui_active(s_ui_window_visible.load());
-    fcae_sponsor_set_connected(g_app.ffi_state.load() == FCAE_STATE_CONNECTED);
+    const int ui_active = s_ui_window_visible.load() ? 1 : 0;
+    if (ui_active != s_sponsor_ui_active_sent) {
+        fcae_sponsor_set_ui_active(ui_active != 0);
+        s_sponsor_ui_active_sent = ui_active;
+    }
+    const int connected = g_app.ffi_state.load() == FCAE_STATE_CONNECTED ? 1 : 0;
+    if (connected != s_sponsor_connected_sent) {
+        fcae_sponsor_set_connected(connected != 0);
+        s_sponsor_connected_sent = connected;
+    }
     if (now >= s_sponsor_manifest_check) {
         const uint64_t remaining = fcae_sponsor_manifest_refresh_remaining_secs();
         if (remaining == 0) fcae_sponsor_refresh_manifest_async();
@@ -102,9 +116,14 @@ static void poll_sponsor() {
     info.abi_version = FCAE_ABI_VERSION;
     const FcaeStatus poll_status = fcae_sponsor_poll(&info);
     if (poll_status != FCAE_OK) {
-        g_app.add_log(FCAE_LOG_WARN, fcae_last_error());
+        const char* error = fcae_last_error();
+        if (s_sponsor_last_error != error) {
+            s_sponsor_last_error = error;
+            g_app.add_log(FCAE_LOG_WARN, error);
+        }
         return;
     }
+    s_sponsor_last_error.clear();
     const bool card_available = info.available || info.campaign_count != 0;
     const bool card_changed = card_available != s_sponsor.available
         || info.generation != s_sponsor.generation;
@@ -278,13 +297,15 @@ static bool s_log_scroll_pending = false;
 static bool     s_painted_once = false;
 static double   s_last_paint_t = 0.0;
 
-// The UI frame clock is hardcoded at 30 FPS on every platform: frames are
-// paced by this interval and never by a content-derived timeout, so GIF/video
-// sponsor frames, the connect spinner, a blinking caret and an idle window all
-// advance at the same fixed rate matching the sponsor engine.
+// Animation (sponsor frames, spinner) advances at 30 FPS; an unchanged window
+// is not repainted, only re-checked at the idle intervals below.
 static constexpr unsigned kUiFrameRate = 30;
 static constexpr unsigned kUiFrameIntervalMs = 1000 / kUiFrameRate;
-static constexpr double kUiFrameSeconds = 1.0 / kUiFrameRate;
+static constexpr unsigned kUiIdleIntervalMs = 250;
+static constexpr unsigned kUiUnfocusedIntervalMs = 500;
+static constexpr unsigned kUiCaretIntervalMs = 100;
+static constexpr double kUiCaretPhaseSeconds = 0.4;
+static constexpr double kUiHeartbeatSeconds = 2.0;
 
 // UI state that keeps needing frames on its own.
 static bool s_busy_anim = false;      // connect/scan spinner is on screen
@@ -431,6 +452,14 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, s_update_latest);
     h = fnv_cstr(h, s_update_notes);
     h = fnv_cstr(h, s_update_dl_url);
+    if (s_update_in_progress) {
+        h = fnv_value(h, (long long)std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - s_check_start_time).count());
+    }
+    h = fnv_value(h, s_tun_paused);
+    if (ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput) {
+        h = fnv_value(h, (long long)(ui_now_seconds() / kUiCaretPhaseSeconds));
+    }
     h = fnv_value(h, s_sponsor.available);
     h = fnv_value(h, s_sponsor.generation);
     h = fnv_value(h, fcae_sponsor_audio_enabled());
@@ -458,7 +487,7 @@ static void ui_poll_telemetry(double now) {
         if (fcae_detect_lan_ip(lan_ip, sizeof(lan_ip)) == FCAE_OK && lan_ip[0]) {
             snprintf(telem.lan_ip, sizeof(telem.lan_ip), "%s", lan_ip);
         }
-        next_lan_probe = now + 1.0;
+        next_lan_probe = now + 5.0;
     }
     g_app.telem = telem;
     g_app.ffi_state.store(telem.state);
@@ -475,6 +504,11 @@ void ui_request_redraw() {
 void ui_set_window_visible(bool visible) {
     s_ui_window_visible.store(visible);
     fcae_sponsor_set_ui_active(visible);
+    s_sponsor_ui_active_sent = visible ? 1 : 0;
+}
+
+void ui_set_window_focused(bool focused) {
+    s_ui_window_focused.store(focused);
 }
 
 bool ui_should_render(bool interacting) {
@@ -489,33 +523,32 @@ bool ui_should_render(bool interacting) {
     // Telemetry and locally animated sponsor frames change without input.
     ui_poll_telemetry(now);
     poll_sponsor();
+    s_tun_paused = fcae_tun_paused();
 
     // A redraw request is only cleared once a frame is really painted, so it
     // cannot be lost while the window is minimized.
     if (g_app.redraw_requested.load() || s_log_scroll_pending) return true;
 
     // The user is interacting: paint every frame the caller offers (hover,
-    // drag, typing, scroll). The platform caps this at ~60 FPS.
+    // drag, typing, scroll). The platform caps this at ~30 FPS.
     if (interacting) return true;
 
     // Spinner/connect animation is running: it moves on its own.
     if (s_busy_anim) return true;
 
-    // Nothing changed since the last painted frame: hold the repaint to the
-    // next hardcoded 30 FPS frame boundary instead of waiting for a
-    // content-derived timeout. A changed frame is still painted immediately
-    // and stays capped by the platform's own 30 FPS frame interval.
-    if (s_painted_once && ui_content_signature() == s_painted_sig
-            && now - s_last_paint_t < kUiFrameSeconds) {
-        return false;
-    }
-    return true;
+    // Identical pixels are not repainted; a slow heartbeat covers state that
+    // ImGui settles over a frame or two after the last change.
+    return !s_painted_once || ui_content_signature() != s_painted_sig
+        || now - s_last_paint_t >= kUiHeartbeatSeconds;
 }
 
 unsigned ui_sleep_ms() {
-    // Hardcoded 30 FPS: the platform waits exactly one frame interval and never
-    // a content-derived timeout.
-    return kUiFrameIntervalMs;
+    const bool focused = s_ui_window_focused.load();
+    if (s_busy_anim || (s_sponsor.available && s_sponsor.animated))
+        return focused ? kUiFrameIntervalMs : 2 * kUiFrameIntervalMs;
+    if (!focused) return kUiUnfocusedIntervalMs;
+    if (ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput) return kUiCaretIntervalMs;
+    return kUiIdleIntervalMs;
 }
 
 void ui_note_frame_drawn() {
@@ -577,11 +610,34 @@ static std::string exe_dir() {
 #endif
 }
 
-// Preferred write path: next to the executable (stable regardless of cwd).
+#if defined(__APPLE__)
+// A signed bundle must not be written to and /Applications is often
+// read-only, so macOS keeps settings in the user's Application Support.
+static std::string mac_support_dir() {
+    const char* home = getenv("HOME");
+    if (!home || !*home) {
+        const passwd* pw = getpwuid(getuid());
+        home = pw ? pw->pw_dir : nullptr;
+    }
+    if (!home || !*home) return {};
+    std::string dir = std::string(home) + "/Library/Application Support/FCAE VPN";
+    mkdir((std::string(home) + "/Library/Application Support").c_str(), 0755);
+    mkdir(dir.c_str(), 0700);
+    return dir;
+}
+#endif
+
+// Preferred write path: next to the executable (stable regardless of cwd);
+// Application Support on macOS.
 static std::string get_config_path() {
     static std::string cached;
     if (!cached.empty()) return cached;
+#if defined(__APPLE__)
+    std::string dir = mac_support_dir();
+    if (dir.empty()) dir = exe_dir();
+#else
     std::string dir = exe_dir();
+#endif
     cached = dir.empty() ? "FCAE_VPN.cfg" : join_cfg(dir);
     return cached;
 }
@@ -616,10 +672,15 @@ static bool file_exists(const std::string& path) {
     return true;
 }
 
-// Resolve which cfg to load: prefer next to exe, then cwd (legacy), then create at exe.
+// Resolve which cfg to load: prefer the write path, then legacy locations
+// (next to the exe on macOS, then cwd); the next save lands on the write path.
 static std::string resolve_config_path_for_load() {
     std::string primary = get_config_path();
     if (file_exists(primary)) return primary;
+#if defined(__APPLE__)
+    const std::string legacy = join_cfg(exe_dir());
+    if (legacy != primary && file_exists(legacy)) return legacy;
+#endif
     if (primary != "FCAE_VPN.cfg" && file_exists("FCAE_VPN.cfg"))
         return "FCAE_VPN.cfg";
     return primary;
@@ -845,7 +906,7 @@ static bool load_config_from(const std::string& path) {
 static bool load_config() {
     std::string path = resolve_config_path_for_load();
     if (!load_config_from(path)) return false;
-    // If we loaded a legacy cwd cfg, migrate a copy next to the exe for next time.
+    // A legacy cfg was loaded: write it to the current location for next time.
     std::string primary = get_config_path();
     if (path != primary && !file_exists(primary)) {
         save_config();
@@ -1118,7 +1179,7 @@ void ui_frame() {
     render_ui();
 
     // The connect/scan spinner keeps requesting frames while it moves; every
-    // other repaint is paced by the fixed 60 FPS clock in ui_should_render().
+    // other repaint is gated on content changes in ui_should_render().
     const int st = g_app.ffi_state.load();
     s_busy_anim = g_app.start_busy.load()
                || st == FCAE_STATE_PROVISIONING
@@ -1551,8 +1612,7 @@ void render_ui() {
 
         ImGui::Spacing();
 
-        bool tun_paused = false;
-        try { tun_paused = fcae_tun_paused(); } catch (...) {}
+        const bool tun_paused = s_tun_paused;
 
         ImVec4 btn = (connected || busy) ? ImVec4(0.70f, 0.18f, 0.18f, 1.0f) : ImVec4(0.12f, 0.55f, 0.18f, 1.0f);
         ImVec4 btn_h(btn.x + 0.08f, btn.y + 0.08f, btn.z + 0.08f, 1.0f);
@@ -2895,8 +2955,9 @@ void render_ui() {
             // Take a thread-safe snapshot of the logs for rendering.
             // This avoids a data race with the FFI callback thread which
             // calls add_log() concurrently.
-            uint64_t revision = 0;
-            auto logs_snapshot = g_app.copy_logs(revision);
+            static uint64_t revision = ~0ULL;
+            static std::vector<std::pair<int, std::string>> logs_snapshot;
+            g_app.sync_logs(revision, logs_snapshot);
 
             const bool manual_scroll =
                 (ImGui::IsWindowHovered() &&

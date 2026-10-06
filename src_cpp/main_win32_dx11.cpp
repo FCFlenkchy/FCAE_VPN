@@ -150,7 +150,7 @@ static bool CreateDeviceD3D(HWND hWnd) {
     sd.SampleDesc.Count   = 1;
     sd.SampleDesc.Quality = 0;
     sd.Windowed           = TRUE;
-    sd.SwapEffect         = DXGI_SWAP_EFFECT_DISCARD;
+    sd.SwapEffect         = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
     UINT createDeviceFlags = 0;
     D3D_FEATURE_LEVEL featureLevel;
@@ -162,14 +162,19 @@ static bool CreateDeviceD3D(HWND hWnd) {
         D3D_DRIVER_TYPE_REFERENCE
     };
     HRESULT device_result = E_FAIL;
-    for (D3D_DRIVER_TYPE driver : drivers) {
-        device_result = D3D11CreateDeviceAndSwapChain(
-            nullptr, driver, nullptr, createDeviceFlags, levels, 2,
-            D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice,
-            &featureLevel, &g_pd3dDeviceContext);
-        if (SUCCEEDED(device_result) && g_pSwapChain && g_pd3dDevice && g_pd3dDeviceContext)
-            break;
-        CleanupDeviceD3D();
+    // The flip model presents without a DWM copy; Windows before 10 lacks it.
+    for (DXGI_SWAP_EFFECT effect : { DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_SWAP_EFFECT_DISCARD }) {
+        sd.SwapEffect = effect;
+        for (D3D_DRIVER_TYPE driver : drivers) {
+            device_result = D3D11CreateDeviceAndSwapChain(
+                nullptr, driver, nullptr, createDeviceFlags, levels, 2,
+                D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice,
+                &featureLevel, &g_pd3dDeviceContext);
+            if (SUCCEEDED(device_result) && g_pSwapChain && g_pd3dDevice && g_pd3dDeviceContext)
+                break;
+            CleanupDeviceD3D();
+        }
+        if (SUCCEEDED(device_result) && g_pSwapChain) break;
     }
     if (FAILED(device_result) || !g_pSwapChain || !g_pd3dDevice || !g_pd3dDeviceContext)
         return false;
@@ -283,7 +288,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     // ── Event-driven, change-gated render loop ───────────────────────────────
     // A frame is painted only when
-    //   * the user interacts with the window (hover/drag/type — capped at 60 FPS
+    //   * the user interacts with the window (hover/drag/type — capped at 30 FPS
     //     and kept alive for a short tail after the last input),
     //   * the fingerprint of everything the UI paints changed (telemetry stats,
     //     logs, transient status text, settings), or
@@ -330,7 +335,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                 case WM_MOUSEMOVE:
                     // Only movement counts. Windows repeats WM_MOUSEMOVE at the
                     // same position, and treating those as input would pin the
-                    // loop at 60 FPS forever.
+                    // loop at 30 FPS forever.
                     if (!have_mouse_pos || msg.pt.x != last_mouse_pos.x || msg.pt.y != last_mouse_pos.y) {
                         last_mouse_pos = msg.pt;
                         have_mouse_pos = true;
@@ -370,8 +375,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             ui_set_window_visible(true);
             sponsor_window_visible = true;
         }
+        ui_set_window_focused(GetForegroundWindow() == hWnd);
 
-        // Throttle to 60 FPS max — skip the frame if it is too early.
+        // Cap at ~30 FPS: skip the frame if it is too early.
         const auto frame_now = std::chrono::steady_clock::now();
         if (frame_now - last_frame_time < min_frame_interval) continue;
 

@@ -20,8 +20,11 @@ pub mod config;
 pub mod error;
 pub mod registry;
 pub mod session;
+pub mod socks5p;
 pub mod telemetry;
 pub mod tun_dns;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod unix_tun;
 pub mod update;
 
 pub use error::{CoreError, Result};

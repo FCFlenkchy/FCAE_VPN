@@ -194,7 +194,7 @@ int main(int argc, char** argv) {
         const double t_before = glfwGetTime();
         bool interacting = (t_before - last_event_time) < interaction_tail;
 
-        // Wait for events: ~60 FPS while interacting, slower when idle (the
+        // Wait for events: ~30 FPS while interacting, slower when idle (the
         // engine poll still runs, see ui_sleep_ms()).
         double timeout = hidden ? 1.0
                        : interacting ? min_frame_interval.count() / 1000.0
@@ -222,8 +222,9 @@ int main(int argc, char** argv) {
             ui_set_window_visible(true);
             sponsor_window_visible = true;
         }
+        ui_set_window_focused(glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0);
 
-        // Throttle to 60 FPS max — skip frame if less than 16ms since last render
+        // Cap at ~30 FPS: skip the frame if less than 33 ms since the last render
         auto now = std::chrono::steady_clock::now();
         if (now - last_frame_time < min_frame_interval) {
             continue;

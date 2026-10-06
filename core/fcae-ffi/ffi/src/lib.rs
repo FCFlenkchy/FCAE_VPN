@@ -316,6 +316,15 @@ where
     }
 }
 
+/// [`guard`] for exports that return a value instead of a status: a panic is
+/// logged and `fallback` returned.
+fn guard_value<T>(what: &str, fallback: T, f: impl FnOnce() -> T + std::panic::UnwindSafe) -> T {
+    std::panic::catch_unwind(f).unwrap_or_else(|_| {
+        log::error!("[ffi] {what}: panicked");
+        fallback
+    })
+}
+
 /// Copy a Rust string into a fixed C buffer, always NUL-terminating and
 /// truncating on a char boundary.
 fn fill(buf: &mut [c_char], s: &str) {
@@ -466,6 +475,9 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         let telemetry = Arc::new(TelemetryCell::new());
 
         logger::install(opts.log_cb, opts.user_data, opts.max_log_level);
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        fcae_runtime::unix_tun::recover();
 
         // Forward state transitions to the host callback, so a UI can react
         // on the edge instead of polling telemetry every frame.
@@ -638,19 +650,13 @@ pub extern "C" fn fcae_resume_tun() -> FcaeStatus {
 /// True while a session is alive and its TUN data plane is paused.
 #[no_mangle]
 pub extern "C" fn fcae_tun_paused() -> bool {
-    RUNTIME
-        .get()
-        .map(|rt| rt.supervisor.tun_is_paused())
-        .unwrap_or(false)
+    guard_value("fcae_tun_paused", false, || RUNTIME.get().is_some_and(|rt| rt.supervisor.tun_is_paused()))
 }
 
 /// True while a session is active.
 #[no_mangle]
 pub extern "C" fn fcae_is_running() -> bool {
-    RUNTIME
-        .get()
-        .map(|rt| rt.supervisor.is_running())
-        .unwrap_or(false)
+    guard_value("fcae_is_running", false, || RUNTIME.get().is_some_and(|rt| rt.supervisor.is_running()))
 }
 
 /// Detect the local IPv4 address selected by the default route without sending traffic.
@@ -760,6 +766,10 @@ pub extern "C" fn fcae_set_tun_fd_provider(
 /// device and the session fails with no visible cause.
 #[no_mangle]
 pub extern "C" fn fcae_is_privileged() -> bool {
+    guard_value("fcae_is_privileged", false, is_privileged)
+}
+
+fn is_privileged() -> bool {
     #[cfg(feature = "tun")]
     {
         if fcae_bridge_tun2socks::platform::is_privileged() {
@@ -845,13 +855,15 @@ pub extern "C" fn fcae_abi_version() -> u32 {
 /// `out` must point to storage for at least `max` `FcaeBackend` values.
 #[no_mangle]
 pub unsafe extern "C" fn fcae_available_backends(out: *mut FcaeBackend, max: u32) -> u32 {
-    let available = fcae_runtime::registry::available();
-    if !out.is_null() {
-        for (i, id) in available.iter().take(max as usize).enumerate() {
-            out.add(i).write(*id);
+    guard_value("fcae_available_backends", 0, move || {
+        let available = fcae_runtime::registry::available();
+        if !out.is_null() {
+            for (i, id) in available.iter().take(max as usize).enumerate() {
+                out.add(i).write(*id);
+            }
         }
-    }
-    available.len() as u32
+        available.len() as u32
+    })
 }
 
 /// Describe one backend: name, whether it can actually run, and what it
@@ -1033,7 +1045,7 @@ fn hev_info_fields() -> (u64, &'static str, &'static str, bool, &'static str) {
 #[no_mangle]
 pub unsafe extern "C" fn fcae_psiphon_regions(out: *mut c_char, cap: u32) -> u32 {
     #[cfg(feature = "psiphon")]
-    let list = fcae_bridge_psiphon::regions().join(",");
+    let list = guard_value("fcae_psiphon_regions", Vec::new(), fcae_bridge_psiphon::regions).join(",");
     #[cfg(not(feature = "psiphon"))]
     let list = String::new();
 
@@ -1048,15 +1060,17 @@ pub unsafe extern "C" fn fcae_psiphon_regions(out: *mut c_char, cap: u32) -> u32
 #[no_mangle]
 pub unsafe extern "C" fn fcae_parse_tcp_buffer_size(text: *const c_char) -> u32 {
     if text.is_null() { return 0; }
-    CStr::from_ptr(text).to_str().ok()
-        .and_then(|s| config::parse_tcp_buffer_size(s).ok()).unwrap_or(0)
+    let text = CStr::from_ptr(text);
+    guard_value("fcae_parse_tcp_buffer_size", 0, || {
+        text.to_str().ok().and_then(|s| config::parse_tcp_buffer_size(s).ok()).unwrap_or(0)
+    })
 }
 
 /// Psiphon's currently bound SOCKS port, or zero when unavailable.
 #[no_mangle]
 pub extern "C" fn fcae_psiphon_socks_port() -> u16 {
     #[cfg(feature = "psiphon")]
-    { fcae_bridge_psiphon::proxy_ports().0 }
+    { guard_value("fcae_psiphon_socks_port", 0, || fcae_bridge_psiphon::proxy_ports().0) }
     #[cfg(not(feature = "psiphon"))]
     { 0 }
 }
@@ -1065,7 +1079,7 @@ pub extern "C" fn fcae_psiphon_socks_port() -> u16 {
 #[no_mangle]
 pub extern "C" fn fcae_psiphon_http_port() -> u16 {
     #[cfg(feature = "psiphon")]
-    { fcae_bridge_psiphon::proxy_ports().1 }
+    { guard_value("fcae_psiphon_http_port", 0, || fcae_bridge_psiphon::proxy_ports().1) }
     #[cfg(not(feature = "psiphon"))]
     { 0 }
 }
@@ -1074,7 +1088,7 @@ pub extern "C" fn fcae_psiphon_http_port() -> u16 {
 #[no_mangle]
 pub unsafe extern "C" fn fcae_psiphon_attach_request(out: *mut std::ffi::c_char, cap: u32) -> u32 {
     #[cfg(feature = "psiphon")]
-    let request = fcae_bridge_psiphon::host_request();
+    let request = guard_value("fcae_psiphon_attach_request", String::new(), fcae_bridge_psiphon::host_request);
     #[cfg(not(feature = "psiphon"))]
     let request = String::new();
     if !out.is_null() && cap > 0 { fill(std::slice::from_raw_parts_mut(out, cap as usize), &request); }
@@ -1084,7 +1098,9 @@ pub unsafe extern "C" fn fcae_psiphon_attach_request(out: *mut std::ffi::c_char,
 #[no_mangle]
 pub extern "C" fn fcae_psiphon_attach_complete(id: u64, socks: u16, http: u16) {
     #[cfg(feature = "psiphon")]
-    fcae_bridge_psiphon::host_complete(id, socks, http);
+    guard_value("fcae_psiphon_attach_complete", (), || fcae_bridge_psiphon::host_complete(id, socks, http));
+    #[cfg(not(feature = "psiphon"))]
+    let _ = (id, socks, http);
 }
 
 /// Install Android's `VpnService.protect(fd)` for Psiphon's own sockets.
@@ -1304,37 +1320,39 @@ pub extern "C" fn fcae_sponsor_initialize_android_context(
     java_vm: *mut c_void,
     context: *mut c_void,
 ) -> bool {
-    fcae_sponsor::initialize_android_context(java_vm, context)
+    guard_value("fcae_sponsor_initialize_android_context", false, move || {
+        fcae_sponsor::initialize_android_context(java_vm, context)
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_load_cache() {
-    fcae_sponsor::load_cached_manifest();
+    guard_value("fcae_sponsor_load_cache", (), || fcae_sponsor::load_cached_manifest());
 }
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_refresh_manifest_async() {
-    fcae_sponsor::refresh_manifest_async();
+    guard_value("fcae_sponsor_refresh_manifest_async", (), || fcae_sponsor::refresh_manifest_async());
 }
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_refresh_manifest_now_async() {
-    fcae_sponsor::refresh_manifest_now_async();
+    guard_value("fcae_sponsor_refresh_manifest_now_async", (), || fcae_sponsor::refresh_manifest_now_async());
 }
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_manifest_due() -> bool {
-    fcae_sponsor::manifest_due()
+    guard_value("fcae_sponsor_manifest_due", false, || fcae_sponsor::manifest_due())
 }
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_manifest_refresh_remaining_secs() -> u64 {
-    fcae_sponsor::manifest_refresh_remaining_secs()
+    guard_value("fcae_sponsor_manifest_refresh_remaining_secs", 0, || fcae_sponsor::manifest_refresh_remaining_secs())
 }
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_manifest_check_started() {
-    fcae_sponsor::manifest_check_started();
+    guard_value("fcae_sponsor_manifest_check_started", (), || fcae_sponsor::manifest_check_started());
 }
 
 #[no_mangle]
@@ -1348,40 +1366,43 @@ pub unsafe extern "C" fn fcae_sponsor_set_manifest_json(json: *const c_char) -> 
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_set_connected(connected: bool) {
-    fcae_sponsor::set_connected(connected);
+    guard_value("fcae_sponsor_set_connected", (), || fcae_sponsor::set_connected(connected));
 }
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_set_ui_active(active: bool) {
     // Held across the switch so a poll that read its frame before the UI hid
     // cannot store it afterwards.
-    let mut frame = SPONSOR_FRAME.lock();
-    if !active {
-        *frame = None;
-    }
-    fcae_sponsor::set_ui_active(active);
+    guard_value("fcae_sponsor_set_ui_active", (), || {
+        let mut frame = SPONSOR_FRAME.lock();
+        if !active {
+            *frame = None;
+        }
+        fcae_sponsor::set_ui_active(active);
+    });
 }
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_release_media() {
-    let mut frame = SPONSOR_FRAME.lock();
-    *frame = None;
-    fcae_sponsor::release_media();
+    guard_value("fcae_sponsor_release_media", (), || {
+        *SPONSOR_FRAME.lock() = None;
+        fcae_sponsor::release_media();
+    });
 }
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_set_audio_enabled(enabled: bool) {
-    fcae_sponsor::set_audio_enabled(enabled);
+    guard_value("fcae_sponsor_set_audio_enabled", (), || fcae_sponsor::set_audio_enabled(enabled));
 }
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_audio_enabled() -> bool {
-    fcae_sponsor::audio_enabled()
+    guard_value("fcae_sponsor_audio_enabled", false, || fcae_sponsor::audio_enabled())
 }
 
 #[no_mangle]
 pub extern "C" fn fcae_sponsor_next() {
-    fcae_sponsor::next_campaign();
+    guard_value("fcae_sponsor_next", (), || fcae_sponsor::next_campaign());
 }
 
 #[no_mangle]
