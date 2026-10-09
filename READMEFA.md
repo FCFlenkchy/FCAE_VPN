@@ -26,6 +26,7 @@ FCAE VPN به **شبکه WARP کلادفلر** متصل می‌شود — هما
    - **MASQUE** — ترافیک در داخل نشست‌های HTTP/3 (QUIC) یا HTTP/2 (TLS) با استفاده از روش `CONNECT-IP` کپسوله می‌شود، که آن را برای سیستم‌های DPI شبیه ترافیک عادی HTTPS نشان می‌دهد.
    - **WireGuard** — یک تونل UDP استاندارد WireGuard مستقیماً به گره لبه برقرار می‌شود.
    - **WARP-in-WARP (gool)** — دو تونل WireGuard تو در تو برای لایه رمزگذاری اضافی.
+   - **WARP-in-MASQUE** — تونل WireGuard درون یک نشست MASQUE (HTTP/3 یا HTTP/2) منتقل می‌شود، بنابراین ترافیک بیرونی همچنان شبیه HTTPS به نظر می‌رسد.
 4. **پروکسی محلی** — تونل یک پروکسی محلی SOCKS5 (پورت 1819) و HTTP (پورت 1820) در معرض نمایش قرار می‌دهد. برنامه‌هایی که برای استفاده از این پروکسی‌ها پیکربندی شده‌اند، ترافیک خود را از طریق تونل رمزگذاری‌شده به اینترنت از طریق شبکه کلادفلر عبور می‌دهند.
 
 تمام ترافیک بین کلاینت و کلادفلر رمزگذاری شده است. از کلادفلر به بعد، ترافیق به‌طور عادی به اینترنت عمومی خارج می‌شود.
@@ -77,11 +78,12 @@ FCAE VPN به **شبکه WARP کلادفلر** متصل می‌شود — هما
 | **MASQUE (HTTP/2)** | TLS روی TCP | بهترین — شبیه HTTPS | سریع | جایگزین وقتی QUIC مسدود شده |
 | **WireGuard** | UDP | متوسط — رمزگذاری‌شده ولی قابل تشخیص | سریع‌ترین | وقتی UDP مجاز است |
 | **WARP-in-WARP** | UDP تو در تو | بالا — رمزگذاری دوگانه | متوسط | لایه اضافی وقتی WG به تنهایی مسدود شده |
+| **WARP-in-MASQUE** | WireGuard درون MASQUE | بهترین — شبیه HTTPS، رمزگذاری دوگانه | متوسط | رمزگذاری دوگانه در شرایطی که فقط HTTPS عبور می‌کند |
 
 ## امکانات
 
 - کشف خودکار نقاط اتصال با اعتبارسنجی داده‌ای سرتاسری
-- پشتیبانی از MASQUE (HTTP/3 QUIC / HTTP/2)، WireGuard و WARP-in-WARP (gool)
+- پشتیبانی از MASQUE (HTTP/3 QUIC / HTTP/2)، WireGuard، WARP-in-WARP (gool) و WARP-in-MASQUE
 - رمزگذاری ترافیک با پروفایل‌های قابل پیکربندی
 - اتصال مجدد خودکار با قابلیت اتصال سریع
 - پروکسی‌های محلی SOCKS5 و HTTP
@@ -168,7 +170,7 @@ cmake --build build --config Release
 
 ## قدردانی
 
-- **[Aether](https://github.com/CluvexStudio/aether)** — موتور اصلی دور زدن سانسور توسط CluvexStudio. پروتکل‌های MASQUE، WireGuard و WARP-in-WARP را فراهم می‌کند.
+- **[Aether](https://github.com/CluvexStudio/aether)** — موتور اصلی دور زدن سانسور توسط CluvexStudio. پروتکل‌های MASQUE، WireGuard، WARP-in-WARP و WARP-in-MASQUE را فراهم می‌کند.
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — کتابخانه رابط گرافیکی حالت فوری. برای تمام رندرهای بومی دسکتاپ استفاده می‌شود.
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — موتور تونل SOCKS5 به زبان C، داخل فرایند اجرا می‌شود.
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — کتابخانه هسته تونل سایفون.
@@ -221,7 +223,7 @@ cmake --build build --config Release
 
 ## مجوز
 
-Released under the [LICENSE](LICENSE)
+تحت [LICENSE](LICENSE) منتشر شده است.
 
 نام‌های FCAE و FCAE VPN علامت تجاری این پروژه هستند. بنگرید به [TRADEMARK](TRADEMARK).
 
@@ -234,5 +236,7 @@ Released under the [LICENSE](LICENSE)
 اگر این پروژه به شما در دور زدن سانسور کمک کرد یا وقتتان را ذخیره کرد، لطفاً یک **ستاره** بدهید، این کار به دیگران کمک می‌کند ابزار را پیدا کنند و انگیزه‌ای برای ادامه توسعه است...
 
 [![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN)
+
+**زبان‌های دیگر:** [English](README.md) | [中文](READMECH.md)
 
 </div>

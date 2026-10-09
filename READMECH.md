@@ -26,6 +26,7 @@ FCAE VPN 连接到 **Cloudflare 的 WARP 网络** — 与 Cloudflare 1.1.1.1 DNS
    - **MASQUE** — 流量使用 `CONNECT-IP` 方法封装在 HTTP/3 (QUIC) 或 HTTP/2 (TLS) 会话中，使其在 DPI 系统看来像普通的 HTTPS 流量。
    - **WireGuard** — 直接向边缘节点建立标准的 WireGuard UDP 隧道。
    - **WARP-in-WARP (gool)** — 两层嵌套的 WireGuard 隧道，提供额外的加密层。
+   - **WARP-in-MASQUE** — 在 MASQUE（HTTP/3 或 HTTP/2）会话中承载的 WireGuard 隧道，因此外层流量仍然看起来像 HTTPS。
 4. **本地代理** — 隧道暴露一个本地 SOCKS5 代理（端口 1819）和 HTTP 代理（端口 1820）。配置为使用这些代理的应用程序会将其流量通过加密隧道经由 Cloudflare 网络传输到互联网。
 
 客户端与 Cloudflare 之间的所有流量均已加密。从 Cloudflare 之后，流量正常出口到公共互联网。
@@ -77,11 +78,12 @@ FCAE VPN 连接到 **Cloudflare 的 WARP 网络** — 与 Cloudflare 1.1.1.1 DNS
 | **MASQUE (HTTP/2)** | TLS over TCP | 最佳 — 看起来像 HTTPS | 快 | QUIC 被封禁时的备选 |
 | **WireGuard** | UDP | 中等 — 加密但可被检测 | 最快 | UDP 被允许时使用 |
 | **WARP-in-WARP** | 嵌套 UDP | 高 — 双重加密 | 中等 | 单独 WG 被封禁时的额外层 |
+| **WARP-in-MASQUE** | MASQUE 中的 WireGuard | 最佳 — 看起来像 HTTPS，双重加密 | 中等 | 仅 HTTPS 可通时使用双重加密 |
 
 ## 功能特性
 
 - 自动端点发现，端到端数据面验证
-- 支持 MASQUE (HTTP/3 QUIC / HTTP/2)、WireGuard 和 WARP-in-WARP (gool)
+- 支持 MASQUE (HTTP/3 QUIC / HTTP/2)、WireGuard、WARP-in-WARP (gool) 和 WARP-in-MASQUE
 - 可配置的流量混淆配置文件
 - 自动重连，支持快速重连
 - 本地 SOCKS5 和 HTTP 代理
@@ -168,7 +170,7 @@ cmake --build build --config Release
 
 ## 致谢
 
-- **[Aether](https://github.com/CluvexStudio/aether)** — 由 CluvexStudio 开发的核心审查绕过引擎。提供 MASQUE、WireGuard 和 WARP-in-WARP 协议。
+- **[Aether](https://github.com/CluvexStudio/aether)** — 由 CluvexStudio 开发的核心审查绕过引擎。提供 MASQUE、WireGuard、WARP-in-WARP 和 WARP-in-MASQUE 协议。
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — 即时模式 GUI 库，用于所有原生桌面渲染。
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C 语言 SOCKS5 隧道引擎，进程内运行。
 - **[Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core)** — Psiphon 隧道核心库。
@@ -221,7 +223,7 @@ Bug 反馈与功能建议请提交到 **[GitHub Issues](https://github.com/FCFle
 
 ## 许可证
 
-Released under the [LICENSE](LICENSE)
+根据 [LICENSE](LICENSE) 发布。
 
 FCAE 与 FCAE VPN 为本项目商标。见 [TRADEMARK](TRADEMARK)。
 
@@ -234,5 +236,7 @@ FCAE 与 FCAE VPN 为本项目商标。见 [TRADEMARK](TRADEMARK)。
 如果这个项目帮助您绕过了审查，或者为您节省了时间，请考虑给一个 **Star** — 这能帮助更多人发现这个工具，也是持续开发的动力。
 
 [![Star](https://img.shields.io/github/stars/FCFlenkchy/FCAE_VPN?style=social)](https://github.com/FCFlenkchy/FCAE_VPN)
+
+**其他语言：** [English](README.md) | [فارسی](READMEFA.md)
 
 </div>
