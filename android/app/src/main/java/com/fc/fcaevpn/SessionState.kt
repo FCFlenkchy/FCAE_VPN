@@ -8,14 +8,8 @@ import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * The one status feed for surfaces without an Activity.
- *
- * [FCAEVpnService] (TUN) and [ProxyNotification] (proxy) publish the session's
- * phase and telemetry on every tick of the loops they already run; the widget
- * renders [reconciled]. State is process-local by design, so a reboot or cold
- * process starts idle and only a live owner can restore an active frame. The
- * phase is the owner's to decide — it is the only
- * party that knows the state machine — and is never re-derived by a consumer.
+ * Process-local session state for the widget and other Activity-less surfaces.
+ * Owners publish the phase and telemetry; consumers never derive them independently.
  */
 object SessionState {
 
@@ -28,18 +22,10 @@ object SessionState {
     /** The engine measures the session itself. */
     const val SOURCE_ENGINE = 0
 
-        /**
-         * The exit owns the session's counters: a chained session has two meters
-         * (engine and AAR) reporting different numbers for one traffic, so which
-         * one is the session's is decided once and held, never swapped per tick.
-         */
+        /** The exit-side AAR meter owns a session's counters once it reports. */
     const val SOURCE_AAR = 1
 
-    /**
-     * What the user sees. One vocabulary for the whole app: the widget renders
-     * these words, and the values the Activity's receiver needs (running /
-     * paused / connecting) are derived from them — never the other way round.
-     */
+    /** Shared, owner-derived session vocabulary for every UI surface. */
     enum class Phase { DISCONNECTED, CONNECTING, RECONNECTING, CONNECTED, PAUSED }
 
     /** A command in flight, from the app, the notification or the widget. */
@@ -74,11 +60,7 @@ object SessionState {
         }
     }
 
-    /**
-     * Last snapshot reported in this process, and when. Publishers and the
-     * widget share the app process, so this is the live value: rates move every
-     * second while the disk copy deliberately stands still.
-     */
+    /** Live in-process snapshot. Disk state intentionally does not track its rate updates. */
     @Volatile
     private var latest: Snapshot? = null
     private var latestAt = 0L
@@ -97,11 +79,7 @@ object SessionState {
     private var stable: Snapshot? = null
     private var regressions = 0
 
-        /**
-         * The RTT of the session, fixed by its first successful probe — one value,
-         * one session, one place, so no two surfaces can show different latencies
-         * for one tunnel. A new session starts the measurement over.
-         */
+        /** Holds the first successful RTT for a session so every surface shows the same latency. */
     @JvmStatic
     @Synchronized
     fun holdRtt(sampleMs: Int): Int {
@@ -116,12 +94,7 @@ object SessionState {
         rttHeld = 0
     }
 
-        /**
-         * A command was just sent: until the state it asks for arrives, frames
-         * that contradict it are held back, so a disconnect cannot be undone on
-         * screen by the owner's ticks during teardown. Ends at the first
-         * confirming frame, or at the timeout.
-         */
+        /** Holds contradictory frames until the command is confirmed or expires. */
     @JvmStatic
     @Synchronized
     fun command(command: Command) {
@@ -145,11 +118,7 @@ object SessionState {
         rttSample: Int,
         source: Int
     ) {
-        // A new session owns its own readings: the epoch the owners bump when a
-        // session starts or ends is what tells them apart, so a stale RTT (or a
-        // stale total, if a backend keeps cumulative counters) can never be
-        // presented as this session's. A Stop is not a new session — it pauses
-        // one — so it does not start the measurements over.
+        // Reset readings for a new session; pausing does not create one.
         val generation = FCAEVpnService.sessionEpoch()
         if (generation != sessionGeneration) {
             sessionGeneration = generation
@@ -157,13 +126,7 @@ object SessionState {
             heldStats = longArrayOf(0L, 0L, 0L, 0L)
             clearRtt()
         }
-        // The session's meter, not the frame's: the AAR claims a session's
-        // counters the first time it reports, and keeps them from then on — a
-        // frame from the other meter still carries the phase, but its numbers
-        // are not this session's and are held back. Replacing a
-        // closer-to-the-exit measurement with a wider one is a change of
-        // measurement, not of session, and it is also where a held RTT from the
-        // lesser meter has to go.
+        // Once the AAR reports, retain its exit-side counters and discard the engine's samples.
         val upgraded = source == SOURCE_AAR && statsSource != SOURCE_AAR
         if (upgraded) {
             statsSource = SOURCE_AAR

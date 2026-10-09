@@ -237,9 +237,7 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile private var lastBroadcastGeneration = 0L
     @Volatile private var lastBroadcastEpoch = 0L
-    // Set to true by disconnectAll().  Cleared by connectClicked().
-    // When set, the receiver ignores disconnect broadcasts — they belong
-    // to the previous cycle and would override the optimistic connect UI.
+    // Ignore stale disconnect broadcasts until a new connect resets this flag.
     private var userInitiatedDisconnect = false
     // Notification Stop/Start own the UI until the next command.
     @Volatile private var commandPaused = false
@@ -249,9 +247,7 @@ class MainActivity : AppCompatActivity() {
     // stops keep the clock they already have.
     @Volatile private var notificationPauseUi = false
 
-    // Latest psiphon tunnel telemetry from PsiphonTunnelService
-    // (BROADCAST_STATS). The Aether engine getters return nothing on the
-    // psiphon-only path, so the stats line and RTT are fed from here.
+    // Psiphon-only sessions do not expose Aether telemetry; receive their stats through BROADCAST_STATS.
     @Volatile private var psiRttMs = 0
     @Volatile private var psiUpBps = 0L
     @Volatile private var psiDownBps = 0L
@@ -2739,7 +2735,6 @@ class MainActivity : AppCompatActivity() {
         updateButton()
         saveSettings()
 
-        // Start proxy notification foreground service for bandwidth stats
         val proxyIntent = Intent(this, ProxyNotification::class.java)
         proxyIntent.action = ProxyNotification.ACTION_START
         // One extra, one meaning: whoever hosts the session's notification and
@@ -2889,13 +2884,10 @@ class MainActivity : AppCompatActivity() {
                     connecting = false
                     vpnActive = false
                     engineRunning = false
-                    // Stop proxy notification service since engine failed
                     try { stopService(Intent(this@MainActivity, ProxyNotification::class.java)) } catch (_: Throwable) {}
                     Toast.makeText(this, "Failed to start engine", Toast.LENGTH_SHORT).show()
                 } else {
-                    // In proxy mode, there's no service broadcast to set engineRunning=true.
-                    // Set it optimistically so the poll starts. The poll itself will
-                    // update engineRunning based on actual native state.
+                    // Proxy mode has no service broadcast; polling reconciles this optimistic state.
                     engineRunning = true
                     handler.post(poll)
                 }
@@ -3695,11 +3687,8 @@ class MainActivity : AppCompatActivity() {
             engineRunning = true
             vpnActive = true
             connecting = false
-            // Native state dips while the TUN fd is moving. Painting that dip
-            // is the flinch: CONNECTED, then a blank or RECONNECTING, then
-            // CONNECTED again. The word stays. Stats update only from a real
-            // connected sample. The button is not touched here: Stop has
-            // already chosen START, and Start must be allowed to show STOP.
+            // Keep the connected label through the TUN fd transition to prevent a state flicker.
+            // Update stats only from a real connected sample; Stop already selected the button state.
             holdConnectedLine()
             if (state != 4) {
                 updateButton()
@@ -3709,28 +3698,18 @@ class MainActivity : AppCompatActivity() {
         try {
             // Freshest device LAN IP for the Psiphon LAN fallback below.
             lastNativeLan = lan
-            // Update engine state based on native telemetry.
             // In proxy mode, this is the ONLY source of truth — there are no
             // service broadcasts. In TUN mode, broadcasts may also update
             // these, but the poll always has the freshest data.
             if (vpnActive) {
-                // State 6 = Reconnecting: the session is still alive and the
-                // engine is recovering the tunnel on its own. Treat it as an
-                // active session (button stays DISCONNECT), not a dead one —
-                // showing CONNECT here invited a second session on top of a
-                // live one.
+                // Reconnecting is still a live session; never offer a second connect.
                 engineRunning = state in 1..4 || state == 6
                 connecting = state in 1..3 || state == 6 || commandConnecting
                 // Psiphon reports its egress regions only after a successful
                 // handshake, so this is the first moment the real list can be
                 // read. Cheap and idempotent: it no-ops unless the set changed.
                 if (state == 4 && (isPsiphonSelected() || isEgressPsiphon())) refreshPsiphonRegions()
-                // Detect engine stopped while we thought it was active.
-                // 0 = idle/stopped, 5 = terminal error. The FFI keeps state
-                // 5 sticky after the session thread ends, so without the 5
-                // check vpnActive would survive a dead engine and the first
-                // tap on the (CONNECT-looking) button would call
-                // disconnectAll() instead of connecting.
+                // States 0 and 5 are terminal. Clear stale UI so the next tap connects rather than disconnects.
                 if ((state == 0 || state == 5) && !userInitiatedDisconnect && !commandConnecting) {
                     // Engine died on its own — reset state
                     vpnActive = false
@@ -3740,10 +3719,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Psiphon chain guard: the engine reports Connected once Aether's
-            // SOCKS endpoint is live, but on a Psiphon path the egress tunnel
-            // is still dialling. Keep showing the chain progress instead of
-            // prematurely flipping to "CONNECTED — ...".
+            // Keep the progress label until the Psiphon egress tunnel provides its SOCKS endpoint.
             val isPsiphonPath = isPsiphonSelected() || isEgressPsiphon()
             val psiphonStillChaining = state == 4
                     && isPsiphonPath
@@ -3764,9 +3740,7 @@ class MainActivity : AppCompatActivity() {
             if (state == 5 && errMsg.isNotEmpty()) {
                 statusText.text = "ERROR: $errMsg"
             } else {
-                // Just the state word — "CONNECTING" for every backend and
-                // mode while a dial is in flight, matching the desktop UI
-                // and the Psiphon paths: no staged sub-messages appended.
+                // Show the same dial state for every backend and mode.
                 statusText.text = label
             }
             statusText.setTextColor(
@@ -3786,9 +3760,7 @@ class MainActivity : AppCompatActivity() {
                 renderTrafficStats(rx, tx, totalRx, totalTx, rtt)
             }
 
-            // Psiphon direct and Tor-only sessions do not expose an Aether peer.
-            // Listeners stay gated on a live native state here. Notification
-            // Stop paints the same block itself, without this poll.
+            // Gate listeners on the native state; Notification Stop renders them after polling stops.
             val peerLine = StringBuilder(sessionEndpointText(peer, lan, state == 4 || state == 6))
             // Only append error here if not already shown in statusText (state 5 = ERROR)
             if (errMsg.isNotEmpty() && state != 5) peerLine.append("\nError: $errMsg")

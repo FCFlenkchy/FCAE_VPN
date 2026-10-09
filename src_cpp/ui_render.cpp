@@ -33,13 +33,9 @@ extern "C" void fcae_sponsor_set_ui_active(bool active);
 
 AppState g_app;
 
-// Everything below decides whether a frame needs to be painted at all. The
-// window content is a pure function of telemetry + logs + UI state, so a cheap
-// FNV-1a fingerprint of exactly those values tells us when repainting would
-// produce identical pixels — and then the platform loop simply sleeps instead.
+// The UI fingerprint lets platform loops skip frames whose pixels would not change.
 
-// Update-check UI state, hoisted out of render_ui() so the fingerprint can see
-// when the update panel still has live content (e.g. "Checking... (3s)").
+// Keep update state outside render_ui() so the fingerprint observes live panel changes.
 static bool s_update_checked = false;
 static bool s_update_available = false;
 static char s_update_status[256] = {};
@@ -74,10 +70,7 @@ static bool sponsor_background_changed(uint64_t current, uint64_t previous) {
 static bool s_sponsor_started = false;
 static uint64_t s_sponsor_logged_generation = 0;
 static std::chrono::steady_clock::time_point s_sponsor_manifest_check = {};
-// Window visibility owns the sponsor audio gate. The sponsor poll reapplies
-// this flag instead of forcing it true, so a hidden window keeps retracting
-// the clip (previously the next poll re-activated audio immediately after a
-// minimize, and sponsor sound kept looping while the window was gone).
+// Sponsor polling honors this visibility gate so hidden windows keep audio disabled.
 static std::atomic<bool> s_ui_window_visible{true};
 static std::atomic<bool> s_ui_window_focused{true};
 static int s_sponsor_ui_active_sent = -1;
@@ -104,8 +97,7 @@ static void poll_sponsor() {
     if (now >= s_sponsor_manifest_check) {
         const uint64_t remaining = fcae_sponsor_manifest_refresh_remaining_secs();
         if (remaining == 0) fcae_sponsor_refresh_manifest_async();
-        // A failed due check leaves the successful-manifest timestamp unchanged;
-        // retry it soon without shortening the 12-hour success interval.
+        // Retry a failed due check without shortening the successful refresh interval.
         const uint64_t check_after = remaining == 0 ? 60 : remaining;
         s_sponsor_manifest_check = now + std::chrono::seconds(check_after);
     }
@@ -129,9 +121,7 @@ static void poll_sponsor() {
         || info.height != s_sponsor.height;
     const bool background_shape_changed = info.background_width != s_sponsor.background_width
         || info.background_height != s_sponsor.background_height;
-    // Bits above the frame indices identify the card itself: keyed on those, a
-    // GIF/video card logs once when it is published instead of adding a line to
-    // the log panel on every one of its animation frames.
+    // Card metadata excludes frame indices, so animated cards log once when published.
     const uint64_t sponsor_card = info.generation >> 24;
     if (card_available && sponsor_card != s_sponsor_logged_generation) {
         s_sponsor_logged_generation = sponsor_card;

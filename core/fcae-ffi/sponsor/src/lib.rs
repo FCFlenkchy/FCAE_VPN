@@ -25,45 +25,26 @@ const SPONSOR_POLICY_URL: &str =
 const DEMO_CARD_ID: &str = "fcae-sponsor-demo";
 static DEMO_CARD_PNG: &[u8] = include_bytes!("../assets/sponsor_demo.png");
 const MAX_MANIFEST_BYTES: usize = 128 * 1024;
-// Each foreground icon, optional background, or optional audio clip may use up
-// to 15 MiB on disk. Decoded frame and aggregate budgets below still bound
-// memory use.
+// Cap each media asset at 15 MiB; decoded and aggregate budgets bound memory.
 const MAX_MEDIA_BYTES: usize = 15 * 1024 * 1024;
-// One portable sponsor canvas keeps the manifest behavior identical on every
-// platform and fits the Android card without requiring platform-specific assets.
+// One portable canvas keeps manifest behavior consistent and fits Android.
 const MAX_WIDTH: u32 = 800;
 const MAX_HEIGHT: u32 = 450;
-// MP4 frames may be larger than the portable sponsor canvas. Decode only a
-// bounded source size, then downsample before retaining RGBA frames so a
-// valid 16:9 960x540 campaign video is not rejected just because the card is
-// capped at 800x450.
+// Downsample bounded MP4 sources so 960x540 campaigns fit the 800x450 card canvas.
 const MAX_VIDEO_SOURCE_WIDTH: u32 = 1920;
 const MAX_VIDEO_SOURCE_HEIGHT: u32 = 1080;
 const MAX_VIDEO_SOURCE_PIXELS: u64 =
     MAX_VIDEO_SOURCE_WIDTH as u64 * MAX_VIDEO_SOURCE_HEIGHT as u64;
-/// Pacing cap for animated sponsor media: 30 fps on every platform. Slower
-/// native rates play at their own delays; faster ones are slowed to this.
-/// Also the fallback when a container yields no usable rate.
+/// Caps animation at 30 fps and supplies the fallback for media with no valid rate.
 const FRAME_DELAY_US: u64 = 33_333;
-/// Retained per-frame delay bounds, shared by the decode paths and the decoded
-/// sidecar format. The floor matches the UI's 60 Hz poll: a shorter delay
-/// cannot be presented and only costs decode bytes. The ceiling stops a
-/// corrupt timestamp from freezing the card for minutes.
+/// Clamps frame delays to 20 ms through 10 s: shorter delays cannot render and corrupt timestamps cannot freeze a card.
 const MIN_FRAME_DELAY_MS: u64 = 20;
 const MAX_FRAME_DELAY_MS: u64 = 10_000;
-// Same bounds in microseconds for the sidecar format: stored as u32 µs,
-// read back and clamped so a hydrated card never replays outside the
-// floor/ceiling regardless of what the container reported.
+// Sidecars use the same delay bounds and re-clamp hydrated frames.
 const MIN_FRAME_DELAY_US: u32 = (MIN_FRAME_DELAY_MS * 1_000) as u32;
 const MAX_FRAME_DELAY_US: u32 = (MAX_FRAME_DELAY_MS * 1_000) as u32;
 
-// Every plane is displayed in a 140-unit card, so every plane is *retained*
-// at a card-sized canvas: a still, a GIF and a video frame then cost the same
-// per frame, and a large GIF keeps its whole timeline inside the budget
-// instead of collapsing to a handful of frames. This one canvas is the
-// difference between "the GIF sometimes animates" and "the GIF always does".
-// The accepted *source* size is still 800x450 (MAX_WIDTH/MAX_HEIGHT); only the
-// retained pixels are bounded.
+// Retain every media plane at card size so stills, GIFs, and video share one budget.
 #[cfg(target_os = "android")]
 const MEDIA_MAX_WIDTH: u32 = 320;
 #[cfg(target_os = "android")]
@@ -72,36 +53,22 @@ const MEDIA_MAX_HEIGHT: u32 = 180;
 const MEDIA_MAX_WIDTH: u32 = 400;
 #[cfg(not(target_os = "android"))]
 const MEDIA_MAX_HEIGHT: u32 = 225;
-// Decode enough source samples to cover normal short sponsor clips, but do not
-// let a long or malicious animation turn startup into an unbounded decode.
+// Bound source frames so long or malicious animations cannot cause unbounded decoding.
 const MAX_INPUT_FRAMES: usize = 180;
-// Retention is a byte budget and nothing else -- no parallel frame count that
-// could merge a small animation the budget could have kept. A clip over the
-// budget merges frames (each merged frame's display time is added to its
-// predecessor) instead of replaying only its prefix.
+// Retain by byte budget; compact excess animation by merging frame delays.
 #[cfg(target_os = "android")]
 const MAX_DECODED_BYTES: usize = 6 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_DECODED_BYTES: usize = 12 * 1024 * 1024;
-// Aggregate decoded-memory ceiling. The retention window holds exactly one
-// fully decoded card (the visible one); the prepared next card keeps only a
-// one-frame preview per plane and is hydrated from its decoded sidecar on
-// rotation. Each card is admitted against half of this number --
-// CAMPAIGN_DECODED_BYTES -- which therefore covers one card's two planes.
+// Keep the visible card decoded and the next card as a one-frame preview; each card receives half this budget.
 #[cfg(target_os = "android")]
 const MAX_TOTAL_DECODED_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(not(target_os = "android"))]
 const MAX_TOTAL_DECODED_BYTES: usize = 32 * 1024 * 1024;
-/// Decoded bytes a single card may retain.
 const CAMPAIGN_DECODED_BYTES: usize = MAX_DECODED_BYTES;
-/// Ceiling for the on-disk sponsor cache. Only re-derivable files are swept to
-/// stay under it (decoded sidecars, parked clips); a current asset is never
-/// deleted. Sized so a whole manifest fits with its encoded assets and its
-/// decoded sidecars at once.
+/// Sweeps only re-derivable cache files under this limit; never deletes current assets.
 const MAX_CACHE_BYTES: u64 = 768 * 1024 * 1024;
-/// How often the media worker re-checks that ceiling. A manifest arrives every
-/// 12 hours and pins one fallback per plane per campaign, so a long session
-/// needs its own pass over the tree.
+/// Rechecks cache size during long sessions, independently of the 12-hour manifest refresh.
 const CACHE_SWEEP_INTERVAL: u64 = 15 * 60;
 const DEFAULT_TITLE_COLOR: u32 = 0xFFFFFFFF;
 const DEFAULT_MESSAGE_COLOR: u32 = 0xFFD8E7FF;
@@ -116,9 +83,7 @@ const DEFAULT_ICON_SCALE: u32 = 100;
 const DEFAULT_BACKGROUND_SCALE: u32 = 100;
 const DEFAULT_TITLE_SCALE: u32 = 100;
 const DEFAULT_MESSAGE_SCALE: u32 = 100;
-// Opacity defaults preserve the look campaigns shipped with before the fields
-// existed: the icon fully opaque, the background plane dimmed to sit behind
-// the text, and the card color applied as-is.
+// Preserve legacy opacity defaults for campaigns that predate these fields.
 const DEFAULT_ICON_OPACITY: u8 = 100;
 const DEFAULT_BACKGROUND_OPACITY: u8 = 42;
 const DEFAULT_BACKGROUND_COLOR_OPACITY: u8 = 100;
@@ -126,7 +91,6 @@ const DEFAULT_TITLE_OPACITY: u8 = 100;
 const DEFAULT_MESSAGE_OPACITY: u8 = 100;
 const DEFAULT_DURATION_SECONDS: u32 = 10;
 const MAX_DURATION_SECONDS: u32 = 3_600;
-// Keep the current campaign visible for ten seconds before rotating.
 const ROTATE_EVERY: Duration = Duration::from_secs(10);
 // The manifest is checked at most once every twelve hours unless explicitly refreshed.
 const MANIFEST_REFRESH_SECS: u64 = 12 * 60 * 60;

@@ -133,13 +133,11 @@ int main(int argc, char** argv) {
 
     ui_init();
 
-    // Event-driven, change-gated render loop: glfwWaitEventsTimeout sleeps the
-    // thread while idle, and a frame is painted only when something actually
-    // changed (stats/logs/transient text) or the user is interacting.
+    // Paint only for input or changed UI content; block on events while idle.
     auto last_frame_time = std::chrono::steady_clock::now();
-    constexpr auto min_frame_interval = std::chrono::milliseconds(33);   // ~30 FPS cap
+    constexpr auto min_frame_interval = std::chrono::milliseconds(33);
     constexpr double interaction_tail  = 0.7;
-    double last_event_time = -1e9;                                       // monotonic seconds (glfwGetTime)
+    double last_event_time = -1e9;
     bool hidden = false;
     bool sponsor_window_visible = false;
 

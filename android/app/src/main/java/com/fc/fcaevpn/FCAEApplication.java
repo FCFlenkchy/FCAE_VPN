@@ -6,11 +6,7 @@ import android.os.Bundle;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Activity lifecycle registration, and the one answer services cannot get
- * anywhere else: whether the user has this app on screen. Ending a session is
- * the app's business; ending the process is the user's.
- */
+/** Tracks whether services may end the process because no app Activity is visible. */
 public class FCAEApplication extends Application {
 
     private static final AtomicInteger visibleActivities = new AtomicInteger();
@@ -18,13 +14,7 @@ public class FCAEApplication extends Application {
     /** When the UI last appeared or disappeared, for {@link #uiOnScreen()}. */
     private static volatile long lastVisibilityChangeAt = 0L;
 
-    /**
-     * How long a UI that just went away still counts as the user's.
-     *
-     * Longer than a rotation and shorter than any real decision to leave. A
-     * teardown must not end the process in the gap between two of the user's
-     * own gestures.
-     */
+    /** Keeps a recently hidden UI visible through rotation without treating it as an intent to stay. */
     private static final long VISIBLE_GRACE_MS = 1500L;
 
     public static boolean uiVisibleNow() {

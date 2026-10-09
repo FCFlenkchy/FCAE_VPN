@@ -33,26 +33,11 @@ public class FCAEVpnService extends VpnService {
     /** MainActivity's settings store. */
     private static final String PREFS_MAIN = "fcae_vpn";
 
-        /**
-         * MTU of the VpnService interface; the native side configures tun2socks
-         * with exactly this value (cfg.tun_mtu in android_jni.cpp) or the tunnel
-         * comes up and silently drops oversized packets.
-         *
-         * Never below 1280: this interface carries an IPv6 address, and
-         * Android/Linux reject IPv6 on links with MTU < 1280.
-         */
+        /** Keeps the Android TUN MTU at least 1280 for IPv6 and matches tun2socks to avoid dropped packets. */
     private volatile int sessionTunMtu = 1500;
-    /** True when Psiphon is this session's exit (protocol Psiphon, or
-     *  Psiphon-through-tunnel egress). Set from the start intent before the
-     *  core asks for the interface. */
+    /** Psiphon is this session's exit. Set before the core requests the TUN interface. */
     private volatile boolean sessionPsiphonExit = false;
-    /**
-     * Full session config parked by ACTION_PSIPHON_START (TUN mode, Psiphon
-     * protocol). This service — not MainActivity — starts the session when
-     * Psiphon's READY lands, so a connect survives the activity being swiped
-     * away mid-dial; the READY arm patches the live AAR ports in and hands
-     * it to requestStart(). Cleared on pause, teardown and consumption.
-     */
+    /** Retains a Psiphon TUN start until the AAR supplies live ports, even if the Activity closes. */
     private volatile Intent pendingPsiphonStart;
     private static final String TAG = "FCAE_VPN";
 
@@ -63,12 +48,7 @@ public class FCAEVpnService extends VpnService {
     public static final String EXTRA_FROM_NOTIFICATION = "fromNotification";
     /** Notification Stop only. The shade has already dropped the activity poll. */
     public static volatile boolean notificationPause;
-    /**
-     * Stop/Start of a live TUN session. The status line stays
-     * "CONNECTED - TUN" until the engine is paused or the interface is back.
-     * Closing the fd first makes native state flicker, and the poll was
-     * painting that flicker.
-     */
+    /** Keeps the connected label through a TUN fd transition so native state does not flicker. */
     public static volatile boolean holdConnectedUi;
     public static final String ACTION_DISCONNECT = "com.fc.fcaevpn.DISCONNECT";
     public static final String ACTION_START      = "com.fc.fcaevpn.START";
@@ -79,59 +59,38 @@ public class FCAEVpnService extends VpnService {
     public static final String BROADCAST_VPN_DISCONNECTED  = "com.fc.fcaevpn.VPN_DISCONNECTED";
     public static final String BROADCAST_VPN_STATE_CHANGED = "com.fc.fcaevpn.VPN_STATE_CHANGED";
 
-    // Package-private: ProxyNotification stamps the same generation counter on
-    // its disconnect broadcast, so MainActivity's stale-broadcast filter treats
-    // proxy and TUN teardowns identically.
+    // Both session owners share this counter to invalidate stale broadcasts.
     static final AtomicLong sGeneration = new AtomicLong(0);
 
     /** Session identity for the readings; see {@link #sessionEpoch()}. */
     private static final AtomicLong sessionEpoch = new AtomicLong(0);
     private static FCAEVpnService instance; // Provides immediate UI disconnect.
 
-    /**
-     * Session generation, for publishers that stamp the shared state channel
-     * (SessionState) instead of building the broadcast themselves.
-     */
+    /** Generation stamped on shared session-state publications. */
     public static long stateGeneration() {
         return sGeneration.get();
     }
 
-        /**
-         * Identity of the session, for everything measured once and shown for as
-         * long as it lasts (the RTT, the counters' source).
-         *
-         * Not {@link #stateGeneration()}: that one also invalidates in-flight
-         * engine work, so a Stop bumps it — and a Stop is not a new session.
-         */
+        /** Identity for session measurements, distinct from state generation that also cancels in-flight work. */
     public static long sessionEpoch() {
         return sessionEpoch.get();
     }
 
     private final AtomicLong cleanupGeneration = new AtomicLong(0);
-    /**
-     * Generation the in-flight connect belongs to.
-     *
-     * establishTunNow() runs on a core thread, long after startVpn() returned,
-     * so it needs its own record of which session asked for the interface. A
-     * disconnect that lands mid-handshake bumps cleanupGeneration and the
-     * establish is refused rather than leaving a live TUN behind a UI that
-     * already says DISCONNECTED.
-     */
+    /** Session that requested a deferred TUN. Reject it after disconnect advances cleanupGeneration. */
     private volatile long pendingSessionGen = -1;
     /** Serialises TUN fd ownership between establishTunNow and teardown. */
     private final Object tunLock = new Object();
-    /** Serialises interface CREATION between the early establish (startup
-     *  worker thread) and the core's on-demand fd request (JNI thread). */
+    /** Serialises TUN creation between startup and the JNI fd request. */
     private final Object tunEstablishLock = new Object();
     private volatile ParcelFileDescriptor vpnInterface;
-    private volatile Runnable vpnThread; // queued native startup, never a waiting thread
+    private volatile Runnable vpnThread; // Queued native startup, not a waiting thread.
     private volatile boolean running = false;
     private volatile boolean vpnPaused = false;
     private volatile boolean shuttingDown = false;
     /** Teardown can end with process exit only after the native engine stops. */
     private volatile boolean killProcessOnCleanup = false;
-    /** Notification, widget and tile Disconnect also end the process even if
-     *  an Activity is still started beneath the system UI. */
+    /** Remote Disconnect ends the process even when an Activity remains open. */
     private volatile boolean remoteDisconnect = false;
     private volatile boolean disconnectFromUi = false;
 

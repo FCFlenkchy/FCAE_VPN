@@ -285,36 +285,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     ui_init();
 
-    // A frame is painted only when
-    //   * the user interacts with the window (hover/drag/type — capped at 30 FPS
-    //     and kept alive for a short tail after the last input),
-    //   * the fingerprint of everything the UI paints changed (telemetry stats,
-    //     logs, transient status text, settings), or
-    //   * a window event asked for a repaint (resize, DPI, focus, theme, …).
-    //
-    // Previously the loop woke every 1 s and repainted unconditionally, and any
-    // stray window message (WS_EX_COMPOSITED/DWM redraws, hidden tooltip windows,
-    // the IME, a hovering cursor…) woke it early and cost a full frame — which is
-    // where the idle CPU went. Now the thread blocks on the message queue and an
-    // idle window is genuinely 0% CPU: no periodic repaint, and messages that
-    // don't change anything (a repeated WM_MOUSEMOVE at the same position, for
-    // example) no longer force a frame.
+    // Paint only for input, changed UI content, or an explicit redraw request.
+    // Block on the message queue while idle instead of repainting unconditionally.
     bool done = false;
     bool sponsor_window_visible = false;
     auto last_frame_time = std::chrono::steady_clock::now();
     auto last_input_time = last_frame_time;
     POINT last_mouse_pos = {};
     bool have_mouse_pos = false;
-    constexpr auto min_frame_interval = std::chrono::milliseconds(33);   // ~30 FPS cap
-    constexpr auto interaction_tail   = std::chrono::milliseconds(700);  // smooth for this long after the last input
+    constexpr auto min_frame_interval = std::chrono::milliseconds(33);
+    constexpr auto interaction_tail   = std::chrono::milliseconds(700);
 
     while (!done && g_app.running.load()) {
         const auto loop_now = std::chrono::steady_clock::now();
         const bool interacting = (loop_now - last_input_time) < interaction_tail;
 
-        // A minimized or hidden window has nothing to paint. Sleep in 1 s steps
-        // (keeps the engine-state poll alive) and leave a pending redraw request
-        // alone so the first frame after restoring is guaranteed to be fresh.
+        // Keep polling while hidden so the next visible frame is fresh.
         bool paintable = !IsIconic(hWnd) && IsWindowVisible(hWnd);
 
         DWORD timeout;
@@ -331,9 +317,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             if (msg.message == WM_QUIT) { done = true; break; }
             switch (msg.message) {
                 case WM_MOUSEMOVE:
-                    // Only movement counts. Windows repeats WM_MOUSEMOVE at the
-                    // same position, and treating those as input would pin the
-                    // loop at 30 FPS forever.
+                    // Ignore repeated positions so WM_MOUSEMOVE cannot pin rendering at 30 FPS.
                     if (!have_mouse_pos || msg.pt.x != last_mouse_pos.x || msg.pt.y != last_mouse_pos.y) {
                         last_mouse_pos = msg.pt;
                         have_mouse_pos = true;
@@ -359,9 +343,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         if (got_input) last_input_time = std::chrono::steady_clock::now();
         paintable = !IsIconic(hWnd) && IsWindowVisible(hWnd);
 
-        // Hidden/minimized windows keep the engine alive but release sponsor
-        // audio immediately; restoring the window claims it again before the
-        // next animation poll.
+        // Hidden windows release sponsor audio; visible windows claim it again.
         if (!paintable) {
             if (sponsor_window_visible) {
                 ui_set_window_visible(false);
@@ -375,18 +357,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         }
         ui_set_window_focused(GetForegroundWindow() == hWnd);
 
-        // Cap at ~30 FPS: skip the frame if it is too early.
         const auto frame_now = std::chrono::steady_clock::now();
         if (frame_now - last_frame_time < min_frame_interval) continue;
 
-        // Skip frames whose pixels would be identical to the last painted frame.
         const bool active = got_input || (frame_now - last_input_time) < interaction_tail;
         if (!ui_should_render(active)) continue;
 
-        // If the device was lost or context became invalid (driver crash,
-        // GPU hang, or rapid suspend/resume), skip the frame instead of
-        // crashing the process.  The window will remain visible but frozen;
-        // the engine threads continue running in the background.
+        // A lost D3D device cannot render; normal shutdown still owns teardown.
         if (!g_pd3dDevice || !g_pd3dDeviceContext || !g_pSwapChain || !g_mainRenderTargetView)
             continue;
 
@@ -398,8 +375,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
         ImGui::Render();
 
-        // Double-check RTV again after ImGui::Render — resizing or
-        // WM_SIZE between NewFrame and Render can invalidate the RTV.
+        // WM_SIZE can invalidate the render target between NewFrame and Render.
         if (!g_mainRenderTargetView) continue;
 
         const float clear_color[4] = { 0.05f, 0.05f, 0.08f, 1.0f };
@@ -407,8 +383,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        // Present can fail if device lost (DXGI_ERROR_DEVICE_REMOVED).
-        // Ignore the HRESULT — next frame will skip via the null guard above.
+        // Ignore Present failure; the next frame sees the device guard.
         g_pSwapChain->Present(1, 0);
         last_frame_time = std::chrono::steady_clock::now();
     }
