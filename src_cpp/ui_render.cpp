@@ -295,7 +295,6 @@ static void draw_sponsor_text(const SponsorText& t, const ImVec2& origin, const 
 static uint64_t s_painted_sig = 0;
 static bool s_log_scroll_pending = false;
 static bool     s_painted_once = false;
-static double   s_last_paint_t = 0.0;
 
 // Animation (sponsor frames, spinner) advances at 30 FPS; an unchanged window
 // is not repainted, only re-checked at the idle intervals below.
@@ -305,7 +304,6 @@ static constexpr unsigned kUiIdleIntervalMs = 250;
 static constexpr unsigned kUiUnfocusedIntervalMs = 500;
 static constexpr unsigned kUiCaretIntervalMs = 100;
 static constexpr double kUiCaretPhaseSeconds = 0.4;
-static constexpr double kUiHeartbeatSeconds = 2.0;
 
 // UI state that keeps needing frames on its own.
 static bool s_busy_anim = false;      // connect/scan spinner is on screen
@@ -536,10 +534,10 @@ bool ui_should_render(bool interacting) {
     // Spinner/connect animation is running: it moves on its own.
     if (s_busy_anim) return true;
 
-    // Identical pixels are not repainted; a slow heartbeat covers state that
-    // ImGui settles over a frame or two after the last change.
-    return !s_painted_once || ui_content_signature() != s_painted_sig
-        || now - s_last_paint_t >= kUiHeartbeatSeconds;
+    // Polling above refreshes asynchronous UI state; repaint only when its
+    // fingerprint changes. A periodic forced frame can flash flip-model
+    // swapchains even though the visible content is unchanged.
+    return !s_painted_once || ui_content_signature() != s_painted_sig;
 }
 
 unsigned ui_sleep_ms() {
@@ -555,7 +553,6 @@ void ui_note_frame_drawn() {
     if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Ready)
         s_painted_sig = ui_content_signature();
     s_painted_once = true;
-    s_last_paint_t = ui_now_seconds();
     g_app.redraw_requested.store(false);
 }
 
@@ -1168,7 +1165,6 @@ void ui_frame() {
         render_startup_shell(init == RuntimeInitState::Failed);
         s_busy_anim = false;
         s_painted_once = true;
-        s_last_paint_t = ui_now_seconds();
         // Preserve a completion redraw if initialization finished while this
         // bootstrap frame was being built.
         g_app.redraw_requested.store(
