@@ -1,4 +1,3 @@
-// FCAE VPN — Linux OpenGL3 + GLFW + Dear ImGui frontend
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>
@@ -153,7 +152,6 @@ int main(int argc, char** argv) {
     style.FramePadding     = ImVec2(10, 6);
     style.WindowPadding    = ImVec2(16, 12);
 
-    // Custom dark palette
     ImVec4* colors = style.Colors;
     colors[ImGuiCol_WindowBg]        = ImVec4(0.08f, 0.08f, 0.12f, 1.0f);
     colors[ImGuiCol_ChildBg]         = ImVec4(0.10f, 0.10f, 0.14f, 1.0f);

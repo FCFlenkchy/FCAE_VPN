@@ -1,4 +1,3 @@
-// FCAE VPN — Windows DirectX 11 + Win32 + Dear ImGui frontend
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -286,7 +285,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     ui_init();
 
-    // ── Event-driven, change-gated render loop ───────────────────────────────
     // A frame is painted only when
     //   * the user interacts with the window (hover/drag/type — capped at 30 FPS
     //     and kept alive for a short tail after the last input),
@@ -385,7 +383,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         const bool active = got_input || (frame_now - last_input_time) < interaction_tail;
         if (!ui_should_render(active)) continue;
 
-        // ── Crash-safe D3D11 guard ──────────────────────────────
         // If the device was lost or context became invalid (driver crash,
         // GPU hang, or rapid suspend/resume), skip the frame instead of
         // crashing the process.  The window will remain visible but frozen;

@@ -86,7 +86,7 @@ public class FCAEVpnService extends VpnService {
 
     /** Session identity for the readings; see {@link #sessionEpoch()}. */
     private static final AtomicLong sessionEpoch = new AtomicLong(0);
-    private static FCAEVpnService instance; // ADDED for instant UI disconnect
+    private static FCAEVpnService instance; // Provides immediate UI disconnect.
 
     /**
      * Session generation, for publishers that stamp the shared state channel
@@ -173,7 +173,7 @@ public class FCAEVpnService extends VpnService {
         }
     };
 
-    // ── Psiphon network state (called from native via JNI) ──────────────
+    // Psiphon network state from JNI.
     //
     // These three describe the network BENEATH our tunnel. Psiphon dials on
     // that network with its sockets protected, so it must not be told about

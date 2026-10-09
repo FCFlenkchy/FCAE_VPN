@@ -52,7 +52,7 @@ extern "C" {
 #define FCAE_TUN_ENGINE_ZEPTUN 1
 #define FCAE_TUN_ENGINE_HEV 2
 
-/* ── Enumerations ──────────────────────────────────────────────────── */
+/* Enumerations */
 
 typedef enum {
     FCAE_STATE_DISCONNECTED = 0,
@@ -222,7 +222,7 @@ typedef enum {
     FCAE_INTERNAL             = 10
 } FcaeStatus;
 
-/* ── Configuration ─────────────────────────────────────────────────── */
+/* Configuration */
 
 typedef struct {
     const char *noize_profile;   /* "off"|"light"|"balanced"|"aggressive"  */
@@ -337,7 +337,7 @@ typedef struct {
     FcaeAether      aether;          /* ABI v19 */
 } FcaeConfig;
 
-/* ── Telemetry ─────────────────────────────────────────────────────── */
+/* Telemetry */
 
 typedef struct {
     uint32_t    struct_size;
@@ -432,7 +432,7 @@ typedef struct {
     uint8_t  message_opacity;         /* extra message-color opacity, 0..100 */
 } FcaeSponsorInfo;
 
-/* ── Callbacks ─────────────────────────────────────────────────────── */
+/* Callbacks */
 
 /* Invoked from arbitrary threads; `message` is only valid for the call. */
 typedef void (*FcaeLogCallback)(FcaeLogLevel level, const char *message, void *user_data);
@@ -451,7 +451,7 @@ typedef struct {
     uint64_t          _reserved[4];
 } FcaeInitOptions;
 
-/* ── API ───────────────────────────────────────────────────────────── */
+/* API */
 
 /* Fill `out` with defaults and the correct struct_size/abi_version.
  * Always use this instead of zeroing a FcaeConfig yourself. */
@@ -587,7 +587,7 @@ FcaeStatus fcae_set_tun_fd_provider(int (*provider)(void));
 /* Release everything. fcae_init() must be called again afterwards. */
 FcaeStatus fcae_shutdown(void);
 
-/* ── Update checking ───────────────────────────────────────────────── */
+/* Update checking */
 
 /* Start an async check; poll with fcae_poll_update(). No-op if one is
  * already running. */
@@ -605,7 +605,7 @@ FcaeStatus fcae_check_update_from_json(const char *current_version,
  * `out->struct_size` and `out->abi_version` must be set before calling. */
 FcaeStatus fcae_poll_update(FcaeUpdateInfo *out);
 
-/* ── Privacy-preserving sponsors ───────────────────────────────────── */
+/* Privacy-preserving sponsors */
 
 /* Fetch the manifest and media asynchronously through the connected
  * session's local proxy endpoint. No sponsor request is made while the

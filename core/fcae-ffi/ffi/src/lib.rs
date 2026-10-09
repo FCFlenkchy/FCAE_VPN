@@ -339,7 +339,6 @@ fn fill(buf: &mut [c_char], s: &str) {
     buf[end] = 0;
 }
 
-// ── Lifecycle ───────────────────────────────────────────────────────────
 
 /// Fill `out` with a fully-defaulted, correctly-stamped config.
 ///
@@ -1206,7 +1205,6 @@ fn state_hook(opts: &FcaeInitOptions) -> Option<Box<dyn Fn(FcaeState) + Send + S
     }))
 }
 
-// ── Update checking ─────────────────────────────────────────────────────
 
 /// Start an asynchronous update check. Poll with [`fcae_poll_update`].
 ///

@@ -90,7 +90,6 @@ pub fn restore(undo: TunUndo, _timeout: Duration) {
     drop(undo);
 }
 
-// ── Windows ─────────────────────────────────────────────────────────────
 
 #[cfg(windows)]
 pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {

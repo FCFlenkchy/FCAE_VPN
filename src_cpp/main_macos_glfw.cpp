@@ -1,4 +1,3 @@
-// FCAE VPN — macOS OpenGL3 + GLFW + Dear ImGui frontend
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
@@ -78,7 +77,7 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
-    // macOS Cocoa: use dark appearance if available (GLFW 3.4+)
+    // Keep the working directory unchanged when GLFW supports this hint.
 #ifdef GLFW_COCOA_CHDIR_RESOURCES
     glfwWindowHint(GLFW_COCOA_CHDIR_RESOURCES, GLFW_FALSE);
 #endif
@@ -91,7 +90,6 @@ int main(int argc, char** argv) {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
-    // Disable maximize
 #ifndef GLFW_MAXIMIZABLE
 #define GLFW_MAXIMIZABLE 0x00020006
 #endif
@@ -112,7 +110,6 @@ int main(int argc, char** argv) {
     style.FramePadding      = ImVec2(10, 6);
     style.WindowPadding     = ImVec2(16, 12);
 
-    // Custom dark palette
     ImVec4* colors = style.Colors;
     colors[ImGuiCol_WindowBg]        = ImVec4(0.08f, 0.08f, 0.12f, 1.0f);
     colors[ImGuiCol_ChildBg]         = ImVec4(0.10f, 0.10f, 0.14f, 1.0f);

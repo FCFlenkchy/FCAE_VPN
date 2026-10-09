@@ -42,7 +42,7 @@ static bool sponsor_background_changed(uint64_t current, uint64_t previous) {
     return ((current ^ previous) & ~kSponsorForegroundFrameMask) != 0;
 }
 
-// ── Psiphon socket protection ───────────────────────────────────────────
+// Psiphon socket protection.
 //
 // Psiphon dials out while our TUN is up, so every socket it opens must be
 // excluded from the VPN via VpnService.protect(fd) or it tries to reach the
@@ -102,7 +102,7 @@ static int psiphon_protect(int fd) {
     return ok == JNI_TRUE ? 1 : 0;
 }
 
-// ── Psiphon network state ───────────────────────────────────────────────
+// Psiphon network state.
 //
 // Psiphon needs three facts about the *underlying* network (the one beneath
 // our TUN): its resolvers, whether it is usable at all, and an identity to
@@ -204,7 +204,7 @@ static int psiphon_has_connectivity() {
     return ok == JNI_TRUE ? 1 : 0;
 }
 
-// ── Deferred TUN establishment ──────────────────────────────────────────
+// Deferred TUN establishment.
 //
 // The interface used to be created before the engine started, so the system
 // routes were live while the backend was still dialling. This callback lets
@@ -733,7 +733,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeFree(JNIEnv*, jclass) {
     LOGI("fcae_shutdown");
 }
 
-// ── Structured telemetry: individual getters replace the old JSON round-trip ──
+// Structured telemetry replaces the JSON round-trip.
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeGetState(JNIEnv*, jclass) {
@@ -871,7 +871,6 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeGetTrafficStats(JNIEnv* env, jclass) {
     return out;
 }
 
-// ── Version checker JNI ──────────────────────────────────────────────────
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeCheckForUpdates(JNIEnv* env, jclass, jstring currentVersion, jboolean includePrereleases) {

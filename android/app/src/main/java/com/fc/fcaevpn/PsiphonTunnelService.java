@@ -868,7 +868,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         return " (LAN " + lanAddress + ":" + port + ")";
     }
 
-    // ── HostService ──────────────────────────────────────────────────────
 
     @Override
     public Context getContext() { return this; }

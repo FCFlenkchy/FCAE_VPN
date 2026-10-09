@@ -28,7 +28,7 @@ pub const FCAE_TUN_ENGINE_TUN2SOCKS: u64 = 0;
 pub const FCAE_TUN_ENGINE_ZEPTUN: u64 = 1;
 pub const FCAE_TUN_ENGINE_HEV: u64 = 2;
 
-// ── Enumerations ────────────────────────────────────────────────────────
+// Enumerations
 
 /// Tunnel lifecycle state, reported through [`FcaeTelemetry::state`].
 #[repr(C)]
@@ -304,7 +304,7 @@ pub enum FcaeStatus {
     Internal = 10,
 }
 
-// ── Configuration ───────────────────────────────────────────────────────
+// Configuration
 
 /// Obfuscation / fragmentation knobs, split out of the flat config so a
 /// backend that does not support them can ignore one struct.
@@ -512,7 +512,7 @@ pub struct FcaeAether {
     pub fragment_sni: bool,
 }
 
-// ── Telemetry ───────────────────────────────────────────────────────────
+// Telemetry
 
 /// Fixed-width snapshot of tunnel state, memcpy'd into caller-owned storage
 /// so the UI never has to free anything.
@@ -643,7 +643,7 @@ pub struct FcaeSponsorInfo {
     pub message_opacity: u8,
 }
 
-// ── Callbacks ───────────────────────────────────────────────────────────
+// Callbacks
 
 /// Log sink. Invoked from arbitrary engine threads; `message` is only valid
 /// for the duration of the call, so copy it.
@@ -673,7 +673,7 @@ pub struct FcaeInitOptions {
     pub _reserved: [u64; 4],
 }
 
-// ── Const helpers shared by Rust callers ────────────────────────────────
+// Const helpers shared by Rust callers.
 
 impl FcaeState {
     /// True while the session is doing work the user should see a spinner for.

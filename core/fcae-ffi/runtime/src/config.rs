@@ -578,7 +578,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         ..SessionConfig::default()
     };
 
-    // ── Ports ───────────────────────────────────────────────────────────
+    // Ports
     // TUN mode needs an internal SOCKS endpoint even if the user zeroed the
     // port, so fall back rather than failing.
     if cfg.socks_port == 0 && (cfg.mode == FcaeMode::Tun || raw._reserved[0] != 0
@@ -599,7 +599,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         )));
     }
 
-    // ── UDP buffer ──────────────────────────────────────────────────────
+    // UDP buffer
     // Out-of-range values used to be dropped silently; say so instead.
     cfg.udp_buf_kb = match raw.udp_buf_kb {
         0 => None,
@@ -611,7 +611,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         }
     };
 
-    // ── Obfuscation ─────────────────────────────────────────────────────
+    // Obfuscation
     let o = &raw.obfuscation;
     let noize = cstr_opt(o.noize_profile).unwrap_or_else(|| "balanced".into());
     if !matches!(noize.as_str(), "off" | "light" | "balanced" | "aggressive" | "firewall" | "gfw") {
@@ -642,7 +642,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         ech_enabled: o.ech_enabled,
     };
 
-    // ── DNS ─────────────────────────────────────────────────────────────
+    // DNS
     let d = &raw.dns;
     let use_doh = d.mode == FcaeDnsMode::Doh;
     let doh_url = cstr_opt(d.doh_url);
@@ -675,7 +675,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         sni: cstr_opt(d.sni),
     };
 
-    // ── Routing ─────────────────────────────────────────────────────────
+    // Routing
     let (block, direct) = parse_inline_routes(cstr_opt(raw.routing.rules_inline).as_deref());
     cfg.routing = RoutingConfig {
         rules_file: cstr_opt(raw.routing.rules_file),
@@ -683,7 +683,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         block,
     };
 
-    // ── Zero Trust / Psiphon ────────────────────────────────────────────
+    // Zero Trust and Psiphon
     cfg.zero_trust = ZeroTrustConfig {
         team_name: cstr_opt(raw.zero_trust.team_name),
         access_token: cstr_opt(raw.zero_trust.access_token),
@@ -706,7 +706,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
 
     cfg.aether = parse_aether(&raw.aether)?;
 
-    // ── Tor ─────────────────────────────────────────────────────────────
+    // Tor
     let t = &raw.tor;
     if let Some(bind) = cstr_opt(t.bind) {
         if bind.parse::<std::net::SocketAddr>().is_err() {
@@ -841,7 +841,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         pt_path: cstr_opt(t.pt_path),
     };
 
-    // ── TUN ─────────────────────────────────────────────────────────────
+    // TUN
     let mtu = match raw.tun_mtu {
         0 => 1500,
         v if (1280..=9000).contains(&v) => v,
@@ -1155,7 +1155,7 @@ pub mod env_compat {
         set("AETHER_ACCESS_TOKEN", cfg.zero_trust.access_token.as_deref());
         set("AETHER_ACCESS_EMAIL", cfg.zero_trust.access_email.as_deref());
 
-        // ── Tor ─────────────────────────────────────────────────────────
+        // Tor
         // Tor is an egress inside the engine, so it is configured the same
         // way the engine configures itself: through AETHER_TOR*. Every
         // variable is written unconditionally (or removed) so a previous

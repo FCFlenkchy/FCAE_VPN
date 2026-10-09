@@ -148,14 +148,12 @@ object NativeEngine {
     /** Inject a host-side line (Psiphon AAR notices live in :psiphon). */
     @JvmStatic external fun nativeAppendLog(line: String)
 
-    // ── TUN engine enumeration ───────────────────────────────────────
     // No engine start required: availability is a compile-/platform-time
     // property, queried by the UI while the engine is down.
     @JvmStatic external fun nativeTunEngineCount(): Int
     /** "display_name|unavailable_reason"; reason is "" when available. */
     @JvmStatic external fun nativeTunEngineInfo(index: Int): String
 
-    // ── Structured telemetry getters ──
     @JvmStatic external fun nativeGetState(): Int
     @JvmStatic external fun nativeGetRxBps(): Long
     @JvmStatic external fun nativeGetTxBps(): Long
@@ -240,7 +238,6 @@ object NativeEngine {
         )
     }
 
-    // ── version checker ─────────────────────────────────────────────
     @JvmStatic external fun nativeCheckForUpdates(currentVersion: String, includePrereleases: Boolean)
     @JvmStatic external fun nativePollUpdate(): FcaeUpdateInfo
     @JvmStatic external fun nativeCheckUpdateFromJson(currentVersion: String, json: String, includePrereleases: Boolean): Boolean

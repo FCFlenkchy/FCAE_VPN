@@ -100,7 +100,7 @@ pub mod platform;
 #[cfg(all(windows, wintun_staged))]
 static WINTUN_DLL: &[u8] = include_bytes!(env!("FCAE_WINTUN_DLL"));
 
-// ── Go c-archive symbols ────────────────────────────────────────────────
+// Go c-archive symbols.
 
 #[cfg(tun2socks_linked)]
 extern "C" {

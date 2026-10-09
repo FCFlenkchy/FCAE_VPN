@@ -30,11 +30,9 @@
 // UI-lifetime audio gate is an embedding hook rather than a public ABI field.
 extern "C" void fcae_sponsor_set_ui_active(bool active);
 
-// ── Global application state ─────────────────────────────────────────────
 
 AppState g_app;
 
-// ── Idle-friendly rendering ──────────────────────────────────────────────
 // Everything below decides whether a frame needs to be painted at all. The
 // window content is a pure function of telemetry + logs + UI state, so a cheap
 // FNV-1a fingerprint of exactly those values tells us when repainting would
@@ -556,7 +554,6 @@ void ui_note_frame_drawn() {
     g_app.redraw_requested.store(false);
 }
 
-// ── Config persistence ──────────────────────────────────────────────────
 
 static std::string join_cfg(const std::string& dir) {
     if (dir.empty()) return "FCAE_VPN.cfg";
@@ -867,7 +864,6 @@ static bool load_config_from(const std::string& path) {
     static char line[8192];
     int applied = 0;
     while (fgets(line, sizeof(line), f)) {
-        // strip CR/LF and trailing spaces
         size_t len = strlen(line);
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' ||
                            line[len - 1] == ' ' || line[len - 1] == '\t')) {
@@ -880,7 +876,6 @@ static bool load_config_from(const std::string& path) {
         *eq = '\0';
         const char* key = line;
         const char* val = eq + 1;
-        // trim key
         while (*key == ' ' || *key == '\t') key++;
         char* kend = (char*)key + strlen(key);
         while (kend > key && (kend[-1] == ' ' || kend[-1] == '\t')) *--kend = '\0';
@@ -1491,7 +1486,6 @@ static std::string psiphon_region_label(const std::string& code) {
     return code;
 }
 
-// ── External links ───────────────────────────────────────────────────────
 // https only, host-allowlisted, exec'd as one argv entry (never shell text).
 static bool open_external_url(const char* url) {
     if (!url || strncmp(url, "https://", 8) != 0) return false;
@@ -1583,7 +1577,6 @@ void render_ui() {
                       || g_app.start_busy.load();
     bool errored    = (cur == FCAE_STATE_ERROR);
 
-    // ── 1. STATUS BAR + ACTIONS ──────────────────────────────────────────
     {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 10));
@@ -1886,7 +1879,6 @@ void render_ui() {
             g_app.save_status[0] = '\0';
         }
 
-        // ── Check for Updates button ────────────────────────────
         {
             float btn_width = 136.0f;
             ImGui::SameLine(0, 12);
@@ -1982,7 +1974,6 @@ void render_ui() {
             }
             ImGui::PopStyleVar(); // Pop ButtonTextAlign
 
-            // Update popup modal
             if (s_update_popup_open) {
                 ImGui::OpenPopup("##update_popup");
                 s_update_popup_open = false;
@@ -2155,7 +2146,6 @@ void render_ui() {
         ImGui::PopStyleVar(2);
     }
 
-    // ── 2. TRAFFIC STATS + SPONSORS (SIDE BY SIDE ROW) ────────────────────
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     {
         const float avail_w = ImGui::GetContentRegionAvail().x;
@@ -2217,7 +2207,6 @@ void render_ui() {
             const char* sponsor_title = sponsor_has_content ? s_sponsor.title : "Become a sponsor";
             const char* sponsor_message = sponsor_has_content ? s_sponsor.message : "Click to learn more";
 
-            // ── Header bar: SPONSORS | Link | [↻] [🔊] ──
             // Mirrors Android's 38dp rounded_rectangle row: #171A26 fill,
             // 1px #292D3D border, 10/4 horizontal padding, 8px gap to the card.
             constexpr float kHeaderPadV = 4.0f;
@@ -2260,7 +2249,6 @@ void render_ui() {
             }
             ImGui::SetCursorScreenPos(ImVec2(header_min.x, header_max.y + 8.0f));
 
-            // ── Sponsor Card ──
             ImTextureID texture = ImTextureID{};
             ImTextureID background_texture = ImTextureID{};
             if (!s_sponsor_rgba.empty() && s_sponsor.width > 0 && s_sponsor.height > 0
@@ -2469,7 +2457,6 @@ void render_ui() {
 
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
-    // ── 3. CONFIG TABS (fill remaining height) ───────────────────────────
     float remain = ImGui::GetContentRegionAvail().y;
     if (remain < 120.0f) remain = 120.0f;
     ImGui::BeginChild("##tabs_host", ImVec2(0, remain), ImGuiChildFlags_None);
@@ -3033,7 +3020,7 @@ void render_ui() {
         ImGui::EndTabBar();
     }
 
-    ImGui::EndChild(); // ##tabs_host
+    ImGui::EndChild();
 
     ImGui::PopStyleVar(2);
     ImGui::End();

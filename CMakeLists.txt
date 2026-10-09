@@ -4,7 +4,7 @@ project(fcaevpn LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ── Options ───────────────────────────────────────────────────────────────
+# Options
 option(AETHER_TARGET "Build target" "LINUX_X64")
 
 function(fcae_version_parts value prefix)
@@ -108,7 +108,7 @@ endif()
 message(STATUS "FCAE_VERSION = ${FCAE_VERSION}")
 message(STATUS "FCAE_IS_PRERELEASE = ${FCAE_IS_PRERELEASE}")
 
-# ── Parse version into MAJOR.MINOR.PATCH.BUILD for the Windows RC ────────
+# Parse version into MAJOR.MINOR.PATCH.BUILD for the Windows RC
 set(FCAE_VERSION_MAJOR 0)
 set(FCAE_VERSION_MINOR 0)
 set(FCAE_VERSION_PATCH 0)
@@ -140,7 +140,7 @@ if(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
   include_directories("${CMAKE_BINARY_DIR}")
 endif()
 
-# ── Source files ──────────────────────────────────────────────────────────
+# Source files
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/src_cpp/imgui)
 set(IMGUI_BACKEND_DIR ${IMGUI_DIR}/backends)
 
@@ -287,7 +287,7 @@ endfunction()
 
 # Android Psiphon: official AAR, not a second Go library.
 
-# ── Target-specific configuration ────────────────────────────────────────
+# Target-specific configuration
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
 
     # Kotlin UI + JNI bridge only (no ImGui / NativeActivity)
@@ -709,7 +709,7 @@ elseif(UNIX)
 
 endif()
 
-# ── Common compile flags ─────────────────────────────────────────────────
+# Common compile flags
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64" OR AETHER_TARGET STREQUAL "ANDROID_ARM32" OR AETHER_TARGET STREQUAL "ANDROID_X86_64" OR AETHER_TARGET STREQUAL "ANDROID_UNIVERSAL")
     set(AETHER_COMPILE_TARGET fcaevpn_native)
 else()

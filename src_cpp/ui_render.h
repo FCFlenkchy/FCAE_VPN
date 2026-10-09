@@ -77,9 +77,6 @@ struct AppState {
     bool tls_verify = false;
     bool disable_grease = false;
     bool fragment_sni = false;
-    // TUN DNS servers (comma separated per family). The bridge applies them
-    // to the OS when the tunnel comes up and restores on down; defaults
-    // mirror the Android VpnService hardcode.
     char tun_mtu[8] = "1500";
     char tun_tcp_sndbuf[32] = "256000";
     char tun_tcp_rcvbuf[32] = "256000";
@@ -87,6 +84,9 @@ struct AppState {
     // high-latency, lossy links it tends to overshoot and add queueing
     // delay. OFF by default on every platform, opt-in here and on Android.
     bool tun_tcp_auto_tuning = false;
+    // TUN DNS servers (comma separated per family). The bridge applies them
+    // to the OS when the tunnel comes up and restores on down; defaults
+    // mirror the Android VpnService hardcode.
     char tun_dns4[96]  = "1.1.1.1,1.0.0.1";
     char tun_dns6[112] = "2606:4700:4700::1111,2606:4700:4700::1001";
     // Zero Trust (Cloudflare Teams)
@@ -95,7 +95,6 @@ struct AppState {
     char access_client_id[128] = {};
     char access_client_secret[128] = {};
     char access_email[128] = {};
-    // Routing rules file
     char routes_file[256] = {};
     // Inline routing rules (comma-separated, takes precedence over file)
     char routes_inline[2048] = {};
@@ -445,7 +444,6 @@ void ui_shutdown();
 void render_ui();
 void log_callback(FcaeLogLevel level, const char* message, void* user_data);
 
-// ── Change-gated rendering ───────────────────────────────────────────────
 // A frame is painted only when its content fingerprint changed, on input, or
 // while something animates (spinner, animated sponsor card, caret). Platform
 // main loops call ui_should_render() before each frame and wait for
