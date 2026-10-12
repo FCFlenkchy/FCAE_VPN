@@ -993,6 +993,7 @@ public class FCAEVpnService extends VpnService {
         final boolean tlsVerify     = intent.getBooleanExtra("tlsVerify", false);
         final boolean disableGrease = intent.getBooleanExtra("disableGrease", false);
         final boolean fragmentSni   = intent.getBooleanExtra("fragmentSni", false);
+        final String upstreamProxy = orEmpty(intent.getStringExtra("upstreamProxy")).trim();
         final String noizeVal = (noize == null || noize.isEmpty()) ? "balanced" : noize;
         final String peerVal  = (peer == null) ? "" : peer;
         final int sysProfile  = intent.getIntExtra("sysProfile", 0);
@@ -1102,7 +1103,8 @@ public class FCAEVpnService extends VpnService {
                     tunTcpSndbuf, tunTcpRcvbuf, tunTcpAutoTuning, t2sLog, tunEngine, tunMtu,
                     tunDnsCfgV,
                     echDns, echDomain, goolInner, tlsCiphers, enrollAddress, exitLoc,
-                    tlsVerify, disableGrease, fragmentSni
+                    tlsVerify, disableGrease, fragmentSni,
+                    upstreamProxy
                 );
                 if (ok && throughPsiphon) {
                     // nativeStart creates the Aether attach request. Poll only
@@ -1736,6 +1738,7 @@ public class FCAEVpnService extends VpnService {
         putInt(e, i, "torSocksPort", 0); // 0 = engine default (defer)
         putStr(e, i, "psiphonConfig");
         putStr(e, i, "psiphonRegion");
+        putStr(e, i, "upstreamProxy");
         putInt(e, i, "psiphonSocksPort", 0);
         putInt(e, i, "psiphonHttpPort", 0);
         // The AAR's transport is not a native config field, but a headless
@@ -1799,6 +1802,7 @@ public class FCAEVpnService extends VpnService {
         copyInt(p, i, "torSocksPort", 0); // 0 = engine default (defer)
         copyStr(p, i, "psiphonConfig");
         copyStr(p, i, "psiphonRegion");
+        copyStr(p, i, "upstreamProxy");
         copyInt(p, i, "psiphonSocksPort", 0);
         copyInt(p, i, "psiphonHttpPort", 0);
         copyInt(p, i, "psiphonTransport", 0);

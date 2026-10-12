@@ -163,6 +163,10 @@ pub struct Endpoints {
     pub psiphon_dns: bool,
 }
 
+fn routable(ip: IpAddr) -> bool {
+    !(ip.is_unspecified() || ip.is_multicast() || ip.is_loopback())
+}
+
 /// Addresses a TUN bridge must keep off its own device, parsed from
 /// [`Endpoints::peer_ip`].
 ///
@@ -173,12 +177,27 @@ pub fn bypass_peers(peer_ip: Option<&str>) -> Vec<IpAddr> {
     let mut peers: Vec<IpAddr> = Vec::new();
     for entry in peer_ip.unwrap_or_default().split(',') {
         let Ok(ip) = entry.trim().parse::<IpAddr>() else { continue };
-        if ip.is_unspecified() || ip.is_multicast() || ip.is_loopback() || peers.contains(&ip) {
+        if !routable(ip) || peers.contains(&ip) {
             continue;
         }
         peers.push(ip);
     }
     peers
+}
+
+/// `peer_ip` with `extra` appended. Appended rather than prepended: a
+/// pinned carrier endpoint keeps the first position.
+pub fn append_bypass(peer_ip: Option<&str>, extra: &[IpAddr]) -> Option<String> {
+    let mut list = peer_ip.map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+    let present = bypass_peers(peer_ip);
+    for ip in extra.iter().filter(|ip| routable(**ip) && !present.contains(ip)) {
+        let list = list.get_or_insert_with(String::new);
+        if !list.is_empty() {
+            list.push(',');
+        }
+        list.push_str(&ip.to_string());
+    }
+    list
 }
 
 impl Endpoints {
@@ -272,5 +291,17 @@ mod tests {
         );
         assert!(bypass_peers(None).is_empty());
         assert!(bypass_peers(Some("")).is_empty());
+    }
+
+    #[test]
+    fn appended_bypass_keeps_the_carrier_first_and_skips_duplicates() {
+        let proxy = [IpAddr::from([10, 0, 0, 1]), IpAddr::from([162, 159, 192, 1])];
+        assert_eq!(
+            append_bypass(Some("162.159.192.1,188.114.96.1"), &proxy).as_deref(),
+            Some("162.159.192.1,188.114.96.1,10.0.0.1")
+        );
+        assert_eq!(append_bypass(None, &proxy[..1]).as_deref(), Some("10.0.0.1"));
+        assert_eq!(append_bypass(None, &[IpAddr::from([127, 0, 0, 1])]), None);
+        assert_eq!(append_bypass(Some(" "), &[]), None);
     }
 }

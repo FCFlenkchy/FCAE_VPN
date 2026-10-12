@@ -640,6 +640,23 @@ async fn run_session(
             }
         }
 
+        // The carrier's own list, before the proxy joins it, is what the
+        // Windows health tick compares the live endpoints against.
+        let carrier_peers = endpoints.peer_ip.clone();
+        if config.is_tun() && cfg!(not(target_os = "android")) {
+            if let Some(proxy) = &config.upstream_proxy {
+                let bypass = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
+                        return Ok(());
+                    }
+                    ips = proxy.bypass_addresses() => ips,
+                };
+                endpoints.peer_ip = crate::backend::append_bypass(endpoints.peer_ip.as_deref(), &bypass);
+            }
+        }
+
         let tun_start = {
             let _control = tun_control.lock();
             *live_tun.lock() = Some(LiveTun {
@@ -690,7 +707,7 @@ async fn run_session(
         // of churning against a dead upstream. The TUN stays up across the gap.
         let chained = psi_handle.is_some();
         let carrier_ended = handle.wait();
-        let pump = pump_counters(&*handle, &sink, &config, &*tun_bridge, &tun_paused, &tun_control, &tun_settle, &endpoints);
+        let pump = pump_counters(&*handle, &sink, &config, &*tun_bridge, &tun_paused, &tun_control, &tun_settle, carrier_peers.as_deref());
         tokio::pin!(carrier_ended, pump);
         let mut carrier_up = true;
         let outcome = loop {
@@ -825,6 +842,8 @@ async fn start_psiphon_through_tunnel(
     let mut psi_cfg = config.clone();
     psi_cfg.backend = FcaeBackend::Psiphon;
     psi_cfg.psiphon.through_tunnel = false;
+    // Psiphon reaches the user's proxy through Aether, which already dials it.
+    psi_cfg.upstream_proxy = None;
     let json = psi_cfg
         .psiphon
         .config_json
@@ -878,10 +897,10 @@ async fn pump_counters(
     paused: &AtomicBool,
     control: &Mutex<()>,
     settle: &Mutex<Option<std::time::Instant>>,
-    endpoints: &Endpoints,
+    carrier_peers: Option<&str>,
 ) -> Result<()> {
     #[cfg(not(windows))]
-    let _ = endpoints;
+    let _ = carrier_peers;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut unhealthy: u32 = 0;
     loop {
@@ -914,7 +933,7 @@ async fn pump_counters(
             continue;
         }
         #[cfg(windows)]
-        if handle.endpoints().peer_ip != endpoints.peer_ip {
+        if handle.endpoints().peer_ip.as_deref() != carrier_peers {
             return Err(CoreError::Internal("outer endpoint changed; reconnecting TUN with fresh routes".into()));
         }
     }
@@ -1312,7 +1331,7 @@ mod tests {
             let _transition = control.lock();
             let result = runtime.block_on(async {
                 tokio::time::timeout(Duration::from_millis(10), pump_counters(
-                    &handle, &sink, &cfg, &bridge, &paused, &control, &settle, &endpoints,
+                    &handle, &sink, &cfg, &bridge, &paused, &control, &settle, endpoints.peer_ip.as_deref(),
                 )).await
             });
             assert!(result.is_err());
@@ -1323,7 +1342,7 @@ mod tests {
             *settle.lock() = Some(std::time::Instant::now() + TUN_SETTLE);
             let result = runtime.block_on(async {
                 tokio::time::timeout(Duration::from_millis(300), pump_counters(
-                    &handle, &sink, &cfg, &bridge, &paused, &control, &settle, &endpoints,
+                    &handle, &sink, &cfg, &bridge, &paused, &control, &settle, endpoints.peer_ip.as_deref(),
                 )).await
             });
             assert!(result.is_err(), "settle window must outlast the probe");
@@ -1332,7 +1351,7 @@ mod tests {
 
         *settle.lock() = None;
         let result = runtime.block_on(pump_counters(
-            &handle, &sink, &cfg, &bridge, &paused, &control, &settle, &endpoints,
+            &handle, &sink, &cfg, &bridge, &paused, &control, &settle, endpoints.peer_ip.as_deref(),
         ));
         assert!(result.is_err());
         assert!(bridge.0.load(Ordering::SeqCst) >= TUN_HEALTH_FAIL_TICKS as usize);

@@ -440,6 +440,7 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
             disable_grease: false,
             fragment_sni: false,
         },
+        upstream_proxy: std::ptr::null(),
     });
     FcaeStatus::Ok
 }
@@ -1063,6 +1064,21 @@ pub unsafe extern "C" fn fcae_parse_tcp_buffer_size(text: *const c_char) -> u32 
     guard_value("fcae_parse_tcp_buffer_size", 0, || {
         text.to_str().ok().and_then(|s| config::parse_tcp_buffer_size(s).ok()).unwrap_or(0)
     })
+}
+
+/// Validates an upstream proxy URL without a runtime; NULL/empty is valid.
+///
+/// # Safety
+/// `text` must be NULL or NUL-terminated; `err` NULL or `cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_check_upstream_proxy(text: *const c_char, err: *mut c_char, cap: u32) -> bool {
+    let failure = guard_value("fcae_check_upstream_proxy", Some("invalid proxy".to_string()), || {
+        fcae_runtime::upstream::UpstreamProxy::from_c(text).err()
+    });
+    if !err.is_null() && cap > 0 {
+        fill(std::slice::from_raw_parts_mut(err, cap as usize), failure.as_deref().unwrap_or(""));
+    }
+    failure.is_none()
 }
 
 /// Psiphon's currently bound SOCKS port, or zero when unavailable.

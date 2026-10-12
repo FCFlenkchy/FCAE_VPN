@@ -571,7 +571,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 final String embeddedList = readEmbeddedServerList();
                 if (stopping) return;
                 emitLog("starting tunnel" + (region.isEmpty() ? " (region Auto)" : " (region " + region + ")")
-                        + (upstreamProxy.isEmpty() ? "" : " via " + upstreamProxy)
+                        + (upstreamProxy.isEmpty() ? "" : " via " + redactUpstreamProxy(upstreamProxy))
                         + sourceSummary(embeddedList));
                 // Populate the region selector from authoritative sources in
                 // parallel with the handshake: the same remote server list
@@ -1009,13 +1009,29 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         return new String[]{TRANSPORT_PROTOCOLS[selection]};
     }
 
-    /** tunnel-core dropped the bare "socks" scheme; map it to socks5. */
+    /**
+     * Spell the proxy the way tunnel-core registers its dialers: socks5 (it
+     * always hands host names to the proxy) and http. A bare host:port is
+     * SOCKS5, as everywhere else in the app.
+     */
     static String normalizeUpstreamProxyUrl(String url) {
         String u = url.trim();
-        if (u.regionMatches(true, 0, "socks://", 0, 8)) {
-            return "socks5://" + u.substring(8);
+        int sep = u.indexOf("://");
+        if (sep < 0) return "socks5://" + u;
+        String rest = u.substring(sep + 3);
+        switch (u.substring(0, sep).toLowerCase(java.util.Locale.ROOT)) {
+            case "socks": case "socks5": case "socks5h": return "socks5://" + rest;
+            case "http": return "http://" + rest;
+            default: return u;
         }
-        return u;
+    }
+
+    /** The proxy without its credentials, for logs. */
+    static String redactUpstreamProxy(String url) {
+        int sep = url.indexOf("://");
+        int at = url.lastIndexOf('@');
+        if (at < 0) return url;
+        return (sep >= 0 && sep < at ? url.substring(0, sep + 3) : "") + url.substring(at + 1);
     }
 
     /**

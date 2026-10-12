@@ -573,6 +573,10 @@ pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<Star
     let mut config_json = inject_string_field(&config_json, "DataRootDirectory", &data_root_dir)?;
     config_json = inject_psiphon_ports(&config_json, p.socks_port, p.http_port)?;
     config_json = inject_string_field(&config_json, "ListenInterface", if cfg.lan_sharing { "any" } else { "" })?;
+    if let Some(proxy) = &cfg.upstream_proxy {
+        config_json = inject_upstream_proxy(&config_json, &proxy.url())?;
+        log::info!("[psiphon] dialling out through the upstream proxy {proxy}");
+    }
     config_json = inject_bootstrap_resolvers(&config_json)?;
 
     // Do not volunteer as an in-proxy proxy unless explicitly configured.
@@ -802,6 +806,23 @@ fn inject_string_field(config_json: &str, key: &str, value: &str) -> Result<Stri
         CoreError::InvalidConfig("psiphon.config_json must be a JSON object".into())
     })?;
     map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+    serde_json::to_string(&object).map_err(|e| {
+        CoreError::InvalidConfig(format!("could not render psiphon.config_json: {e}"))
+    })
+}
+
+/// Sets `UpstreamProxyURL`, dropping any differently-cased spelling: Go's
+/// case-insensitive decoder would otherwise let whichever sorts last win.
+#[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
+fn inject_upstream_proxy(config_json: &str, url: &str) -> Result<String> {
+    let mut object: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
+        CoreError::InvalidConfig(format!("psiphon.config_json is invalid JSON: {e}"))
+    })?;
+    let map = object.as_object_mut().ok_or_else(|| {
+        CoreError::InvalidConfig("psiphon.config_json must be a JSON object".into())
+    })?;
+    map.retain(|key, _| !key.eq_ignore_ascii_case("UpstreamProxyURL"));
+    map.insert("UpstreamProxyURL".into(), serde_json::Value::String(url.to_string()));
     serde_json::to_string(&object).map_err(|e| {
         CoreError::InvalidConfig(format!("could not render psiphon.config_json: {e}"))
     })
@@ -1567,6 +1588,20 @@ mod tests {
             serde_json::from_str(&validate(&cfg).unwrap().config_json).unwrap();
         assert_eq!(local["DisableTactics"], true);
         assert_eq!(local["LimitTunnelProtocols"][0], "QUIC-OSSH");
+    }
+
+    #[test]
+    fn user_proxy_replaces_any_configured_upstream() {
+        let mut cfg = make_config(
+            Some(r#"{"UpstreamProxyUrl":"http://old:1","A":1}"#),
+            Some("/tmp/psi"),
+        );
+        cfg.upstream_proxy = Some("socks://u:p%40ss@10.0.0.1:1080".parse().unwrap());
+        let out = validate(&cfg).unwrap().config_json;
+        let local: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(local["UpstreamProxyURL"], "socks5://u:p%40ss@10.0.0.1:1080");
+        assert!(!out.contains("old:1"), "{out}");
+        assert_eq!(local["A"], 1);
     }
 
     #[test]

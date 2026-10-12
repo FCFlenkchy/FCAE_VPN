@@ -18,6 +18,7 @@ use fcae_runtime::backend::{
 use fcae_runtime::config::{env_compat, SessionConfig};
 use fcae_runtime::error::{CoreError, Result};
 use fcae_runtime::telemetry::TelemetrySink;
+use fcae_runtime::upstream::{Relay, UpstreamProxy};
 use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
 
@@ -108,6 +109,22 @@ impl Backend for AetherBackend {
             cfg.socks_port = free_loopback_port()?;
         }
 
+        let relay = match cfg.upstream_proxy.take() {
+            Some(proxy) if proxy.engine_needs_relay(cfg.tor.mode) => {
+                let relay = Relay::start(proxy).await?;
+                cfg.upstream_proxy = Some(UpstreamProxy::loopback(relay.addr()));
+                Some(relay)
+            }
+            direct => {
+                cfg.upstream_proxy = direct;
+                None
+            }
+        };
+        if let Some(proxy) = &cx.config.upstream_proxy {
+            let via = if relay.is_some() { " (via a local relay)" } else { "" };
+            log::info!("[aether] dialling out through the upstream proxy {proxy}{via}");
+        }
+
         env_compat::apply(&cfg);
         pin_engine_stats_interval();
         cx.report(FcaeState::Scanning, "Establishing tunnel…");
@@ -182,6 +199,7 @@ impl Backend for AetherBackend {
             peers,
             stopped: AtomicBool::new(false),
             carrier_up: AtomicBool::new(true),
+            relay: Mutex::new(relay),
         }))
     }
 
@@ -559,6 +577,8 @@ struct AetherHandle {
     stopped: AtomicBool,
     /// Link state observed by `wait` across engine-side re-dials.
     carrier_up: AtomicBool,
+    /// Loopback bridge to the user's proxy when the engine cannot dial it.
+    relay: Mutex<Option<Relay>>,
 }
 
 #[async_trait]
@@ -654,6 +674,7 @@ impl BackendHandle for AetherHandle {
         if self.stopped.swap(true, Ordering::AcqRel) { return Ok(()); }
         let (job, addr) = (self.job, self.socks_addr);
         ffi_cancel(job);
+        drop(self.relay.lock().take());
         let deadline = tokio::time::Instant::now() + timeout;
         while tokio::time::Instant::now() < deadline {
             if ffi_poll(job).ok().flatten().is_some() { break; }

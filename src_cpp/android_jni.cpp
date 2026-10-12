@@ -404,6 +404,17 @@ Java_com_fc_fcaevpn_NativeEngine_nativeParseTcpBufferSize(JNIEnv* env, jclass, j
     return (jint)fcae_parse_tcp_buffer_size(value.c_str());
 }
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeCheckUpstreamProxy(JNIEnv* env, jclass, jstring text) {
+    const std::string value = jstr(env, text);
+    char err[192] = {};
+    fcae_check_upstream_proxy(value.c_str(), err, sizeof(err));
+    // NewStringUTF wants modified UTF-8; the message may echo user input.
+    for (char* c = err; *c; ++c)
+        if ((unsigned char)*c >= 0x80) *c = '?';
+    return env->NewStringUTF(err);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeInit(JNIEnv*, jclass) {
     ensure_init();
@@ -474,7 +485,8 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jstring exitLoc,
     jboolean tlsVerify,
     jboolean disableGrease,
-    jboolean fragmentSni
+    jboolean fragmentSni,
+    jstring upstreamProxy
 ) {
     ensure_init();
 
@@ -541,6 +553,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     cfg.aether.tls_verify     = tlsVerify == JNI_TRUE;
     cfg.aether.disable_grease = disableGrease == JNI_TRUE;
     cfg.aether.fragment_sni   = fragmentSni == JNI_TRUE;
+
+    const std::string upstreamOwned = jstr(env, upstreamProxy);
+    cfg.upstream_proxy = upstreamOwned.empty() ? nullptr : upstreamOwned.c_str();
 
     cfg.zero_trust.team_name    = teamOwned.empty() ? nullptr : teamOwned.c_str();
     cfg.zero_trust.access_token = tokenOwned.empty() ? nullptr : tokenOwned.c_str();

@@ -9,6 +9,7 @@
 //!   implements today and Psiphon will implement unchanged.
 //! * [`telemetry`] — the single shared telemetry cell + log bus.
 //! * [`update`] — app-level update checking: release manifest fetch, decode, compare.
+//! * [`upstream`] — the user's upstream proxy and its loopback SOCKS5 relay.
 //! * [`session`] — the supervisor that owns the runtime thread, starts the
 //!   backend, raises the TUN bridge, and guarantees teardown ordering.
 //!
@@ -26,6 +27,7 @@ pub mod tun_dns;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod unix_tun;
 pub mod update;
+pub mod upstream;
 
 pub use error::{CoreError, Result};
 

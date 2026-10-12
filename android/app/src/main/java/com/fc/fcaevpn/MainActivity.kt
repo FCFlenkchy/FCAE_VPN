@@ -170,6 +170,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerSysprofile: Spinner
     private lateinit var editSni: android.widget.EditText
     private lateinit var editForcePeer: android.widget.EditText
+    private lateinit var editUpstreamProxy: android.widget.EditText
     private lateinit var editSocksPort: android.widget.EditText
     private lateinit var editHttpPort: android.widget.EditText
     private lateinit var editTunMtu: android.widget.EditText
@@ -1238,6 +1239,14 @@ class MainActivity : AppCompatActivity() {
         spinnerSysprofile = findViewById(R.id.spinnerSysprofile)
         editSni = findViewById(R.id.editSni)
         editForcePeer = findViewById(R.id.editForcePeer)
+        editUpstreamProxy = findViewById(R.id.editUpstreamProxy)
+        editUpstreamProxy.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                editUpstreamProxy.error = upstreamProxyError().ifEmpty { null }
+            }
+        })
         editSocksPort = findViewById(R.id.editSocksPort)
         editHttpPort = findViewById(R.id.editHttpPort)
         editTunMtu = findViewById(R.id.editTunMtu)
@@ -1324,7 +1333,7 @@ class MainActivity : AppCompatActivity() {
         // cursor.  This covers every focus-loss path (taps outside, back
         // button, keyboard dismissal, spinner selection) regardless of how
         // the focus was moved.
-        val editTexts = listOf(editTunMtu, editSni, editForcePeer, editSocksPort, editHttpPort, editTorHttpPort, editTunTcpSndbuf, editTunTcpRcvbuf,
+        val editTexts = listOf(editTunMtu, editSni, editForcePeer, editUpstreamProxy, editSocksPort, editHttpPort, editTorHttpPort, editTunTcpSndbuf, editTunTcpRcvbuf,
             editTeam, editAccessToken, editAccessEmail, editRoutesFile, editRoutesInline,
             editEchDns, editEchDomain, editGoolInner, editEnrollAddress, editExitLoc, editTlsCiphers)
         for (et in editTexts) {
@@ -2326,6 +2335,7 @@ class MainActivity : AppCompatActivity() {
             putBoolean("disableGrease", switchDisableGrease.isChecked)
             putBoolean("fragmentSni", switchFragmentSni.isChecked)
             putString("forcePeer", editForcePeer.text.toString().trim())
+            putString("upstreamProxy", upstreamProxyText())
             putInt("sysprofile", spinnerSysprofile.selectedItemPosition)
             putString("socksPort", editSocksPort.text.toString())
             putString("httpPort", editHttpPort.text.toString())
@@ -2435,6 +2445,7 @@ class MainActivity : AppCompatActivity() {
         switchDisableGrease.isChecked = prefs.getBoolean("disableGrease", false)
         switchFragmentSni.isChecked = prefs.getBoolean("fragmentSni", false)
         editForcePeer.setText(prefs.getString("forcePeer", ""))
+        editUpstreamProxy.setText(prefs.getString("upstreamProxy", ""))
         spinnerSysprofile.setSelection(prefs.getInt("sysprofile", 0))
         editSocksPort.setText(prefs.getString("socksPort", "1819"))
         editHttpPort.setText(prefs.getString("httpPort", "1820"))
@@ -2534,6 +2545,11 @@ class MainActivity : AppCompatActivity() {
             editTorHttpPort.error = "Use a port from 1 to 65535"
             return
         }
+        upstreamProxyError().takeIf { it.isNotEmpty() }?.let {
+            editUpstreamProxy.error = it
+            editUpstreamProxy.requestFocus()
+            return
+        }
         connectionEpoch++
         userInitiatedDisconnect = false
         commandPaused = false
@@ -2570,62 +2586,51 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** AAR start; the foreground owner, not the Activity, owns the Psiphon bind. */
     private fun startPsiphon() {
-        startPsiphonWithUpstream(null)
-    }
-
-    /** AAR start. `upstream` is socks5://127.0.0.1:<aether> for through-tunnel. */
-    private fun startPsiphonWithUpstream(upstream: String?) {
-        if (upstream == null) {
-            connecting = true
-            vpnActive = true
-            updateButton()
-            saveSettings()
-            resetStats()
-            statusText.text = "CONNECTING"
-            statusText.setTextColor(COLOR_PROGRESS)
-        }
+        connecting = true
+        vpnActive = true
+        updateButton()
+        saveSettings()
+        resetStats()
+        statusText.text = "CONNECTING"
+        statusText.setTextColor(COLOR_PROGRESS)
+        val upstream = upstreamProxyText()
         ingestPsiphonLog(
-            if (upstream.isNullOrBlank()) "connecting"
-            else "connecting through $upstream"
+            if (upstream.isEmpty()) "connecting"
+            else "connecting through " + PsiphonTunnelService.redactUpstreamProxy(upstream)
         )
-        val i = Intent(this, PsiphonTunnelService::class.java)
-        i.action = PsiphonTunnelService.ACTION_START
-        i.putExtra("psiphonRegion", selectedPsiphonRegion())
-        i.putExtra("psiphonTransport", selectedPsiphonTransportIndex())
-        i.putExtra("lanSharing", switchLan.isChecked)
-        i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
-        i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
-        if (!upstream.isNullOrBlank()) i.putExtra("upstreamProxy", upstream)
-        // The foreground owner, not the Activity, owns the Psiphon bind.
         val owner = if (isTunModeSelected()) {
-            Intent(this, FCAEVpnService::class.java)
-                .setAction(FCAEVpnService.ACTION_PSIPHON_START)
-        } else if (upstream.isNullOrBlank()) {
-            Intent(this, ProxyNotification::class.java)
-                .setAction(ProxyNotification.ACTION_PSIPHON)
-        } else {
-            // Chained proxy mode must keep the normal Aether owner so its
-            // attach-request polling remains active.
-            Intent(this, ProxyNotification::class.java)
-                .setAction(ProxyNotification.ACTION_START)
-        }
-        i.extras?.let { owner.putExtras(it) }
-        if (isTunModeSelected()) {
             // A previous proxy owner must not keep its foreground service alive
             // while this TUN owner takes over.
             ProxyNotification.stopForModeSwitch()
             // Full session config rides on the owner: FCAEVpnService starts
             // the engine session itself when Psiphon reports READY, so the
             // connect survives this activity being swiped away mid-dial.
-            owner.putExtras(buildStartIntent())
             // The TUN-mode owner raises the interface before the AAR connects
             // (TUN first); it needs the session's MTU for that first Builder.
-            owner.putExtra("tunMtu", tunMtuBytes())
+            Intent(this, FCAEVpnService::class.java)
+                .setAction(FCAEVpnService.ACTION_PSIPHON_START)
+                .putExtras(buildStartIntent())
+                .putExtra("tunMtu", tunMtuBytes())
+        } else {
+            Intent(this, ProxyNotification::class.java)
+                .setAction(ProxyNotification.ACTION_PSIPHON)
         }
+        owner.putExtra("psiphonRegion", selectedPsiphonRegion())
+        owner.putExtra("psiphonTransport", selectedPsiphonTransportIndex())
+        owner.putExtra("lanSharing", switchLan.isChecked)
+        owner.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
+        owner.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
+        owner.putExtra("upstreamProxy", upstream)
         startForegroundService(owner)
         connectGeneration = FCAEVpnService.stateGeneration()
     }
+
+    private fun upstreamProxyText(): String = editUpstreamProxy.text.toString().trim()
+
+    private fun upstreamProxyError(): String =
+        try { NativeEngine.nativeCheckUpstreamProxy(upstreamProxyText()) } catch (_: Throwable) { "" }
 
     /**
      * Start the VPN service with the current settings.
@@ -2724,6 +2729,7 @@ class MainActivity : AppCompatActivity() {
         // tunnel looked dead even though Psiphon was up.
         i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
+        i.putExtra("upstreamProxy", upstreamProxyText())
         return i
     }
 
@@ -2796,6 +2802,7 @@ class MainActivity : AppCompatActivity() {
         val psiphonRegion = selectedPsiphonRegion()
         val psiphonSocksPort = editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0
         val psiphonHttpPort = editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0
+        val upstreamProxy = upstreamProxyText()
 
         val tunMtu = tunMtuBytes()
         val tunTcpSndbuf = tcpBufferBytes(editTunTcpSndbuf)
@@ -2869,6 +2876,7 @@ class MainActivity : AppCompatActivity() {
                     tlsVerify = tlsVerify,
                     disableGrease = disableGrease,
                     fragmentSni = fragmentSni,
+                    upstreamProxy = upstreamProxy,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }

@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 19;
+pub const FCAE_ABI_VERSION: u32 = 20;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
@@ -483,6 +483,11 @@ pub struct FcaeConfig {
     pub tun_engine: u64,
     /// Aether engine options. ABI v19: appended so all earlier offsets hold.
     pub aether: FcaeAether,
+    /// Proxy every outbound connection of the session dials through:
+    /// `http://`, `socks5://`, `socks5h://` or `socks://` (= socks5),
+    /// optionally with `user:pass@`; a bare
+    /// `host:port` is socks5. NULL or empty dials directly. ABI v20.
+    pub upstream_proxy: *const c_char,
 }
 
 /// Aether engine options without a home in the older sub-structs. Every

@@ -119,10 +119,14 @@ object NativeEngine {
         tlsVerify: Boolean,
         disableGrease: Boolean,
         fragmentSni: Boolean,
+        // Outbound proxy URL (http/socks5) or "" for direct.
+        upstreamProxy: String,
     ): Boolean
     @JvmStatic external fun nativePsiphonAttachRequest(): String
     @JvmStatic external fun nativePsiphonAttachComplete(id: Long, socks: Int, http: Int)
     @JvmStatic external fun nativeParseTcpBufferSize(text: String): Int
+    /** Why [text] is not a usable upstream proxy, or "" when it is (or empty). */
+    @JvmStatic external fun nativeCheckUpstreamProxy(text: String): String
     @JvmStatic external fun nativeStop()
 
     /**
@@ -235,6 +239,7 @@ object NativeEngine {
             tlsVerify = session.getBooleanExtra("tlsVerify", false),
             disableGrease = session.getBooleanExtra("disableGrease", false),
             fragmentSni = session.getBooleanExtra("fragmentSni", false),
+            upstreamProxy = session.getStringExtra("upstreamProxy").orEmpty(),
         )
     }
 

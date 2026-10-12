@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cctype>
 #include <new>
+#include <cerrno>
+#include <cstring>
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -22,6 +24,7 @@
 #include <unistd.h>
 #elif !defined(ANDROID)
 #include <fcntl.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -78,10 +81,14 @@ static int s_sponsor_connected_sent = -1;
 static std::string s_sponsor_last_error;
 static bool s_tun_paused = false;
 
+static const std::string& data_dir();
+static std::string join_path(const std::string& dir, const char* name);
+
 static void poll_sponsor() {
     const auto now = std::chrono::steady_clock::now();
     if (!s_sponsor_started) {
-        fcae_sponsor_load_cache();
+        if (fcae_sponsor_set_cache_dir(join_path(data_dir(), "sponsors").c_str()) != FCAE_OK)
+            fcae_sponsor_load_cache();
         s_sponsor_started = true;
     }
     const int ui_active = s_ui_window_visible.load() ? 1 : 0;
@@ -403,6 +410,7 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, g_app.tun_dns6);
     h = fnv_cstr(h, g_app.noize_profile);
     h = fnv_cstr(h, g_app.force_peer);
+    h = fnv_cstr(h, g_app.upstream_proxy);
     h = fnv_cstr(h, g_app.config_path);
     h = fnv_cstr(h, g_app.sni);
     h = fnv_cstr(h, g_app.ech_dns);
@@ -545,43 +553,66 @@ void ui_note_frame_drawn() {
 }
 
 
-static std::string join_cfg(const std::string& dir) {
-    if (dir.empty()) return "FCAE_VPN.cfg";
-    char sep =
 #if defined(_WIN32)
-        '\\';
-#else
-        '/';
-#endif
-    if (dir.back() == '/' || dir.back() == '\\') return dir + "FCAE_VPN.cfg";
-    return dir + sep + "FCAE_VPN.cfg";
+static constexpr char kPathSep = '\\';
+
+static std::wstring widen(const std::string& s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring w((size_t)n - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
+    return w;
 }
+
+static std::string narrow(const wchar_t* w) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return {};
+    std::string s((size_t)n - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, &s[0], n, nullptr, nullptr);
+    return s;
+}
+#else
+static constexpr char kPathSep = '/';
+#endif
+
+static bool is_absolute_path(const char* p) {
+    return p[0] == '/' || p[0] == '\\' || (p[0] && p[1] == ':');
+}
+
+static std::string join_path(const std::string& dir, const char* name) {
+    if (dir.empty()) return name;
+    if (dir.back() == '/' || dir.back() == '\\') return dir + name;
+    return dir + kPathSep + name;
+}
+
+static std::string join_cfg(const std::string& dir) { return join_path(dir, "FCAE_VPN.cfg"); }
 
 static std::string exe_dir() {
 #if defined(ANDROID)
     return "/data/data/com.fc.fcaevpn/files";
 #elif defined(_WIN32)
-    wchar_t wbuf[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, wbuf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return {};
-    std::wstring w(wbuf, n);
+    std::wstring w(MAX_PATH, L'\0');
+    for (;;) {
+        DWORD n = GetModuleFileNameW(nullptr, &w[0], (DWORD)w.size());
+        if (n == 0) return {};
+        if (n < w.size()) { w.resize(n); break; }
+        if (w.size() >= 32768) return {};
+        w.resize(w.size() * 2);
+    }
     size_t slash = w.find_last_of(L"\\/");
     if (slash != std::wstring::npos) w.resize(slash);
-    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (len <= 1) return {};
-    std::string u8((size_t)len - 1, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &u8[0], len, nullptr, nullptr);
-    return u8;
+    return narrow(w.c_str());
 #elif defined(__APPLE__)
-    char buf[PATH_MAX];
-    uint32_t size = PATH_MAX;
-    if (_NSGetExecutablePath(buf, &size) == 0) {
-        std::string p(buf);
-        size_t slash = p.find_last_of('/');
-        if (slash != std::string::npos) p.resize(slash);
-        return p;
-    }
-    return {};
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string p(size, '\0');
+    if (_NSGetExecutablePath(&p[0], &size) != 0) return {};
+    p.resize(strlen(p.c_str()));
+    char real[PATH_MAX];
+    if (realpath(p.c_str(), real)) p = real;
+    size_t slash = p.find_last_of('/');
+    if (slash != std::string::npos) p.resize(slash);
+    return p;
 #else
     char buf[4096];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -594,49 +625,31 @@ static std::string exe_dir() {
 #endif
 }
 
-#if defined(__APPLE__)
-// A signed bundle must not be written to and /Applications is often
-// read-only, so macOS keeps settings in the user's Application Support.
-static std::string mac_support_dir() {
-    const char* home = getenv("HOME");
-    if (!home || !*home) {
-        const passwd* pw = getpwuid(getuid());
-        home = pw ? pw->pw_dir : nullptr;
-    }
-    if (!home || !*home) return {};
-    std::string dir = std::string(home) + "/Library/Application Support/FCAE VPN";
-    mkdir((std::string(home) + "/Library/Application Support").c_str(), 0755);
-    mkdir(dir.c_str(), 0700);
-    return dir;
-}
-#endif
-
-// Preferred write path: next to the executable (stable regardless of cwd);
-// Application Support on macOS.
-static std::string get_config_path() {
-    static std::string cached;
-    if (!cached.empty()) return cached;
-#if defined(__APPLE__)
-    std::string dir = mac_support_dir();
-    if (dir.empty()) dir = exe_dir();
+static bool dir_exists(const std::string& dir) {
+#if defined(_WIN32)
+    const DWORD attr = GetFileAttributesW(widen(dir).c_str());
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
 #else
-    std::string dir = exe_dir();
+    struct stat st;
+    return stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 #endif
-    cached = dir.empty() ? "FCAE_VPN.cfg" : join_cfg(dir);
-    return cached;
+}
+
+static bool make_dir(const std::string& dir, bool private_dir) {
+#if defined(_WIN32)
+    (void)private_dir;
+    return CreateDirectoryW(widen(dir).c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
+#else
+    return mkdir(dir.c_str(), private_dir ? 0700 : 0755) == 0 || errno == EEXIST;
+#endif
 }
 
 // Open for read/write. On Windows use wide paths so UTF-8 exe dirs work.
 static FILE* open_cfg(const std::string& path, const char* mode) {
 #if defined(_WIN32)
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
-    if (wlen <= 0) return nullptr;
-    std::wstring wpath((size_t)wlen - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &wpath[0], wlen);
-    int mlen = MultiByteToWideChar(CP_UTF8, 0, mode, -1, nullptr, 0);
-    if (mlen <= 0) return nullptr;
-    std::wstring wmode((size_t)mlen - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, mode, -1, &wmode[0], mlen);
+    const std::wstring wpath = widen(path);
+    const std::wstring wmode = widen(mode);
+    if (wpath.empty() || wmode.empty()) return nullptr;
     return _wfopen(wpath.c_str(), wmode.c_str());
 #else
     if (mode && mode[0] == 'w') {
@@ -656,17 +669,158 @@ static bool file_exists(const std::string& path) {
     return true;
 }
 
-// Resolve which cfg to load: prefer the write path, then legacy locations
-// (next to the exe on macOS, then cwd); the next save lands on the write path.
-static std::string resolve_config_path_for_load() {
-    std::string primary = get_config_path();
-    if (file_exists(primary)) return primary;
-#if defined(__APPLE__)
-    const std::string legacy = join_cfg(exe_dir());
-    if (legacy != primary && file_exists(legacy)) return legacy;
+static bool dir_writable(const std::string& dir) {
+    if (dir.empty() || !make_dir(dir, false)) return false;
+    const std::string probe = join_path(dir, ".fcae_write_probe");
+    FILE* f = open_cfg(probe, "wb");
+    if (!f) return false;
+    fclose(f);
+#if defined(_WIN32)
+    _wremove(widen(probe).c_str());
+#else
+    unlink(probe.c_str());
 #endif
-    if (primary != "FCAE_VPN.cfg" && file_exists("FCAE_VPN.cfg"))
-        return "FCAE_VPN.cfg";
+    return true;
+}
+
+#if !defined(_WIN32) && !defined(ANDROID)
+static std::string home_dir() {
+    const char* home = getenv("HOME");
+    if (!home || !*home) {
+        const passwd* pw = getpwuid(getuid());
+        home = pw ? pw->pw_dir : nullptr;
+    }
+    return home && *home ? home : "";
+}
+#endif
+
+#if defined(__APPLE__)
+static std::string mac_support_dir() {
+    const std::string home = home_dir();
+    if (home.empty()) return {};
+    make_dir(home + "/Library/Application Support", false);
+    std::string dir = home + "/Library/Application Support/FCAE VPN";
+    return make_dir(dir, true) ? dir : std::string();
+}
+
+static bool ends_with(const std::string& s, const char* suffix) {
+    const size_t n = strlen(suffix);
+    return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
+}
+#endif
+
+// The folder that travels with the app: next to the .exe, next to the
+// AppImage file (its own directory is a read-only mount), or next to the
+// .app bundle (never inside it, which would break the signature). An app
+// installed under /Applications is not portable.
+static std::string portable_root() {
+#if defined(__APPLE__)
+    std::string dir = exe_dir();
+    if (!ends_with(dir, ".app/Contents/MacOS")) return dir;
+    dir.resize(dir.size() - strlen("/Contents/MacOS"));
+    const size_t slash = dir.find_last_of('/');
+    if (slash == std::string::npos || slash == 0) return {};
+    dir.resize(slash);
+    if (ends_with(dir, "/Applications") || dir.find("/Applications/") != std::string::npos
+        || dir.find("/AppTranslocation/") != std::string::npos)
+        return {};
+    return dir;
+#elif defined(_WIN32) || defined(ANDROID)
+    return exe_dir();
+#else
+    const char* appimage = getenv("APPIMAGE");
+    if (appimage && appimage[0] == '/') {
+        std::string dir(appimage);
+        const size_t slash = dir.find_last_of('/');
+        dir.resize(slash == 0 ? 1 : slash);
+        return dir;
+    }
+    return exe_dir();
+#endif
+}
+
+// Per-user location for when the portable folder is read-only.
+static std::string user_data_dir() {
+#if defined(_WIN32)
+    const wchar_t* root = _wgetenv(L"LOCALAPPDATA");
+    if (!root || !*root) return {};
+    std::string dir = narrow(root) + "\\FCAE_VPN";
+    return make_dir(dir, true) ? dir : std::string();
+#elif defined(__APPLE__)
+    return mac_support_dir();
+#elif defined(ANDROID)
+    return {};
+#else
+    std::string base;
+    const char* xdg = getenv("XDG_DATA_HOME");
+    if (xdg && xdg[0] == '/') {
+        base = xdg;
+    } else {
+        const std::string home = home_dir();
+        if (home.empty()) return {};
+        make_dir(home + "/.local", false);
+        base = home + "/.local/share";
+    }
+    make_dir(base, false);
+    std::string dir = base + "/fcae-vpn";
+    return make_dir(dir, true) ? dir : std::string();
+#endif
+}
+
+// Root of every file the app writes: settings, identity, Psiphon datastore,
+// sponsor cache. Relative paths in the settings resolve against it.
+static const std::string& data_dir() {
+    static const std::string dir = [] {
+        std::string root = portable_root();
+        if (dir_writable(root)) return root;
+        std::string user = user_data_dir();
+        return user.empty() ? root : user;
+    }();
+    return dir;
+}
+
+static std::string resolve_data_path(const char* stored) {
+    if (!stored[0] || is_absolute_path(stored)) return stored;
+    return join_path(data_dir(), stored);
+}
+
+// An absolute path written by an older build becomes relative when it lies
+// inside data_dir(), and falls back to its file name when it points into a
+// folder that no longer exists (the portable folder moved).
+static bool make_portable(char* buf, size_t cap) {
+    if (!buf[0] || !is_absolute_path(buf)) return false;
+    const std::string path = buf;
+    const std::string& root = data_dir();
+    const size_t n = root.size();
+    if (n && path.size() > n + 1 && path.compare(0, n, root) == 0
+        && (path[n] == '/' || path[n] == '\\')) {
+        snprintf(buf, cap, "%s", path.c_str() + n + 1);
+        return true;
+    }
+    const size_t slash = path.find_last_of("/\\");
+    if (slash == std::string::npos || slash + 1 == path.size() || slash == 0) return false;
+    if (dir_exists(path.substr(0, slash))) return false;
+    snprintf(buf, cap, "%s", path.c_str() + slash + 1);
+    return true;
+}
+
+static std::string get_config_path() {
+    static const std::string path = join_cfg(data_dir());
+    return path;
+}
+
+// Resolve which cfg to load: the write path first, then the locations older
+// builds wrote to; the next save lands on the write path.
+static std::string resolve_config_path_for_load() {
+    const std::string primary = get_config_path();
+    if (file_exists(primary)) return primary;
+    std::vector<std::string> legacy = {join_cfg(exe_dir())};
+#if defined(__APPLE__)
+    legacy.push_back(join_cfg(mac_support_dir()));
+#endif
+    legacy.push_back("FCAE_VPN.cfg");
+    for (const std::string& candidate : legacy)
+        if (candidate != primary && file_exists(candidate)) return candidate;
     return primary;
 }
 
@@ -716,6 +870,8 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "http_enabled") g_app.http_enabled = atoi(val.c_str()) != 0;
     else if (key == "force_peer")
         snprintf(g_app.force_peer, sizeof(g_app.force_peer), "%s", val.c_str());
+    else if (key == "upstream_proxy")
+        snprintf(g_app.upstream_proxy, sizeof(g_app.upstream_proxy), "%s", val.c_str());
     else if (key == "config_path")
         snprintf(g_app.config_path, sizeof(g_app.config_path), "%s", val.c_str());
     else if (key == "h2_enabled") g_app.h2_enabled = atoi(val.c_str()) != 0;
@@ -795,6 +951,7 @@ static void save_config() {
     fprintf(f, "socks_enabled=%d\n", g_app.socks_enabled ? 1 : 0);
     fprintf(f, "http_enabled=%d\n", g_app.http_enabled ? 1 : 0);
     fprintf(f, "force_peer=%s\n", g_app.force_peer);
+    fprintf(f, "upstream_proxy=%s\n", g_app.upstream_proxy);
     fprintf(f, "config_path=%s\n", g_app.config_path);
     fprintf(f, "h2_enabled=%d\n", g_app.h2_enabled ? 1 : 0);
     fprintf(f, "ech_enabled=%d\n", g_app.ech_enabled ? 1 : 0);
@@ -1071,42 +1228,19 @@ void ui_init() {
             snprintf(g_app.save_status, sizeof(g_app.save_status), "Created FCAE_VPN.cfg");
             g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
         }
-        // Make relative identity path (aether.toml) resolve next to the executable
-        if (g_app.config_path[0] && g_app.config_path[0] != '/' && g_app.config_path[0] != '\\'
-            && !(g_app.config_path[0] && g_app.config_path[1] == ':')) {
-            std::string dir = exe_dir();
-            if (!dir.empty()) {
-                char sep =
-#if defined(_WIN32)
-                    '\\';
-#else
-                    '/';
-#endif
-                std::string full = dir + sep + g_app.config_path;
-                snprintf(g_app.config_path, sizeof(g_app.config_path), "%s", full.c_str());
-            }
+        // Data paths stay relative to data_dir() so the folder can move
+        // between machines; resolve_data_path() anchors them at use.
+        bool migrated = make_portable(g_app.config_path, sizeof(g_app.config_path));
+        migrated |= make_portable(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir));
+        migrated |= make_portable(g_app.routes_file, sizeof(g_app.routes_file));
+        if (!g_app.psiphon_data_dir[0]) {
+            snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir), "psiphon");
+            migrated = true;
         }
+        if (migrated) save_config();
+        g_app.add_log(4, ("[ui] data folder: " + data_dir()).c_str());
         g_app.add_log(4, ("[ui] settings file: " + get_config_path()).c_str());
-        g_app.add_log(4, (std::string("[ui] identity file: ") + g_app.config_path).c_str());
-
-        // Psiphon keeps a persistent datastore and refuses to start without a
-        // writable directory for it. Default it next to the executable, in its own
-        // subdirectory so it never collides with the engine's state. The user can
-        // still override it in the config file.
-        if (g_app.psiphon_data_dir[0] == '\0') {
-            std::string dir = exe_dir();
-            if (!dir.empty()) {
-                char sep =
-#if defined(_WIN32)
-                    '\\';
-#else
-                    '/';
-#endif
-                std::string full = dir + sep + "psiphon";
-                snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir),
-                         "%s", full.c_str());
-            }
-        }
+        g_app.add_log(4, ("[ui] identity file: " + resolve_data_path(g_app.config_path)).c_str());
 
         // Auto-trigger update check once on startup if enabled and the FFI is live.
         if (runtime_ok && g_app.auto_update_check) {
@@ -1713,7 +1847,7 @@ void render_ui() {
                 struct Owned {
                     std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
                     std::string ech_dns, ech_domain, gool_inner, tls_ciphers, enroll_address, exit_loc;
-                    std::string psi_json, psi_embedded;
+                    std::string psi_json, psi_embedded, psi_dir, upstream;
                     FcaeConfig c{};
                 };
                 // Use unique_ptr with a custom deleter that handles the
@@ -1727,12 +1861,14 @@ void render_ui() {
                 );
                 o->noize = g_app.noize_profile;
                 o->peer  = g_app.force_peer;
-                o->path  = g_app.config_path;
+                o->path  = resolve_data_path(g_app.config_path);
                 o->sni   = g_app.sni;
                 o->team  = g_app.team_name;
                 o->token = g_app.access_token;
                 o->email = g_app.access_email;
-                o->routes = g_app.routes_file;
+                o->routes = resolve_data_path(g_app.routes_file);
+                o->psi_dir = resolve_data_path(g_app.psiphon_data_dir);
+                o->upstream = g_app.upstream_proxy;
                 o->routes_inline = g_app.routes_inline;
                 o->ech_dns = g_app.ech_dns;
                 o->ech_domain = g_app.ech_domain;
@@ -1748,19 +1884,20 @@ void render_ui() {
                 o->psi_json = g_app.psiphon_config_json_built;
                 {
                     // Auto-load psiphon_servers.txt
-                    // from the executable's directory when it exists and has
+                    // from the data folder when it exists and has
                     // content: the drop-in bundled-entries slot. Put entries
                     // you are ENTITLED to distribute there (your own servers
                     // or Psiphon-Labs provisioning) — never entries extracted
                     // from other clients; redistributing the Psiphon
                     // network's server addresses unprovisioned is what gets
                     // repositories taken down.
-                    std::string bundled = exe_dir() + "/psiphon_servers.txt";
-                    std::ifstream f(bundled, std::ios::binary);
-                    if (f) {
-                        std::ostringstream ss;
-                        ss << f.rdbuf();
-                        o->psi_embedded = ss.str();
+                    std::string bundled = join_path(data_dir(), "psiphon_servers.txt");
+                    if (FILE* f = open_cfg(bundled, "rb")) {
+                        char chunk[16384];
+                        size_t n;
+                        while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0)
+                            o->psi_embedded.append(chunk, n);
+                        fclose(f);
                         if (!o->psi_embedded.empty()) {
                             g_app.add_log(3, ("[ui] psiphon embedded server list: " +
                                               std::to_string(o->psi_embedded.size()) +
@@ -1789,6 +1926,8 @@ void render_ui() {
                 o->c.aether.enroll_address     = o->enroll_address.empty() ? nullptr : o->enroll_address.c_str();
                 o->c.aether.exit_loc           = o->exit_loc.empty() ? nullptr : o->exit_loc.c_str();
                 o->c.psiphon.config_json          = o->psi_json.c_str();
+                o->c.psiphon.data_root_dir        = o->psi_dir.empty() ? nullptr : o->psi_dir.c_str();
+                o->c.upstream_proxy               = o->upstream.empty() ? nullptr : o->upstream.c_str();
                 o->c.psiphon.embedded_server_list =
                     o->psi_embedded.empty() ? nullptr : o->psi_embedded.c_str();
                 auto* raw = o.release(); // transfer ownership to the thread
@@ -2510,6 +2649,19 @@ void render_ui() {
             ImGui::RadioButton("Proxy", &g_app.mode, 0);
             ImGui::RadioButton("TUN",   &g_app.mode, 1);
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::Text("Upstream Proxy");
+            ImGui::PushItemWidth(260);
+            ImGui::InputTextWithHint("##upstream_proxy", "socks5://user:pass@host:port",
+                                     g_app.upstream_proxy, sizeof(g_app.upstream_proxy));
+            ImGui::PopItemWidth();
+            {
+                char proxy_err[192];
+                if (!fcae_check_upstream_proxy(g_app.upstream_proxy, proxy_err, sizeof(proxy_err)))
+                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", proxy_err);
+                else
+                    ImGui::TextDisabled("http://, socks5:// or socks://; empty = direct");
+            }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Transport Options");
             ImGui::Checkbox("ECH", &g_app.ech_enabled);

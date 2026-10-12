@@ -60,6 +60,8 @@ struct AppState {
     bool tor_http_enabled = false;
     int tor_http_port = 1822;
     char force_peer[128] = {};
+    // Outbound proxy every carrier dials through (http/socks5 URL).
+    char upstream_proxy[512] = {};
     // Engine identity file (Cloudflare device certs). Not the UI settings file.
     char config_path[256] = "aether.toml";
     bool h2_enabled      = true;
@@ -255,6 +257,7 @@ struct AppState {
         c.http_port        = mode == 1 ? 0 : (http_enabled ? http_port : 0);
         c.tor_http_port    = tor_http_enabled ? tor_http_port : 0;
         c.force_peer       = force_peer[0] ? force_peer : nullptr;
+        c.upstream_proxy   = upstream_proxy[0] ? upstream_proxy : nullptr;
         c.config_path      = config_path;
 
         c.obfuscation.noize_profile    = noize_profile;
@@ -348,7 +351,7 @@ struct AppState {
         std::string json = kDefaultPsiphonConfig;
         // Server-entry sources are no longer user-configurable here: the
         // core falls back to its built-in legacy remote list (+ embedded
-        // entries auto-loaded from exe_dir()/psiphon_servers.txt by the
+        // entries auto-loaded from <data folder>/psiphon_servers.txt by the
         // start worker, and the legacy-list injection in the psiphon
         // bridge). Only the transport choice needs splicing in.
         json = merge_psiphon_transport(json, psiphon_transport);

@@ -19,6 +19,7 @@ use std::time::Duration;
 use fcae_abi::*;
 
 use crate::error::{CoreError, Result};
+use crate::upstream::UpstreamProxy;
 
 /// Read an optional C string: NULL, invalid UTF-8 and empty/whitespace all
 /// collapse to `None` so callers never have to distinguish "" from NULL.
@@ -307,6 +308,8 @@ pub struct SessionConfig {
     pub tor: TorConfig,
     pub tun: TunConfig,
     pub aether: AetherOptions,
+    /// Proxy every outbound connection of the session goes through.
+    pub upstream_proxy: Option<UpstreamProxy>,
 }
 
 impl Default for SessionConfig {
@@ -335,6 +338,7 @@ impl Default for SessionConfig {
             tor: TorConfig::default(),
             tun: TunConfig::default(),
             aether: AetherOptions::default(),
+            upstream_proxy: None,
         }
     }
 }
@@ -705,6 +709,8 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     };
 
     cfg.aether = parse_aether(&raw.aether)?;
+    cfg.upstream_proxy = UpstreamProxy::from_c(raw.upstream_proxy)
+        .map_err(|e| CoreError::InvalidConfig(format!("upstream_proxy: {e}")))?;
 
     // Tor
     let t = &raw.tor;
@@ -895,7 +901,32 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         ..TunConfig::default()
     };
 
+    if let Some(proxy) = &cfg.upstream_proxy {
+        if !proxy.kind.carries_udp() && aether_carrier_is_udp(&cfg) {
+            return Err(CoreError::InvalidConfig(
+                "an HTTP upstream proxy carries TCP only, but the selected transport runs over UDP \
+                 (WireGuard, WARP-in-WARP or HTTP/3); pick an HTTP/2 transport or use a SOCKS5 proxy"
+                    .into(),
+            ));
+        }
+    }
+
     Ok(cfg)
+}
+
+/// Whether the Aether carrier dials the network over UDP. Tor Only has no
+/// carrier and Reverse forces it onto HTTP/2 through Tor.
+fn aether_carrier_is_udp(cfg: &SessionConfig) -> bool {
+    cfg.backend == FcaeBackend::Aether
+        && !matches!(cfg.tor.mode, FcaeTorMode::Only | FcaeTorMode::Reverse)
+        && match cfg.protocol {
+            FcaeProtocol::WireGuard | FcaeProtocol::Gool => true,
+            FcaeProtocol::Masque
+            | FcaeProtocol::Auto
+            | FcaeProtocol::MasqueInMasque
+            | FcaeProtocol::WarpInMasque => !cfg.obfuscation.h2_enabled,
+            FcaeProtocol::Tor => false,
+        }
 }
 
 /// Validate an [`FcaeInitOptions`] header.
@@ -1135,6 +1166,10 @@ pub mod env_compat {
         );
 
         set("AETHER_PEER", cfg.force_peer.as_deref());
+        // Written on every start: the engine repoints this variable at its
+        // own Tor/Psiphon carrier in the reverse modes, and that value would
+        // otherwise outlive the session.
+        set("AETHER_UPSTREAM", cfg.upstream_proxy.as_ref().map(UpstreamProxy::url));
         // cfg.data_dir reaches the engine as the directory part of
         // AETHER_CONFIG, which is what it derives its sibling paths (identity,
         // lastconn, the tor state dir) from. AETHER_DATA_DIR was never read.
@@ -1337,9 +1372,13 @@ mod tests {
         assert_eq!(offset_of!(FcaeConfig, tun_tcp_rcvbuf), base + 12);
         assert_eq!(offset_of!(FcaeConfig, tun_tcp_auto_tuning), base + 16);
         assert_eq!(offset_of!(FcaeConfig, tor_http_port), base + 24);
-        // Appended after the former reserved slots; ABI v7.
+        // Appended after the former reserved slots; ABI v7, v8, v19, v20.
         assert_eq!(offset_of!(FcaeConfig, tun2socks_log_level), base + 32);
-        assert_eq!(size_of::<FcaeConfig>(), base + 40);
+        assert_eq!(offset_of!(FcaeConfig, tun_engine), base + 40);
+        assert_eq!(offset_of!(FcaeConfig, aether), base + 48);
+        let proxy = base + 48 + size_of::<FcaeAether>();
+        assert_eq!(offset_of!(FcaeConfig, upstream_proxy), proxy);
+        assert_eq!(size_of::<FcaeConfig>(), proxy + size_of::<*const c_char>());
     }
 
     #[test]
@@ -1448,6 +1487,16 @@ mod tests {
         assert!(std::env::var("AETHER_TOR_HTTP_PROXY").is_err());
         assert!(std::env::var("AETHER_TOR_BRIDGES").is_err());
         assert!(std::env::var("AETHER_TOR_BIND").is_err());
+
+        // A carrier address the engine wrote in a reverse mode never
+        // survives into the next session.
+        std::env::set_var("AETHER_UPSTREAM", "socks5://127.0.0.1:1821");
+        env_compat::apply(&cfg);
+        assert!(std::env::var("AETHER_UPSTREAM").is_err());
+        cfg.upstream_proxy = Some("http://u:p@10.0.0.1:3128".parse().unwrap());
+        env_compat::apply(&cfg);
+        assert_eq!(std::env::var("AETHER_UPSTREAM").unwrap(), "http://u:p@10.0.0.1:3128");
+        std::env::remove_var("AETHER_UPSTREAM");
     }
 
     #[test]
@@ -1502,6 +1551,32 @@ mod tests {
         }
         raw.tor_http_port = 0;
         assert!(unsafe { parse(&raw) }.is_ok());
+    }
+
+    #[test]
+    fn upstream_proxy_is_parsed_and_tcp_only_kinds_refuse_udp_carriers() {
+        let mut raw: FcaeConfig = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.upstream_proxy = c"http://10.0.0.1:3128".as_ptr();
+        raw.obfuscation.h2_enabled = true;
+        let cfg = unsafe { parse(&raw) }.expect("http proxy with MASQUE over HTTP/2");
+        assert_eq!(cfg.upstream_proxy.unwrap().kind, crate::upstream::ProxyKind::Http);
+
+        raw.obfuscation.h2_enabled = false;
+        assert!(unsafe { parse(&raw) }.is_err());
+        raw.protocol = FcaeProtocol::WireGuard;
+        assert!(unsafe { parse(&raw) }.is_err());
+        raw.tor.mode = FcaeTorMode::Only;
+        assert!(unsafe { parse(&raw) }.is_ok());
+
+        raw.tor.mode = FcaeTorMode::Off;
+        raw.upstream_proxy = c"socks5://10.0.0.1:1080".as_ptr();
+        assert!(unsafe { parse(&raw) }.is_ok());
+        raw.upstream_proxy = c"ftp://10.0.0.1:21".as_ptr();
+        assert!(unsafe { parse(&raw) }.is_err());
+        raw.upstream_proxy = c"  ".as_ptr();
+        assert!(unsafe { parse(&raw) }.unwrap().upstream_proxy.is_none());
     }
 
     #[test]
