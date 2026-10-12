@@ -404,15 +404,25 @@ Java_com_fc_fcaevpn_NativeEngine_nativeParseTcpBufferSize(JNIEnv* env, jclass, j
     return (jint)fcae_parse_tcp_buffer_size(value.c_str());
 }
 
+// Canonical proxy URL (ok) or the parse error; both ASCII-safe for NewStringUTF.
+static bool normalize_upstream_proxy(JNIEnv* env, jstring text, char (&out)[2048]) {
+    const std::string value = jstr(env, text);
+    const bool ok = fcae_normalize_upstream_proxy(value.c_str(), out, sizeof(out));
+    for (char* c = out; *c; ++c)
+        if ((unsigned char)*c >= 0x80) *c = '?';
+    return ok;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeCheckUpstreamProxy(JNIEnv* env, jclass, jstring text) {
-    const std::string value = jstr(env, text);
-    char err[192] = {};
-    fcae_check_upstream_proxy(value.c_str(), err, sizeof(err));
-    // NewStringUTF wants modified UTF-8; the message may echo user input.
-    for (char* c = err; *c; ++c)
-        if ((unsigned char)*c >= 0x80) *c = '?';
-    return env->NewStringUTF(err);
+    char out[2048];
+    return env->NewStringUTF(normalize_upstream_proxy(env, text, out) ? "" : out);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeNormalizeUpstreamProxy(JNIEnv* env, jclass, jstring text) {
+    char out[2048];
+    return normalize_upstream_proxy(env, text, out) ? env->NewStringUTF(out) : nullptr;
 }
 
 extern "C" JNIEXPORT void JNICALL

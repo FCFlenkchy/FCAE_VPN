@@ -1087,7 +1087,8 @@
                 android:layout_height="48dp"
                 android:layout_marginTop="4dp"
                 android:background="#FF1E1E2C"
-                android:hint="socks5://user:pass@host:port"
+                android:hint="socks5 &amp; http &amp; ip:port &amp; @user:pass"
+                android:ellipsize="end"
                 android:importantForAutofill="no"
                 android:inputType="textUri|textNoSuggestions"
                 android:padding="12dp"
@@ -1095,14 +1096,6 @@
                 android:textColor="#FFE8ECF4"
                 android:textColorHint="#FF5A6478"
                 android:textSize="14sp" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="http://, socks5:// or socks://. Every protocol, chain and Psiphon dials through it."
-                android:textColor="#FF5A6478"
-                android:textSize="11sp" />
 
             <TextView
                 android:layout_width="match_parent"

@@ -862,7 +862,7 @@ mod ffi {
     /// c-archives duplicate `_cgo_topofstack`/`crosscall2`, and one `dlopen`'d
     /// beside another SIGSEGVs — so Psiphon is its own module. What it does
     /// not have to be is a file next to the executable: the bytes are
-    /// embedded here, written under the temp directory on first use, and the
+    /// embedded here, unpacked into `deps/` beside the app on first use, and the
     /// eleven `psi_*` exports below are bound by hand. Same shape as the
     /// hev-socks5-tunnel engine, which is why the released desktop app is one
     /// file rather than one file plus a DLL.
@@ -872,6 +872,7 @@ mod ffi {
     /// extension can never drift from what was built.
     const DLL_NAME: &str = env!("FCAE_PSIPHON_DLL_NAME");
     /// Beside the engine's own directory so neither overwrites the other.
+    #[cfg(unix)]
     const EXTRACT_DIR: &str = "psiphon";
 
     type SetLogCallback = unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int, *const c_char)>);
@@ -1019,14 +1020,20 @@ mod ffi {
         Ok(resolved)
     }
 
-    /// Writes the embedded library under a per-user private temp directory
-    /// and returns its path. The host runs TUN elevated, so a shared,
-    /// predictable extract path is an escalation path: the directory is
-    /// created 0700 and re-verified on reuse, and a file already on disk is
-    /// trusted only when its bytes hash to the embedded digest — a stale
-    /// copy from an older version is never dlopen'd either.
+    /// Writes the embedded library into `deps/` beside the app (a per-user
+    /// private temp directory when that is unusable) and returns its path.
+    /// The host runs TUN elevated, so a shared, predictable extract path is
+    /// an escalation path: the directory must be 0700 and owned by this user,
+    /// and a file already on disk is trusted only when its bytes hash to the
+    /// embedded digest — a stale copy from an older version is never
+    /// dlopen'd either.
+    #[cfg(unix)]
     fn extract() -> Result<std::path::PathBuf> {
-        let dir = private_dir()?.join(EXTRACT_DIR);
+        let dir = match fcae_runtime::deps::dir() {
+            Some(deps) => deps.to_path_buf(),
+            None => private_temp_dir()?,
+        }
+        .join(EXTRACT_DIR);
         std::fs::create_dir_all(&dir).map_err(|e| {
             CoreError::StartFailed(format!("cannot create {}: {e}", dir.display()))
         })?;
@@ -1038,7 +1045,6 @@ mod ffi {
         std::fs::write(&staged, EMBEDDED).map_err(|e| {
             CoreError::StartFailed(format!("cannot write {}: {e}", staged.display()))
         })?;
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
@@ -1051,8 +1057,25 @@ mod ffi {
         Ok(dest)
     }
 
+    /// Stages the library like the engine DLLs: verified against the embedded
+    /// bytes and write-locked for the life of the process, so nothing can
+    /// swap it between the check and `LoadLibraryW`.
+    #[cfg(windows)]
+    fn extract() -> Result<std::path::PathBuf> {
+        use fcae_runtime::windows_dll::EmbeddedFiles;
+        static STAGED: OnceLock<EmbeddedFiles> = OnceLock::new();
+        let staged = match STAGED.get() {
+            Some(staged) => staged,
+            None => {
+                let files = EmbeddedFiles::stage("psiphon", &[(DLL_NAME, EMBEDDED)])?;
+                STAGED.get_or_init(|| files)
+            }
+        };
+        Ok(staged.directory().join(DLL_NAME))
+    }
+
     #[cfg(unix)]
-    fn private_dir() -> Result<std::path::PathBuf> {
+    fn private_temp_dir() -> Result<std::path::PathBuf> {
         use std::os::unix::fs::MetadataExt;
         let uid = unsafe { libc::getuid() };
         let base = std::env::temp_dir().join(format!("FCAE_VPN-{uid}"));
@@ -1082,19 +1105,14 @@ mod ffi {
         Ok(base)
     }
 
-    #[cfg(windows)]
-    fn private_dir() -> Result<std::path::PathBuf> {
-        // The Windows temp directory already carries per-user ACLs; that is
-        // the ownership guarantee the unix 0700 mkdir provides.
-        Ok(std::env::temp_dir().join("FCAE_VPN"))
-    }
-
+    #[cfg(unix)]
     fn embedded_digest() -> &'static [u8; 32] {
         use sha2::Digest;
         static DIGEST: OnceLock<[u8; 32]> = OnceLock::new();
         DIGEST.get_or_init(|| sha2::Sha256::digest(EMBEDDED).into())
     }
 
+    #[cfg(unix)]
     fn matches_embedded(path: &std::path::Path) -> bool {
         use sha2::Digest;
         let Ok(meta) = path.metadata() else {

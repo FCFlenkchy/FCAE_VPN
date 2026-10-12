@@ -2595,7 +2595,7 @@ class MainActivity : AppCompatActivity() {
         resetStats()
         statusText.text = "CONNECTING"
         statusText.setTextColor(COLOR_PROGRESS)
-        val upstream = upstreamProxyText()
+        val upstream = upstreamProxyUrl()
         ingestPsiphonLog(
             if (upstream.isEmpty()) "connecting"
             else "connecting through " + PsiphonTunnelService.redactUpstreamProxy(upstream)
@@ -2628,6 +2628,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun upstreamProxyText(): String = editUpstreamProxy.text.toString().trim()
+
+    /** The canonical `user:pass@host:port` URL every consumer (tunnel-core included) understands. */
+    private fun upstreamProxyUrl(): String {
+        val raw = upstreamProxyText()
+        if (raw.isEmpty()) return raw
+        return try { NativeEngine.nativeNormalizeUpstreamProxy(raw) ?: raw } catch (_: Throwable) { raw }
+    }
 
     private fun upstreamProxyError(): String =
         try { NativeEngine.nativeCheckUpstreamProxy(upstreamProxyText()) } catch (_: Throwable) { "" }
@@ -2729,7 +2736,7 @@ class MainActivity : AppCompatActivity() {
         // tunnel looked dead even though Psiphon was up.
         i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
-        i.putExtra("upstreamProxy", upstreamProxyText())
+        i.putExtra("upstreamProxy", upstreamProxyUrl())
         return i
     }
 
@@ -2802,7 +2809,7 @@ class MainActivity : AppCompatActivity() {
         val psiphonRegion = selectedPsiphonRegion()
         val psiphonSocksPort = editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0
         val psiphonHttpPort = editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0
-        val upstreamProxy = upstreamProxyText()
+        val upstreamProxy = upstreamProxyUrl()
 
         val tunMtu = tunMtuBytes()
         val tunTcpSndbuf = tcpBufferBytes(editTunTcpSndbuf)

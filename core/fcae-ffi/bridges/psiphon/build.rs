@@ -19,8 +19,8 @@
 //!
 //! When `enabled` is on (the `psiphon-live` feature), `go/` is built as
 //! `libfcae_psiphon` (`c-shared` `.so` / `.dll` / `.dylib`). The library is
-//! **not** linked: its bytes are embedded in the host binary and written to
-//! the temp directory on first use, then loaded and bound by hand, the same
+//! **not** linked: its bytes are embedded in the host binary and unpacked into
+//! `deps/` beside the app on first use, then loaded and bound by hand, the same
 //! way the hev-socks5-tunnel engine is handled. That keeps the released
 //! desktop app a single file — the DLL is a build product, not a shippable
 //! one. A second Go runtime still needs its own module, so `force_shared`

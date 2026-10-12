@@ -74,7 +74,7 @@ fn load_from_dir(dir: &Path) -> Result<Ffi> {
 fn load_embedded() -> Result<Ffi> {
     #[cfg(hev_dynamic)]
     {
-        let embedded = EmbeddedFiles::stage(EMBEDDED).map_err(|e| CoreError::Internal(e.to_string()))?;
+        let embedded = EmbeddedFiles::stage("hev", EMBEDDED).map_err(|e| CoreError::Internal(e.to_string()))?;
         let mut ffi = load_from_dir(embedded.directory())?;
         ffi._embedded = Some(embedded);
         Ok(ffi)

@@ -2651,16 +2651,22 @@ void render_ui() {
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Upstream Proxy");
-            ImGui::PushItemWidth(260);
-            ImGui::InputTextWithHint("##upstream_proxy", "socks5://user:pass@host:port",
+            ImGui::PushItemWidth(-FLT_MIN);
+            ImGui::InputTextWithHint("##upstream_proxy", "socks5 & http & ip:port & @user:pass",
                                      g_app.upstream_proxy, sizeof(g_app.upstream_proxy));
             ImGui::PopItemWidth();
             {
-                char proxy_err[192];
-                if (!fcae_check_upstream_proxy(g_app.upstream_proxy, proxy_err, sizeof(proxy_err)))
+                static char checked[sizeof(g_app.upstream_proxy)] = {1};
+                static char proxy_err[192];
+                if (strcmp(checked, g_app.upstream_proxy) != 0) {
+                    char canonical[2048];
+                    proxy_err[0] = 0;
+                    if (!fcae_normalize_upstream_proxy(g_app.upstream_proxy, canonical, sizeof(canonical)))
+                        snprintf(proxy_err, sizeof(proxy_err), "%s", canonical);
+                    memcpy(checked, g_app.upstream_proxy, sizeof(checked));
+                }
+                if (proxy_err[0])
                     ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", proxy_err);
-                else
-                    ImGui::TextDisabled("http://, socks5:// or socks://; empty = direct");
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Transport Options");

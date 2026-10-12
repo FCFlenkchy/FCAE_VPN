@@ -1324,7 +1324,7 @@ jobs:
           cp build/fcaevpn "$APP/Contents/MacOS/fcaevpn"
           chmod +x "$APP/Contents/MacOS/fcaevpn"
           # No libfcae_psiphon.dylib: the second Go runtime is embedded in
-          # fcaevpn and dlopen'd from the temp directory at first start, so
+          # fcaevpn and dlopen'd from deps/ beside the app (or temp) at first start, so
           # there is no framework for the bundle to carry.
 
           ICONSET="$RUNNER_TEMP/AppIcon.iconset"

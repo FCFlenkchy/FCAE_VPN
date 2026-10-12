@@ -102,11 +102,7 @@ impl FromStr for UpstreamProxy {
             None => (ProxyKind::Socks5, raw),
         };
         let rest = rest.strip_suffix('/').unwrap_or(rest);
-        let (credentials, endpoint) = match rest.rsplit_once('@') {
-            Some((credentials, endpoint)) => (Some(credentials), endpoint),
-            None => (None, rest),
-        };
-        let (host, port) = split_endpoint(endpoint)?;
+        let (credentials, host, port) = split_credentials(rest)?;
         let (user, password) = match credentials {
             None => (None, None),
             Some(credentials) => {
@@ -127,6 +123,34 @@ impl FromStr for UpstreamProxy {
             return Err("socks5 user names and passwords are limited to 255 bytes".into());
         }
         Ok(Self { kind, host, port, user, password })
+    }
+}
+
+/// Credentials may precede the address (`user:pass@host:port`, the URL form)
+/// or follow it (`host:port@user:pass`). When both readings parse, the one with
+/// the more address-like host wins, ties going to the URL form.
+fn split_credentials(rest: &str) -> std::result::Result<(Option<&str>, String, u16), String> {
+    let Some((leading, endpoint)) = rest.rsplit_once('@') else {
+        let (host, port) = split_endpoint(rest)?;
+        return Ok((None, host, port));
+    };
+    let url_form = split_endpoint(endpoint);
+    let (address, trailing) = rest.split_once('@').unwrap_or((rest, ""));
+    match (url_form, split_endpoint(address)) {
+        (Ok((host, _)), Ok((alt_host, alt_port))) if host_rank(&alt_host) > host_rank(&host) => {
+            Ok((Some(trailing), alt_host, alt_port))
+        }
+        (Ok((host, port)), _) => Ok((Some(leading), host, port)),
+        (Err(_), Ok((host, port))) => Ok((Some(trailing), host, port)),
+        (Err(e), Err(_)) => Err(e),
+    }
+}
+
+fn host_rank(host: &str) -> u8 {
+    if host.parse::<IpAddr>().is_ok() || host.eq_ignore_ascii_case("localhost") {
+        2
+    } else {
+        u8::from(host.contains('.'))
     }
 }
 
@@ -639,6 +663,24 @@ mod tests {
         assert_eq!(parse(&proxy.url()), proxy);
         assert_eq!(proxy.to_string(), "socks5://1.2.3.4:1080");
         assert!(!format!("{proxy:?}").contains("p@ss"));
+    }
+
+    #[test]
+    fn credentials_may_trail_the_address() {
+        let canonical = parse("socks5://user:pass@1.2.3.4:1080");
+        assert_eq!(parse("socks5://1.2.3.4:1080@user:pass"), canonical);
+        assert_eq!(parse("1.2.3.4:1080@user:pass"), canonical);
+        assert_eq!(parse("socks5://1.2.3.4:1080@user:pass").url(), "socks5://user:pass@1.2.3.4:1080");
+        assert_eq!(parse("http://[2001:db8::1]:8080@u:p").url(), "http://u:p@[2001:db8::1]:8080");
+        let numeric = parse("socks5://1.2.3.4:1080@user:1234");
+        assert_eq!((numeric.host.as_str(), numeric.port), ("1.2.3.4", 1080));
+        assert_eq!((numeric.user.as_deref(), numeric.password.as_deref()), (Some("user"), Some("1234")));
+        let named = parse("socks5://proxy.example:1080@user:1234");
+        assert_eq!((named.host.as_str(), named.user.as_deref()), ("proxy.example", Some("user")));
+        let leading = parse("socks5://user:1234@proxy.example:1080");
+        assert_eq!((leading.host.as_str(), leading.port, leading.user.as_deref()), ("proxy.example", 1080, Some("user")));
+        let both = parse("socks5://1.1.1.1:1@2.2.2.2:2");
+        assert_eq!((both.host.as_str(), both.user.as_deref()), ("2.2.2.2", Some("1.1.1.1")));
     }
 
     #[test]

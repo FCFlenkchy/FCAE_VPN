@@ -54,11 +54,11 @@ impl Library {
         Ok(std::mem::transmute_copy(&proc))
     }
 
-    pub fn embedded(files: &[(&str, &[u8])], entry: &str) -> Result<Self> {
+    pub fn embedded(label: &str, files: &[(&str, &[u8])], entry: &str) -> Result<Self> {
         if !files.iter().any(|(name, _)| *name == entry) {
             return Err(CoreError::Internal("embedded DLL entry is missing".into()));
         }
-        let files = EmbeddedFiles::stage(files)?;
+        let files = EmbeddedFiles::stage(label, files)?;
         Self::load(files.dir.join(entry).as_os_str(), LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32, files.locks)
     }
 
@@ -76,7 +76,10 @@ pub struct EmbeddedFiles {
 }
 
 impl EmbeddedFiles {
-    pub fn stage(files: &[(&str, &[u8])]) -> Result<Self> {
+    /// Unpacks `files` into `deps/<label>-<digest>/` beside the app (the temp
+    /// directory when that is unusable) and holds them write-locked. Distinct
+    /// byte sets get distinct folders, since a loaded copy cannot be replaced.
+    pub fn stage(label: &str, files: &[(&str, &[u8])]) -> Result<Self> {
         let mut hash = Sha256::new();
         for (name, bytes) in files {
             if Path::new(name).file_name() != Some(OsStr::new(name)) {
@@ -87,7 +90,12 @@ impl EmbeddedFiles {
             hash.update((bytes.len() as u64).to_le_bytes());
             hash.update(bytes);
         }
-        let dir = std::env::temp_dir().join("FCAE_VPN").join("native").join(format!("{:x}", hash.finalize()));
+        let digest = hash.finalize();
+        let name = format!("{label}-{:016x}", u64::from_be_bytes(digest[..8].try_into().expect("32-byte digest")));
+        let dir = match crate::deps::dir() {
+            Some(deps) => deps.join(name),
+            None => std::env::temp_dir().join("FCAE_VPN").join("native").join(name),
+        };
         std::fs::create_dir_all(&dir).map_err(|e| {
             CoreError::Internal(format!("cannot create {}: {e}", dir.display()))
         })?;
@@ -137,7 +145,7 @@ pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {
     static WINTUN: OnceLock<std::result::Result<Library, String>> = OnceLock::new();
     WINTUN.get_or_init(|| {
         let library = if let Some(bytes) = bytes {
-            Library::embedded(&[("wintun.dll", bytes)], "wintun.dll")
+            Library::embedded("wintun", &[("wintun.dll", bytes)], "wintun.dll")
         } else {
             Library::load(OsStr::new("wintun.dll"), LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32, Vec::new())
         };

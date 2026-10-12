@@ -485,7 +485,8 @@ pub struct FcaeConfig {
     pub aether: FcaeAether,
     /// Proxy every outbound connection of the session dials through:
     /// `http://`, `socks5://`, `socks5h://` or `socks://` (= socks5),
-    /// optionally with `user:pass@`; a bare
+    /// with optional credentials as `user:pass@host:port` or
+    /// `host:port@user:pass`; a bare
     /// `host:port` is socks5. NULL or empty dials directly. ABI v20.
     pub upstream_proxy: *const c_char,
 }

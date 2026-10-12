@@ -127,6 +127,7 @@ object NativeEngine {
     @JvmStatic external fun nativeParseTcpBufferSize(text: String): Int
     /** Why [text] is not a usable upstream proxy, or "" when it is (or empty). */
     @JvmStatic external fun nativeCheckUpstreamProxy(text: String): String
+    @JvmStatic external fun nativeNormalizeUpstreamProxy(text: String): String?
     @JvmStatic external fun nativeStop()
 
     /**

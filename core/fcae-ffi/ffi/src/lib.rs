@@ -1066,19 +1066,26 @@ pub unsafe extern "C" fn fcae_parse_tcp_buffer_size(text: *const c_char) -> u32 
     })
 }
 
-/// Validates an upstream proxy URL without a runtime; NULL/empty is valid.
+/// Parses an upstream proxy without a runtime; NULL/empty is valid (no proxy).
+/// On success writes its canonical URL (empty for none) into `out`, otherwise
+/// the reason, and returns whether it parsed.
 ///
 /// # Safety
-/// `text` must be NULL or NUL-terminated; `err` NULL or `cap` writable bytes.
+/// `text` must be NULL or NUL-terminated; `out` NULL or `cap` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn fcae_check_upstream_proxy(text: *const c_char, err: *mut c_char, cap: u32) -> bool {
-    let failure = guard_value("fcae_check_upstream_proxy", Some("invalid proxy".to_string()), || {
-        fcae_runtime::upstream::UpstreamProxy::from_c(text).err()
+pub unsafe extern "C" fn fcae_normalize_upstream_proxy(text: *const c_char, out: *mut c_char, cap: u32) -> bool {
+    let parsed = guard_value("fcae_normalize_upstream_proxy", Err("invalid proxy".to_string()), || {
+        fcae_runtime::upstream::UpstreamProxy::from_c(text).map(|proxy| proxy.map(|proxy| proxy.url()).unwrap_or_default())
     });
-    if !err.is_null() && cap > 0 {
-        fill(std::slice::from_raw_parts_mut(err, cap as usize), failure.as_deref().unwrap_or(""));
+    let parsed = match parsed {
+        Ok(url) if !out.is_null() && cap > 0 && url.len() >= cap as usize => Err("proxy URL is too long".to_string()),
+        other => other,
+    };
+    if !out.is_null() && cap > 0 {
+        let text = match &parsed { Ok(text) | Err(text) => text };
+        fill(std::slice::from_raw_parts_mut(out, cap as usize), text);
     }
-    failure.is_none()
+    parsed.is_ok()
 }
 
 /// Psiphon's currently bound SOCKS port, or zero when unavailable.

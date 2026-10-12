@@ -8,6 +8,7 @@
 //! * [`backend`] — the [`Backend`](backend::Backend) plugin trait that Aether
 //!   implements today and Psiphon will implement unchanged.
 //! * [`telemetry`] — the single shared telemetry cell + log bus.
+//! * [`deps`] — the `deps/` folder embedded native libraries unpack into.
 //! * [`update`] — app-level update checking: release manifest fetch, decode, compare.
 //! * [`upstream`] — the user's upstream proxy and its loopback SOCKS5 relay.
 //! * [`session`] — the supervisor that owns the runtime thread, starts the
@@ -18,6 +19,7 @@
 
 pub mod backend;
 pub mod config;
+pub mod deps;
 pub mod error;
 pub mod registry;
 pub mod session;

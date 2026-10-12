@@ -335,7 +335,7 @@ typedef struct {
     uint64_t        tun2socks_log_level; /* FcaeT2sLog; 0 = default (silent) */
     uint64_t        tun_engine;      /* FCAE_TUN_ENGINE_*; TUN mode only; ABI v8 */
     FcaeAether      aether;          /* ABI v19 */
-    const char     *upstream_proxy;  /* http|socks5|socks5h|socks://[user:pass@]host:port; NULL = direct; ABI v20 */
+    const char     *upstream_proxy;  /* http|socks5|socks5h|socks://[user:pass@]host:port[@user:pass]; NULL = direct; ABI v20 */
 } FcaeConfig;
 
 /* Telemetry */
@@ -501,9 +501,10 @@ FcaeStatus fcae_set_tun_fd(int32_t fd);
 /* Pure size parser: decimal whole byte counts only.
  * Returns 0 for invalid/out-of-range/non-integral sizes. NULL also returns 0. */
 uint32_t fcae_parse_tcp_buffer_size(const char *text);
-/* Validates an upstream proxy URL (NULL/empty is valid: no proxy). On error
- * writes the reason into `err` (truncated to `cap`) and returns false. */
-bool fcae_check_upstream_proxy(const char *text, char *err, uint32_t cap);
+/* Parses an upstream proxy (NULL/empty is valid: no proxy). Returns true and
+ * writes its canonical URL ("" for none) into `out`, or returns false and
+ * writes the reason (truncated to `cap`). */
+bool fcae_normalize_upstream_proxy(const char *text, char *out, uint32_t cap);
 
 /* True if the process can create a TUN device (admin/root). */
 bool       fcae_is_privileged(void);
