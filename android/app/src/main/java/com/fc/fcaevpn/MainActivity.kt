@@ -254,6 +254,8 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var psiDownBps = 0L
     @Volatile private var psiTotalUp = 0L
     @Volatile private var psiTotalDown = 0L
+    /** The exit's latest word on its tunnel; false while tunnel-core redials. */
+    @Volatile private var psiTunnelUp = true
     @Volatile private var lastPsiphonStageLabel = ""
 
     private fun resetPsiStats() {
@@ -263,6 +265,7 @@ class MainActivity : AppCompatActivity() {
         psiDownBps = 0L
         psiTotalUp = 0L
         psiTotalDown = 0L
+        psiTunnelUp = true
     }
 
     private fun renderTrafficStats(
@@ -314,6 +317,18 @@ class MainActivity : AppCompatActivity() {
         psiDownBps = intent.getLongExtra(PsiphonTunnelService.EXTRA_DOWN_BPS, psiDownBps)
         psiTotalUp = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_UP, psiTotalUp)
         psiTotalDown = intent.getLongExtra(PsiphonTunnelService.EXTRA_TOTAL_DOWN, psiTotalDown)
+        psiTunnelUp = PsiphonTunnelService.tunnelUp(intent)
+    }
+
+    /** Pure Psiphon proxy has no engine to poll, so the exit's samples decide the word. */
+    private fun showPurePsiphonStatus() {
+        if (psiTunnelUp) {
+            statusText.text = "CONNECTED - PROXY"
+            statusText.setTextColor(COLOR_CONNECTED)
+        } else {
+            statusText.text = "RECONNECTING"
+            statusText.setTextColor(COLOR_PROGRESS)
+        }
     }
 
     private fun restoreLatestPsiStats() {
@@ -363,7 +378,13 @@ class MainActivity : AppCompatActivity() {
                     pendingPsiSocks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, pendingPsiSocks)
                     acceptPsiStats(intent)
                     if (vpnActive && (isPsiphonSelected() || isEgressPsiphon())) {
-                        handler.post { renderPsiStats() }
+                        handler.post {
+                            if (isPsiphonSelected() && !isTunModeSelected() && !connecting
+                                    && !commandConnecting && !notificationPause()) {
+                                showPurePsiphonStatus()
+                            }
+                            renderPsiStats()
+                        }
                     }
                 }
                 PsiphonTunnelService.BROADCAST_READY -> {
@@ -1723,10 +1744,8 @@ class MainActivity : AppCompatActivity() {
                         connecting = false
                         updateButton()
                         handler.removeCallbacks(poll)
-                        if (!statusText.text.toString().contains("CONNECTING")) {
-                            statusText.text = "CONNECTED - PROXY"
-                            statusText.setTextColor(COLOR_CONNECTED)
-                        }
+                        val word = statusText.text.toString()
+                        if (!word.contains("CONNECTING") || word == "RECONNECTING") showPurePsiphonStatus()
                         renderPsiStats()
                     }
                 } else if (try { NativeEngine.nativeTunPaused() } catch (_: Throwable) { false }) {
@@ -2008,10 +2027,7 @@ class MainActivity : AppCompatActivity() {
             engineRunning = true
             updateButton()
             handler.removeCallbacks(poll)
-            if (!connecting) {
-                statusText.text = "CONNECTED - PROXY"
-                statusText.setTextColor(COLOR_CONNECTED)
-            }
+            if (!connecting) showPurePsiphonStatus()
             renderPsiStats()
             return
         }
@@ -3740,8 +3756,12 @@ class MainActivity : AppCompatActivity() {
                     && isPsiphonPath
                     && commandConnecting
                     && pendingPsiSocks == 0
+            // The engine sees only the exit's local listener, which outlives
+            // the exit's tunnel while tunnel-core redials.
+            val psiphonExitDown = state == 4 && isPsiphonPath && !psiphonStillChaining && !psiTunnelUp
             val label = when {
                 psiphonStillChaining -> "CONNECTING"
+                psiphonExitDown -> "RECONNECTING"
                 state == 0 -> "DISCONNECTED"
                 state in 1..3 -> "CONNECTING"
                 state == 4 -> {
@@ -3760,7 +3780,7 @@ class MainActivity : AppCompatActivity() {
             }
             statusText.setTextColor(
                 when {
-                    psiphonStillChaining -> COLOR_PROGRESS
+                    psiphonStillChaining || psiphonExitDown -> COLOR_PROGRESS
                     state == 4 -> COLOR_CONNECTED
                     state == 5 -> COLOR_ERROR
                     state == 0 -> COLOR_DISCONNECTED

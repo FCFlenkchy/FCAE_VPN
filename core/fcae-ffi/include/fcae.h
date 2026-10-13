@@ -335,7 +335,7 @@ typedef struct {
     uint64_t        tun2socks_log_level; /* FcaeT2sLog; 0 = default (silent) */
     uint64_t        tun_engine;      /* FCAE_TUN_ENGINE_*; TUN mode only; ABI v8 */
     FcaeAether      aether;          /* ABI v19 */
-    const char     *upstream_proxy;  /* http|socks5|socks5h|socks://[user:pass@]host:port[@user:pass]; NULL = direct; ABI v20 */
+    const char     *upstream_proxy;  /* http|socks5|socks5h://[user:pass@]host:port[@user:pass]; NULL = direct; ABI v20 */
 } FcaeConfig;
 
 /* Telemetry */

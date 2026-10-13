@@ -454,6 +454,8 @@ impl Backend for PsiphonBackend {
             http_port: ffi::http_port(),
             host_lease: None,
             stopped: AtomicBool::new(false),
+            sink: cx.telemetry.clone(),
+            tunnel_up: AtomicBool::new(true),
         }))
     }
 
@@ -1470,6 +1472,11 @@ mod counters_state {
     }
 }
 
+/// Consecutive one-second polls without a tunnel before the loss is shown,
+/// so a tunnel swap does not flicker the status.
+#[cfg(all(feature = "enabled", psiphon_linked))]
+const TUNNEL_LOST_TICKS: u32 = 2;
+
 /// Handle over a running Psiphon tunnel.
 #[cfg_attr(not(all(feature = "enabled", psiphon_linked)), allow(dead_code))]
 struct PsiphonHandle {
@@ -1477,6 +1484,12 @@ struct PsiphonHandle {
     socks_port: u16,
     http_port: u16,
     stopped: AtomicBool,
+    /// tunnel-core redials on its own after losing every tunnel; `wait`
+    /// mirrors that gap into the session state instead of returning.
+    #[cfg(all(feature = "enabled", psiphon_linked))]
+    sink: fcae_runtime::telemetry::TelemetrySink,
+    #[cfg(all(feature = "enabled", psiphon_linked))]
+    tunnel_up: AtomicBool,
 }
 
 #[async_trait]
@@ -1516,18 +1529,40 @@ impl BackendHandle for PsiphonHandle {
     }
 
     async fn wait(&self) -> Result<()> {
-        // The shim tracks tunnel count via the Tunnels notice, so a drop is
-        // observable now (ClientLibrary gave no such signal and this had to
-        // park forever). Returning lets the supervisor reconnect.
+        // A stopped controller ends the session so the supervisor restarts
+        // it. Losing every tunnel does not: tunnel-core redials by itself,
+        // so the gap is reported as Reconnecting (debounced like Aether's
+        // carrier) and Connected again once a tunnel is back -- never left
+        // showing Connected over a dead exit.
         #[cfg(all(feature = "enabled", psiphon_linked))]
         {
+            let mut down_ticks = 0u32;
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 if self.stopped.load(Ordering::SeqCst) {
                     return Ok(());
                 }
-                if ffi::state() == ffi::STATE_STOPPED {
-                    return Err(CoreError::Internal("the Psiphon tunnel dropped".into()));
+                match ffi::state() {
+                    ffi::STATE_STOPPED => {
+                        return Err(CoreError::Internal("the Psiphon tunnel dropped".into()));
+                    }
+                    ffi::STATE_CONNECTED => {
+                        down_ticks = 0;
+                        if !self.tunnel_up.swap(true, Ordering::AcqRel) {
+                            log::info!("[psiphon] tunnel re-established");
+                            self.sink.set_state(FcaeState::Connected, "Tunnel reconnected".into());
+                        }
+                    }
+                    _ => {
+                        down_ticks = down_ticks.saturating_add(1);
+                        if down_ticks == TUNNEL_LOST_TICKS && self.tunnel_up.swap(false, Ordering::AcqRel) {
+                            log::warn!("[psiphon] every tunnel lost; tunnel-core is redialing");
+                            self.sink.set_state(
+                                FcaeState::Reconnecting,
+                                "Psiphon lost its tunnel; reconnecting…".into(),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1545,6 +1580,11 @@ impl BackendHandle for PsiphonHandle {
                 }
             }
         }
+    }
+
+    #[cfg(all(feature = "enabled", psiphon_linked))]
+    fn carrier_up(&self) -> bool {
+        self.tunnel_up.load(Ordering::Acquire)
     }
 
     async fn stop(&self, _timeout: Duration) -> Result<()> {
@@ -1614,7 +1654,7 @@ mod tests {
             Some(r#"{"UpstreamProxyUrl":"http://old:1","A":1}"#),
             Some("/tmp/psi"),
         );
-        cfg.upstream_proxy = Some("socks://u:p%40ss@10.0.0.1:1080".parse().unwrap());
+        cfg.upstream_proxy = Some("socks5://u:p%40ss@10.0.0.1:1080".parse().unwrap());
         let out = validate(&cfg).unwrap().config_json;
         let local: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(local["UpstreamProxyURL"], "socks5://u:p%40ss@10.0.0.1:1080");
@@ -1691,7 +1731,16 @@ mod tests {
 
     #[test]
     fn psiphon_endpoint_requires_native_dns() {
-        let handle = PsiphonHandle { host_lease: None, socks_port: 1080, http_port: 8080, stopped: AtomicBool::new(false) };
+        let handle = PsiphonHandle {
+            host_lease: None,
+            socks_port: 1080,
+            http_port: 8080,
+            stopped: AtomicBool::new(false),
+            #[cfg(all(feature = "enabled", psiphon_linked))]
+            sink: fcae_runtime::telemetry::TelemetrySink::new(Arc::new(fcae_runtime::telemetry::TelemetryCell::new())),
+            #[cfg(all(feature = "enabled", psiphon_linked))]
+            tunnel_up: AtomicBool::new(true),
+        };
         let endpoints = handle.endpoints();
         assert!(!endpoints.udp);
         assert!(endpoints.psiphon_dns);

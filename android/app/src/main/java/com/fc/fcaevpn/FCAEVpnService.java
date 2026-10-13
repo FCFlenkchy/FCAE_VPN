@@ -1556,13 +1556,18 @@ public class FCAEVpnService extends VpnService {
         try {
             state = NativeEngine.nativeGetState();
         } catch (Exception e) {
-            return SessionState.Phase.CONNECTED;
+            state = 4;
         }
         if (state == 6) return SessionState.Phase.RECONNECTING;
         // 0 = the engine has not reported yet, 1..3 = provisioning/scanning/
         // connecting: a session that exists and is not passing traffic yet.
         if (state <= 3) return SessionState.Phase.CONNECTING;
         if (state == 5) return SessionState.Phase.DISCONNECTED;
+        // The engine only sees the AAR's local SOCKS listener, which stays up
+        // while tunnel-core redials; the exit's own word decides.
+        if (sessionPsiphonExit && !PsiphonTunnelService.tunnelUp(lastPsiphonStats)) {
+            return SessionState.Phase.RECONNECTING;
+        }
         return SessionState.Phase.CONNECTED;
     }
 

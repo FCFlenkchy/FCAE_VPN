@@ -87,13 +87,13 @@ impl FromStr for UpstreamProxy {
                     "socks4" | "socks4a" => {
                         return Err("socks4 proxies are not supported; use socks5:// or http://".into())
                     }
-                    "socks" | "socks5" | "socks5h" => ProxyKind::Socks5,
+                    "socks5" | "socks5h" => ProxyKind::Socks5,
                     "https" => {
                         return Err("TLS to the proxy (https://) is not supported; use http://".into())
                     }
                     other => {
                         return Err(format!(
-                            "unsupported proxy scheme `{other}`; use http, socks5 or socks"
+                            "unsupported proxy scheme `{other}`; use http:// or socks5://"
                         ))
                     }
                 },
@@ -637,7 +637,6 @@ mod tests {
         assert_eq!(parse("HTTP://1.2.3.4:8080").kind, ProxyKind::Http);
         assert_eq!(parse("socks5://1.2.3.4:1080").kind, ProxyKind::Socks5);
         assert_eq!(parse("socks5h://proxy.example:1080").kind, ProxyKind::Socks5);
-        assert_eq!(parse("socks://1.2.3.4:1080").kind, ProxyKind::Socks5);
         assert_eq!(parse("1.2.3.4:1080").kind, ProxyKind::Socks5);
         assert_eq!(parse("socks5://[2001:db8::1]:1080/").host, "2001:db8::1");
     }
@@ -647,7 +646,7 @@ mod tests {
         for bad in [
             "", "ftp://1.2.3.4:21", "https://1.2.3.4:443", "socks5://1.2.3.4", "socks5://1.2.3.4:0",
             "socks5://1.2.3.4:70000", "socks5://2001:db8::1:1080", "socks5://bad host:1080",
-            "socks4://1.2.3.4:1080", "socks4a://1.2.3.4:1080", "socks5://:p@1.2.3.4:1080", "socks5://u%zz@1.2.3.4:1080",
+            "socks4://1.2.3.4:1080", "socks4a://1.2.3.4:1080", "socks://1.2.3.4:1080", "socks5://:p@1.2.3.4:1080", "socks5://u%zz@1.2.3.4:1080",
             "http://1.2.3.4:8080/path",
         ] {
             assert!(bad.parse::<UpstreamProxy>().is_err(), "{bad:?} accepted");
@@ -685,7 +684,7 @@ mod tests {
 
     #[test]
     fn canonical_urls() {
-        assert_eq!(parse("socks://u@[2001:db8::1]:1080/").url(), "socks5://u@[2001:db8::1]:1080");
+        assert_eq!(parse("socks5h://u@[2001:db8::1]:1080/").url(), "socks5://u@[2001:db8::1]:1080");
         assert_eq!(parse("socks5h://h.example:1080").url(), "socks5://h.example:1080");
         assert_eq!(parse("http://h.example:3128").url(), "http://h.example:3128");
     }

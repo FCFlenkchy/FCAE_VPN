@@ -484,7 +484,7 @@ pub struct FcaeConfig {
     /// Aether engine options. ABI v19: appended so all earlier offsets hold.
     pub aether: FcaeAether,
     /// Proxy every outbound connection of the session dials through:
-    /// `http://`, `socks5://`, `socks5h://` or `socks://` (= socks5),
+    /// `http://`, `socks5://` or `socks5h://`,
     /// with optional credentials as `user:pass@host:port` or
     /// `host:port@user:pass`; a bare
     /// `host:port` is socks5. NULL or empty dials directly. ABI v20.

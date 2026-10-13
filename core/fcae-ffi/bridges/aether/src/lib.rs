@@ -645,8 +645,13 @@ impl BackendHandle for AetherHandle {
                 if !was_up {
                     was_up = true;
                     self.carrier_up.store(true, Ordering::Release);
-                    self.sink
-                        .set_state(FcaeState::Connected, "Tunnel reconnected".into());
+                    // A chained Psiphon exit is restarted by the supervisor,
+                    // which reports Connected once that exit is back; the
+                    // carrier alone is not a working session.
+                    if !self.cfg.psiphon.through_tunnel {
+                        self.sink
+                            .set_state(FcaeState::Connected, "Tunnel reconnected".into());
+                    }
                 }
             } else {
                 misses = misses.saturating_add(1);

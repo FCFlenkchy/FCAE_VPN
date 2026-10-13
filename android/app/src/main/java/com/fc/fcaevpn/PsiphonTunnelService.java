@@ -87,6 +87,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String EXTRA_STAGE = "psiphonStage";
     public static final String EXTRA_STAGE_LABEL = "psiphonStageLabel";
     public static final String EXTRA_RTT = "rttMs";
+    /** Whether tunnel-core holds a tunnel right now; false while it redials. */
+    public static final String EXTRA_TUNNEL_UP = "tunnelUp";
     public static final String EXTRA_UP_BPS = "upBps";
     public static final String EXTRA_DOWN_BPS = "downBps";
     public static final String EXTRA_TOTAL_UP = "totalUp";
@@ -211,6 +213,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     }
 
     public static boolean hasActiveBinding() { return connection != null; }
+    /** The exit's tunnel state carried by a stats sample; no sample says nothing against it. */
+    public static boolean tunnelUp(Intent stats) {
+        return stats == null || stats.getBooleanExtra(EXTRA_TUNNEL_UP, true);
+    }
+
     public static boolean isCurrentBroadcast(Intent intent) {
         return intent.getLongExtra("psiSession", -1) == activeSession;
     }
@@ -417,6 +424,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private volatile boolean handshakeConnected;
     private volatile boolean handshakeRegion;
     private volatile boolean readyBroadcast;
+    // tunnel-core redials by itself after losing every tunnel (Tunnels count
+    // 0 -> onConnecting) and reports onConnected again once one is back.
+    private volatile boolean tunnelUp;
     private final Handler logHandler = new Handler(Looper.getMainLooper());
     private boolean logFlushPending;
     private final StringBuilder logBuf = new StringBuilder();
@@ -553,6 +563,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         handshakeConnected = false;
         handshakeRegion = false;
         readyBroadcast = false;
+        tunnelUp = false;
         bytesUp.set(0);
         bytesDown.set(0);
         broadcastStage(1, "CONNECTING");
@@ -683,6 +694,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         logHandler.removeCallbacks(dialHeartbeat);
         Thread st = statsThread;
         psiphonUp = false;
+        tunnelUp = false;
         if (st != null) {
             st.interrupt();
             // Let the loop finish any in-flight broadcast before the final
@@ -705,6 +717,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             fin.putExtra(EXTRA_SOCKS, socksPort.get());
             fin.putExtra(EXTRA_HTTP, httpPort.get());
             fin.putExtra(EXTRA_RTT, lastRttMs);
+            fin.putExtra(EXTRA_TUNNEL_UP, false);
             fin.putExtra(EXTRA_UP_BPS, 0L);
             fin.putExtra(EXTRA_DOWN_BPS, 0L);
             fin.putExtra(EXTRA_TOTAL_UP, bytesUp.get());
@@ -1020,7 +1033,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (sep < 0) return "socks5://" + u;
         String rest = u.substring(sep + 3);
         switch (u.substring(0, sep).toLowerCase(java.util.Locale.ROOT)) {
-            case "socks": case "socks5": case "socks5h": return "socks5://" + rest;
+            case "socks5": case "socks5h": return "socks5://" + rest;
             case "http": return "http://" + rest;
             default: return u;
         }
@@ -1335,6 +1348,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public void onConnected() {
         if (stopping) return;
         psiphonUp = true;
+        if (!tunnelUp && readyBroadcast) emitLog("tunnel re-established");
+        tunnelUp = true;
         handshakeConnected = true;
         int s = socksPort.get();
         PsiphonTunnel t = liveTunnel;
@@ -1347,6 +1362,15 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (lastRegions.isEmpty()) fetchRemoteServerRegions();
         startStatsLoop();
         maybeBroadcastReady();
+    }
+
+    // Tunnels count 0, paired with the count-1 onConnected above. Network
+    // waits are not used: a tunnel can survive one without a new notice.
+    @Override
+    public void onConnecting() {
+        if (stopping || !tunnelUp) return;
+        tunnelUp = false;
+        emitLog("lost every tunnel; reconnecting");
     }
 
     private synchronized void maybeBroadcastReady() {
@@ -1481,6 +1505,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 i.putExtra(EXTRA_SOCKS, socksPort.get());
                 i.putExtra(EXTRA_HTTP, httpPort.get());
                 i.putExtra(EXTRA_RTT, lastRttMs);
+                i.putExtra(EXTRA_TUNNEL_UP, tunnelUp);
                 i.putExtra(EXTRA_UP_BPS, upBps);
                 i.putExtra(EXTRA_DOWN_BPS, downBps);
                 i.putExtra(EXTRA_TOTAL_UP, up);

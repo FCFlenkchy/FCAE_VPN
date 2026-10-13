@@ -64,6 +64,8 @@ public class ProxyNotification extends Service {
          * made the status flip CONNECTED -> CONNECTING -> CONNECTED.
          */
     private volatile boolean psiLive;
+    /** The exit was up at some point this session, so a gap is a reconnect. */
+    private volatile boolean psiWasLive;
     private boolean handingOff;
     private long ownerGeneration;
     private Intent lastPsiphonStats;
@@ -176,7 +178,8 @@ public class ProxyNotification extends Service {
             if (PsiphonTunnelService.BROADCAST_STATS.equals(intent.getAction())) {
                 lastPsiphonStats = new Intent(intent);
                 cachePsiphonStats(context, lastPsiphonStats);
-                psiLive = true;
+                psiLive = PsiphonTunnelService.tunnelUp(intent);
+                psiWasLive |= psiLive;
                 updateNotification();
                 return;
             }
@@ -189,6 +192,7 @@ public class ProxyNotification extends Service {
                     || PsiphonTunnelService.BROADCAST_FAILED.equals(intent.getAction());
             if (!ready && !stopped) return;
             psiLive = ready;
+            psiWasLive |= ready;
             if (!externalPsiphon) return;
             if (stopped) {
                 stopProxy();
@@ -339,6 +343,7 @@ public class ProxyNotification extends Service {
             externalPsiphon = true;
             psiTelemetry = true;
             psiLive = false;
+            psiWasLive = false;
             showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
             Intent psi = new Intent(this, PsiphonTunnelService.class).setAction(PsiphonTunnelService.ACTION_START);
             if (intent.getExtras() != null) psi.putExtras(intent.getExtras());
@@ -425,6 +430,7 @@ public class ProxyNotification extends Service {
             externalPsiphon = true;
             psiTelemetry = true;
             psiLive = false;
+            psiWasLive = false;
             Intent psi = new Intent(this, PsiphonTunnelService.class)
                     .setAction(PsiphonTunnelService.ACTION_START)
                     .putExtras(session)
@@ -436,6 +442,7 @@ public class ProxyNotification extends Service {
         psiTelemetry = psiTelemetry ||
                 (described && session.getBooleanExtra("psiphonThroughTunnel", false));
         psiLive = false;
+        psiWasLive = false;
         if (described) startEngineFromSession(session);
         return START_STICKY;
     }
@@ -544,6 +551,7 @@ public class ProxyNotification extends Service {
             // says nothing about it — it reads CONNECTED as soon as the first
             // hop is, while the exit may still be dialing.
             if (psiLive) return SessionState.Phase.CONNECTED;
+            if (psiWasLive) return SessionState.Phase.RECONNECTING;
             int carrier = 0;
             try { carrier = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
             return carrier == 6 ? SessionState.Phase.RECONNECTING : SessionState.Phase.CONNECTING;
@@ -614,6 +622,7 @@ public class ProxyNotification extends Service {
         sessionRequested = false;
         psiTelemetry = false;
         psiLive = false;
+        psiWasLive = false;
         handler.removeCallbacks(statsRunnable);
         PsiphonTunnelService.killProcessOnExit(this);
         // Proxy mode has no VpnService, so nothing else broadcasts state. The
