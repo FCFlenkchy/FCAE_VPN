@@ -1,7 +1,7 @@
 {
   "type": "release",
   "version": "1.4.1",
-  "release_date": "2026-10-12",
+  "release_date": "2026-10-13",
   "release_notes": "upstream proxy http & socks5 into ui's and destkops now fully portable",
   "download_url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/1.4.1"
 }
