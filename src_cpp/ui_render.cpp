@@ -366,7 +366,6 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, t.total_tx);
     h = fnv_cstr(h, t.connected_peer);
     h = fnv_cstr(h, t.lan_ip);
-    h = fnv_cstr(h, t.status_message);
     h = fnv_cstr(h, t.last_error);
 
     // Log revision also detects identical new lines after the ring fills.
@@ -2315,10 +2314,6 @@ void render_ui() {
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Show connection details");
-
-            if (telem.status_message[0] && telem.state == FCAE_STATE_CONNECTED) {
-                ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.60f, 1.0f), "%s", telem.status_message);
-            }
         }
         ImGui::EndGroup();
 

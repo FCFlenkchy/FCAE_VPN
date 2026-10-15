@@ -856,6 +856,7 @@ fn inject_psiphon_ports(config_json: &str, socks: u16, http: u16) -> Result<Stri
 mod ffi {
     use fcae_runtime::error::{CoreError, Result};
     use std::ffi::{c_char, c_int, CStr, CString};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::OnceLock;
 
     /// The whole second Go runtime, carried inside this binary.
@@ -1248,8 +1249,7 @@ mod ffi {
 
     pub(super) fn start(inputs: &super::StartInputs, use_binder: bool) -> Result<()> {
         // Fresh session: drop the previous tunnel's RTT measurement.
-        PSI_RTT_MS.store(0, std::sync::atomic::Ordering::Relaxed);
-        PSI_RTT_NEXT_PROBE_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
+        reset_rtt();
         let config = CString::new(inputs.config_json.as_str())
             .map_err(|_| CoreError::InvalidConfig("psiphon.config_json contains a NUL".into()))?;
         let servers = CString::new(inputs.embedded_server_list.as_str()).map_err(|_| {
@@ -1338,66 +1338,89 @@ mod ffi {
             total_tx,
             tx_bytes_sec: tx_rate,
             rx_bytes_sec: rx_rate,
-            rtt_ms: PSI_RTT_MS.load(std::sync::atomic::Ordering::Relaxed) as u32,
+            rtt_ms: PSI_RTT_MS.load(Ordering::Acquire) as u32,
         }
     }
 
     // The psiphon shim exports no latency telemetry, so the bridge measures
     // it: one HTTP round trip through the shim's local HTTP proxy
     // (absolute-URI HEAD against Google's generate_204 edge) -- a full tunnel
-    // round trip to the internet. Runs on a short-lived thread at most every
-    // 2 s so the ~500 ms telemetry pump in counters() never blocks on a dead
-    // or filtered tunnel. 0 means "no measurement yet".
-    static PSI_RTT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    static PSI_RTT_PROBE_ACTIVE: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-    static PSI_RTT_NEXT_PROBE_SECS: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
+    // round trip to the internet. Like the Android service, it is measured
+    // once per connect and then held: periodic probes made the figure jump
+    // on every refresh, spammed Psiphon notices and, on a broken server,
+    // inflated its port-forward failure count. Until the first success it
+    // retries with backoff (2, 4, then every 8 s, 12 attempts) on a
+    // short-lived thread, so the telemetry pump never blocks on a dead or
+    // filtered tunnel. 0 means "no measurement yet".
+    const RTT_ATTEMPTS: u32 = 12;
+    static PSI_RTT_MS: AtomicU64 = AtomicU64::new(0);
+    static PSI_RTT_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+    static PSI_RTT_NEXT_PROBE_SECS: AtomicU64 = AtomicU64::new(0);
+    static PSI_RTT_PROBE_ACTIVE: AtomicBool = AtomicBool::new(false);
+    /// Bumped per session so a probe still in flight from the previous
+    /// tunnel cannot publish into the new one.
+    static PSI_RTT_SESSION: AtomicU64 = AtomicU64::new(0);
 
+    fn reset_rtt() {
+        PSI_RTT_SESSION.fetch_add(1, Ordering::AcqRel);
+        PSI_RTT_MS.store(0, Ordering::Release);
+        PSI_RTT_ATTEMPTS.store(0, Ordering::Relaxed);
+        PSI_RTT_NEXT_PROBE_SECS.store(0, Ordering::Relaxed);
+    }
+
+    /// Time to a successful status line; error pages and resets are not a
+    /// tunnel round trip and must not be held for the whole session.
     fn probe_rtt_once(port: u16) -> Option<u64> {
         use std::io::{Read, Write};
-        let mut stream = std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-            std::time::Duration::from_millis(1500),
-        )
-        .ok()?;
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(1500)));
-        let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(1500)));
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+        let mut stream = std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), TIMEOUT).ok()?;
+        stream.set_read_timeout(Some(TIMEOUT)).ok()?;
+        stream.set_write_timeout(Some(TIMEOUT)).ok()?;
         let started = std::time::Instant::now();
         stream
             .write_all(b"HEAD http://www.gstatic.com/generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n")
             .ok()?;
-        let mut one = [0u8; 1];
-        stream.read(&mut one).ok()?;
-        Some(started.elapsed().as_millis().max(1) as u64)
+        let mut status = [0u8; 12];
+        stream.read_exact(&mut status).ok()?;
+        let elapsed = started.elapsed();
+        let success = status.starts_with(b"HTTP/1.") && status[8] == b' ' && matches!(status[9], b'2' | b'3');
+        success.then(|| elapsed.as_millis().max(1) as u64)
     }
 
     fn refresh_rtt() {
-        use std::sync::atomic::Ordering::Relaxed;
+        if PSI_RTT_MS.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let attempts = PSI_RTT_ATTEMPTS.load(Ordering::Relaxed);
+        if attempts >= RTT_ATTEMPTS {
+            return;
+        }
         let port = http_port();
         if port == 0 {
-            PSI_RTT_MS.store(0, Relaxed);
             return;
         }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if now < PSI_RTT_NEXT_PROBE_SECS.load(Relaxed) {
+        if now < PSI_RTT_NEXT_PROBE_SECS.load(Ordering::Relaxed) || PSI_RTT_PROBE_ACTIVE.swap(true, Ordering::AcqRel) {
             return;
         }
-        if PSI_RTT_PROBE_ACTIVE.swap(true, Relaxed) {
-            return;
-        }
-        PSI_RTT_NEXT_PROBE_SECS.store(now + 4, Relaxed);
-        let _ = std::thread::Builder::new()
-            .name("fcae-psi-rtt".into())
-            .spawn(move || {
-                if let Some(ms) = probe_rtt_once(port) {
-                    PSI_RTT_MS.store(ms, Relaxed);
+        let attempt = attempts + 1;
+        PSI_RTT_ATTEMPTS.store(attempt, Ordering::Relaxed);
+        PSI_RTT_NEXT_PROBE_SECS.store(now + (1u64 << attempt.min(3)), Ordering::Relaxed);
+        let session = PSI_RTT_SESSION.load(Ordering::Acquire);
+        let spawned = std::thread::Builder::new().name("fcae-psi-rtt".into()).spawn(move || {
+            if let Some(ms) = probe_rtt_once(port) {
+                if PSI_RTT_SESSION.load(Ordering::Acquire) == session {
+                    PSI_RTT_MS.store(ms, Ordering::Release);
                 }
-                PSI_RTT_PROBE_ACTIVE.store(false, Relaxed);
-            });
+            }
+            PSI_RTT_PROBE_ACTIVE.store(false, Ordering::Release);
+        });
+        if spawned.is_err() {
+            PSI_RTT_PROBE_ACTIVE.store(false, Ordering::Release);
+        }
     }
 
     /// Cumulative tunneled bytes from the shim's BytesTransferred notices.
