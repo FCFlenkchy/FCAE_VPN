@@ -138,24 +138,6 @@ jobs:
           # engine records a dependency on any of them.
           make -C core/hev-socks5-tunnel tp-static -j"$(nproc)"
 
-          # The engine FreeLibrary()s wintun.dll when WintunCreateAdapter
-          # fails. The driver's rundll32 installer can still have pipe-pump
-          # threads parked in wintun code then, and unmapping the DLL under
-          # them kills the host process (reproduced: execute fault in freed
-          # wintun text right after "socks5 tunnel open" fails). Pinning the
-          # module on first load freezes its refcount, so the close becomes a
-          # no-op and the host survives adapter-open failures.
-          sed -i '/^#undef X$/a\
-\
-    {\
-        HMODULE pinned;\
-        (void)GetModuleHandleExW (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |\
-                                  GET_MODULE_HANDLE_EX_FLAG_PIN,\
-                                  (LPCWSTR)hev_wintun_open, &pinned);\
-    }\
-' core/hev-socks5-tunnel/src/misc/hev-wintun.c
-          grep -q 'GET_MODULE_HANDLE_EX_FLAG_PIN' core/hev-socks5-tunnel/src/misc/hev-wintun.c
-
           # hev-task-system's IOCP reactor references get_osfhandle(), which
           # msys-2.0.dll exports only as _get_osfhandle(); this compat object
           # defines the plain name on top of it, so the static link resolves
