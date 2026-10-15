@@ -1,8 +1,8 @@
 //! Platform glue for the zeptun bridge.
 //!
-//! Deliberately thin: zeptun configures address/routes/DNS itself on desktop
-//! (`configure`/`auto_route`), and on Android the VpnService owns the device,
-//! so there is none of the shell-out undo machinery tun2socks needs.
+//! Deliberately thin: on desktop the shared runtime guards (`windows_tun`,
+//! `unix_tun`) own addressing, routes and DNS, and on Android the VpnService
+//! owns the device.
 
 /// True when building for the mobile preset (Android: VpnService-created fd).
 pub const fn is_android() -> bool {

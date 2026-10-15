@@ -15,7 +15,7 @@
 //! |---|---|---|
 //! | interop | cgo c-archive + recovery shims | plain C ABI, no runtime |
 //! | Android artifact | c-shared `.so` staged into jniLibs | static `.a` links into libfcae_ffi |
-//! | device setup | bridge shell-outs for address/routes/DNS | engine does it (`configure`/`auto_route`) |
+//! | device setup | bridge shell-outs for address/routes/DNS | same host guards; Android's VpnService owns it |
 //! | protect callback | not needed (loopback-only upstream) | same: FCAE's exit is always `127.0.0.1:port` |
 //! | FD device | Go option plumbing | `ZeptunConfig.device_kind = FD` |
 //!
@@ -331,7 +331,8 @@ struct Handle {
     engine: NonNull<c_void>,
     fd: Option<i32>,
     _psiphon_adapter: Option<socks5p::Adapter>,
-    dns: Option<fcae_runtime::tun_dns::DnsGuard>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    host: Option<fcae_runtime::unix_tun::TunGuard>,
     #[cfg(windows)]
     network: Option<fcae_runtime::windows_tun::TunGuard>,
 }
@@ -350,7 +351,8 @@ impl Drop for Handle {
         // abandoned the handle.
         #[cfg(windows)]
         drop(self.network.take());
-        drop(self.dns.take());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        drop(self.host.take());
         unsafe {
             zeptun_stop(self.engine.as_ptr());
             zeptun_destroy(self.engine.as_ptr());
@@ -507,14 +509,18 @@ impl TunBridge for ZeptunBridge {
                     set_c_str(&mut config.address6, v6)?;
                 }
             }
-            // Desktop: zeptun creates the device AND configures
-            // address/routes itself — no platform shell-out, unlike tun2socks.
+            // Desktop: zeptun only creates the device. Its auto_route
+            // exempts nothing but the engine's own sockets (Linux fwmark,
+            // macOS bound interface), so the backend's carrier connections
+            // in this same process would be routed back into the TUN. The
+            // host guards own addressing, carrier bypass, routes and DNS,
+            // exactly as for the other engines.
             None => {
                 config.device_kind = ZEPTUN_DEVICE_TUN;
                 set_c_str(&mut config.tun_name, adapter_name(cfg))?;
                 config.mtu = cfg.tun.mtu;
-                config.configure = u8::from(!cfg!(windows));
-                config.auto_route = u8::from(!cfg!(windows));
+                config.configure = 0;
+                config.auto_route = 0;
                 set_c_str(&mut config.address4, &cfg.tun.ipv4)?;
                 if let Some(v6) = &cfg.tun.ipv6 {
                     set_c_str(&mut config.address6, v6)?;
@@ -562,7 +568,8 @@ impl TunBridge for ZeptunBridge {
             engine: handle,
             fd: fd.map(|_| config.tun_fd),
             _psiphon_adapter: psiphon_adapter,
-            dns: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            host: None,
             #[cfg(windows)]
             network: None,
         };
@@ -581,7 +588,8 @@ impl TunBridge for ZeptunBridge {
             return Err(zeptun_err("start", rc)); // Handle drops: stop+destroy.
         }
 
-        if fd.is_none() && !platform::is_android() {
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        if fd.is_none() {
             let mut name = [0 as c_char; 64];
             let rc = unsafe { zeptun_interface_name(handle.as_ptr(), name.as_mut_ptr(), name.len()) };
             if rc < 0 { return Err(zeptun_err("interface_name", rc)); }
@@ -593,10 +601,13 @@ impl TunBridge for ZeptunBridge {
                 network_cfg.tun.name = name.to_owned();
                 handle.network = Some(fcae_runtime::windows_tun::TunGuard::configure(&network_cfg, endpoints.peer_ip.as_deref())?);
             }
-            #[cfg(not(windows))]
-            { handle.dns = Some(fcae_runtime::tun_dns::DnsGuard::apply(cfg, name)?); }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            { handle.host = Some(fcae_runtime::unix_tun::TunGuard::configure(cfg, name, endpoints.peer_ip.as_deref(), true)?); }
         }
 
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
+        }
         self.running.store(true, Ordering::SeqCst);
         *active = Some(handle);
         log::info!(
@@ -613,9 +624,27 @@ impl TunBridge for ZeptunBridge {
         // design (its own worker pool joins under its control).
         self.closing.store(true, Ordering::SeqCst);
         let handle = self.active.lock().take();
+        let was_up = handle.is_some();
         drop(handle);
-        if self.running.swap(false, Ordering::SeqCst) {
+        self.running.store(false, Ordering::SeqCst);
+        if was_up {
             log::info!("[tun] down (zeptun)");
+        }
+        self.external_fd.store(-1, Ordering::SeqCst);
+    }
+
+    /// Never blocks: a start in flight holds `active` for seconds while the
+    /// adapter comes up, and full teardown (engine joins, host restore)
+    /// belongs to the session worker's `stop`. Signalling the engine is
+    /// enough to halt the data plane; a start that holds the lock sees
+    /// `closing` and unwinds itself.
+    fn abort(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        if let Some(active) = self.active.try_lock() {
+            if let Some(handle) = active.as_ref() {
+                unsafe { zeptun_stop(handle.as_ptr()) };
+            }
+            self.running.store(false, Ordering::SeqCst);
         }
         self.external_fd.store(-1, Ordering::SeqCst);
     }

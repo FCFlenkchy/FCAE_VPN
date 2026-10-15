@@ -28,7 +28,9 @@
 //!
 //! Loading is lazy and isolated: a missing or unloadable DLL surfaces as
 //! "engine unavailable" (or a specific start error) instead of taking the app
-//! down at startup.
+//! down at startup. The MSYS runtime is initialised on a dedicated, parked
+//! thread and only ever entered from threads created after that (see
+//! `windows.rs` for the thread-local-storage rules this follows).
 //!
 //! ## Build requirements
 //!
@@ -113,6 +115,21 @@ pub(crate) fn log_level(t2s_log_level: u8) -> &'static str {
         3 => "warn",
         _ => "error",
     }
+}
+
+/// Runs the engine's `main`, absorbing a stale stop request.
+///
+/// `hev_socks5_tunnel_quit` latches `SYNC_STOP` whenever no run is live, and
+/// the next run consumes it by returning 0 before it starts. A quit racing
+/// the previous engine's own exit therefore makes this run end at once; a
+/// clean exit nobody in this generation asked for is exactly that latch.
+pub(crate) fn run_engine(closing: &std::sync::atomic::AtomicBool, mut main: impl FnMut() -> std::ffi::c_int) -> std::ffi::c_int {
+    let code = main();
+    if code != 0 || closing.load(std::sync::atomic::Ordering::SeqCst) {
+        return code;
+    }
+    log::debug!("[hev] discarding a stop latched by the previous engine");
+    main()
 }
 
 pub(crate) fn generate_config(cfg: &fcae_runtime::config::SessionConfig, socks: std::net::SocketAddr) -> fcae_runtime::error::Result<(std::net::SocketAddr, String)> {

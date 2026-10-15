@@ -1,7 +1,25 @@
-use std::ffi::{c_int, c_uchar, c_uint};
+//! Windows backend: the engine is an MSYS2 DLL hosted in this process.
+//!
+//! The MSYS runtime (a Cygwin fork) keeps each thread's `_cygtls` at
+//! `StackBase - __CYGTLS_PADSIZE__`. `msys_dll_init` claims that slot on the
+//! calling thread as `_main_tls` for the life of the process, and every
+//! runtime call reads `_my_tls` from the same place. Two invariants follow:
+//!
+//! * the initialising thread must reserve the top of its stack and never
+//!   exit, so the slot neither overwrites live frames nor dangles;
+//! * MSYS code may only run on threads the runtime has seen start, i.e.
+//!   threads created after initialisation (it hooks their entry point).
+//!   Threads that predate the load — the UI thread, the session thread and
+//!   its tokio workers — have garbage where `_my_tls` should be.
+//!
+//! So one parked host thread loads the runtime, a call thread spawned after
+//! it services `quit`/`stats`, and each engine run gets a fresh thread.
+
+use std::ffi::{c_int, c_uchar, c_uint, CString};
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{mpsc, Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use fcae_runtime::backend::Endpoints;
@@ -12,11 +30,15 @@ use fcae_runtime::windows_dll::{EmbeddedFiles, Library};
 use parking_lot::Mutex;
 
 use fcae_runtime::socks5p;
-use crate::{generate_config, HevStats};
+use crate::{generate_config, run_engine, HevStats};
 
 const RESTART_GRACE: Duration = Duration::from_secs(2);
+const STATS_TIMEOUT: Duration = Duration::from_millis(250);
 const DLL_NAME: &str = "libhev-socks5-tunnel.dll";
 const MSYS_NAME: &str = "msys-2.0.dll";
+/// Covers `__CYGTLS_PADSIZE__` (12800) plus the frames std puts above the
+/// host closure, with ample margin for runtime revisions.
+const TLS_RESERVE: usize = 64 << 10;
 
 #[cfg(hev_dynamic)]
 const EMBEDDED: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/engine_files.rs"));
@@ -30,42 +52,57 @@ struct Ffi {
     main_from_str: MainFn,
     quit: QuitFn,
     stats: StatsFn,
-    _libs: Vec<Library>,
+    _engine: Library,
+    /// An initialised runtime owns threads and process state; unloading it
+    /// would leave them executing freed code.
+    _msys: ManuallyDrop<Library>,
     _embedded: Option<EmbeddedFiles>,
 }
 
+enum Call {
+    Quit,
+    Stats(mpsc::SyncSender<HevStats>),
+}
+
+struct Runtime {
+    ffi: Ffi,
+    calls: mpsc::Sender<Call>,
+}
+
+static RUNTIME: OnceLock<std::result::Result<Runtime, String>> = OnceLock::new();
+static BOOT: Once = Once::new();
+
 fn call_msys_init(lib: &Library) -> Result<()> {
     unsafe {
-        if let Ok(init) = lib.symbol::<InitFn>(c"msys_dll_init") {
-            init();
-            return Ok(());
-        }
-        if let Ok(init) = lib.symbol::<InitFn>(c"cygwin_dll_init") {
-            init();
-            return Ok(());
-        }
+        let init = lib
+            .symbol::<InitFn>(c"msys_dll_init")
+            .or_else(|_| lib.symbol::<InitFn>(c"cygwin_dll_init"))
+            .map_err(|_| CoreError::Internal(format!("{MSYS_NAME} exports neither msys_dll_init nor cygwin_dll_init")))?;
+        init();
     }
-    Err(CoreError::Internal(format!("{MSYS_NAME} missing msys_dll_init/cygwin_dll_init")))
+    Ok(())
 }
 
 fn load_from_dir(dir: &Path) -> Result<Ffi> {
     let msys_path = dir.join(MSYS_NAME);
     let engine_path = dir.join(DLL_NAME);
     if !msys_path.is_file() {
-        return Err(CoreError::Internal(format!("{} not found beside engine", MSYS_NAME)));
+        return Err(CoreError::Internal(format!("{MSYS_NAME} not found beside the engine")));
     }
     if !engine_path.is_file() {
-        return Err(CoreError::Internal(format!("{} not found", DLL_NAME)));
+        return Err(CoreError::Internal(format!("{DLL_NAME} not found")));
     }
-    let msys_lib = Library::from_path(&msys_path)?;
-    call_msys_init(&msys_lib)?;
-    let engine_lib = Library::from_path(&engine_path)?;
+    let msys = Library::from_path(&msys_path)?;
+    call_msys_init(&msys)?;
+    let msys = ManuallyDrop::new(msys);
+    let engine = Library::from_path(&engine_path)?;
     unsafe {
         Ok(Ffi {
-            main_from_str: engine_lib.symbol(c"hev_socks5_tunnel_main_from_str")?,
-            quit: engine_lib.symbol(c"hev_socks5_tunnel_quit")?,
-            stats: engine_lib.symbol(c"hev_socks5_tunnel_stats")?,
-            _libs: vec![msys_lib, engine_lib],
+            main_from_str: engine.symbol(c"hev_socks5_tunnel_main_from_str")?,
+            quit: engine.symbol(c"hev_socks5_tunnel_quit")?,
+            stats: engine.symbol(c"hev_socks5_tunnel_stats")?,
+            _engine: engine,
+            _msys: msys,
             _embedded: None,
         })
     }
@@ -88,11 +125,78 @@ fn load_embedded() -> Result<Ffi> {
 fn load() -> Result<Ffi> {
     if let Some(path) = std::env::var_os("FCAE_HEV_DLL") {
         let path = PathBuf::from(path);
-        let file = if path.is_file() { path } else { return Err(CoreError::Internal(format!("FCAE_HEV_DLL points at {}, not a file", path.display()))); };
-        let dir = file.parent().ok_or_else(|| CoreError::Internal("FCAE_HEV_DLL has no parent".into()))?;
+        if !path.is_file() {
+            return Err(CoreError::Internal(format!("FCAE_HEV_DLL points at {}, not a file", path.display())));
+        }
+        let dir = path.parent().ok_or_else(|| CoreError::Internal("FCAE_HEV_DLL has no parent".into()))?;
         return load_from_dir(dir);
     }
     load_embedded()
+}
+
+/// Entry of the host thread. Captures nothing: everything it produces is
+/// published through statics, so no live state sits in the reserved range.
+fn host_entry() {
+    host_thread()
+}
+
+#[inline(never)]
+fn host_thread() -> ! {
+    let mut reserve = MaybeUninit::<[u8; TLS_RESERVE]>::uninit();
+    std::hint::black_box(&mut reserve);
+    host_main()
+}
+
+/// Runs entirely below the reservation and never returns: the frames above
+/// it are overwritten by the runtime's TLS once `msys_dll_init` ran.
+#[inline(never)]
+fn host_main() -> ! {
+    let runtime = std::panic::catch_unwind(load)
+        .unwrap_or_else(|_| Err(CoreError::Internal("loading the hev DLL panicked".into())))
+        .and_then(|ffi| {
+            let (calls, queue) = mpsc::channel();
+            let (quit, stats) = (ffi.quit, ffi.stats);
+            std::thread::Builder::new()
+                .name("hev-msys-calls".into())
+                .spawn(move || serve(queue, quit, stats))
+                .map_err(|e| CoreError::Internal(format!("cannot start the hev call thread: {e}")))?;
+            Ok(Runtime { ffi, calls })
+        })
+        .map_err(|e| {
+            log::error!("[hev] {e}");
+            e.to_string()
+        });
+    let _ = RUNTIME.set(runtime);
+    loop {
+        std::thread::park();
+    }
+}
+
+fn serve(queue: mpsc::Receiver<Call>, quit: QuitFn, stats: StatsFn) {
+    for call in queue {
+        match call {
+            Call::Quit => unsafe { quit() },
+            Call::Stats(reply) => {
+                let mut s = HevStats::default();
+                unsafe { stats(&mut s.tx_packets, &mut s.tx_bytes, &mut s.rx_packets, &mut s.rx_bytes) };
+                let _ = reply.send(s);
+            }
+        }
+    }
+}
+
+fn runtime() -> Result<&'static Runtime> {
+    BOOT.call_once(|| {
+        if let Err(e) = std::thread::Builder::new().name("hev-msys".into()).spawn(host_entry) {
+            let _ = RUNTIME.set(Err(format!("cannot start the MSYS host thread: {e}")));
+        }
+    });
+    RUNTIME.wait().as_ref().map_err(|e| CoreError::Internal(e.clone()))
+}
+
+/// The runtime if a start already loaded it; never triggers the load.
+fn loaded() -> Option<&'static Runtime> {
+    RUNTIME.get()?.as_ref().ok()
 }
 
 pub fn unavailable_reason() -> Option<&'static str> {
@@ -109,14 +213,6 @@ pub fn unavailable_reason() -> Option<&'static str> {
 }
 
 pub fn is_supported() -> bool { unavailable_reason().is_none() }
-
-fn ffi() -> Result<&'static Ffi> {
-    static FFI: OnceLock<std::result::Result<Ffi, String>> = OnceLock::new();
-    FFI.get_or_init(|| load().map_err(|e| {
-        log::error!("[hev] {e}");
-        e.to_string()
-    })).as_ref().map_err(|e| CoreError::Internal(e.clone()))
-}
 
 struct Engine {
     thread: std::thread::JoinHandle<()>,
@@ -156,14 +252,14 @@ impl HevSocks5TunnelBridge {
     pub fn android_fd(&self) -> Option<i32> { let fd = self.external_fd.load(Ordering::SeqCst); (fd >= 0).then_some(fd) }
     pub fn stats(&self) -> Option<HevStats> {
         if !self.running.load(Ordering::SeqCst) { return None; }
-        let f = ffi().ok()?;
-        let mut s = HevStats::default();
-        unsafe { (f.stats)(&mut s.tx_packets, &mut s.tx_bytes, &mut s.rx_packets, &mut s.rx_bytes); }
-        Some(s)
+        let (reply, result) = mpsc::sync_channel(1);
+        loaded()?.calls.send(Call::Stats(reply)).ok()?;
+        result.recv_timeout(STATS_TIMEOUT).ok()
     }
+    /// Non-blocking: `quit` is queued to the call thread.
     fn signal_stop(&self) -> bool {
         if !self.running.swap(false, Ordering::SeqCst) { return false; }
-        if let Ok(f) = ffi() { unsafe { (f.quit)() }; true } else { false }
+        loaded().is_some_and(|rt| rt.calls.send(Call::Quit).is_ok())
     }
     fn reap_locked(slot: &mut Option<Active>) -> bool {
         if slot.as_ref().is_some_and(|a| a.thread.is_finished()) {
@@ -182,37 +278,38 @@ impl HevSocks5TunnelBridge {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
-    fn spawn_engine(&self, yaml: &str, fd: i32) -> Result<Engine> {
-        let config = std::ffi::CString::new(yaml).map_err(|_| CoreError::Internal("hev config contains NUL".into()))?;
-        let dup = if fd >= 0 {
-            let d = unsafe { libc::dup(fd) };
-            if d < 0 { return Err(CoreError::Internal(format!("dup tun fd failed: {}", std::io::Error::last_os_error()))); }
-            Some(d)
-        } else { None };
+    fn shutdown(&self, timeout: Duration) {
+        self.closing.store(true, Ordering::SeqCst);
+        self.signal_stop();
+        if !self.reap(timeout) {
+            log::warn!("[hev] engine did not stop within {timeout:?}");
+            if let Some(active) = self.active.lock().as_mut() {
+                if let Some(undo) = active.undo.take() { fcae_runtime::windows_tun::restore_wrapper(undo); }
+            }
+        }
+    }
+    /// The engine's exit status once its thread is gone, as a start error.
+    fn exited(&self, rc: &AtomicI32) -> Option<CoreError> {
+        self.active.lock().as_ref().is_some_and(|a| a.thread.is_finished())
+            .then(|| CoreError::Internal(format!("hev exited during startup code {}", rc.load(Ordering::SeqCst))))
+    }
+    /// Runs the engine on a thread created after the runtime was initialised.
+    fn spawn_engine(&self, rt: &'static Runtime, yaml: &str) -> Result<Engine> {
+        let config = CString::new(yaml).map_err(|_| CoreError::Internal("hev config contains NUL".into()))?;
+        let entry = rt.ffi.main_from_str;
         let running = self.running.clone();
         let closing = self.closing.clone();
         let rc = Arc::new(AtomicI32::new(0));
-        let rc2 = rc.clone();
+        let rc_thread = rc.clone();
         self.running.store(true, Ordering::SeqCst);
         let thread = std::thread::Builder::new().name("hev-socks5-tunnel".into()).spawn(move || {
-            let f = match ffi() {
-                Ok(f) => f,
-                Err(e) => {
-                    log::error!("[hev] {e}");
-                    running.store(false, Ordering::SeqCst);
-                    rc2.store(-100, Ordering::SeqCst);
-                    if let Some(d) = dup { unsafe { libc::close(d) }; }
-                    return;
-                }
-            };
-            let code = unsafe { (f.main_from_str)(config.as_bytes().as_ptr() as *const c_uchar, config.as_bytes().len() as c_uint, dup.unwrap_or(-1)) };
-            if let Some(d) = dup { unsafe { libc::close(d) }; }
+            let bytes = config.as_bytes();
+            let code = run_engine(&closing, || unsafe { entry(bytes.as_ptr(), bytes.len() as c_uint, -1) });
             running.store(false, Ordering::SeqCst);
-            rc2.store(code, Ordering::SeqCst);
+            rc_thread.store(code, Ordering::SeqCst);
             if code != 0 && !closing.load(Ordering::SeqCst) { log::error!("[hev] engine exited code {code}"); }
         }).map_err(|e| {
             self.running.store(false, Ordering::SeqCst);
-            if let Some(d) = dup { unsafe { libc::close(d) }; }
             CoreError::Internal(format!("spawn hev thread: {e}"))
         })?;
         Ok(Engine { thread, rc })
@@ -231,52 +328,45 @@ impl TunBridge for HevSocks5TunnelBridge {
         }
         self.closing.store(false, Ordering::SeqCst);
         crate::platform::ensure_wintun(crate::platform::wintun_bytes())?;
+        // Resolve the native bridge before changing engine state or spawning a
+        // worker so a missing/incompatible DLL becomes a normal start error.
+        let rt = runtime()?;
         let base_socks = endpoints.socks.ok_or_else(|| CoreError::Internal("TUN needs SOCKS endpoint".into()))?;
         let psiphon = if endpoints.psiphon_dns {
             let resolvers = fcae_runtime::tun_dns::psiphon_resolvers(cfg)?;
             Some(socks5p::Adapter::start("hev", base_socks, resolvers).map_err(|e| CoreError::Internal(format!("hev socks5p: {e}")))?)
         } else { None };
         let socks = psiphon.as_ref().map(|a| a.endpoint()).unwrap_or(base_socks);
-        let fd = cfg.tun.fd.or_else(|| self.android_fd()).unwrap_or(-1);
-        // Resolve the native bridge before changing engine state or spawning a
-        // worker so a missing/incompatible DLL becomes a normal start error.
-        ffi()?;
         let (_, yaml) = generate_config(cfg, socks)?;
-        let engine = self.spawn_engine(&yaml, fd)?;
-        let exit_code = engine.rc.clone();
+        let engine = self.spawn_engine(rt, &yaml)?;
+        let exit_code = engine.rc;
         *self.active.lock() = Some(Active { thread: engine.thread, _psiphon: psiphon, undo: None });
         let configured = (|| -> Result<()> {
-            let undo = fcae_runtime::windows_tun::TunGuard::configure(cfg, endpoints.peer_ip.as_deref())?;
+            let undo = fcae_runtime::windows_tun::TunGuard::configure(cfg, endpoints.peer_ip.as_deref())
+                .map_err(|e| self.exited(&exit_code).unwrap_or(e))?;
             self.active.lock().as_mut().ok_or_else(|| CoreError::Internal("HEV startup cancelled".into()))?.undo = Some(undo);
-            if self.active.lock().as_ref().is_some_and(|a| a.thread.is_finished()) {
-                return Err(CoreError::Internal(format!("hev exited during startup code {}", exit_code.load(Ordering::SeqCst))));
+            if let Some(e) = self.exited(&exit_code) { return Err(e); }
+            if self.closing.load(Ordering::SeqCst) {
+                return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
             }
             Ok(())
         })();
         if let Err(e) = configured {
-            self.closing.store(true, Ordering::SeqCst);
-            self.signal_stop();
-            self.reap(RESTART_GRACE);
+            self.shutdown(RESTART_GRACE);
             return Err(e);
         }
         Ok(())
     }
+    /// Lock-free so a Disconnect never waits behind a start that is still
+    /// bringing the adapter up; that start sees `closing` and unwinds itself.
     fn abort(&self) {
-        let _l = self.lifecycle.lock();
         self.closing.store(true, Ordering::SeqCst);
         self.signal_stop();
         self.clear_android_fd();
     }
     fn stop(&self, timeout: Duration) {
         let _l = self.lifecycle.lock();
-        self.closing.store(true, Ordering::SeqCst);
-        self.signal_stop();
-        if !self.reap(timeout) {
-            log::warn!("[hev] engine did not stop within {timeout:?}");
-            if let Some(active) = self.active.lock().as_mut() {
-                if let Some(undo) = active.undo.take() { fcae_runtime::windows_tun::restore_wrapper(undo); }
-            }
-        }
+        self.shutdown(timeout);
         self.clear_android_fd();
     }
     fn preauthorised_fd(&self) -> Option<i32> { self.android_fd() }

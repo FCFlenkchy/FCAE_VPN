@@ -10,7 +10,7 @@ use fcae_runtime::session::TunBridge;
 use parking_lot::Mutex;
 
 use fcae_runtime::socks5p;
-use crate::{generate_config, HevStats};
+use crate::{generate_config, run_engine, HevStats};
 
 const RESTART_GRACE: Duration = Duration::from_secs(2);
 
@@ -161,7 +161,7 @@ impl HevSocks5TunnelBridge {
         self.running.store(true, Ordering::SeqCst);
         let thread = std::thread::Builder::new().name("hev-socks5-tunnel".into()).spawn(move || {
             let bytes = config.as_bytes();
-            let code = unsafe { engine_main_from_str(bytes.as_ptr() as *const c_uchar, bytes.len() as c_uint, dup.unwrap_or(-1)) };
+            let code = run_engine(&closing, || unsafe { engine_main_from_str(bytes.as_ptr() as *const c_uchar, bytes.len() as c_uint, dup.unwrap_or(-1)) });
             if let Some(dup) = dup { unsafe { libc::close(dup) }; }
             running.store(false, Ordering::SeqCst);
             rc_thread.store(code, Ordering::SeqCst);
@@ -198,35 +198,38 @@ impl TunBridge for HevSocks5TunnelBridge {
         #[cfg(target_os = "linux")]
         let before = Vec::new();
         let engine = self.spawn_engine(&yaml, fd)?;
-        let exit_code = engine.rc.clone();
+        let exit_code = engine.rc;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let host = if fd < 0 {
-            match configure_host(cfg, endpoints.peer_ip.as_deref(), &before) {
-                Ok(guard) => Some(guard),
-                Err(error) => {
-                    self.closing.store(true, Ordering::SeqCst);
-                    self.signal_stop();
-                    *self.active.lock() = Some(Active { thread: engine.thread, _psiphon: psiphon_adapter, _host: None });
-                    return Err(error);
-                }
-            }
-        } else {
-            None
+        let (host, configured) = match (fd < 0).then(|| configure_host(cfg, endpoints.peer_ip.as_deref(), &before)).transpose() {
+            Ok(host) => (host, Ok(())),
+            Err(error) => (None, Err(error)),
         };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let configured: Result<()> = Ok(());
         *self.active.lock() = Some(Active {
             thread: engine.thread,
             _psiphon: psiphon_adapter,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             _host: host,
         });
-        if self.active.lock().as_ref().is_some_and(|a| a.thread.is_finished()) {
-            return Err(CoreError::Internal(format!("hev-socks5-tunnel exited during startup (code {})", exit_code.load(Ordering::SeqCst))));
+        let exited = self.active.lock().as_ref().is_some_and(|a| a.thread.is_finished());
+        let outcome = if exited {
+            Err(CoreError::Internal(format!("hev-socks5-tunnel exited during startup (code {})", exit_code.load(Ordering::SeqCst))))
+        } else if configured.is_ok() && self.closing.load(Ordering::SeqCst) {
+            Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()))
+        } else {
+            configured
+        };
+        if outcome.is_err() {
+            self.closing.store(true, Ordering::SeqCst);
+            self.signal_stop();
         }
-        Ok(())
+        outcome
     }
 
+    /// Lock-free so a Disconnect never waits behind a start that is still
+    /// configuring the host; that start sees `closing` and unwinds itself.
     fn abort(&self) {
-        let _lifecycle = self.lifecycle.lock();
         self.closing.store(true, Ordering::SeqCst);
         self.signal_stop();
         self.clear_android_fd();
