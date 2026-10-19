@@ -1218,7 +1218,6 @@ public class FCAEVpnService extends VpnService {
             if (killProcessOnCleanup) scheduleProcessKill();
             return;
         }
-        PsiphonTunnelService.killProcessOnExit(this);
         sGeneration.incrementAndGet();
         final long myGen = cleanupGeneration.incrementAndGet();
         running = false;
@@ -1241,23 +1240,18 @@ public class FCAEVpnService extends VpnService {
         }
         lastStartIntent = null;
 
-        // Close our VpnService fd immediately. The native dup is a
-        // different number; abort (nativeStopBegin) closes that without
-        // waiting on Go. Together that drops the kernel TUN in ~1ms.
+        // Closing the service-owned fd drops the Android VPN interface
+        // immediately. Publish teardown to the user before calling native code:
+        // stop-begin can contend with an in-flight start, and the notification
+        // must not remain actionable while that control call is delayed.
         closeQuiet(pfd);
-        try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
-        sweepTun();
 
-        // 1. INSTANT UI & NOTIFICATION CLEANUP
         Runnable uiCleanup = () -> {
             handler.removeCallbacks(statsRunnable);
             handler.removeCallbacks(connectWatchdog);
             notifyUi();
             notification.dismiss();
             stopForeground(STOP_FOREGROUND_REMOVE);
-            // Same reason as the broadcast, one step stronger: this turn can end
-            // with this process dead, and the widget must not keep offering
-            // DISCONNECT for a session that is already over.
             SessionState.markIdle(this);
         };
 
@@ -1266,6 +1260,12 @@ public class FCAEVpnService extends VpnService {
         } else {
             handler.post(uiCleanup);
         }
+
+        // Signal the separate Psiphon process before the potentially contended
+        // native stop path. This is idempotent and also releases its TUN owner.
+        PsiphonTunnelService.killProcessOnExit(this);
+        try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
+        sweepTun();
 
         NativeEngine.lifecycleExecutor.execute(() -> {
             if (myGen != cleanupGeneration.get()) return;

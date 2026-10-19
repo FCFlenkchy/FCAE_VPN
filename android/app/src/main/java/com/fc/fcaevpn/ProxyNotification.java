@@ -352,6 +352,10 @@ public class ProxyNotification extends Service {
             return START_STICKY;
         }
         if (intent != null && ACTION_DISCONNECT_KILL.equals(intent.getAction())) {
+            // The Psiphon process can keep the shared notification alive after
+            // this owner was recreated. A foreground-service PendingIntent must
+            // promote a newly created owner before it can process teardown.
+            showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
             SessionState.command(SessionState.Command.DISCONNECT);
             terminalTeardown("Remote Disconnect");
             return START_NOT_STICKY;
