@@ -346,13 +346,9 @@ impl Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        // 'stop' before 'destroy' per the C API contract; both are
-        // idempotent in zeptun, and stop here only runs if stop() raced and
-        // abandoned the handle.
-        #[cfg(windows)]
-        drop(self.network.take());
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        drop(self.host.take());
+        // Keep the TUN/network configuration alive until the engine has
+        // stopped. Restoring routes or closing the host interface first lets
+        // Zeptun's worker thread race teardown (especially on Windows).
         unsafe {
             zeptun_stop(self.engine.as_ptr());
             zeptun_destroy(self.engine.as_ptr());
@@ -360,6 +356,10 @@ impl Drop for Handle {
                 libc::close(fd);
             }
         }
+        #[cfg(windows)]
+        drop(self.network.take());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        drop(self.host.take());
     }
 }
 
