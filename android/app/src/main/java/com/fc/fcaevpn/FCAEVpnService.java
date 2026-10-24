@@ -988,10 +988,26 @@ public class FCAEVpnService extends VpnService {
         final String echDomain     = orEmpty(intent.getStringExtra("echDomain"));
         final String goolInner     = orEmpty(intent.getStringExtra("goolInner"));
         final String tlsCiphers    = orEmpty(intent.getStringExtra("tlsCiphers"));
-        final String enrollAddress = orEmpty(intent.getStringExtra("enrollAddress"));
+        final String apiAddress    = orEmpty(intent.getStringExtra("apiAddress"));
+        final String apiHost       = orEmpty(intent.getStringExtra("apiHost"));
+        final String apiSni        = orEmpty(intent.getStringExtra("apiSni"));
         final String exitLoc       = orEmpty(intent.getStringExtra("exitLoc"));
+        final String tls13Ciphers  = orEmpty(intent.getStringExtra("tls13Ciphers"));
+        final String tlsGroups     = orEmpty(intent.getStringExtra("tlsGroups"));
+        final String tlsKeyShares  = orEmpty(intent.getStringExtra("tlsKeyShares"));
+        final String tlsSigalgs    = orEmpty(intent.getStringExtra("tlsSigalgs"));
+        final String tlsCertCompression = orEmpty(intent.getStringExtra("tlsCertCompression"));
+        final String tlsAlps       = orEmpty(intent.getStringExtra("tlsAlps"));
+        final String tlsTrustAnchors = orEmpty(intent.getStringExtra("tlsTrustAnchors"));
+        final String tlsServerPadding = orEmpty(intent.getStringExtra("tlsServerPadding"));
         final boolean tlsVerify     = intent.getBooleanExtra("tlsVerify", false);
         final boolean disableGrease = intent.getBooleanExtra("disableGrease", false);
+        final boolean enableGreaseSigalgs = intent.getBooleanExtra("enableGreaseSigalgs", false);
+        final boolean enableEchGrease = intent.getBooleanExtra("enableEchGrease", false);
+        final boolean disableOcspStapling = intent.getBooleanExtra("disableOcspStapling", false);
+        final boolean disableSct = intent.getBooleanExtra("disableSct", false);
+        final boolean disableSessionTicket = intent.getBooleanExtra("disableSessionTicket", false);
+        final boolean disableExtensionPermutation = intent.getBooleanExtra("disableExtensionPermutation", false);
         final boolean fragmentSni   = intent.getBooleanExtra("fragmentSni", false);
         final String upstreamProxy = orEmpty(intent.getStringExtra("upstreamProxy")).trim();
         final String noizeVal = (noize == null || noize.isEmpty()) ? "balanced" : noize;
@@ -1102,8 +1118,11 @@ public class FCAEVpnService extends VpnService {
                     psiphonCfgV, psiphonRegionV, psiphonSocks, psiphonHttp,
                     tunTcpSndbuf, tunTcpRcvbuf, tunTcpAutoTuning, t2sLog, tunEngine, tunMtu,
                     tunDnsCfgV,
-                    echDns, echDomain, goolInner, tlsCiphers, enrollAddress, exitLoc,
-                    tlsVerify, disableGrease, fragmentSni,
+                    echDns, echDomain, goolInner, tlsCiphers, apiAddress, apiHost, apiSni, exitLoc,
+                    tls13Ciphers, tlsGroups, tlsKeyShares, tlsSigalgs, tlsCertCompression, tlsAlps,
+                    tlsTrustAnchors, tlsServerPadding,
+                    tlsVerify, disableGrease, enableGreaseSigalgs, enableEchGrease, disableOcspStapling,
+                    disableSct, disableSessionTicket, disableExtensionPermutation, fragmentSni,
                     upstreamProxy
                 );
                 if (ok && throughPsiphon) {
@@ -1716,10 +1735,26 @@ public class FCAEVpnService extends VpnService {
         putStr(e, i, "echDomain");
         putStr(e, i, "goolInner");
         putStr(e, i, "tlsCiphers");
-        putStr(e, i, "enrollAddress");
+        putStr(e, i, "apiAddress");
+        putStr(e, i, "apiHost");
+        putStr(e, i, "apiSni");
         putStr(e, i, "exitLoc");
+        putStr(e, i, "tls13Ciphers");
+        putStr(e, i, "tlsGroups");
+        putStr(e, i, "tlsKeyShares");
+        putStr(e, i, "tlsSigalgs");
+        putStr(e, i, "tlsCertCompression");
+        putStr(e, i, "tlsAlps");
+        putStr(e, i, "tlsTrustAnchors");
+        putStr(e, i, "tlsServerPadding");
         putBool(e, i, "tlsVerify", false);
         putBool(e, i, "disableGrease", false);
+        putBool(e, i, "enableGreaseSigalgs", false);
+        putBool(e, i, "enableEchGrease", false);
+        putBool(e, i, "disableOcspStapling", false);
+        putBool(e, i, "disableSct", false);
+        putBool(e, i, "disableSessionTicket", false);
+        putBool(e, i, "disableExtensionPermutation", false);
         putBool(e, i, "fragmentSni", false);
         putInt(e, i, "sysProfile", 0);
         putStr(e, i, "teamName");
@@ -1780,10 +1815,32 @@ public class FCAEVpnService extends VpnService {
         copyStr(p, i, "echDomain");
         copyStr(p, i, "goolInner");
         copyStr(p, i, "tlsCiphers");
-        copyStr(p, i, "enrollAddress");
+        if (p.contains("apiAddress")) {
+            copyStr(p, i, "apiAddress");
+        } else {
+            // Preserve sessions saved by the v2.3 integration after the
+            // Aether API-address rename.
+            i.putExtra("apiAddress", p.getString("enrollAddress", ""));
+        }
+        copyStr(p, i, "apiHost");
+        copyStr(p, i, "apiSni");
         copyStr(p, i, "exitLoc");
+        copyStr(p, i, "tls13Ciphers");
+        copyStr(p, i, "tlsGroups");
+        copyStr(p, i, "tlsKeyShares");
+        copyStr(p, i, "tlsSigalgs");
+        copyStr(p, i, "tlsCertCompression");
+        copyStr(p, i, "tlsAlps");
+        copyStr(p, i, "tlsTrustAnchors");
+        copyStr(p, i, "tlsServerPadding");
         copyBool(p, i, "tlsVerify", false);
         copyBool(p, i, "disableGrease", false);
+        copyBool(p, i, "enableGreaseSigalgs", false);
+        copyBool(p, i, "enableEchGrease", false);
+        copyBool(p, i, "disableOcspStapling", false);
+        copyBool(p, i, "disableSct", false);
+        copyBool(p, i, "disableSessionTicket", false);
+        copyBool(p, i, "disableExtensionPermutation", false);
         copyBool(p, i, "fragmentSni", false);
         copyInt(p, i, "sysProfile", 0);
         copyStr(p, i, "teamName");

@@ -666,18 +666,18 @@ jobs:
               trap 'rm -rf "$LIBC_DIR"' EXIT
               for abi in arm64-v8a armeabi-v7a x86_64 x86; do
                 case "$abi" in
-                  arm64-v8a)   ZIG_TARGET=aarch64-linux-android.24; NDK_TARGET=aarch64-linux-android ;;
-                  armeabi-v7a) ZIG_TARGET=arm-linux-androideabi.24; NDK_TARGET=arm-linux-androideabi ;;
-                  x86_64)      ZIG_TARGET=x86_64-linux-android.24; NDK_TARGET=x86_64-linux-android ;;
-                  x86)         ZIG_TARGET=x86-linux-android.24; NDK_TARGET=i686-linux-android ;;
+                  arm64-v8a)   ZIG_TARGET=aarch64-linux-android.29; NDK_TARGET=aarch64-linux-android ;;
+                  armeabi-v7a) ZIG_TARGET=arm-linux-androideabi.29; NDK_TARGET=arm-linux-androideabi ;;
+                  x86_64)      ZIG_TARGET=x86_64-linux-android.29; NDK_TARGET=x86_64-linux-android ;;
+                  x86)         ZIG_TARGET=x86-linux-android.29; NDK_TARGET=i686-linux-android ;;
                 esac
                 test -d "$SYSROOT/usr/include/$NDK_TARGET"
-                test -f "$SYSROOT/usr/lib/$NDK_TARGET/24/libc.so"
-                test -f "$SYSROOT/usr/lib/$NDK_TARGET/24/crtbegin_so.o"
+                test -f "$SYSROOT/usr/lib/$NDK_TARGET/29/libc.so"
+                test -f "$SYSROOT/usr/lib/$NDK_TARGET/29/crtbegin_so.o"
                 printf '%s\n' \
                   "include_dir=$SYSROOT/usr/include" \
                   "sys_include_dir=$SYSROOT/usr/include/$NDK_TARGET" \
-                  "crt_dir=$SYSROOT/usr/lib/$NDK_TARGET/24" \
+                  "crt_dir=$SYSROOT/usr/lib/$NDK_TARGET/29" \
                   'msvc_lib_dir=' 'kernel32_lib_dir=' 'gcc_dir=' > "$LIBC_DIR/$abi.conf"
                 zig build -Dtarget="$ZIG_TARGET" -Doptimize=ReleaseSmall -Dstrip=true \
                   -Dandroid-libc="$LIBC_DIR/$abi.conf" --libc "$LIBC_DIR/$abi.conf" \
@@ -793,10 +793,10 @@ jobs:
                   ANDROID_CFLAGS="$ANDROID_CFLAGS -mfpu=neon"
                 fi
                 make static \
-                  CC="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang" \
+                  CC="$TOOLCHAIN/bin/${CLANG_TARGET}29-clang" \
                   AR="$TOOLCHAIN/bin/llvm-ar" \
                   STRIP="$TOOLCHAIN/bin/llvm-strip" \
-                  PP="$TOOLCHAIN/bin/${CLANG_TARGET}24-clang -E" \
+                  PP="$TOOLCHAIN/bin/${CLANG_TARGET}29-clang -E" \
                   CFLAGS="$ANDROID_CFLAGS"
                 mkdir -p "$STAGE/$abi"
                 cp bin/libhev-socks5-tunnel.a \
@@ -867,8 +867,8 @@ jobs:
                   RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
                 fi
 
-                CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
-                CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
+                CLANG="$BIN/${NDK_CLANG_PREFIX}29-clang"
+                CLANGXX="$BIN/${NDK_CLANG_PREFIX}29-clang++"
 
                 # boring-sys hands CC_<target> to CMake as CMAKE_C_COMPILER next to the
                 # NDK toolchain file, which picks bin/clang. Any other path makes CMake
@@ -881,13 +881,13 @@ jobs:
                 export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
                 ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
                 ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
-                export CC="${NDK_CLANG_PREFIX}24-clang"
-                export CXX="${NDK_CLANG_PREFIX}24-clang++"
+                export CC="${NDK_CLANG_PREFIX}29-clang"
+                export CXX="${NDK_CLANG_PREFIX}29-clang++"
                 export AR=llvm-ar
 
                 export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-                export "CFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}24 --sysroot=$PREBUILT/sysroot"
-                export "CXXFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}24 --sysroot=$PREBUILT/sysroot"
+                export "CFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
+                export "CXXFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
 
                 case "$TARGET_TRIPLE" in
                   aarch64-linux-android)   HEV_ABI=arm64-v8a ;;
@@ -919,8 +919,8 @@ jobs:
                 RUST_ENV_UPPER=ARMV7_LINUX_ANDROIDEABI
               fi
 
-              CLANG="$BIN/${NDK_CLANG_PREFIX}24-clang"
-              CLANGXX="$BIN/${NDK_CLANG_PREFIX}24-clang++"
+              CLANG="$BIN/${NDK_CLANG_PREFIX}29-clang"
+              CLANGXX="$BIN/${NDK_CLANG_PREFIX}29-clang++"
 
               # See the universal branch: CC_<target> must be the NDK's own clang.
               export "CC_${RUST_ENV_LOWER}"="$BIN/clang"
@@ -930,13 +930,13 @@ jobs:
               export "CARGO_TARGET_${RUST_ENV_UPPER}_AR"="$BIN/llvm-ar"
               ln -sf "$CLANG" "$BIN/${NDK_CLANG_PREFIX}-clang"
               ln -sf "$CLANGXX" "$BIN/${NDK_CLANG_PREFIX}-clang++"
-              export CC="${NDK_CLANG_PREFIX}24-clang"
-              export CXX="${NDK_CLANG_PREFIX}24-clang++"
+              export CC="${NDK_CLANG_PREFIX}29-clang"
+              export CXX="${NDK_CLANG_PREFIX}29-clang++"
               export AR=llvm-ar
 
               export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
-              export "CFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}24 --sysroot=$PREBUILT/sysroot"
-              export "CXXFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}24 --sysroot=$PREBUILT/sysroot"
+              export "CFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
+              export "CXXFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
 
               echo "Using NDK: $NDK"
               "$CLANG" --version | head -1

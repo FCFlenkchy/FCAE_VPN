@@ -491,10 +491,26 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jstring echDomain,
     jstring goolInner,
     jstring tlsCiphers,
-    jstring enrollAddress,
+    jstring apiAddress,
+    jstring apiHost,
+    jstring apiSni,
     jstring exitLoc,
+    jstring tls13Ciphers,
+    jstring tlsGroups,
+    jstring tlsKeyShares,
+    jstring tlsSigalgs,
+    jstring tlsCertCompression,
+    jstring tlsAlps,
+    jstring tlsTrustAnchors,
+    jstring tlsServerPadding,
     jboolean tlsVerify,
     jboolean disableGrease,
+    jboolean enableGreaseSigalgs,
+    jboolean enableEchGrease,
+    jboolean disableOcspStapling,
+    jboolean disableSct,
+    jboolean disableSessionTicket,
+    jboolean disableExtensionPermutation,
     jboolean fragmentSni,
     jstring upstreamProxy
 ) {
@@ -552,16 +568,42 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     const std::string echDomainOwned = jstr(env, echDomain);
     const std::string goolInnerOwned = jstr(env, goolInner);
     const std::string tlsCiphersOwned = jstr(env, tlsCiphers);
-    const std::string enrollOwned = jstr(env, enrollAddress);
+    const std::string apiAddressOwned = jstr(env, apiAddress);
+    const std::string apiHostOwned = jstr(env, apiHost);
+    const std::string apiSniOwned = jstr(env, apiSni);
     const std::string exitLocOwned = jstr(env, exitLoc);
+    const std::string tls13CiphersOwned = jstr(env, tls13Ciphers);
+    const std::string tlsGroupsOwned = jstr(env, tlsGroups);
+    const std::string tlsKeySharesOwned = jstr(env, tlsKeyShares);
+    const std::string tlsSigalgsOwned = jstr(env, tlsSigalgs);
+    const std::string tlsCertCompressionOwned = jstr(env, tlsCertCompression);
+    const std::string tlsAlpsOwned = jstr(env, tlsAlps);
+    const std::string tlsTrustAnchorsOwned = jstr(env, tlsTrustAnchors);
+    const std::string tlsServerPaddingOwned = jstr(env, tlsServerPadding);
     cfg.aether.ech_dns        = echDnsOwned.empty() ? nullptr : echDnsOwned.c_str();
     cfg.aether.ech_domain     = echDomainOwned.empty() ? nullptr : echDomainOwned.c_str();
     cfg.aether.gool_inner     = goolInnerOwned.empty() ? nullptr : goolInnerOwned.c_str();
     cfg.aether.tls_ciphers    = tlsCiphersOwned.empty() ? nullptr : tlsCiphersOwned.c_str();
-    cfg.aether.enroll_address = enrollOwned.empty() ? nullptr : enrollOwned.c_str();
+    cfg.aether.api_address    = apiAddressOwned.empty() ? nullptr : apiAddressOwned.c_str();
+    cfg.aether.api_host       = apiHostOwned.empty() ? nullptr : apiHostOwned.c_str();
+    cfg.aether.api_sni        = apiSniOwned.empty() ? nullptr : apiSniOwned.c_str();
     cfg.aether.exit_loc       = exitLocOwned.empty() ? nullptr : exitLocOwned.c_str();
+    cfg.aether.tls13_ciphers  = tls13CiphersOwned.empty() ? nullptr : tls13CiphersOwned.c_str();
+    cfg.dns.tls_groups        = tlsGroupsOwned.empty() ? nullptr : tlsGroupsOwned.c_str();
+    cfg.aether.tls_key_shares = tlsKeySharesOwned.empty() ? nullptr : tlsKeySharesOwned.c_str();
+    cfg.aether.tls_sigalgs    = tlsSigalgsOwned.empty() ? nullptr : tlsSigalgsOwned.c_str();
+    cfg.aether.tls_cert_compression = tlsCertCompressionOwned.empty() ? nullptr : tlsCertCompressionOwned.c_str();
+    cfg.aether.tls_alps       = tlsAlpsOwned.empty() ? nullptr : tlsAlpsOwned.c_str();
+    cfg.aether.tls_trust_anchors = tlsTrustAnchorsOwned.empty() ? nullptr : tlsTrustAnchorsOwned.c_str();
+    cfg.aether.tls_server_padding = tlsServerPaddingOwned.empty() ? nullptr : tlsServerPaddingOwned.c_str();
     cfg.aether.tls_verify     = tlsVerify == JNI_TRUE;
     cfg.aether.disable_grease = disableGrease == JNI_TRUE;
+    cfg.aether.enable_grease_sigalgs = enableGreaseSigalgs == JNI_TRUE;
+    cfg.aether.enable_ech_grease = enableEchGrease == JNI_TRUE;
+    cfg.aether.disable_ocsp_stapling = disableOcspStapling == JNI_TRUE;
+    cfg.aether.disable_sct = disableSct == JNI_TRUE;
+    cfg.aether.disable_session_ticket = disableSessionTicket == JNI_TRUE;
+    cfg.aether.disable_extension_permutation = disableExtensionPermutation == JNI_TRUE;
     cfg.aether.fragment_sni   = fragmentSni == JNI_TRUE;
 
     const std::string upstreamOwned = jstr(env, upstreamProxy);

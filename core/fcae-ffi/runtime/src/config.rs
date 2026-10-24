@@ -87,11 +87,26 @@ pub struct AetherOptions {
     pub ech_domain: Option<String>,
     pub gool_inner: Option<String>,
     pub tls_ciphers: Option<String>,
-    pub enroll_address: Option<String>,
+    pub api_address: Option<String>,
+    pub api_host: Option<String>,
+    pub api_sni: Option<String>,
     pub exit_loc: Option<String>,
+    pub tls13_ciphers: Option<String>,
+    pub tls_key_shares: Option<String>,
+    pub tls_sigalgs: Option<String>,
+    pub tls_cert_compression: Option<String>,
+    pub tls_alps: Option<String>,
+    pub tls_trust_anchors: Option<String>,
+    pub tls_server_padding: Option<String>,
     pub tls_verify: bool,
     pub disable_grease: bool,
     pub fragment_sni: bool,
+    pub enable_grease_sigalgs: bool,
+    pub enable_ech_grease: bool,
+    pub disable_ocsp_stapling: bool,
+    pub disable_sct: bool,
+    pub disable_session_ticket: bool,
+    pub disable_extension_permutation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -500,11 +515,26 @@ unsafe fn parse_aether(raw: &FcaeAether) -> Result<AetherOptions> {
         ech_domain: cstr_opt(raw.ech_domain),
         gool_inner,
         tls_ciphers: cstr_opt(raw.tls_ciphers),
-        enroll_address: cstr_opt(raw.enroll_address),
+        api_address: cstr_opt(raw.api_address),
+        api_host: cstr_opt(raw.api_host),
+        api_sni: cstr_opt(raw.api_sni),
         exit_loc,
+        tls13_ciphers: cstr_opt(raw.tls13_ciphers),
+        tls_key_shares: cstr_opt(raw.tls_key_shares),
+        tls_sigalgs: cstr_opt(raw.tls_sigalgs),
+        tls_cert_compression: cstr_opt(raw.tls_cert_compression),
+        tls_alps: cstr_opt(raw.tls_alps),
+        tls_trust_anchors: cstr_opt(raw.tls_trust_anchors),
+        tls_server_padding: cstr_opt(raw.tls_server_padding),
         tls_verify: raw.tls_verify,
         disable_grease: raw.disable_grease,
         fragment_sni: raw.fragment_sni,
+        enable_grease_sigalgs: raw.enable_grease_sigalgs,
+        enable_ech_grease: raw.enable_ech_grease,
+        disable_ocsp_stapling: raw.disable_ocsp_stapling,
+        disable_sct: raw.disable_sct,
+        disable_session_ticket: raw.disable_session_ticket,
+        disable_extension_permutation: raw.disable_extension_permutation,
     })
 }
 
@@ -1139,13 +1169,31 @@ pub mod env_compat {
         // second name for it that nothing reads.
         set("AETHER_TLS_GROUPS", cfg.dns.tls_groups.as_deref());
         set("AETHER_TLS_CIPHERS", cfg.aether.tls_ciphers.as_deref());
+        set("AETHER_TLS13_CIPHERS", cfg.aether.tls13_ciphers.as_deref());
+        set("AETHER_TLS_KEY_SHARES", cfg.aether.tls_key_shares.as_deref());
+        set("AETHER_TLS_SIGALGS", cfg.aether.tls_sigalgs.as_deref());
+        set("AETHER_TLS_CERT_COMPRESSION", cfg.aether.tls_cert_compression.as_deref());
+        set("AETHER_TLS_ALPS", cfg.aether.tls_alps.as_deref());
+        set("AETHER_TLS_TRUST_ANCHORS", cfg.aether.tls_trust_anchors.as_deref());
+        set("AETHER_TLS_SERVER_PADDING", cfg.aether.tls_server_padding.as_deref());
         flag("AETHER_TLS_VERIFY", cfg.aether.tls_verify);
         flag("AETHER_DISABLE_GREASE", cfg.aether.disable_grease);
-        set("AETHER_ENROLL_ADDRESS", cfg.aether.enroll_address.as_deref());
+        flag("AETHER_ENABLE_GREASE_SIGALGS", cfg.aether.enable_grease_sigalgs);
+        flag("AETHER_ENABLE_ECH_GREASE", cfg.aether.enable_ech_grease);
+        flag("AETHER_DISABLE_OCSP_STAPLING", cfg.aether.disable_ocsp_stapling);
+        flag("AETHER_DISABLE_SCT", cfg.aether.disable_sct);
+        flag("AETHER_DISABLE_SESSION_TICKET", cfg.aether.disable_session_ticket);
+        flag("AETHER_DISABLE_EXTENSION_PERMUTATION", cfg.aether.disable_extension_permutation);
+        set("AETHER_API_ADDRESS", cfg.aether.api_address.as_deref());
+        set("AETHER_API_HOST", cfg.aether.api_host.as_deref());
+        set("AETHER_API_SNI", cfg.aether.api_sni.as_deref());
         set("AETHER_EXIT_LOC", cfg.aether.exit_loc.as_deref());
-        // Overrides the SNI presented on MASQUE TLS handshakes; empty means
-        // the engine's built-in name.
-        set("AETHER_SNI", cfg.dns.sni.as_deref());
+        set("AETHER_MASQUE_SNI", cfg.dns.sni.as_deref());
+        // These v2.3 names are deliberately cleared. Keeping them around
+        // risks stale process-global state when an application upgrades the
+        // embedded engine between sessions.
+        set("AETHER_ENROLL_ADDRESS", None::<&str>);
+        set("AETHER_SNI", None::<&str>);
         // NOTE: cfg.dns.use_doh / cfg.dns.doh_url are accepted by the ABI but
         // cannot be honoured: the engine resolves over plain UDP (see
         // socks::resolver_addresses) and has no DoH client. They were
@@ -1372,7 +1420,7 @@ mod tests {
         assert_eq!(offset_of!(FcaeConfig, tun_tcp_rcvbuf), base + 12);
         assert_eq!(offset_of!(FcaeConfig, tun_tcp_auto_tuning), base + 16);
         assert_eq!(offset_of!(FcaeConfig, tor_http_port), base + 24);
-        // Appended after the former reserved slots; ABI v7, v8, v19, v20.
+        // Appended after the former reserved slots; ABI v7, v8, v19, v20, v21.
         assert_eq!(offset_of!(FcaeConfig, tun2socks_log_level), base + 32);
         assert_eq!(offset_of!(FcaeConfig, tun_engine), base + 40);
         assert_eq!(offset_of!(FcaeConfig, aether), base + 48);

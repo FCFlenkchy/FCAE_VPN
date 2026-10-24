@@ -114,10 +114,9 @@ impl<'a> CArchive<'a> {
             lib_name,
             target: Target::from_cargo_env(),
             // Must match android/app/build.gradle.kts `minSdk` and the
-            // `...24-clang` the CI workflow selects. At 21 the Go bridge was
-            // compiled against older NDK headers than everything it links
-            // with.
-            android_api: 24,
+            // `...29-clang` selected by CI. This keeps the Go bridge on the
+            // same Android API surface as Aether v2.4.
+            android_api: 29,
             ldflags: vec!["-s".into(), "-w".into()],
             tags: Vec::new(),
             force_shared: false,

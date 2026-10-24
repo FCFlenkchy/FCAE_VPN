@@ -35,7 +35,7 @@
 //!
 //! * Zig built artifacts produced OUTSIDE the cargo graph (see `build.rs`):
 //!   * desktop → `make -C core/zeptun` (lands in `core/zeptun/zig-out/lib/`)
-//!   * android → per-ABI API-24 builds with `-Dandroid-libc` (see CI)
+//!   * android → per-ABI API-29 builds with `-Dandroid-libc` (see CI)
 //!     (lands in `core/zeptun/zig-out/android/prebuilt/<abi>/`)
 //! * or `FCAE_ZEPTUN_LIBDIR=<dir>` pointing at a directory with `libzeptun.a`.
 //!

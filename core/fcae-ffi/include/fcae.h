@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 20
+#define FCAE_ABI_VERSION 21
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -288,11 +288,26 @@ typedef struct {
     const char *ech_domain;      /* domain whose HTTPS record holds the key */
     const char *gool_inner;      /* WARP-in-MASQUE inner WireGuard ip:port */
     const char *tls_ciphers;     /* TLS 1.2 cipher list                    */
-    const char *enroll_address;  /* WARP API address, optional :port       */
+    const char *api_address;     /* WARP API address, optional :port       */
+    const char *api_host;        /* WARP API HTTP host                     */
+    const char *api_sni;         /* WARP API TLS server name               */
     const char *exit_loc;        /* "DE,SE" accept only; "!IR,RU" refuse   */
+    const char *tls13_ciphers;   /* TLS 1.3 cipher list                    */
+    const char *tls_key_shares;  /* TLS key-share groups                   */
+    const char *tls_sigalgs;     /* TLS signature algorithms                */
+    const char *tls_cert_compression; /* zlib:brotli:zstd                */
+    const char *tls_alps;        /* new | old                              */
+    const char *tls_trust_anchors; /* dotted OID list                       */
+    const char *tls_server_padding; /* 0..65535                             */
     bool        tls_verify;
     bool        disable_grease;
     bool        fragment_sni;    /* split the ClientHello inside the SNI   */
+    bool        enable_grease_sigalgs;
+    bool        enable_ech_grease;
+    bool        disable_ocsp_stapling;
+    bool        disable_sct;
+    bool        disable_session_ticket;
+    bool        disable_extension_permutation;
 } FcaeAether;
 
 typedef struct {
@@ -334,7 +349,7 @@ typedef struct {
     uint64_t        tor_http_port; /* 0 disables; 1..65535; formerly reserved[3] */
     uint64_t        tun2socks_log_level; /* FcaeT2sLog; 0 = default (silent) */
     uint64_t        tun_engine;      /* FCAE_TUN_ENGINE_*; TUN mode only; ABI v8 */
-    FcaeAether      aether;          /* ABI v19 */
+    FcaeAether      aether;          /* ABI v21 */
     const char     *upstream_proxy;  /* http|socks5|socks5h://[user:pass@]host:port[@user:pass]; NULL = direct; ABI v20 */
 } FcaeConfig;
 

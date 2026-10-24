@@ -69,11 +69,10 @@ android {
 
     defaultConfig {
         applicationId = "com.fc.fcaevpn"
-        // Rodio/CPAL's Android backend uses NDK AAudio, which is available
-        // only from API 26 and is linked directly by the Rust static library.
-        // Keeping the app below API 26 makes CMake select an API-24 sysroot
-        // where libaaudio is absent and configureCMakeRelease fails.
-        minSdk = 26
+        // Aether v2.4 Android artifacts require API 29+. Rodio/CPAL also
+        // links NDK AAudio directly, so the engine cannot support older
+        // Android releases.
+        minSdk = 29
         targetSdk = 34
         versionCode = androidVersionCode
         versionName = appVersion

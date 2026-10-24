@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 20;
+pub const FCAE_ABI_VERSION: u32 = 21;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
@@ -481,7 +481,7 @@ pub struct FcaeConfig {
     /// TUN mode. ABI v8: appended after `tun2socks_log_level` so all earlier
     /// offsets hold.
     pub tun_engine: u64,
-    /// Aether engine options. ABI v19: appended so all earlier offsets hold.
+    /// Aether engine options. Added in ABI v19 and extended in ABI v21.
     pub aether: FcaeAether,
     /// Proxy every outbound connection of the session dials through:
     /// `http://`, `socks5://` or `socks5h://`,
@@ -499,7 +499,7 @@ pub struct FcaeAether {
     /// Resolver of the ECH key lookup: `udp://ip[:port]`, `tcp://ip[:port]`
     /// or a DoH `https://` URL. Read only with `obfuscation.ech_enabled`.
     pub ech_dns: *const c_char,
-    /// Domain whose HTTPS record carries the ECH key.
+    /// Domain whose HTTPS record carries the key.
     pub ech_domain: *const c_char,
     /// `ip:port` of the WireGuard endpoint WARP-in-MASQUE dials inside the
     /// tunnel; NULL takes the one its registration names.
@@ -507,15 +507,36 @@ pub struct FcaeAether {
     /// OpenSSL-style TLS 1.2 cipher list in place of Chrome's.
     pub tls_ciphers: *const c_char,
     /// Address (IP or domain, optional `:port`) the WARP API calls connect to.
-    pub enroll_address: *const c_char,
+    pub api_address: *const c_char,
+    /// HTTP host sent on WARP API calls.
+    pub api_host: *const c_char,
+    /// ClientHello server name sent on WARP API calls.
+    pub api_sni: *const c_char,
     /// Exit-country policy: `DE,SE` accepts only those, `!IR,RU` refuses those.
     pub exit_loc: *const c_char,
+    /// TLS 1.3 cipher suites, groups with key shares, and signature algorithms.
+    pub tls13_ciphers: *const c_char,
+    pub tls_key_shares: *const c_char,
+    pub tls_sigalgs: *const c_char,
+    /// TLS ClientHello extension options.
+    pub tls_cert_compression: *const c_char,
+    pub tls_alps: *const c_char,
+    pub tls_trust_anchors: *const c_char,
+    pub tls_server_padding: *const c_char,
     /// Verify TLS certificates (off by default in the engine).
     pub tls_verify: bool,
     /// Leave GREASE out of the ClientHello.
     pub disable_grease: bool,
     /// Split the ClientHello inside the server name when fragmenting.
     pub fragment_sni: bool,
+    /// Offer GREASE signature algorithms and ECH without a real ECH config.
+    pub enable_grease_sigalgs: bool,
+    pub enable_ech_grease: bool,
+    /// Leave the corresponding ClientHello extensions out.
+    pub disable_ocsp_stapling: bool,
+    pub disable_sct: bool,
+    pub disable_session_ticket: bool,
+    pub disable_extension_permutation: bool,
 }
 
 // Telemetry

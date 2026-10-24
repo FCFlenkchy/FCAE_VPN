@@ -416,11 +416,27 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, g_app.ech_domain);
     h = fnv_cstr(h, g_app.gool_inner);
     h = fnv_cstr(h, g_app.tls_ciphers);
-    h = fnv_cstr(h, g_app.enroll_address);
+    h = fnv_cstr(h, g_app.api_address);
+    h = fnv_cstr(h, g_app.api_host);
+    h = fnv_cstr(h, g_app.api_sni);
     h = fnv_cstr(h, g_app.exit_loc);
+    h = fnv_cstr(h, g_app.tls_groups);
+    h = fnv_cstr(h, g_app.tls13_ciphers);
+    h = fnv_cstr(h, g_app.tls_key_shares);
+    h = fnv_cstr(h, g_app.tls_sigalgs);
+    h = fnv_cstr(h, g_app.tls_cert_compression);
+    h = fnv_cstr(h, g_app.tls_alps);
+    h = fnv_cstr(h, g_app.tls_trust_anchors);
+    h = fnv_cstr(h, g_app.tls_server_padding);
     h = fnv_value(h, g_app.tls_verify);
     h = fnv_value(h, g_app.disable_grease);
     h = fnv_value(h, g_app.fragment_sni);
+    h = fnv_value(h, g_app.enable_grease_sigalgs);
+    h = fnv_value(h, g_app.enable_ech_grease);
+    h = fnv_value(h, g_app.disable_ocsp_stapling);
+    h = fnv_value(h, g_app.disable_sct);
+    h = fnv_value(h, g_app.disable_session_ticket);
+    h = fnv_value(h, g_app.disable_extension_permutation);
     h = fnv_cstr(h, g_app.team_name);
     h = fnv_cstr(h, g_app.access_token);
     h = fnv_cstr(h, g_app.access_email);
@@ -881,11 +897,28 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "ech_domain") snprintf(g_app.ech_domain, sizeof(g_app.ech_domain), "%s", val.c_str());
     else if (key == "gool_inner") snprintf(g_app.gool_inner, sizeof(g_app.gool_inner), "%s", val.c_str());
     else if (key == "tls_ciphers") snprintf(g_app.tls_ciphers, sizeof(g_app.tls_ciphers), "%s", val.c_str());
-    else if (key == "enroll_address") snprintf(g_app.enroll_address, sizeof(g_app.enroll_address), "%s", val.c_str());
+    // Read the v2.3 key as a migration path; saves always use api_address.
+    else if (key == "api_address" || key == "enroll_address") snprintf(g_app.api_address, sizeof(g_app.api_address), "%s", val.c_str());
+    else if (key == "api_host") snprintf(g_app.api_host, sizeof(g_app.api_host), "%s", val.c_str());
+    else if (key == "api_sni") snprintf(g_app.api_sni, sizeof(g_app.api_sni), "%s", val.c_str());
     else if (key == "exit_loc") snprintf(g_app.exit_loc, sizeof(g_app.exit_loc), "%s", val.c_str());
+    else if (key == "tls_groups") snprintf(g_app.tls_groups, sizeof(g_app.tls_groups), "%s", val.c_str());
+    else if (key == "tls13_ciphers") snprintf(g_app.tls13_ciphers, sizeof(g_app.tls13_ciphers), "%s", val.c_str());
+    else if (key == "tls_key_shares") snprintf(g_app.tls_key_shares, sizeof(g_app.tls_key_shares), "%s", val.c_str());
+    else if (key == "tls_sigalgs") snprintf(g_app.tls_sigalgs, sizeof(g_app.tls_sigalgs), "%s", val.c_str());
+    else if (key == "tls_cert_compression") snprintf(g_app.tls_cert_compression, sizeof(g_app.tls_cert_compression), "%s", val.c_str());
+    else if (key == "tls_alps") snprintf(g_app.tls_alps, sizeof(g_app.tls_alps), "%s", val.c_str());
+    else if (key == "tls_trust_anchors") snprintf(g_app.tls_trust_anchors, sizeof(g_app.tls_trust_anchors), "%s", val.c_str());
+    else if (key == "tls_server_padding") snprintf(g_app.tls_server_padding, sizeof(g_app.tls_server_padding), "%s", val.c_str());
     else if (key == "tls_verify") g_app.tls_verify = atoi(val.c_str()) != 0;
     else if (key == "disable_grease") g_app.disable_grease = atoi(val.c_str()) != 0;
     else if (key == "fragment_sni") g_app.fragment_sni = atoi(val.c_str()) != 0;
+    else if (key == "enable_grease_sigalgs") g_app.enable_grease_sigalgs = atoi(val.c_str()) != 0;
+    else if (key == "enable_ech_grease") g_app.enable_ech_grease = atoi(val.c_str()) != 0;
+    else if (key == "disable_ocsp_stapling") g_app.disable_ocsp_stapling = atoi(val.c_str()) != 0;
+    else if (key == "disable_sct") g_app.disable_sct = atoi(val.c_str()) != 0;
+    else if (key == "disable_session_ticket") g_app.disable_session_ticket = atoi(val.c_str()) != 0;
+    else if (key == "disable_extension_permutation") g_app.disable_extension_permutation = atoi(val.c_str()) != 0;
     else if (key == "logging_enabled") g_app.logging_enabled = atoi(val.c_str()) != 0;
     else if (key == "auto_scroll") g_app.auto_scroll = atoi(val.c_str()) != 0;
     else if (key == "auto_update_check") g_app.auto_update_check = atoi(val.c_str()) != 0;
@@ -959,11 +992,27 @@ static void save_config() {
     fprintf(f, "ech_domain=%s\n", g_app.ech_domain);
     fprintf(f, "gool_inner=%s\n", g_app.gool_inner);
     fprintf(f, "tls_ciphers=%s\n", g_app.tls_ciphers);
-    fprintf(f, "enroll_address=%s\n", g_app.enroll_address);
+    fprintf(f, "api_address=%s\n", g_app.api_address);
+    fprintf(f, "api_host=%s\n", g_app.api_host);
+    fprintf(f, "api_sni=%s\n", g_app.api_sni);
     fprintf(f, "exit_loc=%s\n", g_app.exit_loc);
+    fprintf(f, "tls_groups=%s\n", g_app.tls_groups);
+    fprintf(f, "tls13_ciphers=%s\n", g_app.tls13_ciphers);
+    fprintf(f, "tls_key_shares=%s\n", g_app.tls_key_shares);
+    fprintf(f, "tls_sigalgs=%s\n", g_app.tls_sigalgs);
+    fprintf(f, "tls_cert_compression=%s\n", g_app.tls_cert_compression);
+    fprintf(f, "tls_alps=%s\n", g_app.tls_alps);
+    fprintf(f, "tls_trust_anchors=%s\n", g_app.tls_trust_anchors);
+    fprintf(f, "tls_server_padding=%s\n", g_app.tls_server_padding);
     fprintf(f, "tls_verify=%d\n", g_app.tls_verify ? 1 : 0);
     fprintf(f, "disable_grease=%d\n", g_app.disable_grease ? 1 : 0);
     fprintf(f, "fragment_sni=%d\n", g_app.fragment_sni ? 1 : 0);
+    fprintf(f, "enable_grease_sigalgs=%d\n", g_app.enable_grease_sigalgs ? 1 : 0);
+    fprintf(f, "enable_ech_grease=%d\n", g_app.enable_ech_grease ? 1 : 0);
+    fprintf(f, "disable_ocsp_stapling=%d\n", g_app.disable_ocsp_stapling ? 1 : 0);
+    fprintf(f, "disable_sct=%d\n", g_app.disable_sct ? 1 : 0);
+    fprintf(f, "disable_session_ticket=%d\n", g_app.disable_session_ticket ? 1 : 0);
+    fprintf(f, "disable_extension_permutation=%d\n", g_app.disable_extension_permutation ? 1 : 0);
     fprintf(f, "tun_mtu=%s\n", g_app.tun_mtu);
     fprintf(f, "tun_tcp_sndbuf=%s\n", g_app.tun_tcp_sndbuf);
     fprintf(f, "tun_tcp_rcvbuf=%s\n", g_app.tun_tcp_rcvbuf);
@@ -1845,7 +1894,9 @@ void render_ui() {
                 // Snapshot config + own string storage for the worker thread.
                 struct Owned {
                     std::string noize, peer, path, sni, team, token, email, routes, routes_inline;
-                    std::string ech_dns, ech_domain, gool_inner, tls_ciphers, enroll_address, exit_loc;
+                    std::string ech_dns, ech_domain, gool_inner, tls_ciphers, api_address, api_host, api_sni, exit_loc;
+                    std::string tls_groups, tls13_ciphers, tls_key_shares, tls_sigalgs, tls_cert_compression;
+                    std::string tls_alps, tls_trust_anchors, tls_server_padding;
                     std::string psi_json, psi_embedded, psi_dir, upstream;
                     FcaeConfig c{};
                 };
@@ -1873,8 +1924,18 @@ void render_ui() {
                 o->ech_domain = g_app.ech_domain;
                 o->gool_inner = g_app.gool_inner;
                 o->tls_ciphers = g_app.tls_ciphers;
-                o->enroll_address = g_app.enroll_address;
+                o->api_address = g_app.api_address;
+                o->api_host = g_app.api_host;
+                o->api_sni = g_app.api_sni;
                 o->exit_loc = g_app.exit_loc;
+                o->tls_groups = g_app.tls_groups;
+                o->tls13_ciphers = g_app.tls13_ciphers;
+                o->tls_key_shares = g_app.tls_key_shares;
+                o->tls_sigalgs = g_app.tls_sigalgs;
+                o->tls_cert_compression = g_app.tls_cert_compression;
+                o->tls_alps = g_app.tls_alps;
+                o->tls_trust_anchors = g_app.tls_trust_anchors;
+                o->tls_server_padding = g_app.tls_server_padding;
                 o->c = g_app.to_config();
                 // to_config() built the JSON (with the server-entry fields
                 // merged in) into a g_app buffer; snapshot it, and read the
@@ -1922,8 +1983,18 @@ void render_ui() {
                 o->c.aether.ech_domain         = o->ech_domain.empty() ? nullptr : o->ech_domain.c_str();
                 o->c.aether.gool_inner         = o->gool_inner.empty() ? nullptr : o->gool_inner.c_str();
                 o->c.aether.tls_ciphers        = o->tls_ciphers.empty() ? nullptr : o->tls_ciphers.c_str();
-                o->c.aether.enroll_address     = o->enroll_address.empty() ? nullptr : o->enroll_address.c_str();
+                o->c.aether.api_address        = o->api_address.empty() ? nullptr : o->api_address.c_str();
+                o->c.aether.api_host           = o->api_host.empty() ? nullptr : o->api_host.c_str();
+                o->c.aether.api_sni            = o->api_sni.empty() ? nullptr : o->api_sni.c_str();
                 o->c.aether.exit_loc           = o->exit_loc.empty() ? nullptr : o->exit_loc.c_str();
+                o->c.dns.tls_groups            = o->tls_groups.empty() ? nullptr : o->tls_groups.c_str();
+                o->c.aether.tls13_ciphers      = o->tls13_ciphers.empty() ? nullptr : o->tls13_ciphers.c_str();
+                o->c.aether.tls_key_shares     = o->tls_key_shares.empty() ? nullptr : o->tls_key_shares.c_str();
+                o->c.aether.tls_sigalgs        = o->tls_sigalgs.empty() ? nullptr : o->tls_sigalgs.c_str();
+                o->c.aether.tls_cert_compression = o->tls_cert_compression.empty() ? nullptr : o->tls_cert_compression.c_str();
+                o->c.aether.tls_alps           = o->tls_alps.empty() ? nullptr : o->tls_alps.c_str();
+                o->c.aether.tls_trust_anchors  = o->tls_trust_anchors.empty() ? nullptr : o->tls_trust_anchors.c_str();
+                o->c.aether.tls_server_padding = o->tls_server_padding.empty() ? nullptr : o->tls_server_padding.c_str();
                 o->c.psiphon.config_json          = o->psi_json.c_str();
                 o->c.psiphon.data_root_dir        = o->psi_dir.empty() ? nullptr : o->psi_dir.c_str();
                 o->c.upstream_proxy               = o->upstream.empty() ? nullptr : o->upstream.c_str();
@@ -2992,9 +3063,23 @@ void render_ui() {
             ImGui::Text("TLS Fingerprint");
             ImGui::Checkbox("Verify TLS certificates", &g_app.tls_verify);
             ImGui::Checkbox("Disable GREASE", &g_app.disable_grease);
+            ImGui::Checkbox("Enable GREASE signature algorithms", &g_app.enable_grease_sigalgs);
+            ImGui::Checkbox("Enable ECH GREASE", &g_app.enable_ech_grease);
+            ImGui::Checkbox("Disable OCSP stapling", &g_app.disable_ocsp_stapling);
+            ImGui::Checkbox("Disable SCT", &g_app.disable_sct);
+            ImGui::Checkbox("Disable session tickets", &g_app.disable_session_ticket);
+            ImGui::Checkbox("Disable extension permutation", &g_app.disable_extension_permutation);
             ImGui::PushItemWidth(-1);
             ImGui::InputTextWithHint("##tls_ciphers", "TLS 1.2 ciphers (default: Chrome's)",
                                      g_app.tls_ciphers, sizeof(g_app.tls_ciphers));
+            ImGui::InputTextWithHint("##tls13_ciphers", "TLS 1.3 ciphers", g_app.tls13_ciphers, sizeof(g_app.tls13_ciphers));
+            ImGui::InputTextWithHint("##tls_groups", "TLS groups", g_app.tls_groups, sizeof(g_app.tls_groups));
+            ImGui::InputTextWithHint("##tls_key_shares", "TLS key-share groups", g_app.tls_key_shares, sizeof(g_app.tls_key_shares));
+            ImGui::InputTextWithHint("##tls_sigalgs", "TLS signature algorithms", g_app.tls_sigalgs, sizeof(g_app.tls_sigalgs));
+            ImGui::InputTextWithHint("##tls_cert_compression", "Certificate compression (zlib:brotli:zstd)", g_app.tls_cert_compression, sizeof(g_app.tls_cert_compression));
+            ImGui::InputTextWithHint("##tls_alps", "ALPS mode (new or old)", g_app.tls_alps, sizeof(g_app.tls_alps));
+            ImGui::InputTextWithHint("##tls_trust_anchors", "Trust-anchor OIDs", g_app.tls_trust_anchors, sizeof(g_app.tls_trust_anchors));
+            ImGui::InputTextWithHint("##tls_server_padding", "Server padding (0-65535)", g_app.tls_server_padding, sizeof(g_app.tls_server_padding));
             ImGui::PopItemWidth();
             ImGui::EndChild();
             ImGui::EndTabItem();
@@ -3018,9 +3103,13 @@ void render_ui() {
             ImGui::Text("MASQUE SNI");
             ImGui::InputText("##sni", g_app.sni, sizeof(g_app.sni));
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Text("WARP API Address");
-            ImGui::InputTextWithHint("##enroll_address", "default (ip or domain[:port])",
-                                     g_app.enroll_address, sizeof(g_app.enroll_address));
+            ImGui::Text("WARP API");
+            ImGui::InputTextWithHint("##api_address", "Address (default: built-in)",
+                                     g_app.api_address, sizeof(g_app.api_address));
+            ImGui::InputTextWithHint("##api_host", "HTTP host (optional)",
+                                     g_app.api_host, sizeof(g_app.api_host));
+            ImGui::InputTextWithHint("##api_sni", "TLS SNI (optional)",
+                                     g_app.api_sni, sizeof(g_app.api_sni));
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Exit Countries");
             ImGui::InputTextWithHint("##exit_loc", "any (DE,SE accepts / !IR,RU refuses)",

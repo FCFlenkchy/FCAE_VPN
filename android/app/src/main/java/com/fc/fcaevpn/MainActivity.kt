@@ -142,11 +142,27 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchFragmentSni: SwitchMaterial
     private lateinit var layoutGoolInner: android.view.View
     private lateinit var editGoolInner: android.widget.EditText
-    private lateinit var editEnrollAddress: android.widget.EditText
+    private lateinit var editApiAddress: android.widget.EditText
+    private lateinit var editApiHost: android.widget.EditText
+    private lateinit var editApiSni: android.widget.EditText
     private lateinit var editExitLoc: android.widget.EditText
     private lateinit var switchTlsVerify: SwitchMaterial
     private lateinit var switchDisableGrease: SwitchMaterial
+    private lateinit var switchGreaseSigalgs: SwitchMaterial
+    private lateinit var switchEchGrease: SwitchMaterial
+    private lateinit var switchDisableOcspStapling: SwitchMaterial
+    private lateinit var switchDisableSct: SwitchMaterial
+    private lateinit var switchDisableSessionTicket: SwitchMaterial
+    private lateinit var switchDisableExtensionPermutation: SwitchMaterial
     private lateinit var editTlsCiphers: android.widget.EditText
+    private lateinit var editTls13Ciphers: android.widget.EditText
+    private lateinit var editTlsGroups: android.widget.EditText
+    private lateinit var editTlsKeyShares: android.widget.EditText
+    private lateinit var editTlsSigalgs: android.widget.EditText
+    private lateinit var editTlsCertCompression: android.widget.EditText
+    private lateinit var editTlsAlps: android.widget.EditText
+    private lateinit var editTlsTrustAnchors: android.widget.EditText
+    private lateinit var editTlsServerPadding: android.widget.EditText
     private lateinit var switchFragment: SwitchMaterial
     private lateinit var layoutFragment: android.view.View
     private lateinit var editFragMinSize: android.widget.EditText
@@ -1207,11 +1223,27 @@ class MainActivity : AppCompatActivity() {
         switchFragmentSni = findViewById(R.id.switchFragmentSni)
         layoutGoolInner = findViewById(R.id.layoutGoolInner)
         editGoolInner = findViewById(R.id.editGoolInner)
-        editEnrollAddress = findViewById(R.id.editEnrollAddress)
+        editApiAddress = findViewById(R.id.editApiAddress)
+        editApiHost = findViewById(R.id.editApiHost)
+        editApiSni = findViewById(R.id.editApiSni)
         editExitLoc = findViewById(R.id.editExitLoc)
         switchTlsVerify = findViewById(R.id.switchTlsVerify)
         switchDisableGrease = findViewById(R.id.switchDisableGrease)
+        switchGreaseSigalgs = findViewById(R.id.switchGreaseSigalgs)
+        switchEchGrease = findViewById(R.id.switchEchGrease)
+        switchDisableOcspStapling = findViewById(R.id.switchDisableOcspStapling)
+        switchDisableSct = findViewById(R.id.switchDisableSct)
+        switchDisableSessionTicket = findViewById(R.id.switchDisableSessionTicket)
+        switchDisableExtensionPermutation = findViewById(R.id.switchDisableExtensionPermutation)
         editTlsCiphers = findViewById(R.id.editTlsCiphers)
+        editTls13Ciphers = findViewById(R.id.editTls13Ciphers)
+        editTlsGroups = findViewById(R.id.editTlsGroups)
+        editTlsKeyShares = findViewById(R.id.editTlsKeyShares)
+        editTlsSigalgs = findViewById(R.id.editTlsSigalgs)
+        editTlsCertCompression = findViewById(R.id.editTlsCertCompression)
+        editTlsAlps = findViewById(R.id.editTlsAlps)
+        editTlsTrustAnchors = findViewById(R.id.editTlsTrustAnchors)
+        editTlsServerPadding = findViewById(R.id.editTlsServerPadding)
         switchFragment = findViewById(R.id.switchFragment)
         layoutFragment = findViewById(R.id.layoutFragment)
         editFragMinSize = findViewById(R.id.editFragMinSize)
@@ -1356,7 +1388,9 @@ class MainActivity : AppCompatActivity() {
         // the focus was moved.
         val editTexts = listOf(editTunMtu, editSni, editForcePeer, editUpstreamProxy, editSocksPort, editHttpPort, editTorHttpPort, editTunTcpSndbuf, editTunTcpRcvbuf,
             editTeam, editAccessToken, editAccessEmail, editRoutesFile, editRoutesInline,
-            editEchDns, editEchDomain, editGoolInner, editEnrollAddress, editExitLoc, editTlsCiphers)
+            editEchDns, editEchDomain, editGoolInner, editApiAddress, editApiHost, editApiSni, editExitLoc,
+            editTlsCiphers, editTls13Ciphers, editTlsGroups, editTlsKeyShares, editTlsSigalgs,
+            editTlsCertCompression, editTlsAlps, editTlsTrustAnchors, editTlsServerPadding)
         for (et in editTexts) {
             et.setOnFocusChangeListener { view, hasFocus ->
                 (view as android.widget.EditText).isCursorVisible = hasFocus
@@ -2345,10 +2379,26 @@ class MainActivity : AppCompatActivity() {
             putString("echDomain", editEchDomain.text.toString().trim())
             putString("goolInner", editGoolInner.text.toString().trim())
             putString("tlsCiphers", editTlsCiphers.text.toString().trim())
-            putString("enrollAddress", editEnrollAddress.text.toString().trim())
+            putString("apiAddress", editApiAddress.text.toString().trim())
+            putString("apiHost", editApiHost.text.toString().trim())
+            putString("apiSni", editApiSni.text.toString().trim())
             putString("exitLoc", editExitLoc.text.toString().trim())
+            putString("tls13Ciphers", editTls13Ciphers.text.toString().trim())
+            putString("tlsGroups", editTlsGroups.text.toString().trim())
+            putString("tlsKeyShares", editTlsKeyShares.text.toString().trim())
+            putString("tlsSigalgs", editTlsSigalgs.text.toString().trim())
+            putString("tlsCertCompression", editTlsCertCompression.text.toString().trim())
+            putString("tlsAlps", editTlsAlps.text.toString().trim())
+            putString("tlsTrustAnchors", editTlsTrustAnchors.text.toString().trim())
+            putString("tlsServerPadding", editTlsServerPadding.text.toString().trim())
             putBoolean("tlsVerify", switchTlsVerify.isChecked)
             putBoolean("disableGrease", switchDisableGrease.isChecked)
+            putBoolean("enableGreaseSigalgs", switchGreaseSigalgs.isChecked)
+            putBoolean("enableEchGrease", switchEchGrease.isChecked)
+            putBoolean("disableOcspStapling", switchDisableOcspStapling.isChecked)
+            putBoolean("disableSct", switchDisableSct.isChecked)
+            putBoolean("disableSessionTicket", switchDisableSessionTicket.isChecked)
+            putBoolean("disableExtensionPermutation", switchDisableExtensionPermutation.isChecked)
             putBoolean("fragmentSni", switchFragmentSni.isChecked)
             putString("forcePeer", editForcePeer.text.toString().trim())
             putString("upstreamProxy", upstreamProxyText())
@@ -2455,10 +2505,26 @@ class MainActivity : AppCompatActivity() {
         editEchDomain.setText(prefs.getString("echDomain", ""))
         editGoolInner.setText(prefs.getString("goolInner", ""))
         editTlsCiphers.setText(prefs.getString("tlsCiphers", ""))
-        editEnrollAddress.setText(prefs.getString("enrollAddress", ""))
+        editApiAddress.setText(prefs.getString("apiAddress", prefs.getString("enrollAddress", "")))
+        editApiHost.setText(prefs.getString("apiHost", ""))
+        editApiSni.setText(prefs.getString("apiSni", ""))
         editExitLoc.setText(prefs.getString("exitLoc", ""))
+        editTls13Ciphers.setText(prefs.getString("tls13Ciphers", ""))
+        editTlsGroups.setText(prefs.getString("tlsGroups", ""))
+        editTlsKeyShares.setText(prefs.getString("tlsKeyShares", ""))
+        editTlsSigalgs.setText(prefs.getString("tlsSigalgs", ""))
+        editTlsCertCompression.setText(prefs.getString("tlsCertCompression", ""))
+        editTlsAlps.setText(prefs.getString("tlsAlps", ""))
+        editTlsTrustAnchors.setText(prefs.getString("tlsTrustAnchors", ""))
+        editTlsServerPadding.setText(prefs.getString("tlsServerPadding", ""))
         switchTlsVerify.isChecked = prefs.getBoolean("tlsVerify", false)
         switchDisableGrease.isChecked = prefs.getBoolean("disableGrease", false)
+        switchGreaseSigalgs.isChecked = prefs.getBoolean("enableGreaseSigalgs", false)
+        switchEchGrease.isChecked = prefs.getBoolean("enableEchGrease", false)
+        switchDisableOcspStapling.isChecked = prefs.getBoolean("disableOcspStapling", false)
+        switchDisableSct.isChecked = prefs.getBoolean("disableSct", false)
+        switchDisableSessionTicket.isChecked = prefs.getBoolean("disableSessionTicket", false)
+        switchDisableExtensionPermutation.isChecked = prefs.getBoolean("disableExtensionPermutation", false)
         switchFragmentSni.isChecked = prefs.getBoolean("fragmentSni", false)
         editForcePeer.setText(prefs.getString("forcePeer", ""))
         editUpstreamProxy.setText(prefs.getString("upstreamProxy", ""))
@@ -2715,10 +2781,26 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("echDomain", editEchDomain.text.toString().trim())
         i.putExtra("goolInner", editGoolInner.text.toString().trim())
         i.putExtra("tlsCiphers", editTlsCiphers.text.toString().trim())
-        i.putExtra("enrollAddress", editEnrollAddress.text.toString().trim())
+        i.putExtra("apiAddress", editApiAddress.text.toString().trim())
+        i.putExtra("apiHost", editApiHost.text.toString().trim())
+        i.putExtra("apiSni", editApiSni.text.toString().trim())
         i.putExtra("exitLoc", editExitLoc.text.toString().trim())
+        i.putExtra("tls13Ciphers", editTls13Ciphers.text.toString().trim())
+        i.putExtra("tlsGroups", editTlsGroups.text.toString().trim())
+        i.putExtra("tlsKeyShares", editTlsKeyShares.text.toString().trim())
+        i.putExtra("tlsSigalgs", editTlsSigalgs.text.toString().trim())
+        i.putExtra("tlsCertCompression", editTlsCertCompression.text.toString().trim())
+        i.putExtra("tlsAlps", editTlsAlps.text.toString().trim())
+        i.putExtra("tlsTrustAnchors", editTlsTrustAnchors.text.toString().trim())
+        i.putExtra("tlsServerPadding", editTlsServerPadding.text.toString().trim())
         i.putExtra("tlsVerify", switchTlsVerify.isChecked)
         i.putExtra("disableGrease", switchDisableGrease.isChecked)
+        i.putExtra("enableGreaseSigalgs", switchGreaseSigalgs.isChecked)
+        i.putExtra("enableEchGrease", switchEchGrease.isChecked)
+        i.putExtra("disableOcspStapling", switchDisableOcspStapling.isChecked)
+        i.putExtra("disableSct", switchDisableSct.isChecked)
+        i.putExtra("disableSessionTicket", switchDisableSessionTicket.isChecked)
+        i.putExtra("disableExtensionPermutation", switchDisableExtensionPermutation.isChecked)
         i.putExtra("fragmentSni", switchFragmentSni.isChecked)
         // TUN needs a loopback SOCKS listener internally, but it must not
         // expose the public proxy controls. HTTP proxying is disabled in TUN.
@@ -2792,10 +2874,26 @@ class MainActivity : AppCompatActivity() {
         val echDomain = editEchDomain.text.toString().trim()
         val goolInner = editGoolInner.text.toString().trim()
         val tlsCiphers = editTlsCiphers.text.toString().trim()
-        val enrollAddress = editEnrollAddress.text.toString().trim()
+        val apiAddress = editApiAddress.text.toString().trim()
+        val apiHost = editApiHost.text.toString().trim()
+        val apiSni = editApiSni.text.toString().trim()
         val exitLoc = editExitLoc.text.toString().trim()
+        val tls13Ciphers = editTls13Ciphers.text.toString().trim()
+        val tlsGroups = editTlsGroups.text.toString().trim()
+        val tlsKeyShares = editTlsKeyShares.text.toString().trim()
+        val tlsSigalgs = editTlsSigalgs.text.toString().trim()
+        val tlsCertCompression = editTlsCertCompression.text.toString().trim()
+        val tlsAlps = editTlsAlps.text.toString().trim()
+        val tlsTrustAnchors = editTlsTrustAnchors.text.toString().trim()
+        val tlsServerPadding = editTlsServerPadding.text.toString().trim()
         val tlsVerify = switchTlsVerify.isChecked
         val disableGrease = switchDisableGrease.isChecked
+        val enableGreaseSigalgs = switchGreaseSigalgs.isChecked
+        val enableEchGrease = switchEchGrease.isChecked
+        val disableOcspStapling = switchDisableOcspStapling.isChecked
+        val disableSct = switchDisableSct.isChecked
+        val disableSessionTicket = switchDisableSessionTicket.isChecked
+        val disableExtensionPermutation = switchDisableExtensionPermutation.isChecked
         val fragmentSni = switchFragmentSni.isChecked
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
         // Extract ALL UI values on the main thread — never read Views from bg.
@@ -2894,10 +2992,26 @@ class MainActivity : AppCompatActivity() {
                     echDomain = echDomain,
                     goolInner = goolInner,
                     tlsCiphers = tlsCiphers,
-                    enrollAddress = enrollAddress,
+                    apiAddress = apiAddress,
+                    apiHost = apiHost,
+                    apiSni = apiSni,
                     exitLoc = exitLoc,
+                    tls13Ciphers = tls13Ciphers,
+                    tlsGroups = tlsGroups,
+                    tlsKeyShares = tlsKeyShares,
+                    tlsSigalgs = tlsSigalgs,
+                    tlsCertCompression = tlsCertCompression,
+                    tlsAlps = tlsAlps,
+                    tlsTrustAnchors = tlsTrustAnchors,
+                    tlsServerPadding = tlsServerPadding,
                     tlsVerify = tlsVerify,
                     disableGrease = disableGrease,
+                    enableGreaseSigalgs = enableGreaseSigalgs,
+                    enableEchGrease = enableEchGrease,
+                    disableOcspStapling = disableOcspStapling,
+                    disableSct = disableSct,
+                    disableSessionTicket = disableSessionTicket,
+                    disableExtensionPermutation = disableExtensionPermutation,
                     fragmentSni = fragmentSni,
                     upstreamProxy = upstreamProxy,
                 )

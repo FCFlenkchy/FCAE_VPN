@@ -67,18 +67,34 @@ struct AppState {
     bool h2_enabled      = true;
     bool ech_enabled     = true;
 
-    // MASQUE SNI (empty = default consumer-masque.cloudflareclient.com)
+    // MASQUE SNI (empty = Aether's v2.4 default www.cloudflare.com).
     char sni[128] = {};
     // Aether engine options (FcaeAether); empty strings take the engine default.
     char ech_dns[256] = {};
     char ech_domain[128] = {};
     char gool_inner[64] = {};
     char tls_ciphers[512] = {};
-    char enroll_address[128] = {};
+    char api_address[128] = {};
+    char api_host[128] = {};
+    char api_sni[128] = {};
     char exit_loc[128] = {};
+    char tls_groups[256] = {};
+    char tls13_ciphers[512] = {};
+    char tls_key_shares[256] = {};
+    char tls_sigalgs[512] = {};
+    char tls_cert_compression[64] = {};
+    char tls_alps[8] = {};
+    char tls_trust_anchors[512] = {};
+    char tls_server_padding[8] = {};
     bool tls_verify = false;
     bool disable_grease = false;
     bool fragment_sni = false;
+    bool enable_grease_sigalgs = false;
+    bool enable_ech_grease = false;
+    bool disable_ocsp_stapling = false;
+    bool disable_sct = false;
+    bool disable_session_ticket = false;
+    bool disable_extension_permutation = false;
     char tun_mtu[8] = "1500";
     char tun_tcp_sndbuf[32] = "256000";
     char tun_tcp_rcvbuf[32] = "256000";
@@ -272,11 +288,27 @@ struct AppState {
         c.aether.ech_domain     = ech_domain[0] ? ech_domain : nullptr;
         c.aether.gool_inner     = gool_inner[0] ? gool_inner : nullptr;
         c.aether.tls_ciphers    = tls_ciphers[0] ? tls_ciphers : nullptr;
-        c.aether.enroll_address = enroll_address[0] ? enroll_address : nullptr;
+        c.aether.api_address    = api_address[0] ? api_address : nullptr;
+        c.aether.api_host       = api_host[0] ? api_host : nullptr;
+        c.aether.api_sni        = api_sni[0] ? api_sni : nullptr;
         c.aether.exit_loc       = exit_loc[0] ? exit_loc : nullptr;
+        c.dns.tls_groups         = tls_groups[0] ? tls_groups : nullptr;
+        c.aether.tls13_ciphers   = tls13_ciphers[0] ? tls13_ciphers : nullptr;
+        c.aether.tls_key_shares  = tls_key_shares[0] ? tls_key_shares : nullptr;
+        c.aether.tls_sigalgs     = tls_sigalgs[0] ? tls_sigalgs : nullptr;
+        c.aether.tls_cert_compression = tls_cert_compression[0] ? tls_cert_compression : nullptr;
+        c.aether.tls_alps        = tls_alps[0] ? tls_alps : nullptr;
+        c.aether.tls_trust_anchors = tls_trust_anchors[0] ? tls_trust_anchors : nullptr;
+        c.aether.tls_server_padding = tls_server_padding[0] ? tls_server_padding : nullptr;
         c.aether.tls_verify     = tls_verify;
         c.aether.disable_grease = disable_grease;
         c.aether.fragment_sni   = fragment_sni;
+        c.aether.enable_grease_sigalgs = enable_grease_sigalgs;
+        c.aether.enable_ech_grease = enable_ech_grease;
+        c.aether.disable_ocsp_stapling = disable_ocsp_stapling;
+        c.aether.disable_sct = disable_sct;
+        c.aether.disable_session_ticket = disable_session_ticket;
+        c.aether.disable_extension_permutation = disable_extension_permutation;
 
         // Where does this session's traffic end: protocol Psiphon (backend
         // 1) or egress "Psiphon through the tunnel" (tor_mode 3 on a
