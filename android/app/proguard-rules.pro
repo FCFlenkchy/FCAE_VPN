@@ -1,4 +1,8 @@
-# JNI exports use name-based lookup from libfcaevpn_native.so.
+# JNI exports use name-based lookup from libfcaevpn_native.so. Keep the
+# Kotlin object itself as well: FCAEVpnService starts before an Activity and
+# must resolve NativeEngine even in an R8-minified process.
+-keep class com.fc.fcaevpn.NativeEngine { *; }
+-keep class com.fc.fcaevpn.NativeEngine$Loaded { *; }
 -keepclasseswithmembernames,includedescriptorclasses class com.fc.fcaevpn.** {
     native <methods>;
 }

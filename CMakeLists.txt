@@ -249,10 +249,13 @@ function(fcae_link_go_bridges target_name abi)
     set(jni_dir ${CMAKE_SOURCE_DIR}/android/app/src/main/jniLibs/${abi})
     # TUN mode always needs it: a hard dependency.
     set(t2s ${jni_dir}/libfcae_go_bridge.so)
-    if(EXISTS "${t2s}")
-        target_link_libraries(${target_name} PRIVATE "${t2s}")
-        message(STATUS "linking Go bridge: ${t2s}")
+    if(NOT EXISTS "${t2s}")
+        message(FATAL_ERROR
+            "Missing required Android Go bridge: ${t2s}. Build the fcae-ffi tun2socks bridge "
+            "for ${abi} before configuring CMake so Gradle can package it.")
     endif()
+    target_link_libraries(${target_name} PRIVATE "${t2s}")
+    message(STATUS "linking Go bridge: ${t2s}")
 
     # The .so sits next to our library in the APK's native lib dir.
     target_link_options(${target_name} PRIVATE "-Wl,-rpath,\\$ORIGIN")

@@ -10,15 +10,21 @@ object NativeEngine {
         Thread(r, "FCAE-Lifecycle").apply { isDaemon = true }
     }
 
-    init {
-        // tun2socks Go runtime. Must load before the Rust JNI library, which
-        // references t2s_* symbols. Psiphon is not in this .so (official AAR
-        // when re-enabled). Do not swallow this error: a missing bridge is a
-        // packaging/build failure, not an optional runtime feature.
-        System.loadLibrary("fcae_go_bridge")
+    @Volatile private var loadFailure: String? = null
 
-        System.loadLibrary("fcaevpn_native")
-        Loaded.value = true
+    init {
+        // Loading can fail when an APK is missing an ABI-specific native
+        // payload. Never let that poison this class: Android turns a failed
+        // object initialiser into NoClassDefFoundError at every later service
+        // call, which hides the actual loader error and crashes the process.
+        try {
+            System.loadLibrary("fcae_go_bridge")
+            System.loadLibrary("fcaevpn_native")
+            Loaded.value = true
+        } catch (t: Throwable) {
+            loadFailure = t.toString()
+            android.util.Log.e("FCAE_VPN", "native libraries unavailable", t)
+        }
     }
 
     /**
@@ -40,9 +46,11 @@ object NativeEngine {
      * would throw UnsatisfiedLinkError.
      */
     @JvmStatic
-    fun ensureLoaded() {
-        // Referencing the object is enough; `init` has already run by here.
-    }
+    fun ensureLoaded(): Boolean = Loaded.value
+
+    /** Loader failure retained for the service log when a packaged ABI is missing. */
+    @JvmStatic
+    fun nativeLoadFailure(): String = loadFailure.orEmpty()
 
     @JvmStatic external fun nativeInit()
     @JvmStatic external fun nativeSetNativeLibDir(path: String)
@@ -193,6 +201,7 @@ object NativeEngine {
          */
     @JvmStatic
     fun startSession(context: Context, session: Intent): Boolean {
+        if (!ensureLoaded()) return false
         val mode = if (session.getIntExtra("mode", 1) == 1) 1 else 0
         val socks = session.getIntExtra("socksPort", 1819)
         nativeInit()

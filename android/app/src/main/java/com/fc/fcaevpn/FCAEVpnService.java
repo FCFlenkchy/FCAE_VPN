@@ -97,6 +97,8 @@ public class FCAEVpnService extends VpnService {
     private Intent lastStartIntent;
     private VpnNotification notification;
     private Handler handler;
+    /** True only after every JNI library and service callback registered. */
+    private volatile boolean nativeReady;
 
     private final Object cmdLock = new Object();
     private volatile boolean engineOpInFlight = false;
@@ -589,13 +591,19 @@ public class FCAEVpnService extends VpnService {
                 // nativeRegisterVpnService() could be the first native call and throw
                 // UnsatisfiedLinkError on launch. Wrapped, so a build without the
                 // libraries degrades to no tunnel instead of crashing.
-        try {
-            NativeEngine.ensureLoaded();
-            // Register before any tunnel starts: Psiphon may call protect()
-            // as soon as it begins dialling.
-            nativeRegisterVpnService();
-        } catch (Throwable t) {
-            android.util.Log.e("FCAE_VPN", "native register failed: " + t);
+        nativeReady = NativeEngine.ensureLoaded();
+        if (nativeReady) {
+            try {
+                // Register before any tunnel starts: Psiphon may call protect()
+                // as soon as it begins dialling.
+                nativeRegisterVpnService();
+            } catch (Throwable t) {
+                nativeReady = false;
+                android.util.Log.e("FCAE_VPN", "native register failed", t);
+            }
+        } else {
+            android.util.Log.e("FCAE_VPN", "native libraries unavailable: "
+                    + NativeEngine.nativeLoadFailure());
         }
 
         handler = new Handler(Looper.getMainLooper());
@@ -639,6 +647,7 @@ public class FCAEVpnService extends VpnService {
                     return START_NOT_STICKY;
 
                 case ACTION_PSIPHON_START:
+                    if (!requireNativeEngine(startId)) return START_NOT_STICKY;
                     ProcessExit.cancel();
                     armConnectWatchdog();
                     pendingPsiphonStart = new Intent(intent);
@@ -668,6 +677,7 @@ public class FCAEVpnService extends VpnService {
                     return START_STICKY;
 
                 case ACTION_REPLAY:
+                    if (!requireNativeEngine(startId)) return START_NOT_STICKY;
                     Intent recalled = recalledSession(this);
                     if (recalled == null || !recalled.hasExtra("protocol")) {
                         SessionState.command(SessionState.Command.NONE);
@@ -702,6 +712,7 @@ public class FCAEVpnService extends VpnService {
                     // Fall through to the normal owner path with the complete
                     // saved configuration loaded by the foreground service.
                 case ACTION_START:
+                    if (!requireNativeEngine(startId)) return START_NOT_STICKY;
                     notificationPause = false;
                     // Resume and connect look the same on the wire and are not
                     // the same thing on screen: only the connect may show the
@@ -726,6 +737,21 @@ public class FCAEVpnService extends VpnService {
 
         showReady();
         return START_STICKY;
+    }
+
+    /** Stop and remove this owner when JNI could not be loaded. */
+    private boolean requireNativeEngine(int startId) {
+        if (nativeReady && NativeEngine.ensureLoaded()) return true;
+        String detail = NativeEngine.nativeLoadFailure();
+        Log.e(TAG, "refusing VPN start: native engine is unavailable"
+                + (detail.isEmpty() ? "" : " (" + detail + ")"));
+        handler.removeCallbacks(connectWatchdog);
+        SessionState.command(SessionState.Command.NONE);
+        SessionState.markIdle(this);
+        notification.dismiss();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf(startId);
+        return false;
     }
 
     /**
@@ -785,6 +811,11 @@ public class FCAEVpnService extends VpnService {
      * of an aborting warp-in-warp task.
      */
     private synchronized void requestStart(Intent intent) {
+        if (!nativeReady || !NativeEngine.ensureLoaded()) {
+            Log.e(TAG, "start ignored: native engine is unavailable");
+            showReady();
+            return;
+        }
         Intent src = intent;
         if (src == null || !src.hasExtra("protocol")) {
             if (lastStartIntent != null) {
