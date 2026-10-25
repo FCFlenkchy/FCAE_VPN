@@ -1,8 +1,8 @@
 [
   {
     "version": "1.4.2",
-    "date": "2026-10-24",
-    "notes": "bump aether to 2.4.0",
+    "date": "2026-10-25",
+    "notes": "bump aether to 2.4.0 (fixed failed to load native library)",
     "url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/1.4.2"
   },
   {
