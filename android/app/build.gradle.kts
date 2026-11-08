@@ -76,8 +76,6 @@ android {
         targetSdk = 34
         versionCode = androidVersionCode
         versionName = appVersion
-        resourceConfigurations += "en"
-
         buildConfigField("String", "APP_VERSION", "\"${appVersion}\"")
         buildConfigField("Boolean", "IS_PRERELEASE", "${isPrerelease}")
 
@@ -139,6 +137,10 @@ android {
         }
     }
 
+    androidResources {
+        localeFilters += "en"
+    }
+
     buildFeatures {
         buildConfig = true
     }
@@ -167,12 +169,6 @@ android {
         cmake {
             path = file("../../CMakeLists.txt")
             version = "3.22.1"
-        }
-    }
-
-    sourceSets {
-        getByName("main") {
-            jniLibs.srcDirs("src/main/jniLibs")
         }
     }
 
