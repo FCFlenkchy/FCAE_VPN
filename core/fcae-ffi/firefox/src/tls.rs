@@ -1,0 +1,89 @@
+use boring::ssl::{ConnectConfiguration, SslConnector, SslMethod, SslVerifyMode};
+use tokio::net::TcpStream;
+use tokio_boring::SslStream;
+
+use crate::dialer::Dialer;
+use crate::error::{FirefoxError, Result};
+
+pub const ALPN_H2: &[u8] = b"\x02h2";
+pub const ALPN_H1: &[u8] = b"\x08http/1.1";
+pub const ALPN_H2_H1: &[u8] = b"\x02h2\x08http/1.1";
+
+const FIREFOX_TLS12_CIPHERS: &str = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA";
+const FIREFOX_TLS13_CIPHERS: &str = "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384";
+const FIREFOX_GROUPS: &str = "X25519MLKEM768:X25519:P-256:P-384:P-521";
+const FIREFOX_KEY_SHARES: &str = "X25519MLKEM768:X25519:P-256";
+const FIREFOX_SIGALGS: &str = "ecdsa_secp256r1_sha256:ecdsa_secp384r1_sha384:ecdsa_secp521r1_sha512:rsa_pss_rsae_sha256:rsa_pss_rsae_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha256:rsa_pkcs1_sha384:rsa_pkcs1_sha512:ecdsa_sha1:rsa_pkcs1_sha1";
+
+fn fingerprint() -> aether_engine::tls::Fingerprint {
+    aether_engine::tls::Fingerprint {
+        ciphers: Some(FIREFOX_TLS12_CIPHERS.into()),
+        tls13_ciphers: Some(FIREFOX_TLS13_CIPHERS.into()),
+        groups: FIREFOX_GROUPS.into(),
+        key_shares: Some(FIREFOX_KEY_SHARES.into()),
+        grease: false,
+        grease_sigalgs: false,
+        sigalgs: Some(FIREFOX_SIGALGS.into()),
+        cert_compression: Some("zlib:brotli:zstd".into()),
+        alps: None,
+        trust_anchors: None,
+        server_padding: None,
+        ech_grease: true,
+        ocsp_stapling: true,
+        sct: true,
+        session_ticket: true,
+        permute_extensions: false,
+    }
+}
+
+fn configuration(alpn: &[u8]) -> Result<ConnectConfiguration> {
+    let mut builder = SslConnector::builder(SslMethod::tls())
+        .map_err(|error| FirefoxError::Protocol(format!("creating TLS context: {error}")))?;
+    let fingerprint = fingerprint();
+    fingerprint
+        .apply(&mut builder, alpn)
+        .map_err(|error| FirefoxError::Protocol(format!("configuring Firefox TLS fingerprint: {error}")))?;
+    builder
+        .set_default_verify_paths()
+        .map_err(|error| FirefoxError::Protocol(format!("loading system trust roots: {error}")))?;
+    builder.set_verify(SslVerifyMode::PEER);
+    let mut configuration = builder
+        .build()
+        .configure()
+        .map_err(|error| FirefoxError::Protocol(format!("creating TLS connection: {error}")))?;
+    configuration.set_verify_hostname(true);
+    configuration.set_use_server_name_indication(true);
+    fingerprint
+        .prepare(&mut configuration, alpn)
+        .map_err(|error| FirefoxError::Protocol(format!("preparing Firefox TLS handshake: {error}")))?;
+    Ok(configuration)
+}
+
+pub async fn connect(dialer: &Dialer, host: &str, port: u16, alpn: &[u8]) -> Result<SslStream<TcpStream>> {
+    let config = configuration(alpn)?;
+    let tcp = dialer.connect_tcp(host, port).await?;
+    tokio_boring::connect(config, host, tcp)
+        .await
+        .map_err(|error| FirefoxError::Tls { host: host.into(), message: error.to_string() })
+}
+
+pub fn require_h2(stream: &SslStream<TcpStream>) -> Result<()> {
+    if stream.ssl().selected_alpn_protocol() == Some(b"h2") {
+        Ok(())
+    } else {
+        Err(FirefoxError::Protocol("Mozilla proxy did not negotiate HTTP/2".into()))
+    }
+}
+
+pub fn firefox_user_agent() -> String {
+    let platform = if cfg!(target_os = "windows") || cfg!(target_os = "android") {
+        "Windows NT 10.0; Win64; x64"
+    } else if cfg!(target_os = "macos") {
+        "Macintosh; Intel Mac OS X 10.15"
+    } else if cfg!(target_arch = "aarch64") {
+        "X11; Linux aarch64"
+    } else {
+        "X11; Linux x86_64"
+    };
+    format!("Mozilla/5.0 ({platform}; rv:158.0) Gecko/20100101 Firefox/158.0")
+}

@@ -88,7 +88,7 @@ object NativeEngine {
         // Aether engine verbosity: 0=off 1=error 2=warn 3=info 4=debug 5=trace.
         // Not the FFI's own log level -- that stays at info.
         engineLog: Int,
-        // 0 = Aether, 1 = Psiphon (FcaeBackend).
+        // 0 = Aether, 1 = Psiphon, 2 = Firefox (FcaeBackend).
         backend: Int,
         // Tor's own SOCKS listener; must differ from socksPort/httpPort.
         // 0 = defer to the engine default (config.rs DEFAULT_TOR_SOCKS_PORT);
@@ -145,7 +145,22 @@ object NativeEngine {
         fragmentSni: Boolean,
         // Outbound proxy URL (http/socks5) or "" for direct.
         upstreamProxy: String,
+        // Ordered additional exits after backend (Aether=0, Psiphon=1, Firefox=2).
+        chainCount: Int,
+        chainExit0: Int,
+        chainExit1: Int,
+        chainExit2: Int,
+        firefoxAccountId: String,
+        firefoxLocation: String,
+        firefoxServer: String,
+        firefoxTransport: String,
     ): Boolean
+    @JvmStatic external fun nativeFirefoxCaptchaPending(): Long
+    @JvmStatic external fun nativeFirefoxCaptchaImage(id: Long): String
+    @JvmStatic external fun nativeFirefoxCaptchaAnswer(id: Long, answer: String): Boolean
+    @JvmStatic external fun nativeFirefoxAccountSubmit(requestJson: String): Long
+    @JvmStatic external fun nativeFirefoxJobPoll(id: Long): String
+    @JvmStatic external fun nativeFirefoxJobRelease(id: Long)
     @JvmStatic external fun nativePsiphonAttachRequest(): String
     @JvmStatic external fun nativePsiphonAttachComplete(id: Long, socks: Int, http: Int)
     @JvmStatic external fun nativeParseTcpBufferSize(text: String): Int
@@ -282,6 +297,14 @@ object NativeEngine {
             disableExtensionPermutation = session.getBooleanExtra("disableExtensionPermutation", false),
             fragmentSni = session.getBooleanExtra("fragmentSni", false),
             upstreamProxy = session.getStringExtra("upstreamProxy").orEmpty(),
+            chainCount = session.getIntExtra("chainCount", 0),
+            chainExit0 = session.getIntExtra("chainExit0", 1),
+            chainExit1 = session.getIntExtra("chainExit1", 2),
+            chainExit2 = session.getIntExtra("chainExit2", 0),
+            firefoxAccountId = session.getStringExtra("firefoxAccountId").orEmpty(),
+            firefoxLocation = session.getStringExtra("firefoxLocation").orEmpty(),
+            firefoxServer = session.getStringExtra("firefoxServer").orEmpty(),
+            firefoxTransport = session.getStringExtra("firefoxTransport").orEmpty().ifEmpty { "auto" },
         )
     }
 

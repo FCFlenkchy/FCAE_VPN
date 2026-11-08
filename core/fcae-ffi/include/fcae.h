@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 21
+#define FCAE_ABI_VERSION 22
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -66,7 +66,8 @@ typedef enum {
 
 typedef enum {
     FCAE_BACKEND_AETHER  = 0,
-    FCAE_BACKEND_PSIPHON = 1
+    FCAE_BACKEND_PSIPHON = 1,
+    FCAE_BACKEND_FIREFOX = 2
 } FcaeBackend;
 
 /* What a backend supports, so the UI can describe it rather than hardcoding
@@ -310,6 +311,22 @@ typedef struct {
     bool        disable_extension_permutation;
 } FcaeAether;
 
+/* Firefox IP Protection selection. Credentials are entered through the
+ * asynchronous native account API and never cross FcaeConfig. */
+typedef struct {
+    const char *account_id;      /* stable ID returned by the account API  */
+    const char *location;        /* NULL/empty = recommended location      */
+    const char *server;          /* optional proxy host[:port] override    */
+    const char *transport;       /* auto | h2 | h1 | h3 (h3 reserved)     */
+} FcaeFirefox;
+
+/* Additional exits in carrier-to-final-exit order. Every backend may occur
+ * at most once. Aether + [Psiphon, Firefox] = Aether -> Psiphon -> Firefox. */
+typedef struct {
+    FcaeBackend exits[3];
+    uint32_t    count;
+} FcaeChain;
+
 typedef struct {
     uint32_t        struct_size;   /* = sizeof(FcaeConfig)                 */
     uint32_t        abi_version;   /* = FCAE_ABI_VERSION                   */
@@ -351,6 +368,8 @@ typedef struct {
     uint64_t        tun_engine;      /* FCAE_TUN_ENGINE_*; TUN mode only; ABI v8 */
     FcaeAether      aether;          /* ABI v21 */
     const char     *upstream_proxy;  /* http|socks5|socks5h://[user:pass@]host:port[@user:pass]; NULL = direct; ABI v20 */
+    FcaeFirefox    firefox;         /* Firefox IP Protection; ABI v22      */
+    FcaeChain      chain;           /* ordered additional exits; ABI v22   */
 } FcaeConfig;
 
 /* Telemetry */
@@ -576,6 +595,31 @@ void       fcae_psiphon_attach_complete(uint64_t id, uint16_t socks, uint16_t ht
  * need this. */
 FcaeStatus fcae_set_psiphon_protect(int (*protect)(int fd));
 
+/* Firefox carrier sockets use the same Android VpnService.protect(fd) hook. */
+FcaeStatus fcae_set_firefox_protect(int (*protect)(int fd));
+
+/* Native, bounded visual CAPTCHA exchange. Hosts poll the oldest request ID,
+ * fetch its immutable data URL once with the two-call image API, then submit
+ * only the human answer. Request ID 0 means no challenge is pending. */
+uint64_t   fcae_firefox_captcha_pending(void);
+uint32_t   fcae_firefox_captcha_image(uint64_t id, char *out, uint32_t cap);
+bool       fcae_firefox_captcha_answer(uint64_t id, const char *answer);
+
+/* Submit a native Rust Firefox account operation JSON request. Passwords and
+ * codes are consumed by the account worker and are absent from job snapshots.
+ * Returns an opaque job ID, or 0 when the request cannot be queued. */
+uint64_t   fcae_firefox_account_submit(const char *request);
+/* Poll returns the required JSON byte count excluding NUL. Use a second call
+ * with a buffer of required+1 bytes. Zero means the job no longer exists. */
+uint32_t   fcae_firefox_job_poll(uint64_t id, char *out, uint32_t cap);
+void       fcae_firefox_job_release(uint64_t id);
+/* Optional host CAPTCHA solver. Receives an image data URL and writes at most
+ * 256 answer bytes plus NUL. Returns the answer length, or <=0 to decline. */
+FcaeStatus fcae_firefox_set_captcha_callback(
+    int (*callback)(const char *image_data_url, uint32_t image_len,
+                    char *answer, uint32_t answer_cap, void *user_data),
+    void *user_data);
+
 /* Install the host's view of the underlying network for Psiphon.
  *
  *   dns          -> comma-delimited resolver list ("8.8.8.8,1.1.1.1")
@@ -657,4 +701,4 @@ FcaeStatus fcae_sponsor_copy_background_rgba(uint8_t *out, size_t capacity);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x0de2fad17ac20336 */
+/* fcae-abi-fingerprint: 0x9b5b3ec1e7c5f14f */

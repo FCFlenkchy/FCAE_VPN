@@ -137,6 +137,20 @@ pub struct PsiphonConfig {
     pub through_tunnel: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirefoxConfig {
+    pub account_id: Option<String>,
+    pub location: Option<String>,
+    pub server: Option<String>,
+    pub transport: String,
+}
+
+impl Default for FirefoxConfig {
+    fn default() -> Self {
+        Self { account_id: None, location: None, server: None, transport: "auto".into() }
+    }
+}
+
 pub const DEFAULT_TCP_BUFFER: u32 = 256000;
 // gVisor TCP MinBufferSize/MaxBufferSize in the pinned tun2socks dependency.
 pub const MIN_TCP_BUFFER: u32 = 4 * 1024;
@@ -325,6 +339,9 @@ pub struct SessionConfig {
     pub aether: AetherOptions,
     /// Proxy every outbound connection of the session goes through.
     pub upstream_proxy: Option<UpstreamProxy>,
+    pub firefox: FirefoxConfig,
+    /// Additional exits in carrier-to-final-exit order.
+    pub chain: Vec<FcaeBackend>,
 }
 
 impl Default for SessionConfig {
@@ -354,6 +371,8 @@ impl Default for SessionConfig {
             tun: TunConfig::default(),
             aether: AetherOptions::default(),
             upstream_proxy: None,
+            firefox: FirefoxConfig::default(),
+            chain: Vec::new(),
         }
     }
 }
@@ -376,6 +395,14 @@ impl SessionConfig {
 
     pub fn is_tun(&self) -> bool {
         self.mode == FcaeMode::Tun
+    }
+
+    pub fn exit_backend(&self) -> FcaeBackend {
+        self.chain.last().copied().unwrap_or(self.backend)
+    }
+
+    pub fn upstream_requires_udp(&self) -> bool {
+        aether_carrier_is_udp(self)
     }
 
     /// How long to let a backend reach a usable state before giving up.
@@ -741,6 +768,68 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     cfg.aether = parse_aether(&raw.aether)?;
     cfg.upstream_proxy = UpstreamProxy::from_c(raw.upstream_proxy)
         .map_err(|e| CoreError::InvalidConfig(format!("upstream_proxy: {e}")))?;
+    let firefox_transport = cstr_opt(raw.firefox.transport).unwrap_or_else(|| "auto".into());
+    if !matches!(firefox_transport.as_str(), "auto" | "h1" | "h2" | "h3") {
+        return Err(CoreError::InvalidConfig(format!(
+            "firefox.transport={firefox_transport:?} is invalid (expected auto, h1, h2 or h3)"
+        )));
+    }
+    cfg.firefox = FirefoxConfig {
+        account_id: cstr_opt(raw.firefox.account_id),
+        location: cstr_opt(raw.firefox.location),
+        server: cstr_opt(raw.firefox.server),
+        transport: firefox_transport,
+    };
+    if raw.chain.count > raw.chain.exits.len() as u32 {
+        return Err(CoreError::InvalidConfig(format!(
+            "chain.count={} exceeds the {} additional exits available in the ABI",
+            raw.chain.count,
+            raw.chain.exits.len()
+        )));
+    }
+    let mut seen = vec![cfg.backend];
+    for exit in raw.chain.exits.iter().take(raw.chain.count as usize) {
+        let exit = FcaeBackend::try_from(*exit as u32)
+            .map_err(|_| CoreError::InvalidConfig("chain contains an unknown backend".into()))?;
+        if seen.contains(&exit) {
+            return Err(CoreError::InvalidConfig(format!(
+                "chain backend {exit:?} occurs more than once; looping a route is not supported"
+            )));
+        }
+        seen.push(exit);
+        cfg.chain.push(exit);
+    }
+    if cfg.chain.is_empty() && cfg.psiphon.through_tunnel && cfg.backend != FcaeBackend::Psiphon {
+        cfg.chain.push(FcaeBackend::Psiphon);
+    }
+    cfg.psiphon.through_tunnel = cfg.chain.len() == 1 && cfg.chain[0] == FcaeBackend::Psiphon;
+    if cfg.exit_backend() == FcaeBackend::Firefox && cfg.is_tun() && cfg.firefox.transport == "h1" {
+        return Err(CoreError::InvalidConfig(
+            "Firefox TUN requires UDP-safe H2; select firefox.transport auto or h2".into(),
+        ));
+    }
+    let tor_tcp_exit = cfg.protocol == FcaeProtocol::Tor
+        || matches!(raw.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain);
+    let mut previous_udp = match cfg.backend {
+        FcaeBackend::Aether => !tor_tcp_exit,
+        FcaeBackend::Psiphon => false,
+        FcaeBackend::Firefox => cfg.firefox.transport != "h1",
+    };
+    for exit in cfg.chain.clone() {
+        let mut hop = cfg.clone();
+        hop.backend = exit;
+        hop.chain.clear();
+        if hop.upstream_requires_udp() && !previous_udp {
+            return Err(CoreError::InvalidConfig(format!(
+                "the {exit:?} hop requires a UDP-capable upstream; the preceding backend is TCP-only"
+            )));
+        }
+        previous_udp = match exit {
+            FcaeBackend::Psiphon => false,
+            FcaeBackend::Firefox => cfg.firefox.transport != "h1",
+            FcaeBackend::Aether => !tor_tcp_exit,
+        };
+    }
 
     // Tor
     let t = &raw.tor;
@@ -890,7 +979,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     if cfg.backend == FcaeBackend::Psiphon {
         cfg.psiphon.through_tunnel = false;
     }
-    let psiphon_exit = cfg.backend == FcaeBackend::Psiphon || cfg.psiphon.through_tunnel;
+    let psiphon_exit = cfg.chain.last().copied().unwrap_or(cfg.backend) == FcaeBackend::Psiphon;
     cfg.tun = TunConfig {
         engine: match raw.tun_engine {
             0 => TunEngine::Tun2socks,

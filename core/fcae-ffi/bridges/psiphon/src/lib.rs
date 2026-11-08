@@ -361,8 +361,9 @@ impl Backend for PsiphonBackend {
                 "a Psiphon tunnel is already starting".into(),
             ));
         }
-        // From here on every exit path must clear STARTING.
-        let _guard = StartGuard;
+        // From here on every exit path must clear STARTING. Once armed, an
+        // incomplete start also owns a stop request for the Go controller.
+        let mut guard = StartGuard { armed: false, abandoned: Arc::new(AtomicBool::new(false)) };
         {
             ffi::wait_previous_stop().await?;
         }
@@ -404,7 +405,18 @@ impl Backend for PsiphonBackend {
         // tunnel. Kick it off, then poll for the handshake.
         let launch = inputs.clone();
         let use_binder = cfg!(target_os = "android");
-        tokio::task::spawn_blocking(move || ffi::start(&launch, use_binder))
+        guard.armed = true;
+        let abandoned = guard.abandoned.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = ffi::start(&launch, use_binder);
+            if abandoned.load(Ordering::SeqCst) {
+                // The stop requested by StartGuard may have run before this
+                // blocking start returned. Repeat it after the start so no
+                // controller can survive its abandoned Rust owner.
+                ffi::stop();
+            }
+            result
+        })
             .await
             .map_err(|e| CoreError::Internal(format!("psiphon start task panicked: {e}")))??;
 
@@ -449,6 +461,7 @@ impl Backend for PsiphonBackend {
         log::info!("[psiphon] tunnel established, socks 127.0.0.1:{socks_port}");
         wait_for_local_proxy(socks_port, &cx.cancel).await?;
 
+        guard.armed = false;
         Ok(Box::new(PsiphonHandle {
             socks_port,
             http_port: ffi::http_port(),
@@ -459,6 +472,25 @@ impl Backend for PsiphonBackend {
         }))
     }
 
+    async fn drain(&self) {
+        #[cfg(not(all(feature = "enabled", psiphon_linked)))]
+        {
+            // The foreground owner polls this queue and stops an AAR whose
+            // request disappeared before an attach lease was returned.
+            HOST_ATTACH.lock().take();
+        }
+        #[cfg(all(feature = "enabled", psiphon_linked))]
+        {
+            let stop_pending = STOP_THREAD.lock().is_some();
+            if stop_pending || ffi::state() != ffi::STATE_STOPPED {
+                let _ = ffi::request_stop();
+            }
+            if let Err(error) = ffi::wait_previous_stop().await {
+                log::warn!("[psiphon] controller drain failed: {error}");
+            }
+        }
+    }
+
     fn recover_stale_state(&self) {
         // Psiphon runs in-process; a dead process leaves no orphan to reap.
         // Its datastore is crash-safe and recovered on next start.
@@ -466,14 +498,21 @@ impl Backend for PsiphonBackend {
     }
 }
 
-/// Clears [`STARTING`] however `start` exits.
+/// Clears [`STARTING`] and stops an incomplete Go start, however `start` exits.
 #[cfg(all(feature = "enabled", psiphon_linked))]
-struct StartGuard;
+struct StartGuard {
+    armed: bool,
+    abandoned: Arc<AtomicBool>,
+}
 
 #[cfg(all(feature = "enabled", psiphon_linked))]
 impl Drop for StartGuard {
     fn drop(&mut self) {
         STARTING.store(false, Ordering::SeqCst);
+        if self.armed {
+            self.abandoned.store(true, Ordering::SeqCst);
+            let _ = ffi::request_stop();
+        }
     }
 }
 

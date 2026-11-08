@@ -263,8 +263,27 @@ impl Supervisor {
             )));
         }
 
-        // Clear anything a previous crashed process left behind.
-        backend.recover_stale_state();
+        // Keep every route provider alive through final draining. A cancelled
+        // downstream start has no handle for stop_all(), so draining only the
+        // carrier would leak its listeners or controller past session teardown.
+        let mut drain_backends = vec![backend.clone()];
+        let ordered_exits: Vec<FcaeBackend> = if config.chain.is_empty()
+            && config.psiphon.through_tunnel
+            && config.backend != FcaeBackend::Psiphon
+        {
+            vec![FcaeBackend::Psiphon]
+        } else {
+            config.chain.clone()
+        };
+        for exit in ordered_exits {
+            let downstream = registry::resolve(exit)?;
+            if !drain_backends.iter().any(|present| present.id() == downstream.id()) {
+                drain_backends.push(downstream);
+            }
+        }
+        for provider in &drain_backends {
+            provider.recover_stale_state();
+        }
 
         self.telemetry
             .begin_session(config.backend, config.mode, config.lan_sharing);
@@ -326,11 +345,13 @@ impl Supervisor {
                 // blocking OS commands.
                 tun_bridge.stop(stop_timeout);
                 // A cancelled start may not have returned a BackendHandle.
-                // Drain its retained task while its runtime is still alive.
-                // Dropping the runtime early force-cancelled Tor despite the
-                // no-abort policy in BackendHandle::stop, and let the reaper
-                // release the next-start barrier before task destructors ran.
-                rt.block_on(backend.drain());
+                // Drain every provider while its runtime is still alive, not
+                // just the carrier. Dropping the runtime early force-cancelled
+                // Tor despite the no-abort policy in BackendHandle::stop, and
+                // let the reaper release the next-start barrier too soon.
+                for provider in &drain_backends {
+                    rt.block_on(provider.drain());
+                }
                 drop(rt); // worker/reaper waits; stop() on the UI still returns promptly
 
                 match outcome {
@@ -520,135 +541,98 @@ async fn run_session(
         paused: tun_paused.clone(),
         control: tun_control.clone(),
     };
+    let mut config = config;
+    if config.chain.is_empty() && config.psiphon.through_tunnel && config.backend != FcaeBackend::Psiphon {
+        config.chain.push(FcaeBackend::Psiphon);
+    }
     let mut attempt: u32 = 0;
 
     loop {
         if cancel.is_cancelled() {
             return Ok(());
         }
-
-        let cx = BackendContext::new(config.clone(), sink.clone(), cancel.clone());
+        let mut carrier_config = config.clone();
+        if !config.chain.is_empty() {
+            carrier_config.mode = FcaeMode::Proxy;
+            carrier_config.lan_sharing = false;
+            carrier_config.http_port = 0;
+            if config.backend == FcaeBackend::Psiphon {
+                // Android's carrier attaches to the AAR listener started by the
+                // foreground owner. Other Psiphon hops own their listener and
+                // can report the kernel-selected port after starting.
+                if !cfg!(target_os = "android") {
+                    carrier_config.psiphon.socks_port = 0;
+                }
+                carrier_config.psiphon.http_port = 0;
+            } else {
+                carrier_config.socks_port = 0;
+            }
+            make_internal_listeners_private(&mut carrier_config)?;
+        }
+        let cx = BackendContext::new(carrier_config.clone(), sink.clone(), cancel.clone());
         cx.report(
-            if attempt == 0 {
-                FcaeState::Connecting
-            } else {
-                FcaeState::Reconnecting
-            },
-            if attempt == 0 {
-                "Connecting…".to_string()
-            } else {
-                format!("Reconnecting (attempt {attempt})…")
-            },
+            if attempt == 0 { FcaeState::Connecting } else { FcaeState::Reconnecting },
+            if attempt == 0 { "Connecting…".to_string() } else { format!("Reconnecting (attempt {attempt})…") },
         );
-
-        // Race the backend start against cancellation and a hard timeout, so
-        // a stuck scan can never wedge the session thread forever.
-        // Tor bootstrap is far slower than a WARP scan; using only
-        // start_timeout() cancelled a healthy tor start, dropped the
-        // engine task, and the next disconnect/connect crashed.
-        let start_budget = if config.tor.is_enabled() {
-            config.tor_start_timeout()
+        let start_budget = if carrier_config.tor.is_enabled() {
+            carrier_config.tor_start_timeout()
         } else {
-            config.start_timeout()
+            carrier_config.start_timeout()
         };
         let handle = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(()),
             started = backend.start(cx) => started,
-            _ = tokio::time::sleep(start_budget) => {
-                Err(CoreError::Timeout(start_budget))
-            }
+            _ = tokio::time::sleep(start_budget) => Err(CoreError::Timeout(start_budget)),
         };
-
         let handle: Box<dyn BackendHandle> = match handle {
-            Ok(h) => h,
-            Err(e) => {
-                // A deterministic failure (missing privileges, invalid config,
-                // no such resolver binary) fails identically on every retry;
-                // looping on it is how "RECONNECTING" becomes permanent.
-                let transient = e.is_transient();
-                if !transient
-                    || !should_retry(auto_reconnect, max_reconnects, attempt, &cancel)
-                {
-                    return Err(e);
+            Ok(handle) => handle,
+            Err(error) => {
+                let transient = error.is_transient();
+                if !transient || !should_retry(auto_reconnect, max_reconnects, attempt, &cancel) {
+                    return Err(error);
                 }
                 attempt += 1;
-                sink.set_state(
-                    FcaeState::Reconnecting,
-                    format!("Connect failed ({e}); retrying…"),
-                );
+                sink.set_state(FcaeState::Reconnecting, format!("Connect failed ({error}); retrying…"));
                 if backoff(&cancel, attempt).await.is_break() {
                     return Ok(());
                 }
                 continue;
             }
         };
-
-        // `handle` needs no `mut` (only `endpoints` below is reassigned).
-        let mut endpoints = handle.endpoints();
+        let carrier: Arc<dyn BackendHandle> = Arc::from(handle);
+        let mut handles: Vec<Arc<dyn BackendHandle>> = vec![carrier];
+        let mut endpoints = handles[0].endpoints();
         if let Some(peers) = &endpoints.peer_ip {
-            // The host shows one peer: the first is the endpoint the backend
-            // dialled, the rest are bypass candidates for the TUN bridge.
             let display = peers.split(',').next().unwrap_or(peers).trim();
             if !display.is_empty() {
                 sink.set_peer(display.to_string());
             }
         }
+        let carrier_peers = endpoints.peer_ip.clone();
 
-        // Egress "Psiphon through the tunnel": Aether is up; start Psiphon
-        // with UpstreamProxyURL = Aether SOCKS, then tun2socks dials Psiphon.
-        //
-        // psi_handle owns the second hop and MUST be stopped on every exit
-        // path below, in teardown order: TUN first, then Psiphon (it dials
-        // through Aether), then Aether. Skipping the psi stop left the
-        // controller and its SOCKS listener running after a disconnect --
-        // and the next connect failed with "already running" (which is how
-        // the unused-variable warning earned its keep as a real leak).
-        let mut psi_handle: Option<Box<dyn BackendHandle>> = None;
-        if config.psiphon.through_tunnel && config.backend != FcaeBackend::Psiphon {
-            let psi_start = tokio::select! {
-                biased;
-                carrier = handle.wait() => {
-                    let detail = carrier.err().map(|e| format!(": {e}"))
-                        .unwrap_or_default();
-                    Err(CoreError::StartFailed(format!(
-                        "Aether dropped while Psiphon was connecting{detail}"
-                    )))
-                }
-                result = start_psiphon_through_tunnel(
-                    &config, &endpoints, &sink, &cancel
-                ) => result,
-            };
-            match psi_start {
-                Ok(h) => {
-                    let psi_ep = h.endpoints();
-                    if psi_ep.socks.is_none() {
-                        let _ = h.stop(stop_timeout).await;
-                        let _ = handle.stop(stop_timeout).await;
-                        return Err(CoreError::StartFailed("Psiphon exit has no SOCKS endpoint".into()));
-                    }
-                    endpoints = Endpoints { peer_ip: endpoints.peer_ip.clone(), ..psi_ep };
-                    psi_handle = Some(h);
-                }
-                Err(e) => {
-                    // Never silently send requested Psiphon traffic through
-                    // the carrier. No TUN is raised before the final exit.
-                    stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
-                    if cancel.is_cancelled() { return Ok(()); }
-                    return Err(e);
-                }
+        if let Err(error) = start_downstream(&config, &mut handles, &mut endpoints, &sink, &cancel, stop_timeout).await {
+            stop_all(&mut handles, stop_timeout).await;
+            if cancel.is_cancelled() {
+                return Ok(());
             }
+            if !error.is_transient() || !should_retry(auto_reconnect, max_reconnects, attempt, &cancel) {
+                return Err(error);
+            }
+            attempt += 1;
+            sink.set_state(FcaeState::Reconnecting, format!("Chain startup failed ({error}); retrying…"));
+            if backoff(&cancel, attempt).await.is_break() {
+                return Ok(());
+            }
+            continue;
         }
 
-        // The carrier's own list, before the proxy joins it, is what the
-        // Windows health tick compares the live endpoints against.
-        let carrier_peers = endpoints.peer_ip.clone();
         if config.is_tun() && cfg!(not(target_os = "android")) {
             if let Some(proxy) = &config.upstream_proxy {
                 let bypass = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
-                        stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
+                        stop_all(&mut handles, stop_timeout).await;
                         return Ok(());
                     }
                     ips = proxy.bypass_addresses() => ips,
@@ -659,17 +643,10 @@ async fn run_session(
 
         let tun_start = {
             let _control = tun_control.lock();
-            *live_tun.lock() = Some(LiveTun {
-                config: config.clone(),
-                endpoints: endpoints.clone(),
-            });
+            *live_tun.lock() = Some(LiveTun { config: config.clone(), endpoints: endpoints.clone() });
             if config.is_tun() && !cancel.is_cancelled() && !tun_paused.load(Ordering::SeqCst) {
                 let started = tun_bridge.start(&config, &endpoints);
                 if started.is_ok() {
-                    // A device that was just raised is not yet proof of a
-                    // working data plane: its routes are still being
-                    // installed, so hold the settle window and let the first
-                    // health ticks land inside it.
                     *tun_settle.lock() = Some(std::time::Instant::now() + TUN_SETTLE);
                 }
                 started
@@ -677,96 +654,118 @@ async fn run_session(
                 Ok(())
             }
         };
-        if let Err(e) = tun_start {
-            stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
-            return Err(e);
+        if let Err(error) = tun_start {
+            stop_all(&mut handles, stop_timeout).await;
+            return Err(error);
         }
         if cancel.is_cancelled() {
             tun_bridge.stop(stop_timeout);
-            stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
+            stop_all(&mut handles, stop_timeout).await;
             return Ok(());
         }
         if !config.is_tun() {
-            debug_assert!(
-                !tun_bridge.is_running(),
-                "proxy mode must never leave a TUN device up"
-            );
+            debug_assert!(!tun_bridge.is_running(), "proxy mode must never leave a TUN device up");
         }
 
         sink.set_state(
             FcaeState::Connected,
-            format!("Connected ({} {})", exit_name(&config),
-                if config.mode == FcaeMode::Tun { "TUN" } else { "Proxy" }),
+            format!("Connected ({} {})", route_name(&config), if config.mode == FcaeMode::Tun { "TUN" } else { "Proxy" }),
         );
 
-        // Pump counters into telemetry while we wait for the tunnel to end.
-        //
-        // The carrier re-dials on its own without `wait` returning. A chained
-        // Psiphon exit has nothing to dial through meanwhile, so it is stopped
-        // when the carrier drops and started again once it is back, instead
-        // of churning against a dead upstream. The TUN stays up across the gap.
-        let chained = psi_handle.is_some();
-        let carrier_ended = handle.wait();
-        let pump = pump_counters(&*handle, &sink, &config, &*tun_bridge, &tun_paused, &tun_control, &tun_settle, carrier_peers.as_deref());
+        let chained = !config.chain.is_empty();
+        let carrier_wait_handle = handles[0].clone();
+        let carrier_ended = async move { carrier_wait_handle.wait().await };
+        let pump_handle = handles[0].clone();
+        let pump_sink = sink.clone();
+        let pump_config = config.clone();
+        let pump_tun = tun_bridge.clone();
+        let pump_paused = tun_paused.clone();
+        let pump_control = tun_control.clone();
+        let pump_settle = tun_settle.clone();
+        let pump_peers = carrier_peers.clone();
+        let pump = async move {
+            pump_counters(
+                &*pump_handle,
+                &pump_sink,
+                &pump_config,
+                &*pump_tun,
+                &pump_paused,
+                &pump_control,
+                &pump_settle,
+                pump_peers.as_deref(),
+            ).await
+        };
         tokio::pin!(carrier_ended, pump);
-        let mut carrier_up = true;
+        let mut hop_up = vec![true; handles.len()];
         let outcome = loop {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
                     tun_bridge.stop(stop_timeout);
-                    stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
+                    stop_all(&mut handles, stop_timeout).await;
                     return Ok(());
                 }
-                r = &mut carrier_ended => break r,
-                r = exit_ended(&psi_handle) => break r,
-                up = carrier_changed(&*handle, carrier_up), if chained => {
-                    carrier_up = up;
-                    if !up {
-                        if let Some(psi) = psi_handle.take() {
-                            log::info!("[session] carrier dropped; stopping the Psiphon exit");
-                            let _ = psi.stop(stop_timeout).await;
-                        }
+                result = &mut carrier_ended => break result,
+                (_, result) = exits_ended(handles[1..].to_vec()), if chained && handles.len() > 1 => break result,
+                (index, up) = chain_carrier_changed(handles.clone(), hop_up.clone()), if chained => {
+                    if index >= handles.len() {
                         continue;
                     }
-                    log::info!("[session] carrier is back; restarting the Psiphon exit");
-                    let carrier = handle.endpoints();
+                    hop_up[index] = up;
+                    if !up {
+                        log::info!("[session] chain hop {index} dropped; stopping its downstream exits");
+                        stop_after(&mut handles, index, stop_timeout).await;
+                        hop_up.truncate(handles.len());
+                        let peer_ip = endpoints.peer_ip.clone();
+                        endpoints = Endpoints { peer_ip, ..handles[index].endpoints() };
+                        *live_tun.lock() = None;
+                        continue;
+                    }
+                    if handles.len() != index + 1 {
+                        continue;
+                    }
+                    log::info!("[session] chain hop {index} is back; rebuilding its downstream exits");
+                    let previous = endpoints.clone();
+                    let peer_ip = previous.peer_ip.clone();
+                    let mut rebuilt = Endpoints { peer_ip, ..handles[index].endpoints() };
                     let restarted = tokio::select! {
                         biased;
                         _ = cancel.cancelled() => {
                             tun_bridge.stop(stop_timeout);
-                            stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
+                            stop_all(&mut handles, stop_timeout).await;
                             return Ok(());
                         }
-                        r = &mut carrier_ended => break r,
-                        r = start_psiphon_through_tunnel(&config, &carrier, &sink, &cancel) => r,
+                        result = &mut carrier_ended => break result,
+                        result = start_downstream(&config, &mut handles, &mut rebuilt, &sink, &cancel, stop_timeout) => result,
                     };
                     match restarted {
-                        Ok(psi) if psi.endpoints().socks == endpoints.socks => {
-                            psi_handle = Some(psi);
+                        Ok(()) => {
+                            let listener_changed = rebuilt.socks != previous.socks || rebuilt.http != previous.http;
+                            if listener_changed && config.is_tun() {
+                                let _control = tun_control.lock();
+                                tun_bridge.stop(stop_timeout);
+                                if !tun_paused.load(Ordering::SeqCst) {
+                                    if let Err(error) = tun_bridge.start(&config, &rebuilt) {
+                                        break Err(error);
+                                    }
+                                    *tun_settle.lock() = Some(std::time::Instant::now() + TUN_SETTLE);
+                                }
+                            }
+                            endpoints = rebuilt;
+                            *live_tun.lock() = Some(LiveTun { config: config.clone(), endpoints: endpoints.clone() });
+                            hop_up = vec![true; handles.len()];
                             sink.set_state(
                                 FcaeState::Connected,
-                                format!("Connected ({} {})", exit_name(&config),
-                                    if config.mode == FcaeMode::Tun { "TUN" } else { "Proxy" }),
+                                format!("Connected ({} {})", route_name(&config), if config.mode == FcaeMode::Tun { "TUN" } else { "Proxy" }),
                             );
                         }
-                        // The TUN and every client point at the old listener.
-                        Ok(psi) => {
-                            let _ = psi.stop(stop_timeout).await;
-                            break Err(CoreError::Internal("Psiphon exit came back on another port".into()));
-                        }
-                        Err(e) => break Err(e),
+                        Err(error) => break Err(error),
                     }
                 }
                 result = &mut pump => break result,
             }
         };
 
-        // Tunnel ended. Set reconnecting state immediately so the UI doesn't
-        // briefly show Connected after the backend exits. Then tear the bridge
-        // down before retrying so the new session gets a clean device instead
-        // of inheriting a half-configured one. Psiphon (the chained hop) goes
-        // down with the bridge, before Aether, so it never outlives its own upstream.
         if should_retry(auto_reconnect, max_reconnects, attempt, &cancel) {
             sink.set_state(FcaeState::Reconnecting, "Tunnel dropped; reconnecting…".into());
         }
@@ -775,16 +774,13 @@ async fn run_session(
             *live_tun.lock() = None;
             tun_bridge.stop(stop_timeout);
         }
-        stop_chained_handles(&psi_handle, &handle, stop_timeout).await;
+        stop_all(&mut handles, stop_timeout).await;
 
         match outcome {
             Ok(()) if cancel.is_cancelled() => return Ok(()),
-            Ok(()) | Err(_) if !should_retry(auto_reconnect, max_reconnects, attempt, &cancel) => {
-                return outcome;
-            }
+            Ok(()) | Err(_) if !should_retry(auto_reconnect, max_reconnects, attempt, &cancel) => return outcome,
             _ => {}
         }
-
         attempt += 1;
         sink.cell().note_reconnect();
         if backoff(&cancel, attempt).await.is_break() {
@@ -793,86 +789,187 @@ async fn run_session(
     }
 }
 
-/// Resolves with the carrier's new link state once it differs from `up`.
-async fn carrier_changed(handle: &dyn BackendHandle, up: bool) -> bool {
+async fn chain_carrier_changed(handles: Vec<Arc<dyn BackendHandle>>, previous: Vec<bool>) -> (usize, bool) {
     loop {
         tokio::time::sleep(CARRIER_POLL).await;
-        let now = handle.carrier_up();
-        if now != up {
-            return now;
+        for (index, handle) in handles.iter().enumerate() {
+            let up = handle.carrier_up();
+            if previous.get(index).copied() != Some(up) {
+                return (index, up);
+            }
         }
     }
 }
 
-/// Resolves when the chained exit ends on its own; pending while none runs.
-async fn exit_ended(psi: &Option<Box<dyn BackendHandle>>) -> Result<()> {
-    match psi {
-        Some(psi) => psi.wait().await,
-        None => std::future::pending().await,
+async fn exits_ended(handles: Vec<Arc<dyn BackendHandle>>) -> (usize, Result<()>) {
+    match handles.len() {
+        0 => std::future::pending().await,
+        1 => (0, handles[0].wait().await),
+        2 => {
+            tokio::select! {
+                result = handles[0].wait() => (0, result),
+                result = handles[1].wait() => (1, result),
+            }
+        }
+        3 => {
+            tokio::select! {
+                result = handles[0].wait() => (0, result),
+                result = handles[1].wait() => (1, result),
+                result = handles[2].wait() => (2, result),
+            }
+        }
+        _ => (0, Err(CoreError::Internal("too many chained exits".into()))),
     }
 }
 
-/// Stop the chained Psiphon hop (if any) and then the primary backend, in
-/// that order: psi dials through Aether's SOCKS, so it must not outlive it.
-/// Both stops are best-effort and idempotent (each handle guards itself).
-async fn stop_chained_handles(
-    psi: &Option<Box<dyn BackendHandle>>,
-    primary: &Box<dyn BackendHandle>,
-    timeout: Duration,
-) {
-    if let Some(psi) = psi.as_ref() {
-        let _ = psi.stop(timeout).await;
+async fn stop_after(handles: &mut Vec<Arc<dyn BackendHandle>>, index: usize, timeout: Duration) {
+    while handles.len() > index + 1 {
+        if let Some(handle) = handles.pop() {
+            let _ = handle.stop(timeout).await;
+        }
     }
-    let _ = primary.stop(timeout).await;
 }
 
-/// Start Psiphon as the egress hop in front of an already-up Aether SOCKS.
-async fn start_psiphon_through_tunnel(
+async fn stop_all(handles: &mut Vec<Arc<dyn BackendHandle>>, timeout: Duration) {
+    while let Some(handle) = handles.pop() {
+        let _ = handle.stop(timeout).await;
+    }
+}
+
+async fn start_downstream(
     config: &SessionConfig,
-    aether: &Endpoints,
+    handles: &mut Vec<Arc<dyn BackendHandle>>,
+    endpoints: &mut Endpoints,
     sink: &TelemetrySink,
     cancel: &CancelToken,
-) -> Result<Box<dyn BackendHandle>> {
-    let socks = aether.socks.ok_or_else(|| {
-        CoreError::StartFailed(
-            "Psiphon through the tunnel needs Aether's SOCKS listener".into(),
-        )
-    })?;
-    let url = format!("socks5://{socks}");
-    let mut psi_cfg = config.clone();
-    psi_cfg.backend = FcaeBackend::Psiphon;
-    psi_cfg.psiphon.through_tunnel = false;
-    // Psiphon reaches the user's proxy through Aether, which already dials it.
-    psi_cfg.upstream_proxy = None;
-    let json = psi_cfg
-        .psiphon
-        .config_json
-        .as_deref()
-        .unwrap_or("{}");
-    psi_cfg.psiphon.config_json = Some(crate::config::inject_upstream_proxy_url(json, &url));
+    stop_timeout: Duration,
+) -> Result<()> {
+    let target_len = config.chain.len() + 1;
+    while handles.len() < target_len {
+        let hop = handles.len();
+        let exit = config.chain[hop - 1];
+        let final_hop = hop == config.chain.len();
+        let previous = handles[hop - 1].endpoints();
+        let monitored = handles.to_vec();
+        let started = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(CoreError::StartFailed("chain cancelled".into())),
+            (index, result) = exits_ended(monitored) => {
+                let detail = result.err().map(|error| format!(": {error}")).unwrap_or_default();
+                Err(CoreError::StartFailed(format!("chain hop {index} dropped while exit {exit:?} was connecting{detail}")))
+            }
+            result = start_chain_hop(config, exit, final_hop, &previous, sink, cancel) => result,
+        };
+        match started {
+            Ok(handle) => {
+                let next = handle.endpoints();
+                if next.socks.is_none() && (hop + 1 < target_len || config.is_tun()) {
+                    let _ = handle.stop(stop_timeout).await;
+                    return Err(CoreError::StartFailed(format!("chained {exit:?} exit has no required SOCKS endpoint")));
+                }
+                *endpoints = Endpoints { peer_ip: endpoints.peer_ip.clone(), ..next };
+                handles.push(handle);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
 
-    // Past the backend's own deadline, so its error is the one reported.
-    let psi_budget = psi_cfg.start_timeout() + CHAIN_START_GRACE;
-    let backend = registry::resolve(FcaeBackend::Psiphon)?;
-    sink.set_state(
-        FcaeState::Connecting,
-        "Establishing tunnel…".to_string(),
-    );
-    let cx = BackendContext::new(psi_cfg, sink.clone(), cancel.clone());
+async fn start_chain_hop(
+    config: &SessionConfig,
+    exit: FcaeBackend,
+    final_hop: bool,
+    previous: &Endpoints,
+    sink: &TelemetrySink,
+    cancel: &CancelToken,
+) -> Result<Arc<dyn BackendHandle>> {
+    let socks = previous.socks.ok_or_else(|| CoreError::StartFailed(format!("{exit:?} needs its upstream SOCKS listener")))?;
+    let url = format!("socks5://{socks}");
+    let mut hop = config.clone();
+    hop.backend = exit;
+    hop.chain.clear();
+    hop.psiphon.through_tunnel = false;
+    hop.mode = if final_hop { config.mode } else { FcaeMode::Proxy };
+    hop.lan_sharing = final_hop && config.lan_sharing;
+    if exit == FcaeBackend::Psiphon {
+        hop.upstream_proxy = None;
+        let json = hop.psiphon.config_json.as_deref().unwrap_or("{}");
+        hop.psiphon.config_json = Some(crate::config::inject_upstream_proxy_url(json, &url));
+        if !final_hop {
+            hop.psiphon.socks_port = 0;
+            hop.psiphon.http_port = 0;
+        }
+    } else {
+        hop.upstream_proxy = Some(crate::upstream::UpstreamProxy::loopback(socks));
+        if !final_hop {
+            hop.socks_port = 0;
+            hop.http_port = 0;
+        }
+    }
+    if !final_hop {
+        make_internal_listeners_private(&mut hop)?;
+    }
+    if hop.upstream_requires_udp() && !previous.udp {
+        return Err(CoreError::InvalidConfig(format!(
+            "the {exit:?} hop needs UDP upstream, but the preceding backend exposes TCP only; choose its HTTP/2 transport or reorder the chain"
+        )));
+    }
+    let budget = if hop.tor.is_enabled() { hop.tor_start_timeout() } else { hop.start_timeout() } + CHAIN_START_GRACE;
+    let backend = registry::resolve(exit)?;
+    sink.set_state(FcaeState::Connecting, format!("Establishing {exit:?} chain hop…"));
+    let cx = BackendContext::new(hop, sink.clone(), cancel.clone());
     let handle = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Err(CoreError::StartFailed("chain cancelled".into())),
-        r = tokio::time::timeout(psi_budget, backend.start(cx)) =>
-            r.map_err(|_| CoreError::StartFailed("Psiphon exit startup timed out".into()))??,
+        result = tokio::time::timeout(budget, backend.start(cx)) => result
+            .map_err(|_| CoreError::StartFailed(format!("{exit:?} chain startup timed out")))??,
     };
-    log::info!("[session] Psiphon through-tunnel via {url}");
-    Ok(handle)
+    log::info!("[session] chained {exit:?} via {url}");
+    Ok(Arc::from(handle))
 }
 
-fn exit_name(config: &SessionConfig) -> &'static str {
-    if config.backend == FcaeBackend::Psiphon || config.psiphon.through_tunnel { "Psiphon" }
-    else if matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain) { "Tor" }
-    else { "Aether" }
+fn make_internal_listeners_private(config: &mut SessionConfig) -> Result<()> {
+    if config.backend != FcaeBackend::Aether || !config.tor.is_enabled() {
+        return Ok(());
+    }
+    // Aether's legacy Tor integration requires a numeric listen address and
+    // does not report back an ephemeral port. Keep this allocation scoped to
+    // that API; Firefox and Psiphon report their own port-zero listeners.
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .map_err(|error| CoreError::StartFailed(format!("cannot allocate an internal Tor listener: {error}")))?;
+    let port = listener.local_addr()
+        .map_err(|error| CoreError::StartFailed(format!("cannot inspect the internal Tor listener: {error}")))?.port();
+    drop(listener);
+    config.tor.bind = Some(format!("127.0.0.1:{port}"));
+    config.tor.http_port = 0;
+    Ok(())
+}
+
+fn route_name(config: &SessionConfig) -> String {
+    if config.chain.is_empty() && !config.psiphon.through_tunnel {
+        if config.backend == FcaeBackend::Aether
+            && matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain)
+        {
+            return "Tor".into();
+        }
+        return backend_label(config.backend).into();
+    }
+    let mut names = vec![backend_label(config.backend)];
+    if config.chain.is_empty() && config.psiphon.through_tunnel {
+        names.push("Psiphon");
+    } else {
+        names.extend(config.chain.iter().map(|backend| backend_label(*backend)));
+    }
+    names.join(" → ")
+}
+
+fn backend_label(backend: FcaeBackend) -> &'static str {
+    match backend {
+        FcaeBackend::Aether => "Aether",
+        FcaeBackend::Psiphon => "Psiphon",
+        FcaeBackend::Firefox => "Firefox",
+    }
 }
 
 fn should_retry(auto: bool, max: u32, attempt: u32, cancel: &CancelToken) -> bool {
@@ -1035,15 +1132,18 @@ mod tests {
     #[test]
     fn routing_label_names_the_exit_not_the_carrier() {
         let mut cfg = SessionConfig::default();
-        assert_eq!(exit_name(&cfg), "Aether");
+        assert_eq!(route_name(&cfg), "Aether");
         cfg.tor.mode = FcaeTorMode::Chain;
-        assert_eq!(exit_name(&cfg), "Tor");
+        assert_eq!(route_name(&cfg), "Tor");
         cfg.tor.mode = FcaeTorMode::Reverse;
-        assert_eq!(exit_name(&cfg), "Aether");
+        assert_eq!(route_name(&cfg), "Aether");
         cfg.tor.mode = FcaeTorMode::Only;
-        assert_eq!(exit_name(&cfg), "Tor");
+        assert_eq!(route_name(&cfg), "Tor");
         cfg.psiphon.through_tunnel = true;
-        assert_eq!(exit_name(&cfg), "Psiphon");
+        assert_eq!(route_name(&cfg), "Aether → Psiphon");
+        cfg.psiphon.through_tunnel = false;
+        cfg.chain = vec![FcaeBackend::Psiphon, FcaeBackend::Firefox];
+        assert_eq!(route_name(&cfg), "Aether → Psiphon → Firefox");
     }
 
     #[test]
@@ -1075,7 +1175,8 @@ mod tests {
         let result = runtime.block_on(run_session(Arc::new(FakeBackend), cfg,
             TelemetrySink::new(cell.clone()), CancelToken::new(), Arc::new(NoTun),
             Duration::from_millis(10), false, 0,
-            Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(())), Arc::new(Mutex::new(None))));
+            Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(())), Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None))));
         assert!(result.is_err());
         assert_ne!(cell.snapshot().state, FcaeState::Connected);
 
@@ -1099,7 +1200,7 @@ mod tests {
             fn capabilities(&self) -> Capabilities { FakeBackend.capabilities() }
             async fn start(&self, cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
                 if let Some(json) = cx.config.psiphon.config_json {
-                    assert!(json.contains("socks5://127.0.0.1:1819"));
+                    assert!(json.contains("socks5://127.0.0.1:"));
                 }
                 assert!(!EXIT_READY.load(Ordering::SeqCst));
                 tokio::task::yield_now().await;
@@ -1139,7 +1240,8 @@ mod tests {
             runtime.block_on(run_session(backend, cfg, TelemetrySink::new(cell.clone()),
                 cancel.clone(), Arc::new(CheckTun { cancel, checked: checked.clone(), chained }),
                 Duration::from_millis(10), false, 0,
-                Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(())), Arc::new(Mutex::new(None)))).unwrap();
+                Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(())), Arc::new(Mutex::new(None)),
+                Arc::new(Mutex::new(None)))).unwrap();
             assert!(checked.load(Ordering::SeqCst));
         }
     }
@@ -1184,6 +1286,7 @@ mod tests {
             0,     // unlimited budget: the error class, not the budget, must stop it
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(())),
+            Arc::new(Mutex::new(None)),
             Arc::new(Mutex::new(None)),
         ));
         assert!(result.is_err());

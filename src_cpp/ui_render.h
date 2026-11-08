@@ -31,8 +31,12 @@ struct AppState {
     std::atomic<bool> redraw_requested{true};
 
     int  protocol        = 0;
-    // 0 = Aether, 1 = Psiphon (FcaeBackend).
+    // 0 = Aether, 1 = Psiphon, 2 = Firefox (FcaeBackend).
     int  backend         = 0;
+    // Ordered additional exits after backend. At most two are useful with
+    // three backends; the ABI reserves a third slot for future providers.
+    int  chain_count     = 0;
+    int  chain_exits[3]  = {1, 2, 0};
     // 0 = Proxy, 1 = TUN. TUN is the product default on every desktop
     // platform (and Android): full-system tunneling out of the box. The
     // device itself is still only raised AFTER the backend reports a live
@@ -158,6 +162,25 @@ struct AppState {
     // Joined "v4,v6" built by to_config() for FcaeDnsConfig.server.
     char dns_server_built[224] = {0};
 
+    // Firefox IP Protection. Secrets and pending FxA session state are never
+    // persisted in the UI configuration file.
+    char firefox_account_id[33] = {};
+    char firefox_location[128] = {};
+    char firefox_server[256] = {};
+    int  firefox_transport = 0; // 0=auto, 1=h2, 2=h1
+    char firefox_email[256] = {};
+    char firefox_password[1024] = {};
+    char firefox_code[256] = {};
+    char firefox_pending_id[128] = {};
+    char firefox_status[256] = {};
+    uint64_t firefox_job = 0;
+    uint64_t firefox_captcha_id = 0;
+    uint64_t firefox_captcha_opened = 0;
+    char firefox_captcha_answer[257] = {};
+    char firefox_operation[24] = {};
+    bool firefox_totp = false;
+    bool firefox_remove_in_flight = false;
+
     // Tor egress (inside the Aether engine, not a separate backend).
     int  tor_mode    = 0;        // FcaeTorMode
     int  tor_bridges = 0;        // FcaeTorBridges
@@ -240,7 +263,18 @@ struct AppState {
         FcaeConfig c;
         fcae_config_default(&c);
 
-        c.backend          = (backend >= 0 && backend <= 1) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
+        c.backend          = (backend >= 0 && backend <= 2) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
+        const bool explicit_chain = chain_count > 0 && chain_count <= 3;
+        if (explicit_chain) {
+            c.chain.count = (uint32_t)chain_count;
+            for (int i = 0; i < chain_count; ++i) {
+                c.chain.exits[i] = (chain_exits[i] >= 0 && chain_exits[i] <= 2)
+                    ? (FcaeBackend)chain_exits[i] : FCAE_BACKEND_AETHER;
+            }
+        } else if (backend != 1 && tor_mode == 3) {
+            c.chain.exits[0] = FCAE_BACKEND_PSIPHON;
+            c.chain.count = 1;
+        }
         c.protocol         = (protocol >= 0 && protocol <= 6) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
         // Mode is shared by every protocol/backend: once the UI selects TUN,
         // never let a Psiphon/Tor mapping silently turn it back into Proxy.
@@ -316,8 +350,9 @@ struct AppState {
         // exits are IPv4-only.
         const bool proto_psiphon  = (backend == 1);
         const bool proto_tor      = (protocol == 4);
-        const bool egress_psiphon = (!proto_psiphon && tor_mode == 3);
-        const bool psiphon_exit   = (proto_psiphon || egress_psiphon);
+        const bool egress_psiphon = (!proto_psiphon && !explicit_chain && tor_mode == 3);
+        const int final_backend = explicit_chain ? chain_exits[chain_count - 1] : (egress_psiphon ? 1 : backend);
+        const bool psiphon_exit   = (final_backend == 1);
 
         c.dns.sni = sni[0] ? sni : nullptr;
         // TUN DNS override: NULL keeps the bridge's default (no system DNS
@@ -347,7 +382,7 @@ struct AppState {
         // UpstreamProxyURL. Egress index 3 is Psiphon, not a FcaeTorMode.
         // (The flags were computed above; the DNS override needs them too.)
         int tm = tor_mode;
-        if (proto_psiphon || egress_psiphon || tm < 0 || tm > 2) tm = 0;
+        if ((proto_psiphon && !explicit_chain) || egress_psiphon || tm < 0 || tm > 2) tm = 0;
         // Protocol Tor normalises tor.mode to Only inside the runtime no
         // matter what we pass, so keep sending 0 for the non-chain case (a
         // stale Chain value would only produce a normalization warning).
@@ -393,6 +428,11 @@ struct AppState {
         c.psiphon.data_root_dir = psiphon_data_dir[0] ? psiphon_data_dir : nullptr;
         c.psiphon.socks_port    = (uint16_t)psiphon_socks_port;
         c.psiphon.http_port     = (uint16_t)psiphon_http_port;
+        c.firefox.account_id = firefox_account_id[0] ? firefox_account_id : nullptr;
+        c.firefox.location = firefox_location[0] ? firefox_location : nullptr;
+        c.firefox.server = firefox_server[0] ? firefox_server : nullptr;
+        static const char* const kFirefoxTransports[] = {"auto", "h2", "h1"};
+        c.firefox.transport = kFirefoxTransports[(firefox_transport >= 0 && firefox_transport <= 2) ? firefox_transport : 0];
 
         return c;
     }

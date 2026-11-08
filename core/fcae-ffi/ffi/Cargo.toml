@@ -21,6 +21,8 @@ aether = ["dep:fcae-bridge-aether"]
 # Compile the Psiphon backend in. On its own this registers the backend so the
 # UI can list it, but starting a tunnel reports BackendUnavailable.
 psiphon = ["dep:fcae-bridge-psiphon"]
+# Native Rust Firefox Accounts, Guardian and Fastly IP Protection backend.
+firefox = ["dep:fcae-firefox-bridge"]
 # Psiphon that actually runs on desktop (libfcae_psiphon, force_shared,
 # embedded rather than linked).
 # Android: do not use this feature; use the official AAR (android/psiphon).
@@ -52,12 +54,14 @@ fcae-sponsor.workspace = true
 fcae-bridge-tun2socks = { workspace = true, optional = true }
 fcae-bridge-aether = { workspace = true, optional = true }
 fcae-bridge-psiphon = { workspace = true, optional = true }
+fcae-firefox-bridge = { workspace = true, optional = true }
 fcae-bridge-zeptun = { workspace = true, optional = true }
 fcae-bridge-hev-socks5-tunnel = { workspace = true, optional = true }
 libc.workspace = true
 log.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
+serde_json.workspace = true
 
 [build-dependencies]
 fcae-build.workspace = true

@@ -593,7 +593,10 @@ impl BackendHandle for AetherHandle {
             peer_ip: (!self.peers.is_empty()).then(|| {
                 self.peers.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")
             }),
-            udp: true,
+            // Arti's Tor-terminated SOCKS listener carries CONNECT streams,
+            // not UDP associations. Aether's own tunnel listener can still
+            // carry datagrams through its MASQUE/WireGuard netstack.
+            udp: !matches!(self.cfg.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain),
             psiphon_dns: false,
         }
     }

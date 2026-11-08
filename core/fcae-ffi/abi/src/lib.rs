@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 21;
+pub const FCAE_ABI_VERSION: u32 = 22;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
@@ -57,6 +57,8 @@ pub enum FcaeBackend {
     /// Psiphon tunnel core. Reserved; `fcae_start` returns
     /// [`FcaeStatus::BackendUnavailable`] until the backend is compiled in.
     Psiphon = 1,
+    /// Firefox Accounts / Mozilla VPN IP Protection over Fastly CONNECT.
+    Firefox = 2,
 }
 
 /// What a backend supports, so the UI can describe it instead of hardcoding
@@ -411,6 +413,32 @@ pub struct FcaePsiphon {
     pub http_port: u16,
 }
 
+/// Firefox IP Protection selection. Secrets deliberately have no ABI field:
+/// account credentials live in the native account store and are entered via
+/// the asynchronous Firefox account operation API.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FcaeFirefox {
+    /// Stable 32-lowercase-hex account identifier returned by the account API.
+    pub account_id: *const c_char,
+    /// Country/city code or name; NULL/empty selects Mozilla's recommended location.
+    pub location: *const c_char,
+    /// Explicit proxy host[:port], bypassing Remote Settings selection.
+    pub server: *const c_char,
+    /// "auto", "h2", "h1" or "h3". H3 is reserved for a future QUIC carrier.
+    pub transport: *const c_char,
+}
+
+/// Ordered additional exits after the top-level carrier backend. For example,
+/// backend=Aether and exits=[Psiphon,Firefox] routes Aether → Psiphon → Firefox.
+/// Each backend may occur at most once in a route.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FcaeChain {
+    pub exits: [FcaeBackend; 3],
+    pub count: u32,
+}
+
 /// Top-level session configuration.
 ///
 /// **Caller must set `struct_size = sizeof(FcaeConfig)` and
@@ -489,6 +517,10 @@ pub struct FcaeConfig {
     /// `host:port@user:pass`; a bare
     /// `host:port` is socks5. NULL or empty dials directly. ABI v20.
     pub upstream_proxy: *const c_char,
+    /// Firefox IP Protection options. Appended in ABI v22; older offsets hold.
+    pub firefox: FcaeFirefox,
+    /// Ordered additional backend exits; count=0 preserves a single-hop session.
+    pub chain: FcaeChain,
 }
 
 /// Aether engine options without a home in the older sub-structs. Every
@@ -760,6 +792,7 @@ impl_try_from_enum!(FcaeState, {
 impl_try_from_enum!(FcaeBackend, {
     Aether = 0,
     Psiphon = 1,
+    Firefox = 2,
 });
 
 impl_try_from_enum!(FcaeProtocol, {

@@ -71,6 +71,23 @@ class MainActivity : AppCompatActivity() {
     private var updateAvailableInfo: FcaeUpdateInfo? = null
     private var updateResultDialog: androidx.appcompat.app.AlertDialog? = null
     private var connectionInfoDialog: androidx.appcompat.app.AlertDialog? = null
+    private var firefoxStatusView: TextView? = null
+    private var firefoxAccountView: android.widget.EditText? = null
+    private var firefoxJob = 0L
+    private var firefoxOperation = ""
+    private var firefoxPendingId = ""
+    private var firefoxTotp = false
+    private var firefoxRemoveInFlight = false
+    private var firefoxCaptchaDialog: androidx.appcompat.app.AlertDialog? = null
+    private var firefoxCaptchaId = 0L
+    private var firefoxCaptchaSuppressed = 0L
+    private val firefoxJobPoll = object : Runnable {
+        override fun run() {
+            pollFirefoxCaptcha()
+            pollFirefoxAccountJob()
+            if (firefoxJob != 0L) handler.postDelayed(this, 250L)
+        }
+    }
     private val connectionInfoSync = object : Runnable {
         override fun run() {
             val dialog = connectionInfoDialog
@@ -311,9 +328,9 @@ class MainActivity : AppCompatActivity() {
      * nativeGetState() after the activity returns from the background would
      * therefore look like a stopped engine and erase perfectly live stats. */
     private fun renderPsiStats() {
-        if (isPsiphonSelected()) {
+        if (isPurePsiphon()) {
             peerText.text = psiphonEndpointText(nativeLanFallback(lastNativeLan))
-        } else if (isEgressPsiphon() && pendingPsiSocks > 0 &&
+        } else if (isFinalPsiphon() && pendingPsiSocks > 0 &&
             !peerText.text.toString().contains("Psiphon local:")) {
             val current = peerText.text.toString().trim()
             peerText.text = if (current.isEmpty()) psiphonEndpointText(nativeLanFallback(lastNativeLan))
@@ -354,7 +371,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun hasActivePsiOwner(): Boolean {
-        if (!isPsiphonSelected() && !isEgressPsiphon()) return false
+        if (!routeIncludesPsiphon()) return false
         if (PsiphonTunnelService.hasActiveBinding()) return true
         val latest = ProxyNotification.latestPsiphonStats(this) ?: return false
         return PsiphonTunnelService.isCurrentBroadcast(latest)
@@ -377,8 +394,7 @@ class MainActivity : AppCompatActivity() {
                     val label = intent.getStringExtra(PsiphonTunnelService.EXTRA_STAGE_LABEL) ?: return
                     lastPsiphonStageLabel = label
                     handler.post {
-                        if ((connecting || commandConnecting)
-                                && (isPsiphonSelected() || isEgressPsiphon())) {
+                        if ((connecting || commandConnecting) && routeIncludesPsiphon()) {
                             // Stage text is diagnostic only; the state renderer owns
                             // the visible status for every backend.
                         }
@@ -393,13 +409,13 @@ class MainActivity : AppCompatActivity() {
                     pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: ""
                     pendingPsiSocks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, pendingPsiSocks)
                     acceptPsiStats(intent)
-                    if (vpnActive && (isPsiphonSelected() || isEgressPsiphon())) {
+                    if (vpnActive && routeIncludesPsiphon()) {
                         handler.post {
-                            if (isPsiphonSelected() && !isTunModeSelected() && !connecting
+                            if (isPurePsiphon() && !isTunModeSelected() && !connecting
                                     && !commandConnecting && !notificationPause()) {
                                 showPurePsiphonStatus()
                             }
-                            renderPsiStats()
+                            if (isFinalPsiphon()) renderPsiStats()
                         }
                     }
                 }
@@ -416,8 +432,13 @@ class MainActivity : AppCompatActivity() {
                         pendingPsiSocks = socks
                         pendingPsiHttp = http
                         pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: ""
-                        if (isEgressPsiphon()) {
+                        if (!isPsiphonSelected() && routeIncludesPsiphon()) {
                             handler.post(poll)
+                            return@post
+                        }
+                        if (isPsiphonSelected() && selectedChain().isNotEmpty()) {
+                            statusText.text = "CONNECTING"
+                            statusText.setTextColor(COLOR_PROGRESS)
                             return@post
                         }
                         connecting = false
@@ -573,8 +594,7 @@ class MainActivity : AppCompatActivity() {
                             // engine's Connected broadcast to flip the UI to
                             // "CONNECTED - TUN" before Psiphon had actually
                             // finished its handshake.
-                            if (!(isPsiphonSelected() || isEgressPsiphon())
-                                    || pendingPsiSocks != 0) {
+                            if (!routeIncludesPsiphon() || pendingPsiSocks != 0) {
                                 commandConnecting = false
                                 connecting = false
                             }
@@ -609,6 +629,7 @@ class MainActivity : AppCompatActivity() {
     private val poll = object : Runnable {
         override fun run() {
             if (!vpnActive) return
+            pollFirefoxCaptcha()
             if (!pollBusy.compareAndSet(false, true)) {
                 handler.postDelayed(this, POLL_INTERVAL_MS)
                 return
@@ -629,7 +650,7 @@ class MainActivity : AppCompatActivity() {
                     // included: the engine's RTT belongs to the carrier hop, and
                     // holdRtt is first-wins — taking it while the exit's probe
                     // was pending would freeze the wrong number for the session.
-                    val rtt = if (isPsiphonSelected() || isEgressPsiphon()) psiRttMs
+                    val rtt = if (isFinalPsiphon()) psiRttMs
                         else SessionState.holdRtt(NativeEngine.nativeGetRttMs())
                     val rx = NativeEngine.nativeGetRxBps()
                     val tx = NativeEngine.nativeGetTxBps()
@@ -1196,6 +1217,8 @@ class MainActivity : AppCompatActivity() {
         try { NativeEngine.nativeSponsorInit(java.io.File(filesDir, "sponsors").absolutePath) }
         catch (_: Throwable) {}
         spinnerProtocol = findViewById(R.id.spinnerProtocol)
+        findViewById<MaterialButton>(R.id.btnHomeChainSettings).setOnClickListener { showChainSettings() }
+        findViewById<MaterialButton>(R.id.btnFirefoxSettings).setOnClickListener { showFirefoxSettings() }
         spinnerMode = findViewById(R.id.spinnerMode)
         spinnerScan = findViewById(R.id.spinnerScan)
         spinnerIpVersion = findViewById(R.id.spinnerIpVersion)
@@ -1336,7 +1359,7 @@ class MainActivity : AppCompatActivity() {
         val homeSections = listOf<android.view.View>(
             findViewById(R.id.homeSectionStatus),
             findViewById(R.id.homeSectionProtocol),
-            findViewById(R.id.homeSectionEgress),
+            findViewById(R.id.homeSectionChain),
             findViewById(R.id.homeSectionSponsor),
         )
 
@@ -1410,6 +1433,7 @@ class MainActivity : AppCompatActivity() {
                 "MASQUE (HTTP/3)", "MASQUE (HTTP/2)", "WireGuard", "WARP-in-WARP",
                 "Tor", "Psiphon", "MASQUE-in-MASQUE (HTTP/3)", "MASQUE-in-MASQUE (HTTP/2)",
                 "WARP-in-MASQUE (HTTP/3)", "WARP-in-MASQUE (HTTP/2)",
+                "Firefox IP Protection",
             ),
         )
         spinnerMode.adapter = ArrayAdapter(
@@ -1455,7 +1479,6 @@ class MainActivity : AppCompatActivity() {
                 "Off",
                 "Tor through the tunnel",
                 "Tunnel through Tor (MASQUE only)",
-                "Psiphon through the tunnel",
             ),
         )
         // Positions map 1:1 onto FcaeTorBridges.
@@ -1605,6 +1628,7 @@ class MainActivity : AppCompatActivity() {
                 // combo; Tor protocol grays the two Tor entries). Do not reset
                 // the combo — restoring protocol restores the pick.
                 applyTorLock()
+                updateChainRouteText()
                 layoutGoolInner.visibility =
                     if (position in 8..9) android.view.View.VISIBLE else android.view.View.GONE
             }
@@ -1737,7 +1761,7 @@ class MainActivity : AppCompatActivity() {
         // Pure Psiphon proxy has no native engine state; capture that owner
         // state on the UI thread before the background query can overwrite it.
         val psiServiceActiveAtCreate = hasActivePsiOwner()
-        val purePsiphonProxyAtCreate = isPsiphonSelected() && !isTunModeSelected()
+        val purePsiphonProxyAtCreate = isPurePsiphon() && !isTunModeSelected()
         if (psiServiceActiveAtCreate) restoreLatestPsiStats()
         bgExecutor.execute {
             try {
@@ -1882,7 +1906,7 @@ class MainActivity : AppCompatActivity() {
         if (!::statsText.isInitialized || !::statusText.isInitialized) return
         statusText.text = "CONNECTED - ${if (isTunSession()) "TUN" else "PROXY"}"
         statusText.setTextColor(COLOR_CONNECTED)
-        if (isPsiphonSelected() || isEgressPsiphon()) {
+        if (isFinalPsiphon()) {
             restoreLatestPsiStats()
             if (rx != 0L || tx != 0L || totalRx != 0L || totalTx != 0L || rtt != 0) {
                 psiDownBps = rx
@@ -1923,13 +1947,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun notificationEndpointsMissing(): Boolean {
         val shown = if (::peerText.isInitialized) peerText.text?.toString().orEmpty() else ""
-        if (!isPsiphonSelected() && !isTorOnly() && !shown.contains("Peer:")) return true
-        val wantsAether = !isPsiphonSelected() && !isTorOnly() &&
-            (switchSocks.isChecked || isTunModeSelected() || isEgressPsiphon()
-                || effectiveTorMode() in 1..2 || switchHttp.isChecked)
-        if (wantsAether && !shown.contains("Aether local:")) return true
-        if ((isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0
-            && !shown.contains("Psiphon local:")) return true
+        if (!isPurePsiphon() && !isTorOnly() && !shown.contains("Peer:")) return true
+        val finalBackend = routeBackends().lastOrNull() ?: 0
+        val finalName = if (finalBackend == 2) "Firefox" else "Aether"
+        val wantsFinalProxy = !isPurePsiphon() && !isTorOnly() && finalBackend != 1 &&
+            (switchSocks.isChecked || isTunModeSelected() || effectiveTorMode() in 1..2 || switchHttp.isChecked)
+        if (wantsFinalProxy && !shown.contains("$finalName local:")) return true
+        if (isFinalPsiphon() && pendingPsiSocks > 0 && !shown.contains("Psiphon local:")) return true
         return false
     }
 
@@ -2019,7 +2043,7 @@ class MainActivity : AppCompatActivity() {
         inForeground = true
         handler.removeCallbacks(sponsorManifestRefresh)
         handler.post(sponsorManifestRefresh)
-        if (isPsiphonSelected() || isEgressPsiphon()) {
+        if (routeIncludesPsiphon()) {
             // The Activity receiver is not registered while it is stopped.
             // Ask the still-bound service to replay its learned list before
             // deciding which Psiphon UI path to restore.
@@ -2054,7 +2078,7 @@ class MainActivity : AppCompatActivity() {
         // idle value into DISCONNECTED or erase the service's last snapshot
         // when the Activity returns from the background.
         val psiphonServiceActive = hasActivePsiOwner()
-        val purePsiphonProxy = isPsiphonSelected() && !isTunModeSelected()
+        val purePsiphonProxy = isPurePsiphon() && !isTunModeSelected()
         if (psiphonServiceActive) restoreLatestPsiStats()
         if (purePsiphonProxy && (psiphonServiceActive || connecting)) {
             vpnActive = true
@@ -2316,27 +2340,447 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyTorLock() {
         if (!::spinnerTor.isInitialized || !::spinnerTorBridges.isInitialized) return
-        ensureEgressAdapter()
+        ensureTorRoutingAdapter()
     }
 
-    /**
-     * One-time plain adapter for the egress combo. Nothing is disabled,
-     * nothing is gray: the four entries always render and select normally,
-     * and combos the current protocol cannot use are ignored downstream.
-     * Guarded on adapter==null so the selection is never disturbed.
-     */
-    private fun ensureEgressAdapter() {
+    /** Installs the Aether Tor routing choices without disturbing selection. */
+    private fun ensureTorRoutingAdapter() {
         if (!::spinnerTor.isInitialized || spinnerTor.adapter != null) return
         val labels = listOf(
             "Off",
             "Tor through the tunnel",
             "Tunnel through Tor (MASQUE only)",
-            "Psiphon through the tunnel",
         )
         val a = android.widget.ArrayAdapter(
             this, R.layout.spinner_dark_item, labels)
         a.setDropDownViewResource(R.layout.spinner_dark_item)
         spinnerTor.adapter = a
+    }
+
+    private fun selectedChain(): List<Int> {
+        val count = prefs.getInt("chainCount", 0).coerceIn(0, 2)
+        return (0 until count).map { prefs.getInt("chainExit$it", if (it == 0) 1 else 2) }
+    }
+
+    private fun routeBackends(): List<Int> = listOf(backendFromSelection()) + selectedChain()
+
+    private fun updateChainRouteText() {
+        if (!::spinnerProtocol.isInitialized) return
+        val names = listOf("Aether", "Psiphon", "Firefox")
+        findViewById<TextView>(R.id.textChainRoute).text = routeBackends().joinToString("  ->  ") {
+            names.getOrElse(it) { "Unknown" }
+        }
+    }
+
+    private fun showChainSettings() {
+        val names = listOf("Aether", "Psiphon", "Firefox")
+        val choices = listOf("None") + names
+        val chain = selectedChain()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(8))
+        }
+        box.addView(TextView(this).apply {
+            text = "CHAIN SETTINGS\nAdditional exits are started from left to right. Public proxy ports belong to the final exit."
+            setTextColor(Color.parseColor("#FFE0E4EE"))
+        })
+        val first = Spinner(this)
+        val second = Spinner(this)
+        for ((index, spinner) in listOf(first, second).withIndex()) {
+            box.addView(TextView(this).apply {
+                text = "Additional exit ${index + 1}"
+                setTextColor(Color.parseColor("#FF9AA3B5"))
+                setPadding(0, dp(14), 0, 0)
+            })
+            spinner.adapter = ArrayAdapter(this, R.layout.spinner_dark_item, choices)
+            val selected = chain.getOrNull(index)?.plus(1) ?: 0
+            spinner.setSelection(if (selected in choices.indices) selected else 0)
+            box.addView(spinner)
+        }
+        val route = TextView(this).apply {
+            setTextColor(Color.parseColor("#FF60A5FA"))
+            setPadding(0, dp(16), 0, 0)
+        }
+        fun routeText(): String {
+            val selected = listOf(first.selectedItemPosition - 1, second.selectedItemPosition - 1).filter { it >= 0 }
+            return "Route: " + (listOf(backendFromSelection()) + selected).joinToString("  ->  ") { names.getOrElse(it) { "Unknown" } }
+        }
+        val listener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                route.text = routeText()
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+        first.onItemSelectedListener = listener
+        second.onItemSelectedListener = listener
+        route.text = routeText()
+        box.addView(route)
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("CHAIN SETTINGS")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val selected = listOf(first.selectedItemPosition - 1, second.selectedItemPosition - 1).filter { it >= 0 }
+                val routeBackends = listOf(backendFromSelection()) + selected
+                if (selected.any { it !in 0..2 } || routeBackends.size != routeBackends.distinct().size) {
+                    Toast.makeText(this, "Each backend may appear only once; remove the duplicate or carrier loop.", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                prefs.edit()
+                    .putInt("chainCount", selected.size)
+                    .putInt("chainExit0", selected.getOrElse(0) { 1 })
+                    .putInt("chainExit1", selected.getOrElse(1) { 2 })
+                    .apply()
+                saveSettings()
+                updateChainRouteText()
+                Toast.makeText(this, routeText(), Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun addDialogInput(box: LinearLayout, label: String, value: String = "", password: Boolean = false): android.widget.EditText {
+        box.addView(TextView(this).apply {
+            text = label
+            setTextColor(Color.parseColor("#FF9AA3B5"))
+            setPadding(0, dp(12), 0, dp(3))
+        })
+        val input = android.widget.EditText(this).apply {
+            setText(value)
+            setSingleLine(true)
+            textSize = 14f
+            setTextColor(Color.parseColor("#FFE8ECF4"))
+            setHintTextColor(Color.parseColor("#FF6B7280"))
+            setBackgroundColor(Color.parseColor("#FF1E1E2C"))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            if (password) inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        box.addView(input)
+        return input
+    }
+
+    private fun addDialogButton(box: LinearLayout, label: String, action: () -> Unit): MaterialButton {
+        val button = MaterialButton(this).apply {
+            text = label
+            setOnClickListener { action() }
+        }
+        box.addView(button)
+        return button
+    }
+
+    private fun showFirefoxSettings() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        box.addView(TextView(this).apply {
+            text = "Firefox Accounts and Mozilla VPN credentials are stored by the native provider. Passwords and codes are never saved."
+            setTextColor(Color.parseColor("#FFE0E4EE"))
+        })
+        val account = addDialogInput(box, "Account ID", prefs.getString("firefoxAccountId", "").orEmpty())
+        firefoxAccountView = account
+        val email = addDialogInput(box, "Email", prefs.getString("firefoxEmail", "").orEmpty())
+        val password = addDialogInput(box, "Password / new password", password = true)
+        val code = addDialogInput(box, "Verification / reset / unblock code")
+        val status = TextView(this).apply {
+            setTextColor(Color.parseColor("#FFFFB454"))
+            setPadding(0, dp(12), 0, dp(4))
+        }
+        box.addView(status)
+        firefoxStatusView = status
+
+        fun base(operation: String): org.json.JSONObject = org.json.JSONObject()
+            .put("op", operation)
+            .put("data_dir", filesDir.absolutePath)
+        fun emailValue(): String = email.text.toString().trim()
+        fun submit(request: org.json.JSONObject, message: String) {
+            if (request.optString("op") == "login") {
+                prefs.edit().putString("firefoxEmail", emailValue()).apply()
+                firefoxPendingId = emailValue().lowercase()
+            }
+            firefoxSubmit(request, message)
+        }
+        addDialogButton(box, "Sign in") {
+            val request = base("login").put("email", emailValue()).put("password", password.text.toString())
+            if (code.text.isNotEmpty()) request.put("unblock_code", code.text.toString().trim())
+            submit(request, "Signing in to Firefox Accounts…")
+        }
+        addDialogButton(box, "Verify email / TOTP") {
+            if (firefoxPendingId.isEmpty()) {
+                status.text = "Sign in first to obtain a pending verification ID."
+            } else {
+                submit(base(if (firefoxTotp) "verify_totp" else "verify_email")
+                    .put("pending_id", firefoxPendingId).put("code", code.text.toString().trim()), "Verifying Firefox Account…")
+            }
+        }
+        addDialogButton(box, "Resend verification code") {
+            if (firefoxPendingId.isNotEmpty()) submit(base("resend").put("pending_id", firefoxPendingId), "Resending verification code…")
+        }
+        addDialogButton(box, "Cancel verification") {
+            if (firefoxPendingId.isNotEmpty()) submit(base("cancel").put("pending_id", firefoxPendingId), "Cancelling verification…")
+        }
+        addDialogButton(box, "Send unblock code") {
+            submit(base("unblock").put("email", emailValue()), "Sending unblock code…")
+        }
+        addDialogButton(box, "Forgot password") {
+            submit(base("forgot").put("email", emailValue()), "Requesting password reset…")
+        }
+        addDialogButton(box, "Reset password with code") {
+            submit(base("reset").put("email", emailValue()).put("code", code.text.toString().trim())
+                .put("password", password.text.toString()).put("account_id", account.text.toString().trim()),
+                "Resetting Firefox Account password…")
+        }
+        addDialogButton(box, "Refresh account / entitlement") {
+            submit(base("entitlement").put("account_id", account.text.toString().trim()), "Checking Firefox IP Protection entitlement…")
+        }
+        addDialogButton(box, "Remove saved account") {
+            firefoxRemoveInFlight = true
+            submit(base("remove").put("account_id", account.text.toString().trim()), "Removing Firefox Account…")
+        }
+
+        val location = addDialogInput(box, "Location (auto, country/city code or name)", prefs.getString("firefoxLocation", "").orEmpty())
+        val server = addDialogInput(box, "Server override (optional host[:port])", prefs.getString("firefoxServer", "").orEmpty())
+        box.addView(TextView(this).apply {
+            text = "Firefox transport"
+            setTextColor(Color.parseColor("#FF9AA3B5"))
+            setPadding(0, dp(12), 0, dp(3))
+        })
+        val transport = Spinner(this)
+        transport.adapter = ArrayAdapter(this, R.layout.spinner_dark_item,
+            listOf("Auto (H2 with H1 fallback)", "HTTP/2", "HTTP/1.1"))
+        transport.setSelection(when (prefs.getString("firefoxTransport", "auto")) {
+            "h2" -> 1
+            "h1" -> 2
+            else -> 0
+        })
+        box.addView(transport)
+        box.addView(TextView(this).apply {
+            text = "UDP uses a separate MASQUE CONNECT-UDP session over HTTP/2. HTTP/1.1 is TCP fallback only."
+            setTextColor(Color.parseColor("#FF9AA3B5"))
+            setPadding(0, dp(8), 0, dp(8))
+        })
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("FIREFOX IP PROTECTION SETTINGS")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setNegativeButton("Close", null)
+            .setPositiveButton("Save connection settings", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                prefs.edit()
+                    .putString("firefoxAccountId", account.text.toString().trim())
+                    .putString("firefoxEmail", emailValue())
+                    .putString("firefoxLocation", location.text.toString().trim())
+                    .putString("firefoxServer", server.text.toString().trim())
+                    .putString("firefoxTransport", listOf("auto", "h2", "h1")[transport.selectedItemPosition.coerceIn(0, 2)])
+                    .apply()
+                saveSettings()
+                password.setText("")
+                code.setText("")
+                dialog.dismiss()
+            }
+        }
+        dialog.setOnDismissListener {
+            firefoxStatusView = null
+            firefoxAccountView = null
+            password.setText("")
+            code.setText("")
+        }
+        dialog.show()
+    }
+
+    private fun firefoxSubmit(request: org.json.JSONObject, message: String) {
+        if (firefoxJob != 0L) {
+            firefoxRemoveInFlight = false
+            firefoxSetStatus("Another Firefox account operation is still running.")
+            return
+        }
+        firefoxJob = try { NativeEngine.nativeFirefoxAccountSubmit(request.toString()) } catch (error: Throwable) {
+            firefoxSetStatus("Firefox account operation is unavailable: ${error.message}")
+            firefoxRemoveInFlight = false
+            return
+        }
+        if (firefoxJob == 0L) {
+            firefoxSetStatus("The Firefox account request was empty or could not be queued.")
+            firefoxRemoveInFlight = false
+            return
+        }
+        firefoxOperation = request.optString("op")
+        firefoxSetStatus(message)
+        handler.removeCallbacks(firefoxJobPoll)
+        handler.post(firefoxJobPoll)
+    }
+
+    private fun firefoxSetStatus(message: String) {
+        firefoxStatusView?.text = message
+        if (firefoxStatusView == null && message.isNotEmpty()) Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
+
+    private fun pollFirefoxCaptcha() {
+        val id = try { NativeEngine.nativeFirefoxCaptchaPending() } catch (_: Throwable) { 0L }
+        if (id == 0L) {
+            firefoxCaptchaDialog?.dismiss()
+            firefoxCaptchaDialog = null
+            firefoxCaptchaId = 0L
+            firefoxCaptchaSuppressed = 0L
+            return
+        }
+        if (id != firefoxCaptchaId) {
+            firefoxCaptchaDialog?.dismiss()
+            firefoxCaptchaDialog = null
+            firefoxCaptchaId = 0L
+            if (id != firefoxCaptchaSuppressed) firefoxCaptchaSuppressed = 0L
+        }
+        if (id == firefoxCaptchaSuppressed || firefoxCaptchaDialog?.isShowing == true) return
+        showFirefoxCaptcha(id)
+    }
+
+    private fun showFirefoxCaptcha(id: Long) {
+        firefoxCaptchaId = id
+        val image = try { NativeEngine.nativeFirefoxCaptchaImage(id) } catch (_: Throwable) { "" }
+        val separator = image.indexOf(";base64,")
+        val mime = if (separator > 0) image.substring(0, separator) else ""
+        if (mime !in setOf("data:image/png", "data:image/jpeg", "data:image/gif", "data:image/webp")) {
+            firefoxCaptchaSuppressed = id
+            firefoxSetStatus("The Firefox CAPTCHA image is unavailable or uses an unsupported format.")
+            return
+        }
+        val bitmap = try {
+            val bytes = android.util.Base64.decode(image.substring(separator + 8), android.util.Base64.DEFAULT)
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (_: Throwable) { null }
+        if (bitmap == null) {
+            firefoxCaptchaSuppressed = id
+            firefoxSetStatus("The Firefox CAPTCHA image could not be decoded.")
+            return
+        }
+        val answer = android.widget.EditText(this).apply {
+            hint = "Characters shown in the image"
+            isSingleLine = true
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+            addView(android.widget.ImageView(this@MainActivity).apply {
+                setImageBitmap(bitmap)
+                adjustViewBounds = true
+                maxHeight = dp(280)
+                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                contentDescription = "Firefox Account CAPTCHA"
+            })
+            addView(answer)
+        }
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("FIREFOX ACCOUNT CAPTCHA")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Submit answer", null)
+            .setNegativeButton("Not now", null)
+            .setCancelable(false)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val value = answer.text.toString().trim()
+                if (value.isEmpty()) {
+                    answer.error = "Enter the characters shown in the image."
+                    return@setOnClickListener
+                }
+                val accepted = try { NativeEngine.nativeFirefoxCaptchaAnswer(id, value) } catch (_: Throwable) { false }
+                if (accepted) {
+                    firefoxCaptchaSuppressed = 0L
+                    firefoxSetStatus("CAPTCHA answer submitted; continuing Firefox Account sign-in…")
+                    dialog.dismiss()
+                } else {
+                    answer.error = "This CAPTCHA expired or was already answered."
+                }
+            }
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+                firefoxCaptchaSuppressed = id
+                firefoxSetStatus("CAPTCHA postponed. Firefox Account sign-in is still waiting.")
+                dialog.dismiss()
+            }
+        }
+        dialog.setOnDismissListener {
+            if (firefoxCaptchaDialog === dialog) {
+                firefoxCaptchaDialog = null
+                firefoxCaptchaId = 0L
+            }
+        }
+        firefoxCaptchaDialog = dialog
+        dialog.show()
+        firefoxSetStatus("Enter the CAPTCHA shown in the dialog to continue.")
+    }
+
+    private fun pollFirefoxAccountJob() {
+        val id = firefoxJob
+        if (id == 0L) return
+        val raw = try { NativeEngine.nativeFirefoxJobPoll(id) } catch (error: Throwable) {
+            firefoxJob = 0L
+            firefoxRemoveInFlight = false
+            firefoxSetStatus("Firefox account polling failed: ${error.message}")
+            return
+        }
+        if (raw.isEmpty()) return
+        val result = try { org.json.JSONObject(raw) } catch (_: Throwable) { return }
+        val state = result.optString("status")
+        if (state == "running") return
+        firefoxJob = 0L
+        try { NativeEngine.nativeFirefoxJobRelease(id) } catch (_: Throwable) {}
+        val payload = result.optJSONObject("result") ?: result
+        if (state == "error") {
+            firefoxRemoveInFlight = false
+            firefoxSetStatus(payload.optString("message").ifEmpty { "Firefox account operation failed (${payload.optString("code")})." })
+            return
+        }
+        val operationState = payload.optString("state")
+        when (operationState) {
+            "email_code", "totp" -> {
+                firefoxPendingId = payload.optString("pending_id")
+                firefoxTotp = operationState == "totp"
+                firefoxSetStatus(if (firefoxTotp) "Enter the authenticator (TOTP) code, then verify." else "Enter the emailed verification code, then verify.")
+            }
+            "complete" -> {
+                val account = payload.optJSONObject("account")
+                val accountId = account?.optString("id").orEmpty()
+                if (accountId.isNotEmpty()) {
+                    prefs.edit().putString("firefoxAccountId", accountId).apply()
+                    firefoxAccountView?.setText(accountId)
+                }
+                firefoxPendingId = ""
+                firefoxTotp = false
+                firefoxSetStatus("Firefox Account is ready for IP Protection.")
+            }
+            else -> {
+                if (firefoxRemoveInFlight) {
+                    prefs.edit().remove("firefoxAccountId").apply()
+                    firefoxAccountView?.setText("")
+                    firefoxRemoveInFlight = false
+                    firefoxPendingId = ""
+                    firefoxSetStatus("Saved Firefox Account removed.")
+                } else if (payload.has("entitlement")) {
+                    val entitlement = payload.optJSONObject("entitlement")
+                    firefoxSetStatus("Subscription: ${entitlement?.optBoolean("subscribed") == true}; byte limit: ${entitlement?.optLong("max_bytes", 0L) ?: 0L}")
+                } else {
+                    if (firefoxOperation == "cancel") {
+                        firefoxPendingId = ""
+                        firefoxTotp = false
+                    }
+                    if (firefoxOperation == "reset") {
+                        if (payload.optBoolean("account_removed")) {
+                            prefs.edit().remove("firefoxAccountId").apply()
+                            firefoxAccountView?.setText("")
+                        }
+                        firefoxPendingId = ""
+                        firefoxSetStatus("Password reset. Existing sessions were revoked; sign in with the new password.")
+                    } else {
+                        firefoxSetStatus("Firefox account operation completed.")
+                    }
+                }
+            }
+        }
     }
 
     private fun saveSettings() {
@@ -2352,7 +2796,7 @@ class MainActivity : AppCompatActivity() {
             putString("torBridgeLines", editTorBridgeLines.text.toString().trim())
             putInt("engineLog", spinnerEngineLog.selectedItemPosition)
             putInt("t2sLog", t2sLogValue())
-            putInt("backend", if (isPsiphonProtocol()) 1 else 0)
+            putInt("backend", backendFromSelection())
             putString("torSocksPort", editTorSocksPort.text.toString().trim())
             putString("psiphonRegion", selectedPsiphonRegion())
             putInt("psiphonTransport", selectedPsiphonTransportIndex())
@@ -2453,24 +2897,20 @@ class MainActivity : AppCompatActivity() {
         spinnerScan.setSelection(prefs.getInt("scan", 0))
         spinnerIpVersion.setSelection(prefs.getInt("ipVersion", 0))
         spinnerNoize.setSelection(prefs.getInt("noize", 2))
-        // "Tor only" left the egress list: it is the Tor entry of the
-        // protocol list now (position 4). A saved egress position of 3 (the
-        // old "Tor only") maps back onto the protocol list, so an existing
-        // setup keeps the same effective config. Psiphon ignores the tor
-        // fields entirely, so there is nothing to migrate for that backend
-        // -- the egress entry just resets to Off.
         val savedTor = prefs.getInt("tor", 0)
-        if (savedTor > 3) {
-            // Saved 3+ values are the pre-Psiphon-egress "Tor only" entry.
-            if (prefs.getInt("backend", 0) != 1) {
-                spinnerProtocol.setSelection(4)
+        if (savedTor == 3) {
+            if (!prefs.contains("chainCount")) {
+                prefs.edit().putInt("chainCount", 1).putInt("chainExit0", 1).putInt("chainExit1", 2).apply()
             }
+            prefs.edit().putInt("tor", 0).apply()
+            spinnerTor.setSelection(0)
+        } else if (savedTor > 3) {
+            if (prefs.getInt("backend", 0) != 1) spinnerProtocol.setSelection(4)
             spinnerTor.setSelection(0)
         } else {
-            // Restore the pick verbatim, whatever the protocol: entries the
-            // protocol cannot use are ignored downstream, never re-pointed.
-            spinnerTor.setSelection(savedTor.coerceIn(0, 3))
+            spinnerTor.setSelection(savedTor.coerceIn(0, 2))
         }
+        updateChainRouteText()
         spinnerTorBridges.setSelection(prefs.getInt("torBridges", 0))
         editTorBridgeLines.setText(prefs.getString("torBridgeLines", ""))
         spinnerEngineLog.setSelection(prefs.getInt("engineLog", 3))
@@ -2697,7 +3137,8 @@ class MainActivity : AppCompatActivity() {
                 .putExtra("tunMtu", tunMtuBytes())
         } else {
             Intent(this, ProxyNotification::class.java)
-                .setAction(ProxyNotification.ACTION_PSIPHON)
+                .setAction(ProxyNotification.ACTION_START)
+                .putExtras(buildStartIntent())
         }
         owner.putExtra("psiphonRegion", selectedPsiphonRegion())
         owner.putExtra("psiphonTransport", selectedPsiphonTransportIndex())
@@ -2835,6 +3276,15 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("psiphonSocksPort", if (pendingPsiSocks > 0) pendingPsiSocks else editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("upstreamProxy", upstreamProxyUrl())
+        val chain = selectedChain()
+        i.putExtra("chainCount", chain.size)
+        i.putExtra("chainExit0", chain.getOrElse(0) { 1 })
+        i.putExtra("chainExit1", chain.getOrElse(1) { 2 })
+        i.putExtra("chainExit2", 0)
+        i.putExtra("firefoxAccountId", prefs.getString("firefoxAccountId", "").orEmpty())
+        i.putExtra("firefoxLocation", prefs.getString("firefoxLocation", "").orEmpty())
+        i.putExtra("firefoxServer", prefs.getString("firefoxServer", "").orEmpty())
+        i.putExtra("firefoxTransport", prefs.getString("firefoxTransport", "auto").orEmpty())
         return i
     }
 
@@ -2848,9 +3298,15 @@ class MainActivity : AppCompatActivity() {
 
         val proxyIntent = Intent(this, ProxyNotification::class.java)
         proxyIntent.action = ProxyNotification.ACTION_START
-        // One extra, one meaning: whoever hosts the session's notification and
-        // reads its telemetry for the widget has to know which hop measures it.
-        proxyIntent.putExtra("psiphonThroughTunnel", isEgressPsiphon())
+        // Telemetry-only route extras: without `protocol` this remains the
+        // Activity-owned start path, so the notification owner cannot start a
+        // duplicate engine, but it can still select the final hop's counters.
+        val notificationChain = selectedChain()
+        proxyIntent.putExtra("backend", backendFromSelection())
+        proxyIntent.putExtra("chainCount", notificationChain.size)
+        proxyIntent.putExtra("chainExit0", notificationChain.getOrElse(0) { 1 })
+        proxyIntent.putExtra("chainExit1", notificationChain.getOrElse(1) { 2 })
+        proxyIntent.putExtra("chainExit2", 0)
         startForegroundService(proxyIntent)
         connectGeneration = FCAEVpnService.stateGeneration()
 
@@ -2924,6 +3380,11 @@ class MainActivity : AppCompatActivity() {
         val psiphonSocksPort = editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0
         val psiphonHttpPort = editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0
         val upstreamProxy = upstreamProxyUrl()
+        val chain = selectedChain()
+        val firefoxAccountId = prefs.getString("firefoxAccountId", "").orEmpty()
+        val firefoxLocation = prefs.getString("firefoxLocation", "").orEmpty()
+        val firefoxServer = prefs.getString("firefoxServer", "").orEmpty()
+        val firefoxTransport = prefs.getString("firefoxTransport", "auto").orEmpty()
 
         val tunMtu = tunMtuBytes()
         val tunTcpSndbuf = tcpBufferBytes(editTunTcpSndbuf)
@@ -3014,6 +3475,14 @@ class MainActivity : AppCompatActivity() {
                     disableExtensionPermutation = disableExtensionPermutation,
                     fragmentSni = fragmentSni,
                     upstreamProxy = upstreamProxy,
+                    chainCount = chain.size,
+                    chainExit0 = chain.getOrElse(0) { 1 },
+                    chainExit1 = chain.getOrElse(1) { 2 },
+                    chainExit2 = 0,
+                    firefoxAccountId = firefoxAccountId,
+                    firefoxLocation = firefoxLocation,
+                    firefoxServer = firefoxServer,
+                    firefoxTransport = firefoxTransport,
                 )
             } catch (e: Throwable) {
                 handler.post { Toast.makeText(this, "Start failed: ${e.message}", Toast.LENGTH_LONG).show() }
@@ -3777,10 +4246,10 @@ class MainActivity : AppCompatActivity() {
      */
     private fun sessionEndpointText(peer: String, lan: String, listenersUp: Boolean): String {
         val peerLine = StringBuilder()
-        if (!isPsiphonSelected() && !isTorOnly() && peer.isNotBlank()) {
+        if (!isPurePsiphon() && !isTorOnly() && peer.isNotBlank()) {
             peerLine.append("Peer: $peer")
         }
-        if (listenersUp && !isPsiphonSelected()) {
+        if (listenersUp && !isPurePsiphon()) {
             fun endpoints(backend: String, socks: String?, http: String?, socksKind: String = "SOCKS5") {
                 val local = mutableListOf<String>()
                 val shared = mutableListOf<String>()
@@ -3795,17 +4264,20 @@ class MainActivity : AppCompatActivity() {
             }
             if (!isTorOnly()) {
                 val tun = isTunModeSelected()
-                endpoints("Aether",
-                    if (switchSocks.isChecked || tun || isEgressPsiphon() || effectiveTorMode() in 1..2)
-                        editSocksPort.text.toString().trim().ifEmpty { "1819" } else null,
-                    if (!tun && switchHttp.isChecked) editHttpPort.text.toString().trim().ifEmpty { "1820" } else null,
-                    if (tun) "internal SOCKS5" else "SOCKS5")
+                val finalBackend = routeBackends().lastOrNull() ?: 0
+                if (finalBackend != 1) {
+                    endpoints(if (finalBackend == 2) "Firefox" else "Aether",
+                        if (switchSocks.isChecked || tun || effectiveTorMode() in 1..2)
+                            editSocksPort.text.toString().trim().ifEmpty { "1819" } else null,
+                        if (!tun && switchHttp.isChecked) editHttpPort.text.toString().trim().ifEmpty { "1820" } else null,
+                        if (tun) "internal SOCKS5" else "SOCKS5")
+                }
             }
             if (isTorOnly() || effectiveTorMode() in 1..2) endpoints("Tor",
                 editTorSocksPort.text.toString().trim().ifEmpty { "1821" },
                 if (switchTorHttp.isChecked) editTorHttpPort.text.toString() else null)
         }
-        if (listenersUp && (isPsiphonSelected() || isEgressPsiphon()) && pendingPsiSocks > 0)
+        if (listenersUp && isFinalPsiphon() && pendingPsiSocks > 0)
             peerLine.append("\n" + psiphonEndpointText(nativeLanFallback(lan)))
         return peerLine.toString()
     }
@@ -3853,7 +4325,7 @@ class MainActivity : AppCompatActivity() {
                 // Psiphon reports its egress regions only after a successful
                 // handshake, so this is the first moment the real list can be
                 // read. Cheap and idempotent: it no-ops unless the set changed.
-                if (state == 4 && (isPsiphonSelected() || isEgressPsiphon())) refreshPsiphonRegions()
+                if (state == 4 && routeIncludesPsiphon()) refreshPsiphonRegions()
                 // States 0 and 5 are terminal. Clear stale UI so the next tap connects rather than disconnects.
                 if ((state == 0 || state == 5) && !userInitiatedDisconnect && !commandConnecting) {
                     // Engine died on its own — reset state
@@ -3865,7 +4337,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Keep the progress label until the Psiphon egress tunnel provides its SOCKS endpoint.
-            val isPsiphonPath = isPsiphonSelected() || isEgressPsiphon()
+            val isPsiphonPath = isFinalPsiphon()
             val psiphonStillChaining = state == 4
                     && isPsiphonPath
                     && commandConnecting
@@ -3901,7 +4373,7 @@ class MainActivity : AppCompatActivity() {
                     else -> COLOR_PROGRESS
                 },
             )
-            if (isPsiphonSelected() || isEgressPsiphon()) {
+            if (isFinalPsiphon()) {
                 // Psiphon owns this line through BROADCAST_STATS.
             } else if (state == 0 || state == 5) {
                 resetStats()
@@ -3991,26 +4463,28 @@ class MainActivity : AppCompatActivity() {
         6, 7 -> 5 // MASQUE-in-MASQUE
         8, 9 -> 6 // WARP-in-MASQUE
         4 -> 4    // Tor (FcaeProtocol::Tor; implies tor.mode = Only)
-        5 -> 3    // Psiphon picks its own transport (FcaeProtocol::Auto)
+        5, 10 -> 3 // Psiphon/Firefox pick their own backend transport
         else -> 0 // MASQUE (either HTTP version)
     }
 
-    /** 0 = Aether, 1 = Psiphon. Only the Psiphon entry switches backend. */
+    /** 0 = Aether, 1 = Psiphon, 2 = Firefox. */
     private fun isTorOnly(): Boolean =
         ::spinnerProtocol.isInitialized && spinnerProtocol.selectedItemPosition == 4
 
     private fun isPsiphonProtocol(): Boolean =
         ::spinnerProtocol.isInitialized && spinnerProtocol.selectedItemPosition == 5
 
-    /**
-     * Egress "Psiphon through the tunnel": valid with any Aether-backed
-     * protocol — WARP transports AND Protocol=Tor (the chain then runs
-     * Aether(Tor-only) -> Psiphon). Only Protocol=Psiphon excludes it, since
-     * there is no engine to chain through then.
-     */
-    private fun isEgressPsiphon(): Boolean =
-        ::spinnerTor.isInitialized && !isPsiphonProtocol() &&
-            spinnerTor.selectedItemPosition == 3
+    private fun isFirefoxProtocol(): Boolean =
+        ::spinnerProtocol.isInitialized && spinnerProtocol.selectedItemPosition == 10
+
+    /** The established two-hop Android Psiphon-owner flow, now represented by the home chain. */
+    private fun isEgressPsiphon(): Boolean = routeBackends() == listOf(0, 1)
+
+    private fun routeIncludesPsiphon(): Boolean = routeBackends().contains(1)
+
+    private fun isFinalPsiphon(): Boolean = routeBackends().lastOrNull() == 1
+
+    private fun isPurePsiphon(): Boolean = isPsiphonSelected() && selectedChain().isEmpty()
 
     /**
      * Only Protocol=Psiphon runs the Psiphon attach backend. Egress "Psiphon
@@ -4018,15 +4492,18 @@ class MainActivity : AppCompatActivity() {
      * and the supervisor requests the AAR exit through the foreground owner.
      * Its _reserved[0] flag now follows the same routing as desktop.
      */
-    private fun backendFromSelection(): Int =
-        if (isPsiphonProtocol()) 1 else 0
+    private fun backendFromSelection(): Int = when {
+        isPsiphonProtocol() -> 1
+        isFirefoxProtocol() -> 2
+        else -> 0
+    }
 
     /** Protocol Psiphon only. Egress Psiphon starts Aether first, then the AAR. */
     private fun isPsiphonSelected(): Boolean = isPsiphonProtocol()
 
-    /** Tor modes 1/2 only. Protocol Tor/Psiphon and egress Psiphon send Off. */
+    /** Tor is an Aether setting and stays independent of the ordered backend chain. */
     private fun effectiveTorMode(): Int {
-        if (isTorOnly() || isPsiphonProtocol() || isEgressPsiphon()) return 0
+        if (isTorOnly() || backendFromSelection() != 0) return 0
         val p = if (::spinnerTor.isInitialized) spinnerTor.selectedItemPosition else 0
         return if (p in 0..2) p else 0
     }
@@ -4189,6 +4666,7 @@ class MainActivity : AppCompatActivity() {
      *  (core 3, via the backend) sit at the end of the list. */
     private fun selectionPositionFromPrefs(protocol: Int, h2: Boolean, backend: Int = 0): Int =
         when {
+            backend == 2 -> 10         // Firefox IP Protection
             backend == 1 -> 5          // Psiphon
             protocol == 6 -> if (h2) 9 else 8
             protocol == 5 -> if (h2) 7 else 6

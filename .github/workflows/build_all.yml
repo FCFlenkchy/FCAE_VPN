@@ -897,7 +897,7 @@ jobs:
                 export FCAE_HEV_LIBDIR="$(pwd)/core/hev-socks5-tunnel/bin/android/$HEV_ABI"
                 export FCAE_ZEPTUN_LIBDIR="$(pwd)/core/zeptun/zig-out/android/prebuilt/$HEV_ABI"
 
-                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
+                cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target "$TARGET_TRIPLE" -p fcae-ffi --features aether,tor,psiphon,firefox,zeptun,hev
 
                 DEST="$(pwd)/target/$TARGET_TRIPLE/release/libfcae_ffi.a"
                 ls -lh "$DEST"
@@ -941,7 +941,7 @@ jobs:
               echo "Using NDK: $NDK"
               "$CLANG" --version | head -1
 
-              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon,zeptun,hev
+              cargo build --manifest-path core/fcae-ffi/Cargo.toml --release --target ${{ matrix.target }} -p fcae-ffi --features aether,tor,psiphon,firefox,zeptun,hev
 
               DEST="$(pwd)/target/${{ matrix.target }}/release/libfcae_ffi.a"
               ls -lh "$DEST"
@@ -952,7 +952,7 @@ jobs:
               # Windows runs hev-socks5-tunnel in-process through the DLL that
               # build-hev-windows stages; FCAE_HEV_DLL says it is part of the
               # install, which switches the crate to the dynamic backend.
-              windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,zeptun,hev ;;
+              windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,firefox,zeptun,hev ;;
               *) echo "::error::Unsupported desktop target: ${{ matrix.name }}"; exit 1 ;;
             esac
             if [ "${{ matrix.name }}" = "windows-x64" ]; then

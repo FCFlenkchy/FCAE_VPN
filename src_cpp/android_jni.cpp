@@ -286,6 +286,7 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeRegisterVpnService(JNIEnv* env, jobject
         LOGE("fcae_set_tun_fd_provider: %s", fcae_last_error());
     }
     fcae_set_psiphon_protect(psiphon_protect);
+    fcae_set_firefox_protect(psiphon_protect);
     fcae_set_psiphon_network_callbacks(
         g_dns_mid ? psiphon_dns_servers : nullptr,
         g_connectivity_mid ? psiphon_has_connectivity : nullptr,
@@ -306,6 +307,7 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeUnregisterVpnService(JNIEnv* env, jobje
         g_network_id_mid = nullptr;
         fcae_set_tun_fd_provider(nullptr);
         fcae_set_psiphon_protect(nullptr);
+        fcae_set_firefox_protect(nullptr);
         fcae_set_psiphon_network_callbacks(nullptr, nullptr, nullptr);
     }
 }
@@ -396,6 +398,48 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativePsiphonAttachComplete(JNIEnv*, jclass, jlong id, jint socks, jint http) {
     if (socks < 0 || socks > 65535 || http < 0 || http > 65535) return;
     fcae_psiphon_attach_complete((uint64_t)id, (uint16_t)socks, (uint16_t)http);
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxCaptchaPending(JNIEnv*, jclass) {
+    return (jlong)fcae_firefox_captcha_pending();
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxCaptchaImage(JNIEnv* env, jclass, jlong id) {
+    const uint32_t needed = fcae_firefox_captcha_image((uint64_t)id, nullptr, 0);
+    if (!needed || needed > 8 * 1024 * 1024) return env->NewStringUTF("");
+    std::string image(needed + 1, '\0');
+    fcae_firefox_captcha_image((uint64_t)id, image.data(), (uint32_t)image.size());
+    image.resize(needed);
+    return env->NewStringUTF(image.c_str());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxCaptchaAnswer(JNIEnv* env, jclass, jlong id, jstring answer) {
+    const std::string owned = jstr(env, answer);
+    return fcae_firefox_captcha_answer((uint64_t)id, owned.c_str()) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxAccountSubmit(JNIEnv* env, jclass, jstring request) {
+    const std::string owned = jstr(env, request);
+    return owned.empty() ? 0 : (jlong)fcae_firefox_account_submit(owned.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxJobPoll(JNIEnv* env, jclass, jlong id) {
+    const uint32_t needed = fcae_firefox_job_poll((uint64_t)id, nullptr, 0);
+    if (!needed || needed > 1024 * 1024) return env->NewStringUTF("");
+    std::string json(needed + 1, '\0');
+    fcae_firefox_job_poll((uint64_t)id, json.data(), (uint32_t)json.size());
+    json.resize(needed);
+    return env->NewStringUTF(json.c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxJobRelease(JNIEnv*, jclass, jlong id) {
+    fcae_firefox_job_release((uint64_t)id);
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -512,7 +556,15 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jboolean disableSessionTicket,
     jboolean disableExtensionPermutation,
     jboolean fragmentSni,
-    jstring upstreamProxy
+    jstring upstreamProxy,
+    jint chainCount,
+    jint chainExit0,
+    jint chainExit1,
+    jint chainExit2,
+    jstring firefoxAccountId,
+    jstring firefoxLocation,
+    jstring firefoxServer,
+    jstring firefoxTransport
 ) {
     ensure_init();
 
@@ -530,6 +582,11 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     std::string torLinesOwned = jstr(env, torBridgeLines);
     std::string psiCfgOwned = jstr(env, psiphonConfig);
     std::string psiRegionOwned = jstr(env, psiphonRegion);
+    std::string firefoxAccountOwned = jstr(env, firefoxAccountId);
+    std::string firefoxLocationOwned = jstr(env, firefoxLocation);
+    std::string firefoxServerOwned = jstr(env, firefoxServer);
+    std::string firefoxTransportOwned = jstr(env, firefoxTransport);
+    if (firefoxTransportOwned.empty()) firefoxTransportOwned = "auto";
 
     auto clamp_port = [](jint p) -> uint16_t {
         return (p > 0 && p < 65536) ? (uint16_t)p : 0;
@@ -538,7 +595,18 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     FcaeConfig cfg;
     fcae_config_default(&cfg);
 
-    cfg.backend = (backend >= 0 && backend <= 1) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
+    cfg.backend = (backend >= 0 && backend <= 2) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
+    const jint exits[3] = {chainExit0, chainExit1, chainExit2};
+    if (chainCount > 0 && chainCount <= 3) {
+        cfg.chain.count = (uint32_t)chainCount;
+        for (jint i = 0; i < chainCount; ++i) {
+            cfg.chain.exits[i] = (exits[i] >= 0 && exits[i] <= 2) ? (FcaeBackend)exits[i] : FCAE_BACKEND_AETHER;
+        }
+    }
+    cfg.firefox.account_id = firefoxAccountOwned.empty() ? nullptr : firefoxAccountOwned.c_str();
+    cfg.firefox.location = firefoxLocationOwned.empty() ? nullptr : firefoxLocationOwned.c_str();
+    cfg.firefox.server = firefoxServerOwned.empty() ? nullptr : firefoxServerOwned.c_str();
+    cfg.firefox.transport = firefoxTransportOwned.c_str();
     cfg.protocol = (protocol >= 0 && protocol <= 6) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
     // Mode is independent of protocol/backend. The Android UI passes 1 for
     // TUN, and no protocol-specific path may silently turn that into Proxy.
@@ -640,7 +708,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     // side passes filesDir, which is exactly that.
     if (!psiCfgOwned.empty()) cfg.psiphon.config_json = psiCfgOwned.c_str();
     if (!psiRegionOwned.empty()) cfg.psiphon.egress_region = psiRegionOwned.c_str();
-    cfg._reserved[0] = psiphonThroughTunnel == JNI_TRUE ? 1 : 0;
+    cfg._reserved[0] = cfg.chain.count == 0 && psiphonThroughTunnel == JNI_TRUE ? 1 : 0;
     cfg.psiphon.socks_port = clamp_port(psiphonSocksPort);
     cfg.psiphon.http_port = clamp_port(psiphonHttpPort);
     cfg.tun_tcp_sndbuf = (uint32_t)tunTcpSndbuf;

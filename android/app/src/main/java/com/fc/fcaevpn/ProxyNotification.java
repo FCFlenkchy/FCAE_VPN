@@ -69,6 +69,7 @@ public class ProxyNotification extends Service {
     private boolean handingOff;
     private long ownerGeneration;
     private Intent lastPsiphonStats;
+    private Intent pendingPsiphonSession;
 
     public static void cachePsiphonStats(Intent stats) {
         latestPsiphonStats = stats == null ? null : new Intent(stats);
@@ -175,6 +176,25 @@ public class ProxyNotification extends Service {
     private final android.content.BroadcastReceiver psiphonReceiver = new android.content.BroadcastReceiver() {
         @Override public void onReceive(android.content.Context context, Intent intent) {
             if (stopping || handingOff || !PsiphonTunnelService.isCurrentBroadcast(intent)) return;
+            final Intent pending = pendingPsiphonSession;
+            if (pending != null && PsiphonTunnelService.BROADCAST_READY.equals(intent.getAction())) {
+                if (intent.getBooleanExtra("regionsOnly", false)
+                        || intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, 0) <= 0) return;
+                pendingPsiphonSession = null;
+                pending.putExtra("psiphonSocksPort",
+                        intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, 0));
+                pending.putExtra("psiphonHttpPort",
+                        intent.getIntExtra(PsiphonTunnelService.EXTRA_HTTP, 0));
+                psiTelemetry = FCAEVpnService.finalBackend(pending) == 1;
+                startEngineFromSession(pending);
+                handler.post(statsRunnable);
+                return;
+            }
+            if (pending != null && PsiphonTunnelService.BROADCAST_FAILED.equals(intent.getAction())) {
+                pendingPsiphonSession = null;
+                stopProxy();
+                return;
+            }
             if (PsiphonTunnelService.BROADCAST_STATS.equals(intent.getAction())) {
                 lastPsiphonStats = new Intent(intent);
                 cachePsiphonStats(context, lastPsiphonStats);
@@ -410,7 +430,8 @@ public class ProxyNotification extends Service {
             if (recalled != null && recalled.hasExtra("protocol")) session = recalled;
         }
         final boolean described = session.hasExtra("protocol");
-        psiTelemetry = session.getBooleanExtra("psiphonThroughTunnel", false);
+        pendingPsiphonSession = null;
+        psiTelemetry = FCAEVpnService.finalBackend(session) == 1;
         // The stats tick is the only proxy-mode poller of the chained Psiphon
         // attach request, so every live session needs it, including one this
         // start leaves untouched.
@@ -429,10 +450,12 @@ public class ProxyNotification extends Service {
         handler.postDelayed(statsRunnable, 2000L);
 
         if (described && session.getIntExtra("backend", 0) == 1) {
-            // Protocol=Psiphon in proxy mode IS the AAR tunnel: no engine
-            // session exists, and this owner carries its notification.
-            externalPsiphon = true;
-            psiTelemetry = true;
+            // A pure Psiphon session is entirely AAR-owned. With downstream
+            // hops, park the native start until READY supplies the carrier's
+            // live listener; starting earlier would dial an unbound port.
+            externalPsiphon = !FCAEVpnService.hasChain(session);
+            pendingPsiphonSession = externalPsiphon ? null : new Intent(session);
+            if (!externalPsiphon) handler.removeCallbacks(statsRunnable);
             psiLive = false;
             psiWasLive = false;
             Intent psi = new Intent(this, PsiphonTunnelService.class)
@@ -443,8 +466,6 @@ public class ProxyNotification extends Service {
             return START_STICKY;
         }
         externalPsiphon = false;
-        psiTelemetry = psiTelemetry ||
-                (described && session.getBooleanExtra("psiphonThroughTunnel", false));
         psiLive = false;
         psiWasLive = false;
         if (described) startEngineFromSession(session);
@@ -624,6 +645,7 @@ public class ProxyNotification extends Service {
         lastPsiphonStats = null;
         stopping = true;
         sessionRequested = false;
+        pendingPsiphonSession = null;
         psiTelemetry = false;
         psiLive = false;
         psiWasLive = false;

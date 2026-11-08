@@ -364,6 +364,13 @@
                 android:background="#FF1E1E2C"
                 android:popupBackground="#FF1E1E2C" />
 
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnFirefoxSettings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Firefox settings" />
+
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -388,6 +395,14 @@
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
                 android:visibility="gone">
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="AETHER SETTINGS"
+                android:textColor="#FF60A5FA"
+                android:textSize="16sp"
+                android:textStyle="bold" />
             <LinearLayout android:id="@+id/layoutTunSettings" android:layout_width="match_parent"
                 android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
                 <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
@@ -783,6 +798,14 @@
             </LinearLayout>
 
             <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="TOR SETTINGS (AETHER)"
+                android:textColor="#FFFF9F40"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+            <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
@@ -829,6 +852,14 @@
                 android:textColorHint="#FF6B7280"
                 android:textSize="14sp" />
 
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="PSIPHON SETTINGS"
+                android:textColor="#FFAB8CFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -921,7 +952,7 @@
 
             </LinearLayout>
             <LinearLayout
-                android:id="@+id/homeSectionEgress"
+                android:id="@+id/homeSectionChain"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical">
@@ -929,18 +960,27 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:id="@+id/labelEgress"
-                android:text="Egress"
+                android:id="@+id/labelChain"
+                android:text="Chain"
                 android:textColor="#FF9AA3B5"
                 android:textSize="13sp" />
 
-            <Spinner
-                android:id="@+id/spinnerTor"
+            <TextView
+                android:id="@+id/textChainRoute"
                 android:layout_width="match_parent"
-                android:layout_height="48dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Aether"
+                android:textColor="#FFE0E4EE"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnHomeChainSettings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:background="#FF1E1E2C"
-                android:popupBackground="#FF1E1E2C" />
+                android:text="Edit ordered chain" />
 
             <TextView
                 android:id="@+id/peerText"
@@ -962,6 +1002,28 @@
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
                 android:visibility="gone">
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="TOR SETTINGS (AETHER)"
+                android:textColor="#FFFF9F40"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Tor routing"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+            <Spinner
+                android:id="@+id/spinnerTor"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:popupBackground="#FF1E1E2C" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

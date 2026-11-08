@@ -456,6 +456,13 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
             disable_extension_permutation: false,
         },
         upstream_proxy: std::ptr::null(),
+        firefox: FcaeFirefox {
+            account_id: std::ptr::null(),
+            location: std::ptr::null(),
+            server: std::ptr::null(),
+            transport: std::ptr::null(),
+        },
+        chain: FcaeChain { exits: [FcaeBackend::Aether; 3], count: 0 },
     });
     FcaeStatus::Ok
 }
@@ -509,6 +516,8 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         fcae_bridge_aether::register();
         #[cfg(feature = "psiphon")]
         fcae_bridge_psiphon::register();
+        #[cfg(feature = "firefox")]
+        fcae_firefox_bridge::register();
 
         #[cfg(any(feature = "tun", feature = "zeptun", feature = "hev"))]
         let engines = Arc::new(TunEngines {
@@ -564,9 +573,15 @@ fn tun_backend_description() -> String {
 }
 
 fn sponsor_proxy_for(config: &config::SessionConfig) -> Option<String> {
-    let (scheme, port) = if config.backend == FcaeBackend::Psiphon
-        || config.psiphon.through_tunnel
-    {
+    let (scheme, port) = if !config.chain.is_empty() {
+        if config.exit_backend() == FcaeBackend::Psiphon {
+            ("socks5h", config.psiphon.socks_port)
+        } else if config.socks_port != 0 {
+            ("socks5h", config.socks_port)
+        } else {
+            ("http", config.http_port)
+        }
+    } else if config.backend == FcaeBackend::Psiphon {
         ("socks5h", config.psiphon.socks_port)
     } else if config.tor.is_exit() {
         let port = config
@@ -1159,6 +1174,131 @@ pub extern "C" fn fcae_set_psiphon_protect(
     })
 }
 
+/// Install Android's `VpnService.protect(fd)` for Firefox carrier sockets.
+/// The callback returns 1 on success and 0 on failure, matching Psiphon's ABI.
+#[no_mangle]
+pub extern "C" fn fcae_set_firefox_protect(
+    cb: Option<unsafe extern "C" fn(std::ffi::c_int) -> std::ffi::c_int>,
+) -> FcaeStatus {
+    guard("fcae_set_firefox_protect", || {
+        #[cfg(feature = "firefox")]
+        fcae_firefox_bridge::set_protect_callback(cb);
+        #[cfg(not(feature = "firefox"))]
+        let _ = cb;
+        Ok(())
+    })
+}
+
+/// Returns the oldest pending visual CAPTCHA request ID, or zero when no human
+/// answer is needed. The opaque image is fetched once with `captcha_image`.
+#[no_mangle]
+pub extern "C" fn fcae_firefox_captcha_pending() -> u64 {
+    #[cfg(feature = "firefox")]
+    { return fcae_firefox_bridge::accounts::captcha_pending(); }
+    #[cfg(not(feature = "firefox"))]
+    { 0 }
+}
+
+/// Two-call image read: the return value is the required byte count excluding
+/// NUL. A second call with capacity required+1 copies the immutable data URL.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_firefox_captcha_image(id: u64, out: *mut c_char, cap: u32) -> u32 {
+    #[cfg(feature = "firefox")]
+    let text = guard_value("fcae_firefox_captcha_image", String::new(), || {
+        fcae_firefox_bridge::accounts::captcha_image(id).unwrap_or_default()
+    });
+    #[cfg(not(feature = "firefox"))]
+    let text = { let _ = id; String::new() };
+    if !out.is_null() && cap > 0 && !text.is_empty() {
+        fill(std::slice::from_raw_parts_mut(out, cap as usize), &text);
+    }
+    text.len() as u32
+}
+
+/// Submits a trimmed, non-empty human answer. Returns false for an unknown,
+/// expired, already answered, or invalid request. Answers never enter snapshots.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_firefox_captcha_answer(id: u64, answer: *const c_char) -> bool {
+    #[cfg(feature = "firefox")]
+    {
+        return guard_value("fcae_firefox_captcha_answer", false, || {
+            if answer.is_null() { return false; }
+            let Ok(answer) = CStr::from_ptr(answer).to_str() else { return false };
+            fcae_firefox_bridge::accounts::captcha_answer(id, answer)
+        });
+    }
+    #[cfg(not(feature = "firefox"))]
+    { let _ = (id, answer); false }
+}
+
+/// Submit a Firefox account operation JSON request. Returns an opaque job ID,
+/// or 0 for a null request / unavailable feature. Secrets are consumed by the
+/// account worker and are never returned by `fcae_firefox_job_poll`.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_firefox_account_submit(request: *const c_char) -> u64 {
+    #[cfg(feature = "firefox")]
+    {
+        return guard_value("fcae_firefox_account_submit", 0, || {
+            if request.is_null() {
+                return 0;
+            }
+            let Ok(request) = CStr::from_ptr(request).to_str() else { return 0 };
+            fcae_firefox_bridge::accounts::submit(request)
+        });
+    }
+    #[cfg(not(feature = "firefox"))]
+    {
+        let _ = request;
+        0
+    }
+}
+
+/// Read a job snapshot as JSON. Returns bytes excluding NUL; zero means the
+/// job does not exist (or Firefox is not compiled in).
+#[no_mangle]
+pub unsafe extern "C" fn fcae_firefox_job_poll(id: u64, out: *mut c_char, cap: u32) -> u32 {
+    #[cfg(feature = "firefox")]
+    let text = guard_value("fcae_firefox_job_poll", String::new(), || {
+        fcae_firefox_bridge::accounts::poll(id).map(|snapshot| {
+            serde_json::json!({"id":id, "status":snapshot.status, "result":snapshot.result}).to_string()
+        }).unwrap_or_default()
+    });
+    #[cfg(not(feature = "firefox"))]
+    let text = {
+        let _ = id;
+        String::new()
+    };
+    if !out.is_null() && cap > 0 && !text.is_empty() {
+        fill(std::slice::from_raw_parts_mut(out, cap as usize), &text);
+    }
+    text.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn fcae_firefox_job_release(id: u64) {
+    #[cfg(feature = "firefox")]
+    guard_value("fcae_firefox_job_release", (), || fcae_firefox_bridge::accounts::release(id));
+    #[cfg(not(feature = "firefox"))]
+    let _ = id;
+}
+
+/// Install the optional host CAPTCHA solver. The callback receives an image
+/// data URL and writes a NUL-terminated answer of at most 256 bytes. It
+/// returns the answer length, or <=0 when the challenge cannot be solved.
+#[no_mangle]
+pub extern "C" fn fcae_firefox_set_captcha_callback(
+    callback: Option<unsafe extern "C" fn(*const c_char, u32, *mut c_char, u32, *mut c_void) -> std::ffi::c_int>,
+    user_data: *mut c_void,
+) -> FcaeStatus {
+    guard("fcae_firefox_set_captcha_callback", || {
+        #[cfg(feature = "firefox")]
+        fcae_firefox_bridge::set_captcha_callback(callback, user_data);
+        #[cfg(not(feature = "firefox"))]
+        let _ = (callback, user_data);
+        Ok(())
+    })
+}
+
 /// Install the host's view of the underlying network for Psiphon.
 ///
 /// `dns` returns a comma-delimited list of the resolvers in use on the
@@ -1195,6 +1335,7 @@ fn backend_id_str(id: FcaeBackend) -> &'static str {
     match id {
         FcaeBackend::Aether => "aether",
         FcaeBackend::Psiphon => "psiphon",
+        FcaeBackend::Firefox => "firefox",
     }
 }
 
@@ -1202,6 +1343,7 @@ fn backend_display_name(id: FcaeBackend) -> &'static str {
     match id {
         FcaeBackend::Aether => "Aether (WARP / MASQUE)",
         FcaeBackend::Psiphon => "Psiphon",
+        FcaeBackend::Firefox => "Firefox IP Protection",
     }
 }
 

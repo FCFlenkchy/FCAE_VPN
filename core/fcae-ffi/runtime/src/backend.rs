@@ -21,6 +21,7 @@ use crate::telemetry::TelemetrySink;
 pub enum BackendId {
     Aether,
     Psiphon,
+    Firefox,
 }
 
 impl BackendId {
@@ -28,6 +29,7 @@ impl BackendId {
         match self {
             BackendId::Aether => "aether",
             BackendId::Psiphon => "psiphon",
+            BackendId::Firefox => "firefox",
         }
     }
 }

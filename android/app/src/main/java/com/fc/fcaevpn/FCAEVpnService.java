@@ -924,6 +924,29 @@ public class FCAEVpnService extends VpnService {
         handler.postDelayed(connectWatchdog, CONNECT_WATCHDOG_MS);
     }
 
+    public static boolean hasChain(Intent session) {
+        return session != null && session.getIntExtra("chainCount", 0) > 0;
+    }
+
+    public static int finalBackend(Intent session) {
+        if (session == null) return 0;
+        final int count = session.getIntExtra("chainCount", 0);
+        if (count > 0 && count <= 3) {
+            return session.getIntExtra("chainExit" + (count - 1), session.getIntExtra("backend", 0));
+        }
+        return session.getIntExtra("backend", 0);
+    }
+
+    public static boolean routeIncludesPsiphon(Intent session) {
+        if (session == null) return false;
+        if (session.getIntExtra("backend", 0) == 1) return true;
+        final int count = Math.min(3, Math.max(0, session.getIntExtra("chainCount", 0)));
+        for (int i = 0; i < count; ++i) {
+            if (session.getIntExtra("chainExit" + i, 0) == 1) return true;
+        }
+        return false;
+    }
+
     private void preparePsiphonConnect(Intent intent) {
         if (running || vpnThread != null) return;
         disconnectFromUi = false;
@@ -936,7 +959,7 @@ public class FCAEVpnService extends VpnService {
         shuttingDown = false;
         running = false;
         uiConnecting = true;
-        sessionPsiphonExit = true;
+        sessionPsiphonExit = finalBackend(intent) == 1;
         sessionTunMtu = Math.max(1280, Math.min(9000,
                 intent.getIntExtra("tunMtu", 1500)));
         pendingSessionGen = cleanupGeneration.incrementAndGet();
@@ -1069,17 +1092,17 @@ public class FCAEVpnService extends VpnService {
         final int tunEngine = intent.getIntExtra("tunEngine", 0);
         final int torHttpPort = intent.getIntExtra("torHttpPort", 0);
         final boolean throughPsiphon = intent.getBooleanExtra("psiphonThroughTunnel", false);
+        final boolean psiphonInRoute = routeIncludesPsiphon(intent);
         final String psiphonCfg    = intent.getStringExtra("psiphonConfig");
         final String psiphonRegion = intent.getStringExtra("psiphonRegion");
         final String psiphonCfgV    = (psiphonCfg == null) ? "" : psiphonCfg;
         final String psiphonRegionV = (psiphonRegion == null) ? "" : psiphonRegion;
         final int psiphonSocks = intent.getIntExtra("psiphonSocksPort", 0);
         final int psiphonHttp  = intent.getIntExtra("psiphonHttpPort", 0);
-        // Sticky within a session: the "raise the TUN over a live exit" start
-        // carries the same extras, but a resume or a recalled start may not,
-        // and a session that is measured by the exit must never be described as
-        // engine-measured halfway through it.
-        sessionPsiphonExit = sessionPsiphonExit || backend == 1 || throughPsiphon;
+        // Only the last hop supplies session DNS policy and traffic counters.
+        // A Psiphon carrier or intermediate still uses the native final exit's
+        // counters, even though its AAR remains bound for attach supervision.
+        sessionPsiphonExit = finalBackend(intent) == 1;
         final String teamVal   = (teamName == null) ? "" : teamName;
         final String tokenVal  = (accessTok == null) ? "" : accessTok;
         final String emailVal  = (accessEm == null) ? "" : accessEm;
@@ -1156,9 +1179,9 @@ public class FCAEVpnService extends VpnService {
                     disableSct, disableSessionTicket, disableExtensionPermutation, fragmentSni,
                     upstreamProxy
                 );
-                if (ok && throughPsiphon) {
-                    // nativeStart creates the Aether attach request. Poll only
-                    // after protocol startup has created that request.
+                if (ok && psiphonInRoute) {
+                    // nativeStart creates downstream attach requests. Poll only
+                    // after startup has installed the ordered route.
                     PsiphonTunnelService.pollChainedRequest(this);
                 }
                 if (!ok) {
@@ -1699,10 +1722,7 @@ public class FCAEVpnService extends VpnService {
         if (sessionPsiphonExit && lastPsiphonStats != null) {
             return ProxyNotification.psiphonTrafficText(lastPsiphonStats);
         }
-        boolean psiphonExpected = sessionPsiphonExit ||
-                PsiphonTunnelService.hasActiveBinding() ||
-                (lastStartIntent != null && lastStartIntent.getBooleanExtra("psiphonThroughTunnel", false));
-        if (psiphonExpected) return VpnNotification.zeroTrafficText();
+        if (sessionPsiphonExit) return VpnNotification.zeroTrafficText();
         try {
             long[] s = nativeGetTrafficStats();
             if (s != null && s.length >= 4) return VpnNotification.trafficText(s[0], s[1], s[2], s[3]);
@@ -1798,6 +1818,14 @@ public class FCAEVpnService extends VpnService {
         putStr(e, i, "torBridgeLines");
         putInt(e, i, "engineLog", 3);
         putInt(e, i, "backend", 0);
+        putInt(e, i, "chainCount", 0);
+        putInt(e, i, "chainExit0", 1);
+        putInt(e, i, "chainExit1", 2);
+        putInt(e, i, "chainExit2", 0);
+        putStr(e, i, "firefoxAccountId");
+        putStr(e, i, "firefoxLocation");
+        putStr(e, i, "firefoxServer");
+        putStr(e, i, "firefoxTransport");
         putBool(e, i, "psiphonThroughTunnel", false);
         putInt(e, i, "tunMtu", 1500);
         putInt(e, i, "tunTcpSndbuf", 256000);
@@ -1884,6 +1912,14 @@ public class FCAEVpnService extends VpnService {
         copyStr(p, i, "torBridgeLines");
         copyInt(p, i, "engineLog", 3);
         copyInt(p, i, "backend", 0);
+        copyInt(p, i, "chainCount", 0);
+        copyInt(p, i, "chainExit0", 1);
+        copyInt(p, i, "chainExit1", 2);
+        copyInt(p, i, "chainExit2", 0);
+        copyStr(p, i, "firefoxAccountId");
+        copyStr(p, i, "firefoxLocation");
+        copyStr(p, i, "firefoxServer");
+        copyStr(p, i, "firefoxTransport");
         copyBool(p, i, "psiphonThroughTunnel", false);
         copyInt(p, i, "tunMtu", 1500);
         copyInt(p, i, "tunTcpSndbuf", 256000);
