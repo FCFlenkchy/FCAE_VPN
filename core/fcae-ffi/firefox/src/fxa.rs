@@ -13,8 +13,10 @@ use crate::error::{FirefoxError, Result};
 
 pub const FXA_AUTH: &str = "https://api.accounts.firefox.com/v1";
 pub const FXA_OAUTH: &str = "https://oauth.accounts.firefox.com/v1";
-pub const FIREFOX_CLIENT_ID: &str = "a2270f727f45f648";
-pub const FIREFOX_SCOPE: &str = "https://identity.mozilla.com/apps/secure-proxy";
+pub const FIREFOX_CLIENT_ID: &str = "5882386c6d801776";
+pub const FIREFOX_SCOPE: &str = "profile https://identity.mozilla.com/apps/vpn";
+pub const LEGACY_FIREFOX_CLIENT_ID: &str = "a2270f727f45f648";
+pub const LEGACY_FIREFOX_SCOPE: &str = "https://identity.mozilla.com/apps/secure-proxy";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginResponse {
@@ -83,11 +85,16 @@ impl Fxa {
         if !valid_email(&email) || password.is_empty() || password.len() > 1024 {
             return Err(FirefoxError::InvalidConfig("a valid email and non-empty password are required".into()));
         }
-        let response = self.login_as(&email, None, password, unblock_code, true).await;
-        match response {
+        match self.login_as(&email, None, password, unblock_code, true).await {
             Err(FirefoxError::EmailCaseCorrection(corrected)) if corrected != email => {
-                self.login_as(&corrected, Some(&email), password, unblock_code, true).await
+                match self.login_as(&corrected, Some(&email), password, unblock_code, true).await {
+                    Err(error) if is_request_blocked(&error) => {
+                        Err(FirefoxError::UnblockCodeRequired(corrected))
+                    }
+                    result => result,
+                }
             }
+            Err(error) if is_request_blocked(&error) => Err(FirefoxError::UnblockCodeRequired(email)),
             result => result,
         }
     }
@@ -95,7 +102,7 @@ impl Fxa {
     async fn login_as(&self, email: &str, original: Option<&str>, password: &str, unblock_code: Option<&str>, verification: bool) -> Result<LoginResponse> {
         let result = self.login_attempt(email, original, password, unblock_code, verification).await;
         match result {
-            Err(FirefoxError::Http { status: 400, errno: Some(102), .. }) if verification => {
+            Err(FirefoxError::Http { status: 400, errno: Some(107), .. }) if verification => {
                 self.login_attempt(email, original, password, unblock_code, false).await
             }
             result => result,
@@ -106,10 +113,7 @@ impl Fxa {
         let mut auth_pw = derive_auth_pw(email, password);
         let mut body = serde_json::json!({
             "email": email,
-            "authPW": hex::encode_upper(auth_pw),
-            "reason": "signin",
-            "metricsContext": {},
-            "service": "sync",
+            "authPW": hex::encode(auth_pw),
         });
         if let Some(original) = original {
             body["originalLoginEmail"] = serde_json::Value::String(original.to_string());
@@ -237,13 +241,13 @@ impl Fxa {
         parse_tokens(response)
     }
 
-    pub async fn refresh_token(&self, refresh_token: &str) -> Result<OAuthTokens> {
+    pub async fn refresh_token(&self, refresh_token: &str, client_id: &str, scope: &str) -> Result<OAuthTokens> {
         let body = serde_json::to_vec(&serde_json::json!({
-            "client_id": FIREFOX_CLIENT_ID,
+            "client_id": client_id,
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
             "ttl": 1296000,
-            "scope": FIREFOX_SCOPE,
+            "scope": scope,
         }))?;
         let request = oauth_request(&format!("{FXA_AUTH}/oauth/token"), body.clone())?;
         let primary = self.http.send(request.clone()).await?;
@@ -288,11 +292,11 @@ impl Fxa {
             .ok_or_else(|| FirefoxError::Protocol("device registration response has no id".into()))
     }
 
-    pub async fn revoke_token(&self, token: &str) -> Result<()> {
+    pub async fn revoke_token(&self, token: &str, client_id: &str) -> Result<()> {
         if token.is_empty() {
             return Ok(());
         }
-        let body = serde_json::json!({"client_id":FIREFOX_CLIENT_ID, "token":token});
+        let body = serde_json::json!({"client_id":client_id, "token":token});
         let response = self.request(ControlRequest::new(Method::POST, &format!("{FXA_OAUTH}/destroy"))?.json(&body)?).await?;
         if response.status == 400 || response.status == 401 || response.status == 403 {
             return Ok(());
@@ -369,6 +373,10 @@ fn oauth_request(url: &str, body: Vec<u8>) -> Result<ControlRequest> {
     request.body = Some(body);
     request.headers.push((http::header::CONTENT_TYPE, http::HeaderValue::from_static("application/json; charset=utf-8")));
     Ok(request)
+}
+
+fn is_request_blocked(error: &FirefoxError) -> bool {
+    matches!(error, FirefoxError::Http { status: 400, errno: Some(125), .. })
 }
 
 fn parse_tokens(response: ControlResponse) -> Result<OAuthTokens> {

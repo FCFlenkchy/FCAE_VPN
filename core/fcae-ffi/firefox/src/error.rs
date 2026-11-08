@@ -16,6 +16,8 @@ pub enum FirefoxError {
     EmailCaseCorrection(String),
     #[error("Mozilla's security check requires interactive sign-in")]
     ChallengeRequired,
+    #[error("Firefox Accounts requires the emailed unblock code")]
+    UnblockCodeRequired(String),
     #[error("Mozilla VPN quota is exhausted{0}")]
     QuotaExhausted(String),
     #[error("Mozilla VPN is not entitled for this account")]
@@ -92,6 +94,7 @@ impl FirefoxError {
             Self::VerificationRequired => "verification_required",
             Self::EmailCaseCorrection(_) => "email_case_correction",
             Self::ChallengeRequired => "challenge_required",
+            Self::UnblockCodeRequired(_) => "unblock_code_required",
             Self::QuotaExhausted(_) => "quota_exhausted",
             Self::NotEntitled => "not_entitled",
             Self::RegionUnavailable => "region_unavailable",

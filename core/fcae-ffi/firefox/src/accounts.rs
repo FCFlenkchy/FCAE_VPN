@@ -21,12 +21,19 @@ pub enum LoginOutcome {
     Complete(Account),
     EmailCode(PendingLogin),
     Totp(PendingLogin),
+    UnblockCode(UnblockCodePrompt),
 }
 
 #[derive(Debug, Clone)]
 pub struct PendingLogin {
     pub id: String,
     pub email: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnblockCodePrompt {
+    pub email: String,
+    pub sent: bool,
 }
 
 struct PendingSession {
@@ -71,7 +78,16 @@ impl Accounts {
 
     pub async fn login(&self, email: &str, password: &str, unblock_code: Option<&str>) -> Result<LoginOutcome> {
         self.pending.lock().await.retain(|_, pending| pending.created.elapsed() < PENDING_LIFETIME);
-        let login = self.fxa.login(email, password, unblock_code).await?;
+        let sent = unblock_code.map(str::trim).filter(|code| !code.is_empty()).is_none();
+        let login = match self.fxa.login(email, password, unblock_code).await {
+            Err(FirefoxError::UnblockCodeRequired(email)) => {
+                if sent {
+                    self.fxa.send_unblock_code(&email).await?;
+                }
+                return Ok(LoginOutcome::UnblockCode(UnblockCodePrompt { email, sent }));
+            }
+            result => result?,
+        };
         if login.verified {
             return self.finish_login(login).await.map(LoginOutcome::Complete);
         }
@@ -141,7 +157,7 @@ impl Accounts {
 
     pub async fn remove(&self, id: &str) -> Result<()> {
         if let Ok(credentials) = self.store.credentials(id) {
-            self.fxa.revoke_token(&credentials.refresh_token).await?;
+            self.fxa.revoke_token(&credentials.refresh_token, credentials.oauth_client_id()).await?;
         }
         self.store.remove(id)
     }
@@ -194,10 +210,13 @@ impl Accounts {
         let tokens = self.fxa.oauth_from_session(&login.session_token).await?;
         let refresh_token = tokens.refresh_token.clone().filter(|token| !token.is_empty())
             .ok_or_else(|| FirefoxError::Protocol("OAuth sign-in response has no offline refresh token".into()))?;
+        let scope = if tokens.scope.is_empty() { crate::fxa::FIREFOX_SCOPE.to_string() } else { tokens.scope };
         let credentials = Credentials {
             access_token: tokens.access_token,
             refresh_token,
-            scope: tokens.scope,
+            client_id: crate::fxa::FIREFOX_CLIENT_ID.into(),
+            oauth_scope: crate::fxa::FIREFOX_SCOPE.into(),
+            scope,
             obtained_at: Utc::now(),
             expires_in: tokens.expires_in,
         };
@@ -253,13 +272,18 @@ impl TokenManager {
     }
 
     async fn refresh_locked(&self, credentials: &mut Credentials) -> Result<()> {
-        let refreshed = self.fxa.refresh_token(&credentials.refresh_token).await?;
+        let client_id = credentials.oauth_client_id().to_string();
+        let oauth_scope = credentials.oauth_request_scope().to_string();
+        let refreshed = self.fxa.refresh_token(&credentials.refresh_token, &client_id, &oauth_scope).await?;
         let mut refresh_token = refreshed.refresh_token.filter(|token| !token.is_empty())
             .unwrap_or_else(|| credentials.refresh_token.clone());
+        let scope = if refreshed.scope.is_empty() { oauth_scope.clone() } else { refreshed.scope };
         let replacement = Credentials {
             access_token: refreshed.access_token,
             refresh_token: refresh_token.clone(),
-            scope: refreshed.scope,
+            scope,
+            client_id,
+            oauth_scope,
             obtained_at: Utc::now(),
             expires_in: refreshed.expires_in,
         };

@@ -191,6 +191,7 @@ async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<
                 LoginOutcome::Complete(account) => Ok(json!({"state":"complete", "account": account})),
                 LoginOutcome::EmailCode(pending) => Ok(json!({"state":"email_code", "pending_id":pending.id, "email":pending.email})),
                 LoginOutcome::Totp(pending) => Ok(json!({"state":"totp", "pending_id":pending.id, "email":pending.email})),
+                LoginOutcome::UnblockCode(prompt) => Ok(json!({"state":"unblock_code", "email":prompt.email, "sent":prompt.sent})),
             }
         }
         "verify_email" => {

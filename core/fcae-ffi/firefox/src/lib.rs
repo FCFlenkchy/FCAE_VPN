@@ -16,7 +16,7 @@ pub mod tls;
 pub mod transport;
 pub mod types;
 
-pub use accounts::{Accounts, LoginOutcome, PendingLogin, TokenManager};
+pub use accounts::{Accounts, LoginOutcome, PendingLogin, TokenManager, UnblockCodePrompt};
 pub use challenge::{CaptchaSolver, ChallengeService};
 pub use control::ControlPlane;
 pub use dialer::Dialer;

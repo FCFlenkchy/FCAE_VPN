@@ -366,45 +366,18 @@
 
             <Spinner
                 android:id="@+id/spinnerProtocol"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="4dp"
-                android:background="#FF1E1E2C"
-                android:popupBackground="#FF1E1E2C" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="Route"
-                android:textColor="#FF9AA3B5"
-                android:textSize="13sp" />
-
-            <TextView
-                android:id="@+id/textChainRoute"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="Aether"
-                android:textColor="#FFE0E4EE"
-                android:textSize="15sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/textProtocolHint"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:textColor="#FFB0B8C8"
-                android:textSize="12sp" />
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:visibility="gone" />
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnHomeChainSettings"
+                android:id="@+id/btnProtocolSettings"
                 style="@style/Widget.FCAEVPN.DialogActionButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="Add / edit chain" />
+                android:layout_marginTop="4dp"
+                android:text="MASQUE H2 (Aether)"
+                android:textAllCaps="false" />
 
             <TextView
                 android:id="@+id/peerText"

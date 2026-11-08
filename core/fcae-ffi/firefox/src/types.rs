@@ -76,11 +76,23 @@ pub struct Credentials {
     pub refresh_token: String,
     #[serde(default)]
     pub scope: String,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub oauth_scope: String,
     pub obtained_at: DateTime<Utc>,
     pub expires_in: u64,
 }
 
 impl Credentials {
+    pub fn oauth_client_id(&self) -> &str {
+        if self.client_id.is_empty() { crate::fxa::LEGACY_FIREFOX_CLIENT_ID } else { &self.client_id }
+    }
+
+    pub fn oauth_request_scope(&self) -> &str {
+        if self.oauth_scope.is_empty() { crate::fxa::LEGACY_FIREFOX_SCOPE } else { &self.oauth_scope }
+    }
+
     pub fn expires_at(&self) -> DateTime<Utc> {
         self.obtained_at + chrono::Duration::seconds(self.expires_in.min(i64::MAX as u64) as i64)
     }
@@ -96,6 +108,8 @@ impl Drop for Credentials {
         self.access_token.zeroize();
         self.refresh_token.zeroize();
         self.scope.zeroize();
+        self.client_id.zeroize();
+        self.oauth_scope.zeroize();
     }
 }
 
