@@ -2050,7 +2050,7 @@ static void firefox_account_rows(const std::string& root) {
             s_firefox_removing_account_id = account.id;
             g_app.firefox_remove_in_flight = true;
             firefox_submit("{\"op\":\"remove\",\"data_dir\":\"" + root
-                + "\",\"account_id\":\"" + firefox_json_escape(account.id) + "\"}",
+                + "\",\"account_id\":\"" + firefox_json_escape(account.id.c_str()) + "\"}",
                 "Removing Firefox Account…");
         }
         ImGui::EndDisabled();

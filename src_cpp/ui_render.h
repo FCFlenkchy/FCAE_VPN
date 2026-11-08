@@ -277,7 +277,7 @@ struct AppState {
                 case 5: case 10: hop.protocol = FCAE_PROTOCOL_AUTO; break;
                 case 6: case 7: hop.protocol = FCAE_PROTOCOL_MASQUE_IN_MASQUE; break;
                 case 8: case 9: hop.protocol = FCAE_PROTOCOL_WARP_IN_MASQUE; break;
-                default: hop.protocol = FCAE_PROTOCOL_WARP_IN_WARP; break;
+                default: hop.protocol = FCAE_PROTOCOL_GOOL; break;
             }
             chain_hops_built.push_back(hop);
         }
