@@ -104,117 +104,35 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 
-      # The engine's Windows backend is MSYS-only, so upstream's own toolchain is
-      # the only one that can build it -- the same recipe upstream's CI uses.
-      - name: setup msys2
-        uses: msys2/setup-msys2@v2
+      # Upstream's native Windows build uses Clang with the MSVC ABI and embeds
+      # yaml, lwip and hev-task-system in the engine DLL.
+      - name: setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
         with:
-          msystem: MSYS
-          update: true
-          cache: false
-          install: >-
-            make
-            gcc
+          arch: x64
 
-      - name: build hev-socks5-tunnel DLL (MSYS)
-        shell: msys2 {0}
+      - name: setup GNU make and POSIX shell
+        shell: pwsh
         run: |
-          set -euo pipefail
-          # Everything stays workspace-relative: inside the MSYS shell a Windows
-          # path such as $GITHUB_WORKSPACE is not a usable path.
-          echo "toolchain: $(gcc -dumpmachine) -- $(gcc --version | head -1)"
+          choco install make --no-progress -y
+          Add-Content $env:GITHUB_PATH "C:\Program Files\Git\usr\bin"
 
-          # The Makefile targets MSYS2 (MSYSTEM=MSYS); a bare POSIX environment
-          # such as Cygwin is kept working below rather than by the Makefile.
-          # The third-party libraries the engine links against (yaml, lwip,
-          # hev-task-system) are built as static archives: this ld flavor
-          # cannot resolve symbols from the raw PE .so files it finds for
-          # -lyaml -llwip -lhev-task-system, so a minted import library was
-          # the only bridge, and a missing or empty one turns every symbol
-          # the engine takes from these DLLs into an undefined reference at
-          # the final link. Real archives need no bridge: the engine's link
-          # pulls their object code in directly. The engine's own tp-shared
-          # prerequisite links the same objects into lib*.so as well; those
-          # DLLs stay beside the engine so the loader finds them if the
-          # engine records a dependency on any of them.
-          make -C core/hev-socks5-tunnel tp-static -j"$(nproc)"
+      - name: build hev-socks5-tunnel DLL (MSVC)
+        shell: cmd
+        run: |
+          clang --version
+          make --version
+          make -C core/hev-socks5-tunnel shared ARCH=x64 -j4
+          if errorlevel 1 exit /b 1
+          if not exist core\hev-socks5-tunnel\bin\hev-socks5-tunnel.dll exit /b 1
+          if not exist core\hev-socks5-tunnel\bin\hev-socks5-tunnel.dll.lib exit /b 1
+          mkdir engine
+          copy /Y core\hev-socks5-tunnel\bin\hev-socks5-tunnel.dll engine\libhev-socks5-tunnel.dll
+          if errorlevel 1 exit /b 1
+          dir engine
 
-          # hev-task-system's IOCP reactor references get_osfhandle(), which
-          # msys-2.0.dll exports only as _get_osfhandle(); this compat object
-          # defines the plain name on top of it, so the static link resolves
-          # no matter how the MSYS <io.h> spellings line up.
-          ENG=core/hev-socks5-tunnel
-          mkdir -p "$ENG/build-compat"
-          cat > "$ENG/build-compat/fcae-msys-compat.c" <<'EOF'
-          #include <io.h>
-          #include <stdint.h>
-          #ifdef get_osfhandle
-          #undef get_osfhandle
-          #endif
-          intptr_t _get_osfhandle (int fd);
-          intptr_t get_osfhandle (int fd)
-          {
-              return _get_osfhandle (fd);
-          }
-          EOF
-          gcc -O2 -c "$ENG/build-compat/fcae-msys-compat.c" -o "$ENG/build-compat/fcae-msys-compat.o"
-
-          # The engine DLL must export its C API (main_from_str, quit, stats)
-          # for the bridge's GetProcAddress, so the export flag goes on its
-          # link. The compat object and the three archives go in by absolute
-          # path: explicit files always link, whatever -l candidate form
-          # this ld prefers. Command-line LFLAGS propagates into the tp-shared
-          # prerequisite's relinks, where the same inputs are harmless: the
-          # archives contribute nothing those DLLs do not already reference,
-          # and a DLL link tolerates the rest.
-          LDFLAGS_HEV="-Wl,--export-all-symbols \
-            $PWD/$ENG/build-compat/fcae-msys-compat.o \
-            $PWD/$ENG/third-part/yaml/bin/libyaml.a \
-            $PWD/$ENG/third-part/lwip/bin/liblwip.a \
-            $PWD/$ENG/third-part/hev-task-system/bin/libhev-task-system.a"
-          if [ -n "${MSYSTEM:-}" ]; then
-            make -C "$ENG" shared -j"$(nproc)" LFLAGS="$LDFLAGS_HEV"
-          else
-            # Outside MSYS the Makefile also skips the Windows system
-            # libraries, so supply them here (LFLAGS is appended at the end of
-            # its LDFLAGS, which is where -l flags belong).
-            make -C "$ENG" shared -j"$(nproc)" LFLAGS="$LDFLAGS_HEV -lws2_32 -lIphlpapi"
-          fi
-
-          test -s core/hev-socks5-tunnel/bin/libhev-socks5-tunnel.so
-          test -s core/hev-socks5-tunnel/third-part/yaml/bin/libyaml.so
-          test -s core/hev-socks5-tunnel/third-part/lwip/bin/liblwip.so
-          test -s core/hev-socks5-tunnel/third-part/hev-task-system/bin/libhev-task-system.so
-
-          # The engine DLL is loaded by explicit path, so it may carry a proper
-          # Windows name; its imports keep the names the linker recorded, so
-          # the third-party DLLs stay named lib*.so.
-          mkdir -p engine
-          mv core/hev-socks5-tunnel/bin/libhev-socks5-tunnel.so engine/libhev-socks5-tunnel.dll
-          cp -v core/hev-socks5-tunnel/third-part/yaml/bin/libyaml.so engine/
-          cp -v core/hev-socks5-tunnel/third-part/lwip/bin/liblwip.so engine/
-          cp -v core/hev-socks5-tunnel/third-part/hev-task-system/bin/libhev-task-system.so engine/
-
-          # Ship the runtime every DLL in the set was linked against
-          # (msys-2.0.dll on MSYS, cygwin1.dll on Cygwin); the loader resolves
-          # each import next to its own DLL, so only the POSIX prefix libraries
-          # need collecting.
-          if command -v ldd >/dev/null 2>&1; then
-            for dll in engine/libhev-socks5-tunnel.dll engine/*.so; do
-              ldd "$dll" |
-                awk '$3 ~ /^\/usr\/bin\// { print $3 }' | sort -u |
-                while read -r lib; do
-                  cp -v "$lib" engine/
-                done
-            done
-          fi
-          if [ -n "${MSYSTEM:-}" ]; then
-            test -s engine/msys-2.0.dll
-          fi
-          ls -l engine
-
-      # The windows-x64 leg runs on ubuntu, where no toolchain can produce an MSYS
-      # binary, so the engine DLL crosses runners in the run's cache (restored by
+      # The windows-x64 leg runs on ubuntu, where the MSVC SDK is unavailable,
+      # so the engine DLL crosses runners in the run's cache (restored by
       # that leg alone) instead of an artifact. The key carries the attempt so a
       # re-run never collides with its own earlier entry, and cross-os archives
       # are allowed because the cache version is otherwise salted per platform.
@@ -330,7 +248,6 @@ jobs:
           set -euo pipefail
           ENGINE="$GITHUB_WORKSPACE/engine"
           test -s "$ENGINE/libhev-socks5-tunnel.dll"
-          test -s "$ENGINE/msys-2.0.dll"
           echo "FCAE_HEV_DLL=$ENGINE/libhev-socks5-tunnel.dll" >> "$GITHUB_ENV"
           echo "FCAE_HEV_ENGINE_DIR=$ENGINE" >> "$GITHUB_ENV"
           ls -la "$ENGINE"
@@ -746,12 +663,9 @@ jobs:
               make static CFLAGS="-arch x86_64 -mmacosx-version-min=13.0"
               ;;
             windows-x64)
-              # Nothing to build here: the engine's Windows backend is MSYS-only
-              # (tunnel, hev-task-system IOCP reactor, Win64 ABI assembly and the
-              # wintun session all sit behind __MSYS__), so only MSYS2 can build
-              # it. The `build-hev-windows` job builds the engine DLL and this
-              # leg loads it in-process at runtime: no exe, no child process,
-              # same adapter and GUID as the in-process engines use elsewhere.
+              # The native MSVC engine DLL comes from build-hev-windows; this
+              # leg loads it in-process at runtime with the same adapter and
+              # GUID as the in-process engines use elsewhere.
               echo "hev-socks5-tunnel ships as a DLL (built by build-hev-windows)"
               ;;
             android-*)
@@ -1171,7 +1085,7 @@ jobs:
               IMPORTS="$("$OBJDUMP" -p "$EXE" | awk '/DLL Name:/ { print $3 }' | sort -u)"
               echo "$EXE imports:"
               echo "$IMPORTS" | sed 's/^/  /'
-              if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|libyaml\.so|liblwip\.so|libhev-task-system\.so|msys-2\.0\.dll|wintun\.dll|zeptun\.dll|libfcae_psiphon\.dll|libgcc_s_seh-1\.dll|libstdc\+\+-6\.dll|libwinpthread-1\.dll)$'; then
+              if echo "$IMPORTS" | grep -qiE '^(libhev-socks5-tunnel\.dll|hev-socks5-tunnel\.dll|wintun\.dll|zeptun\.dll|libfcae_psiphon\.dll|libgcc_s_seh-1\.dll|libstdc\+\+-6\.dll|libwinpthread-1\.dll)$'; then
                 echo "::error::$EXE imports a DLL that is supposed to be embedded or statically linked"
                 exit 1
               fi

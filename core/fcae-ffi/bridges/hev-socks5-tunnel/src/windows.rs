@@ -1,25 +1,11 @@
-//! Windows backend: the engine is an MSYS2 DLL hosted in this process.
-//!
-//! The MSYS runtime (a Cygwin fork) keeps each thread's `_cygtls` at
-//! `StackBase - __CYGTLS_PADSIZE__`. `msys_dll_init` claims that slot on the
-//! calling thread as `_main_tls` for the life of the process, and every
-//! runtime call reads `_my_tls` from the same place. Two invariants follow:
-//!
-//! * the initialising thread must reserve the top of its stack and never
-//!   exit, so the slot neither overwrites live frames nor dangles;
-//! * MSYS code may only run on threads the runtime has seen start, i.e.
-//!   threads created after initialisation (it hooks their entry point).
-//!   Threads that predate the load — the UI thread, the session thread and
-//!   its tokio workers — have garbage where `_my_tls` should be.
-//!
-//! So one parked host thread loads the runtime, a call thread spawned after
-//! it services `quit`/`stats`, and each engine run gets a fresh thread.
+//! Windows backend: the native MSVC engine DLL is hosted in this process.
+//! Loading is lazy, a dedicated call thread serializes `quit`/`stats`, and each
+//! engine run gets its own thread.
 
 use std::ffi::{c_int, c_uchar, c_uint, CString};
-use std::mem::{ManuallyDrop, MaybeUninit};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{mpsc, Arc, Once, OnceLock};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use fcae_runtime::backend::Endpoints;
@@ -35,10 +21,6 @@ use crate::{generate_config, run_engine, HevStats};
 const RESTART_GRACE: Duration = Duration::from_secs(2);
 const STATS_TIMEOUT: Duration = Duration::from_millis(250);
 const DLL_NAME: &str = "libhev-socks5-tunnel.dll";
-const MSYS_NAME: &str = "msys-2.0.dll";
-/// Covers `__CYGTLS_PADSIZE__` (12800) plus the frames std puts above the
-/// host closure, with ample margin for runtime revisions.
-const TLS_RESERVE: usize = 64 << 10;
 
 #[cfg(hev_dynamic)]
 const EMBEDDED: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/engine_files.rs"));
@@ -46,16 +28,12 @@ const EMBEDDED: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/engine_fi
 type MainFn = unsafe extern "C" fn(*const c_uchar, c_uint, c_int) -> c_int;
 type QuitFn = unsafe extern "C" fn();
 type StatsFn = unsafe extern "C" fn(*mut usize, *mut usize, *mut usize, *mut usize);
-type InitFn = unsafe extern "C" fn();
 
 struct Ffi {
     main_from_str: MainFn,
     quit: QuitFn,
     stats: StatsFn,
     _engine: Library,
-    /// An initialised runtime owns threads and process state; unloading it
-    /// would leave them executing freed code.
-    _msys: ManuallyDrop<Library>,
     _embedded: Option<EmbeddedFiles>,
 }
 
@@ -70,31 +48,12 @@ struct Runtime {
 }
 
 static RUNTIME: OnceLock<std::result::Result<Runtime, String>> = OnceLock::new();
-static BOOT: Once = Once::new();
-
-fn call_msys_init(lib: &Library) -> Result<()> {
-    unsafe {
-        let init = lib
-            .symbol::<InitFn>(c"msys_dll_init")
-            .or_else(|_| lib.symbol::<InitFn>(c"cygwin_dll_init"))
-            .map_err(|_| CoreError::Internal(format!("{MSYS_NAME} exports neither msys_dll_init nor cygwin_dll_init")))?;
-        init();
-    }
-    Ok(())
-}
 
 fn load_from_dir(dir: &Path) -> Result<Ffi> {
-    let msys_path = dir.join(MSYS_NAME);
     let engine_path = dir.join(DLL_NAME);
-    if !msys_path.is_file() {
-        return Err(CoreError::Internal(format!("{MSYS_NAME} not found beside the engine")));
-    }
     if !engine_path.is_file() {
         return Err(CoreError::Internal(format!("{DLL_NAME} not found")));
     }
-    let msys = Library::from_path(&msys_path)?;
-    call_msys_init(&msys)?;
-    let msys = ManuallyDrop::new(msys);
     let engine = Library::from_path(&engine_path)?;
     unsafe {
         Ok(Ffi {
@@ -102,7 +61,6 @@ fn load_from_dir(dir: &Path) -> Result<Ffi> {
             quit: engine.symbol(c"hev_socks5_tunnel_quit")?,
             stats: engine.symbol(c"hev_socks5_tunnel_stats")?,
             _engine: engine,
-            _msys: msys,
             _embedded: None,
         })
     }
@@ -134,44 +92,6 @@ fn load() -> Result<Ffi> {
     load_embedded()
 }
 
-/// Entry of the host thread. Captures nothing: everything it produces is
-/// published through statics, so no live state sits in the reserved range.
-fn host_entry() {
-    host_thread()
-}
-
-#[inline(never)]
-fn host_thread() -> ! {
-    let mut reserve = MaybeUninit::<[u8; TLS_RESERVE]>::uninit();
-    std::hint::black_box(&mut reserve);
-    host_main()
-}
-
-/// Runs entirely below the reservation and never returns: the frames above
-/// it are overwritten by the runtime's TLS once `msys_dll_init` ran.
-#[inline(never)]
-fn host_main() -> ! {
-    let runtime = std::panic::catch_unwind(load)
-        .unwrap_or_else(|_| Err(CoreError::Internal("loading the hev DLL panicked".into())))
-        .and_then(|ffi| {
-            let (calls, queue) = mpsc::channel();
-            let (quit, stats) = (ffi.quit, ffi.stats);
-            std::thread::Builder::new()
-                .name("hev-msys-calls".into())
-                .spawn(move || serve(queue, quit, stats))
-                .map_err(|e| CoreError::Internal(format!("cannot start the hev call thread: {e}")))?;
-            Ok(Runtime { ffi, calls })
-        })
-        .map_err(|e| {
-            log::error!("[hev] {e}");
-            e.to_string()
-        });
-    let _ = RUNTIME.set(runtime);
-    loop {
-        std::thread::park();
-    }
-}
-
 fn serve(queue: mpsc::Receiver<Call>, quit: QuitFn, stats: StatsFn) {
     for call in queue {
         match call {
@@ -186,12 +106,26 @@ fn serve(queue: mpsc::Receiver<Call>, quit: QuitFn, stats: StatsFn) {
 }
 
 fn runtime() -> Result<&'static Runtime> {
-    BOOT.call_once(|| {
-        if let Err(e) = std::thread::Builder::new().name("hev-msys".into()).spawn(host_entry) {
-            let _ = RUNTIME.set(Err(format!("cannot start the MSYS host thread: {e}")));
-        }
-    });
-    RUNTIME.wait().as_ref().map_err(|e| CoreError::Internal(e.clone()))
+    RUNTIME
+        .get_or_init(|| {
+            std::panic::catch_unwind(load)
+                .unwrap_or_else(|_| Err(CoreError::Internal("loading the hev DLL panicked".into())))
+                .and_then(|ffi| {
+                    let (calls, queue) = mpsc::channel();
+                    let (quit, stats) = (ffi.quit, ffi.stats);
+                    std::thread::Builder::new()
+                        .name("hev-calls".into())
+                        .spawn(move || serve(queue, quit, stats))
+                        .map_err(|e| CoreError::Internal(format!("cannot start the hev call thread: {e}")))?;
+                    Ok(Runtime { ffi, calls })
+                })
+                .map_err(|e| {
+                    log::error!("[hev] {e}");
+                    e.to_string()
+                })
+        })
+        .as_ref()
+        .map_err(|e| CoreError::Internal(e.clone()))
 }
 
 /// The runtime if a start already loaded it; never triggers the load.
@@ -200,11 +134,7 @@ fn loaded() -> Option<&'static Runtime> {
 }
 
 pub fn unavailable_reason() -> Option<&'static str> {
-    // The UI calls this while rendering the first frame. Loading an MSYS DLL
-    // is not a passive capability check: its process initializers and
-    // msys_dll_init execute native runtime code and a runtime mismatch can
-    // terminate the host process. Only report build-time availability here;
-    // load the bridge on an explicit HEV session start.
+    // Keep UI capability checks passive; load the DLL on explicit session start.
     if !cfg!(all(hev_dynamic, wintun_staged)) {
         Some("HEV Windows DLL or Wintun not embedded")
     } else {
@@ -293,7 +223,7 @@ impl HevSocks5TunnelBridge {
         self.active.lock().as_ref().is_some_and(|a| a.thread.is_finished())
             .then(|| CoreError::Internal(format!("hev exited during startup code {}", rc.load(Ordering::SeqCst))))
     }
-    /// Runs the engine on a thread created after the runtime was initialised.
+    /// Runs the engine on a dedicated thread.
     fn spawn_engine(&self, rt: &'static Runtime, yaml: &str) -> Result<Engine> {
         let config = CString::new(yaml).map_err(|_| CoreError::Internal("hev config contains NUL".into()))?;
         let entry = rt.ffi.main_from_str;

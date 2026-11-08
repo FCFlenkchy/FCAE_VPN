@@ -12,25 +12,16 @@
 //! | platform | backend | why |
 //! |----------|---------|-----|
 //! | Linux, macOS, Android | linked in-process, C ABI | the engine's own TUN code compiles for these |
-//! | Windows | DLL loaded in-process at runtime | the engine's Windows backend is `__MSYS__`-only and links the MSYS runtime, which the MinGW build cannot link; a DLL is the one MSYS2 artifact a native process can host |
+//! | Windows | native DLL loaded in-process at runtime | the MSVC C ABI interoperates with the MinGW host without a POSIX runtime |
 //!
-//! Windows is the odd one out: the engine's Windows backend (tun device, the
-//! hev-task-system IOCP reactor, Win64 ABI assembly, the wintun session) is
-//! behind `__MSYS__`, so it needs the MSYS runtime. No Rust target produces
-//! MSYS binaries and the MinGW link cannot take the archive (those code paths
-//! are compiled out and the remaining sources need POSIX socket headers MinGW
-//! does not ship). So MSYS2 builds the engine as a DLL (`make shared`, by the
-//! `build-hev-windows` job) and the app loads it next to the executable with
-//! `LoadLibraryExW` at first use: same process and same wintun adapter
-//! (name and GUID) as the in-process engines use everywhere else. The DLL
-//! drags its `msys-2.0.dll` runtime and third-party imports along, so the app
-//! itself stays a plain MinGW binary.
+//! The `build-hev-windows` job runs upstream's native Windows build with Clang
+//! targeting MSVC. The resulting DLL embeds yaml, lwip and hev-task-system and
+//! is loaded with `LoadLibraryExW` at first use: same process and same wintun
+//! adapter identity as the other engines, while the app remains a MinGW binary.
 //!
 //! Loading is lazy and isolated: a missing or unloadable DLL surfaces as
 //! "engine unavailable" (or a specific start error) instead of taking the app
-//! down at startup. The MSYS runtime is initialised on a dedicated, parked
-//! thread and only ever entered from threads created after that (see
-//! `windows.rs` for the thread-local-storage rules this follows).
+//! down at startup.
 //!
 //! ## Build requirements
 //!

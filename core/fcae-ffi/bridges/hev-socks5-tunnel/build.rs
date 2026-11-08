@@ -6,21 +6,18 @@
 //!   its own Makefile outside the cargo graph — `make -C core/hev-socks5-tunnel
 //!   static`, cross-compiled with the NDK on Android — and the archive is
 //!   linked into libfcae_ffi. `FCAE_HEV_LIBDIR=<dir>` overrides the search path.
-//! * **In-process, DLL** (Windows): the engine has no native Windows port
-//!   (its Windows backend is `__MSYS__`-only and links the MSYS runtime), so
-//!   it cannot be linked from the MinGW build. Instead the `build-hev-windows`
-//!   job builds it as a DLL with MSYS2, this script embeds it — together with
-//!   every library it imports — in the binary, and the app loads it at
-//!   runtime: same process, no child process, no exe, no files beside the exe.
+//! * **In-process, DLL** (Windows): the `build-hev-windows` job builds the
+//!   engine with Clang targeting MSVC, this script embeds the resulting DLL in
+//!   the binary, and the app loads it at runtime: same process, no child
+//!   process, no exe, no files beside the exe.
 //!   `FCAE_HEV_DLL` says that DLL is part of the build, which is what makes
 //!   the crate compile the dynamic backend and report the engine as available.
 //!   Without it a Windows build must use `stub`.
 
 use std::path::{Path, PathBuf};
 
-/// The Windows job may add compiler/runtime DLLs discovered by `ldd`; the
-/// complete directory is embedded after the engine is built rather than
-/// maintaining a hand-written dependency allowlist.
+/// Embed every staged engine file so any runtime files added by upstream stay
+/// beside the DLL when the bridge extracts it.
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(hev_linked)");
@@ -51,9 +48,8 @@ fn main() {
         println!("cargo:rustc-env=FCAE_HEV_WINTUN_DLL={}", dll.display());
     }
 
-    // Windows: the engine cannot be linked (MSYS-only runtime), so it is
-    // loaded as a DLL at runtime. Nothing ships beside the app — the whole
-    // engine set is embedded here and the bridge extracts it before loading.
+    // Nothing ships beside the app: the native DLL and any staged runtime files
+    // are embedded here and extracted by the bridge before loading.
     if target.os == fcae_build::target::Os::Windows {
         let staged = std::env::var("FCAE_HEV_DLL").unwrap_or_default();
         let staged = staged.trim();
@@ -85,10 +81,8 @@ fn main() {
                 names.push(name);
             }
             names.sort();
-            if !names.iter().any(|name| name == "libhev-socks5-tunnel.dll")
-                || !names.iter().any(|name| name == "msys-2.0.dll")
-            {
-                panic!("the staged engine set is missing the HEV DLL or MSYS runtime");
+            if !names.iter().any(|name| name == "libhev-socks5-tunnel.dll") {
+                panic!("the staged engine set is missing the HEV DLL");
             }
             let generated = names.iter().map(|name| {
                 format!(
@@ -108,17 +102,15 @@ fn main() {
             return;
         }
         panic!(
-            "the hev-socks5-tunnel engine has no native Windows port (its Windows backend is \
-             MSYS-only and links the MSYS runtime), so it cannot be linked into this MinGW \
-             build. The build-hev-windows job builds it as a DLL with MSYS2 and hands the \
-             result over; point FCAE_HEV_DLL at the resulting libhev-socks5-tunnel.dll, or \
-             build with `--features fcae-bridge-hev-socks5-tunnel/stub`; the engine then \
-             reports itself unavailable in the UI."
+            "the native Windows HEV DLL is missing. The build-hev-windows job builds it with \
+             Clang targeting MSVC and hands the result over; point FCAE_HEV_DLL at the staged \
+             libhev-socks5-tunnel.dll, or build with \
+             `--features fcae-bridge-hev-socks5-tunnel/stub` to report the engine unavailable."
         );
     }
 
     let submodule = fcae_build::repo_root().join("core/hev-socks5-tunnel");
-    let header = submodule.join("include/hev-socks5-tunnel.h");
+    let header = submodule.join("src").join("hev-main.h");
     if !header.is_file() {
         panic!(
             "hev-socks5-tunnel submodule missing at {}.\n\
