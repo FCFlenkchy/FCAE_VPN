@@ -1064,6 +1064,14 @@ public class FCAEVpnService extends VpnService {
         final boolean disableExtensionPermutation = intent.getBooleanExtra("disableExtensionPermutation", false);
         final boolean fragmentSni   = intent.getBooleanExtra("fragmentSni", false);
         final String upstreamProxy = orEmpty(intent.getStringExtra("upstreamProxy")).trim();
+        final int chainCount = intent.getIntExtra("chainCount", 0);
+        final int chainExit0 = intent.getIntExtra("chainExit0", 1);
+        final int chainExit1 = intent.getIntExtra("chainExit1", 2);
+        final int chainExit2 = intent.getIntExtra("chainExit2", 0);
+        final String firefoxAccountId = orEmpty(intent.getStringExtra("firefoxAccountId"));
+        final String firefoxLocation = orEmpty(intent.getStringExtra("firefoxLocation"));
+        final String firefoxServer = orEmpty(intent.getStringExtra("firefoxServer"));
+        final String firefoxTransport = orEmpty(intent.getStringExtra("firefoxTransport"));
         final String noizeVal = (noize == null || noize.isEmpty()) ? "balanced" : noize;
         final String peerVal  = (peer == null) ? "" : peer;
         final int sysProfile  = intent.getIntExtra("sysProfile", 0);
@@ -1177,7 +1185,9 @@ public class FCAEVpnService extends VpnService {
                     tlsTrustAnchors, tlsServerPadding,
                     tlsVerify, disableGrease, enableGreaseSigalgs, enableEchGrease, disableOcspStapling,
                     disableSct, disableSessionTicket, disableExtensionPermutation, fragmentSni,
-                    upstreamProxy
+                    upstreamProxy,
+                    chainCount, chainExit0, chainExit1, chainExit2,
+                    firefoxAccountId, firefoxLocation, firefoxServer, firefoxTransport
                 );
                 if (ok && psiphonInRoute) {
                     // nativeStart creates downstream attach requests. Poll only
