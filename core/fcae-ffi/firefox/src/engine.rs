@@ -146,16 +146,17 @@ impl FirefoxEngine {
 }
 
 async fn resolve_candidates(dialer: &Dialer, candidates: &[Candidate]) {
-    let lookups = candidates.iter().take(256).map(|candidate| {
+    let mut lookups = Vec::with_capacity(candidates.len().min(256));
+    for candidate in candidates.iter().take(256) {
         let dialer = dialer.clone();
         let host = candidate.host.clone();
         let port = candidate.port;
-        async move {
+        lookups.push(async move {
             if let Err(error) = dialer.resolve(&host, port).await {
                 log::debug!("[firefox] pre-resolving {host} failed: {error}");
             }
-        }
-    });
+        });
+    }
     futures::stream::iter(lookups).buffer_unordered(16).collect::<Vec<()>>().await;
 }
 
