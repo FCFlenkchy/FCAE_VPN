@@ -72,10 +72,13 @@ class MainActivity : AppCompatActivity() {
     private var updateAvailableInfo: FcaeUpdateInfo? = null
     private var updateResultDialog: androidx.appcompat.app.AlertDialog? = null
     private var connectionInfoDialog: androidx.appcompat.app.AlertDialog? = null
+    private data class FirefoxAccountChoice(val id: String, val email: String, val monthlyUsage: String = "")
+
     private var firefoxStatusView: TextView? = null
-    private var firefoxAccountSpinner: Spinner? = null
-    private var firefoxAccountAdapter: ArrayAdapter<String>? = null
-    private var firefoxAccountChoices: List<Pair<String, String>> = emptyList()
+    private var firefoxAccountRows: LinearLayout? = null
+    private var firefoxAccountChoices: List<FirefoxAccountChoice> = emptyList()
+    private var firefoxAccountSelect: ((FirefoxAccountChoice) -> Unit)? = null
+    private var firefoxAccountRemove: ((FirefoxAccountChoice) -> Unit)? = null
     private var firefoxSelectedAccountId = ""
     private var firefoxEmailView: android.widget.EditText? = null
     private var firefoxVerifyButton: MaterialButton? = null
@@ -2368,28 +2371,31 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun selectedChain(): List<Int> {
-        val count = prefs.getInt("chainCount", 0).coerceIn(0, 2)
-        return (0 until count).map { prefs.getInt("chainExit$it", if (it == 0) 1 else 2) }
+        if (prefs.contains("chainTransports")) {
+            return NativeEngine.parseChainTransports(prefs.getString("chainTransports", "")).toList()
+        }
+        val count = prefs.getInt("chainCount", 0).coerceIn(0, 3)
+        return (0 until count).map { index ->
+            when (prefs.getInt("chainExit$index", 0)) {
+                1 -> 5
+                2 -> 10
+                else -> 0
+            }
+        }
     }
 
-    private fun routeBackends(): List<Int> = listOf(backendFromSelection()) + selectedChain()
+    private fun routeBackends(): List<Int> =
+        listOf(backendFromSelection()) + selectedChain().map { backendForProtocolPosition(it) }
 
     private fun updateProtocolButton() {
         if (!::spinnerProtocol.isInitialized) return
-        val protocol = spinnerProtocol.selectedItem?.toString() ?: "Protocol"
-        val exits = selectedChain().size
-        findViewById<MaterialButton>(R.id.btnProtocolSettings).text = when (exits) {
-            0 -> protocol
-            1 -> "$protocol · 1 additional exit"
-            else -> "$protocol · $exits additional exits"
-        }
+        findViewById<MaterialButton>(R.id.btnProtocolSettings).text = "Protocol"
     }
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density).roundToInt()
 
     private fun showProtocolSettings() {
-        val backendNames = listOf("Aether", "Psiphon", "Firefox")
         val protocolChoices = (0 until spinnerProtocol.adapter.count).map {
             spinnerProtocol.adapter.getItem(it).toString()
         }
@@ -2400,11 +2406,6 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(12), dp(20), dp(8))
         }
-        box.addView(TextView(this).apply {
-            text = "Protocol"
-            setTextColor(Color.parseColor("#FF9AA3B5"))
-            textSize = 13f
-        })
         val protocols = android.widget.RadioGroup(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(4), 0, dp(8))
@@ -2428,39 +2429,10 @@ class MainActivity : AppCompatActivity() {
         })
         val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         box.addView(rows)
-        val route = TextView(this).apply {
-            setTextColor(Color.parseColor("#FF60A5FA"))
-            setPadding(0, dp(16), 0, 0)
-            textSize = 15f
-        }
-        val validation = TextView(this).apply {
-            setTextColor(Color.parseColor("#FFFF8C80"))
-            setPadding(0, dp(8), 0, 0)
-            textSize = 13f
-        }
-        lateinit var addButton: MaterialButton
-
-        fun carrier(): Int = backendForProtocolPosition(draftProtocol)
-
-        fun routeText(): String = buildString {
-            append(protocolChoices[draftProtocol])
-            draft.forEach { backend ->
-                append("  ->  ")
-                append(backendNames.getOrElse(backend) { "Unknown" })
-            }
-        }
-
-        fun updatePreview() {
-            val completeRoute = listOf(carrier()) + draft
-            val valid = completeRoute.all { it in 0..2 } && completeRoute.size == completeRoute.distinct().size
-            route.text = routeText()
-            validation.text = if (valid) "" else "Remove duplicate exits, including the backend used by the selected protocol."
-            addButton.isEnabled = draft.size < 2 && (0..2).any { it != carrier() && it !in draft }
-        }
 
         fun renderRows() {
             rows.removeAllViews()
-            draft.forEachIndexed { index, backend ->
+            draft.forEachIndexed { index, transport ->
                 rows.addView(TextView(this).apply {
                     text = "Exit ${index + 1}"
                     setTextColor(Color.parseColor("#FF9AA3B5"))
@@ -2471,15 +2443,14 @@ class MainActivity : AppCompatActivity() {
                     gravity = android.view.Gravity.CENTER_VERTICAL
                 }
                 val spinner = Spinner(this).apply {
-                    adapter = ArrayAdapter(this@MainActivity, R.layout.spinner_dark_item, backendNames).apply {
+                    adapter = ArrayAdapter(this@MainActivity, R.layout.spinner_dark_item, protocolChoices).apply {
                         setDropDownViewResource(R.layout.spinner_dark_item)
                     }
-                    setSelection(backend.coerceIn(0, 2))
+                    setSelection(transport.coerceIn(0, protocolChoices.lastIndex))
                 }
                 spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
                     override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
                         if (index < draft.size) draft[index] = position
-                        updatePreview()
                     }
                     override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
                 }
@@ -2488,58 +2459,40 @@ class MainActivity : AppCompatActivity() {
                     if (index < draft.size) {
                         draft.removeAt(index)
                         renderRows()
-                        updatePreview()
                     }
                 }
                 rows.addView(row)
             }
-            updatePreview()
         }
 
         protocols.setOnCheckedChangeListener { _, checkedId ->
-            if (checkedId in protocolChoices.indices) {
-                draftProtocol = checkedId
-                updatePreview()
-            }
+            if (checkedId in protocolChoices.indices) draftProtocol = checkedId
         }
-        addButton = addDialogButton(box, "+ Add exit") {
-            val next = (0..2).firstOrNull { it != carrier() && it !in draft }
-            if (next != null && draft.size < 2) {
-                draft.add(next)
-                renderRows()
-            }
+        addDialogButton(box, "+ Add exit") {
+            draft.add(0)
+            renderRows()
         }
-        box.addView(route)
-        box.addView(validation)
         renderRows()
 
-        val builder = androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Protocol")
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setView(ScrollView(this).apply { addView(box) })
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Apply", null)
-        if (selectedChain().isNotEmpty()) builder.setNeutralButton("Clear exits", null)
-        val dialog = builder.create()
+            .create()
         dialog.setOnShowListener {
             styleDialogButtons(dialog)
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                if (validation.text.isNotEmpty()) {
-                    Toast.makeText(this, validation.text, Toast.LENGTH_LONG).show()
-                    return@setOnClickListener
-                }
                 spinnerProtocol.setSelection(draftProtocol)
                 prefs.edit()
-                    .putInt("chainCount", draft.size)
-                    .putInt("chainExit0", draft.getOrElse(0) { 1 })
-                    .putInt("chainExit1", draft.getOrElse(1) { 2 })
+                    .putString("chainTransports", NativeEngine.encodeChainTransports(draft.toIntArray()))
+                    .remove("chainCount")
+                    .remove("chainExit0")
+                    .remove("chainExit1")
+                    .remove("chainExit2")
                     .apply()
                 saveSettings()
                 updateProtocolButton()
                 dialog.dismiss()
-            }
-            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener {
-                draft.clear()
-                renderRows()
             }
         }
         dialog.show()
@@ -2617,34 +2570,68 @@ class MainActivity : AppCompatActivity() {
         firefoxRegionSpinner?.setSelection(selectedPosition)
     }
 
-    private fun updateFirefoxAccountChoices(accounts: List<Pair<String, String>>, preferred: String? = null) {
+    private fun renderFirefoxAccountRows() {
+        val rows = firefoxAccountRows ?: return
+        rows.removeAllViews()
+        firefoxAccountChoices.forEach { choice ->
+            val entry = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(6), 0, dp(6))
+            }
+            entry.addView(MaterialButton(this).apply {
+                text = choice.email.ifBlank { choice.id }
+                isAllCaps = false
+                setTextColor(Color.parseColor("#FFE0E4EE"))
+                backgroundTintList = ColorStateList.valueOf(Color.parseColor("#FF1E1E2C"))
+                strokeColor = ColorStateList.valueOf(Color.parseColor(
+                    if (choice.id == firefoxSelectedAccountId) "#FF60A5FA" else "#FF334155"
+                ))
+                strokeWidth = dp(1)
+                cornerRadius = dp(8)
+                setOnClickListener { firefoxAccountSelect?.invoke(choice) }
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            val details = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+            }
+            details.addView(TextView(this).apply {
+                text = "Monthly usage: ${choice.monthlyUsage.ifBlank { "Unavailable" }}"
+                setTextColor(Color.parseColor("#FF9AA3B5"))
+                textSize = 12f
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addDialogButton(details, "Remove") {
+                if (firefoxJob != 0L) {
+                    firefoxSetStatus("Another Firefox account operation is still running.")
+                } else {
+                    firefoxAccountRemove?.invoke(choice)
+                }
+            }
+            entry.addView(details)
+            rows.addView(entry)
+        }
+    }
+
+    private fun updateFirefoxAccountChoices(accounts: List<FirefoxAccountChoice>, preferred: String? = null) {
         val previous = firefoxSelectedAccountId
         val selected = preferred ?: firefoxSelectedAccountId.ifEmpty {
             prefs.getString("firefoxAccountId", "").orEmpty()
         }
-        val merged = LinkedHashMap<String, String>()
-        for ((id, email) in accounts) {
-            if (id.isNotBlank()) merged[id] = email
+        val merged = LinkedHashMap<String, FirefoxAccountChoice>()
+        for (account in accounts) {
+            if (account.id.isNotBlank()) merged[account.id] = account
         }
-        firefoxAccountChoices = listOf("" to "") + merged.map { it.key to it.value }
-        firefoxAccountAdapter?.apply {
-            clear()
-            add("Add new account…")
-            addAll(merged.map { (id, email) -> email.ifBlank { "Account ${id.take(8)}" } })
-            notifyDataSetChanged()
-        }
-        val position = firefoxAccountChoices.indexOfFirst { it.first == selected }.coerceAtLeast(0)
-        firefoxSelectedAccountId = firefoxAccountChoices[position].first
+        firefoxAccountChoices = merged.values.toList()
+        firefoxSelectedAccountId = if (merged.containsKey(selected)) selected else ""
         val selectionChanged = previous != firefoxSelectedAccountId
         if (preferred != null || selectionChanged) {
-            firefoxEmailView?.setText(firefoxAccountChoices[position].second)
+            firefoxEmailView?.setText(merged[firefoxSelectedAccountId]?.email.orEmpty())
         }
         if (selectionChanged) {
             firefoxPendingId = ""
             firefoxTotp = false
             updateFirefoxVerificationControls()
         }
-        firefoxAccountSpinner?.setSelection(position)
+        renderFirefoxAccountRows()
     }
 
     private fun updateFirefoxVerificationControls() {
@@ -2663,13 +2650,9 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.parseColor("#FF9AA3B5"))
             setPadding(0, dp(4), 0, dp(3))
         })
-        val account = Spinner(this)
-        account.adapter = ArrayAdapter<String>(this, R.layout.spinner_dark_item, mutableListOf()).apply {
-            setDropDownViewResource(R.layout.spinner_dark_item)
-            firefoxAccountAdapter = this
-        }
-        firefoxAccountSpinner = account
-        box.addView(account)
+        val accounts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        firefoxAccountRows = accounts
+        box.addView(accounts)
         val email = addDialogInput(box, "Email", prefs.getString("firefoxEmail", "").orEmpty())
         firefoxEmailView = email
         val password = addDialogInput(box, "Password", password = true)
@@ -2682,21 +2665,10 @@ class MainActivity : AppCompatActivity() {
         firefoxStatusView = status
         val savedId = prefs.getString("firefoxAccountId", "").orEmpty()
         val savedEmail = prefs.getString("firefoxEmail", "").orEmpty()
-        updateFirefoxAccountChoices(if (savedId.isEmpty()) emptyList() else listOf(savedId to savedEmail), savedId)
-        account.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
-                val choice = firefoxAccountChoices.getOrNull(position) ?: return
-                if (choice.first == firefoxSelectedAccountId) return
-                firefoxSelectedAccountId = choice.first
-                email.setText(choice.second)
-                password.setText("")
-                code.setText("")
-                firefoxPendingId = ""
-                firefoxTotp = false
-                updateFirefoxVerificationControls()
-            }
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
-        }
+        updateFirefoxAccountChoices(
+            if (savedId.isEmpty()) emptyList() else listOf(FirefoxAccountChoice(savedId, savedEmail)),
+            savedId,
+        )
 
         fun base(operation: String): org.json.JSONObject = org.json.JSONObject()
             .put("op", operation)
@@ -2711,6 +2683,31 @@ class MainActivity : AppCompatActivity() {
             }
             firefoxSubmit(request, message)
         }
+        firefoxAccountSelect = { choice ->
+            firefoxSelectedAccountId = choice.id
+            email.setText(choice.email)
+            password.setText("")
+            code.setText("")
+            firefoxPendingId = ""
+            firefoxTotp = false
+            updateFirefoxVerificationControls()
+            renderFirefoxAccountRows()
+        }
+        firefoxAccountRemove = { choice ->
+            firefoxRemovingAccountId = choice.id
+            firefoxRemoveInFlight = true
+            submit(base("remove").put("account_id", choice.id), "Removing Firefox Account…")
+        }
+        addDialogButton(box, "Add new account") {
+            firefoxSelectedAccountId = ""
+            email.setText("")
+            password.setText("")
+            code.setText("")
+            firefoxPendingId = ""
+            firefoxTotp = false
+            updateFirefoxVerificationControls()
+            renderFirefoxAccountRows()
+        }
         addDialogButton(box, "Sign in") {
             val request = base("login").put("email", emailValue()).put("password", password.text.toString())
             if (code.text.isNotEmpty()) request.put("unblock_code", code.text.toString().trim())
@@ -2724,15 +2721,6 @@ class MainActivity : AppCompatActivity() {
             submit(base("resend").put("pending_id", firefoxPendingId), "Resending verification code…")
         }
         updateFirefoxVerificationControls()
-        addDialogButton(box, "Remove saved account") {
-            if (firefoxSelectedAccountId.isEmpty()) {
-                status.text = "Select a saved Firefox account."
-            } else {
-                firefoxRemovingAccountId = firefoxSelectedAccountId
-                firefoxRemoveInFlight = true
-                submit(base("remove").put("account_id", firefoxRemovingAccountId), "Removing Firefox Account…")
-            }
-        }
 
         box.addView(TextView(this).apply {
             text = "Region (Mozilla country/city list)"
@@ -2791,8 +2779,9 @@ class MainActivity : AppCompatActivity() {
         }
         dialog.setOnDismissListener {
             firefoxStatusView = null
-            firefoxAccountSpinner = null
-            firefoxAccountAdapter = null
+            firefoxAccountRows = null
+            firefoxAccountSelect = null
+            firefoxAccountRemove = null
             firefoxEmailView = null
             firefoxVerifyButton = null
             firefoxResendButton = null
@@ -2948,7 +2937,7 @@ class MainActivity : AppCompatActivity() {
             firefoxRemoveInFlight = false
             firefoxRemovingAccountId = ""
             firefoxSetStatus(payload.optString("message").ifEmpty { "Firefox account operation failed (${payload.optString("code")})." })
-            if (failedOperation == "list" && firefoxAccountSpinner != null) {
+            if (failedOperation == "list" && firefoxAccountRows != null) {
                 firefoxSubmit(org.json.JSONObject()
                     .put("op", "locations")
                     .put("data_dir", filesDir.absolutePath), "Loading Mozilla regions…")
@@ -2982,8 +2971,8 @@ class MainActivity : AppCompatActivity() {
                         .putString("firefoxAccountId", accountId)
                         .putString("firefoxEmail", accountEmail)
                         .apply()
-                    val accounts = firefoxAccountChoices.filter { it.first.isNotEmpty() && it.first != accountId } +
-                        (accountId to accountEmail)
+                    val accounts = firefoxAccountChoices.filter { it.id != accountId } +
+                        FirefoxAccountChoice(accountId, accountEmail, account?.optString("monthly_usage").orEmpty())
                     updateFirefoxAccountChoices(accounts, accountId)
                 }
                 firefoxPendingId = ""
@@ -3006,17 +2995,23 @@ class MainActivity : AppCompatActivity() {
                     firefoxSetStatus(if (options.isEmpty()) "No Mozilla regions are available; the saved location is preserved." else "Mozilla region list updated.")
                 } else if (firefoxOperation == "list") {
                     val values = payload.optJSONArray("accounts")
-                    val accounts = mutableListOf<Pair<String, String>>()
+                    val accounts = mutableListOf<FirefoxAccountChoice>()
                     if (values != null) {
                         for (index in 0 until values.length()) {
                             val value = values.optJSONObject(index) ?: continue
                             val accountId = value.optString("id").trim()
-                            if (accountId.isNotEmpty()) accounts.add(accountId to value.optString("email").trim())
+                            if (accountId.isNotEmpty()) {
+                                accounts.add(FirefoxAccountChoice(
+                                    accountId,
+                                    value.optString("email").trim(),
+                                    value.optString("monthly_usage").trim(),
+                                ))
+                            }
                         }
                     }
                     updateFirefoxAccountChoices(accounts)
                     firefoxSetStatus(if (accounts.isEmpty()) "No saved Firefox accounts. Choose Add new account to sign in." else "Saved Firefox accounts loaded.")
-                    if (firefoxAccountSpinner != null) {
+                    if (firefoxAccountRows != null) {
                         firefoxSubmit(org.json.JSONObject()
                             .put("op", "locations")
                             .put("data_dir", filesDir.absolutePath), "Loading Mozilla regions…")
@@ -3027,7 +3022,7 @@ class MainActivity : AppCompatActivity() {
                         prefs.edit().remove("firefoxAccountId").apply()
                     }
                     val selectedAfterRemoval = if (firefoxSelectedAccountId == removedId) "" else firefoxSelectedAccountId
-                    updateFirefoxAccountChoices(firefoxAccountChoices.filter { it.first != removedId }, selectedAfterRemoval)
+                    updateFirefoxAccountChoices(firefoxAccountChoices.filter { it.id != removedId }, selectedAfterRemoval)
                     firefoxRemoveInFlight = false
                     firefoxRemovingAccountId = ""
                     firefoxPendingId = ""
@@ -3045,7 +3040,7 @@ class MainActivity : AppCompatActivity() {
                             prefs.edit().remove("firefoxAccountId").apply()
                             val resetEmail = firefoxEmailView?.text?.toString().orEmpty()
                             updateFirefoxAccountChoices(firefoxAccountChoices.filter {
-                                !it.second.equals(resetEmail, ignoreCase = true)
+                                !it.email.equals(resetEmail, ignoreCase = true)
                             }, "")
                         }
                         firefoxPendingId = ""
@@ -3175,8 +3170,12 @@ class MainActivity : AppCompatActivity() {
         spinnerNoize.setSelection(prefs.getInt("noize", 2))
         val savedTor = prefs.getInt("tor", 0)
         if (savedTor == 3) {
-            if (!prefs.contains("chainCount")) {
-                prefs.edit().putInt("chainCount", 1).putInt("chainExit0", 1).putInt("chainExit1", 2).apply()
+            if (!prefs.contains("chainTransports")) {
+                val chain = selectedChain().ifEmpty { listOf(5) }
+                prefs.edit()
+                    .putString("chainTransports", NativeEngine.encodeChainTransports(chain.toIntArray()))
+                    .remove("chainCount").remove("chainExit0").remove("chainExit1").remove("chainExit2")
+                    .apply()
             }
             prefs.edit().putInt("tor", 0).apply()
             spinnerTor.setSelection(0)
@@ -3553,10 +3552,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("psiphonHttpPort", if (pendingPsiHttp > 0) pendingPsiHttp else editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
         i.putExtra("upstreamProxy", upstreamProxyUrl())
         val chain = selectedChain()
-        i.putExtra("chainCount", chain.size)
-        i.putExtra("chainExit0", chain.getOrElse(0) { 1 })
-        i.putExtra("chainExit1", chain.getOrElse(1) { 2 })
-        i.putExtra("chainExit2", 0)
+        i.putExtra("chainTransports", chain.toIntArray())
         i.putExtra("firefoxAccountId", prefs.getString("firefoxAccountId", "").orEmpty())
         i.putExtra("firefoxLocation", prefs.getString("firefoxLocation", "").orEmpty())
         i.putExtra("firefoxServer", prefs.getString("firefoxServer", "").orEmpty())
@@ -3579,10 +3575,7 @@ class MainActivity : AppCompatActivity() {
         // duplicate engine, but it can still select the final hop's counters.
         val notificationChain = selectedChain()
         proxyIntent.putExtra("backend", backendFromSelection())
-        proxyIntent.putExtra("chainCount", notificationChain.size)
-        proxyIntent.putExtra("chainExit0", notificationChain.getOrElse(0) { 1 })
-        proxyIntent.putExtra("chainExit1", notificationChain.getOrElse(1) { 2 })
-        proxyIntent.putExtra("chainExit2", 0)
+        proxyIntent.putExtra("chainTransports", notificationChain.toIntArray())
         startForegroundService(proxyIntent)
         connectGeneration = FCAEVpnService.stateGeneration()
 
@@ -3751,10 +3744,7 @@ class MainActivity : AppCompatActivity() {
                     disableExtensionPermutation = disableExtensionPermutation,
                     fragmentSni = fragmentSni,
                     upstreamProxy = upstreamProxy,
-                    chainCount = chain.size,
-                    chainExit0 = chain.getOrElse(0) { 1 },
-                    chainExit1 = chain.getOrElse(1) { 2 },
-                    chainExit2 = 0,
+                    chainTransports = chain.toIntArray(),
                     firefoxAccountId = firefoxAccountId,
                     firefoxLocation = firefoxLocation,
                     firefoxServer = firefoxServer,

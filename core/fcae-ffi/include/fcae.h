@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
-#define FCAE_ABI_VERSION 22
+#define FCAE_ABI_VERSION 23
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -320,11 +320,20 @@ typedef struct {
     const char *transport;       /* auto | h2 | h1 | h3 (h3 reserved)     */
 } FcaeFirefox;
 
-/* Additional exits in carrier-to-final-exit order. Every backend may occur
- * at most once. Aether + [Psiphon, Firefox] = Aether -> Psiphon -> Firefox. */
+/* One dynamic exit, including the transport used by an Aether hop. */
 typedef struct {
-    FcaeBackend exits[3];
-    uint32_t    count;
+    FcaeBackend  backend;
+    FcaeProtocol protocol;
+    bool         h2_enabled;
+} FcaeChainHop;
+
+/* Additional exits in carrier-to-final-exit order. hops/hop_count accepts any
+ * number of exits and takes precedence over the legacy three-slot exits array. */
+typedef struct {
+    FcaeBackend         exits[3];
+    uint32_t            count;
+    const FcaeChainHop *hops;
+    uint32_t            hop_count;
 } FcaeChain;
 
 typedef struct {
@@ -369,7 +378,7 @@ typedef struct {
     FcaeAether      aether;          /* ABI v21 */
     const char     *upstream_proxy;  /* http|socks5|socks5h://[user:pass@]host:port[@user:pass]; NULL = direct; ABI v20 */
     FcaeFirefox    firefox;         /* Firefox IP Protection; ABI v22      */
-    FcaeChain      chain;           /* ordered additional exits; ABI v22   */
+    FcaeChain      chain;           /* ordered additional exits; ABI v23   */
 } FcaeConfig;
 
 /* Telemetry */
@@ -701,4 +710,4 @@ FcaeStatus fcae_sponsor_copy_background_rgba(uint8_t *out, size_t capacity);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x9b5b3ec1e7c5f14f */
+/* fcae-abi-fingerprint: 0x39590b2e5c7fb3b4 */

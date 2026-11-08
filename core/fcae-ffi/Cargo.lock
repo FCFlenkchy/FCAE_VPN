@@ -1842,6 +1842,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "fcae-abi",
+ "futures",
  "libc",
  "log",
  "once_cell",

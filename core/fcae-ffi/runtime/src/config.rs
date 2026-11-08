@@ -306,6 +306,19 @@ impl TorConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainHop {
+    pub backend: FcaeBackend,
+    pub protocol: FcaeProtocol,
+    pub h2_enabled: bool,
+}
+
+impl ChainHop {
+    pub fn new(backend: FcaeBackend, protocol: FcaeProtocol, h2_enabled: bool) -> Self {
+        Self { backend, protocol, h2_enabled }
+    }
+}
+
 /// Fully validated session configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionConfig {
@@ -341,7 +354,7 @@ pub struct SessionConfig {
     pub upstream_proxy: Option<UpstreamProxy>,
     pub firefox: FirefoxConfig,
     /// Additional exits in carrier-to-final-exit order.
-    pub chain: Vec<FcaeBackend>,
+    pub chain: Vec<ChainHop>,
 }
 
 impl Default for SessionConfig {
@@ -398,7 +411,7 @@ impl SessionConfig {
     }
 
     pub fn exit_backend(&self) -> FcaeBackend {
-        self.chain.last().copied().unwrap_or(self.backend)
+        self.chain.last().map(|hop| hop.backend).unwrap_or(self.backend)
     }
 
     pub fn upstream_requires_udp(&self) -> bool {
@@ -780,54 +793,64 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         server: cstr_opt(raw.firefox.server),
         transport: firefox_transport,
     };
-    if raw.chain.count > raw.chain.exits.len() as u32 {
-        return Err(CoreError::InvalidConfig(format!(
-            "chain.count={} exceeds the {} additional exits available in the ABI",
-            raw.chain.count,
-            raw.chain.exits.len()
-        )));
-    }
-    let mut seen = vec![cfg.backend];
-    for exit in raw.chain.exits.iter().take(raw.chain.count as usize) {
-        let exit = FcaeBackend::try_from(*exit as u32)
-            .map_err(|_| CoreError::InvalidConfig("chain contains an unknown backend".into()))?;
-        if seen.contains(&exit) {
+    if raw.chain.hop_count > 0 {
+        if raw.chain.hops.is_null() {
+            return Err(CoreError::InvalidConfig("chain.hops is null with a nonzero hop_count".into()));
+        }
+        for exit in std::slice::from_raw_parts(raw.chain.hops, raw.chain.hop_count as usize) {
+            let backend = FcaeBackend::try_from(exit.backend as u32)
+                .map_err(|_| CoreError::InvalidConfig("chain contains an unknown backend".into()))?;
+            let protocol = FcaeProtocol::try_from(exit.protocol as u32)
+                .map_err(|_| CoreError::InvalidConfig("chain contains an unknown protocol".into()))?;
+            cfg.chain.push(ChainHop::new(backend, protocol, exit.h2_enabled));
+        }
+    } else {
+        if raw.chain.count > raw.chain.exits.len() as u32 {
             return Err(CoreError::InvalidConfig(format!(
-                "chain backend {exit:?} occurs more than once; looping a route is not supported"
+                "chain.count={} exceeds the {} legacy additional exits available in the ABI",
+                raw.chain.count,
+                raw.chain.exits.len()
             )));
         }
-        seen.push(exit);
-        cfg.chain.push(exit);
+        for exit in raw.chain.exits.iter().take(raw.chain.count as usize) {
+            let exit = FcaeBackend::try_from(*exit as u32)
+                .map_err(|_| CoreError::InvalidConfig("chain contains an unknown backend".into()))?;
+            cfg.chain.push(ChainHop::new(exit, cfg.protocol, cfg.obfuscation.h2_enabled));
+        }
     }
     if cfg.chain.is_empty() && cfg.psiphon.through_tunnel && cfg.backend != FcaeBackend::Psiphon {
-        cfg.chain.push(FcaeBackend::Psiphon);
+        cfg.chain.push(ChainHop::new(FcaeBackend::Psiphon, cfg.protocol, cfg.obfuscation.h2_enabled));
     }
-    cfg.psiphon.through_tunnel = cfg.chain.len() == 1 && cfg.chain[0] == FcaeBackend::Psiphon;
+    cfg.psiphon.through_tunnel = cfg.chain.len() == 1 && cfg.chain[0].backend == FcaeBackend::Psiphon;
     if cfg.exit_backend() == FcaeBackend::Firefox && cfg.is_tun() && cfg.firefox.transport == "h1" {
         return Err(CoreError::InvalidConfig(
             "Firefox TUN requires UDP-safe H2; select firefox.transport auto or h2".into(),
         ));
     }
-    let tor_tcp_exit = cfg.protocol == FcaeProtocol::Tor
-        || matches!(raw.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain);
+    let aether_provides_udp = |protocol| {
+        protocol != FcaeProtocol::Tor && !matches!(raw.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain)
+    };
     let mut previous_udp = match cfg.backend {
-        FcaeBackend::Aether => !tor_tcp_exit,
+        FcaeBackend::Aether => aether_provides_udp(cfg.protocol),
         FcaeBackend::Psiphon => false,
         FcaeBackend::Firefox => cfg.firefox.transport != "h1",
     };
     for exit in cfg.chain.clone() {
         let mut hop = cfg.clone();
-        hop.backend = exit;
+        hop.backend = exit.backend;
+        hop.protocol = exit.protocol;
+        hop.obfuscation.h2_enabled = exit.h2_enabled;
         hop.chain.clear();
         if hop.upstream_requires_udp() && !previous_udp {
             return Err(CoreError::InvalidConfig(format!(
-                "the {exit:?} hop requires a UDP-capable upstream; the preceding backend is TCP-only"
+                "the {:?} hop requires a UDP-capable upstream; the preceding backend is TCP-only",
+                exit.backend
             )));
         }
-        previous_udp = match exit {
+        previous_udp = match exit.backend {
             FcaeBackend::Psiphon => false,
             FcaeBackend::Firefox => cfg.firefox.transport != "h1",
-            FcaeBackend::Aether => !tor_tcp_exit,
+            FcaeBackend::Aether => aether_provides_udp(exit.protocol),
         };
     }
 
@@ -979,7 +1002,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     if cfg.backend == FcaeBackend::Psiphon {
         cfg.psiphon.through_tunnel = false;
     }
-    let psiphon_exit = cfg.chain.last().copied().unwrap_or(cfg.backend) == FcaeBackend::Psiphon;
+    let psiphon_exit = cfg.chain.last().map(|hop| hop.backend).unwrap_or(cfg.backend) == FcaeBackend::Psiphon;
     cfg.tun = TunConfig {
         engine: match raw.tun_engine {
             0 => TunEngine::Tun2socks,
@@ -1714,6 +1737,30 @@ mod tests {
         assert!(unsafe { parse(&raw) }.is_err());
         raw.upstream_proxy = c"  ".as_ptr();
         assert!(unsafe { parse(&raw) }.unwrap().upstream_proxy.is_none());
+    }
+
+    #[test]
+    fn dynamic_chain_preserves_full_transport_hops_without_a_slot_limit() {
+        let mut raw: FcaeConfig = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        let hops = [
+            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false },
+            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false },
+            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::Masque, h2_enabled: true },
+            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::Gool, h2_enabled: false },
+            FcaeChainHop { backend: FcaeBackend::Aether, protocol: FcaeProtocol::MasqueInMasque, h2_enabled: true },
+        ];
+        raw.chain.hops = hops.as_ptr();
+        raw.chain.hop_count = hops.len() as u32;
+
+        let cfg = unsafe { parse(&raw) }.expect("five explicit transport hops parse");
+        assert_eq!(cfg.chain.len(), hops.len());
+        for (actual, expected) in cfg.chain.iter().zip(hops) {
+            assert_eq!(actual.backend, expected.backend);
+            assert_eq!(actual.protocol, expected.protocol);
+            assert_eq!(actual.h2_enabled, expected.h2_enabled);
+        }
     }
 
     #[test]

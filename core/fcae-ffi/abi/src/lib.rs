@@ -20,7 +20,7 @@
 use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
-pub const FCAE_ABI_VERSION: u32 = 22;
+pub const FCAE_ABI_VERSION: u32 = 23;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
@@ -429,14 +429,24 @@ pub struct FcaeFirefox {
     pub transport: *const c_char,
 }
 
-/// Ordered additional exits after the top-level carrier backend. For example,
-/// backend=Aether and exits=[Psiphon,Firefox] routes Aether → Psiphon → Firefox.
-/// Each backend may occur at most once in a route.
+/// One dynamically supplied exit, including the transport used by an Aether hop.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FcaeChainHop {
+    pub backend: FcaeBackend,
+    pub protocol: FcaeProtocol,
+    pub h2_enabled: bool,
+}
+
+/// Ordered additional exits after the top-level carrier backend. `hops` supports
+/// any number of exits and takes precedence over the legacy three-slot `exits`.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct FcaeChain {
     pub exits: [FcaeBackend; 3],
     pub count: u32,
+    pub hops: *const FcaeChainHop,
+    pub hop_count: u32,
 }
 
 /// Top-level session configuration.

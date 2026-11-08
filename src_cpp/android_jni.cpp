@@ -7,6 +7,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "fcae.h"
 
@@ -557,10 +558,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     jboolean disableExtensionPermutation,
     jboolean fragmentSni,
     jstring upstreamProxy,
-    jint chainCount,
-    jint chainExit0,
-    jint chainExit1,
-    jint chainExit2,
+    jintArray chainTransports,
     jstring firefoxAccountId,
     jstring firefoxLocation,
     jstring firefoxServer,
@@ -596,13 +594,30 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     fcae_config_default(&cfg);
 
     cfg.backend = (backend >= 0 && backend <= 2) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
-    const jint exits[3] = {chainExit0, chainExit1, chainExit2};
-    if (chainCount > 0 && chainCount <= 3) {
-        cfg.chain.count = (uint32_t)chainCount;
-        for (jint i = 0; i < chainCount; ++i) {
-            cfg.chain.exits[i] = (exits[i] >= 0 && exits[i] <= 2) ? (FcaeBackend)exits[i] : FCAE_BACKEND_AETHER;
+    const jsize chain_count = chainTransports ? env->GetArrayLength(chainTransports) : 0;
+    std::vector<FcaeChainHop> chain_hops((size_t)chain_count);
+    if (chain_count > 0) {
+        jint* transports = env->GetIntArrayElements(chainTransports, nullptr);
+        if (!transports) return JNI_FALSE;
+        for (jsize i = 0; i < chain_count; ++i) {
+            const int transport = transports[i];
+            FcaeChainHop& hop = chain_hops[(size_t)i];
+            hop.backend = transport == 5 ? FCAE_BACKEND_PSIPHON : transport == 10 ? FCAE_BACKEND_FIREFOX : FCAE_BACKEND_AETHER;
+            hop.h2_enabled = transport == 1 || transport == 7 || transport == 9;
+            switch (transport) {
+                case 0: case 1: hop.protocol = FCAE_PROTOCOL_MASQUE; break;
+                case 2: hop.protocol = FCAE_PROTOCOL_WIREGUARD; break;
+                case 4: hop.protocol = FCAE_PROTOCOL_TOR; break;
+                case 5: case 10: hop.protocol = FCAE_PROTOCOL_AUTO; break;
+                case 6: case 7: hop.protocol = FCAE_PROTOCOL_MASQUE_IN_MASQUE; break;
+                case 8: case 9: hop.protocol = FCAE_PROTOCOL_WARP_IN_MASQUE; break;
+                default: hop.protocol = FCAE_PROTOCOL_WARP_IN_WARP; break;
+            }
         }
+        env->ReleaseIntArrayElements(chainTransports, transports, JNI_ABORT);
     }
+    cfg.chain.hops = chain_hops.data();
+    cfg.chain.hop_count = (uint32_t)chain_hops.size();
     cfg.firefox.account_id = firefoxAccountOwned.empty() ? nullptr : firefoxAccountOwned.c_str();
     cfg.firefox.location = firefoxLocationOwned.empty() ? nullptr : firefoxLocationOwned.c_str();
     cfg.firefox.server = firefoxServerOwned.empty() ? nullptr : firefoxServerOwned.c_str();
@@ -708,7 +723,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     // side passes filesDir, which is exactly that.
     if (!psiCfgOwned.empty()) cfg.psiphon.config_json = psiCfgOwned.c_str();
     if (!psiRegionOwned.empty()) cfg.psiphon.egress_region = psiRegionOwned.c_str();
-    cfg._reserved[0] = cfg.chain.count == 0 && psiphonThroughTunnel == JNI_TRUE ? 1 : 0;
+    cfg._reserved[0] = cfg.chain.hop_count == 0 && psiphonThroughTunnel == JNI_TRUE ? 1 : 0;
     cfg.psiphon.socks_port = clamp_port(psiphonSocksPort);
     cfg.psiphon.http_port = clamp_port(psiphonHttpPort);
     cfg.tun_tcp_sndbuf = (uint32_t)tunTcpSndbuf;

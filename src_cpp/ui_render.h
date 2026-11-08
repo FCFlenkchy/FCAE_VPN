@@ -33,10 +33,9 @@ struct AppState {
     int  protocol        = 0;
     // 0 = Aether, 1 = Psiphon, 2 = Firefox (FcaeBackend).
     int  backend         = 0;
-    // Ordered additional exits after backend. At most two are useful with
-    // three backends; the ABI reserves a third slot for future providers.
-    int  chain_count     = 0;
-    int  chain_exits[3]  = {1, 2, 0};
+    // Ordered additional exits as transport indexes matching kTransportNames.
+    std::vector<int> chain_transports;
+    std::vector<FcaeChainHop> chain_hops_built;
     // 0 = Proxy, 1 = TUN. TUN is the product default on every desktop
     // platform (and Android): full-system tunneling out of the box. The
     // device itself is still only raised AFTER the backend reports a live
@@ -264,17 +263,29 @@ struct AppState {
         fcae_config_default(&c);
 
         c.backend          = (backend >= 0 && backend <= 2) ? (FcaeBackend)backend : FCAE_BACKEND_AETHER;
-        const bool explicit_chain = chain_count > 0 && chain_count <= 3;
-        if (explicit_chain) {
-            c.chain.count = (uint32_t)chain_count;
-            for (int i = 0; i < chain_count; ++i) {
-                c.chain.exits[i] = (chain_exits[i] >= 0 && chain_exits[i] <= 2)
-                    ? (FcaeBackend)chain_exits[i] : FCAE_BACKEND_AETHER;
+        const bool explicit_chain = !chain_transports.empty();
+        chain_hops_built.clear();
+        chain_hops_built.reserve(chain_transports.size() + (!explicit_chain && backend != 1 && tor_mode == 3 ? 1 : 0));
+        for (int transport : chain_transports) {
+            FcaeChainHop hop{};
+            hop.backend = transport == 5 ? FCAE_BACKEND_PSIPHON : transport == 10 ? FCAE_BACKEND_FIREFOX : FCAE_BACKEND_AETHER;
+            hop.h2_enabled = transport == 1 || transport == 7 || transport == 9;
+            switch (transport) {
+                case 0: case 1: hop.protocol = FCAE_PROTOCOL_MASQUE; break;
+                case 2: hop.protocol = FCAE_PROTOCOL_WIREGUARD; break;
+                case 4: hop.protocol = FCAE_PROTOCOL_TOR; break;
+                case 5: case 10: hop.protocol = FCAE_PROTOCOL_AUTO; break;
+                case 6: case 7: hop.protocol = FCAE_PROTOCOL_MASQUE_IN_MASQUE; break;
+                case 8: case 9: hop.protocol = FCAE_PROTOCOL_WARP_IN_MASQUE; break;
+                default: hop.protocol = FCAE_PROTOCOL_WARP_IN_WARP; break;
             }
-        } else if (backend != 1 && tor_mode == 3) {
-            c.chain.exits[0] = FCAE_BACKEND_PSIPHON;
-            c.chain.count = 1;
+            chain_hops_built.push_back(hop);
         }
+        if (!explicit_chain && backend != 1 && tor_mode == 3) {
+            chain_hops_built.push_back({FCAE_BACKEND_PSIPHON, FCAE_PROTOCOL_AUTO, false});
+        }
+        c.chain.hops = chain_hops_built.data();
+        c.chain.hop_count = (uint32_t)chain_hops_built.size();
         c.protocol         = (protocol >= 0 && protocol <= 6) ? (FcaeProtocol)protocol : FCAE_PROTOCOL_MASQUE;
         // Mode is shared by every protocol/backend: once the UI selects TUN,
         // never let a Psiphon/Tor mapping silently turn it back into Proxy.
@@ -351,7 +362,7 @@ struct AppState {
         const bool proto_psiphon  = (backend == 1);
         const bool proto_tor      = (protocol == 4);
         const bool egress_psiphon = (!proto_psiphon && !explicit_chain && tor_mode == 3);
-        const int final_backend = explicit_chain ? chain_exits[chain_count - 1] : (egress_psiphon ? 1 : backend);
+        const int final_backend = !chain_hops_built.empty() ? (int)chain_hops_built.back().backend : (egress_psiphon ? 1 : backend);
         const bool psiphon_exit   = (final_backend == 1);
 
         c.dns.sni = sni[0] ? sni : nullptr;

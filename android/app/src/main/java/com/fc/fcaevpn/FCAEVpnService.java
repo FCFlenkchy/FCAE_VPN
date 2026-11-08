@@ -925,14 +925,15 @@ public class FCAEVpnService extends VpnService {
     }
 
     public static boolean hasChain(Intent session) {
-        return session != null && session.getIntExtra("chainCount", 0) > 0;
+        return session != null && NativeEngine.sessionChainTransports(session).length > 0;
     }
 
     public static int finalBackend(Intent session) {
         if (session == null) return 0;
-        final int count = session.getIntExtra("chainCount", 0);
-        if (count > 0 && count <= 3) {
-            return session.getIntExtra("chainExit" + (count - 1), session.getIntExtra("backend", 0));
+        final int[] chain = NativeEngine.sessionChainTransports(session);
+        if (chain.length > 0) {
+            final int transport = chain[chain.length - 1];
+            return transport == 5 ? 1 : transport == 10 ? 2 : 0;
         }
         return session.getIntExtra("backend", 0);
     }
@@ -940,9 +941,8 @@ public class FCAEVpnService extends VpnService {
     public static boolean routeIncludesPsiphon(Intent session) {
         if (session == null) return false;
         if (session.getIntExtra("backend", 0) == 1) return true;
-        final int count = Math.min(3, Math.max(0, session.getIntExtra("chainCount", 0)));
-        for (int i = 0; i < count; ++i) {
-            if (session.getIntExtra("chainExit" + i, 0) == 1) return true;
+        for (int transport : NativeEngine.sessionChainTransports(session)) {
+            if (transport == 5) return true;
         }
         return false;
     }
@@ -1064,10 +1064,7 @@ public class FCAEVpnService extends VpnService {
         final boolean disableExtensionPermutation = intent.getBooleanExtra("disableExtensionPermutation", false);
         final boolean fragmentSni   = intent.getBooleanExtra("fragmentSni", false);
         final String upstreamProxy = orEmpty(intent.getStringExtra("upstreamProxy")).trim();
-        final int chainCount = intent.getIntExtra("chainCount", 0);
-        final int chainExit0 = intent.getIntExtra("chainExit0", 1);
-        final int chainExit1 = intent.getIntExtra("chainExit1", 2);
-        final int chainExit2 = intent.getIntExtra("chainExit2", 0);
+        final int[] chainTransports = NativeEngine.sessionChainTransports(intent);
         final String firefoxAccountId = orEmpty(intent.getStringExtra("firefoxAccountId"));
         final String firefoxLocation = orEmpty(intent.getStringExtra("firefoxLocation"));
         final String firefoxServer = orEmpty(intent.getStringExtra("firefoxServer"));
@@ -1186,7 +1183,7 @@ public class FCAEVpnService extends VpnService {
                     tlsVerify, disableGrease, enableGreaseSigalgs, enableEchGrease, disableOcspStapling,
                     disableSct, disableSessionTicket, disableExtensionPermutation, fragmentSni,
                     upstreamProxy,
-                    chainCount, chainExit0, chainExit1, chainExit2,
+                    chainTransports,
                     firefoxAccountId, firefoxLocation, firefoxServer, firefoxTransport
                 );
                 if (ok && psiphonInRoute) {
@@ -1828,10 +1825,7 @@ public class FCAEVpnService extends VpnService {
         putStr(e, i, "torBridgeLines");
         putInt(e, i, "engineLog", 3);
         putInt(e, i, "backend", 0);
-        putInt(e, i, "chainCount", 0);
-        putInt(e, i, "chainExit0", 1);
-        putInt(e, i, "chainExit1", 2);
-        putInt(e, i, "chainExit2", 0);
+        e.putString("chainTransports", NativeEngine.encodeChainTransports(NativeEngine.sessionChainTransports(i)));
         putStr(e, i, "firefoxAccountId");
         putStr(e, i, "firefoxLocation");
         putStr(e, i, "firefoxServer");
@@ -1922,10 +1916,14 @@ public class FCAEVpnService extends VpnService {
         copyStr(p, i, "torBridgeLines");
         copyInt(p, i, "engineLog", 3);
         copyInt(p, i, "backend", 0);
-        copyInt(p, i, "chainCount", 0);
-        copyInt(p, i, "chainExit0", 1);
-        copyInt(p, i, "chainExit1", 2);
-        copyInt(p, i, "chainExit2", 0);
+        if (p.contains("chainTransports")) {
+            i.putExtra("chainTransports", NativeEngine.parseChainTransports(p.getString("chainTransports", "")));
+        } else {
+            copyInt(p, i, "chainCount", 0);
+            copyInt(p, i, "chainExit0", 1);
+            copyInt(p, i, "chainExit1", 2);
+            copyInt(p, i, "chainExit2", 0);
+        }
         copyStr(p, i, "firefoxAccountId");
         copyStr(p, i, "firefoxLocation");
         copyStr(p, i, "firefoxServer");

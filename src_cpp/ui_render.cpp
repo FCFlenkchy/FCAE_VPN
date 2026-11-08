@@ -35,7 +35,31 @@
 extern "C" void fcae_sponsor_set_ui_active(bool active);
 
 
+static std::string join_chain_transports(const std::vector<int>& transports) {
+    std::string out;
+    for (int transport : transports) {
+        if (!out.empty()) out += ',';
+        out += std::to_string(transport);
+    }
+    return out;
+}
+
+static std::vector<int> parse_chain_transports(const std::string& value) {
+    std::vector<int> out;
+    size_t start = 0;
+    while (start < value.size()) {
+        size_t end = value.find(',', start);
+        if (end == std::string::npos) end = value.size();
+        if (end > start) out.push_back(atoi(value.substr(start, end - start).c_str()));
+        start = end + 1;
+    }
+    return out;
+}
+
 AppState g_app;
+static bool s_loaded_chain_transports = false;
+static int s_loaded_legacy_chain_count = -1;
+static int s_loaded_legacy_chain_exits[3] = {};
 
 // The UI fingerprint lets platform loops skip frames whose pixels would not change.
 
@@ -382,8 +406,8 @@ static uint64_t ui_content_signature() {
     // programmatic change must repaint too), plus transient notices.
     h = fnv_value(h, g_app.protocol);
     h = fnv_value(h, g_app.backend);
-    h = fnv_value(h, g_app.chain_count);
-    for (int exit : g_app.chain_exits) h = fnv_value(h, exit);
+    h = fnv_value(h, (int)g_app.chain_transports.size());
+    for (int transport : g_app.chain_transports) h = fnv_value(h, transport);
     h = fnv_cstr(h, g_app.firefox_account_id);
     h = fnv_cstr(h, g_app.firefox_location);
     h = fnv_cstr(h, g_app.firefox_server);
@@ -862,10 +886,13 @@ static int parse_port(const std::string& v, int fallback) {
 static void apply_config_kv(const std::string& key, const std::string& val) {
     if (key == "protocol") g_app.protocol = atoi(val.c_str());
     else if (key == "backend") g_app.backend = atoi(val.c_str());
-    else if (key == "chain_count") g_app.chain_count = atoi(val.c_str());
-    else if (key == "chain_exit_0") g_app.chain_exits[0] = atoi(val.c_str());
-    else if (key == "chain_exit_1") g_app.chain_exits[1] = atoi(val.c_str());
-    else if (key == "chain_exit_2") g_app.chain_exits[2] = atoi(val.c_str());
+    else if (key == "chain_transports") {
+        g_app.chain_transports = parse_chain_transports(val);
+        s_loaded_chain_transports = true;
+    } else if (key == "chain_count") s_loaded_legacy_chain_count = atoi(val.c_str());
+    else if (key == "chain_exit_0") s_loaded_legacy_chain_exits[0] = atoi(val.c_str());
+    else if (key == "chain_exit_1") s_loaded_legacy_chain_exits[1] = atoi(val.c_str());
+    else if (key == "chain_exit_2") s_loaded_legacy_chain_exits[2] = atoi(val.c_str());
     else if (key == "firefox_account_id") snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", val.c_str());
     else if (key == "firefox_location") snprintf(g_app.firefox_location, sizeof(g_app.firefox_location), "%s", val.c_str());
     else if (key == "firefox_server") snprintf(g_app.firefox_server, sizeof(g_app.firefox_server), "%s", val.c_str());
@@ -977,8 +1004,7 @@ static void save_config() {
     // Always LF; empty values allowed. Line-based load is robust on Win/Linux.
     fprintf(f, "protocol=%d\n", g_app.protocol);
     fprintf(f, "backend=%d\n", g_app.backend);
-    fprintf(f, "chain_count=%d\n", g_app.chain_count);
-    for (int i = 0; i < 3; ++i) fprintf(f, "chain_exit_%d=%d\n", i, g_app.chain_exits[i]);
+    fprintf(f, "chain_transports=%s\n", join_chain_transports(g_app.chain_transports).c_str());
     fprintf(f, "firefox_account_id=%s\n", g_app.firefox_account_id);
     fprintf(f, "firefox_location=%s\n", g_app.firefox_location);
     fprintf(f, "firefox_server=%s\n", g_app.firefox_server);
@@ -1083,6 +1109,8 @@ static bool load_config_from(const std::string& path) {
     if (!f) return false;
 
     static char line[8192];
+    s_loaded_chain_transports = false;
+    s_loaded_legacy_chain_count = -1;
     int applied = 0;
     while (fgets(line, sizeof(line), f)) {
         size_t len = strlen(line);
@@ -1111,15 +1139,23 @@ static bool load_config_from(const std::string& path) {
     fclose(f);
 
     if (applied == 0) return false;
-    if (g_app.tor_mode == 3) {
-        if (g_app.chain_count == 0 && g_app.backend != 1) {
-            g_app.chain_count = 1;
-            g_app.chain_exits[0] = 1;
+    if (!s_loaded_chain_transports && s_loaded_legacy_chain_count > 0) {
+        g_app.chain_transports.clear();
+        const int count = std::min(s_loaded_legacy_chain_count, 3);
+        for (int i = 0; i < count; ++i) {
+            const int backend = s_loaded_legacy_chain_exits[i];
+            g_app.chain_transports.push_back(backend == 1 ? 5 : backend == 2 ? 10 : 0);
         }
+    }
+    if (g_app.tor_mode == 3) {
+        if (g_app.chain_transports.empty() && g_app.backend != 1) g_app.chain_transports.push_back(5);
         g_app.tor_mode = 0;
     }
-    g_app.chain_count = (g_app.chain_count >= 0 && g_app.chain_count <= 2) ? g_app.chain_count : 0;
-    for (int& exit : g_app.chain_exits) if (exit < 0 || exit > 2) exit = 0;
+    g_app.chain_transports.erase(
+        std::remove_if(g_app.chain_transports.begin(), g_app.chain_transports.end(), [](int transport) {
+            return transport < 0 || transport > 10;
+        }),
+        g_app.chain_transports.end());
     snprintf(g_app.save_status, sizeof(g_app.save_status), "Config loaded!");
     g_app.add_log(4, ("[ui] config loaded (" + std::to_string(applied) + " keys): " + path).c_str());
     return true;
@@ -1905,12 +1941,14 @@ struct FirefoxLocationOption {
 struct FirefoxAccountOption {
     std::string id;
     std::string email;
+    std::string monthly_usage;
 };
 
 static std::vector<FirefoxLocationOption> s_firefox_location_options = {
     {"", "Automatic (recommended)"},
 };
 static std::vector<FirefoxAccountOption> s_firefox_account_options;
+static void firefox_submit(const std::string& request, const char* pending);
 static bool s_firefox_accounts_loaded = false;
 static std::string s_firefox_removing_account_id;
 static bool s_firefox_settings_popup_open = false;
@@ -1971,51 +2009,59 @@ static std::vector<FirefoxAccountOption> firefox_parse_accounts(const std::strin
         FirefoxAccountOption account{
             firefox_json_string(object, "id"),
             firefox_json_string(object, "email"),
+            firefox_json_string(object, "monthly_usage"),
         };
         if (!account.id.empty()) accounts.push_back(std::move(account));
     }
     return accounts;
 }
 
-static void firefox_account_combo() {
-    std::vector<FirefoxAccountOption> accounts = s_firefox_account_options;
-    const std::string selected_id = g_app.firefox_account_id;
-    const bool known = std::any_of(accounts.begin(), accounts.end(), [&](const FirefoxAccountOption& account) {
-        return account.id == selected_id;
-    });
-    if (!s_firefox_accounts_loaded && !selected_id.empty() && !known) {
-        accounts.insert(accounts.begin(), {selected_id, g_app.firefox_email});
-    }
-
-    std::vector<std::string> label_strings;
-    std::vector<const char*> labels;
-    label_strings.reserve(accounts.size() + 1);
-    labels.reserve(accounts.size() + 1);
-    label_strings.push_back("Add new account…");
-    labels.push_back(label_strings.back().c_str());
-    int selected = 0;
-    for (size_t i = 0; i < accounts.size(); ++i) {
-        label_strings.push_back(accounts[i].email.empty()
-            ? "Account " + accounts[i].id.substr(0, 8)
-            : accounts[i].email);
-        labels.push_back(label_strings.back().c_str());
-        if (accounts[i].id == selected_id) selected = (int)i + 1;
-    }
-    if (!ImGui::Combo("Firefox account", &selected, labels.data(), (int)labels.size())) return;
-
+static void firefox_clear_account_selection() {
     g_app.firefox_password[0] = 0;
     g_app.firefox_code[0] = 0;
     g_app.firefox_pending_id[0] = 0;
     g_app.firefox_totp = false;
-    if (selected == 0) {
-        g_app.firefox_account_id[0] = 0;
-        g_app.firefox_email[0] = 0;
-    } else {
-        const FirefoxAccountOption& account = accounts[(size_t)selected - 1];
-        snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", account.id.c_str());
-        snprintf(g_app.firefox_email, sizeof(g_app.firefox_email), "%s", account.email.c_str());
-    }
+    g_app.firefox_account_id[0] = 0;
+    g_app.firefox_email[0] = 0;
+}
+
+static void firefox_select_account(const FirefoxAccountOption& account) {
+    g_app.firefox_password[0] = 0;
+    g_app.firefox_code[0] = 0;
+    g_app.firefox_pending_id[0] = 0;
+    g_app.firefox_totp = false;
+    snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", account.id.c_str());
+    snprintf(g_app.firefox_email, sizeof(g_app.firefox_email), "%s", account.email.c_str());
     save_config();
+}
+
+static void firefox_account_rows(const std::string& root) {
+    for (const FirefoxAccountOption& account : s_firefox_account_options) {
+        ImGui::PushID(account.id.c_str());
+        const std::string email = account.email.empty() ? account.id : account.email;
+        const bool selected = g_app.firefox_account_id == account.id;
+        if (ImGui::Selectable(email.c_str(), selected)) {
+            firefox_select_account(account);
+        }
+        ImGui::TextDisabled("Monthly usage: %s", account.monthly_usage.empty() ? "Unavailable" : account.monthly_usage.c_str());
+        ImGui::SameLine();
+        ImGui::BeginDisabled(g_app.firefox_job != 0);
+        if (ImGui::SmallButton("Remove")) {
+            s_firefox_removing_account_id = account.id;
+            g_app.firefox_remove_in_flight = true;
+            firefox_submit("{\"op\":\"remove\",\"data_dir\":\"" + root
+                + "\",\"account_id\":\"" + firefox_json_escape(account.id) + "\"}",
+                "Removing Firefox Account…");
+        }
+        ImGui::EndDisabled();
+        ImGui::Separator();
+        ImGui::PopID();
+    }
+    if (ImGui::Button("Add new account")) {
+        firefox_clear_account_selection();
+        save_config();
+    }
+    ImGui::Spacing();
 }
 
 static void firefox_location_combo() {
@@ -2147,15 +2193,17 @@ static void firefox_poll_job() {
         const size_t account = json.find("\"account\"");
         const std::string id = account == std::string::npos ? std::string() : firefox_json_string(json, "id", account);
         const std::string email = account == std::string::npos ? std::string() : firefox_json_string(json, "email", account);
+        const std::string monthly_usage = account == std::string::npos ? std::string() : firefox_json_string(json, "monthly_usage", account);
         if (!id.empty()) {
             snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", id.c_str());
             snprintf(g_app.firefox_email, sizeof(g_app.firefox_email), "%s", email.c_str());
             const auto existing = std::find_if(s_firefox_account_options.begin(), s_firefox_account_options.end(),
                 [&](const FirefoxAccountOption& option) { return option.id == id; });
             if (existing == s_firefox_account_options.end()) {
-                s_firefox_account_options.push_back({id, email});
+                s_firefox_account_options.push_back({id, email, monthly_usage});
             } else {
                 existing->email = email;
+                existing->monthly_usage = monthly_usage;
             }
             save_config();
         }
@@ -2212,7 +2260,6 @@ static void firefox_poll_captcha() {
     }
 }
 
-static const char* const kChainBackends[] = {"Aether", "Psiphon", "Firefox"};
 static const char* const kTransportNames[] = {
     "MASQUE (HTTP/3 QUIC)",
     "MASQUE H2 (Aether)",
@@ -2260,90 +2307,48 @@ static void apply_transport(int transport) {
     }
 }
 
-static std::string protocol_route_text(int transport, const std::vector<int>& exits) {
-    std::string route = transport >= 0 && transport < (int)IM_ARRAYSIZE(kTransportNames)
-        ? kTransportNames[transport] : "Unknown";
-    for (int backend : exits) {
-        route += "  ->  ";
-        route += backend >= 0 && backend < 3 ? kChainBackends[backend] : "Unknown";
-    }
-    return route;
-}
-
 static void open_protocol_editor() {
     s_protocol_draft = current_transport();
-    s_chain_draft.clear();
-    const int count = std::max(0, std::min(g_app.chain_count, 2));
-    for (int i = 0; i < count; ++i) s_chain_draft.push_back(g_app.chain_exits[i]);
+    s_chain_draft = g_app.chain_transports;
     s_chain_editor_popup_open = true;
 }
 
 static void render_protocol_editor() {
     if (s_chain_editor_popup_open) {
-        ImGui::OpenPopup("Protocol");
+        ImGui::OpenPopup("##protocol-editor");
         s_chain_editor_popup_open = false;
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(540, 0), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Protocol", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    ImGui::SetNextWindowSize(ImVec2(600, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("##protocol-editor", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     for (int i = 0; i < (int)IM_ARRAYSIZE(kTransportNames); ++i) {
         ImGui::RadioButton(kTransportNames[i], &s_protocol_draft, i);
     }
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     ImGui::Text("Additional exits (optional)");
-    const int carrier = transport_carrier(s_protocol_draft);
+    const float exit_list_height = std::min(240.0f, ImGui::GetMainViewport()->WorkSize.y * 0.35f);
+    ImGui::BeginChild("##exit-list", ImVec2(0, exit_list_height), ImGuiChildFlags_None);
     int remove_index = -1;
     for (size_t i = 0; i < s_chain_draft.size(); ++i) {
         ImGui::PushID((int)i);
         ImGui::Text("Exit %d", (int)i + 1);
-        ImGui::SameLine(100);
-        ImGui::SetNextItemWidth(220);
-        ImGui::Combo("##backend", &s_chain_draft[i], kChainBackends, IM_ARRAYSIZE(kChainBackends));
+        ImGui::SameLine(90);
+        ImGui::SetNextItemWidth(350);
+        ImGui::Combo("##transport", &s_chain_draft[i], kTransportNames, IM_ARRAYSIZE(kTransportNames));
         ImGui::SameLine();
         if (ImGui::Button("Remove")) remove_index = (int)i;
         ImGui::PopID();
     }
+    ImGui::EndChild();
     if (remove_index >= 0) s_chain_draft.erase(s_chain_draft.begin() + remove_index);
-
-    int next_backend = -1;
-    if (s_chain_draft.size() < 2) {
-        for (int backend = 0; backend < 3; ++backend) {
-            if (backend != carrier && std::find(s_chain_draft.begin(), s_chain_draft.end(), backend) == s_chain_draft.end()) {
-                next_backend = backend;
-                break;
-            }
-        }
-    }
-    ImGui::BeginDisabled(next_backend < 0);
-    if (ImGui::Button("+ Add exit") && next_backend >= 0) s_chain_draft.push_back(next_backend);
-    ImGui::EndDisabled();
+    if (ImGui::Button("+ Add exit")) s_chain_draft.push_back(0);
     ImGui::Spacing();
-    ImGui::TextWrapped("%s", protocol_route_text(s_protocol_draft, s_chain_draft).c_str());
-    std::vector<int> complete_route = {carrier};
-    complete_route.insert(complete_route.end(), s_chain_draft.begin(), s_chain_draft.end());
-    std::vector<int> unique = complete_route;
-    std::sort(unique.begin(), unique.end());
-    const bool valid = std::all_of(complete_route.begin(), complete_route.end(), [](int backend) {
-        return backend >= 0 && backend < 3;
-    }) && std::adjacent_find(unique.begin(), unique.end()) == unique.end();
-    if (!valid) {
-        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
-                           "Remove duplicate exits, including the backend used by the selected protocol.");
-    }
-    ImGui::Spacing();
-    ImGui::BeginDisabled(!valid);
     if (ImGui::Button("Apply")) {
         apply_transport(s_protocol_draft);
-        g_app.chain_count = (int)s_chain_draft.size();
-        for (size_t i = 0; i < s_chain_draft.size(); ++i) g_app.chain_exits[i] = s_chain_draft[i];
+        g_app.chain_transports = s_chain_draft;
         save_config();
         ImGui::CloseCurrentPopup();
-    }
-    ImGui::EndDisabled();
-    if (!s_chain_draft.empty()) {
-        ImGui::SameLine();
-        if (ImGui::Button("Clear exits")) s_chain_draft.clear();
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
@@ -2375,7 +2380,7 @@ static void render_firefox_settings() {
     ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.25f, 1.0f), "FIREFOX IP PROTECTION SETTINGS");
     ImGui::Separator();
     const std::string root = firefox_json_escape(data_dir().c_str());
-    firefox_account_combo();
+    firefox_account_rows(root);
     ImGui::InputText("Email", g_app.firefox_email, sizeof(g_app.firefox_email));
     ImGui::InputText("Password", g_app.firefox_password, sizeof(g_app.firefox_password), ImGuiInputTextFlags_Password);
     if (!g_app.firefox_job && ImGui::Button("Sign in")) {
@@ -2403,11 +2408,6 @@ static void render_firefox_settings() {
                 firefox_submit("{\"op\":\"resend\",\"data_dir\":\"" + root + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"}", "Resending verification code…");
             }
         }
-    }
-    if (!g_app.firefox_job && g_app.firefox_account_id[0] && ImGui::Button("Remove saved account")) {
-        s_firefox_removing_account_id = g_app.firefox_account_id;
-        g_app.firefox_remove_in_flight = true;
-        firefox_submit("{\"op\":\"remove\",\"data_dir\":\"" + root + "\",\"account_id\":\"" + firefox_json_escape(g_app.firefox_account_id) + "\"}", "Removing Firefox Account…");
     }
     if (g_app.firefox_captcha_id) {
         ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.3f, 1.0f), "CAPTCHA required");
@@ -3374,7 +3374,7 @@ void render_ui() {
             };
             if (telem.connected_peer[0])
                 ImGui::TextWrapped("Peer: %s", telem.connected_peer);
-            const int final_backend = g_app.chain_count > 0 ? g_app.chain_exits[g_app.chain_count - 1]
+            const int final_backend = !g_app.chain_transports.empty() ? transport_carrier(g_app.chain_transports.back())
                 : ((telem.backend != FCAE_BACKEND_PSIPHON && g_app.tor_mode == 3) ? FCAE_BACKEND_PSIPHON : telem.backend);
             const char* final_name = final_backend == FCAE_BACKEND_FIREFOX ? "Firefox"
                 : final_backend == FCAE_BACKEND_PSIPHON ? "Psiphon" : "Aether";
@@ -3411,17 +3411,12 @@ void render_ui() {
 
     if (ImGui::BeginTabBar("##Tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
 
-        if (ImGui::BeginTabItem("Protocol")) {
+        if (ImGui::BeginTabItem("Connection")) {
             ImGui::BeginChild("##proto_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
-            const int transport = current_transport();
-            const int chain_count = std::max(0, std::min(g_app.chain_count, 2));
-            std::string protocol_label = kTransportNames[transport];
-            if (chain_count == 1) protocol_label += " · 1 additional exit";
-            if (chain_count > 1) protocol_label += " · " + std::to_string(chain_count) + " additional exits";
-            if (ImGui::Button(protocol_label.c_str())) open_protocol_editor();
+            if (ImGui::Button("Protocol")) open_protocol_editor();
             if (!narrow) ImGui::SameLine();
-            if (ImGui::Button("Firefox IP Protection settings")) open_firefox_settings();
+            if (ImGui::Button("Firefox settings")) open_firefox_settings();
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Mode");
             ImGui::RadioButton("Proxy", &g_app.mode, 0);

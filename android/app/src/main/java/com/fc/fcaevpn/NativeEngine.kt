@@ -145,11 +145,8 @@ object NativeEngine {
         fragmentSni: Boolean,
         // Outbound proxy URL (http/socks5) or "" for direct.
         upstreamProxy: String,
-        // Ordered additional exits after backend (Aether=0, Psiphon=1, Firefox=2).
-        chainCount: Int,
-        chainExit0: Int,
-        chainExit1: Int,
-        chainExit2: Int,
+        // Ordered additional exits as home-protocol transport indexes (0-10).
+        chainTransports: IntArray,
         firefoxAccountId: String,
         firefoxLocation: String,
         firefoxServer: String,
@@ -208,6 +205,31 @@ object NativeEngine {
     @JvmStatic external fun nativeGetLanIp(): String
     @JvmStatic external fun nativeGetStatusMsg(): String
     @JvmStatic external fun nativeGetLastError(): String
+
+    @JvmStatic
+    fun parseChainTransports(value: String?): IntArray = value.orEmpty()
+        .split(',')
+        .mapNotNull { it.trim().toIntOrNull() }
+        .filter { it in 0..10 }
+        .toIntArray()
+
+    @JvmStatic
+    fun encodeChainTransports(transports: IntArray): String = transports.joinToString(",")
+
+    @JvmStatic
+    fun sessionChainTransports(session: Intent): IntArray {
+        session.getIntArrayExtra("chainTransports")?.let { chain ->
+            return chain.filter { it in 0..10 }.toIntArray()
+        }
+        val count = session.getIntExtra("chainCount", 0).coerceIn(0, 3)
+        return IntArray(count) { index ->
+            when (session.getIntExtra("chainExit$index", 0)) {
+                1 -> 5
+                2 -> 10
+                else -> 0
+            }
+        }
+    }
 
         /**
          * Start a session from a canonical session intent (the extras the UI writes
@@ -297,10 +319,7 @@ object NativeEngine {
             disableExtensionPermutation = session.getBooleanExtra("disableExtensionPermutation", false),
             fragmentSni = session.getBooleanExtra("fragmentSni", false),
             upstreamProxy = session.getStringExtra("upstreamProxy").orEmpty(),
-            chainCount = session.getIntExtra("chainCount", 0),
-            chainExit0 = session.getIntExtra("chainExit0", 1),
-            chainExit1 = session.getIntExtra("chainExit1", 2),
-            chainExit2 = session.getIntExtra("chainExit2", 0),
+            chainTransports = sessionChainTransports(session),
             firefoxAccountId = session.getStringExtra("firefoxAccountId").orEmpty(),
             firefoxLocation = session.getStringExtra("firefoxLocation").orEmpty(),
             firefoxServer = session.getStringExtra("firefoxServer").orEmpty(),

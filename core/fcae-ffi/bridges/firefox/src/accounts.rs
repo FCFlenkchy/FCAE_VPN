@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use fcae_firefox::{Accounts, ChallengeService, ControlPlane, Dialer, FirefoxError, Fxa, LoginOutcome, Result};
+use fcae_firefox::{Account, Accounts, ChallengeService, ControlPlane, Dialer, FirefoxError, Fxa, LoginOutcome, Result};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -162,13 +162,48 @@ fn finish(jobs: &Mutex<HashMap<u64, JobSnapshot>>, id: u64, result: Result<Value
     jobs.lock().insert(id, snapshot);
 }
 
+fn format_bytes(bytes: i64) -> String {
+    let value = bytes.max(0) as f64;
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    if value >= GIB {
+        format!("{:.2} GiB", value / GIB)
+    } else if value >= MIB {
+        format!("{:.2} MiB", value / MIB)
+    } else if value >= KIB {
+        format!("{:.1} KiB", value / KIB)
+    } else {
+        format!("{} B", value as i64)
+    }
+}
+
+fn account_json(account: Account) -> Result<Value> {
+    let monthly_usage = match &account.usage {
+        Some(usage) if usage.unlimited => "Unlimited".into(),
+        Some(usage) => {
+            let used = usage.limit.saturating_sub(usage.remaining).max(0);
+            format!("{} used of {}", format_bytes(used), format_bytes(usage.limit))
+        }
+        None => "Not reported".into(),
+    };
+    let mut value = serde_json::to_value(account)?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("monthly_usage".into(), json!(monthly_usage));
+    }
+    Ok(value)
+}
+
 async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<Value> {
     let request: Value = serde_json::from_str(raw)?;
     let operation = required(&request, "op")?;
     let data_dir = optional(&request, "data_dir").unwrap_or_else(|| "fcae-data".into());
     let accounts = service(services, &data_dir)?;
     match operation.as_str() {
-        "list" => Ok(json!({"accounts": accounts.list()?})),
+        "list" => {
+            let values = accounts.list()?.into_iter().map(account_json).collect::<Result<Vec<_>>>()?;
+            Ok(json!({"accounts": values}))
+        }
         "locations" => {
             let countries = accounts.locations().await?;
             let mut locations = Vec::with_capacity(countries.len() + countries.iter().map(|country| country.cities.len()).sum::<usize>());
@@ -188,7 +223,7 @@ async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<
                 optional(&request, "unblock_code").as_deref(),
             ).await?;
             match outcome {
-                LoginOutcome::Complete(account) => Ok(json!({"state":"complete", "account": account})),
+                LoginOutcome::Complete(account) => Ok(json!({"state":"complete", "account": account_json(account)?})),
                 LoginOutcome::EmailCode(pending) => Ok(json!({"state":"email_code", "pending_id":pending.id, "email":pending.email})),
                 LoginOutcome::Totp(pending) => Ok(json!({"state":"totp", "pending_id":pending.id, "email":pending.email})),
                 LoginOutcome::UnblockCode(prompt) => Ok(json!({"state":"unblock_code", "email":prompt.email, "sent":prompt.sent})),
@@ -196,11 +231,11 @@ async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<
         }
         "verify_email" => {
             let account = accounts.verify_email(&required(&request, "pending_id")?, &required(&request, "code")?).await?;
-            Ok(json!({"state":"complete", "account":account}))
+            Ok(json!({"state":"complete", "account":account_json(account)?}))
         }
         "verify_totp" => {
             let account = accounts.verify_totp(&required(&request, "pending_id")?, &required(&request, "code")?).await?;
-            Ok(json!({"state":"complete", "account":account}))
+            Ok(json!({"state":"complete", "account":account_json(account)?}))
         }
         "resend" => {
             accounts.resend_email(&required(&request, "pending_id")?).await?;

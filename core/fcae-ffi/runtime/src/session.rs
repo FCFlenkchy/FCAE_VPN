@@ -16,11 +16,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use fcae_abi::{FcaeBackend, FcaeMode, FcaeState, FcaeTorMode};
+use fcae_abi::{FcaeBackend, FcaeMode, FcaeProtocol, FcaeState, FcaeTorMode};
 use parking_lot::Mutex;
 
 use crate::backend::{BackendContext, BackendHandle, CancelToken, Endpoints};
-use crate::config::SessionConfig;
+use crate::config::{ChainHop, SessionConfig};
 use crate::error::{CoreError, Result};
 use crate::registry;
 use crate::telemetry::{TelemetryCell, TelemetrySink};
@@ -273,7 +273,7 @@ impl Supervisor {
         {
             vec![FcaeBackend::Psiphon]
         } else {
-            config.chain.clone()
+            config.chain.iter().map(|hop| hop.backend).collect()
         };
         for exit in ordered_exits {
             let downstream = registry::resolve(exit)?;
@@ -543,7 +543,7 @@ async fn run_session(
     };
     let mut config = config;
     if config.chain.is_empty() && config.psiphon.through_tunnel && config.backend != FcaeBackend::Psiphon {
-        config.chain.push(FcaeBackend::Psiphon);
+        config.chain.push(ChainHop::new(FcaeBackend::Psiphon, config.protocol, config.obfuscation.h2_enabled));
     }
     let mut attempt: u32 = 0;
 
@@ -802,24 +802,11 @@ async fn chain_carrier_changed(handles: Vec<Arc<dyn BackendHandle>>, previous: V
 }
 
 async fn exits_ended(handles: Vec<Arc<dyn BackendHandle>>) -> (usize, Result<()>) {
-    match handles.len() {
-        0 => std::future::pending().await,
-        1 => (0, handles[0].wait().await),
-        2 => {
-            tokio::select! {
-                result = handles[0].wait() => (0, result),
-                result = handles[1].wait() => (1, result),
-            }
-        }
-        3 => {
-            tokio::select! {
-                result = handles[0].wait() => (0, result),
-                result = handles[1].wait() => (1, result),
-                result = handles[2].wait() => (2, result),
-            }
-        }
-        _ => (0, Err(CoreError::Internal("too many chained exits".into()))),
+    if handles.is_empty() {
+        return std::future::pending().await;
     }
+    let (result, index, _) = futures::future::select_all(handles.iter().map(|handle| handle.wait())).await;
+    (index, result)
 }
 
 async fn stop_after(handles: &mut Vec<Arc<dyn BackendHandle>>, index: usize, timeout: Duration) {
@@ -878,21 +865,31 @@ async fn start_downstream(
 
 async fn start_chain_hop(
     config: &SessionConfig,
-    exit: FcaeBackend,
+    exit: ChainHop,
     final_hop: bool,
     previous: &Endpoints,
     sink: &TelemetrySink,
     cancel: &CancelToken,
 ) -> Result<Arc<dyn BackendHandle>> {
-    let socks = previous.socks.ok_or_else(|| CoreError::StartFailed(format!("{exit:?} needs its upstream SOCKS listener")))?;
+    let backend = exit.backend;
+    let socks = previous.socks.ok_or_else(|| CoreError::StartFailed(format!("{backend:?} needs its upstream SOCKS listener")))?;
     let url = format!("socks5://{socks}");
     let mut hop = config.clone();
-    hop.backend = exit;
+    hop.backend = backend;
+    hop.protocol = exit.protocol;
+    hop.obfuscation.h2_enabled = exit.h2_enabled;
+    if backend == FcaeBackend::Aether {
+        if exit.protocol == FcaeProtocol::Tor {
+            hop.tor.mode = FcaeTorMode::Only;
+        } else if hop.tor.mode == FcaeTorMode::Only {
+            hop.tor.mode = FcaeTorMode::Off;
+        }
+    }
     hop.chain.clear();
     hop.psiphon.through_tunnel = false;
     hop.mode = if final_hop { config.mode } else { FcaeMode::Proxy };
     hop.lan_sharing = final_hop && config.lan_sharing;
-    if exit == FcaeBackend::Psiphon {
+    if backend == FcaeBackend::Psiphon {
         hop.upstream_proxy = None;
         let json = hop.psiphon.config_json.as_deref().unwrap_or("{}");
         hop.psiphon.config_json = Some(crate::config::inject_upstream_proxy_url(json, &url));
@@ -912,20 +909,20 @@ async fn start_chain_hop(
     }
     if hop.upstream_requires_udp() && !previous.udp {
         return Err(CoreError::InvalidConfig(format!(
-            "the {exit:?} hop needs UDP upstream, but the preceding backend exposes TCP only; choose its HTTP/2 transport or reorder the chain"
+            "the {backend:?} hop needs UDP upstream, but the preceding backend exposes TCP only; choose its HTTP/2 transport or reorder the chain"
         )));
     }
     let budget = if hop.tor.is_enabled() { hop.tor_start_timeout() } else { hop.start_timeout() } + CHAIN_START_GRACE;
-    let backend = registry::resolve(exit)?;
-    sink.set_state(FcaeState::Connecting, format!("Establishing {exit:?} chain hop…"));
+    let backend_impl = registry::resolve(backend)?;
+    sink.set_state(FcaeState::Connecting, format!("Establishing {backend:?} chain hop…"));
     let cx = BackendContext::new(hop, sink.clone(), cancel.clone());
     let handle = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Err(CoreError::StartFailed("chain cancelled".into())),
-        result = tokio::time::timeout(budget, backend.start(cx)) => result
-            .map_err(|_| CoreError::StartFailed(format!("{exit:?} chain startup timed out")))??,
+        result = tokio::time::timeout(budget, backend_impl.start(cx)) => result
+            .map_err(|_| CoreError::StartFailed(format!("{backend:?} chain startup timed out")))??,
     };
-    log::info!("[session] chained {exit:?} via {url}");
+    log::info!("[session] chained {backend:?} via {url}");
     Ok(Arc::from(handle))
 }
 
@@ -959,7 +956,7 @@ fn route_name(config: &SessionConfig) -> String {
     if config.chain.is_empty() && config.psiphon.through_tunnel {
         names.push("Psiphon");
     } else {
-        names.extend(config.chain.iter().map(|backend| backend_label(*backend)));
+        names.extend(config.chain.iter().map(|hop| backend_label(hop.backend)));
     }
     names.join(" → ")
 }
@@ -1142,7 +1139,10 @@ mod tests {
         cfg.psiphon.through_tunnel = true;
         assert_eq!(route_name(&cfg), "Aether → Psiphon");
         cfg.psiphon.through_tunnel = false;
-        cfg.chain = vec![FcaeBackend::Psiphon, FcaeBackend::Firefox];
+        cfg.chain = vec![
+            ChainHop::new(FcaeBackend::Psiphon, cfg.protocol, cfg.obfuscation.h2_enabled),
+            ChainHop::new(FcaeBackend::Firefox, cfg.protocol, cfg.obfuscation.h2_enabled),
+        ];
         assert_eq!(route_name(&cfg), "Aether → Psiphon → Firefox");
     }
 

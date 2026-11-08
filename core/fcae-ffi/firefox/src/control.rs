@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::dialer::Dialer;
 use crate::error::{FirefoxError, Result};
-use crate::tls::{firefox_user_agent, ALPN_H2_H1};
+use crate::tls::{firefox_user_agent, ALPN_H1, ALPN_H2_H1};
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_HEADER_LIST: u32 = 128 * 1024;
@@ -138,7 +138,14 @@ impl ControlPlane {
 
     pub async fn send(&self, request: ControlRequest) -> Result<ControlResponse> {
         let request = self.decorate(request);
-        tokio::time::timeout(self.timeout, self.exchange(request))
+        tokio::time::timeout(self.timeout, self.exchange(request, ALPN_H1, false))
+            .await
+            .map_err(|_| FirefoxError::Timeout(self.timeout))?
+    }
+
+    pub async fn send_h2(&self, request: ControlRequest) -> Result<ControlResponse> {
+        let request = self.decorate(request);
+        tokio::time::timeout(self.timeout, self.exchange(request, ALPN_H2_H1, true))
             .await
             .map_err(|_| FirefoxError::Timeout(self.timeout))?
     }
@@ -185,9 +192,12 @@ impl ControlPlane {
         request
     }
 
-    async fn exchange(&self, request: ControlRequest) -> Result<ControlResponse> {
-        let tls = crate::tls::connect(&self.dialer, &request.host, request.port, ALPN_H2_H1).await?;
+    async fn exchange(&self, request: ControlRequest, alpn: &[u8], require_h2: bool) -> Result<ControlResponse> {
+        let tls = crate::tls::connect(&self.dialer, &request.host, request.port, alpn).await?;
         let is_h2 = tls.ssl().selected_alpn_protocol() == Some(b"h2");
+        if require_h2 && !is_h2 {
+            return Err(FirefoxError::Protocol("Mozilla did not negotiate HTTP/2".into()));
+        }
         let response = if is_h2 { over_h2(tls, &request).await? } else { over_h1(tls, &request).await? };
         self.store_cookies(&request.host, &response.headers);
         Ok(response)

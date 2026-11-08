@@ -300,7 +300,7 @@
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnFirefoxSettings"
-                style="@style/Widget.FCAEVPN.DialogActionButton"
+                style="@style/Widget.FCAEVPN.SettingsButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
@@ -355,15 +355,6 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical">
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:id="@+id/labelProtocol"
-                android:text="Protocol"
-                android:textColor="#FF9AA3B5"
-                android:textSize="13sp" />
-
             <Spinner
                 android:id="@+id/spinnerProtocol"
                 android:layout_width="0dp"
@@ -376,7 +367,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="MASQUE H2 (Aether)"
+                android:text="Protocol"
                 android:textAllCaps="false" />
 
             <TextView

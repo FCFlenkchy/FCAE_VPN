@@ -462,7 +462,12 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
             server: std::ptr::null(),
             transport: std::ptr::null(),
         },
-        chain: FcaeChain { exits: [FcaeBackend::Aether; 3], count: 0 },
+        chain: FcaeChain {
+            exits: [FcaeBackend::Aether; 3],
+            count: 0,
+            hops: std::ptr::null(),
+            hop_count: 0,
+        },
     });
     FcaeStatus::Ok
 }
