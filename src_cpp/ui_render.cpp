@@ -1788,7 +1788,8 @@ static bool firefox_open_captcha(uint64_t id) {
         }
     }
     static std::string previous_path;
-    const std::string path = join_path(data_dir(), "firefox-captcha-" + std::to_string(id) + ".html");
+    const std::string filename = "firefox-captcha-" + std::to_string(id) + ".html";
+    const std::string path = join_path(data_dir(), filename.c_str());
     if (!previous_path.empty() && previous_path != path) std::remove(previous_path.c_str());
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) return false;
