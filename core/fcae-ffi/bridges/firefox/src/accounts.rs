@@ -233,7 +233,7 @@ async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<
     }
 }
 
-fn service(services: &mut HashMap<String, Accounts>, data_dir: &str) -> Result<&Accounts> {
+fn service<'a>(services: &'a mut HashMap<String, Accounts>, data_dir: &str) -> Result<&'a Accounts> {
     if !services.contains_key(data_dir) {
         let store = fcae_firefox::AccountStore::new(data_dir)?;
         let dialer = Dialer::new(None, protect_callback(), 10)?;

@@ -30,14 +30,11 @@ const MAX_UDP_PACKET: usize = 65_535;
 const MAX_UDP_CAPSULE: usize = MAX_UDP_PACKET + 16;
 const UDP_QUEUE_BYTES: usize = 256 * 1024;
 
-static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
-
 pub trait TunnelIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> TunnelIo for T {}
 pub type BoxedTunnel = Box<dyn TunnelIo>;
 
 struct SessionInner {
-    id: u64,
     alive: AtomicBool,
     token: RwLock<Zeroizing<String>>,
     last_activity: AtomicU64,
@@ -89,7 +86,6 @@ impl H2Session {
         let (sender, mut connection) = builder.handshake(tls).await.map_err(h2_error)?;
         let mut ping_pong = connection.ping_pong().ok_or_else(|| FirefoxError::H2("connection has no PING support".into()))?;
         let inner = Arc::new(SessionInner {
-            id: NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
             alive: AtomicBool::new(true),
             token: RwLock::new(Zeroizing::new(token)),
             last_activity: AtomicU64::new(now_millis()),

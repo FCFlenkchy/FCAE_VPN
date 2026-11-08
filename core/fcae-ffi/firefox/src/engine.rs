@@ -148,9 +148,11 @@ impl FirefoxEngine {
 async fn resolve_candidates(dialer: &Dialer, candidates: &[Candidate]) {
     let lookups = candidates.iter().take(256).map(|candidate| {
         let dialer = dialer.clone();
+        let host = candidate.host.clone();
+        let port = candidate.port;
         async move {
-            if let Err(error) = dialer.resolve(&candidate.host, candidate.port).await {
-                log::debug!("[firefox] pre-resolving {} failed: {error}", candidate.host);
+            if let Err(error) = dialer.resolve(&host, port).await {
+                log::debug!("[firefox] pre-resolving {host} failed: {error}");
             }
         }
     });
