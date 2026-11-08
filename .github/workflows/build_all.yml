@@ -514,14 +514,16 @@ jobs:
                   x86_64)      ZIG_TARGET=x86_64-linux-android.29; NDK_TARGET=x86_64-linux-android ;;
                   x86)         ZIG_TARGET=x86-linux-android.29; NDK_TARGET=i686-linux-android ;;
                 esac
+                CRT_DIR="$SYSROOT/usr/lib/$NDK_TARGET/29"
                 test -d "$SYSROOT/usr/include/$NDK_TARGET"
-                test -f "$SYSROOT/usr/lib/$NDK_TARGET/29/libc.so"
-                test -f "$SYSROOT/usr/lib/$NDK_TARGET/29/crtbegin_so.o"
+                test -f "$CRT_DIR/libc.so"
+                test -f "$CRT_DIR/crtbegin_so.o"
                 printf '%s\n' \
                   "include_dir=$SYSROOT/usr/include" \
                   "sys_include_dir=$SYSROOT/usr/include/$NDK_TARGET" \
-                  "crt_dir=$SYSROOT/usr/lib/$NDK_TARGET/29" \
-                  'msvc_lib_dir=' 'kernel32_lib_dir=' 'gcc_dir=' > "$LIBC_DIR/$abi.conf"
+                  "cc_dir=$CRT_DIR" \
+                  "crt_dir=$CRT_DIR" \
+                  'msvc_lib_dir=' 'kernel32_lib_dir=' 'darwin_sdk_dir=' > "$LIBC_DIR/$abi.conf"
                 zig build -Dtarget="$ZIG_TARGET" -Doptimize=small -Dstrip=true \
                   -Dandroid-libc="$LIBC_DIR/$abi.conf" --libc "$LIBC_DIR/$abi.conf" \
                   --prefix "$PWD/zig-out/android/$abi"
