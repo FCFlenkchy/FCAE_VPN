@@ -216,7 +216,7 @@ fn challenge_prefix(page: &str) -> Option<String> {
 }
 
 fn parse_challenge_init(script: &str, prefix: &str) -> Result<(Vec<Challenge>, String)> {
-    for (index, _) in script.match_indices("init").rev() {
+    for (index, _) in script.rmatch_indices("init") {
         if index > 0 && script.as_bytes()[index - 1].is_ascii_alphanumeric() {
             continue;
         }

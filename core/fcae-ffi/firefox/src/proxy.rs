@@ -1,8 +1,6 @@
 use std::collections::HashMap;
-use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -10,7 +8,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task::AbortHandle;
 
 use crate::error::{FirefoxError, Result};
-use crate::transport::{BoxedTunnel, Upstream};
+use crate::transport::Upstream;
 use crate::types::{authority, valid_dns_name};
 
 const MAX_HEAD: usize = 32 * 1024;

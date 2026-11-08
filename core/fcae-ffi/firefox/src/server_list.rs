@@ -299,7 +299,7 @@ pub fn compare_versions(left: &str, right: &str) -> Ordering {
         let b = parse_version_part(right.get(index).copied().unwrap_or(""));
         let ordering = a.a.cmp(&b.a)
             .then_with(|| compare_optional_string(&a.b, a.has_b, &b.b, b.has_b))
-            .then_with(|| a.cmp(&b.c))
+            .then_with(|| a.c.cmp(&b.c))
             .then_with(|| compare_optional_string(&a.d, a.has_d, &b.d, b.has_d));
         if ordering != Ordering::Equal {
             return ordering;

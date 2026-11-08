@@ -251,7 +251,9 @@ async fn over_h2(tls: SslStream<TcpStream>, request: &ControlRequest) -> Result<
     let mut builder = h2::client::Builder::new();
     builder.enable_push(false).max_header_list_size(MAX_HEADER_LIST);
     let (client, connection) = builder.handshake(tls).await.map_err(h2_error)?;
-    let driver = ConnectionDriver(tokio::spawn(async move { let _ = connection.await }));
+    let driver = ConnectionDriver(tokio::spawn(async move {
+        let _ = connection.await;
+    }));
     let result = async {
         let mut client = client.ready().await.map_err(h2_error)?;
         let authority = if request.port == 443 { request.host.clone() } else { crate::types::authority(&request.host, request.port) };

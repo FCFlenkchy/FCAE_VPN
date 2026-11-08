@@ -16,7 +16,7 @@ async-trait.workspace = true
 base64 = "0.22"
 boring = "5.3"
 bytes = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 h2 = "0.4.15"
 hex = "0.4"
 hkdf = "0.12"

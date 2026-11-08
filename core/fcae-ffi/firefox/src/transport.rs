@@ -1,7 +1,7 @@
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::AbortHandle;
 use tokio_boring::SslStream;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::accounts::TokenManager;
 use crate::dialer::Dialer;
@@ -177,7 +177,7 @@ impl H2Session {
         }
         let token = self.token();
         let mut sender = self.sender.clone();
-        sender.ready().await.map_err(h2_error)?;
+        sender = sender.ready().await.map_err(h2_error)?;
         let request = connect_request(target, &token, None)?;
         let (response, send) = sender.send_request(request, false).map_err(h2_error)?;
         let response = response.await.map_err(h2_error)?;
@@ -206,7 +206,7 @@ impl H2Session {
         let authority = self.authority();
         let uri = format!("https://{authority}{path}");
         let mut sender = self.sender.clone();
-        sender.ready().await.map_err(h2_error)?;
+        sender = sender.ready().await.map_err(h2_error)?;
         let request = connect_request(&uri, &token, Some(h2::ext::Protocol::from_static("connect-udp")))?;
         let (response, send) = sender.send_request(request, false).map_err(h2_error)?;
         let response = response.await.map_err(h2_error)?;
@@ -323,7 +323,7 @@ impl AsyncWrite for H2Tunnel {
 impl Drop for H2Tunnel {
     fn drop(&mut self) {
         if !self.shutdown {
-            self.send.reset(h2::Reason::CANCEL);
+            self.send.send_reset(h2::Reason::CANCEL);
         }
         self.inner.active_streams.fetch_sub(1, Ordering::Relaxed);
     }
@@ -560,7 +560,7 @@ impl Upstream {
 
     pub async fn open_tcp(&self, target: &str) -> Result<BoxedTunnel> {
         let result = self.open_tcp_inner(target).await;
-        self.observe_result(&result).await;
+        self.observe_result(result.as_ref().err()).await;
         result
     }
 
@@ -630,7 +630,9 @@ impl Upstream {
         for attempt in 0..2 {
             let token = self.current_token().await?;
             match self.open_h1(target, &token).await {
-                Err(FirefoxError::PassRejected) if attempt == 0 => self.renew(true).await?,
+                Err(FirefoxError::PassRejected) if attempt == 0 => {
+                    self.renew(true).await?;
+                }
                 result => return result,
             }
         }
@@ -680,7 +682,7 @@ impl Upstream {
 
     pub async fn open_udp(&self, target: &str) -> Result<UdpTunnel> {
         let result = self.open_udp_inner(target).await;
-        self.observe_result(&result).await;
+        self.observe_result(result.as_ref().err()).await;
         result
     }
 
@@ -695,7 +697,9 @@ impl Upstream {
             let session = self.get_udp_session().await?;
             match tokio::time::timeout(self.timeout, session.open_udp(target)).await {
                 Ok(Ok(tunnel)) => return Ok(tunnel),
-                Ok(Err(FirefoxError::PassRejected)) if attempt == 0 => self.renew(true).await?,
+                Ok(Err(FirefoxError::PassRejected)) if attempt == 0 => {
+                    self.renew(true).await?;
+                }
                 Ok(Err(error)) if attempt == 0 && retryable_session_error(&error) => {
                     session.kill();
                     *self.udp_session.lock().await = None;
@@ -727,10 +731,10 @@ impl Upstream {
         Ok(session)
     }
 
-    async fn observe_result<T>(&self, result: &Result<T>) {
-        match result {
-            Ok(_) => self.failures.store(0, Ordering::Release),
-            Err(error) => self.note_error(error).await,
+    async fn observe_result(&self, error: Option<&FirefoxError>) {
+        match error {
+            None => self.failures.store(0, Ordering::Release),
+            Some(error) => self.note_error(error).await,
         }
     }
 
