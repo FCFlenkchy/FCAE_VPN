@@ -1952,6 +1952,11 @@ static void firefox_submit(const std::string& request, const char* pending);
 static bool s_firefox_accounts_loaded = false;
 static std::string s_firefox_removing_account_id;
 static bool s_firefox_settings_popup_open = false;
+static bool s_firefox_add_popup_open = false;
+static bool s_firefox_code_popup_open = false;
+static bool s_firefox_add_should_close = false;
+static bool s_firefox_code_should_close = false;
+static bool s_firefox_unblock_required = false;
 static bool s_chain_editor_popup_open = false;
 static int s_protocol_draft = 0;
 static std::vector<int> s_chain_draft;
@@ -2016,34 +2021,34 @@ static std::vector<FirefoxAccountOption> firefox_parse_accounts(const std::strin
     return accounts;
 }
 
-static void firefox_clear_account_selection() {
+static void firefox_clear_login_form() {
     g_app.firefox_password[0] = 0;
     g_app.firefox_code[0] = 0;
     g_app.firefox_pending_id[0] = 0;
     g_app.firefox_totp = false;
-    g_app.firefox_account_id[0] = 0;
     g_app.firefox_email[0] = 0;
+    s_firefox_unblock_required = false;
 }
 
 static void firefox_select_account(const FirefoxAccountOption& account) {
-    g_app.firefox_password[0] = 0;
-    g_app.firefox_code[0] = 0;
-    g_app.firefox_pending_id[0] = 0;
-    g_app.firefox_totp = false;
     snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", account.id.c_str());
     snprintf(g_app.firefox_email, sizeof(g_app.firefox_email), "%s", account.email.c_str());
     save_config();
 }
 
 static void firefox_account_rows(const std::string& root) {
+    if (s_firefox_account_options.empty() && s_firefox_accounts_loaded) {
+        ImGui::TextDisabled("No saved Firefox accounts.");
+    }
     for (const FirefoxAccountOption& account : s_firefox_account_options) {
         ImGui::PushID(account.id.c_str());
         const std::string email = account.email.empty() ? account.id : account.email;
         const bool selected = g_app.firefox_account_id == account.id;
-        if (ImGui::Selectable(email.c_str(), selected)) {
-            firefox_select_account(account);
-        }
+        ImGui::TextUnformatted(email.c_str());
         ImGui::TextDisabled("Monthly usage: %s", account.monthly_usage.empty() ? "Unavailable" : account.monthly_usage.c_str());
+        ImGui::BeginDisabled(selected);
+        if (ImGui::SmallButton(selected ? "Selected" : "Use")) firefox_select_account(account);
+        ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::BeginDisabled(g_app.firefox_job != 0);
         if (ImGui::SmallButton("Remove")) {
@@ -2051,16 +2056,25 @@ static void firefox_account_rows(const std::string& root) {
             g_app.firefox_remove_in_flight = true;
             firefox_submit("{\"op\":\"remove\",\"data_dir\":\"" + root
                 + "\",\"account_id\":\"" + firefox_json_escape(account.id.c_str()) + "\"}",
-                "Removing Firefox Account…");
+                "Removing Firefox account…");
         }
         ImGui::EndDisabled();
         ImGui::Separator();
         ImGui::PopID();
     }
-    if (ImGui::Button("Add new account")) {
-        firefox_clear_account_selection();
-        save_config();
+    if (g_app.firefox_pending_id[0] && ImGui::Button("Continue verification")) {
+        s_firefox_code_popup_open = true;
     }
+    if (s_firefox_unblock_required && ImGui::Button("Continue sign-in with emailed code")) {
+        s_firefox_code_popup_open = true;
+    }
+    ImGui::BeginDisabled(g_app.firefox_job != 0 || g_app.firefox_pending_id[0] || s_firefox_unblock_required);
+    if (ImGui::Button("Add new account")) {
+        firefox_clear_login_form();
+        s_firefox_add_popup_open = true;
+        s_firefox_add_should_close = false;
+    }
+    ImGui::EndDisabled();
     ImGui::Spacing();
 }
 
@@ -2123,6 +2137,17 @@ static void firefox_poll_job() {
         const std::string message = firefox_json_string(json, "message");
         snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
                  message.empty() ? "Firefox account operation failed" : message.c_str());
+        if (strcmp(g_app.firefox_operation, "login") == 0) {
+            const bool reopen_add = s_firefox_unblock_required;
+            g_app.firefox_password[0] = 0;
+            g_app.firefox_code[0] = 0;
+            s_firefox_unblock_required = false;
+            if (reopen_add) {
+                s_firefox_code_should_close = true;
+                s_firefox_add_popup_open = true;
+                s_firefox_add_should_close = false;
+            }
+        }
         if (strcmp(g_app.firefox_operation, "list") == 0) {
             firefox_submit("{\"op\":\"locations\",\"data_dir\":\"" + firefox_json_escape(data_dir().c_str()) + "\"}",
                            "Loading Mozilla regions…");
@@ -2158,8 +2183,6 @@ static void firefox_poll_job() {
         if (selected == s_firefox_account_options.end()) {
             if (g_app.firefox_account_id[0]) {
                 g_app.firefox_account_id[0] = 0;
-                g_app.firefox_pending_id[0] = 0;
-                g_app.firefox_totp = false;
                 save_config();
             }
         } else {
@@ -2174,6 +2197,12 @@ static void firefox_poll_job() {
         const std::string pending = firefox_json_string(json, "pending_id");
         snprintf(g_app.firefox_pending_id, sizeof(g_app.firefox_pending_id), "%s", pending.c_str());
         g_app.firefox_totp = state == "totp";
+        g_app.firefox_password[0] = 0;
+        g_app.firefox_code[0] = 0;
+        s_firefox_unblock_required = false;
+        s_firefox_add_should_close = true;
+        s_firefox_code_popup_open = true;
+        s_firefox_code_should_close = false;
         snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
                  g_app.firefox_totp ? "Enter the authenticator code" : "Enter the code sent to your email");
         return;
@@ -2183,9 +2212,14 @@ static void firefox_poll_job() {
         if (!email.empty()) snprintf(g_app.firefox_email, sizeof(g_app.firefox_email), "%s", email.c_str());
         g_app.firefox_pending_id[0] = 0;
         g_app.firefox_totp = false;
+        g_app.firefox_code[0] = 0;
+        s_firefox_unblock_required = true;
+        s_firefox_add_should_close = true;
+        s_firefox_code_popup_open = true;
+        s_firefox_code_should_close = false;
         snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
                  json.find("\"sent\":true") != std::string::npos
-                    ? "Mozilla emailed an unblock code. Enter it, then sign in again."
+                    ? "Mozilla emailed an unblock code. Enter it to continue sign-in."
                     : "That unblock code was not accepted. Check the latest email from Mozilla.");
         return;
     }
@@ -2211,7 +2245,10 @@ static void firefox_poll_job() {
         g_app.firefox_code[0] = 0;
         g_app.firefox_pending_id[0] = 0;
         g_app.firefox_totp = false;
-        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Firefox account signed in");
+        s_firefox_unblock_required = false;
+        s_firefox_add_should_close = true;
+        s_firefox_code_should_close = true;
+        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Firefox account signed in and selected for connections");
         return;
     }
     if (g_app.firefox_remove_in_flight) {
@@ -2227,6 +2264,7 @@ static void firefox_poll_job() {
     } else if (strcmp(g_app.firefox_operation, "cancel") == 0) {
         g_app.firefox_pending_id[0] = 0;
         g_app.firefox_totp = false;
+        s_firefox_unblock_required = false;
     } else if (strcmp(g_app.firefox_operation, "reset") == 0) {
         g_app.firefox_password[0] = 0;
         g_app.firefox_code[0] = 0;
@@ -2381,34 +2419,6 @@ static void render_firefox_settings() {
     ImGui::Separator();
     const std::string root = firefox_json_escape(data_dir().c_str());
     firefox_account_rows(root);
-    ImGui::InputText("Email", g_app.firefox_email, sizeof(g_app.firefox_email));
-    ImGui::InputText("Password", g_app.firefox_password, sizeof(g_app.firefox_password), ImGuiInputTextFlags_Password);
-    if (!g_app.firefox_job && ImGui::Button("Sign in")) {
-        std::string request = "{\"op\":\"login\",\"data_dir\":\"" + root
-            + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email)
-            + "\",\"password\":\"" + firefox_json_escape(g_app.firefox_password) + "\"";
-        if (g_app.firefox_code[0]) request += ",\"unblock_code\":\"" + firefox_json_escape(g_app.firefox_code) + "\"";
-        request += "}";
-        g_app.firefox_pending_id[0] = 0;
-        g_app.firefox_totp = false;
-        firefox_submit(request, "Signing in to Firefox Accounts…");
-    }
-    ImGui::InputText("Verification or unblock code", g_app.firefox_code, sizeof(g_app.firefox_code));
-    if (g_app.firefox_pending_id[0]) {
-        ImGui::Text("Verification required: %s", g_app.firefox_totp ? "authenticator (TOTP)" : "email");
-        if (!g_app.firefox_job && ImGui::Button("Verify")) {
-            const char* operation = g_app.firefox_totp ? "verify_totp" : "verify_email";
-            firefox_submit(std::string("{\"op\":\"") + operation + "\",\"data_dir\":\"" + root
-                + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id)
-                + "\",\"code\":\"" + firefox_json_escape(g_app.firefox_code) + "\"}", "Verifying Firefox Account…");
-        }
-        if (!g_app.firefox_job && !g_app.firefox_totp) {
-            ImGui::SameLine();
-            if (ImGui::Button("Resend")) {
-                firefox_submit("{\"op\":\"resend\",\"data_dir\":\"" + root + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"}", "Resending verification code…");
-            }
-        }
-    }
     if (g_app.firefox_captcha_id) {
         ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.3f, 1.0f), "CAPTCHA required");
         ImGui::InputText("CAPTCHA answer", g_app.firefox_captcha_answer, sizeof(g_app.firefox_captcha_answer));
@@ -2416,7 +2426,7 @@ static void render_firefox_settings() {
             if (fcae_firefox_captcha_answer(g_app.firefox_captcha_id, g_app.firefox_captcha_answer)) {
                 g_app.firefox_captcha_answer[0] = 0;
                 snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
-                         "CAPTCHA answer submitted; continuing Firefox Account sign-in");
+                         "CAPTCHA answer submitted; continuing Firefox account sign-in");
             } else {
                 snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
                          "CAPTCHA answer is empty, expired, or already submitted");
@@ -2448,16 +2458,131 @@ static void render_firefox_settings() {
     ImGui::EndChild();
     if (ImGui::Button("Save connection settings")) {
         save_config();
-        g_app.firefox_password[0] = 0;
-        g_app.firefox_code[0] = 0;
+        if (!g_app.firefox_job && !s_firefox_unblock_required) {
+            g_app.firefox_password[0] = 0;
+            g_app.firefox_code[0] = 0;
+        }
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
     if (ImGui::Button("Close")) {
-        g_app.firefox_password[0] = 0;
-        g_app.firefox_code[0] = 0;
+        if (!g_app.firefox_job && !s_firefox_unblock_required) {
+            g_app.firefox_password[0] = 0;
+            g_app.firefox_code[0] = 0;
+        }
         ImGui::CloseCurrentPopup();
     }
+    ImGui::EndPopup();
+}
+
+static void render_firefox_add_account() {
+    if (s_firefox_add_popup_open) {
+        ImGui::OpenPopup("Add Firefox account");
+        s_firefox_add_popup_open = false;
+    }
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Add Firefox account", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    if (s_firefox_add_should_close) {
+        s_firefox_add_should_close = false;
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+    ImGui::TextDisabled("Direct email/password sign-in. Credentials are sent to Mozilla and are never saved in the UI configuration.");
+    ImGui::InputText("Email", g_app.firefox_email, sizeof(g_app.firefox_email));
+    ImGui::InputText("Password", g_app.firefox_password, sizeof(g_app.firefox_password), ImGuiInputTextFlags_Password);
+    ImGui::BeginDisabled(g_app.firefox_job != 0 || !g_app.firefox_email[0] || !g_app.firefox_password[0]);
+    if (ImGui::Button("Sign in")) {
+        const std::string root = firefox_json_escape(data_dir().c_str());
+        const std::string request = "{\"op\":\"login\",\"data_dir\":\"" + root
+            + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email)
+            + "\",\"password\":\"" + firefox_json_escape(g_app.firefox_password) + "\"}";
+        g_app.firefox_pending_id[0] = 0;
+        g_app.firefox_totp = false;
+        s_firefox_unblock_required = false;
+        firefox_submit(request, "Signing in to Firefox Accounts…");
+    }
+    ImGui::EndDisabled();
+    if (g_app.firefox_job) ImGui::TextDisabled("Account operation in progress…");
+    if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
+    if (ImGui::Button("Close")) {
+        if (!g_app.firefox_job && !s_firefox_unblock_required) {
+            g_app.firefox_password[0] = 0;
+            g_app.firefox_code[0] = 0;
+        }
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+static void render_firefox_code_prompt() {
+    const bool verification = g_app.firefox_pending_id[0] != 0;
+    if (!verification && !s_firefox_unblock_required && !s_firefox_code_should_close) return;
+    if (s_firefox_code_popup_open) {
+        ImGui::OpenPopup("Firefox account security code");
+        s_firefox_code_popup_open = false;
+    }
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(500, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Firefox account security code", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    if (s_firefox_code_should_close) {
+        s_firefox_code_should_close = false;
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+    const std::string root = firefox_json_escape(data_dir().c_str());
+    if (verification) {
+        ImGui::TextWrapped("%s", g_app.firefox_totp
+            ? "Enter the six-digit code from your authenticator app."
+            : "Mozilla sent a verification code to your email. Enter it to finish adding the account.");
+    } else {
+        ImGui::TextWrapped("Mozilla blocked this direct sign-in as unusual and sent an unblock code to %s.", g_app.firefox_email);
+    }
+    ImGui::InputText(verification ? "Verification code" : "Unblock code", g_app.firefox_code, sizeof(g_app.firefox_code));
+    if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
+    ImGui::BeginDisabled(g_app.firefox_job != 0 || !g_app.firefox_code[0]);
+    if (verification && ImGui::Button("Verify")) {
+        const char* operation = g_app.firefox_totp ? "verify_totp" : "verify_email";
+        firefox_submit(std::string("{\"op\":\"") + operation + "\",\"data_dir\":\"" + root
+            + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id)
+            + "\",\"code\":\"" + firefox_json_escape(g_app.firefox_code) + "\"}", "Verifying Firefox account…");
+    }
+    if (!verification && ImGui::Button("Sign in with code")) {
+        if (!g_app.firefox_password[0]) {
+            snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Restart direct sign-in to enter the password again");
+            s_firefox_unblock_required = false;
+            ImGui::CloseCurrentPopup();
+        } else {
+            firefox_submit("{\"op\":\"login\",\"data_dir\":\"" + root
+                + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email)
+                + "\",\"password\":\"" + firefox_json_escape(g_app.firefox_password)
+                + "\",\"unblock_code\":\"" + firefox_json_escape(g_app.firefox_code) + "\"}",
+                "Signing in with the emailed unblock code…");
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(g_app.firefox_job != 0);
+    if (verification && !g_app.firefox_totp) {
+        ImGui::SameLine();
+        if (ImGui::Button("Resend email")) {
+            firefox_submit("{\"op\":\"resend\",\"data_dir\":\"" + root
+                + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"}",
+                "Resending verification code…");
+        }
+    }
+    if (!verification) {
+        ImGui::SameLine();
+        if (ImGui::Button("Resend unblock code")) {
+            firefox_submit("{\"op\":\"unblock\",\"data_dir\":\"" + root
+                + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email) + "\"}",
+                "Requesting another unblock code…");
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Later")) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
 
@@ -3960,6 +4085,8 @@ void render_ui() {
 
     render_protocol_editor();
     render_firefox_settings();
+    render_firefox_add_account();
+    render_firefox_code_prompt();
 
     ImGui::PopStyleVar(2);
     ImGui::End();

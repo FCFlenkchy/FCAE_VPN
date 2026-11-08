@@ -29,18 +29,36 @@ impl ChallengeService {
         Self { captcha, slot: tokio::sync::Mutex::new(()) }
     }
 
-    pub async fn solve(&self, parent: &ControlPlane, _rejection: &ControlResponse) -> Result<()> {
+    pub async fn solve(&self, parent: &ControlPlane, rejection: &ControlResponse, rejection_origin: &str) -> Result<()> {
         let result = tokio::time::timeout(SOLVE_TIMEOUT, async {
             let _slot = self.slot.lock().await;
             let mut last = FirefoxError::ChallengeRequired;
-            for base in ["https://api.accounts.firefox.com", "https://accounts.firefox.com"] {
+            let rejection_page = std::str::from_utf8(&rejection.body).ok().filter(|body| is_challenge_page(body));
+            let mut bases = Vec::new();
+            for base in [rejection_origin, "https://api.accounts.firefox.com", "https://accounts.firefox.com"] {
+                if trusted_challenge_base(base) && !bases.contains(&base) {
+                    bases.push(base);
+                }
+            }
+            let rejected_base = bases.first().copied() == Some(rejection_origin);
+            for (index, base) in bases.iter().enumerate() {
                 let solver_http = parent.fresh_jar().with_timeout(SOLVE_TIMEOUT);
-                match self.solve_host(&solver_http, base).await {
+                let solved = if index == 0 && rejected_base {
+                    if let Some(page) = rejection_page {
+                        self.solve_page(&solver_http, base, page).await
+                    } else {
+                        self.solve_host(&solver_http, base).await
+                    }
+                } else {
+                    self.solve_host(&solver_http, base).await
+                };
+                match solved {
                     Ok(()) => {
                         parent.import_cookies_for_hosts(&solver_http, &[
                             "accounts.firefox.com",
                             "api.accounts.firefox.com",
                             "oauth.accounts.firefox.com",
+                            "vpn.mozilla.org",
                         ]);
                         return Ok(());
                     }
@@ -58,7 +76,12 @@ impl ChallengeService {
         if !challenged {
             return Err(FirefoxError::Protocol("host did not serve a Fastly challenge page".into()));
         }
-        let prefix = challenge_prefix(&page).ok_or_else(|| FirefoxError::Protocol("challenge asset prefix is missing".into()))?;
+        self.solve_page(http, base, &page).await
+    }
+
+    async fn solve_page(&self, http: &ControlPlane, base: &str, page: &str) -> Result<()> {
+        let page_url = format!("{base}/");
+        let prefix = challenge_prefix(page).ok_or_else(|| FirefoxError::Protocol("challenge asset prefix is missing".into()))?;
         let script = fetch_text(http, &format!("{base}{prefix}/script.js?reload=true")).await?;
         let (mut challenges, mut token) = parse_challenge_init(&script, &prefix)?;
 
@@ -153,9 +176,30 @@ struct PostBackResponse {
     tok: String,
 }
 
+fn trusted_challenge_base(base: &str) -> bool {
+    matches!(base,
+        "https://api.accounts.firefox.com"
+            | "https://accounts.firefox.com"
+            | "https://oauth.accounts.firefox.com"
+            | "https://vpn.mozilla.org"
+    )
+}
+
+fn is_challenge_page(body: &str) -> bool {
+    !body.is_empty()
+        && body.contains("/_fs-ch-")
+        && (body.contains("Client Challenge") || body.contains("script.js") || body.contains("fst-post-back"))
+}
+
 async fn fetch_challenge_page(http: &ControlPlane, url: &str) -> Result<(String, bool)> {
-    let body = fetch_text(http, url).await?;
-    let challenged = body.contains("/_fs-ch-") && body.contains("Client Challenge");
+    let request = ControlRequest::new(Method::GET, url)?
+        .header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")?;
+    let response = http.send(request).await?;
+    let body = String::from_utf8(response.body).map_err(|_| FirefoxError::Protocol("challenge resource is not UTF-8".into()))?;
+    let challenged = is_challenge_page(&body);
+    if response.status != 200 && !challenged {
+        return Err(FirefoxError::Protocol(format!("challenge resource returned HTTP {}", response.status)));
+    }
     Ok((body, challenged))
 }
 

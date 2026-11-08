@@ -73,7 +73,8 @@ impl Fxa {
                 return Err(FirefoxError::ChallengeRequired);
             }
             let Some(challenges) = &self.challenges else { return Err(FirefoxError::ChallengeRequired) };
-            challenges.solve(&self.http, &response).await?;
+            let origin = format!("https://{}", request.host);
+            challenges.solve(&self.http, &response, &origin).await?;
             attempts += 1;
             response = self.http.send(request.clone()).await?;
         }
@@ -176,6 +177,7 @@ impl Fxa {
 
     pub async fn session_verified(&self, session_token: &str) -> Result<bool> {
         let response = self.hawk(Method::GET, &format!("{FXA_AUTH}/recovery_email/status"), session_token, None).await?;
+        ensure_success(&response, "api.accounts.firefox.com")?;
         let status: serde_json::Value = response.json()?;
         status.get("verified").and_then(serde_json::Value::as_bool)
             .ok_or_else(|| FirefoxError::Protocol("FxA session status is missing verified state".into()))
