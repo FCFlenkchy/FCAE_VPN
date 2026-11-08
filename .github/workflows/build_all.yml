@@ -89,62 +89,8 @@ jobs:
             core.setOutput('version_code', String(code));
             core.info(`Android versionCode: ${code}`);
 
-  build-hev-windows:
-    name: hev-socks5-tunnel engine DLL (windows)
-    needs: prepare
-    runs-on: windows-latest
-    steps:
-      - name: checkout
-        uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - name: ensure submodules
-        run: |
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth 1
-
-      # Upstream's native Windows build uses Clang with the MSVC ABI and embeds
-      # yaml, lwip and hev-task-system in the engine DLL.
-      - name: setup MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: setup GNU make and POSIX shell
-        shell: pwsh
-        run: |
-          choco install make --no-progress -y
-          Add-Content $env:GITHUB_PATH "C:\Program Files\Git\usr\bin"
-
-      - name: build hev-socks5-tunnel DLL (MSVC)
-        shell: cmd
-        run: |
-          clang --version
-          make --version
-          make -C core/hev-socks5-tunnel shared ARCH=x64 -j4
-          if errorlevel 1 exit /b 1
-          if not exist core\hev-socks5-tunnel\bin\hev-socks5-tunnel.dll exit /b 1
-          if not exist core\hev-socks5-tunnel\bin\hev-socks5-tunnel.dll.lib exit /b 1
-          mkdir engine
-          copy /Y core\hev-socks5-tunnel\bin\hev-socks5-tunnel.dll engine\libhev-socks5-tunnel.dll
-          if errorlevel 1 exit /b 1
-          dir engine
-
-      # The windows-x64 leg runs on ubuntu, where the MSVC SDK is unavailable,
-      # so the engine DLL crosses runners in the run's cache (restored by
-      # that leg alone) instead of an artifact. The key carries the attempt so a
-      # re-run never collides with its own earlier entry, and cross-os archives
-      # are allowed because the cache version is otherwise salted per platform.
-      - name: hand the engine DLL to the windows-x64 leg
-        uses: actions/cache/save@v6
-        with:
-          path: engine
-          key: hev-windows-engine-${{ github.run_id }}-${{ github.run_attempt }}
-          enableCrossOsArchive: true
-
   build:
-    needs: [prepare, build-hev-windows]
+    needs: prepare
     env:
       FCAE_VERSION: ${{ needs.prepare.outputs.version_full }}
       FCAE_IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
@@ -231,27 +177,6 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 
-      # The engine DLL arrives from build-hev-windows through the run's cache; the
-      # cache restores the saved layout, so it lands in $GITHUB_WORKSPACE/engine.
-      - name: restore hev engine DLL (windows)
-        if: matrix.name == 'windows-x64'
-        uses: actions/cache/restore@v6
-        with:
-          path: engine
-          key: hev-windows-engine-${{ github.run_id }}-${{ github.run_attempt }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: publish hev engine DLL (windows)
-        if: matrix.name == 'windows-x64'
-        run: |
-          set -euo pipefail
-          ENGINE="$GITHUB_WORKSPACE/engine"
-          test -s "$ENGINE/libhev-socks5-tunnel.dll"
-          echo "FCAE_HEV_DLL=$ENGINE/libhev-socks5-tunnel.dll" >> "$GITHUB_ENV"
-          echo "FCAE_HEV_ENGINE_DIR=$ENGINE" >> "$GITHUB_ENV"
-          ls -la "$ENGINE"
-
       - name: setup go
         uses: actions/setup-go@v7
         with:
@@ -278,7 +203,7 @@ jobs:
         with:
           script: |
             const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
-            const prefixes = ['cmake-', 'gradle-', 'sccache-', 'glfw-', 'hev-windows-engine-'];
+            const prefixes = ['cmake-', 'gradle-', 'sccache-', 'glfw-'];
 
             for (const prefix of prefixes) {
               let page = 1;
@@ -361,7 +286,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 nasm \
-            cmake
+            clang lld llvm cmake
           echo "=== MinGW toolchain check ==="
           which x86_64-w64-mingw32-gcc x86_64-w64-mingw32-g++
           x86_64-w64-mingw32-gcc --version | head -1
@@ -496,18 +421,18 @@ jobs:
       - name: cache zig
         uses: actions/cache@v6
         with:
-          path: ${{ runner.tool_cache }}/zig-0.16.0
-          key: zig-0.16.0-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.tool_cache }}/zig-0.17.1
+          key: zig-0.17.1-${{ runner.os }}-${{ runner.arch }}
 
       - name: setup zig
         shell: bash
         run: |
           set -euo pipefail
-          ZIG_VER=0.16.0
+          ZIG_VER=0.17.1
           case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64)  TUPLE=x86_64-linux;  SHA=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;;
-            Darwin-arm64)  TUPLE=aarch64-macos; SHA=b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489 ;;
-            Darwin-x86_64) TUPLE=x86_64-macos;  SHA=0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7 ;;
+            Linux-x86_64)  TUPLE=x86_64-linux;  SHA=3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a ;;
+            Darwin-arm64)  TUPLE=aarch64-macos; SHA=75f1bc7a1e9852f17ec9a0c1895f767c4ec56d46bc8a834920eece1d0359dd8d ;;
+            Darwin-x86_64) TUPLE=x86_64-macos;  SHA=9af07b20319fbd0c92ee46ad23e81d6a782b1aaea2cfb8dcbff35f1d2c7ddbb7 ;;
             *) echo "::error::unsupported runner $(uname -s)-$(uname -m)"; exit 1 ;;
           esac
           ARCHIVE="zig-${TUPLE}-${ZIG_VER}.tar.xz"
@@ -573,10 +498,10 @@ jobs:
             sed -i 's/\.name = if (target\.result\.abi == \.msvc) "zeptun_static" else "zeptun"/.name = "fcae_zeptun_static"/' build.zig
           fi
           case "${{ matrix.name }}" in
-            linux-x64)   zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSmall ;;
-            windows-x64) zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSmall ;;
-            macos-arm64) zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall ;;
-            macos-x64)   zig build -Dtarget=x86_64-macos -Doptimize=ReleaseSmall ;;
+            linux-x64)   zig build -Dtarget=x86_64-linux-gnu -Doptimize=small ;;
+            windows-x64) zig build -Dtarget=x86_64-windows-gnu -Doptimize=small ;;
+            macos-arm64) zig build -Dtarget=aarch64-macos -Doptimize=small ;;
+            macos-x64)   zig build -Dtarget=x86_64-macos -Doptimize=small ;;
             android-*)
               SYSROOT="${ANDROID_NDK_HOME:?}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
               test -d "$SYSROOT/usr/include"
@@ -597,7 +522,7 @@ jobs:
                   "sys_include_dir=$SYSROOT/usr/include/$NDK_TARGET" \
                   "crt_dir=$SYSROOT/usr/lib/$NDK_TARGET/29" \
                   'msvc_lib_dir=' 'kernel32_lib_dir=' 'gcc_dir=' > "$LIBC_DIR/$abi.conf"
-                zig build -Dtarget="$ZIG_TARGET" -Doptimize=ReleaseSmall -Dstrip=true \
+                zig build -Dtarget="$ZIG_TARGET" -Doptimize=small -Dstrip=true \
                   -Dandroid-libc="$LIBC_DIR/$abi.conf" --libc "$LIBC_DIR/$abi.conf" \
                   --prefix "$PWD/zig-out/android/$abi"
                 install -D -m 644 "zig-out/android/$abi/lib/libzeptun.a" \
@@ -649,6 +574,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ROOT="$PWD"
           cd core/hev-socks5-tunnel
           case "${{ matrix.name }}" in
             linux-x64|macos-arm64)
@@ -663,10 +589,44 @@ jobs:
               make static CFLAGS="-arch x86_64 -mmacosx-version-min=13.0"
               ;;
             windows-x64)
-              # The native MSVC engine DLL comes from build-hev-windows; this
-              # leg loads it in-process at runtime with the same adapter and
-              # GUID as the in-process engines use elsewhere.
-              echo "hev-socks5-tunnel ships as a DLL (built by build-hev-windows)"
+              # FCAE links with MinGW, while upstream's native static archives
+              # target the MSVC ABI. Keep the DLL as the C ABI boundary, but
+              # cross-compile it here instead of using a second Windows job.
+              XWIN_VERSION=0.10.0
+              XWIN_PACKAGE="xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl"
+              XWIN_ARCHIVE="${XWIN_PACKAGE}.tar.gz"
+              XWIN_SHA256=d870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88
+              XWIN_ARCHIVE_PATH="$RUNNER_TEMP/$XWIN_ARCHIVE"
+              curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 \
+                --connect-timeout 30 \
+                "https://github.com/Jake-Shadle/xwin/releases/download/${XWIN_VERSION}/${XWIN_ARCHIVE}" \
+                -o "$XWIN_ARCHIVE_PATH"
+              printf '%s  %s\n' "$XWIN_SHA256" "$XWIN_ARCHIVE_PATH" | sha256sum -c -
+              tar -xzf "$XWIN_ARCHIVE_PATH" -C "$RUNNER_TEMP" "$XWIN_PACKAGE/xwin"
+
+              MSVC_ROOT="$RUNNER_TEMP/hev-msvc-sysroot"
+              "$RUNNER_TEMP/$XWIN_PACKAGE/xwin" --accept-license --arch x86_64 \
+                --cache-dir "$RUNNER_TEMP/hev-xwin-cache" splat --output "$MSVC_ROOT"
+              clang --version
+              llvm-ar --version
+              lld-link --version
+
+              MSVC_CC="clang --target=x86_64-pc-windows-msvc -fuse-ld=lld-link"
+              MSVC_CFLAGS="-isystem $MSVC_ROOT/crt/include -isystem $MSVC_ROOT/sdk/include/ucrt -isystem $MSVC_ROOT/sdk/include/um -isystem $MSVC_ROOT/sdk/include/shared"
+              MSVC_LFLAGS="-L$MSVC_ROOT/crt/lib/x86_64 -L$MSVC_ROOT/sdk/lib/ucrt/x86_64 -L$MSVC_ROOT/sdk/lib/um/x86_64"
+              make shared OS=Windows_NT ARCH=x64 \
+                CC="$MSVC_CC" AR=llvm-ar \
+                CFLAGS="$MSVC_CFLAGS" LFLAGS="$MSVC_LFLAGS" \
+                -j"$(nproc)"
+              test -s bin/hev-socks5-tunnel.dll
+              test -s bin/hev-socks5-tunnel.dll.lib
+
+              ENGINE="$ROOT/engine"
+              rm -rf "$ENGINE"
+              install -D -m 644 bin/hev-socks5-tunnel.dll \
+                "$ENGINE/libhev-socks5-tunnel.dll"
+              echo "FCAE_HEV_DLL=$ENGINE/libhev-socks5-tunnel.dll" >> "$GITHUB_ENV"
+              echo "FCAE_HEV_ENGINE_DIR=$ENGINE" >> "$GITHUB_ENV"
               ;;
             android-*)
               if [ -z "${ANDROID_NDK_HOME:-}" ]; then
@@ -864,9 +824,9 @@ jobs:
             fi
           else
             case "${{ matrix.name }}" in
-              # Windows runs hev-socks5-tunnel in-process through the DLL that
-              # build-hev-windows stages; FCAE_HEV_DLL says it is part of the
-              # install, which switches the crate to the dynamic backend.
+              # Windows runs hev-socks5-tunnel in-process through the DLL staged
+              # above; FCAE_HEV_DLL marks it for embedding and selects the
+              # dynamic backend.
               windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,firefox,zeptun,hev ;;
               *) echo "::error::Unsupported desktop target: ${{ matrix.name }}"; exit 1 ;;
             esac
@@ -1098,9 +1058,9 @@ jobs:
             # above already catches the one failure that would survive a
             # successful build - a link that names one of those files.
             #
-            # The engine dir is still asserted: it is exported by a different
-            # job through the workflow environment, and if that link broke the
-            # failure would otherwise surface as a confusing rustc error.
+            # The engine dir is still asserted: it is exported by the engine
+            # build step, and if that link broke the failure would otherwise
+            # surface as a confusing rustc error.
             : "${FCAE_HEV_ENGINE_DIR:?the hev engine dir was not exported}"
           fi
 

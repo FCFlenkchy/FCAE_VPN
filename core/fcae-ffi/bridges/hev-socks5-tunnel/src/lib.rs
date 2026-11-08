@@ -14,10 +14,11 @@
 //! | Linux, macOS, Android | linked in-process, C ABI | the engine's own TUN code compiles for these |
 //! | Windows | native DLL loaded in-process at runtime | the MSVC C ABI interoperates with the MinGW host without a POSIX runtime |
 //!
-//! The `build-hev-windows` job runs upstream's native Windows build with Clang
-//! targeting MSVC. The resulting DLL embeds yaml, lwip and hev-task-system and
-//! is loaded with `LoadLibraryExW` at first use: same process and same wintun
-//! adapter identity as the other engines, while the app remains a MinGW binary.
+//! The Ubuntu `windows-x64` CI leg runs upstream's native Windows build with
+//! Clang targeting MSVC. The resulting DLL embeds yaml, lwip and hev-task-system
+//! and is loaded with `LoadLibraryExW` at first use: same process and same
+//! wintun adapter identity as the other engines, while the app remains a MinGW
+//! binary.
 //!
 //! Loading is lazy and isolated: a missing or unloadable DLL surfaces as
 //! "engine unavailable" (or a specific start error) instead of taking the app

@@ -6,7 +6,7 @@
 //!   its own Makefile outside the cargo graph — `make -C core/hev-socks5-tunnel
 //!   static`, cross-compiled with the NDK on Android — and the archive is
 //!   linked into libfcae_ffi. `FCAE_HEV_LIBDIR=<dir>` overrides the search path.
-//! * **In-process, DLL** (Windows): the `build-hev-windows` job builds the
+//! * **In-process, DLL** (Windows): the Ubuntu `windows-x64` CI leg builds the
 //!   engine with Clang targeting MSVC, this script embeds the resulting DLL in
 //!   the binary, and the app loads it at runtime: same process, no child
 //!   process, no exe, no files beside the exe.
@@ -102,8 +102,8 @@ fn main() {
             return;
         }
         panic!(
-            "the native Windows HEV DLL is missing. The build-hev-windows job builds it with \
-             Clang targeting MSVC and hands the result over; point FCAE_HEV_DLL at the staged \
+            "the native Windows HEV DLL is missing. The Ubuntu windows-x64 CI leg cross-compiles \
+             it with Clang targeting MSVC; point FCAE_HEV_DLL at the staged \
              libhev-socks5-tunnel.dll, or build with \
              `--features fcae-bridge-hev-socks5-tunnel/stub` to report the engine unavailable."
         );
