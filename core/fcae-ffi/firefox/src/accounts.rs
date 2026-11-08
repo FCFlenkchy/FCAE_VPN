@@ -10,8 +10,9 @@ use crate::control::ControlPlane;
 use crate::error::{FirefoxError, Result};
 use crate::fxa::{Fxa, LoginResponse};
 use crate::guardian::{Entitlement, Guardian};
+use crate::server_list::RemoteSettings;
 use crate::store::AccountStore;
-use crate::types::{Account, Credentials, ProxyPass, Usage};
+use crate::types::{Account, Country, Credentials, ProxyPass, Usage};
 
 const PENDING_LIFETIME: Duration = Duration::from_secs(15 * 60);
 
@@ -45,17 +46,23 @@ pub struct Accounts {
     store: AccountStore,
     fxa: Fxa,
     guardian: Guardian,
+    remote: RemoteSettings,
     pending: Arc<tokio::sync::Mutex<HashMap<String, PendingSession>>>,
 }
 
 impl Accounts {
     pub fn new(store: AccountStore, http: ControlPlane, fxa: Fxa) -> Self {
-        let guardian = Guardian::new(http);
-        Self { store, fxa, guardian, pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())) }
+        let guardian = Guardian::new(http.clone());
+        let remote = RemoteSettings::new(http);
+        Self { store, fxa, guardian, remote, pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())) }
     }
 
     pub fn store(&self) -> &AccountStore {
         &self.store
+    }
+
+    pub async fn locations(&self) -> Result<Vec<Country>> {
+        self.remote.load(&self.store).await
     }
 
     pub fn list(&self) -> Result<Vec<Account>> {

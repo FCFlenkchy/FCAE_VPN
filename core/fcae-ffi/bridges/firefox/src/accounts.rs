@@ -169,6 +169,18 @@ async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<
     let accounts = service(services, &data_dir)?;
     match operation.as_str() {
         "list" => Ok(json!({"accounts": accounts.list()?})),
+        "locations" => {
+            let countries = accounts.locations().await?;
+            let mut locations = Vec::with_capacity(countries.len() + countries.iter().map(|country| country.cities.len()).sum::<usize>());
+            for country in countries {
+                let country_name = country.name;
+                locations.push(json!({"value":country.code, "label":country_name.clone()}));
+                for city in country.cities {
+                    locations.push(json!({"value":city.code, "label":format!("{} — {}", country_name, city.name)}));
+                }
+            }
+            Ok(json!({"locations":locations}))
+        }
         "login" => {
             let outcome = accounts.login(
                 &required(&request, "email")?,

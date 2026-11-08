@@ -1,4 +1,6 @@
 use boring::ssl::{ConnectConfiguration, SslConnector, SslMethod, SslVerifyMode};
+#[cfg(target_os = "android")]
+use std::path::Path;
 use tokio::net::TcpStream;
 use tokio_boring::SslStream;
 
@@ -43,6 +45,11 @@ fn configuration(alpn: &[u8]) -> Result<ConnectConfiguration> {
     fingerprint
         .apply(&mut builder, alpn)
         .map_err(|error| FirefoxError::Protocol(format!("configuring Firefox TLS fingerprint: {error}")))?;
+    #[cfg(target_os = "android")]
+    builder
+        .load_verify_locations(None, Some(Path::new("/system/etc/security/cacerts")))
+        .map_err(|error| FirefoxError::Protocol(format!("loading Android system trust roots: {error}")))?;
+    #[cfg(not(target_os = "android"))]
     builder
         .set_default_verify_paths()
         .map_err(|error| FirefoxError::Protocol(format!("loading system trust roots: {error}")))?;

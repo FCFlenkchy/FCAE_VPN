@@ -9,6 +9,7 @@
 #include <new>
 #include <cerrno>
 #include <cstring>
+#include <utility>
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -1896,6 +1897,77 @@ static std::string firefox_json_string(const std::string& json, const char* key,
     }
 }
 
+struct FirefoxLocationOption {
+    std::string value;
+    std::string label;
+};
+
+static std::vector<FirefoxLocationOption> s_firefox_location_options = {
+    {"", "Automatic (recommended)"},
+};
+static bool s_firefox_settings_popup_open = false;
+static bool s_chain_editor_popup_open = false;
+static std::vector<int> s_chain_draft;
+
+static std::vector<FirefoxLocationOption> firefox_parse_locations(const std::string& json) {
+    std::vector<FirefoxLocationOption> options;
+    const size_t key = json.find("\"locations\"");
+    if (key == std::string::npos) return options;
+    size_t cursor = json.find('[', key);
+    if (cursor == std::string::npos) return options;
+    ++cursor;
+    while (cursor < json.size()) {
+        const size_t start = json.find_first_of("{]", cursor);
+        if (start == std::string::npos || json[start] == ']') break;
+        bool quoted = false;
+        bool escaped = false;
+        size_t end = start + 1;
+        for (; end < json.size(); ++end) {
+            const char c = json[end];
+            if (escaped) {
+                escaped = false;
+            } else if (quoted && c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                quoted = !quoted;
+            } else if (!quoted && c == '}') {
+                break;
+            }
+        }
+        if (end >= json.size()) break;
+        const std::string object = json.substr(start, end - start + 1);
+        FirefoxLocationOption option{
+            firefox_json_string(object, "value"),
+            firefox_json_string(object, "label"),
+        };
+        if (!option.value.empty() && !option.label.empty()) options.push_back(std::move(option));
+        cursor = end + 1;
+    }
+    return options;
+}
+
+static void firefox_location_combo() {
+    std::vector<FirefoxLocationOption> options = s_firefox_location_options;
+    const std::string saved = g_app.firefox_location;
+    const auto selected = std::find_if(options.begin(), options.end(), [&](const FirefoxLocationOption& option) {
+        return option.value == saved;
+    });
+    if (!saved.empty() && selected == options.end()) {
+        options.push_back({saved, saved + " (saved location)"});
+    }
+    std::vector<const char*> labels;
+    labels.reserve(options.size());
+    int selected_index = 0;
+    for (size_t i = 0; i < options.size(); ++i) {
+        labels.push_back(options[i].label.c_str());
+        if (options[i].value == saved) selected_index = (int)i;
+    }
+    if (ImGui::Combo("Region", &selected_index, labels.data(), (int)labels.size())) {
+        snprintf(g_app.firefox_location, sizeof(g_app.firefox_location), "%s",
+                 options[(size_t)selected_index].value.c_str());
+    }
+}
+
 static void firefox_submit(const std::string& request, const char* pending) {
     if (g_app.firefox_job != 0) return;
     g_app.firefox_job = fcae_firefox_account_submit(request.c_str());
@@ -1932,6 +2004,27 @@ static void firefox_poll_job() {
         const std::string message = firefox_json_string(json, "message");
         snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
                  message.empty() ? "Firefox account operation failed" : message.c_str());
+        return;
+    }
+    if (strcmp(g_app.firefox_operation, "locations") == 0) {
+        std::vector<FirefoxLocationOption> options = firefox_parse_locations(json);
+        if (!options.empty()) {
+            std::vector<FirefoxLocationOption> unique;
+            unique.reserve(options.size() + 1);
+            unique.push_back({"", "Automatic (recommended)"});
+            for (auto& option : options) {
+                const bool duplicate = std::any_of(unique.begin(), unique.end(), [&](const FirefoxLocationOption& existing) {
+                    return existing.value == option.value;
+                });
+                if (!duplicate) unique.push_back(std::move(option));
+            }
+            options = std::move(unique);
+            s_firefox_location_options = std::move(options);
+            snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Mozilla region list updated");
+        } else {
+            snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
+                     "No Mozilla regions are available; the saved location is preserved");
+        }
         return;
     }
     const std::string state = firefox_json_string(json, "state");
@@ -1992,6 +2085,223 @@ static void firefox_poll_captcha() {
                      "Could not open the CAPTCHA viewer; use Open CAPTCHA image to retry");
         }
     }
+}
+
+static const char* const kChainBackends[] = {"Aether", "Psiphon", "Firefox"};
+
+static std::string chain_route_text(int carrier, const std::vector<int>& exits) {
+    std::string route = carrier >= 0 && carrier < 3 ? kChainBackends[carrier] : "Unknown";
+    for (int backend : exits) {
+        route += "  ->  ";
+        route += backend >= 0 && backend < 3 ? kChainBackends[backend] : "Unknown";
+    }
+    return route;
+}
+
+static void open_chain_editor() {
+    s_chain_draft.clear();
+    const int count = std::max(0, std::min(g_app.chain_count, 2));
+    for (int i = 0; i < count; ++i) s_chain_draft.push_back(g_app.chain_exits[i]);
+    s_chain_editor_popup_open = true;
+}
+
+static void render_chain_editor() {
+    if (s_chain_editor_popup_open) {
+        ImGui::OpenPopup("Protocol chain");
+        s_chain_editor_popup_open = false;
+    }
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(540, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Protocol chain", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    ImGui::TextWrapped("Build an ordered route from the selected carrier. Each backend may appear only once; public proxy ports belong to the final exit.");
+    ImGui::Spacing();
+    int remove_index = -1;
+    for (size_t i = 0; i < s_chain_draft.size(); ++i) {
+        ImGui::PushID((int)i);
+        ImGui::Text("Exit %d", (int)i + 1);
+        ImGui::SameLine(100);
+        ImGui::SetNextItemWidth(220);
+        ImGui::Combo("##backend", &s_chain_draft[i], kChainBackends, IM_ARRAYSIZE(kChainBackends));
+        ImGui::SameLine();
+        if (ImGui::Button("Remove")) remove_index = (int)i;
+        ImGui::PopID();
+    }
+    if (remove_index >= 0) s_chain_draft.erase(s_chain_draft.begin() + remove_index);
+
+    int next_backend = -1;
+    if (s_chain_draft.size() < 2) {
+        for (int backend = 0; backend < 3; ++backend) {
+            if (backend != g_app.backend && std::find(s_chain_draft.begin(), s_chain_draft.end(), backend) == s_chain_draft.end()) {
+                next_backend = backend;
+                break;
+            }
+        }
+    }
+    ImGui::BeginDisabled(next_backend < 0);
+    if (ImGui::Button("+ Add exit") && next_backend >= 0) s_chain_draft.push_back(next_backend);
+    ImGui::EndDisabled();
+    ImGui::Spacing();
+    ImGui::TextWrapped("Route: %s", chain_route_text(g_app.backend, s_chain_draft).c_str());
+    std::vector<int> complete_route = {g_app.backend};
+    complete_route.insert(complete_route.end(), s_chain_draft.begin(), s_chain_draft.end());
+    std::vector<int> unique = complete_route;
+    std::sort(unique.begin(), unique.end());
+    const bool valid = std::all_of(s_chain_draft.begin(), s_chain_draft.end(), [](int backend) {
+        return backend >= 0 && backend < 3;
+    }) && std::adjacent_find(unique.begin(), unique.end()) == unique.end();
+    if (!valid) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+                           "Remove duplicate exits, including any backend already used as the carrier.");
+    }
+    ImGui::Spacing();
+    ImGui::BeginDisabled(!valid);
+    if (ImGui::Button("Apply")) {
+        g_app.chain_count = (int)s_chain_draft.size();
+        for (size_t i = 0; i < s_chain_draft.size(); ++i) g_app.chain_exits[i] = s_chain_draft[i];
+        save_config();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    if (g_app.chain_count > 0 || !s_chain_draft.empty()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Remove chain")) {
+            g_app.chain_count = 0;
+            save_config();
+            ImGui::CloseCurrentPopup();
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+static void open_firefox_settings() {
+    s_firefox_settings_popup_open = true;
+    if (!g_app.firefox_job) {
+        firefox_submit("{\"op\":\"locations\",\"data_dir\":\"" + firefox_json_escape(data_dir().c_str()) + "\"}",
+                       "Loading Mozilla regions…");
+    }
+}
+
+static void render_firefox_settings() {
+    if (s_firefox_settings_popup_open) {
+        ImGui::OpenPopup("Firefox IP Protection settings");
+        s_firefox_settings_popup_open = false;
+    }
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(
+        std::max(320.0f, std::min(680.0f, viewport->Size.x - 24.0f)),
+        std::max(320.0f, std::min(620.0f, viewport->Size.y - 24.0f))), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Firefox IP Protection settings", nullptr)) return;
+    ImGui::BeginChild("##firefox_scroll",
+        ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8.0f),
+        ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.25f, 1.0f), "FIREFOX IP PROTECTION SETTINGS");
+    ImGui::Separator();
+    ImGui::TextWrapped("Firefox Accounts and Mozilla VPN credentials are stored by the native provider. Passwords and codes below are never saved in the FCAE configuration file.");
+    const std::string root = firefox_json_escape(data_dir().c_str());
+    ImGui::InputText("Account ID", g_app.firefox_account_id, sizeof(g_app.firefox_account_id));
+    ImGui::InputText("Email", g_app.firefox_email, sizeof(g_app.firefox_email));
+    ImGui::InputText("Password / new password", g_app.firefox_password, sizeof(g_app.firefox_password), ImGuiInputTextFlags_Password);
+    if (!g_app.firefox_job && ImGui::Button("Sign in")) {
+        std::string request = "{\"op\":\"login\",\"data_dir\":\"" + root
+            + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email)
+            + "\",\"password\":\"" + firefox_json_escape(g_app.firefox_password) + "\"";
+        if (g_app.firefox_code[0]) request += ",\"unblock_code\":\"" + firefox_json_escape(g_app.firefox_code) + "\"";
+        request += "}";
+        firefox_submit(request, "Signing in to Firefox Accounts…");
+    }
+    if (!g_app.firefox_job) {
+        ImGui::SameLine();
+        if (ImGui::Button("Send unblock code")) {
+            firefox_submit("{\"op\":\"unblock\",\"data_dir\":\"" + root + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email) + "\"}", "Sending unblock code…");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Forgot password")) {
+            firefox_submit("{\"op\":\"forgot\",\"data_dir\":\"" + root + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email) + "\"}", "Requesting password reset…");
+        }
+    }
+    ImGui::InputText("Verification / reset / unblock code", g_app.firefox_code, sizeof(g_app.firefox_code));
+    if (g_app.firefox_pending_id[0]) {
+        ImGui::Text("Verification required: %s", g_app.firefox_totp ? "authenticator (TOTP)" : "email");
+        if (!g_app.firefox_job && ImGui::Button("Verify")) {
+            const char* operation = g_app.firefox_totp ? "verify_totp" : "verify_email";
+            firefox_submit(std::string("{\"op\":\"") + operation + "\",\"data_dir\":\"" + root
+                + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id)
+                + "\",\"code\":\"" + firefox_json_escape(g_app.firefox_code) + "\"}", "Verifying Firefox Account…");
+        }
+        if (!g_app.firefox_job) {
+            ImGui::SameLine();
+            if (ImGui::Button("Resend")) {
+                firefox_submit("{\"op\":\"resend\",\"data_dir\":\"" + root + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"}", "Resending verification code…");
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel verification")) {
+                firefox_submit("{\"op\":\"cancel\",\"data_dir\":\"" + root + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"}", "Cancelling verification…");
+            }
+        }
+    }
+    if (!g_app.firefox_job && ImGui::Button("Reset password with code")) {
+        firefox_submit("{\"op\":\"reset\",\"data_dir\":\"" + root + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email)
+            + "\",\"code\":\"" + firefox_json_escape(g_app.firefox_code) + "\",\"password\":\"" + firefox_json_escape(g_app.firefox_password)
+            + "\",\"account_id\":\"" + firefox_json_escape(g_app.firefox_account_id) + "\"}", "Resetting Firefox Account password…");
+    }
+    if (!g_app.firefox_job && g_app.firefox_account_id[0] && ImGui::Button("Remove saved account")) {
+        g_app.firefox_remove_in_flight = true;
+        firefox_submit("{\"op\":\"remove\",\"data_dir\":\"" + root + "\",\"account_id\":\"" + firefox_json_escape(g_app.firefox_account_id) + "\"}", "Removing Firefox Account…");
+    }
+    if (g_app.firefox_captcha_id) {
+        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.3f, 1.0f), "CAPTCHA required");
+        ImGui::InputText("CAPTCHA answer", g_app.firefox_captcha_answer, sizeof(g_app.firefox_captcha_answer));
+        if (ImGui::Button("Submit CAPTCHA answer")) {
+            if (fcae_firefox_captcha_answer(g_app.firefox_captcha_id, g_app.firefox_captcha_answer)) {
+                g_app.firefox_captcha_answer[0] = 0;
+                snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
+                         "CAPTCHA answer submitted; continuing Firefox Account sign-in");
+            } else {
+                snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
+                         "CAPTCHA answer is empty, expired, or already submitted");
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Open CAPTCHA image")) {
+            g_app.firefox_captcha_opened = g_app.firefox_captcha_id;
+            if (!firefox_open_captcha(g_app.firefox_captcha_id)) {
+                snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Could not open the CAPTCHA image");
+            }
+        }
+    }
+    if (g_app.firefox_job) ImGui::TextDisabled("Account operation in progress…");
+    if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    firefox_location_combo();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(g_app.firefox_job != 0);
+    if (ImGui::Button("Refresh regions")) {
+        firefox_submit("{\"op\":\"locations\",\"data_dir\":\"" + root + "\"}",
+                       "Loading Mozilla regions…");
+    }
+    ImGui::EndDisabled();
+    ImGui::InputTextWithHint("Server override", "Optional proxy host[:port]", g_app.firefox_server, sizeof(g_app.firefox_server));
+    static const char* const firefox_transports[] = {"Auto (H2 with H1 fallback)", "HTTP/2", "HTTP/1.1"};
+    ImGui::Combo("Firefox transport", &g_app.firefox_transport, firefox_transports, 3);
+    ImGui::TextDisabled("UDP uses a separate MASQUE CONNECT-UDP session over HTTP/2.");
+    ImGui::EndChild();
+    if (ImGui::Button("Save connection settings")) {
+        save_config();
+        g_app.firefox_password[0] = 0;
+        g_app.firefox_code[0] = 0;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+        g_app.firefox_password[0] = 0;
+        g_app.firefox_code[0] = 0;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }
 
 void render_ui() {
@@ -3006,39 +3316,26 @@ void render_ui() {
             ImGui::RadioButton("TUN",   &g_app.mode, 1);
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.75f, 1.0f), "CHAIN");
-            ImGui::TextWrapped("Ordered carrier-to-exit route; each additional hop uses the preceding hop's local listener.");
-            static const char* const chain_backends[] = {"Aether", "Psiphon", "Firefox"};
+            ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.75f, 1.0f), "PROTOCOL / CHAIN");
             const int carrier = (g_app.backend >= 0 && g_app.backend <= 2) ? g_app.backend : 0;
-            ImGui::Text("Carrier: %s", chain_backends[carrier]);
-            ImGui::SliderInt("Additional exits", &g_app.chain_count, 0, 2);
-            bool chain_valid = true;
-            int chain_seen[3] = {carrier, -1, -1};
-            std::string chain_route = chain_backends[carrier];
-            for (int i = 0; i < g_app.chain_count; ++i) {
-                char label[64];
-                snprintf(label, sizeof(label), "Exit %d##chain_exit_%d", i + 1, i);
-                ImGui::Combo(label, &g_app.chain_exits[i], chain_backends, 3);
-                const int exit = g_app.chain_exits[i];
-                for (int previous = 0; previous < i + 1; ++previous) {
-                    if (chain_seen[previous] == exit) chain_valid = false;
-                }
-                if (i + 1 < 3) chain_seen[i + 1] = exit;
-                if (exit >= 0 && exit <= 2) {
-                    chain_route += "  ->  ";
-                    chain_route += chain_backends[exit];
-                } else {
-                    chain_valid = false;
-                }
+            const int chain_count = std::max(0, std::min(g_app.chain_count, 2));
+            std::vector<int> chain_exits(g_app.chain_exits, g_app.chain_exits + chain_count);
+            ImGui::TextWrapped("Route: %s", chain_route_text(carrier, chain_exits).c_str());
+            std::vector<int> current_route = {carrier};
+            current_route.insert(current_route.end(), chain_exits.begin(), chain_exits.end());
+            std::sort(current_route.begin(), current_route.end());
+            const bool current_chain_valid = std::all_of(chain_exits.begin(), chain_exits.end(), [](int backend) {
+                return backend >= 0 && backend < 3;
+            }) && std::adjacent_find(current_route.begin(), current_route.end()) == current_route.end();
+            if (current_chain_valid) {
+                ImGui::TextDisabled("Ordered carrier-to-exit route; public proxy ports belong to the final exit.");
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+                                   "Invalid route: edit the chain and remove duplicate or unknown backends.");
             }
-            ImGui::Text("Route: %s", chain_route.c_str());
-            if (!chain_valid) {
-                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f),
-                                   "Each backend may appear only once; remove the duplicate or carrier loop.");
-            } else if (g_app.chain_count > 0) {
-                ImGui::TextDisabled("Public proxy ports belong to the final exit; internal hops use private listeners.");
-            }
-            if (ImGui::Button("Clear chain")) g_app.chain_count = 0;
+            if (ImGui::Button(chain_count == 0 ? "Add chain" : "Edit chain")) open_chain_editor();
+            if (!narrow) ImGui::SameLine();
+            if (ImGui::Button("Firefox IP Protection settings")) open_firefox_settings();
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Upstream Proxy");
             ImGui::PushItemWidth(-FLT_MIN);
@@ -3314,95 +3611,6 @@ void render_ui() {
             ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Firefox")) {
-            ImGui::BeginChild("##firefox_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
-            ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.25f, 1.0f), "FIREFOX IP PROTECTION SETTINGS");
-            ImGui::Separator();
-            ImGui::TextWrapped("Firefox Accounts and Mozilla VPN credentials are stored by the native provider. Passwords and codes below are never saved in the FCAE configuration file.");
-            const std::string root = firefox_json_escape(data_dir().c_str());
-            ImGui::InputText("Account ID", g_app.firefox_account_id, sizeof(g_app.firefox_account_id));
-            ImGui::InputText("Email", g_app.firefox_email, sizeof(g_app.firefox_email));
-            ImGui::InputText("Password / new password", g_app.firefox_password, sizeof(g_app.firefox_password), ImGuiInputTextFlags_Password);
-            if (!g_app.firefox_job && ImGui::Button("Sign in")) {
-                std::string request = "{\"op\":\"login\",\"data_dir\":\"" + root
-                    + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email)
-                    + "\",\"password\":\"" + firefox_json_escape(g_app.firefox_password) + "\"";
-                if (g_app.firefox_code[0]) request += ",\"unblock_code\":\"" + firefox_json_escape(g_app.firefox_code) + "\"";
-                request += "}";
-                firefox_submit(request, "Signing in to Firefox Accounts…");
-            }
-            if (!g_app.firefox_job) {
-                ImGui::SameLine();
-                if (ImGui::Button("Send unblock code")) {
-                    firefox_submit("{\"op\":\"unblock\",\"data_dir\":\"" + root + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email) + "\"}", "Sending unblock code…");
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Forgot password")) {
-                    firefox_submit("{\"op\":\"forgot\",\"data_dir\":\"" + root + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email) + "\"}", "Requesting password reset…");
-                }
-            }
-            ImGui::InputText("Verification / reset / unblock code", g_app.firefox_code, sizeof(g_app.firefox_code));
-            if (g_app.firefox_pending_id[0]) {
-                ImGui::Text("Verification required: %s", g_app.firefox_totp ? "authenticator (TOTP)" : "email");
-                if (!g_app.firefox_job && ImGui::Button("Verify")) {
-                    const char* operation = g_app.firefox_totp ? "verify_totp" : "verify_email";
-                    firefox_submit(std::string("{\"op\":\"") + operation + "\",\"data_dir\":\"" + root
-                        + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id)
-                        + "\",\"code\":\"" + firefox_json_escape(g_app.firefox_code) + "\"}", "Verifying Firefox Account…");
-                }
-                if (!g_app.firefox_job) {
-                    ImGui::SameLine();
-                    if (ImGui::Button("Resend")) {
-                        firefox_submit("{\"op\":\"resend\",\"data_dir\":\"" + root + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"}", "Resending verification code…");
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Cancel verification")) {
-                        firefox_submit("{\"op\":\"cancel\",\"data_dir\":\"" + root + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"}", "Cancelling verification…");
-                    }
-                }
-            }
-            if (!g_app.firefox_job && ImGui::Button("Reset password with code")) {
-                firefox_submit("{\"op\":\"reset\",\"data_dir\":\"" + root + "\",\"email\":\"" + firefox_json_escape(g_app.firefox_email)
-                    + "\",\"code\":\"" + firefox_json_escape(g_app.firefox_code) + "\",\"password\":\"" + firefox_json_escape(g_app.firefox_password)
-                    + "\",\"account_id\":\"" + firefox_json_escape(g_app.firefox_account_id) + "\"}", "Resetting Firefox Account password…");
-            }
-            if (!g_app.firefox_job && g_app.firefox_account_id[0] && ImGui::Button("Remove saved account")) {
-                g_app.firefox_remove_in_flight = true;
-                firefox_submit("{\"op\":\"remove\",\"data_dir\":\"" + root + "\",\"account_id\":\"" + firefox_json_escape(g_app.firefox_account_id) + "\"}", "Removing Firefox Account…");
-            }
-            if (g_app.firefox_captcha_id) {
-                ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.3f, 1.0f), "CAPTCHA required");
-                ImGui::InputText("CAPTCHA answer", g_app.firefox_captcha_answer, sizeof(g_app.firefox_captcha_answer));
-                if (ImGui::Button("Submit CAPTCHA answer")) {
-                    if (fcae_firefox_captcha_answer(g_app.firefox_captcha_id, g_app.firefox_captcha_answer)) {
-                        g_app.firefox_captcha_answer[0] = 0;
-                        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
-                                 "CAPTCHA answer submitted; continuing Firefox Account sign-in");
-                    } else {
-                        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
-                                 "CAPTCHA answer is empty, expired, or already submitted");
-                    }
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Open CAPTCHA image")) {
-                    g_app.firefox_captcha_opened = g_app.firefox_captcha_id;
-                    if (!firefox_open_captcha(g_app.firefox_captcha_id)) {
-                        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Could not open the CAPTCHA image");
-                    }
-                }
-            }
-            if (g_app.firefox_job) ImGui::TextDisabled("Account operation in progress…");
-            if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
-            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::InputTextWithHint("Location", "Auto, country/city code or name", g_app.firefox_location, sizeof(g_app.firefox_location));
-            ImGui::InputTextWithHint("Server override", "Optional proxy host[:port]", g_app.firefox_server, sizeof(g_app.firefox_server));
-            static const char* const firefox_transports[] = {"Auto (H2 with H1 fallback)", "HTTP/2", "HTTP/1.1"};
-            ImGui::Combo("Firefox transport", &g_app.firefox_transport, firefox_transports, 3);
-            ImGui::TextDisabled("UDP uses a separate MASQUE CONNECT-UDP session over HTTP/2.");
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-
         if (ImGui::BeginTabItem("Zero Trust")) {
             ImGui::BeginChild("##zt_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
@@ -3663,6 +3871,9 @@ void render_ui() {
     }
 
     ImGui::EndChild();
+
+    render_chain_editor();
+    render_firefox_settings();
 
     ImGui::PopStyleVar(2);
     ImGui::End();

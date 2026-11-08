@@ -298,6 +298,14 @@
                 android:orientation="vertical"
                 android:visibility="gone">
 
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnFirefoxSettings"
+                style="@style/Widget.FCAEVPN.DialogActionButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Firefox IP Protection settings" />
+
             <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/switchAutoUpdate"
                 android:layout_width="match_parent"
@@ -364,12 +372,52 @@
                 android:background="#FF1E1E2C"
                 android:popupBackground="#FF1E1E2C" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnFirefoxSettings"
-                android:layout_width="match_parent"
+            <TextView
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:text="Firefox settings" />
+                android:text="Route"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/textChainRoute"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Aether"
+                android:textColor="#FFE0E4EE"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/textProtocolHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:textColor="#FFB0B8C8"
+                android:textSize="12sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnHomeChainSettings"
+                style="@style/Widget.FCAEVPN.DialogActionButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="Add / edit chain" />
+
+            <TextView
+                android:id="@+id/peerText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/home_details_card"
+                android:fontFamily="monospace"
+                android:padding="12dp"
+                android:textColor="#FFB0B8C8"
+                android:textIsSelectable="true"
+                android:textSize="12sp"
+                android:visibility="gone" />
 
             <TextView
                 android:layout_width="match_parent"
@@ -949,51 +997,6 @@
                 android:layout_marginTop="4dp"
                 android:background="#FF1E1E2C"
                 android:popupBackground="#FF1E1E2C" />
-
-            </LinearLayout>
-            <LinearLayout
-                android:id="@+id/homeSectionChain"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical">
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:id="@+id/labelChain"
-                android:text="Chain"
-                android:textColor="#FF9AA3B5"
-                android:textSize="13sp" />
-
-            <TextView
-                android:id="@+id/textChainRoute"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="Aether"
-                android:textColor="#FFE0E4EE"
-                android:textSize="15sp"
-                android:textStyle="bold" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnHomeChainSettings"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="Edit ordered chain" />
-
-            <TextView
-                android:id="@+id/peerText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:background="@drawable/home_details_card"
-                android:fontFamily="monospace"
-                android:padding="12dp"
-                android:textColor="#FFB0B8C8"
-                android:textIsSelectable="true"
-                android:textSize="12sp"
-                android:visibility="gone" />
 
             </LinearLayout>
             <LinearLayout

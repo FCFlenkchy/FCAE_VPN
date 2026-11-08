@@ -74,6 +74,9 @@ class MainActivity : AppCompatActivity() {
     private var connectionInfoDialog: androidx.appcompat.app.AlertDialog? = null
     private var firefoxStatusView: TextView? = null
     private var firefoxAccountView: android.widget.EditText? = null
+    private var firefoxRegionSpinner: Spinner? = null
+    private var firefoxRegionAdapter: ArrayAdapter<String>? = null
+    private var firefoxRegionChoices: List<Pair<String, String>> = listOf("" to "Automatic (recommended)")
     private var firefoxJob = 0L
     private var firefoxOperation = ""
     private var firefoxPendingId = ""
@@ -1360,7 +1363,6 @@ class MainActivity : AppCompatActivity() {
         val homeSections = listOf<android.view.View>(
             findViewById(R.id.homeSectionStatus),
             findViewById(R.id.homeSectionProtocol),
-            findViewById(R.id.homeSectionChain),
             findViewById(R.id.homeSectionSponsor),
         )
 
@@ -2368,8 +2370,24 @@ class MainActivity : AppCompatActivity() {
     private fun updateChainRouteText() {
         if (!::spinnerProtocol.isInitialized) return
         val names = listOf("Aether", "Psiphon", "Firefox")
-        findViewById<TextView>(R.id.textChainRoute).text = routeBackends().joinToString("  ->  ") {
+        val chain = selectedChain()
+        val route = routeBackends()
+        findViewById<TextView>(R.id.textChainRoute).text = route.joinToString("  ->  ") {
             names.getOrElse(it) { "Unknown" }
+        }
+        findViewById<MaterialButton>(R.id.btnHomeChainSettings).text =
+            if (chain.isEmpty()) "Add chain" else "Edit chain"
+        val routeInvalid = route.any { it !in 0..2 } || route.size != route.distinct().size
+        findViewById<TextView>(R.id.textProtocolHint).apply {
+            text = when {
+                routeInvalid -> "Invalid route: edit the chain and remove duplicate or unknown backends."
+                chain.isNotEmpty() -> "Ordered exits run left to right; public proxy ports belong to the final exit."
+                isFirefoxProtocol() -> "Firefox is the carrier. Add a different backend only if you need another exit."
+                isPsiphonProtocol() -> "Psiphon is the carrier. Add a different backend only if you need another exit."
+                isTorOnly() -> "Tor-only uses the Aether carrier. Chain exits remain optional."
+                else -> "Aether is the carrier. Add Psiphon or Firefox as an ordered exit."
+            }
+            setTextColor(Color.parseColor(if (routeInvalid) "#FFFF8C80" else "#FFB0B8C8"))
         }
     }
 
@@ -2378,69 +2396,125 @@ class MainActivity : AppCompatActivity() {
 
     private fun showChainSettings() {
         val names = listOf("Aether", "Psiphon", "Firefox")
-        val choices = listOf("None") + names
-        val chain = selectedChain()
+        val draft = selectedChain().map { it.coerceIn(0, 2) }.toMutableList()
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(12), dp(20), dp(8))
         }
         box.addView(TextView(this).apply {
-            text = "CHAIN SETTINGS\nAdditional exits are started from left to right. Public proxy ports belong to the final exit."
+            text = "Build an ordered route from the carrier shown on Home. Each backend may appear only once; public proxy ports belong to the final exit."
             setTextColor(Color.parseColor("#FFE0E4EE"))
+            textSize = 14f
         })
-        val first = Spinner(this)
-        val second = Spinner(this)
-        for ((index, spinner) in listOf(first, second).withIndex()) {
-            box.addView(TextView(this).apply {
-                text = "Additional exit ${index + 1}"
-                setTextColor(Color.parseColor("#FF9AA3B5"))
-                setPadding(0, dp(14), 0, 0)
-            })
-            spinner.adapter = ArrayAdapter(this, R.layout.spinner_dark_item, choices)
-            val selected = chain.getOrNull(index)?.plus(1) ?: 0
-            spinner.setSelection(if (selected in choices.indices) selected else 0)
-            box.addView(spinner)
-        }
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(rows)
         val route = TextView(this).apply {
             setTextColor(Color.parseColor("#FF60A5FA"))
             setPadding(0, dp(16), 0, 0)
+            textSize = 15f
         }
-        fun routeText(): String {
-            val selected = listOf(first.selectedItemPosition - 1, second.selectedItemPosition - 1).filter { it >= 0 }
-            return "Route: " + (listOf(backendFromSelection()) + selected).joinToString("  ->  ") { names.getOrElse(it) { "Unknown" } }
+        val validation = TextView(this).apply {
+            setTextColor(Color.parseColor("#FFFF8C80"))
+            setPadding(0, dp(8), 0, 0)
+            textSize = 13f
         }
-        val listener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
-                route.text = routeText()
+        lateinit var addButton: MaterialButton
+
+        fun routeText(): String = "Route: " +
+            (listOf(backendFromSelection()) + draft).joinToString("  ->  ") {
+                names.getOrElse(it) { "Unknown" }
             }
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+
+        fun updatePreview() {
+            val completeRoute = listOf(backendFromSelection()) + draft
+            val valid = draft.all { it in 0..2 } && completeRoute.size == completeRoute.distinct().size
+            route.text = routeText()
+            validation.text = if (valid) "" else "Remove duplicate exits, including any backend already used as the carrier."
+            addButton.isEnabled = draft.size < 2 && (0..2).any { it != backendFromSelection() && it !in draft }
         }
-        first.onItemSelectedListener = listener
-        second.onItemSelectedListener = listener
-        route.text = routeText()
+
+        fun renderRows() {
+            rows.removeAllViews()
+            draft.forEachIndexed { index, backend ->
+                rows.addView(TextView(this).apply {
+                    text = "Exit ${index + 1}"
+                    setTextColor(Color.parseColor("#FF9AA3B5"))
+                    setPadding(0, dp(14), 0, dp(3))
+                })
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                val spinner = Spinner(this).apply {
+                    adapter = ArrayAdapter(this@MainActivity, R.layout.spinner_dark_item, names).apply {
+                        setDropDownViewResource(R.layout.spinner_dark_item)
+                    }
+                    setSelection(backend.coerceIn(0, 2))
+                }
+                spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                        if (index < draft.size) draft[index] = position
+                        updatePreview()
+                    }
+                    override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+                }
+                row.addView(spinner, LinearLayout.LayoutParams(0, dp(52), 1f))
+                addDialogButton(row, "Remove") {
+                    if (index < draft.size) {
+                        draft.removeAt(index)
+                        renderRows()
+                        updatePreview()
+                    }
+                }
+                rows.addView(row)
+            }
+            updatePreview()
+        }
+
+        addButton = addDialogButton(box, "+ Add exit") {
+            val next = (0..2).firstOrNull { it != backendFromSelection() && it !in draft }
+            if (next != null && draft.size < 2) {
+                draft.add(next)
+                renderRows()
+            }
+        }
         box.addView(route)
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("CHAIN SETTINGS")
+        box.addView(validation)
+        renderRows()
+
+        val builder = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Protocol chain")
             .setView(ScrollView(this).apply { addView(box) })
             .setNegativeButton("Cancel", null)
-            .setPositiveButton("Save", null)
-            .create()
+            .setPositiveButton("Apply", null)
+        if (selectedChain().isNotEmpty()) builder.setNeutralButton("Remove chain", null)
+        val dialog = builder.create()
+
+        fun persistChain() {
+            prefs.edit()
+                .putInt("chainCount", draft.size)
+                .putInt("chainExit0", draft.getOrElse(0) { 1 })
+                .putInt("chainExit1", draft.getOrElse(1) { 2 })
+                .apply()
+            saveSettings()
+            updateChainRouteText()
+        }
+
         dialog.setOnShowListener {
+            styleDialogButtons(dialog)
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val selected = listOf(first.selectedItemPosition - 1, second.selectedItemPosition - 1).filter { it >= 0 }
-                val routeBackends = listOf(backendFromSelection()) + selected
-                if (selected.any { it !in 0..2 } || routeBackends.size != routeBackends.distinct().size) {
-                    Toast.makeText(this, "Each backend may appear only once; remove the duplicate or carrier loop.", Toast.LENGTH_LONG).show()
+                if (validation.text.isNotEmpty()) {
+                    Toast.makeText(this, validation.text, Toast.LENGTH_LONG).show()
                     return@setOnClickListener
                 }
-                prefs.edit()
-                    .putInt("chainCount", selected.size)
-                    .putInt("chainExit0", selected.getOrElse(0) { 1 })
-                    .putInt("chainExit1", selected.getOrElse(1) { 2 })
-                    .apply()
-                saveSettings()
-                updateChainRouteText()
+                persistChain()
                 Toast.makeText(this, routeText(), Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
+            }
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener {
+                draft.clear()
+                persistChain()
+                Toast.makeText(this, "Chain removed", Toast.LENGTH_SHORT).show()
                 dialog.dismiss()
             }
         }
@@ -2470,10 +2544,53 @@ class MainActivity : AppCompatActivity() {
     private fun addDialogButton(box: LinearLayout, label: String, action: () -> Unit): MaterialButton {
         val button = MaterialButton(this).apply {
             text = label
+            setAllCaps(false)
+            setTextColor(Color.CYAN)
+            backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
             setOnClickListener { action() }
         }
         box.addView(button)
         return button
+    }
+
+    private fun styleDialogButtons(dialog: androidx.appcompat.app.AlertDialog) {
+        for (which in intArrayOf(
+            androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE,
+            androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE,
+            androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL,
+        )) {
+            dialog.getButton(which)?.setTextColor(Color.CYAN)
+        }
+    }
+
+    private fun selectedFirefoxRegion(): String {
+        val position = firefoxRegionSpinner?.selectedItemPosition ?: -1
+        return firefoxRegionChoices.getOrNull(position)?.first
+            ?: prefs.getString("firefoxLocation", "").orEmpty()
+    }
+
+    private fun updateFirefoxRegionChoices(options: List<Pair<String, String>>, preferred: String? = null) {
+        val selected = preferred ?: firefoxRegionSpinner?.let {
+            firefoxRegionChoices.getOrNull(it.selectedItemPosition)?.first
+        } ?: prefs.getString("firefoxLocation", "").orEmpty()
+        val merged = LinkedHashMap<String, String>()
+        merged[""] = "Automatic (recommended)"
+        for ((value, label) in options) {
+            if (value.isNotBlank() && label.isNotBlank() && !merged.containsKey(value)) {
+                merged[value] = label
+            }
+        }
+        if (selected.isNotBlank() && !merged.containsKey(selected)) {
+            merged[selected] = "$selected (saved location)"
+        }
+        firefoxRegionChoices = merged.map { it.key to it.value }
+        firefoxRegionAdapter?.apply {
+            clear()
+            addAll(firefoxRegionChoices.map { it.second })
+            notifyDataSetChanged()
+        }
+        val selectedPosition = firefoxRegionChoices.indexOfFirst { it.first == selected }.coerceAtLeast(0)
+        firefoxRegionSpinner?.setSelection(selectedPosition)
     }
 
     private fun showFirefoxSettings() {
@@ -2546,7 +2663,19 @@ class MainActivity : AppCompatActivity() {
             submit(base("remove").put("account_id", account.text.toString().trim()), "Removing Firefox Account…")
         }
 
-        val location = addDialogInput(box, "Location (auto, country/city code or name)", prefs.getString("firefoxLocation", "").orEmpty())
+        box.addView(TextView(this).apply {
+            text = "Region (Mozilla country/city list)"
+            setTextColor(Color.parseColor("#FF9AA3B5"))
+            setPadding(0, dp(12), 0, dp(3))
+        })
+        val location = Spinner(this)
+        location.adapter = ArrayAdapter<String>(this, R.layout.spinner_dark_item, mutableListOf()).apply {
+            setDropDownViewResource(R.layout.spinner_dark_item)
+            firefoxRegionAdapter = this
+        }
+        firefoxRegionSpinner = location
+        updateFirefoxRegionChoices(emptyList(), prefs.getString("firefoxLocation", "").orEmpty())
+        box.addView(location)
         val server = addDialogInput(box, "Server override (optional host[:port])", prefs.getString("firefoxServer", "").orEmpty())
         box.addView(TextView(this).apply {
             text = "Firefox transport"
@@ -2574,11 +2703,12 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Save connection settings", null)
             .create()
         dialog.setOnShowListener {
+            styleDialogButtons(dialog)
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 prefs.edit()
                     .putString("firefoxAccountId", account.text.toString().trim())
                     .putString("firefoxEmail", emailValue())
-                    .putString("firefoxLocation", location.text.toString().trim())
+                    .putString("firefoxLocation", selectedFirefoxRegion())
                     .putString("firefoxServer", server.text.toString().trim())
                     .putString("firefoxTransport", listOf("auto", "h2", "h1")[transport.selectedItemPosition.coerceIn(0, 2)])
                     .apply()
@@ -2591,10 +2721,13 @@ class MainActivity : AppCompatActivity() {
         dialog.setOnDismissListener {
             firefoxStatusView = null
             firefoxAccountView = null
+            firefoxRegionSpinner = null
+            firefoxRegionAdapter = null
             password.setText("")
             code.setText("")
         }
         dialog.show()
+        if (firefoxJob == 0L) submit(base("locations"), "Loading Mozilla regions…")
     }
 
     private fun firefoxSubmit(request: org.json.JSONObject, message: String) {
@@ -2686,6 +2819,7 @@ class MainActivity : AppCompatActivity() {
             .setCancelable(false)
             .create()
         dialog.setOnShowListener {
+            styleDialogButtons(dialog)
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val value = answer.text.toString().trim()
                 if (value.isEmpty()) {
@@ -2758,7 +2892,20 @@ class MainActivity : AppCompatActivity() {
                 firefoxSetStatus("Firefox Account is ready for IP Protection.")
             }
             else -> {
-                if (firefoxRemoveInFlight) {
+                if (firefoxOperation == "locations") {
+                    val locations = payload.optJSONArray("locations")
+                    val options = mutableListOf<Pair<String, String>>()
+                    if (locations != null) {
+                        for (index in 0 until locations.length()) {
+                            val location = locations.optJSONObject(index) ?: continue
+                            val value = location.optString("value").trim()
+                            val label = location.optString("label").trim()
+                            if (value.isNotEmpty() && label.isNotEmpty()) options.add(value to label)
+                        }
+                    }
+                    updateFirefoxRegionChoices(options)
+                    firefoxSetStatus(if (options.isEmpty()) "No Mozilla regions are available; the saved location is preserved." else "Mozilla region list updated.")
+                } else if (firefoxRemoveInFlight) {
                     prefs.edit().remove("firefoxAccountId").apply()
                     firefoxAccountView?.setText("")
                     firefoxRemoveInFlight = false
