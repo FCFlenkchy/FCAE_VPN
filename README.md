@@ -18,17 +18,9 @@ A censorship circumvention client for Windows, Linux, macOS, and Android, with T
 - **Firefox IP Protection** — Rust-based support for Mozilla's Firefox IP Protection service.
 - **Psiphon** — Psiphon tunnel core.
 
-## Features
+## Inline Routing Rules (Aether only)
 
-- MASQUE (HTTP/3 QUIC / HTTP/2), WireGuard, WARP-in-WARP (gool) and WARP-in-MASQUE support
-- Traffic obfuscation with configurable profiles
-- Automatic reconnection with quick-reconnect
-- Local SOCKS5 and HTTP proxies
-- Native GUI on all platforms (ImGui + DirectX11 / OpenGL on desktop, Kotlin Material UI on Android)
-
-## Inline Routing Rules
-
-You can define custom routing rules directly in the UI (Routes tab) without needing an external file. Rules use a simple format:
+Aether supports custom routing rules directly in the UI (Routes tab) without needing an external file. These rules apply only to Aether. Rules use a simple format:
 
 ```
 [direct]ip:190.9.2.4,192.33.45.6:400,example.com

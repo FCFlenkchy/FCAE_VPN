@@ -358,7 +358,10 @@ impl Supervisor {
                     Ok(Ok(())) => {
                         telemetry.set_state(FcaeState::Disconnected, "Disconnected".into())
                     }
-                    Ok(Err(e)) => telemetry.set_error(format!("{e}")),
+                    Ok(Err(e)) => {
+                        log::error!("[session] {e}");
+                        telemetry.set_error(format!("{e}"));
+                    }
                     Err(_) => telemetry.set_error("session thread panicked"),
                 }
             })
@@ -545,6 +548,23 @@ async fn run_session(
     if config.chain.is_empty() && config.psiphon.through_tunnel && config.backend != FcaeBackend::Psiphon {
         config.chain.push(ChainHop::new(FcaeBackend::Psiphon, config.protocol, config.obfuscation.h2_enabled));
     }
+    if config.is_tun() {
+        let exit = config.exit_backend();
+        let exit_protocol = config.chain.last().map(|hop| hop.protocol).unwrap_or(config.protocol);
+        let tor_exit = exit == FcaeBackend::Aether && (exit_protocol == FcaeProtocol::Tor
+            || (config.chain.is_empty() && matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain)));
+        let psiphon_socks_disabled = config.psiphon.config_json.as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|json| json.get("DisableLocalSocksProxy").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        let missing = if exit == FcaeBackend::Psiphon { psiphon_socks_disabled }
+            else { !tor_exit && config.socks_port == 0 };
+        if missing {
+            return Err(CoreError::InvalidConfig(format!(
+                "TUN mode requires SOCKS5; enable SOCKS5 for the {} exit proxy", backend_label(exit)
+            )));
+        }
+    }
     let mut attempt: u32 = 0;
 
     loop {
@@ -553,21 +573,8 @@ async fn run_session(
         }
         let mut carrier_config = config.clone();
         if !config.chain.is_empty() {
-            carrier_config.mode = FcaeMode::Proxy;
-            carrier_config.lan_sharing = false;
-            carrier_config.http_port = 0;
-            if config.backend == FcaeBackend::Psiphon {
-                // Android's carrier attaches to the AAR listener started by the
-                // foreground owner. Other Psiphon hops own their listener and
-                // can report the kernel-selected port after starting.
-                if !cfg!(target_os = "android") {
-                    carrier_config.psiphon.socks_port = 0;
-                }
-                carrier_config.psiphon.http_port = 0;
-            } else {
-                carrier_config.socks_port = 0;
-            }
-            make_internal_listeners_private(&mut carrier_config)?;
+            configure_internal_listeners(&mut carrier_config)?;
+            carrier_config.require_udp_proxy = config.chain.first().is_some_and(|hop| hop_needs_udp(&config, *hop));
         }
         let cx = BackendContext::new(carrier_config.clone(), sink.clone(), cancel.clone());
         cx.report(
@@ -639,6 +646,13 @@ async fn run_session(
                 };
                 endpoints.peer_ip = crate::backend::append_bypass(endpoints.peer_ip.as_deref(), &bypass);
             }
+        }
+
+        if config.is_tun() && endpoints.socks.is_none() {
+            stop_all(&mut handles, stop_timeout).await;
+            return Err(CoreError::StartFailed(
+                "TUN mode requires a SOCKS5 endpoint; enable SOCKS5 for the exit proxy".into(),
+            ));
         }
 
         let tun_start = {
@@ -837,6 +851,19 @@ async fn start_downstream(
         let exit = config.chain[hop - 1];
         let final_hop = hop == config.chain.len();
         let previous = handles[hop - 1].endpoints();
+        let (previous_backend, previous_protocol) = if hop == 1 {
+            (config.backend, config.protocol)
+        } else {
+            let prior = config.chain[hop - 2];
+            (prior.backend, prior.protocol)
+        };
+        let previous_name = if previous_backend == FcaeBackend::Aether
+            && (previous_protocol == FcaeProtocol::Tor
+                || (hop == 1 && matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain))) {
+            "Tor"
+        } else {
+            backend_label(previous_backend)
+        };
         let monitored = handles.to_vec();
         let started = tokio::select! {
             biased;
@@ -845,14 +872,17 @@ async fn start_downstream(
                 let detail = result.err().map(|error| format!(": {error}")).unwrap_or_default();
                 Err(CoreError::StartFailed(format!("chain hop {index} dropped while exit {exit:?} was connecting{detail}")))
             }
-            result = start_chain_hop(config, exit, final_hop, &previous, sink, cancel) => result,
+            result = start_chain_hop(config, exit, final_hop, config.chain.get(hop).is_some_and(|next| hop_needs_udp(config, *next)), &previous, previous_name, sink, cancel) => result,
         };
         match started {
             Ok(handle) => {
                 let next = handle.endpoints();
-                if next.socks.is_none() && (hop + 1 < target_len || config.is_tun()) {
+                if (final_hop && config.is_tun() || !final_hop) && next.socks.is_none() {
                     let _ = handle.stop(stop_timeout).await;
-                    return Err(CoreError::StartFailed(format!("chained {exit:?} exit has no required SOCKS endpoint")));
+                    let required = if final_hop { "TUN mode" } else { "the next chain hop" };
+                    return Err(CoreError::StartFailed(format!(
+                        "chained {exit:?} has no SOCKS5 endpoint; enable SOCKS5 for {required}"
+                    )));
                 }
                 *endpoints = Endpoints { peer_ip: endpoints.peer_ip.clone(), ..next };
                 handles.push(handle);
@@ -863,17 +893,29 @@ async fn start_downstream(
     Ok(())
 }
 
+fn chain_upstream(previous: &Endpoints, needs_udp: bool, source: &str) -> Result<crate::upstream::UpstreamProxy> {
+    let addr = previous.socks.ok_or_else(|| CoreError::InvalidConfig(format!(
+        "the next chain hop requires SOCKS5; enable {source} SOCKS5"
+    )))?;
+    if needs_udp && !previous.udp {
+        return Err(CoreError::InvalidConfig(format!(
+            "the next chain hop requires UDP; {source} SOCKS5 is not UDP-capable"
+        )));
+    }
+    Ok(crate::upstream::UpstreamProxy::loopback(addr))
+}
+
 async fn start_chain_hop(
     config: &SessionConfig,
     exit: ChainHop,
     final_hop: bool,
+    next_needs_udp: bool,
     previous: &Endpoints,
+    previous_name: &str,
     sink: &TelemetrySink,
     cancel: &CancelToken,
 ) -> Result<Arc<dyn BackendHandle>> {
     let backend = exit.backend;
-    let socks = previous.socks.ok_or_else(|| CoreError::StartFailed(format!("{backend:?} needs its upstream SOCKS listener")))?;
-    let url = format!("socks5://{socks}");
     let mut hop = config.clone();
     hop.backend = backend;
     hop.protocol = exit.protocol;
@@ -889,28 +931,18 @@ async fn start_chain_hop(
     hop.psiphon.through_tunnel = false;
     hop.mode = if final_hop { config.mode } else { FcaeMode::Proxy };
     hop.lan_sharing = final_hop && config.lan_sharing;
+    let upstream = chain_upstream(previous, hop.upstream_requires_udp(), previous_name)?;
+    if !final_hop {
+        configure_internal_listeners(&mut hop)?;
+        hop.require_udp_proxy = next_needs_udp;
+    }
+    let url = upstream.url();
     if backend == FcaeBackend::Psiphon {
         hop.upstream_proxy = None;
         let json = hop.psiphon.config_json.as_deref().unwrap_or("{}");
         hop.psiphon.config_json = Some(crate::config::inject_upstream_proxy_url(json, &url));
-        if !final_hop {
-            hop.psiphon.socks_port = 0;
-            hop.psiphon.http_port = 0;
-        }
     } else {
-        hop.upstream_proxy = Some(crate::upstream::UpstreamProxy::loopback(socks));
-        if !final_hop {
-            hop.socks_port = 0;
-            hop.http_port = 0;
-        }
-    }
-    if !final_hop {
-        make_internal_listeners_private(&mut hop)?;
-    }
-    if hop.upstream_requires_udp() && !previous.udp {
-        return Err(CoreError::InvalidConfig(format!(
-            "the {backend:?} hop needs UDP upstream, but the preceding backend exposes TCP only; choose its HTTP/2 transport or reorder the chain"
-        )));
+        hop.upstream_proxy = Some(upstream);
     }
     let budget = if hop.tor.is_enabled() { hop.tor_start_timeout() } else { hop.start_timeout() } + CHAIN_START_GRACE;
     let backend_impl = registry::resolve(backend)?;
@@ -919,27 +951,91 @@ async fn start_chain_hop(
     let handle = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Err(CoreError::StartFailed("chain cancelled".into())),
-        result = tokio::time::timeout(budget, backend_impl.start(cx)) => result
-            .map_err(|_| CoreError::StartFailed(format!("{backend:?} chain startup timed out")))??,
+        result = tokio::time::timeout(budget, backend_impl.start(cx)) => match result {
+            Ok(Ok(handle)) => handle,
+            Ok(Err(error)) => {
+                log::warn!("[session] {backend:?} could not start through {previous_name} SOCKS5: {error}");
+                return Err(error);
+            }
+            Err(_) => return Err(CoreError::StartFailed(format!("{backend:?} chain startup timed out via {url}"))),
+        },
     };
     log::info!("[session] chained {backend:?} via {url}");
     Ok(Arc::from(handle))
 }
 
-fn make_internal_listeners_private(config: &mut SessionConfig) -> Result<()> {
-    if config.backend != FcaeBackend::Aether || !config.tor.is_enabled() {
-        return Ok(());
+fn hop_needs_udp(config: &SessionConfig, hop: ChainHop) -> bool {
+    let mut target = config.clone();
+    target.backend = hop.backend;
+    target.protocol = hop.protocol;
+    target.obfuscation.h2_enabled = hop.h2_enabled;
+    if hop.backend == FcaeBackend::Aether {
+        if hop.protocol == FcaeProtocol::Tor { target.tor.mode = FcaeTorMode::Only; }
+        else if target.tor.mode == FcaeTorMode::Only { target.tor.mode = FcaeTorMode::Off; }
     }
-    // Aether's legacy Tor integration requires a numeric listen address and
-    // does not report back an ephemeral port. Keep this allocation scoped to
-    // that API; Firefox and Psiphon report their own port-zero listeners.
+    target.upstream_requires_udp()
+}
+
+fn allocate_internal_port(held: &mut Vec<std::net::TcpListener>) -> Result<u16> {
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .map_err(|error| CoreError::StartFailed(format!("cannot allocate an internal Tor listener: {error}")))?;
-    let port = listener.local_addr()
-        .map_err(|error| CoreError::StartFailed(format!("cannot inspect the internal Tor listener: {error}")))?.port();
-    drop(listener);
-    config.tor.bind = Some(format!("127.0.0.1:{port}"));
-    config.tor.http_port = 0;
+        .map_err(|e| CoreError::StartFailed(format!("cannot allocate an internal listener: {e}")))?;
+    let port = listener.local_addr().map(|a| a.port())
+        .map_err(|e| CoreError::StartFailed(format!("cannot inspect an internal listener: {e}")))?;
+    held.push(listener);
+    Ok(port)
+}
+
+fn configure_internal_listeners(config: &mut SessionConfig) -> Result<()> {
+    config.mode = FcaeMode::Proxy;
+    config.lan_sharing = false;
+    let has_tor = config.backend == FcaeBackend::Aether && config.tor.is_enabled();
+    let is_tor = has_tor && matches!(config.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain);
+    let (socks, http) = match &config.listener_policy {
+        Some(p) if is_tor => (p.tor_socks, p.tor_http),
+        Some(p) if config.backend == FcaeBackend::Firefox => (p.firefox_socks, p.firefox_http),
+        Some(p) if config.backend == FcaeBackend::Aether => (p.aether_socks, p.aether_http),
+        _ => (true, false),
+    };
+    if config.backend == FcaeBackend::Psiphon {
+        let disabled = config.psiphon.config_json.as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|json| json.get("DisableLocalSocksProxy").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        if disabled {
+            return Err(CoreError::InvalidConfig("the next chain hop requires SOCKS5; enable Psiphon SOCKS5".into()));
+        }
+    } else if !socks {
+        let name = if is_tor { "Tor" } else { backend_label(config.backend) };
+        return Err(CoreError::InvalidConfig(format!("the next chain hop requires SOCKS5; enable {name} SOCKS5")));
+    }
+    if has_tor && config.listener_policy.as_ref().is_some_and(|p| !p.tor_socks) {
+        return Err(CoreError::InvalidConfig("Tor currently requires SOCKS5; enable Tor SOCKS5".into()));
+    }
+    if config.tor.mode == FcaeTorMode::Chain && config.listener_policy.as_ref().is_some_and(|p| !p.aether_socks) {
+        return Err(CoreError::InvalidConfig("Tor through Aether requires Aether SOCKS5; enable Aether SOCKS5".into()));
+    }
+    config.internal_socks = socks;
+    config.internal_http = http;
+    let mut held = Vec::new();
+    if config.backend == FcaeBackend::Psiphon {
+        if !cfg!(target_os = "android") {
+            config.psiphon.socks_port = 0;
+            config.psiphon.http_port = 0;
+        }
+    } else {
+        config.socks_port = if config.backend == FcaeBackend::Aether && config.tor.mode != FcaeTorMode::Only {
+            allocate_internal_port(&mut held)?
+        } else { 0 };
+        config.http_port = if config.backend == FcaeBackend::Aether && !is_tor && http {
+            allocate_internal_port(&mut held)?
+        } else { 0 };
+    }
+    if has_tor {
+        let port = allocate_internal_port(&mut held)?;
+        config.tor.bind = Some(format!("127.0.0.1:{port}"));
+        let tor_http = config.listener_policy.as_ref().is_some_and(|p| p.tor_http);
+        config.tor.http_port = if tor_http { allocate_internal_port(&mut held)? } else { 0 };
+    }
     Ok(())
 }
 
@@ -1144,6 +1240,89 @@ mod tests {
             ChainHop::new(FcaeBackend::Firefox, cfg.protocol, cfg.obfuscation.h2_enabled),
         ];
         assert_eq!(route_name(&cfg), "Aether → Psiphon → Firefox");
+    }
+
+    #[test]
+    fn internal_firefox_requires_enabled_socks() {
+        let mut cfg = SessionConfig::default();
+        cfg.backend = FcaeBackend::Firefox;
+        cfg.listener_policy = Some(crate::config::ListenerPolicy {
+            aether_socks: true, aether_http: false,
+            firefox_socks: false, firefox_http: true,
+            tor_socks: true, tor_http: false,
+        });
+        assert!(configure_internal_listeners(&mut cfg).unwrap_err().to_string().contains("Firefox SOCKS5"));
+        cfg.listener_policy.as_mut().unwrap().firefox_socks = true;
+        configure_internal_listeners(&mut cfg).unwrap();
+        assert!(cfg.internal_socks);
+        assert!(cfg.internal_http);
+        assert!(!cfg.lan_sharing);
+    }
+
+    #[test]
+    fn internal_aether_does_not_force_disabled_socks() {
+        let mut cfg = SessionConfig::default();
+        cfg.listener_policy = Some(crate::config::ListenerPolicy {
+            aether_socks: false, aether_http: true,
+            firefox_socks: true, firefox_http: true,
+            tor_socks: true, tor_http: false,
+        });
+        assert!(configure_internal_listeners(&mut cfg).unwrap_err().to_string().contains("Aether SOCKS5"));
+    }
+
+    #[test]
+    fn chain_requires_socks_even_when_http_is_available() {
+        let mut endpoints = Endpoints {
+            socks: None, http: Some("127.0.0.1:8080".parse().unwrap()),
+            peer_ip: None, udp: false, psiphon_dns: false,
+        };
+        assert!(chain_upstream(&endpoints, false, "Firefox").unwrap_err().to_string().contains("Firefox SOCKS5"));
+        assert!(chain_upstream(&endpoints, true, "Firefox").is_err());
+        endpoints.socks = Some("127.0.0.1:1080".parse().unwrap());
+        assert_eq!(chain_upstream(&endpoints, false, "Firefox").unwrap().kind, crate::upstream::ProxyKind::Socks5);
+        assert!(chain_upstream(&endpoints, true, "Firefox").is_err());
+        endpoints.udp = true;
+        assert_eq!(chain_upstream(&endpoints, true, "Firefox").unwrap().kind, crate::upstream::ProxyKind::Socks5);
+    }
+
+    #[test]
+    fn tun_without_socks_fails_before_starting_the_data_plane() {
+        static STOPPED: AtomicBool = AtomicBool::new(false);
+        struct HttpOnlyHandle;
+        #[async_trait]
+        impl BackendHandle for HttpOnlyHandle {
+            fn endpoints(&self) -> Endpoints {
+                Endpoints { socks: None, http: Some("127.0.0.1:8080".parse().unwrap()),
+                    peer_ip: None, udp: false, psiphon_dns: false }
+            }
+            async fn wait(&self) -> Result<()> { std::future::pending().await }
+            async fn stop(&self, _: Duration) -> Result<()> { STOPPED.store(true, Ordering::SeqCst); Ok(()) }
+            fn counters(&self) -> Counters { Counters::default() }
+        }
+        struct HttpOnlyBackend;
+        #[async_trait]
+        impl Backend for HttpOnlyBackend {
+            fn id(&self) -> BackendId { BackendId::Aether }
+            fn capabilities(&self) -> Capabilities { FakeBackend.capabilities() }
+            async fn start(&self, _: BackendContext) -> Result<Box<dyn BackendHandle>> { Ok(Box::new(HttpOnlyHandle)) }
+        }
+        struct NoTun;
+        impl TunBridge for NoTun {
+            fn start(&self, _: &SessionConfig, _: &Endpoints) -> Result<()> { panic!("TUN must not start") }
+            fn stop(&self, _: Duration) {}
+            fn is_running(&self) -> bool { false }
+        }
+        STOPPED.store(false, Ordering::SeqCst);
+        let mut cfg = SessionConfig::default();
+        cfg.mode = FcaeMode::Tun;
+        let sink = TelemetrySink::new(Arc::new(TelemetryCell::new()));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let result = rt.block_on(run_session(Arc::new(HttpOnlyBackend), cfg, sink,
+            CancelToken::new(), Arc::new(NoTun), Duration::from_millis(10), false, 0,
+            Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(())), Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None))));
+        assert!(result.unwrap_err().to_string().contains("TUN mode requires a SOCKS5 endpoint"));
+        assert!(STOPPED.load(Ordering::SeqCst));
     }
 
     #[test]

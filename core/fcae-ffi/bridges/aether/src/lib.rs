@@ -101,11 +101,22 @@ impl Backend for AetherBackend {
                 tor_mode_label(cfg.tor.mode)
             )));
         }
+        if let Some(policy) = &cfg.listener_policy {
+            if cfg.tor.is_enabled() && !policy.tor_socks {
+                return Err(CoreError::InvalidConfig("Tor currently requires SOCKS5; enable Tor SOCKS5".into()));
+            }
+            if cfg.tor.mode == FcaeTorMode::Chain && !policy.aether_socks {
+                return Err(CoreError::InvalidConfig("Tor through Aether requires Aether SOCKS5; enable Aether SOCKS5".into()));
+            }
+        }
         // The engine always binds a SOCKS listener. Port 0 would hand it an
         // ephemeral port that nothing can name -- not even this bridge -- so
         // the readiness probe below could never succeed; reserve a loopback
         // port and let the engine bind that one.
         if cfg.tor.mode != FcaeTorMode::Only && cfg.socks_port == 0 {
+            if !cfg.internal_socks {
+                return Err(CoreError::InvalidConfig("Aether currently requires SOCKS5; enable Aether SOCKS5".into()));
+            }
             cfg.socks_port = free_loopback_port()?;
         }
 

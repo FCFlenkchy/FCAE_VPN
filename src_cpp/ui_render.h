@@ -63,8 +63,14 @@ struct AppState {
     uint16_t firefox_socks_port = kFirefoxDefaultSocksPort;
     uint16_t firefox_http_port  = kFirefoxDefaultHttpPort;
     bool socks_enabled   = true;
-    bool http_enabled    = true;
+    bool http_enabled    = false;
     bool tun_http_enabled = false;
+    bool firefox_socks_enabled = true;
+    bool firefox_http_enabled = false;
+    bool firefox_tun_http_enabled = false;
+    bool psiphon_socks_enabled = true;
+    bool psiphon_http_enabled = true;
+    bool tor_socks_enabled = true;
     bool tor_http_enabled = false;
     int tor_http_port = 1822;
     char force_peer[128] = {};
@@ -280,6 +286,12 @@ struct AppState {
         return final_listener_is_firefox() ? firefox_http_port : http_port;
     }
 
+    bool listener_socks_enabled() const { return final_listener_is_firefox() ? firefox_socks_enabled : socks_enabled; }
+    bool listener_http_enabled() const {
+        return final_listener_is_firefox() ? (mode == 1 ? firefox_tun_http_enabled : firefox_http_enabled)
+                                           : (mode == 1 ? tun_http_enabled : http_enabled);
+    }
+
     FcaeConfig to_config() {
         FcaeConfig c;
         fcae_config_default(&c);
@@ -328,15 +340,8 @@ struct AppState {
         c.tun_engine     = (tun_engine > 0 && tun_engine < (int)fcae_tun_engine_count())
                                ? (uint64_t)tun_engine
                                : FCAE_TUN_ENGINE_TUN2SOCKS;
-        // TUN tunnels through the local SOCKS5 listener tun2socks dials, so
-        // the checkbox is ignored in that mode: a port is always sent (same
-        // rule as Android's FCAEVpnService). Port 0 means "off" for proxy
-        // mode only.
-        const uint16_t selected_socks_port = listener_socks_port();
-        c.socks_port       = (mode == 1 || (backend != 1 && tor_mode != 0))
-                                   ? (selected_socks_port != 0 ? selected_socks_port : default_listener_socks_port())
-                                   : (socks_enabled ? selected_socks_port : (uint16_t)0);
-        c.http_port        = (mode == 1 ? tun_http_enabled : http_enabled) ? listener_http_port() : 0;
+        c.socks_port       = listener_socks_enabled() ? listener_socks_port() : 0;
+        c.http_port        = listener_http_enabled() ? listener_http_port() : 0;
         c.tor_http_port    = tor_http_enabled ? tor_http_port : 0;
         c.force_peer       = force_peer[0] ? force_peer : nullptr;
         c.upstream_proxy   = upstream_proxy[0] ? upstream_proxy : nullptr;
@@ -433,7 +438,7 @@ struct AppState {
             c._reserved[0] |= 1;
         }
 
-        if (mode == 1 && tun_http_enabled) c._reserved[0] |= FCAE_CONFIG_TUN_HTTP;
+        if (mode == 1 && listener_http_enabled()) c._reserved[0] |= FCAE_CONFIG_TUN_HTTP;
 
         // Built in-process. Process-lifetime pointer is safe for fcae_start.
         static const char kDefaultPsiphonConfig[] =
@@ -455,6 +460,15 @@ struct AppState {
         // entries auto-loaded from <data folder>/psiphon_servers.txt by the
         // start worker, and the legacy-list injection in the psiphon
         // bridge). Only the transport choice needs splicing in.
+        if (!psiphon_socks_enabled) json.insert(json.size() - 1, ",\"DisableLocalSocksProxy\":true");
+        if (!psiphon_http_enabled) json.insert(json.size() - 1, ",\"DisableLocalHTTPProxy\":true");
+        json.insert(json.size() - 1,
+            std::string(",\"FCAEListeners\":{\"aetherSocks\":") + (socks_enabled ? "true" : "false") +
+            ",\"aetherHttp\":" + (http_enabled ? "true" : "false") +
+            ",\"firefoxSocks\":" + (firefox_socks_enabled ? "true" : "false") +
+            ",\"firefoxHttp\":" + (firefox_http_enabled ? "true" : "false") +
+            ",\"torSocks\":" + (tor_socks_enabled ? "true" : "false") +
+            ",\"torHttp\":" + (tor_http_enabled ? "true" : "false") + "}");
         json = merge_psiphon_transport(json, psiphon_transport);
         psiphon_config_json_built = json;
         c.psiphon.config_json   = psiphon_config_json_built.c_str();

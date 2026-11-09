@@ -319,6 +319,16 @@ impl ChainHop {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenerPolicy {
+    pub aether_socks: bool,
+    pub aether_http: bool,
+    pub firefox_socks: bool,
+    pub firefox_http: bool,
+    pub tor_socks: bool,
+    pub tor_http: bool,
+}
+
 /// Fully validated session configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionConfig {
@@ -332,9 +342,13 @@ pub struct SessionConfig {
 
     pub lan_sharing: bool,
     pub quick_reconnect: bool,
-    /// Effective SOCKS port after applying the TUN-mode fallback.
+    /// SOCKS port; zero disables the listener.
     pub socks_port: u16,
     pub http_port: u16,
+    pub internal_socks: bool,
+    pub internal_http: bool,
+    pub require_udp_proxy: bool,
+    pub listener_policy: Option<ListenerPolicy>,
     pub force_peer: Option<String>,
     pub config_path: String,
     pub data_dir: Option<String>,
@@ -370,6 +384,10 @@ impl Default for SessionConfig {
             quick_reconnect: true,
             socks_port: 1819,
             http_port: 1820,
+            internal_socks: false,
+            internal_http: false,
+            require_udp_proxy: false,
+            listener_policy: None,
             force_peer: None,
             config_path: "aether.toml".into(),
             data_dir: None,
@@ -653,12 +671,6 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     };
 
     // Ports
-    // TUN mode needs an internal SOCKS endpoint even if the user zeroed the
-    // port, so fall back rather than failing.
-    if cfg.socks_port == 0 && (cfg.mode == FcaeMode::Tun || raw._reserved[0] & !FCAE_CONFIG_TUN_HTTP != 0
-        || matches!(raw.tor.mode, FcaeTorMode::Chain | FcaeTorMode::Reverse)) {
-        cfg.socks_port = 1819;
-    }
     // An old TUN caller may carry a default HTTP port without requesting a listener.
     if cfg.mode == FcaeMode::Tun && raw._reserved[0] & FCAE_CONFIG_TUN_HTTP == 0 {
         cfg.http_port = 0;
@@ -754,6 +766,20 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         direct,
         block,
     };
+
+    cfg.listener_policy = cstr_opt(raw.psiphon.config_json)
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|json| {
+            let p = json.get("FCAEListeners")?;
+            Some(ListenerPolicy {
+                aether_socks: p.get("aetherSocks")?.as_bool()?,
+                aether_http: p.get("aetherHttp")?.as_bool()?,
+                firefox_socks: p.get("firefoxSocks")?.as_bool()?,
+                firefox_http: p.get("firefoxHttp")?.as_bool()?,
+                tor_socks: p.get("torSocks")?.as_bool()?,
+                tor_http: p.get("torHttp")?.as_bool()?,
+            })
+        });
 
     // Zero Trust and Psiphon
     cfg.zero_trust = ZeroTrustConfig {
@@ -950,8 +976,12 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // checks below then cover them like any explicit value.
     if cfg.psiphon.socks_port == 0 { cfg.psiphon.socks_port = DEFAULT_PSIPHON_SOCKS_PORT; }
     if cfg.psiphon.http_port == 0 { cfg.psiphon.http_port = DEFAULT_PSIPHON_HTTP_PORT; }
-    let psi_socks = cfg.psiphon.socks_port;
-    let psi_http = cfg.psiphon.http_port;
+    let psi_options = cfg.psiphon.config_json.as_deref()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+    let disabled = |key: &str| psi_options.as_ref().and_then(|v| v.get(key))
+        .and_then(|v| v.as_bool()).unwrap_or(false);
+    let psi_socks = if disabled("DisableLocalSocksProxy") { 0 } else { cfg.psiphon.socks_port };
+    let psi_http = if disabled("DisableLocalHTTPProxy") { 0 } else { cfg.psiphon.http_port };
     if psi_socks != 0 {
         check_port_clash("psiphon.socks_port", psi_socks, cfg.socks_port, "socks_port")?;
         check_port_clash("psiphon.socks_port", psi_socks, cfg.http_port, "http_port")?;
@@ -1789,11 +1819,23 @@ mod tests {
     }
 
     #[test]
+    fn tun_does_not_silently_restore_a_disabled_socks_listener() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.mode = FcaeMode::Tun;
+        raw.socks_port = 0;
+        let cfg = unsafe { parse(&raw) }.unwrap();
+        assert_eq!(cfg.socks_port, 0);
+    }
+
+    #[test]
     fn tun_http_requires_an_explicit_opt_in() {
         let mut raw = raw_test_config();
         raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
         raw.abi_version = FCAE_ABI_VERSION;
         raw.mode = FcaeMode::Tun;
+        raw.socks_port = 1819;
         raw.http_port = 1820;
         raw.lan_sharing = true;
 

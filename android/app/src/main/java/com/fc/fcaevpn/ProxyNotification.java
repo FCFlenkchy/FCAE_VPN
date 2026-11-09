@@ -179,7 +179,8 @@ public class ProxyNotification extends Service {
             final Intent pending = pendingPsiphonSession;
             if (pending != null && PsiphonTunnelService.BROADCAST_READY.equals(intent.getAction())) {
                 if (intent.getBooleanExtra("regionsOnly", false)
-                        || intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, 0) <= 0) return;
+                        || (intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, 0) <= 0
+                            && intent.getIntExtra(PsiphonTunnelService.EXTRA_HTTP, 0) <= 0)) return;
                 pendingPsiphonSession = null;
                 pending.putExtra("psiphonSocksPort",
                         intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, 0));

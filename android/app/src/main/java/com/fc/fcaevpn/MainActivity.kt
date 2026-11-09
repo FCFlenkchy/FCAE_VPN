@@ -230,10 +230,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchLan: SwitchMaterial
     private lateinit var switchLogging: SwitchMaterial
     private lateinit var switchSocks: SwitchMaterial
-    private var proxySocksChoice = true
-    private var proxyHttpChoice = true
-    private var tunHttpChoice = false
-    private var lastProxyUiMode: Int? = null
+    private lateinit var switchAetherTunHttp: SwitchMaterial
+    private lateinit var switchTorSocks: SwitchMaterial
+    private lateinit var switchPsiphonSocks: SwitchMaterial
+    private lateinit var switchPsiphonHttp: SwitchMaterial
+    private var firefoxSocksEnabled = true
+    private var firefoxHttpEnabled = true
+    private var firefoxTunHttpEnabled = false
     private lateinit var switchTorHttp: SwitchMaterial
     private lateinit var editTorHttpPort: android.widget.EditText
     private lateinit var switchHttp: SwitchMaterial
@@ -399,7 +402,7 @@ class MainActivity : AppCompatActivity() {
     private fun renderPsiStats() {
         if (isPurePsiphon()) {
             peerText.text = psiphonEndpointText(nativeLanFallback(lastNativeLan))
-        } else if (isFinalPsiphon() && pendingPsiSocks > 0 &&
+        } else if (isFinalPsiphon() && (pendingPsiSocks > 0 || pendingPsiHttp > 0) &&
             !peerText.text.toString().contains("Psiphon local:")) {
             val current = peerText.text.toString().trim()
             peerText.text = if (current.isEmpty()) psiphonEndpointText(nativeLanFallback(lastNativeLan))
@@ -519,7 +522,7 @@ class MainActivity : AppCompatActivity() {
                         // Surface psiphon's actual proxy endpoints here too —
                         // pure-psiphon mode never polls the engine, so this
                         // and BROADCAST_STATS are the only UI updates.
-                        if (!isTunModeSelected() && socks > 0) {
+                        if (!isTunModeSelected() && (socks > 0 || http > 0)) {
                             peerText.text = psiphonEndpointText(nativeLanFallback(lastNativeLan))
                         }
                         // TUN mode adds nothing here: FCAEVpnService starts
@@ -659,7 +662,7 @@ class MainActivity : AppCompatActivity() {
                             // engine's Connected broadcast to flip the UI to
                             // "CONNECTED - TUN" before Psiphon had actually
                             // finished its handshake.
-                            if (!routeIncludesPsiphon() || pendingPsiSocks != 0) {
+                            if (!routeIncludesPsiphon() || pendingPsiSocks != 0 || pendingPsiHttp != 0) {
                                 commandConnecting = false
                                 connecting = false
                             }
@@ -1348,6 +1351,10 @@ class MainActivity : AppCompatActivity() {
         }
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
+        switchAetherTunHttp = findViewById(R.id.switchAetherTunHttp)
+        switchTorSocks = findViewById(R.id.switchTorSocks)
+        switchPsiphonSocks = findViewById(R.id.switchPsiphonSocks)
+        switchPsiphonHttp = findViewById(R.id.switchPsiphonHttp)
         switchTorHttp = findViewById(R.id.switchTorHttp)
         editTorHttpPort = findViewById(R.id.editTorHttpPort)
         switchAutoUpdate = findViewById(R.id.switchAutoUpdate)
@@ -1675,14 +1682,12 @@ class MainActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
-                applyModeSocksLock()
                 applyTunEngineVisibility()
                 updateButton()
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
-        applyModeSocksLock()
         applyTunEngineVisibility()
 
         // The protocol list owns "Tor only"; refresh egress applicability
@@ -2025,9 +2030,9 @@ class MainActivity : AppCompatActivity() {
         val finalBackend = routeBackends().lastOrNull() ?: 0
         val finalName = if (finalBackend == 2) "Firefox" else "Aether"
         val wantsFinalProxy = !isPurePsiphon() && !isTorOnly() && finalBackend != 1 &&
-            (switchSocks.isChecked || isTunModeSelected() || effectiveTorMode() in 1..2 || switchHttp.isChecked)
+            (finalSocksEnabled() || finalHttpEnabled())
         if (wantsFinalProxy && !shown.contains("$finalName local:")) return true
-        if (isFinalPsiphon() && pendingPsiSocks > 0 && !shown.contains("Psiphon local:")) return true
+        if (isFinalPsiphon() && (pendingPsiSocks > 0 || pendingPsiHttp > 0) && !shown.contains("Psiphon local:")) return true
         return false
     }
 
@@ -2318,34 +2323,6 @@ class MainActivity : AppCompatActivity() {
         return if (session.active) session.mode == 1 else isTunModeSelected()
     }
 
-    /** Keep the Proxy and TUN HTTP choices independent across mode switches. */
-    private fun applyModeSocksLock() {
-        if (!::spinnerMode.isInitialized || !::switchSocks.isInitialized ||
-            !::switchHttp.isInitialized || !::editSocksPort.isInitialized ||
-            !::editHttpPort.isInitialized) return
-        val mode = if (isTunModeSelected()) 1 else 0
-        when {
-            lastProxyUiMode == null -> {
-                proxySocksChoice = switchSocks.isChecked
-                proxyHttpChoice = switchHttp.isChecked
-                if (mode == 1) switchHttp.isChecked = tunHttpChoice
-            }
-            lastProxyUiMode == 0 && mode == 1 -> {
-                proxySocksChoice = switchSocks.isChecked
-                proxyHttpChoice = switchHttp.isChecked
-                switchHttp.isChecked = tunHttpChoice
-            }
-            lastProxyUiMode == 1 && mode == 0 -> {
-                tunHttpChoice = switchHttp.isChecked
-                switchSocks.isChecked = proxySocksChoice
-                switchHttp.isChecked = proxyHttpChoice
-            }
-        }
-        lastProxyUiMode = mode
-        switchSocks.isEnabled = mode == 0
-        if (mode == 1) switchSocks.isChecked = true
-    }
-
     private fun t2sLogValue(): Int = spinnerT2sLog.selectedItemPosition + 1
 
     /** Inverse of t2sLogValue; a stored 0 (old "default" entry) is Silent. */
@@ -2447,6 +2424,13 @@ class MainActivity : AppCompatActivity() {
         listOf(backendFromSelection()) + selectedChain().map { backendForProtocolPosition(it) }
 
     private fun finalListenerIsFirefox(): Boolean = routeBackends().lastOrNull() == 2
+
+    private fun finalSocksEnabled(): Boolean = if (finalListenerIsFirefox()) firefoxSocksEnabled else switchSocks.isChecked
+    private fun finalHttpEnabled(): Boolean = if (finalListenerIsFirefox()) {
+        if (isTunModeSelected()) firefoxTunHttpEnabled else firefoxHttpEnabled
+    } else {
+        if (isTunModeSelected()) switchAetherTunHttp.isChecked else switchHttp.isChecked
+    }
 
     private fun selectedSocksPort(): android.widget.EditText =
         if (finalListenerIsFirefox()) editFirefoxSocksPort else editSocksPort
@@ -2834,6 +2818,29 @@ class MainActivity : AppCompatActivity() {
         val status = dialogMessage(box, "")
         firefoxStatusView = status
 
+        val firefoxSocksSwitch = SwitchMaterial(this).apply {
+            text = "Firefox SOCKS5 proxy"
+            isChecked = firefoxSocksEnabled
+        }
+        val firefoxHttpSwitch = SwitchMaterial(this).apply {
+            text = "Firefox HTTP proxy in Proxy mode"
+            isChecked = firefoxHttpEnabled
+        }
+        val firefoxTunHttpSwitch = SwitchMaterial(this).apply {
+            text = "Firefox HTTP proxy in TUN mode"
+            isChecked = firefoxTunHttpEnabled
+        }
+        box.addView(firefoxSocksSwitch)
+        box.addView(firefoxHttpSwitch)
+        box.addView(firefoxTunHttpSwitch)
+        box.addView(TextView(this).apply {
+            text = "SOCKS5 is required for TUN exits and UDP-dependent hops."
+            setTextColor(Color.parseColor("#FF9AA3B5"))
+        })
+        val firefoxSocksPort = addDialogInput(box, "SOCKS5 port", editFirefoxSocksPort.text.toString())
+        firefoxSocksPort.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        val firefoxHttpPort = addDialogInput(box, "HTTP proxy port", editFirefoxHttpPort.text.toString())
+        firefoxHttpPort.inputType = android.text.InputType.TYPE_CLASS_NUMBER
         val server = addDialogInput(box, "Server override (optional host[:port])", prefs.getString("firefoxServer", "").orEmpty())
         box.addView(TextView(this).apply {
             text = "Firefox transport"
@@ -2858,6 +2865,18 @@ class MainActivity : AppCompatActivity() {
         dialog.setOnShowListener {
             styleDialogButtons(dialog)
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                for (field in listOf(firefoxSocksPort, firefoxHttpPort)) {
+                    val port = field.text.toString().toIntOrNull()
+                    if (port == null || port !in 1..65535) {
+                        field.error = "Use a port from 1 to 65535"
+                        return@setOnClickListener
+                    }
+                }
+                firefoxSocksEnabled = firefoxSocksSwitch.isChecked
+                firefoxHttpEnabled = firefoxHttpSwitch.isChecked
+                firefoxTunHttpEnabled = firefoxTunHttpSwitch.isChecked
+                editFirefoxSocksPort.setText(firefoxSocksPort.text.toString())
+                editFirefoxHttpPort.setText(firefoxHttpPort.text.toString())
                 val selectedEmail = firefoxAccountChoices.firstOrNull { it.id == firefoxSelectedAccountId }?.email
                     ?: prefs.getString("firefoxEmail", "").orEmpty()
                 prefs.edit()
@@ -3542,11 +3561,18 @@ class MainActivity : AppCompatActivity() {
             putBoolean("quick", switchQuick.isChecked)
             putBoolean("lan", switchLan.isChecked)
             putBoolean("logging", switchLogging.isChecked)
-            putBoolean("socks", if (isTunModeSelected()) proxySocksChoice else switchSocks.isChecked)
+            putBoolean("socks", switchSocks.isChecked)
+            putBoolean("aetherHttp", switchHttp.isChecked)
+            putBoolean("firefoxSocks", firefoxSocksEnabled)
+            putBoolean("firefoxHttp", firefoxHttpEnabled)
+            putBoolean("firefoxTunHttp", firefoxTunHttpEnabled)
+            putBoolean("tunHttp", switchAetherTunHttp.isChecked)
+            putBoolean("torSocks", switchTorSocks.isChecked)
+            putBoolean("psiphonSocks", switchPsiphonSocks.isChecked)
+            putBoolean("psiphonHttp", switchPsiphonHttp.isChecked)
             putBoolean("torHttp", switchTorHttp.isChecked)
             putString("torHttpPort", editTorHttpPort.text.toString())
-            putBoolean("http", if (isTunModeSelected()) proxyHttpChoice else switchHttp.isChecked)
-            putBoolean("tunHttp", if (isTunModeSelected()) switchHttp.isChecked else tunHttpChoice)
+
             putBoolean("autoUpdate", switchAutoUpdate.isChecked)
             putBoolean("checkPreReleases", switchPreReleases.isChecked)
             putString("sni", editSni.text.toString().trim())
@@ -3674,8 +3700,15 @@ class MainActivity : AppCompatActivity() {
         switchSocks.isChecked = prefs.getBoolean("socks", true)
         switchTorHttp.isChecked = prefs.getBoolean("torHttp", false)
         editTorHttpPort.setText(prefs.getString("torHttpPort", "1822"))
-        tunHttpChoice = prefs.getBoolean("tunHttp", false)
-        switchHttp.isChecked = prefs.getBoolean("http", true)
+        val legacyHttp = prefs.getBoolean("http", true)
+        switchHttp.isChecked = prefs.getBoolean("aetherHttp", legacyHttp)
+        switchAetherTunHttp.isChecked = prefs.getBoolean("tunHttp", false)
+        firefoxSocksEnabled = prefs.getBoolean("firefoxSocks", prefs.getBoolean("socks", true))
+        firefoxHttpEnabled = prefs.getBoolean("firefoxHttp", legacyHttp)
+        firefoxTunHttpEnabled = prefs.getBoolean("firefoxTunHttp", prefs.getBoolean("tunHttp", false))
+        switchTorSocks.isChecked = prefs.getBoolean("torSocks", true)
+        switchPsiphonSocks.isChecked = prefs.getBoolean("psiphonSocks", true)
+        switchPsiphonHttp.isChecked = prefs.getBoolean("psiphonHttp", true)
         switchAutoUpdate.isChecked = prefs.getBoolean("autoUpdate", true)
         switchPreReleases.isChecked = prefs.getBoolean("checkPreReleases", false)
         editSni.setText(prefs.getString("sni", ""))
@@ -3765,6 +3798,26 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectClicked() {
         if (connecting || engineRunning || vpnActive) return
+        val route = routeBackends()
+        val transports = listOf(spinnerProtocol.selectedItemPosition) + selectedChain()
+        val disabled = when {
+            (4 in transports || effectiveTorMode() in 1..2) && !switchTorSocks.isChecked -> "Tor SOCKS5"
+            1 in route.dropLast(1) && !switchPsiphonSocks.isChecked -> "Psiphon SOCKS5"
+            2 in route.dropLast(1) && !firefoxSocksEnabled -> "Firefox SOCKS5"
+            1 in route && !switchPsiphonSocks.isChecked && !switchPsiphonHttp.isChecked -> "Psiphon SOCKS5 or HTTP"
+            isFinalPsiphon() && isTunModeSelected() && !switchPsiphonSocks.isChecked -> "Psiphon SOCKS5"
+            finalListenerIsFirefox() && !firefoxSocksEnabled && isTunModeSelected() -> "Firefox SOCKS5"
+            transports.any { it != 4 && it != 5 && it != 10 } && !switchSocks.isChecked -> "Aether SOCKS5"
+            else -> null
+        }
+        if (disabled != null) {
+            val message = "Cannot start: enable $disabled for this session."
+            ingestPsiphonLog("[ui] $message\n")
+            statusText.text = message
+            statusText.setTextColor(COLOR_PROGRESS)
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            return
+        }
         ProcessExit.cancel()
         VpnTileService.clearPendingExit(this)
         if (commandPaused) {
@@ -3849,6 +3902,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** AAR start; the foreground owner, not the Activity, owns the Psiphon bind. */
+    private fun psiphonConfigJson(): String = org.json.JSONObject()
+        .put("FCAETransport", selectedPsiphonTransportIndex())
+        .put("DisableLocalHTTPProxy", !switchPsiphonHttp.isChecked)
+        .put("DisableLocalSocksProxy", !switchPsiphonSocks.isChecked)
+        .put("FCAEListeners", org.json.JSONObject()
+            .put("aetherSocks", switchSocks.isChecked)
+            .put("aetherHttp", switchHttp.isChecked)
+            .put("firefoxSocks", firefoxSocksEnabled)
+            .put("firefoxHttp", firefoxHttpEnabled)
+            .put("torSocks", switchTorSocks.isChecked)
+            .put("torHttp", switchTorHttp.isChecked))
+        .toString()
+
     private fun startPsiphon() {
         connecting = true
         vpnActive = true
@@ -3984,9 +4050,9 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("disableExtensionPermutation", switchDisableExtensionPermutation.isChecked)
         i.putExtra("fragmentSni", switchFragmentSni.isChecked)
         // TUN requires SOCKS for its data plane; HTTP is a separate opt-in.
-        i.putExtra("socksPort", if (isTunModeSelected() || switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) effectiveSocksPort() else 0)
-        i.putExtra("tunHttpEnabled", isTunModeSelected() && switchHttp.isChecked)
-        i.putExtra("httpPort", if (switchHttp.isChecked) effectiveHttpPort() else 0)
+        i.putExtra("socksPort", if (finalSocksEnabled()) effectiveSocksPort() else 0)
+        i.putExtra("tunHttpEnabled", isTunModeSelected() && finalHttpEnabled())
+        i.putExtra("httpPort", if (finalHttpEnabled()) effectiveHttpPort() else 0)
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
         i.putExtra("forcePeer", editForcePeer.text.toString().trim())
         i.putExtra("sysProfile", spinnerSysprofile.selectedItemPosition)
@@ -4004,7 +4070,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("torSocksPort", deferredTorSocksPort())
         i.putExtra("torHttpPort", if (switchTorHttp.isChecked) editTorHttpPort.text.toString().toIntOrNull() ?: 1822 else 0)
         i.putExtra("psiphonThroughTunnel", isEgressPsiphon())
-        i.putExtra("psiphonConfig", org.json.JSONObject().put("FCAETransport", selectedPsiphonTransportIndex()).toString())
+        i.putExtra("psiphonConfig", psiphonConfigJson())
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
         i.putExtra("psiphonTransport", selectedPsiphonTransportIndex())
         // Prefer the LIVE AAR ports: when this start is the Protocol=Psiphon
@@ -4088,8 +4154,8 @@ class MainActivity : AppCompatActivity() {
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
         // Extract ALL UI values on the main thread — never read Views from bg.
         val noizeProfile = spinnerNoize.selectedItem.toString()
-        val socksPort = if (mode == 1 || switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) effectiveSocksPort() else 0
-        val httpPort = if (switchHttp.isChecked) effectiveHttpPort() else 0
+        val socksPort = if (finalSocksEnabled()) effectiveSocksPort() else 0
+        val httpPort = if (finalHttpEnabled()) effectiveHttpPort() else 0
         val forcePeer = editForcePeer.text.toString().trim()
         val sysProfile = spinnerSysprofile.selectedItemPosition
         val teamName = editTeam.text.toString().trim()
@@ -4109,7 +4175,7 @@ class MainActivity : AppCompatActivity() {
         val torSocksPort = deferredTorSocksPort()
         val torHttpPort = if (switchTorHttp.isChecked) editTorHttpPort.text.toString().toIntOrNull() ?: 1822 else 0
         val throughPsiphon = isEgressPsiphon()
-        val psiphonConfig = org.json.JSONObject().put("FCAETransport", selectedPsiphonTransportIndex()).toString()
+        val psiphonConfig = psiphonConfigJson()
         val psiphonRegion = selectedPsiphonRegion()
         val psiphonSocksPort = editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0
         val psiphonHttpPort = editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0
@@ -4996,9 +5062,9 @@ class MainActivity : AppCompatActivity() {
                 val finalBackend = routeBackends().lastOrNull() ?: 0
                 if (finalBackend != 1) {
                     endpoints(if (finalBackend == 2) "Firefox" else "Aether",
-                        if (switchSocks.isChecked || tun || effectiveTorMode() in 1..2)
+                        if (finalSocksEnabled())
                             effectiveSocksPort().toString() else null,
-                        if (switchHttp.isChecked) effectiveHttpPort().toString() else null,
+                        if (finalHttpEnabled()) effectiveHttpPort().toString() else null,
                         if (tun) "internal SOCKS5" else "SOCKS5")
                 }
             }
@@ -5006,7 +5072,7 @@ class MainActivity : AppCompatActivity() {
                 editTorSocksPort.text.toString().trim().ifEmpty { "1821" },
                 if (switchTorHttp.isChecked) editTorHttpPort.text.toString() else null)
         }
-        if (listenersUp && isFinalPsiphon() && pendingPsiSocks > 0)
+        if (listenersUp && isFinalPsiphon() && (pendingPsiSocks > 0 || pendingPsiHttp > 0))
             peerLine.append("\n" + psiphonEndpointText(nativeLanFallback(lan)))
         return peerLine.toString()
     }
@@ -5069,7 +5135,7 @@ class MainActivity : AppCompatActivity() {
             val psiphonStillChaining = state == 4
                     && isPsiphonPath
                     && commandConnecting
-                    && pendingPsiSocks == 0
+                    && pendingPsiSocks == 0 && pendingPsiHttp == 0
             // The engine sees only the exit's local listener, which outlives
             // the exit's tunnel while tunnel-core redials.
             val psiphonExitDown = state == 4 && isPsiphonPath && !psiphonStillChaining && !psiTunnelUp

@@ -204,6 +204,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             start.putExtra("psiphonTransport", request.optInt("psiphonTransport", 0));
             start.putExtra("psiphonSocksPort", request.optInt("psiphonSocksPort", 0));
             start.putExtra("psiphonHttpPort", request.optInt("psiphonHttpPort", 0));
+            start.putExtra("psiphonDisableHttp", request.optBoolean("psiphonDisableHttp", false));
+            start.putExtra("psiphonDisableSocks", request.optBoolean("psiphonDisableSocks", false));
             start.putExtra("lanSharing", request.optBoolean("lanSharing", false));
             startBound(app, start);
             scheduleChainedPoll(app);
@@ -412,6 +414,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     private int wantSocks;
     private int wantHttp;
+    private boolean disableHttp;
+    private boolean disableSocks;
     private final AtomicInteger socksPort = new AtomicInteger(0);
     private final AtomicInteger httpPort = new AtomicInteger(0);
     // Cumulative tunneled bytes, from onBytesTransferred (EmitBytesTransferred
@@ -550,6 +554,17 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             // working across reconnects.
             wantSocks = intent.getIntExtra("psiphonSocksPort", 0);
             wantHttp = intent.getIntExtra("psiphonHttpPort", 0);
+            disableHttp = intent.getBooleanExtra("psiphonDisableHttp", false);
+            disableSocks = intent.getBooleanExtra("psiphonDisableSocks", false);
+            String sessionConfig = intent.getStringExtra("psiphonConfig");
+            if (sessionConfig != null) {
+                try {
+                    JSONObject options = new JSONObject(sessionConfig);
+                    disableHttp = options.optBoolean("DisableLocalHTTPProxy", disableHttp);
+                    disableSocks = options.optBoolean("DisableLocalSocksProxy", disableSocks);
+                }
+                catch (org.json.JSONException e) { emitLog("invalid Psiphon settings: " + e.getMessage()); }
+            }
             if (wantSocks <= 0) wantSocks = DEFAULT_SOCKS_PORT;
             if (wantHttp <= 0) wantHttp = DEFAULT_HTTP_PORT;
             String up = intent.getStringExtra("upstreamProxy");
@@ -569,6 +584,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         psiphonUp = false;
         handshakeConnected = false;
         handshakeRegion = false;
+        socksPort.set(0);
+        httpPort.set(0);
         readyBroadcast = false;
         tunnelUp = false;
         bytesUp.set(0);
@@ -925,6 +942,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             o.put("ClientVersion", "1");
             o.put("TunnelPoolSize", 1);
             o.put("DisableLocalSocksAuth", true);
+            o.put("DisableLocalHTTPProxy", disableHttp);
+            o.put("DisableLocalSocksProxy", disableSocks);
             // Upstream resolves "any" to 0.0.0.0; empty means loopback-only.
             o.put("ListenInterface", lanSharing ? "any" : "");
             o.put("EmitDiagnosticNotices", true);
@@ -1352,6 +1371,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onListeningSocksProxyPort(int port) {
         socksPort.set(port);
+        maybeBroadcastReady();
         if (!stopping) broadcastStage(5, "ESTABLISHING TUNNEL");
         emitLog("SOCKS " + proxyBindHost() + ":" + port + lanSuffix(port));
     }
@@ -1359,6 +1379,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onListeningHttpProxyPort(int port) {
         httpPort.set(port);
+        maybeBroadcastReady();
         emitLog("HTTP " + proxyBindHost() + ":" + port + lanSuffix(port));
     }
 
@@ -1384,9 +1405,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         handshakeConnected = true;
         int s = socksPort.get();
         PsiphonTunnel t = liveTunnel;
-        if (s <= 0 && t != null) s = t.getLocalSocksProxyPort();
+        if (!disableSocks && s <= 0 && t != null) s = t.getLocalSocksProxyPort();
         socksPort.set(s);
-        emitLog("connected, SOCKS " + proxyBindHost() + ":" + s + lanSuffix(s));
+        emitLog(s > 0 ? "connected, SOCKS " + proxyBindHost() + ":" + s + lanSuffix(s) : "connected");
         flushLogs();
         // Last-chance discovery when nothing reported regions during
         // establishing (e.g. a stale replay older than the freshness window).
@@ -1409,8 +1430,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (!handshakeConnected || !handshakeRegion) return;
         int s = socksPort.get();
         PsiphonTunnel t = liveTunnel;
-        if (s <= 0 && t != null) s = t.getLocalSocksProxyPort();
+        if (!disableSocks && s <= 0 && t != null) s = t.getLocalSocksProxyPort();
         if (s > 0) socksPort.set(s);
+        if ((!disableSocks && s <= 0) || (!disableHttp && httpPort.get() <= 0)) return;
         readyBroadcast = true;
         Intent i = new Intent(BROADCAST_READY);
         i.setPackage(getPackageName());

@@ -20,17 +20,9 @@ FCAE VPN 是一款适用于 Windows、Linux、macOS 和 Android 的审查绕过�
 - **Firefox IP Protection** — 使用 Rust 实现对 Mozilla Firefox IP Protection 服务的支持。
 - **Psiphon** — Psiphon 隧道核心。
 
-## 功能特性
+## 内联路由规则（仅适用于 Aether）
 
-- 支持 MASQUE (HTTP/3 QUIC / HTTP/2)、WireGuard、WARP-in-WARP (gool) 和 WARP-in-MASQUE
-- 可配置的流量混淆配置文件
-- 自动重连，支持快速重连
-- 本地 SOCKS5 和 HTTP 代理
-- 所有平台原生 GUI（桌面端 ImGui + DirectX11/OpenGL，Android 端 Kotlin Material UI）
-
-## 内联路由规则
-
-您可以直接在 UI（Routes 选项卡）中定义自定义路由规则，无需外部文件。规则使用简单格式：
+您可以直接在 UI（Routes 选项卡）中定义自定义路由规则，无需外部文件。这些规则仅适用于 Aether，格式如下：
 
 ```
 [direct]ip:190.9.2.4,192.33.45.6:400,example.com

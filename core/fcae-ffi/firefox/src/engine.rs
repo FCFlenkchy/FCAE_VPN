@@ -74,14 +74,16 @@ impl FirefoxEngine {
                     probe_destinations("UDP", &udp_targets, timeout, |target| async move {
                         proxy.probe_udp(&target).await
                     }).await?;
-                    probe_destinations("DNS", &config.dns_servers, timeout, |server| async move {
-                        if crate::doh::provider(&server).is_some() {
-                            crate::doh::check(proxy, &server).await
-                        } else {
-                            log::info!("[firefox] DNS resolver {server} has no encrypted mapping; checking UDP port 53 without changing the configured resolver");
-                            proxy.probe_udp(&crate::types::authority(&server, 53)).await
-                        }
-                    }).await?;
+                    if !config.dns_servers.is_empty() {
+                        probe_destinations("DNS", &config.dns_servers, timeout, |server| async move {
+                            if crate::doh::provider(&server).is_some() {
+                                crate::doh::check(proxy, &server).await
+                            } else {
+                                log::info!("[firefox] DNS resolver {server} has no encrypted mapping; checking UDP port 53 without changing the configured resolver");
+                                proxy.probe_udp(&crate::types::authority(&server, 53)).await
+                            }
+                        }).await?;
+                    }
                 }
                 Ok::<_, FirefoxError>(upstream)
             }.await;
@@ -100,8 +102,7 @@ impl FirefoxEngine {
         let upstream = selected.ok_or_else(|| last_error.unwrap_or_else(|| FirefoxError::NoLocation(" all candidates failed".into())))?;
         let upstream = Arc::new(upstream);
         upstream.set_candidates(candidates);
-        let socks_addr = Some(config.socks_addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()));
-        let proxies = LocalProxies::start(upstream.clone(), socks_addr, config.http_addr).await?;
+        let proxies = LocalProxies::start(upstream.clone(), config.socks_addr, config.http_addr).await?;
         log::info!("[firefox] proxy check passed; local SOCKS {:?}, HTTP {:?}", proxies.socks_addr, proxies.http_addr);
         if let Err(error) = accounts.ensure_device(&account.id).await {
             log::warn!("[firefox] device registration was not refreshed: {error}");

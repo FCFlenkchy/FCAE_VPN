@@ -259,7 +259,7 @@ object NativeEngine {
             fragMaxSize = session.getIntExtra("fragMaxSize", 32),
             fragMinDelay = session.getIntExtra("fragMinDelay", 2),
             fragMaxDelay = session.getIntExtra("fragMaxDelay", 10),
-            socksPort = if (mode == 1 && socks == 0) 1819 else socks,
+            socksPort = socks,
             httpPort = if (mode == 1 && !session.getBooleanExtra("tunHttpEnabled", false)) 0
                 else session.getIntExtra("httpPort", 1820),
             forcePeer = session.getStringExtra("forcePeer").orEmpty(),

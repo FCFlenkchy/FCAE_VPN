@@ -134,8 +134,16 @@ impl Backend for FirefoxBackend {
         };
         let data_dir = PathBuf::from(config.data_dir.clone().unwrap_or_else(|| "fcae-data".into()));
         let bind_host = if config.lan_sharing { "0.0.0.0" } else { "127.0.0.1" };
-        let socks_addr = (config.socks_port != 0).then(|| parse_bind(bind_host, config.socks_port)) .transpose()?;
-        let http_addr = (config.http_port != 0).then(|| parse_bind(bind_host, config.http_port)).transpose()?;
+        let socks_addr = if config.internal_socks {
+            Some(parse_bind("127.0.0.1", 0)?)
+        } else {
+            (config.socks_port != 0).then(|| parse_bind(bind_host, config.socks_port)).transpose()?
+        };
+        let http_addr = if config.internal_http {
+            Some(parse_bind("127.0.0.1", 0)?)
+        } else {
+            (config.http_port != 0).then(|| parse_bind(bind_host, config.http_port)).transpose()?
+        };
         let dns_servers = if config.mode == FcaeMode::Tun {
             let servers = fcae_runtime::tun_dns::servers(&config)?;
             let servers = if servers.is_empty() {
@@ -147,13 +155,16 @@ impl Backend for FirefoxBackend {
         } else {
             Vec::new()
         };
+        if config.require_udp_proxy && socks_addr.is_none() {
+            return Err(CoreError::InvalidConfig("the next hop needs UDP; enable Firefox SOCKS5".into()));
+        }
         let engine_config = EngineConfig {
             data_dir,
             account_id: config.firefox.account_id.clone(),
             location: config.firefox.location.clone(),
             server: config.firefox.server.clone(),
             transport,
-            require_udp: config.mode == FcaeMode::Tun,
+            require_udp: config.mode == FcaeMode::Tun || config.require_udp_proxy,
             dns_servers,
             socks_addr,
             http_addr,

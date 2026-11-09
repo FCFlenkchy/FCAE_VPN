@@ -214,7 +214,7 @@ pub fn host_request() -> String {
 pub fn host_complete(id: u64, socks: u16, http: u16) {
     let mut state = HOST_ATTACH.lock();
     if let Some(s) = state.as_mut().filter(|s| s.id == id) {
-        if socks == 0 { s.failed = true; s.ports = None; }
+        if socks == 0 && http == 0 { s.failed = true; s.ports = None; }
         else if !s.failed { s.ports = Some((socks, http)); }
     }
 }
@@ -237,16 +237,15 @@ const PROXY_READY_GRACE: Duration = Duration::from_secs(10);
 const PROXY_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 const PROXY_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Wait until the exit's SOCKS listener on loopback accepts a connection.
-///
-/// "Connected" is what makes the supervisor raise the TUN, so it must never be
-/// reported on a port number alone: the attach path takes whatever port the
-/// host hands over, and a recalled session replays the last one -- a stale or
-/// dead exit would otherwise be announced as live, and the TUN would be raised
-/// onto nothing (device offline, no data plane). The probe dials exactly the
-/// address the TUN engine will dial, so a refusal here is a refusal there.
-async fn wait_for_local_proxy(socks_port: u16, cancel: &CancelToken) -> Result<()> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], socks_port));
+fn listener_disabled(config: &fcae_runtime::config::SessionConfig, key: &str) -> bool {
+    config.psiphon.config_json.as_deref()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|value| value.get(key).and_then(|value| value.as_bool()))
+        .unwrap_or(false)
+}
+
+async fn wait_for_local_proxy(port: u16, cancel: &CancelToken) -> Result<()> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let deadline = tokio::time::Instant::now() + PROXY_READY_GRACE;
     let mut announced = false;
     loop {
@@ -263,13 +262,13 @@ async fn wait_for_local_proxy(socks_port: u16, cancel: &CancelToken) -> Result<(
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(CoreError::StartFailed(format!(
-                "Psiphon's local SOCKS proxy {addr} accepted no connection: the exit \
+                "Psiphon's local proxy {addr} accepted no connection: the exit \
                  is not there (restart Psiphon and connect again)"
             )));
         }
         if !announced {
             announced = true;
-            log::info!("[psiphon] waiting for the local SOCKS proxy on {addr}");
+            log::info!("[psiphon] waiting for the local proxy on {addr}");
         }
         tokio::time::sleep(PROXY_PROBE_INTERVAL).await;
     }
@@ -310,14 +309,16 @@ impl Backend for PsiphonBackend {
         let json: serde_json::Value = serde_json::from_str(
             cx.config.psiphon.config_json.as_deref().unwrap_or("{}")).unwrap_or_default();
         let mut lease = None;
-        let mut socks = cx.config.psiphon.socks_port;
-        let mut http = cx.config.psiphon.http_port;
+        let mut socks = if listener_disabled(&cx.config, "DisableLocalSocksProxy") { 0 } else { cx.config.psiphon.socks_port };
+        let mut http = if listener_disabled(&cx.config, "DisableLocalHTTPProxy") { 0 } else { cx.config.psiphon.http_port };
         if let Some(upstream) = json.get("UpstreamProxyURL").or_else(|| json.get("UpstreamProxyUrl")).and_then(|v| v.as_str()) {
             let id = NEXT_HOST_ATTACH.fetch_add(1, Ordering::SeqCst);
             let request = serde_json::json!({
                 "requestId": id, "upstreamProxy": upstream,
                 "psiphonRegion": cx.config.psiphon.egress_region.as_deref().unwrap_or(""),
                 "psiphonSocksPort": socks, "psiphonHttpPort": http,
+                "psiphonDisableSocks": json.get("DisableLocalSocksProxy").and_then(|v| v.as_bool()).unwrap_or(false),
+                "psiphonDisableHttp": json.get("DisableLocalHTTPProxy").and_then(|v| v.as_bool()).unwrap_or(false),
                 "psiphonTransport": json.get("FCAETransport").and_then(|v| v.as_i64()).unwrap_or(0),
                 "lanSharing": cx.config.lan_sharing,
             }).to_string();
@@ -336,14 +337,10 @@ impl Backend for PsiphonBackend {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
-        if socks == 0 {
-            return Err(CoreError::StartFailed(
-                "Android Psiphon is the official AAR (process :psiphon). \
-                 Start PsiphonTunnelService first and pass its SOCKS port."
-                    .into(),
-            ));
+        if socks == 0 && http == 0 {
+            return Err(CoreError::StartFailed("Psiphon has no enabled local proxy; enable SOCKS5 or HTTP".into()));
         }
-        wait_for_local_proxy(socks, &cx.cancel).await?;
+        wait_for_local_proxy(if socks != 0 { socks } else { http }, &cx.cancel).await?;
         Ok(Box::new(PsiphonHandle {
             socks_port: socks,
             http_port: http,
@@ -423,22 +420,27 @@ impl Backend for PsiphonBackend {
         cx.report(FcaeState::Connecting, "Establishing tunnel…");
 
         let deadline = std::time::Instant::now() + cx.config.start_timeout();
-        let socks_port = loop {
+        let disable_socks = listener_disabled(&cx.config, "DisableLocalSocksProxy");
+        let disable_http = listener_disabled(&cx.config, "DisableLocalHTTPProxy");
+        if disable_socks && disable_http {
+            return Err(CoreError::InvalidConfig("Psiphon has no enabled local proxy; enable SOCKS5 or HTTP".into()));
+        }
+        let (socks_port, http_port) = loop {
             if cx.cancel.is_cancelled() {
                 ffi::request_stop()?;
                 return Err(CoreError::StartFailed("cancelled".into()));
             }
             if ffi::state() == ffi::STATE_CONNECTED {
-                let port = ffi::socks_port();
-                if port != 0 {
-                    break port;
+                let socks = if disable_socks { 0 } else { ffi::socks_port() };
+                let http = if disable_http { 0 } else { ffi::http_port() };
+                if (disable_socks || socks != 0) && (disable_http || http != 0) {
+                    break (socks, http);
                 }
             }
             if std::time::Instant::now() >= deadline {
-                // Leave nothing running behind a failed start.
                 ffi::request_stop()?;
                 return Err(CoreError::StartFailed(format!(
-                    "Psiphon did not establish a tunnel within {:?}",
+                    "Psiphon did not establish its enabled listeners within {:?}",
                     cx.config.start_timeout()
                 )));
             }
@@ -458,13 +460,13 @@ impl Backend for PsiphonBackend {
             log::info!("[psiphon] egress regions: {}", lock.join(","));
         }
 
-        log::info!("[psiphon] tunnel established, socks 127.0.0.1:{socks_port}");
-        wait_for_local_proxy(socks_port, &cx.cancel).await?;
+        log::info!("[psiphon] tunnel established, SOCKS port {socks_port}, HTTP port {http_port}");
+        wait_for_local_proxy(if socks_port != 0 { socks_port } else { http_port }, &cx.cancel).await?;
 
         guard.armed = false;
         Ok(Box::new(PsiphonHandle {
             socks_port,
-            http_port: ffi::http_port(),
+            http_port,
             host_lease: None,
             stopped: AtomicBool::new(false),
             sink: cx.telemetry.clone(),
@@ -1558,7 +1560,7 @@ struct PsiphonHandle {
 impl BackendHandle for PsiphonHandle {
     fn endpoints(&self) -> Endpoints {
         Endpoints {
-            socks: format!("127.0.0.1:{}", self.socks_port).parse().ok(),
+            socks: (self.socks_port != 0).then(|| format!("127.0.0.1:{}", self.socks_port).parse().ok()).flatten(),
             http: (self.http_port != 0)
                 .then(|| format!("127.0.0.1:{}", self.http_port).parse().ok())
                 .flatten(),
@@ -1773,12 +1775,24 @@ mod tests {
     }
 
     #[test]
+    fn disabled_psiphon_listeners_are_read_independently() {
+        let cfg = make_config(Some(r#"{"DisableLocalSocksProxy":true,"DisableLocalHTTPProxy":false}"#), Some("/tmp/psi"));
+        assert!(listener_disabled(&cfg, "DisableLocalSocksProxy"));
+        assert!(!listener_disabled(&cfg, "DisableLocalHTTPProxy"));
+        let projected: serde_json::Value = serde_json::from_str(&validate(&cfg).unwrap().config_json).unwrap();
+        assert_eq!(projected["DisableLocalSocksProxy"], true);
+        assert_eq!(projected["DisableLocalHTTPProxy"], false);
+    }
+
+    #[test]
     fn host_attachment_ignores_old_bindings_and_cannot_revive_failed_exit() {
         *HOST_ATTACH.lock() = Some(HostAttach {
             id: 42, request: "request".into(), ports: None, failed: false,
         });
         host_complete(41, 1080, 8080);
         assert!(HOST_ATTACH.lock().as_ref().unwrap().ports.is_none());
+        host_complete(42, 0, 8080);
+        assert_eq!(HOST_ATTACH.lock().as_ref().unwrap().ports, Some((0, 8080)));
         host_complete(42, 1080, 8080);
         assert_eq!(HOST_ATTACH.lock().as_ref().unwrap().ports, Some((1080, 8080)));
         host_complete(42, 0, 0);
