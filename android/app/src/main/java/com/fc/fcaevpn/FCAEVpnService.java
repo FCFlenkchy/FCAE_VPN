@@ -77,6 +77,10 @@ public class FCAEVpnService extends VpnService {
         return sessionEpoch.get();
     }
 
+    static void beginProxySessionEpoch() {
+        sessionEpoch.incrementAndGet();
+    }
+
     private final AtomicLong cleanupGeneration = new AtomicLong(0);
     /** Session that requested a deferred TUN. Reject it after disconnect advances cleanupGeneration. */
     private volatile long pendingSessionGen = -1;
@@ -101,6 +105,47 @@ public class FCAEVpnService extends VpnService {
     /** True only after every JNI library and service callback registered. */
     private volatile boolean nativeReady;
     private boolean replayHandedOff;
+    private boolean replayLoading;
+    private long replayLoadGeneration;
+    private int replayLoadStartId;
+    private Intent replayDeferredStart;
+    private final Runnable replayLoadWatchdog = () -> {
+        if (!replayLoading) return;
+        replayLoading = false;
+        ++replayLoadGeneration;
+        replayDeferredStart = null;
+        failReplay(replayLoadStartId, "VPN engine startup timed out. Open FCAE VPN to retry.");
+    };
+    private int replayHandoffStartId;
+    private long replayHandoffToken;
+    private static final AtomicLong replayTokens = new AtomicLong();
+    private final Runnable replayHandoffWatchdog = () -> {
+        if (replayHandedOff) finishProxyReplay(replayHandoffToken, false);
+    };
+    static final String EXTRA_REPLAY_HANDOFF = "com.fc.fcaevpn.REPLAY_HANDOFF";
+
+    static boolean proxyReplayPending(long token) {
+        FCAEVpnService current = instance;
+        return current != null && current.replayHandedOff && current.uiConnecting
+                && !current.shuttingDown && current.replayHandoffToken == token;
+    }
+
+    static void finishProxyReplay(long token, boolean promoted) {
+        FCAEVpnService current = instance;
+        if (!proxyReplayPending(token) || current == null) return;
+        current.replayHandedOff = false;
+        current.handler.removeCallbacks(current.replayHandoffWatchdog);
+        current.uiConnecting = false;
+        if (!promoted) {
+            Log.e(TAG, "proxy replay could not enter foreground");
+            SessionState.command(SessionState.Command.NONE);
+            SessionState.markIdle(current);
+            Toast.makeText(current, "Could not start proxy. Open FCAE VPN to retry.", Toast.LENGTH_LONG).show();
+        }
+        current.notification.dismiss();
+        current.stopForeground(STOP_FOREGROUND_REMOVE);
+        current.stopSelf(current.replayHandoffStartId);
+    }
 
     private final Object cmdLock = new Object();
     private volatile boolean engineOpInFlight = false;
@@ -320,6 +365,10 @@ public class FCAEVpnService extends VpnService {
      */
     @SuppressWarnings("deprecation")
     private void startFg(Notification n) {
+        startFg(n, true);
+    }
+
+    private void startFg(Notification n, boolean handoffProxy) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 VpnNotification.NOTIFICATION_ID,
@@ -328,7 +377,7 @@ public class FCAEVpnService extends VpnService {
         } else {
             startForeground(VpnNotification.NOTIFICATION_ID, n);
         }
-        ProxyNotification.handoffToVpn();
+        if (handoffProxy) ProxyNotification.handoffToVpn();
     }
 
     /** Whitelist or blacklist of apps from the user's split-tunnel settings. */
@@ -585,12 +634,12 @@ public class FCAEVpnService extends VpnService {
         // (including region refreshes).
         notification = new VpnNotification(this);
         startFg(notification.build(VpnNotification.zeroTrafficText(),
-                VpnNotification.BUTTONS_RUNNING));
+                VpnNotification.BUTTONS_RUNNING), false);
 
         // An existing engine may survive service recreation and still needs
         // its protect callback rebound. A cold start must not load the native
         // libraries until the replay command has painted its connecting state.
-        if (NativeEngine.Loaded.value) initializeNative();
+        if (NativeEngine.Loaded.value && !ProxyNotification.sessionActive()) initializeNative();
 
         handler = new Handler(Looper.getMainLooper());
         android.content.IntentFilter psiphonFilter = new android.content.IntentFilter();
@@ -603,8 +652,25 @@ public class FCAEVpnService extends VpnService {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // Preserve eager registration for non-replay lifecycle and control
-        // paths; only a cold replay publishes its first frame before loading.
+        if (replayLoading) {
+            String action = intent != null ? intent.getAction() : null;
+            if (ACTION_DISCONNECT.equals(action) || ACTION_STOP.equals(action)) {
+                cancelReplayLoading(ACTION_DISCONNECT.equals(action));
+                return START_NOT_STICKY;
+            }
+            if (ACTION_START.equals(action) || ACTION_PSIPHON_START.equals(action)) {
+                replayDeferredStart = new Intent(intent);
+                replayLoadStartId = startId;
+            } else if (ACTION_REPLAY.equals(action)) {
+                replayLoadStartId = startId;
+            } else if (ACTION_PSIPHON_REGIONS.equals(action)) {
+                PsiphonTunnelService.startBound(this,
+                        new Intent(this, PsiphonTunnelService.class)
+                                .setAction(PsiphonTunnelService.ACTION_REGIONS));
+            }
+            return START_STICKY;
+        }
+        // Non-replay starts preserve the existing registration behavior.
         if (intent == null || !ACTION_REPLAY.equals(intent.getAction())) initializeNative();
         if (intent != null && intent.getAction() != null) {
             switch (intent.getAction()) {
@@ -666,68 +732,58 @@ public class FCAEVpnService extends VpnService {
                     return START_STICKY;
 
                 case ACTION_REPLAY:
-                    // The widget's foreground-service PendingIntent reaches the
-                    // owner directly, not the widget receiver. Publish before
-                    // native library loading or saved-session disk access.
+                    if (replayHandedOff) {
+                        replayHandoffStartId = startId;
+                        return START_NOT_STICKY;
+                    }
                     if (sessionActive()) return START_STICKY;
-                    if (replayHandedOff || ProxyNotification.sessionActive()) {
+                    if (ProxyNotification.sessionActive()) {
                         notification.dismiss();
                         stopForeground(STOP_FOREGROUND_REMOVE);
                         stopSelf(startId);
                         return START_NOT_STICKY;
                     }
+                    ProcessExit.cancel();
+                    VpnTileService.Companion.clearPendingExit(this);
+                    uiConnecting = true;
                     SessionState.command(SessionState.Command.CONNECT);
-                    SessionState.markConnecting(this, 1);
-                    if (!requireNativeEngine(startId)) return START_NOT_STICKY;
-                    Intent recalled = recalledSession(this);
-                    if (recalled == null || !recalled.hasExtra("protocol")) {
-                        Toast.makeText(this, "Open FCAE VPN and check your settings before connecting.", Toast.LENGTH_LONG).show();
-                        SessionState.command(SessionState.Command.NONE);
-                        SessionState.markIdle(this);
-                        notification.dismiss();
-                        stopForeground(STOP_FOREGROUND_REMOVE);
-                        stopSelf(startId);
-                        return START_NOT_STICKY;
-                    }
-                    if (recalled.getIntExtra("mode", 1) == 0) {
-                        SessionState.markConnecting(this, 0);
-                        replayHandedOff = true;
-                        Intent proxy = new Intent(this, ProxyNotification.class)
-                                .setAction(ProxyNotification.ACTION_START);
+                    SessionState.markConnecting(this, recalledMode(this));
+                    replayLoading = true;
+                    replayLoadStartId = startId;
+                    final long loadGeneration = ++replayLoadGeneration;
+                    Thread loader = new Thread(() -> {
+                        boolean available;
                         try {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                startForegroundService(proxy);
-                            } else {
-                                startService(proxy);
-                            }
-                        } catch (RuntimeException error) {
-                            replayHandedOff = false;
-                            Log.e(TAG, "proxy replay could not start", error);
-                            Toast.makeText(this, "Could not start proxy. Open FCAE VPN to retry.", Toast.LENGTH_LONG).show();
-                            SessionState.command(SessionState.Command.NONE);
-                            SessionState.markIdle(this);
-                            notification.dismiss();
-                            stopForeground(STOP_FOREGROUND_REMOVE);
-                            stopSelf(startId);
-                            return START_NOT_STICKY;
+                            available = NativeEngine.ensureLoaded();
+                        } catch (Throwable error) {
+                            Log.e(TAG, "replay native load failed", error);
+                            available = false;
                         }
-                        notification.dismiss();
-                        stopForeground(STOP_FOREGROUND_REMOVE);
-                        stopSelf(startId);
-                        return START_NOT_STICKY;
+                        final boolean loaded = available;
+                        handler.post(() -> {
+                            if (instance != this || !replayLoading || loadGeneration != replayLoadGeneration) return;
+                            replayLoading = false;
+                            handler.removeCallbacks(replayLoadWatchdog);
+                            Intent deferred = replayDeferredStart;
+                            replayDeferredStart = null;
+                            if (!loaded) {
+                                failReplay(replayLoadStartId, "VPN engine unavailable. Open FCAE VPN for details.");
+                                return;
+                            }
+                            if (deferred != null) onStartCommand(deferred, 0, replayLoadStartId);
+                            else continueReplay(replayLoadStartId);
+                        });
+                    }, "FCAE-ReplayLoader");
+                    try {
+                        loader.start();
+                        handler.postDelayed(replayLoadWatchdog, 60000L);
+                    } catch (Throwable error) {
+                        Log.e(TAG, "could not start replay loader", error);
+                        replayLoading = false;
+                        failReplay(startId, "VPN engine unavailable. Open FCAE VPN for details.");
                     }
-                    if (VpnService.prepare(this) != null) {
-                        Toast.makeText(this, "Open FCAE VPN to grant VPN permission.", Toast.LENGTH_LONG).show();
-                        SessionState.command(SessionState.Command.NONE);
-                        SessionState.markIdle(this);
-                        notification.dismiss();
-                        stopForeground(STOP_FOREGROUND_REMOVE);
-                        stopSelf(startId);
-                        return START_NOT_STICKY;
-                    }
-                    intent = recalled;
-                    // Fall through to the normal owner path with the complete
-                    // saved configuration loaded by the foreground service.
+                    return START_STICKY;
+
                 case ACTION_START:
                     if (!requireNativeEngine(startId)) return START_NOT_STICKY;
                     notificationPause = false;
@@ -756,6 +812,75 @@ public class FCAEVpnService extends VpnService {
         return START_STICKY;
     }
 
+    private void failReplay(int startId, String message) {
+        Log.e(TAG, message);
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+        uiConnecting = false;
+        SessionState.command(SessionState.Command.NONE);
+        SessionState.markIdle(this);
+        notification.dismiss();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf(startId);
+    }
+
+    private void cancelReplayLoading(boolean remoteDisconnect) {
+        replayLoading = false;
+        ++replayLoadGeneration;
+        replayDeferredStart = null;
+        handler.removeCallbacks(replayLoadWatchdog);
+        uiConnecting = false;
+        SessionState.command(SessionState.Command.NONE);
+        SessionState.markIdle(this);
+        notification.dismiss();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf();
+        if (remoteDisconnect) {
+            PsiphonTunnelService.killProcessOnExit(this);
+            ProcessExit.request(this, true);
+        }
+    }
+
+    private void continueReplay(int startId) {
+        if (!requireNativeEngine(startId)) return;
+        Intent recalled = recalledSession(this);
+        if (recalled == null || !recalled.hasExtra("protocol")) {
+            failReplay(startId, "Open FCAE VPN and check your settings before connecting.");
+            return;
+        }
+        if (recalled.getIntExtra("mode", 1) == 0) {
+            SessionState.markConnecting(this, 0);
+            replayHandedOff = true;
+            replayHandoffStartId = startId;
+            replayHandoffToken = replayTokens.incrementAndGet();
+            Intent proxy = new Intent(this, ProxyNotification.class)
+                    .setAction(ProxyNotification.ACTION_START)
+                    .putExtras(recalled)
+                    .putExtra(EXTRA_REPLAY_HANDOFF, replayHandoffToken);
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(proxy);
+                } else {
+                    startService(proxy);
+                }
+            } catch (RuntimeException error) {
+                Log.e(TAG, "proxy replay could not start", error);
+                finishProxyReplay(replayHandoffToken, false);
+                return;
+            }
+            handler.removeCallbacks(replayHandoffWatchdog);
+            handler.postDelayed(replayHandoffWatchdog, 15000L);
+            return;
+        }
+        if (VpnService.prepare(this) != null) {
+            failReplay(startId, "Open FCAE VPN to grant VPN permission.");
+            return;
+        }
+        notificationPause = false;
+        armConnectWatchdog();
+        SessionState.command(SessionState.Command.CONNECT);
+        requestStart(recalled);
+    }
+
     private boolean initializeNative() {
         if (nativeReady) return true;
         if (!NativeEngine.ensureLoaded()) return false;
@@ -777,6 +902,8 @@ public class FCAEVpnService extends VpnService {
                 + (detail.isEmpty() ? "" : " (" + detail + ")"));
         Toast.makeText(this, "VPN engine unavailable. Open FCAE VPN for details.", Toast.LENGTH_LONG).show();
         handler.removeCallbacks(connectWatchdog);
+        uiConnecting = false;
+        replayHandedOff = false;
         SessionState.command(SessionState.Command.NONE);
         SessionState.markIdle(this);
         notification.dismiss();
@@ -799,12 +926,18 @@ public class FCAEVpnService extends VpnService {
 
     /** Notification, widget and tile Disconnect end the service and process. */
     private void requestDisconnect() {
+        if (replayLoading) {
+            cancelReplayLoading(true);
+            return;
+        }
         handler.removeCallbacks(connectWatchdog);
         SessionState.command(SessionState.Command.DISCONNECT);
         synchronized (cmdLock) {
             queuedStart = null;
         }
         remoteDisconnect = true;
+        handler.removeCallbacks(replayHandoffWatchdog);
+        replayHandedOff = false;
         killProcessOnCleanup = true;
         if (shuttingDown) {
             scheduleProcessKill();
@@ -1796,6 +1929,13 @@ public class FCAEVpnService extends VpnService {
         return context.getSharedPreferences(PREFS_LAST, MODE_PRIVATE).getBoolean("has", false);
     }
 
+    /** The last complete saved mode, without loading JNI or parsing the session. */
+    public static int recalledMode(Context context) {
+        if (context == null) return 1;
+        SharedPreferences prefs = context.getSharedPreferences(PREFS_LAST, MODE_PRIVATE);
+        return prefs.getBoolean("has", false) && prefs.getInt("mode", 1) == 0 ? 0 : 1;
+    }
+
     private void rememberStart(Intent i) {
         SharedPreferences prefs = getSharedPreferences(PREFS_LAST, MODE_PRIVATE);
         if (i == null || prefs.getBoolean("blocked", false) || prefs.getBoolean("has", false)) return;
@@ -2022,6 +2162,11 @@ public class FCAEVpnService extends VpnService {
 
     @Override
     public void onDestroy() {
+        replayLoading = false;
+        ++replayLoadGeneration;
+        replayDeferredStart = null;
+        handler.removeCallbacks(replayLoadWatchdog);
+        handler.removeCallbacks(replayHandoffWatchdog);
         unregisterReceiver(psiphonStatsReceiver);
         instance = null;
         // Task removal or service recreation is not a user disconnect. Do not

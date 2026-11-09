@@ -97,6 +97,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // Accessed on the application main thread. The app notification owner keeps
     // this binding alive.
     private static volatile android.content.ServiceConnection connection;
+    private static volatile boolean regionOnlyBinding;
+    private static boolean tunnelStartPending;
     private static final java.util.concurrent.atomic.AtomicLong bindingEpoch = new java.util.concurrent.atomic.AtomicLong();
     private static final Object bindingLock = new Object();
     private static volatile long activeSession;
@@ -215,7 +217,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         }
     }
 
-    public static boolean hasActiveBinding() { return connection != null; }
+    public static boolean hasActiveBinding() { return connection != null && !regionOnlyBinding; }
     /** The exit's tunnel state carried by a stats sample; no sample says nothing against it. */
     public static boolean tunnelUp(Intent stats) {
         return stats == null || stats.getBooleanExtra(EXTRA_TUNNEL_UP, true);
@@ -227,17 +229,30 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static void startBound(Context context, Intent intent) {
         Context app = context.getApplicationContext();
         final long epoch;
+        final boolean regions = ACTION_REGIONS.equals(intent.getAction());
         synchronized (bindingLock) {
+            if (regions && (tunnelStartPending || hasActiveBinding())) return;
+            if (!regions) tunnelStartPending = true;
             terminalStopSent.set(false);
             epoch = bindingEpoch.incrementAndGet();
         }
         new Handler(Looper.getMainLooper()).post(() -> {
             synchronized (bindingLock) {
-                if (epoch != bindingEpoch.get() || connection != null) return;
+                if (epoch != bindingEpoch.get()) return;
+                if (!regions) tunnelStartPending = false;
+                if (connection != null) {
+                    if (regions || !regionOnlyBinding) return;
+                    android.content.ServiceConnection old = connection;
+                    connection = null;
+                    regionOnlyBinding = false;
+                    liveConnections.remove(old);
+                    try { app.unbindService(old); } catch (IllegalArgumentException ignored) {}
+                }
                 activeSession = android.os.SystemClock.elapsedRealtimeNanos();
                 intent.putExtra("psiSession", activeSession);
                 android.content.ServiceConnection next = makeConnection(app, intent);
                 connection = next;
+                regionOnlyBinding = regions;
                 liveConnections.add(next);
                 // A region refresh is bind-only; a tunnel also owns a started service.
                 if (!ACTION_REGIONS.equals(intent.getAction())) {
@@ -246,6 +261,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 if (!app.bindService(intent, next,
                         Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT)) {
                     connection = null;
+                    regionOnlyBinding = false;
                     liveConnections.remove(next);
                     Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
                     failed.putExtra("psiSession", activeSession);
@@ -276,6 +292,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 liveConnections.remove(this);
                 if (connection != this) return;
                 connection = null;
+                regionOnlyBinding = false;
                 // The :psiphon process died. NOT a user action: keep the
                 // session alive (no 0-port completion, no BROADCAST_FAILED)
                 // and rebind with the same intent instead.
@@ -339,10 +356,12 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     private static void releaseBindings(Context app) {
         bindingEpoch.incrementAndGet();
+        tunnelStartPending = false;
         final java.util.List<android.content.ServiceConnection> old =
                 new java.util.ArrayList<>(liveConnections);
         liveConnections.clear();
         connection = null;
+        regionOnlyBinding = false;
         ProxyNotification.cachePsiphonStats(app, null);
         final long request = clientAttachId;
         clientAttachId = 0;

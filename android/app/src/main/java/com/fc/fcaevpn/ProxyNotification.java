@@ -224,6 +224,9 @@ public class ProxyNotification extends Service {
     };
     /** Set once teardown starts, so the watchdog cannot re-enter stopProxy(). */
     private volatile boolean stopping = false;
+    private boolean engineStartPending;
+    private long engineStartDeadline;
+    private static final long ENGINE_START_TIMEOUT_MS = 60000L;
 
     private final Runnable statsRunnable = new Runnable() {
         @Override
@@ -238,7 +241,16 @@ public class ProxyNotification extends Service {
                 try {
                     engineState = NativeEngine.nativeGetState();
                 } catch (Exception ignored) {}
+                if (FCAEVpnService.engineSessionLive(engineState)) engineStartPending = false;
+                if ((engineState == 0 || engineState == 5) && engineStartPending
+                        && android.os.SystemClock.elapsedRealtime() < engineStartDeadline) {
+                    updateNotification();
+                    publishState();
+                    handler.postDelayed(this, 1000);
+                    return;
+                }
                 if (engineState == 0 || engineState == 5) {
+                    engineStartPending = false;
                     Log.w(TAG, "Engine reached terminal state " + engineState
                             + " \u2014 stopping proxy service");
                     stopProxy();
@@ -340,6 +352,13 @@ public class ProxyNotification extends Service {
         return new Notification.Action.Builder(null, label, pi).build();
     }
 
+    private void beginSessionIfNew() {
+        if (!sessionRequested && !PsiphonTunnelService.hasActiveBinding()
+                && !(NativeEngine.Loaded.value && engineAlive())) {
+            FCAEVpnService.beginProxySessionEpoch();
+        }
+    }
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_PSIPHON_REGIONS.equals(intent.getAction())) {
@@ -359,6 +378,7 @@ public class ProxyNotification extends Service {
         }
         if (intent != null && ACTION_PSIPHON.equals(intent.getAction())) {
             ProcessExit.cancel();
+            beginSessionIfNew();
             ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
             sessionRequested = true;
             externalPsiphon = true;
@@ -408,14 +428,29 @@ public class ProxyNotification extends Service {
             return START_STICKY;
         }
 
+        final long replayToken = intent.getLongExtra(FCAEVpnService.EXTRA_REPLAY_HANDOFF, 0L);
+        if (replayToken != 0 && !FCAEVpnService.proxyReplayPending(replayToken)) {
+            if (sessionRequested && !stopping) {
+                updateNotification();
+                return START_STICKY;
+            }
+            showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
+            stopForeground(STOP_FOREGROUND_REMOVE);
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+
         // A fresh proxy session: bump the shared generation counter so this
         // session's later disconnect broadcast is never mistaken for a stale
         // one from a previous connect/disconnect cycle.
         ProcessExit.cancel();
+        beginSessionIfNew();
         ownerGeneration = FCAEVpnService.sGeneration.incrementAndGet();
         sessionRequested = true;
         stopping = false;
         nativeFreed = false;
+        engineStartPending = true;
+        engineStartDeadline = android.os.SystemClock.elapsedRealtime() + ENGINE_START_TIMEOUT_MS;
 
         // A description on the intent means a surface without an Activity is
         // asking for this session (the widget). MainActivity's own ACTION_START
@@ -442,12 +477,17 @@ public class ProxyNotification extends Service {
             // ignores a start on a live tunnel for the same reason: rebuilding
             // the session under it would drop everything in flight.
             Log.i(TAG, "Start ignored: session already up");
-            showNotification(VpnNotification.zeroTrafficText(), BUTTONS_RUNNING);
+            engineStartPending = false;
+            boolean promoted = showNotification(VpnNotification.zeroTrafficText(), BUTTONS_RUNNING);
+            if (replayToken != 0) FCAEVpnService.finishProxyReplay(replayToken, promoted);
+            if (!promoted) { sessionRequested = false; stopSelf(startId); return START_NOT_STICKY; }
             handler.post(statsRunnable);
             return START_STICKY;
         }
 
-        showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
+        boolean promoted = showNotification(VpnNotification.zeroTrafficText(), BUTTONS_CONNECTING);
+        if (replayToken != 0) FCAEVpnService.finishProxyReplay(replayToken, promoted);
+        if (!promoted) { sessionRequested = false; stopSelf(startId); return START_NOT_STICKY; }
         handler.postDelayed(statsRunnable, 2000L);
 
         if (described && session.getIntExtra("backend", 0) == 1) {
@@ -481,7 +521,7 @@ public class ProxyNotification extends Service {
     // startForeground(int, Notification) is deprecated on API 34; the
     // manifest's specialUse covers it.
     @SuppressWarnings("deprecation")
-    private void showNotification(String text, int buttons) {
+    private boolean showNotification(String text, int buttons) {
         Notification.Builder nb = (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
             ? new Notification.Builder(this, CHANNEL_ID)
             : new Notification.Builder(this))
@@ -507,8 +547,10 @@ public class ProxyNotification extends Service {
 
         try {
             startForeground(NOTIFICATION_ID, nb.build());
+            return true;
         } catch (Exception e) {
             Log.e(TAG, "startForeground failed: " + e.getMessage());
+            return false;
         }
     }
 
@@ -519,6 +561,8 @@ public class ProxyNotification extends Service {
      * around the stop/start pair so a disconnect that lands mid-way wins.
      */
     private void startEngineFromSession(Intent session) {
+        engineStartPending = true;
+        engineStartDeadline = android.os.SystemClock.elapsedRealtime() + ENGINE_START_TIMEOUT_MS;
         final Intent described = new Intent(session);
         final long generation = ownerGeneration;
         NativeEngine.lifecycleExecutor.execute(() -> {
@@ -533,7 +577,9 @@ public class ProxyNotification extends Service {
             }
             if (!started) {
                 Log.w(TAG, "headless start refused — ending the session");
-                handler.post(ProxyNotification.this::stopProxy);
+                handler.post(() -> {
+                    if (generation == FCAEVpnService.sGeneration.get() && !stopping) stopProxy();
+                });
             }
         });
     }
@@ -585,6 +631,7 @@ public class ProxyNotification extends Service {
         int state = 5;
         try { state = NativeEngine.nativeGetState(); } catch (Exception ignored) {}
         if (state == 6) return SessionState.Phase.RECONNECTING;
+        if (engineStartPending && (state == 0 || state == 5)) return SessionState.Phase.CONNECTING;
         // 0 = not reported yet: the session exists (this owner is running) and is
         // not passing traffic — dialing, not disconnected.
         if (state <= 3) return SessionState.Phase.CONNECTING;
@@ -646,6 +693,7 @@ public class ProxyNotification extends Service {
         lastPsiphonStats = null;
         stopping = true;
         sessionRequested = false;
+        engineStartPending = false;
         pendingPsiphonSession = null;
         psiTelemetry = false;
         psiLive = false;

@@ -37,7 +37,7 @@ object VpnCommands {
     fun paintConnecting(context: Context): Boolean {
         VpnTileService.clearPendingExit(context)
         SessionState.command(SessionState.Command.CONNECT)
-        SessionState.markConnecting(context, 1)
+        SessionState.markConnecting(context, FCAEVpnService.recalledMode(context))
         return true
     }
 
@@ -55,14 +55,14 @@ object VpnCommands {
         VpnTileService.clearPendingExit(context)
         val command = Intent(context, FCAEVpnService::class.java)
             .setAction(FCAEVpnService.ACTION_REPLAY)
+        ProcessExit.cancel()
         SessionState.command(SessionState.Command.CONNECT)
-        SessionState.markConnecting(context, 1)
+        SessionState.markConnecting(context, FCAEVpnService.recalledMode(context))
         if (!start(context, command)) {
             SessionState.command(SessionState.Command.NONE)
             SessionState.markIdle(context)
             return false
         }
-        ProcessExit.cancel()
         return true
     }
 

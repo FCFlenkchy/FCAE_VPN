@@ -754,60 +754,70 @@ impl Upstream {
         }
         let mut last_error = None;
         for attempt in 0..2 {
-            let session = match self.get_tcp_session().await {
-                Ok(Some(session)) => session,
-                Ok(None) => {
-                    return self.open_h1_authorized(target).await.map(|stream| Box::new(stream) as BoxedTunnel);
+            // Token renewal failures are not transport negotiation failures.
+            let token = self.current_token().await?;
+            let session = match self.get_tcp_session(&token).await {
+                Ok(session) => session,
+                Err(error) => {
+                    if self.preference == TransportPreference::Auto && h1_fallback_allowed(&error) {
+                        return self.fallback_h1(target, error).await;
+                    }
+                    return Err(error);
                 }
-                Err(error) if self.preference == TransportPreference::Auto && !matches!(error, FirefoxError::TlsCertificate { .. }) => {
-                    log::debug!("[firefox] H2 session unavailable, using H1: {error}");
-                    return self.open_h1_authorized(target).await.map(|stream| Box::new(stream) as BoxedTunnel);
-                }
-                Err(error) => return Err(error),
             };
             match tokio::time::timeout(self.timeout, session.open_tcp(target)).await {
                 Ok(Ok(stream)) => return Ok(Box::new(stream)),
                 Ok(Err(FirefoxError::PassRejected)) if attempt == 0 => {
                     self.renew(true).await?;
                 }
-                Ok(Err(error)) if attempt == 0 && retryable_session_error(&error) => {
+                Ok(Err(error)) if retryable_session_error(&error) => {
                     session.kill();
-                    *self.tcp_session.lock().await = None;
+                    self.discard_tcp_session(&session).await;
                     last_error = Some(error);
                 }
                 Ok(Err(error)) => return Err(error),
-                Err(_) if attempt == 0 => {
+                Err(_) => {
                     session.kill();
-                    *self.tcp_session.lock().await = None;
+                    self.discard_tcp_session(&session).await;
                     last_error = Some(FirefoxError::Timeout(self.timeout));
                 }
-                Err(_) => return Err(FirefoxError::Timeout(self.timeout)),
             }
         }
         let error = last_error.unwrap_or_else(|| FirefoxError::H2("could not open proxy stream".into()));
-        if self.preference == TransportPreference::Auto {
-            match self.open_h1_authorized(target).await {
-                Ok(stream) => Ok(Box::new(stream) as BoxedTunnel),
-                Err(h1_error) if !h1_error.is_transient() => Err(h1_error),
-                Err(_) => Err(error),
-            }
+        if self.preference == TransportPreference::Auto && h1_fallback_allowed(&error) {
+            self.fallback_h1(target, error).await
         } else {
             Err(error)
         }
     }
 
-    async fn get_tcp_session(&self) -> Result<Option<H2Session>> {
-        let token = self.current_token().await?;
+    async fn discard_tcp_session(&self, failed: &H2Session) {
+        let mut slot = self.tcp_session.lock().await;
+        if slot.as_ref().is_some_and(|current| Arc::ptr_eq(&current.inner, &failed.inner)) {
+            *slot = None;
+        }
+    }
+
+    async fn fallback_h1(&self, target: &str, h2_error: FirefoxError) -> Result<BoxedTunnel> {
+        log::debug!("[firefox] H2 unavailable, trying H1: {h2_error}");
+        match self.open_h1_authorized(target).await {
+            Ok(stream) => Ok(Box::new(stream)),
+            Err(error) if !error.is_transient() => Err(error),
+            Err(_) => Err(h2_error),
+        }
+    }
+
+    async fn get_tcp_session(&self, token: &str) -> Result<H2Session> {
         let mut slot = self.tcp_session.lock().await;
         if slot.as_ref().is_some_and(H2Session::alive) {
-            return Ok(slot.clone());
+            return Ok(slot.as_ref().unwrap().clone());
         }
         *slot = None;
         let candidate = self.candidate();
         let session = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
             .await.map_err(|_| FirefoxError::Timeout(self.timeout))??;
         *slot = Some(session.clone());
-        Ok(Some(session))
+        Ok(session)
     }
 
     async fn open_h1_authorized(&self, target: &str) -> Result<BufReader<SslStream<TcpStream>>> {
@@ -1029,6 +1039,11 @@ impl Drop for Upstream {
     }
 }
 
+fn h1_fallback_allowed(error: &FirefoxError) -> bool {
+    matches!(error, FirefoxError::H2(_) | FirefoxError::Network(_) | FirefoxError::Tls { .. }
+        | FirefoxError::Dns { .. } | FirefoxError::Timeout(_) | FirefoxError::Protocol(_))
+}
+
 fn retryable_session_error(error: &FirefoxError) -> bool {
     matches!(error, FirefoxError::H2(_) | FirefoxError::Network(_) | FirefoxError::Tls { .. })
 }
@@ -1169,6 +1184,17 @@ mod traffic_tests {
 
     fn http_error(status: u16, message: &str) -> FirefoxError {
         FirefoxError::Http { host: "proxy".into(), status, errno: None, retry_after: None, message: message.into() }
+    }
+
+    #[test]
+    fn h1_fallback_is_limited_to_transport_failures() {
+        assert!(h1_fallback_allowed(&FirefoxError::H2("reset".into())));
+        assert!(h1_fallback_allowed(&FirefoxError::Timeout(Duration::from_secs(1))));
+        assert!(h1_fallback_allowed(&FirefoxError::Protocol("H2 not negotiated".into())));
+        assert!(!h1_fallback_allowed(&FirefoxError::TlsCertificate { host: "proxy".into(), message: "invalid".into() }));
+        assert!(!h1_fallback_allowed(&FirefoxError::PassRejected));
+        assert!(!h1_fallback_allowed(&FirefoxError::QuotaExhausted(String::new())));
+        assert!(!h1_fallback_allowed(&http_error(502, "Fastly; error=destination_ip_prohibited")));
     }
 
     #[test]

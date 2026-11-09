@@ -75,7 +75,6 @@ object SessionState {
     private var pending = Command.NONE
     private var pendingAt = 0L
 
-    private var stablePhase = -1
     private var stable: Snapshot? = null
     private var regressions = 0
 
@@ -124,6 +123,10 @@ object SessionState {
             sessionGeneration = generation
             statsSource = SOURCE_ENGINE
             heldStats = longArrayOf(0L, 0L, 0L, 0L)
+            synchronized(this) {
+                stable = null
+                regressions = 0
+            }
             clearRtt()
         }
         // Once the AAR reports, retain its exit-side counters and discard the engine's samples.
@@ -138,21 +141,21 @@ object SessionState {
             phase, mode, heldStats[0], heldStats[1], heldStats[2], heldStats[3],
             holdRtt(if (mine) rttSample else 0)
         )
-        write(context, snapshot, measured = true)
+        val accepted = write(context, snapshot, measured = true) ?: return
         val intent = Intent(FCAEVpnService.BROADCAST_VPN_STATE_CHANGED)
             .setPackage(context.packageName)
             .putExtra("generation", FCAEVpnService.stateGeneration())
             .putExtra("epoch", FCAEVpnService.sessionEpoch())
-            .putExtra("phase", snapshot.phase.ordinal)
-            .putExtra("mode", snapshot.mode)
-            .putExtra("running", snapshot.running)
-            .putExtra("paused", snapshot.paused)
-            .putExtra("connecting", snapshot.connecting)
-            .putExtra("rx", snapshot.rx)
-            .putExtra("tx", snapshot.tx)
-            .putExtra("totalRx", snapshot.totalRx)
-            .putExtra("totalTx", snapshot.totalTx)
-            .putExtra("rtt", snapshot.rtt)
+            .putExtra("phase", accepted.phase.ordinal)
+            .putExtra("mode", accepted.mode)
+            .putExtra("running", accepted.running)
+            .putExtra("paused", accepted.paused)
+            .putExtra("connecting", accepted.connecting)
+            .putExtra("rx", accepted.rx)
+            .putExtra("tx", accepted.tx)
+            .putExtra("totalRx", accepted.totalRx)
+            .putExtra("totalTx", accepted.totalTx)
+            .putExtra("rtt", accepted.rtt)
         try {
             context.sendBroadcast(intent)
         } catch (_: Throwable) {
@@ -355,12 +358,15 @@ object SessionState {
             (next.totalRx < prev.totalRx || next.totalTx < prev.totalTx)
         if (!regressed) {
             regressions = 0
+            stable = next
             return next
         }
         // A lone bad tick is held back; a real counter restart (the AAR came
         // back with fresh counters) confirms itself on the next sample and is
         // shown then, honestly, instead of being pinned to the old peak.
         if (++regressions < 2) return null
+        stable = next
+        regressions = 0
         return next
     }
 
@@ -369,14 +375,14 @@ object SessionState {
      * running owners, never durable state: after process death or reboot they
      * start idle until a foreground owner reports again.
      */
-    private fun write(context: Context, snapshot: Snapshot, measured: Boolean = false) {
-        if (!accepts(snapshot)) return
+    private fun write(context: Context, snapshot: Snapshot, measured: Boolean = false): Snapshot? {
+        if (!accepts(snapshot)) return null
         // Only an owner's own frame can confirm a command: the optimistic
         // writes made here (a command the user just gave) would otherwise
         // release the latch that is hiding the old state, and the owner's
         // still-dying frames would flip the surfaces back.
         if (measured) confirmed(snapshot)
-        val accepted = stabilize(snapshot.phase, snapshot) ?: return
+        val accepted = stabilize(snapshot.phase, snapshot) ?: return null
         latest = accepted
         latestAt = SystemClock.elapsedRealtime()
         // The frame lands on the widget here, in the process the widget's
@@ -392,5 +398,6 @@ object SessionState {
             VpnTileService.publish(context)
         } catch (_: Throwable) {
         }
+        return accepted
     }
 }
