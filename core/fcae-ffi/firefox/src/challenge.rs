@@ -12,6 +12,8 @@ use crate::error::{FirefoxError, Result};
 
 const SOLVE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_ROUNDS: usize = 8;
+const MAX_SCRIPT_ATTEMPTS: usize = 3;
+const SCRIPT_ERROR_HOST: &str = "Fastly challenge script";
 const POW_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 #[async_trait]
@@ -77,34 +79,38 @@ impl ChallengeService {
             }
             let rejected_base = bases.first().copied() == Some(rejection_origin);
             for (index, base) in bases.iter().enumerate() {
-                let solver_http = parent.fresh_jar().with_timeout(SOLVE_TIMEOUT);
-                let solved = if index == 0 && rejected_base {
-                    if let Some(page) = rejection_page {
-                        if let Some(host) = base.strip_prefix("https://") {
-                            solver_http.store_cookies(host, &rejection.headers);
+                for attempt in 0..MAX_SCRIPT_ATTEMPTS {
+                    let solver_http = parent.fresh_jar().with_timeout(SOLVE_TIMEOUT).with_challenge_h2();
+                    let solved = if index == 0 && rejected_base && attempt == 0 {
+                        if let Some(page) = rejection_page {
+                            if let Some(host) = base.strip_prefix("https://") {
+                                solver_http.store_cookies(host, &rejection.headers);
+                            }
+                            self.solve_page(&solver_http, base, page).await
+                        } else {
+                            self.solve_host(&solver_http, base).await
                         }
-                        self.solve_page(&solver_http, base, page).await
                     } else {
                         self.solve_host(&solver_http, base).await
+                    };
+                    match solved {
+                        Ok(()) if !solver_http.has_cookies() => {
+                            failures.push(format!("{base}: challenge completed but no cookies were issued"));
+                        }
+                        Ok(()) => {
+                            parent.import_cookies_for_hosts(&solver_http, &[
+                                "accounts.firefox.com",
+                                "api.accounts.firefox.com",
+                                "oauth.accounts.firefox.com",
+                                "vpn.mozilla.org",
+                            ]);
+                            return Ok(());
+                        }
+                        Err(FirefoxError::ChallengeRequired) => return Err(FirefoxError::ChallengeRequired),
+                        Err(error) if is_script_state_rejection(&error) && attempt + 1 < MAX_SCRIPT_ATTEMPTS => continue,
+                        Err(error) => failures.push(format!("{base}: {error}")),
                     }
-                } else {
-                    self.solve_host(&solver_http, base).await
-                };
-                match solved {
-                    Ok(()) if !solver_http.has_cookies() => {
-                        failures.push(format!("{base}: challenge completed but no cookies were issued"));
-                    }
-                    Ok(()) => {
-                        parent.import_cookies_for_hosts(&solver_http, &[
-                            "accounts.firefox.com",
-                            "api.accounts.firefox.com",
-                            "oauth.accounts.firefox.com",
-                            "vpn.mozilla.org",
-                        ]);
-                        return Ok(());
-                    }
-                    Err(FirefoxError::ChallengeRequired) => return Err(FirefoxError::ChallengeRequired),
-                    Err(error) => failures.push(format!("{base}: {error}")),
+                    break;
                 }
             }
             Err(FirefoxError::Protocol(format!("Fastly challenge failed ({})", failures.join("; "))))
@@ -218,6 +224,10 @@ struct PostBackResponse {
     tok: String,
 }
 
+fn is_script_state_rejection(error: &FirefoxError) -> bool {
+    matches!(error, FirefoxError::Http { host, status: 400, .. } if host == SCRIPT_ERROR_HOST)
+}
+
 fn trusted_challenge_base(base: &str) -> bool {
     matches!(base,
         "https://api.accounts.firefox.com"
@@ -250,7 +260,13 @@ async fn fetch_text(http: &ControlPlane, url: &str) -> Result<String> {
         .header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")?;
     let response = http.send(request).await?;
     if response.status != 200 {
-        return Err(FirefoxError::Protocol(format!("challenge script returned HTTP {}", response.status)));
+        return Err(FirefoxError::Http {
+            host: SCRIPT_ERROR_HOST.into(),
+            status: response.status,
+            errno: None,
+            retry_after: response.retry_after(),
+            message: "challenge script request failed".into(),
+        });
     }
     String::from_utf8(response.body).map_err(|_| FirefoxError::Protocol("challenge resource is not UTF-8".into()))
 }
@@ -388,6 +404,18 @@ mod tests {
         solver.store_cookies("api.accounts.firefox.com", &headers);
         assert!(solver.has_cookies());
         assert!(!parent.has_cookies());
+    }
+
+    #[test]
+    fn only_script_400_restarts_with_a_fresh_page() {
+        let script_error = |status| FirefoxError::Http {
+            host: SCRIPT_ERROR_HOST.into(), status, errno: None, retry_after: None, message: String::new(),
+        };
+        assert!(is_script_state_rejection(&script_error(400)));
+        assert!(!is_script_state_rejection(&script_error(429)));
+        assert!(!is_script_state_rejection(&FirefoxError::Http {
+            host: "api.accounts.firefox.com".into(), status: 400, errno: Some(125), retry_after: None, message: String::new(),
+        }));
     }
 
     #[test]

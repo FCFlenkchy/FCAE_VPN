@@ -2699,6 +2699,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun showFirefoxSettings() {
         val box = dialogContent()
+        box.addView(TextView(this).apply {
+            text = "Region (Mozilla country/city list)"
+            setTextColor(Color.parseColor("#FF9AA3B5"))
+            setPadding(0, dp(12), 0, dp(3))
+        })
+        val location = Spinner(this)
+        location.adapter = ArrayAdapter<String>(this, R.layout.spinner_dark_item, mutableListOf()).apply {
+            setDropDownViewResource(R.layout.spinner_dark_item)
+            firefoxRegionAdapter = this
+        }
+        firefoxRegionSpinner = location
+        updateFirefoxRegionChoices(emptyList(), prefs.getString("firefoxLocation", "").orEmpty())
+        box.addView(location)
+
         dialogLabel(box, "Firefox accounts")
         val accounts = LinearLayout(this)
         accounts.orientation = LinearLayout.VERTICAL
@@ -2716,19 +2730,6 @@ class MainActivity : AppCompatActivity() {
         val status = dialogMessage(box, "Use an account for Firefox connections.")
         firefoxStatusView = status
 
-        box.addView(TextView(this).apply {
-            text = "Region (Mozilla country/city list)"
-            setTextColor(Color.parseColor("#FF9AA3B5"))
-            setPadding(0, dp(12), 0, dp(3))
-        })
-        val location = Spinner(this)
-        location.adapter = ArrayAdapter<String>(this, R.layout.spinner_dark_item, mutableListOf()).apply {
-            setDropDownViewResource(R.layout.spinner_dark_item)
-            firefoxRegionAdapter = this
-        }
-        firefoxRegionSpinner = location
-        updateFirefoxRegionChoices(emptyList(), prefs.getString("firefoxLocation", "").orEmpty())
-        box.addView(location)
         val server = addDialogInput(box, "Server override (optional host[:port])", prefs.getString("firefoxServer", "").orEmpty())
         box.addView(TextView(this).apply {
             text = "Firefox transport"

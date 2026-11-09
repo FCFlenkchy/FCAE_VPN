@@ -2444,6 +2444,15 @@ static void render_firefox_settings() {
     ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.25f, 1.0f), "FIREFOX IP PROTECTION SETTINGS");
     ImGui::Separator();
     const std::string root = firefox_json_escape(data_dir().c_str());
+    firefox_location_combo();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(g_app.firefox_job != 0);
+    if (ImGui::Button("Refresh regions")) {
+        firefox_submit("{\"op\":\"locations\",\"data_dir\":\"" + root + "\"}",
+                       "Loading Mozilla regions…");
+    }
+    ImGui::EndDisabled();
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     firefox_account_rows(root);
     if (g_app.firefox_captcha_id) {
         ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.3f, 1.0f), "CAPTCHA required");
@@ -2469,14 +2478,6 @@ static void render_firefox_settings() {
     if (g_app.firefox_job) ImGui::TextDisabled("Account operation in progress…");
     if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-    firefox_location_combo();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(g_app.firefox_job != 0);
-    if (ImGui::Button("Refresh regions")) {
-        firefox_submit("{\"op\":\"locations\",\"data_dir\":\"" + root + "\"}",
-                       "Loading Mozilla regions…");
-    }
-    ImGui::EndDisabled();
     ImGui::InputTextWithHint("Server override", "Optional proxy host[:port]", g_app.firefox_server, sizeof(g_app.firefox_server));
     static const char* const firefox_transports[] = {"Auto (H2 with H1 fallback)", "HTTP/2", "HTTP/1.1"};
     ImGui::Combo("Firefox transport", &g_app.firefox_transport, firefox_transports, 3);
@@ -3594,6 +3595,7 @@ void render_ui() {
             if (!narrow) ImGui::SameLine();
             if (ImGui::Button("Firefox settings")) open_firefox_settings();
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "SHARED SETTINGS");
             ImGui::Text("Mode");
             ImGui::RadioButton("Proxy", &g_app.mode, 0);
             ImGui::RadioButton("TUN",   &g_app.mode, 1);
@@ -3618,38 +3620,6 @@ void render_ui() {
                     ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", proxy_err);
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "AETHER SETTINGS");
-            ImGui::Separator();
-            ImGui::Text("Transport Options");
-            ImGui::Checkbox("ECH", &g_app.ech_enabled);
-            if (g_app.ech_enabled) {
-                ImGui::PushItemWidth(260);
-                ImGui::InputTextWithHint("ECH resolver", "udp://1.1.1.1 | tcp:// | https:// DoH",
-                                         g_app.ech_dns, sizeof(g_app.ech_dns));
-                ImGui::InputTextWithHint("ECH domain", "cloudflare-ech.com",
-                                         g_app.ech_domain, sizeof(g_app.ech_domain));
-                ImGui::PopItemWidth();
-                ImGui::TextDisabled("Without a usable ECH key the tunnel does not start.");
-            }
-            ImGui::Checkbox("Quick Reconnect", &g_app.quick_reconnect);
-            if (g_app.protocol == 6) {
-                ImGui::PushItemWidth(260);
-                ImGui::InputTextWithHint("Inner WireGuard endpoint", "auto (ip:port)",
-                                         g_app.gool_inner, sizeof(g_app.gool_inner));
-                ImGui::PopItemWidth();
-            }
-            if (g_app.mode == 0) {
-                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-                ImGui::Text("Proxy Ports");
-                ImGui::PushItemWidth(100);
-                ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
-                ImGui::SameLine(0, 20);
-                ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
-                ImGui::Checkbox("Aether HTTP proxy", &g_app.http_enabled);
-                ImGui::SameLine(0, 20);
-                ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
-                ImGui::PopItemWidth();
-            }
             if (g_app.mode == 1 && ImGui::CollapsingHeader("TUN Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Text("TUN engine");
                 ImGui::SameLine(0, 8);
@@ -3699,6 +3669,39 @@ void render_ui() {
                     if (!fcae_parse_tcp_buffer_size(g_app.tun_tcp_sndbuf) || !fcae_parse_tcp_buffer_size(g_app.tun_tcp_rcvbuf))
                         ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "Buffers: 4096..4194304 bytes.");
                 }
+            }
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "AETHER SETTINGS");
+            ImGui::Separator();
+            ImGui::Text("Transport Options");
+            ImGui::Checkbox("ECH", &g_app.ech_enabled);
+            if (g_app.ech_enabled) {
+                ImGui::PushItemWidth(260);
+                ImGui::InputTextWithHint("ECH resolver", "udp://1.1.1.1 | tcp:// | https:// DoH",
+                                         g_app.ech_dns, sizeof(g_app.ech_dns));
+                ImGui::InputTextWithHint("ECH domain", "cloudflare-ech.com",
+                                         g_app.ech_domain, sizeof(g_app.ech_domain));
+                ImGui::PopItemWidth();
+                ImGui::TextDisabled("Without a usable ECH key the tunnel does not start.");
+            }
+            ImGui::Checkbox("Quick Reconnect", &g_app.quick_reconnect);
+            if (g_app.protocol == 6) {
+                ImGui::PushItemWidth(260);
+                ImGui::InputTextWithHint("Inner WireGuard endpoint", "auto (ip:port)",
+                                         g_app.gool_inner, sizeof(g_app.gool_inner));
+                ImGui::PopItemWidth();
+            }
+            if (g_app.mode == 0) {
+                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+                ImGui::Text("Proxy Ports");
+                ImGui::PushItemWidth(100);
+                ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
+                ImGui::SameLine(0, 20);
+                ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
+                ImGui::Checkbox("Aether HTTP proxy", &g_app.http_enabled);
+                ImGui::SameLine(0, 20);
+                ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
+                ImGui::PopItemWidth();
             }
             ImGui::Spacing();
             ImGui::InputTextWithHint("##force_peer", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));

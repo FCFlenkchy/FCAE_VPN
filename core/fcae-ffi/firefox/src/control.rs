@@ -109,6 +109,13 @@ struct Cookie {
     path: String,
     name: String,
     value: String,
+    expires_at: Option<SystemTime>,
+}
+
+impl Cookie {
+    fn is_valid(&self, now: SystemTime) -> bool {
+        !self.value.is_empty() && self.expires_at.map_or(true, |expiry| expiry > now)
+    }
 }
 
 #[derive(Clone)]
@@ -117,11 +124,15 @@ pub struct ControlPlane {
     timeout: Duration,
     user_agent: String,
     cookies: Arc<Mutex<BTreeMap<String, Cookie>>>,
+    challenge_h2: Option<Arc<tokio::sync::Mutex<Option<ReusableH2>>>>,
 }
 
 impl ControlPlane {
     pub fn new(dialer: Dialer) -> Self {
-        Self { dialer, timeout: Duration::from_secs(20), user_agent: firefox_user_agent(), cookies: Arc::new(Mutex::new(BTreeMap::new())) }
+        Self {
+            dialer, timeout: Duration::from_secs(20), user_agent: firefox_user_agent(),
+            cookies: Arc::new(Mutex::new(BTreeMap::new())), challenge_h2: None,
+        }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -135,7 +146,13 @@ impl ControlPlane {
             timeout: self.timeout,
             user_agent: self.user_agent.clone(),
             cookies: Arc::new(Mutex::new(BTreeMap::new())),
+            challenge_h2: None,
         }
+    }
+
+    pub(crate) fn with_challenge_h2(mut self) -> Self {
+        self.challenge_h2 = Some(Arc::new(tokio::sync::Mutex::new(None)));
+        self
     }
 
     pub async fn with_current_firefox_user_agent(mut self) -> Self {
@@ -159,9 +176,13 @@ impl ControlPlane {
 
     pub async fn send(&self, request: ControlRequest) -> Result<ControlResponse> {
         let request = self.decorate(request);
-        tokio::time::timeout(self.timeout, self.exchange(request, ALPN_H1, false))
-            .await
-            .map_err(|_| FirefoxError::Timeout(self.timeout))?
+        tokio::time::timeout(self.timeout, async {
+            if let Some(pool) = &self.challenge_h2 {
+                self.exchange_challenge(request, pool).await
+            } else {
+                self.exchange(request, ALPN_H1, false).await
+            }
+        }).await.map_err(|_| FirefoxError::Timeout(self.timeout))?
     }
 
     pub async fn send_h2(&self, request: ControlRequest) -> Result<ControlResponse> {
@@ -177,7 +198,8 @@ impl ControlPlane {
     }
 
     pub fn has_cookies(&self) -> bool {
-        self.cookies.lock().values().any(|cookie| !cookie.value.is_empty())
+        let now = SystemTime::now();
+        self.cookies.lock().values().any(|cookie| cookie.is_valid(now))
     }
 
     pub fn import_cookies_for_hosts(&self, other: &ControlPlane, hosts: &[&str]) {
@@ -203,10 +225,11 @@ impl ControlPlane {
             request.headers.push((http::header::ACCEPT_ENCODING, HeaderValue::from_static("identity")));
         }
         let cookies = self.cookies.lock();
+        let now = SystemTime::now();
         let mut values = cookies.values().filter(|cookie| {
             domain_matches(&request.host, &cookie.domain)
                 && path_matches(&request.path, &cookie.path)
-                && !cookie.value.is_empty()
+                && cookie.is_valid(now)
         }).map(|cookie| format!("{}={}", cookie.name, cookie.value)).collect::<Vec<_>>();
         values.sort();
         if !values.is_empty() && !has_header(&request, "cookie") {
@@ -228,6 +251,56 @@ impl ControlPlane {
         Ok(response)
     }
 
+    async fn exchange_challenge(
+        &self,
+        request: ControlRequest,
+        pool: &tokio::sync::Mutex<Option<ReusableH2>>,
+    ) -> Result<ControlResponse> {
+        let mut session = pool.lock().await;
+        if session.as_ref().is_some_and(|current| current.host != request.host || current.port != request.port) {
+            *session = None;
+        }
+        if session.is_none() {
+            let tls = match crate::tls::connect(&self.dialer, &request.host, request.port, ALPN_H2_H1).await {
+                Ok(tls) => tls,
+                Err(error) => {
+                    log::debug!("[firefox] challenge HTTP/2 setup failed: {error}");
+                    drop(session);
+                    return self.exchange(request, ALPN_H1, false).await;
+                }
+            };
+            if tls.ssl().selected_alpn_protocol() != Some(b"h2") {
+                drop(session);
+                let response = over_h1(tls, &request).await?;
+                self.store_cookies(&request.host, &response.headers);
+                return Ok(response);
+            }
+            let mut builder = h2::client::Builder::new();
+            builder.enable_push(false).max_header_list_size(MAX_HEADER_LIST);
+            let (sender, connection) = match builder.handshake(tls).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    log::debug!("[firefox] challenge HTTP/2 handshake failed: {error}");
+                    drop(session);
+                    return self.exchange(request, ALPN_H1, false).await;
+                }
+            };
+            let driver = ConnectionDriver(tokio::spawn(async move { let _ = connection.await; }));
+            *session = Some(ReusableH2 { host: request.host.clone(), port: request.port, sender, _driver: driver });
+        }
+        let sender = session.as_ref().unwrap().sender.clone();
+        match exchange_h2(sender, &request).await {
+            Ok(response) => {
+                self.store_cookies(&request.host, &response.headers);
+                Ok(response)
+            }
+            Err(error) => {
+                *session = None;
+                Err(error)
+            }
+        }
+    }
+
     pub(crate) fn store_cookies(&self, request_host: &str, headers: &HeaderMap) {
         for value in headers.get_all(http::header::SET_COOKIE) {
             let Ok(value) = value.to_str() else { continue };
@@ -238,19 +311,28 @@ impl ControlPlane {
             }
             let mut domain = request_host.to_ascii_lowercase();
             let mut path = "/".to_string();
-            let mut remove = false;
+            let mut max_age = None;
+            let mut expires = None;
             for attribute in parts {
                 let (key, value) = attribute.trim().split_once('=').unwrap_or((attribute.trim(), ""));
                 if key.eq_ignore_ascii_case("domain") && domain_matches(request_host, value.trim_start_matches('.')) {
                     domain = value.trim_start_matches('.').to_ascii_lowercase();
                 } else if key.eq_ignore_ascii_case("path") && value.starts_with('/') {
                     path = value.to_string();
-                } else if key.eq_ignore_ascii_case("max-age") && value.parse::<i64>() == Ok(0) {
-                    remove = true;
+                } else if key.eq_ignore_ascii_case("max-age") {
+                    max_age = value.parse::<i64>().ok();
+                } else if key.eq_ignore_ascii_case("expires") {
+                    expires = httpdate::parse_http_date(value).ok();
                 }
             }
+            let now = SystemTime::now();
+            let expires_at = match max_age {
+                Some(age) if age <= 0 => Some(now),
+                Some(age) => now.checked_add(Duration::from_secs(age as u64)),
+                None => expires,
+            };
             let key = format!("{domain}|{path}|{name}");
-            if remove {
+            if cookie_value.is_empty() || expires_at.is_some_and(|expiry| expiry <= now) {
                 self.cookies.lock().remove(&key);
             } else {
                 self.cookies.lock().insert(key, Cookie {
@@ -258,6 +340,7 @@ impl ControlPlane {
                     path,
                     name: name.to_string(),
                     value: cookie_value.to_string(),
+                    expires_at,
                 });
             }
         }
@@ -306,43 +389,50 @@ impl Drop for ConnectionDriver {
     }
 }
 
+struct ReusableH2 {
+    host: String,
+    port: u16,
+    sender: h2::client::SendRequest<Bytes>,
+    _driver: ConnectionDriver,
+}
+
 async fn over_h2(tls: SslStream<TcpStream>, request: &ControlRequest) -> Result<ControlResponse> {
     let mut builder = h2::client::Builder::new();
     builder.enable_push(false).max_header_list_size(MAX_HEADER_LIST);
     let (client, connection) = builder.handshake(tls).await.map_err(h2_error)?;
-    let driver = ConnectionDriver(tokio::spawn(async move {
-        let _ = connection.await;
-    }));
-    let result = async {
-        let mut client = client.ready().await.map_err(h2_error)?;
-        let authority = if request.port == 443 { request.host.clone() } else { crate::types::authority(&request.host, request.port) };
-        let uri = format!("https://{authority}{}", request.path);
-        let mut head = http::Request::builder().method(request.method.clone()).uri(uri);
-        for (name, value) in &request.headers {
-            head = head.header(name, value);
-        }
-        if let Some(body) = &request.body {
-            head = head.header(http::header::CONTENT_LENGTH, body.len());
-        }
-        let head = head.body(()).map_err(|error| FirefoxError::Protocol(error.to_string()))?;
-        let (answer, mut stream) = client.send_request(head, request.body.is_none()).map_err(h2_error)?;
-        if let Some(body) = &request.body {
-            stream.send_data(Bytes::copy_from_slice(body), true).map_err(h2_error)?;
-        }
-        let (parts, mut body) = answer.await.map_err(h2_error)?.into_parts();
-        let mut data = Vec::new();
-        while let Some(chunk) = body.data().await {
-            let chunk = chunk.map_err(h2_error)?;
-            if data.len().saturating_add(chunk.len()) > MAX_BODY {
-                return Err(FirefoxError::Protocol("control-plane response is too large".into()));
-            }
-            data.extend_from_slice(&chunk);
-            let _ = body.flow_control().release_capacity(chunk.len());
-        }
-        Ok(ControlResponse { status: parts.status.as_u16(), headers: parts.headers, body: data })
-    }.await;
+    let driver = ConnectionDriver(tokio::spawn(async move { let _ = connection.await; }));
+    let result = exchange_h2(client, request).await;
     drop(driver);
     result
+}
+
+async fn exchange_h2(client: h2::client::SendRequest<Bytes>, request: &ControlRequest) -> Result<ControlResponse> {
+    let mut client = client.ready().await.map_err(h2_error)?;
+    let authority = if request.port == 443 { request.host.clone() } else { crate::types::authority(&request.host, request.port) };
+    let uri = format!("https://{authority}{}", request.path);
+    let mut head = http::Request::builder().method(request.method.clone()).uri(uri);
+    for (name, value) in &request.headers {
+        head = head.header(name, value);
+    }
+    if let Some(body) = &request.body {
+        head = head.header(http::header::CONTENT_LENGTH, body.len());
+    }
+    let head = head.body(()).map_err(|error| FirefoxError::Protocol(error.to_string()))?;
+    let (answer, mut stream) = client.send_request(head, request.body.is_none()).map_err(h2_error)?;
+    if let Some(body) = &request.body {
+        stream.send_data(Bytes::copy_from_slice(body), true).map_err(h2_error)?;
+    }
+    let (parts, mut body) = answer.await.map_err(h2_error)?.into_parts();
+    let mut data = Vec::new();
+    while let Some(chunk) = body.data().await {
+        let chunk = chunk.map_err(h2_error)?;
+        if data.len().saturating_add(chunk.len()) > MAX_BODY {
+            return Err(FirefoxError::Protocol("control-plane response is too large".into()));
+        }
+        data.extend_from_slice(&chunk);
+        let _ = body.flow_control().release_capacity(chunk.len());
+    }
+    Ok(ControlResponse { status: parts.status.as_u16(), headers: parts.headers, body: data })
 }
 
 async fn over_h1<S>(mut tls: S, request: &ControlRequest) -> Result<ControlResponse>
@@ -470,6 +560,36 @@ mod tests {
         ] {
             assert_eq!(firefox_release_major(body), None);
         }
+    }
+
+    #[test]
+    fn challenge_cookie_is_sent_only_while_valid() {
+        let control = ControlPlane::new(Dialer::new(None, None, 10).unwrap());
+        let response = parse_h1_response(b"HTTP/1.1 200 OK\r\nSet-Cookie: _fs_ch_st_test=state; Max-Age=10; Path=/\r\nContent-Length: 0\r\n\r\n").unwrap();
+        control.store_cookies("accounts.firefox.com", &response.headers);
+        let request = ControlRequest::new(Method::GET, "https://accounts.firefox.com/_fs-ch-test/script.js?reload=true").unwrap();
+        let decorated = control.decorate(request.clone());
+        assert!(decorated.headers.iter().any(|(name, value)| name.as_str() == "cookie" && value.to_str().ok() == Some("_fs_ch_st_test=state")));
+        let mut cookies = control.cookies.lock();
+        for cookie in cookies.values_mut() {
+            cookie.expires_at = Some(std::time::UNIX_EPOCH);
+        }
+        drop(cookies);
+        assert!(!control.has_cookies());
+        assert!(!control.decorate(request).headers.iter().any(|(name, _)| name.as_str() == "cookie"));
+    }
+
+    #[test]
+    fn max_age_takes_precedence_and_expired_cookies_are_removed() {
+        let control = ControlPlane::new(Dialer::new(None, None, 10).unwrap());
+        let mut headers = HeaderMap::new();
+        headers.append(http::header::SET_COOKIE, "state=ok; Max-Age=10; Expires=Wed, 01 Jan 2020 00:00:00 GMT; Path=/".parse().unwrap());
+        control.store_cookies("accounts.firefox.com", &headers);
+        assert!(control.has_cookies());
+        headers.clear();
+        headers.append(http::header::SET_COOKIE, "state=old; Max-Age=-1; Path=/".parse().unwrap());
+        control.store_cookies("accounts.firefox.com", &headers);
+        assert!(!control.has_cookies());
     }
 
     #[test]

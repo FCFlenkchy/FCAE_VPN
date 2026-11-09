@@ -407,16 +407,11 @@
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
                 android:visibility="gone">
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="AETHER SETTINGS"
-                android:textColor="#FF60A5FA"
-                android:textSize="16sp"
-                android:textStyle="bold" />
             <LinearLayout android:id="@+id/layoutTunSettings" android:layout_width="match_parent"
                 android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp" android:text="SHARED SETTINGS"
+                    android:textColor="#FF60A5FA" android:textSize="16sp" android:textStyle="bold" />
                 <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:layout_marginTop="16dp" android:text="TUN Settings"
                     android:textColor="#FF60A5FA" android:textSize="16sp" android:textStyle="bold" />
@@ -606,6 +601,15 @@
                         android:textColor="#FFE8ECF4" />
                 </LinearLayout>
             </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="AETHER SETTINGS"
+                android:textColor="#FF60A5FA"
+                android:textSize="16sp"
+                android:textStyle="bold" />
 
             <TextView
                 android:layout_width="match_parent"
