@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">FCAE VPN</string>
+    <string name="widget_compact_name">FCAE VPN • Compact</string>
+    <string name="widget_connect">CONNECT</string>
+    <string name="widget_disconnect">DISCONNECT</string>
 </resources>

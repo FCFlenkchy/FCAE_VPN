@@ -751,9 +751,11 @@ public class ProxyNotification extends Service {
             stopSelf();
         }
         final long generation = ownerGeneration;
+        final long exitTicket = ProcessExit.currentTicket();
         if (generation != FCAEVpnService.stateGeneration()) return;
         Runnable exit = () -> {
-            if (generation == FCAEVpnService.stateGeneration()) {
+            if (generation == FCAEVpnService.stateGeneration()
+                    && ProcessExit.isCurrentTicket(exitTicket)) {
                 ProcessExit.request(this, true);
             }
         };

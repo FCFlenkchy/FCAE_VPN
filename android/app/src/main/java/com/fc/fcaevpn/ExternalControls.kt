@@ -29,8 +29,10 @@ object ExternalControls {
             {
                 republishOwnerState()
                 VpnWidgetProvider.refreshAfterEnable(context)
+                VpnCompactWidgetProvider.refresh(context)
             },
-            VpnWidgetProvider::cancelEnableRefresh
+            VpnWidgetProvider::cancelEnableRefresh,
+            listOf(VpnCompactWidgetProvider::class.java)
         )
     }
 
@@ -45,29 +47,43 @@ object ExternalControls {
         control: SwitchMaterial,
         componentClass: Class<*>,
         onEnabled: () -> Unit,
-        onDisabled: () -> Unit
+        onDisabled: () -> Unit,
+        additionalComponents: List<Class<*>> = emptyList()
     ) {
-        val component = ComponentName(context, componentClass)
-        control.isChecked = isEnabled(context.packageManager, component)
-        control.setOnCheckedChangeListener { button, enabled ->
+        val manager = context.packageManager
+        val components = (listOf(componentClass) + additionalComponents).map { ComponentName(context, it) }
+        val enabled = isEnabled(manager, components.first())
+        // Existing installations may already have the original widget enabled.
+        for (component in components.drop(1)) {
+            if (isEnabled(manager, component) != enabled) {
+                try {
+                    manager.setComponentEnabledSetting(component,
+                        if (enabled) PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                        else PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                        PackageManager.DONT_KILL_APP)
+                } catch (_: RuntimeException) { }
+            }
+        }
+        control.isChecked = enabled
+        control.setOnCheckedChangeListener { button, checked ->
+            val previous = components.map { manager.getComponentEnabledSetting(it) }
             try {
-                context.packageManager.setComponentEnabledSetting(
-                    component,
-                    if (enabled) PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                    else PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                    PackageManager.DONT_KILL_APP
-                )
-                if (enabled) onEnabled() else onDisabled()
+                for (component in components) {
+                    manager.setComponentEnabledSetting(component,
+                        if (checked) PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                        else PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                        PackageManager.DONT_KILL_APP)
+                }
+                if (checked) onEnabled() else onDisabled()
             } catch (_: RuntimeException) {
+                components.forEachIndexed { index, component ->
+                    try { manager.setComponentEnabledSetting(component, previous[index], PackageManager.DONT_KILL_APP) }
+                    catch (_: RuntimeException) { }
+                }
                 button.setOnCheckedChangeListener(null)
-                button.isChecked = !enabled
-                bindComponent(
-                    context,
-                    button as SwitchMaterial,
-                    componentClass,
-                    onEnabled,
-                    onDisabled
-                )
+                button.isChecked = !checked
+                bindComponent(context, button as SwitchMaterial, componentClass,
+                    onEnabled, onDisabled, additionalComponents)
                 Toast.makeText(context, "Could not change this control", Toast.LENGTH_SHORT).show()
             }
         }

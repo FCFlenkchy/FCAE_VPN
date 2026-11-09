@@ -44,34 +44,34 @@ class VpnWidgetProvider : AppWidgetProvider() {
                 // exemption that makes startForegroundService legal. A hop
                 // onto clicks[] lost it, startForegroundService threw, and
                 // CONNECT fell through to openApp.
+                if (!WidgetActions.consume(app, intent)) {
+                    refreshControls(app)
+                    return
+                }
                 when (action) {
                     ACTION_WIDGET_TOGGLE -> {
-                        if (!tapActive) {
-                            try { VpnCommands.paintConnecting(app) } catch (_: Throwable) {}
-                        } else {
-                            try { VpnCommands.paintIdle(app) } catch (_: Throwable) {}
-                        }
-                        toggle(app, tapActive)
-                        refresh(app)
-                        if (SessionState.snapshot(app).connecting) scheduleRecheck(app)
+                        // This PendingIntent is a disconnect, never a toggle.
+                        if (tapActive) VpnCommands.disconnect(app)
                     }
                     ACTION_WIDGET_PAUSE_RESUME -> {
-                        try {
+                        val state = SessionState.snapshot(app)
+                        if (state.active && state.mode == 1 && state.paused == tapActive
+                            && SessionState.isLive()) {
                             SessionState.command(
                                 if (tapActive) SessionState.Command.RESUME
                                 else SessionState.Command.PAUSE
                             )
                             SessionState.markPause(app, !tapActive)
-                        } catch (_: Throwable) {}
-                        pauseOrResume(app, tapActive)
-                        refresh(app)
+                            pauseOrResume(app, tapActive)
+                        }
                     }
                 }
-            } catch (_: Throwable) {
+                refreshAll(app)
+            } catch (error: Throwable) {
+                android.util.Log.e("FCAE_WIDGET", "Widget command failed", error)
                 SessionState.command(SessionState.Command.NONE)
-                SessionState.markIdle(app)
-                lastControlKey = null
-                refresh(app)
+                if (!FCAEVpnService.publishCurrentState()) ProxyNotification.publishCurrentState()
+                refreshAll(app)
             } finally {
                 inReceive.set(false)
             }
@@ -83,10 +83,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
         // its process — so any app-state action added to the filter
         // would resurrect the process on every state broadcast. The
         // feed repaints the widget in-process instead.
-    }
-
-    private fun toggle(context: Context, renderedActive: Boolean) {
-        VpnCommands.toggle(context, renderedActive)
     }
 
     private fun pauseOrResume(context: Context, wasPaused: Boolean) {
@@ -109,7 +105,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
         private const val EXTRA_TAP_ACTIVE = "tapActive"
         private const val PENDING_FLAGS =
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        private const val RECHECK_DELAY_MS = 2500L
         /** Meter-only paints. Control changes never wait on this. */
         private const val METER_MIN_MS = 2000L
 
@@ -146,6 +141,21 @@ class VpnWidgetProvider : AppWidgetProvider() {
          * call this synchronously before the kill: the last frame the launcher
          * keeps is the truth.
          */
+        internal fun isReceivingTap(): Boolean = inReceive.get() == true
+
+        @JvmStatic
+        fun refreshAll(context: Context) {
+            refresh(context)
+            VpnCompactWidgetProvider.refresh(context)
+        }
+
+        @JvmStatic
+        fun refreshControls(context: Context) {
+            lastControlKey = null
+            VpnCompactWidgetProvider.invalidatePaint()
+            refreshAll(context)
+        }
+
         @JvmStatic
         fun refresh(context: Context) {
             val app = context.applicationContext
@@ -212,23 +222,6 @@ class VpnWidgetProvider : AppWidgetProvider() {
             return manager.getAppWidgetIds(ComponentName(context, VpnWidgetProvider::class.java))
         }
 
-        /**
-         * A start can still be refused after the command was accepted (nothing
-         * to replay, no engine). Re-ask the owners once it had time to come up,
-         * and fall back to DISCONNECTED rather than leaving a button that lies.
-         */
-        private fun scheduleRecheck(context: Context) {
-            val app = context.applicationContext
-            mainHandler.postDelayed({
-                if (SessionState.isLive()) return@postDelayed
-                SessionState.command(SessionState.Command.NONE)
-                SessionState.markIdle(app)
-                lastControlKey = null
-                lastMeterKey = null
-                refresh(app)
-            }, RECHECK_DELAY_MS)
-        }
-
         private fun dispatch(context: Context, intent: Intent): Boolean =
             VpnCommands.dispatch(context, intent)
 
@@ -270,7 +263,8 @@ class VpnWidgetProvider : AppWidgetProvider() {
             val totalUp = "↑ " + VpnNotification.fmtBytes(shown.totalTx)
             val rtt = "${shown.rtt}ms"
 
-            val controlKey = "$status|$statusColor|$connect|$pausable|$paused"
+            val revision = WidgetActions.current(context)
+            val controlKey = "$status|$statusColor|$connect|$pausable|$paused|$revision"
             val meterKey = "$rtt|$ratesDown|$ratesUp|$totalDown|$totalUp"
             val controlsChanged = force || controlKey != lastControlKey
             val metersChanged = force || meterKey != lastMeterKey
@@ -307,19 +301,19 @@ class VpnWidgetProvider : AppWidgetProvider() {
 
             views.setOnClickPendingIntent(
                 R.id.widget_btn_connect,
-                connectPending(context)
+                connectPending(context, revision)
             )
             views.setOnClickPendingIntent(
                 R.id.widget_btn_disconnect,
-                pending(context, ACTION_WIDGET_TOGGLE, REQ_DISCONNECT, true)
+                disconnectPending(context, revision)
             )
             views.setOnClickPendingIntent(
                 R.id.widget_btn_stop,
-                pending(context, ACTION_WIDGET_PAUSE_RESUME, REQ_STOP, false)
+                pending(context, ACTION_WIDGET_PAUSE_RESUME, REQ_STOP, false, revision)
             )
             views.setOnClickPendingIntent(
                 R.id.widget_btn_start,
-                pending(context, ACTION_WIDGET_PAUSE_RESUME, REQ_START, true)
+                pending(context, ACTION_WIDGET_PAUSE_RESUME, REQ_START, true, revision)
             )
 
             val open = PendingIntent.getActivity(
@@ -371,25 +365,41 @@ class VpnWidgetProvider : AppWidgetProvider() {
             }
         }
 
-        private fun connectPending(context: Context): PendingIntent {
-            val command = Intent(context, FCAEVpnService::class.java)
+        internal fun connectPending(context: Context, revision: Long): PendingIntent {
+            val legacy = Intent(context, FCAEVpnService::class.java)
                 .setAction(FCAEVpnService.ACTION_REPLAY)
-            return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                PendingIntent.getForegroundService(context, REQ_CONNECT, command, PENDING_FLAGS)
+            val existing = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                PendingIntent.getForegroundService(context, REQ_CONNECT, legacy,
+                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE)
             } else {
-                PendingIntent.getService(context, REQ_CONNECT, command, PENDING_FLAGS)
+                PendingIntent.getService(context, REQ_CONNECT, legacy,
+                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE)
+            }
+            existing?.cancel()
+            val command = WidgetActions.stamp(legacy, revision, "connect")
+            val flags = PENDING_FLAGS or PendingIntent.FLAG_ONE_SHOT
+            return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                PendingIntent.getForegroundService(context, REQ_CONNECT, command, flags)
+            } else {
+                PendingIntent.getService(context, REQ_CONNECT, command, flags)
             }
         }
 
-        private fun pending(context: Context, action: String, code: Int, active: Boolean) =
+        internal fun disconnectPending(context: Context, revision: Long): PendingIntent =
+            pending(context, ACTION_WIDGET_TOGGLE, REQ_DISCONNECT, true, revision)
+
+        private fun pending(context: Context, action: String, code: Int, active: Boolean, revision: Long) =
             PendingIntent.getBroadcast(
                 context,
                 code,
-                Intent(context, VpnWidgetProvider::class.java)
-                    .setAction(action)
-                    .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
-                    .putExtra(EXTRA_TAP_ACTIVE, active),
-                PENDING_FLAGS
+                WidgetActions.stamp(
+                    Intent(context, VpnWidgetProvider::class.java)
+                        .setAction(action)
+                        .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+                        .putExtra(EXTRA_TAP_ACTIVE, active),
+                    revision, code.toString()
+                ),
+                PENDING_FLAGS or PendingIntent.FLAG_ONE_SHOT
             )
     }
 }

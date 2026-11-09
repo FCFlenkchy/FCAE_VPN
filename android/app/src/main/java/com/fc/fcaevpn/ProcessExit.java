@@ -25,6 +25,10 @@ public final class ProcessExit {
         ticket.incrementAndGet();
     }
 
+    public static long currentTicket() { return ticket.get(); }
+
+    public static boolean isCurrentTicket(long expected) { return ticket.get() == expected; }
+
     public static void request(Context context) {
         request(context, false);
     }
@@ -50,7 +54,9 @@ public final class ProcessExit {
         long started = terminal ? terminalStartedAt.get() : now;
         if (terminal && now - started < CLEANUP_DEADLINE_MS
                 && VpnTileService.deferTerminalExit()) {
-            main.postDelayed(() -> request(app, true), UI_GRACE_MS);
+            main.postDelayed(() -> {
+                if (request == ticket.get()) request(app, true);
+            }, UI_GRACE_MS);
             return;
         }
         Runnable finish = () -> {

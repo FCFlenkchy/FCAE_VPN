@@ -26,21 +26,6 @@ object VpnCommands {
         false
     }
 
-    fun toggle(context: Context, renderedActive: Boolean, start: (Context, Intent) -> Boolean = ::dispatch) {
-        val live = SessionState.isLive()
-        if (live) disconnect(context, start)
-        else connect(context, start)
-    }
-
-    /** Optimistic frame shown before the foreground owner resolves the saved
-     *  session. The owner publishes the authoritative mode and phase. */
-    fun paintConnecting(context: Context): Boolean {
-        VpnTileService.clearPendingExit(context)
-        SessionState.command(SessionState.Command.CONNECT)
-        SessionState.markConnecting(context, FCAEVpnService.recalledMode(context))
-        return true
-    }
-
     /** Disconnect frame before teardown runs. The latch hides still-live
      *  owner ticks, so the button can flip now instead of waiting on the
      *  service. */
@@ -53,11 +38,13 @@ object VpnCommands {
      *  surface. The foreground owner loads and validates the saved session. */
     fun connect(context: Context, start: (Context, Intent) -> Boolean = ::dispatch): Boolean {
         VpnTileService.clearPendingExit(context)
-        val command = Intent(context, FCAEVpnService::class.java)
-            .setAction(FCAEVpnService.ACTION_REPLAY)
         ProcessExit.cancel()
         SessionState.command(SessionState.Command.CONNECT)
         SessionState.markConnecting(context, FCAEVpnService.recalledMode(context))
+        val command = WidgetActions.stamp(
+            Intent(context, FCAEVpnService::class.java).setAction(FCAEVpnService.ACTION_REPLAY),
+            WidgetActions.current(context), "control-connect"
+        )
         if (!start(context, command)) {
             SessionState.command(SessionState.Command.NONE)
             SessionState.markIdle(context)
@@ -70,7 +57,7 @@ object VpnCommands {
      *  from the widget/tile is not the notification's PendingIntent path: it
      *  can report success without onStartCommand ever running, and then
      *  disconnectNow was skipped — the session (and process) stayed up. */
-    fun disconnect(context: Context, start: (Context, Intent) -> Boolean = ::dispatch) {
+    fun disconnect(context: Context) {
         paintIdle(context)
         val tun = FCAEVpnService.disconnectNow()
         val proxy = ProxyNotification.disconnectNow()

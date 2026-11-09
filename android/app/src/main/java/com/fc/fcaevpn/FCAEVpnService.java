@@ -652,6 +652,17 @@ public class FCAEVpnService extends VpnService {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_REPLAY.equals(intent.getAction())) {
+            boolean current = WidgetActions.consume(this, intent);
+            if (!current || sessionActive() || ProxyNotification.sessionActive()) {
+                VpnWidgetProvider.refreshControls(this);
+                if (ownsSession()) return START_STICKY;
+                notification.dismiss();
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                stopSelf(startId);
+                return START_NOT_STICKY;
+            }
+        }
         if (replayLoading) {
             String action = intent != null ? intent.getAction() : null;
             if (ACTION_DISCONNECT.equals(action) || ACTION_STOP.equals(action)) {
@@ -745,6 +756,10 @@ public class FCAEVpnService extends VpnService {
                     }
                     ProcessExit.cancel();
                     VpnTileService.Companion.clearPendingExit(this);
+                    // A reconnect supersedes any pending remote-exit request.
+                    killProcessOnCleanup = false;
+                    remoteDisconnect = false;
+                    shuttingDown = false;
                     uiConnecting = true;
                     SessionState.command(SessionState.Command.CONNECT);
                     SessionState.markConnecting(this, recalledMode(this));
@@ -1537,6 +1552,9 @@ public class FCAEVpnService extends VpnService {
                     requestStart(next);
                     return;
                 }
+                // The replay loader can outlast teardown. Its foreground owner
+                // must remain alive until the saved start can be dispatched.
+                if (replayLoading) return;
                 stopSelf();
                 ProxyNotification.notifyCleanupComplete(this);
                 // Queued, not immediate: notifyCleanupComplete's broadcast is
@@ -1577,9 +1595,10 @@ public class FCAEVpnService extends VpnService {
      */
     private void scheduleProcessKill() {
         final long gen = cleanupGeneration.get();
+        final long exitTicket = ProcessExit.currentTicket();
         final boolean remote = remoteDisconnect;
         handler.post(() -> {
-            if (gen == cleanupGeneration.get()
+            if (gen == cleanupGeneration.get() && ProcessExit.isCurrentTicket(exitTicket)
                     && (remote || !FCAEApplication.uiVisibleNow())) {
                 ProcessExit.request(this, remote);
             }

@@ -77,6 +77,7 @@ object SessionState {
 
     private var stable: Snapshot? = null
     private var regressions = 0
+    private var controlEpoch = Long.MIN_VALUE
 
         /** Holds the first successful RTT for a session so every surface shows the same latency. */
     @JvmStatic
@@ -375,6 +376,7 @@ object SessionState {
      * running owners, never durable state: after process death or reboot they
      * start idle until a foreground owner reports again.
      */
+    @Synchronized
     private fun write(context: Context, snapshot: Snapshot, measured: Boolean = false): Snapshot? {
         if (!accepts(snapshot)) return null
         // Only an owner's own frame can confirm a command: the optimistic
@@ -383,6 +385,14 @@ object SessionState {
         // still-dying frames would flip the surfaces back.
         if (measured) confirmed(snapshot)
         val accepted = stabilize(snapshot.phase, snapshot) ?: return null
+        val previous = latest ?: Snapshot.IDLE
+        val epoch = if (measured) FCAEVpnService.sessionEpoch() else controlEpoch
+        if (epoch != controlEpoch || previous.active != accepted.active ||
+            (previous.active && accepted.active &&
+                (previous.paused != accepted.paused || previous.mode != accepted.mode))) {
+            WidgetActions.invalidate(context)
+        }
+        if (measured) controlEpoch = epoch
         latest = accepted
         latestAt = SystemClock.elapsedRealtime()
         // The frame lands on the widget here, in the process the widget's
@@ -392,6 +402,10 @@ object SessionState {
         // were resurrecting the very process a teardown had just ended.
         try {
             VpnWidgetProvider.refresh(context)
+        } catch (_: Throwable) {
+        }
+        try {
+            VpnCompactWidgetProvider.refresh(context)
         } catch (_: Throwable) {
         }
         try {
