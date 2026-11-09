@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
@@ -62,11 +63,16 @@ impl FirefoxEngine {
             log::info!("[firefox] checking Mozilla proxy {}", candidate.address);
             let attempt = async {
                 let upstream = Upstream::new(candidate.clone(), config.transport, dialer.clone(), tokens.clone(), config.connect_timeout).await?;
-                let probe = upstream.open_tcp("www.mozilla.org:443").await?;
-                drop(probe);
+                let timeout = config.connect_timeout.min(Duration::from_secs(10));
+                let tcp_targets = ["1.1.1.1:443".to_string(), "8.8.8.8:443".to_string()];
+                let proxy = &upstream;
+                probe_destinations("TCP", &tcp_targets, timeout, |target| async move {
+                    proxy.probe_tcp(&target).await
+                }).await?;
                 if config.require_udp {
-                    let probe = upstream.open_udp("1.1.1.1:53").await?;
-                    drop(probe);
+                    probe_destinations("UDP", &config.udp_probe_targets, timeout, |target| async move {
+                        proxy.probe_udp(&target).await
+                    }).await?;
                 }
                 Ok::<_, FirefoxError>(upstream)
             }.await;
@@ -165,6 +171,37 @@ impl FirefoxEngine {
     }
 }
 
+async fn probe_destinations<F, Fut>(stage: &str, targets: &[String], timeout: Duration, mut connect: F) -> Result<()>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    if targets.is_empty() {
+        return Err(FirefoxError::InvalidConfig(format!("no {stage} probe destinations")));
+    }
+    for (index, target) in targets.iter().enumerate() {
+        let result = match tokio::time::timeout(timeout, connect(target.clone())).await {
+            Ok(result) => result,
+            Err(_) => Err(FirefoxError::Timeout(timeout)),
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let another = index + 1 < targets.len();
+                let destination_failure = matches!(&error,
+                    FirefoxError::Http { status: 502 | 503 | 504, .. } | FirefoxError::Timeout(_));
+                if another && destination_failure {
+                    log::info!("[firefox] {stage} proxy check for {target} failed: {error}; trying another destination");
+                } else {
+                    log::warn!("[firefox] {stage} proxy check for {target} failed: {error}");
+                    return Err(error);
+                }
+            }
+        }
+    }
+    unreachable!()
+}
+
 async fn resolve_candidates(dialer: &Dialer, candidates: &[Candidate]) {
     let mut lookups = Vec::with_capacity(candidates.len().min(256));
     for candidate in candidates.iter().take(256) {
@@ -210,4 +247,53 @@ fn spawn_renewal(engine: Weak<FirefoxEngine>) -> JoinHandle<()> {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn unavailable() -> FirefoxError {
+        FirefoxError::Http {
+            host: "proxy".into(), status: 502, errno: None, retry_after: None,
+            message: "destination_ip_prohibited".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_destination_failure_without_masking_authentication() {
+        let targets = vec!["first".into(), "second".into()];
+        let attempts = AtomicUsize::new(0);
+        probe_destinations("TCP", &targets, Duration::from_secs(1), |target| {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            async move { if target == "first" { Err(unavailable()) } else { Ok(()) } }
+        }).await.unwrap();
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+
+        attempts.store(0, Ordering::Relaxed);
+        let error = probe_destinations("TCP", &targets, Duration::from_secs(1), |_| {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            async { Err(FirefoxError::PassRejected) }
+        }).await.unwrap_err();
+        assert!(matches!(error, FirefoxError::PassRejected));
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_timeout_and_reports_failed_udp_check() {
+        let targets = vec!["first".into(), "second".into()];
+        let attempts = AtomicUsize::new(0);
+        let error = probe_destinations("UDP", &targets, Duration::from_millis(1), |target| {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            async move {
+                if target == "first" { std::future::pending::<()>().await; }
+                Err(unavailable())
+            }
+        }).await.unwrap_err();
+        assert!(matches!(error, FirefoxError::Http { status: 502, .. }));
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert!(matches!(probe_destinations("UDP", &[], Duration::from_secs(1), |_| async { Ok(()) }).await,
+            Err(FirefoxError::InvalidConfig(_))));
+    }
 }

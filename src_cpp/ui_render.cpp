@@ -5,6 +5,7 @@
 #include <memory>
 #include <unordered_map>
 #include <algorithm>
+#include <iterator>
 #include <cctype>
 #include <new>
 #include <cerrno>
@@ -1943,6 +1944,7 @@ static std::string firefox_json_string(const std::string& json, const char* key,
 struct FirefoxLocationOption {
     std::string value;
     std::string label;
+    std::string alias;
 };
 
 struct FirefoxAccountOption {
@@ -1952,7 +1954,7 @@ struct FirefoxAccountOption {
 };
 
 static std::vector<FirefoxLocationOption> s_firefox_location_options = {
-    {"", "Automatic (recommended)"},
+    {"", "Automatic (recommended)", ""},
 };
 static std::vector<FirefoxAccountOption> s_firefox_account_options;
 static void firefox_submit(const std::string& request, const char* pending);
@@ -2012,6 +2014,7 @@ static std::vector<FirefoxLocationOption> firefox_parse_locations(const std::str
         FirefoxLocationOption option{
             firefox_json_string(object, "value"),
             firefox_json_string(object, "label"),
+            firefox_json_string(object, "alias"),
         };
         if (!option.value.empty() && !option.label.empty()) options.push_back(std::move(option));
     }
@@ -2092,19 +2095,29 @@ static void firefox_account_rows(const std::string& root) {
 static void firefox_location_combo() {
     std::vector<FirefoxLocationOption> options = s_firefox_location_options;
     const std::string saved = g_app.firefox_location;
-    const auto selected = std::find_if(options.begin(), options.end(), [&](const FirefoxLocationOption& option) {
-        return option.value == saved;
+    auto normalize = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+        return value;
+    };
+    const std::string normalized = normalize(saved);
+    auto selected = std::find_if(options.begin(), options.end(), [&](const FirefoxLocationOption& option) {
+        return normalize(option.value) == normalized;
     });
+    if (normalized == "rec" || normalized == "recommended") {
+        selected = options.begin();
+    } else if (selected == options.end() && !saved.empty()) {
+        selected = std::find_if(options.begin(), options.end(), [&](const FirefoxLocationOption& option) {
+            return !option.alias.empty() && normalize(option.alias) == normalized;
+        });
+    }
+    int selected_index = selected == options.end() ? 0 : (int)std::distance(options.begin(), selected);
     if (!saved.empty() && selected == options.end()) {
-        options.push_back({saved, saved + " (saved location)"});
+        options.push_back({saved, saved + " (saved location)", ""});
+        selected_index = (int)options.size() - 1;
     }
     std::vector<const char*> labels;
     labels.reserve(options.size());
-    int selected_index = 0;
-    for (size_t i = 0; i < options.size(); ++i) {
-        labels.push_back(options[i].label.c_str());
-        if (options[i].value == saved) selected_index = (int)i;
-    }
+    for (const auto& option : options) labels.push_back(option.label.c_str());
     if (ImGui::Combo("Region", &selected_index, labels.data(), (int)labels.size())) {
         snprintf(g_app.firefox_location, sizeof(g_app.firefox_location), "%s",
                  options[(size_t)selected_index].value.c_str());
@@ -2181,7 +2194,7 @@ static void firefox_poll_job() {
         if (!options.empty()) {
             std::vector<FirefoxLocationOption> unique;
             unique.reserve(options.size() + 1);
-            unique.push_back({"", "Automatic (recommended)"});
+            unique.push_back({"", "Automatic (recommended)", ""});
             for (auto& option : options) {
                 const bool duplicate = std::any_of(unique.begin(), unique.end(), [&](const FirefoxLocationOption& existing) {
                     return existing.value == option.value;
@@ -2370,7 +2383,7 @@ static void firefox_poll_background() {
             if (status == "complete") {
                 auto options = firefox_parse_locations(json);
                 if (!options.empty()) {
-                    std::vector<FirefoxLocationOption> unique = {{"", "Automatic (recommended)"}};
+                    std::vector<FirefoxLocationOption> unique = {{"", "Automatic (recommended)", ""}};
                     for (auto& option : options) {
                         if (std::none_of(unique.begin(), unique.end(), [&](const FirefoxLocationOption& x) { return x.value == option.value; })) unique.push_back(std::move(option));
                     }

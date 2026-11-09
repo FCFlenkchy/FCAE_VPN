@@ -90,6 +90,7 @@ class MainActivity : AppCompatActivity() {
     private var firefoxRegionSpinner: Spinner? = null
     private var firefoxRegionAdapter: ArrayAdapter<String>? = null
     private var firefoxRegionChoices: List<Pair<String, String>> = listOf("" to "Automatic (recommended)")
+    private var firefoxRegionAliases: Map<String, String> = emptyMap()
     private var firefoxJob = 0L
     private var firefoxOperation = ""
     private var firefoxRegionJob = 0L
@@ -2559,9 +2560,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateFirefoxRegionChoices(options: List<Pair<String, String>>, preferred: String? = null) {
-        val selected = preferred ?: firefoxRegionSpinner?.let {
+        val saved = preferred ?: firefoxRegionSpinner?.let {
             firefoxRegionChoices.getOrNull(it.selectedItemPosition)?.first
         } ?: prefs.getString("firefoxLocation", "").orEmpty()
+        val selected = when {
+            saved.equals("REC", ignoreCase = true) || saved.equals("recommended", ignoreCase = true) -> ""
+            options.any { it.first.equals(saved, ignoreCase = true) } -> options.first { it.first.equals(saved, ignoreCase = true) }.first
+            else -> firefoxRegionAliases.entries.firstOrNull { it.key.equals(saved, ignoreCase = true) }?.value ?: saved
+        }
         val merged = LinkedHashMap<String, String>()
         merged[""] = "Automatic (recommended)"
         for ((value, label) in options) {
@@ -2580,6 +2586,24 @@ class MainActivity : AppCompatActivity() {
         }
         val selectedPosition = firefoxRegionChoices.indexOfFirst { it.first == selected }.coerceAtLeast(0)
         firefoxRegionSpinner?.setSelection(selectedPosition)
+    }
+
+    private fun updateFirefoxRegions(locations: org.json.JSONArray?): Boolean {
+        val options = mutableListOf<Pair<String, String>>()
+        val aliases = mutableMapOf<String, String>()
+        if (locations != null) for (index in 0 until locations.length()) {
+            val location = locations.optJSONObject(index) ?: continue
+            val value = location.optString("value").trim()
+            val label = location.optString("label").trim()
+            if (value.isEmpty() || label.isEmpty()) continue
+            options.add(value to label)
+            val alias = location.optString("alias").trim()
+            if (alias.isNotEmpty()) aliases[alias] = value
+        }
+        if (options.isEmpty()) return false
+        firefoxRegionAliases = aliases
+        updateFirefoxRegionChoices(options)
+        return true
     }
 
     private fun renderFirefoxAccountRows() {
@@ -3088,15 +3112,7 @@ class MainActivity : AppCompatActivity() {
                 firefoxRegionJob = 0L
                 try { NativeEngine.nativeFirefoxJobRelease(id) } catch (_: Throwable) {}
                 if (result?.optString("status") == "complete") {
-                    val locations = result.optJSONObject("result")?.optJSONArray("locations")
-                    val options = mutableListOf<Pair<String, String>>()
-                    if (locations != null) for (index in 0 until locations.length()) {
-                        val location = locations.optJSONObject(index) ?: continue
-                        val value = location.optString("value").trim()
-                        val label = location.optString("label").trim()
-                        if (value.isNotEmpty() && label.isNotEmpty()) options.add(value to label)
-                    }
-                    if (options.isNotEmpty()) updateFirefoxRegionChoices(options)
+                    updateFirefoxRegions(result.optJSONObject("result")?.optJSONArray("locations"))
                 }
                 if (firefoxRegionOperation == "locations_cached") startFirefoxRegions("locations")
                 else if (result?.optString("status") != "complete" && firefoxJob == 0L && firefoxStatusView != null) {
@@ -3329,18 +3345,8 @@ class MainActivity : AppCompatActivity() {
             }
             else -> when (firefoxOperation) {
                 "locations" -> {
-                    val locations = payload.optJSONArray("locations")
-                    val options = mutableListOf<Pair<String, String>>()
-                    if (locations != null) {
-                        for (index in 0 until locations.length()) {
-                            val location = locations.optJSONObject(index) ?: continue
-                            val value = location.optString("value").trim()
-                            val label = location.optString("label").trim()
-                            if (value.isNotEmpty() && label.isNotEmpty()) options.add(value to label)
-                        }
-                    }
-                    updateFirefoxRegionChoices(options)
-                    firefoxSetStatus(if (options.isEmpty()) "No Mozilla regions are available; the saved location is preserved." else "Mozilla region list updated.")
+                    val updated = updateFirefoxRegions(payload.optJSONArray("locations"))
+                    firefoxSetStatus(if (!updated) "No Mozilla regions are available; the saved location is preserved." else "Mozilla region list updated.")
                 }
                 "list" -> {
                     val values = payload.optJSONArray("accounts")

@@ -136,6 +136,17 @@ impl Backend for FirefoxBackend {
         let bind_host = if config.lan_sharing { "0.0.0.0" } else { "127.0.0.1" };
         let socks_addr = (config.socks_port != 0).then(|| parse_bind(bind_host, config.socks_port)) .transpose()?;
         let http_addr = (config.http_port != 0).then(|| parse_bind(bind_host, config.http_port)).transpose()?;
+        let udp_probe_targets = if config.mode == FcaeMode::Tun {
+            let servers = fcae_runtime::tun_dns::servers(&config)?;
+            let servers = if servers.is_empty() {
+                vec!["1.1.1.1".to_string(), "1.0.0.1".to_string()]
+            } else {
+                servers
+            };
+            servers.into_iter().take(3).map(|ip| fcae_firefox::types::authority(&ip, 53)).collect()
+        } else {
+            Vec::new()
+        };
         let engine_config = EngineConfig {
             data_dir,
             account_id: config.firefox.account_id.clone(),
@@ -143,6 +154,7 @@ impl Backend for FirefoxBackend {
             server: config.firefox.server.clone(),
             transport,
             require_udp: config.mode == FcaeMode::Tun,
+            udp_probe_targets,
             socks_addr,
             http_addr,
             upstream_proxy: config.upstream_proxy.as_ref().map(|proxy| proxy.url()),

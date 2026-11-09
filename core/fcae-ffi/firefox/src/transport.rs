@@ -614,6 +614,16 @@ impl Upstream {
         Ok(Zeroizing::new(self.pass.read().await.token.clone()))
     }
 
+    pub(crate) async fn probe_tcp(&self, target: &str) -> Result<()> {
+        drop(self.open_tcp_inner(target).await?);
+        Ok(())
+    }
+
+    pub(crate) async fn probe_udp(&self, target: &str) -> Result<()> {
+        drop(self.open_udp_inner(target).await?);
+        Ok(())
+    }
+
     pub async fn open_tcp(&self, target: &str) -> Result<BoxedTunnel> {
         let result = self.open_tcp_inner(target).await;
         self.observe_result(result.as_ref().err()).await;
@@ -848,6 +858,17 @@ impl Upstream {
             session.kill();
         }
         if let Some(session) = self.udp_session.lock().await.take() {
+            session.kill();
+        }
+    }
+}
+
+impl Drop for Upstream {
+    fn drop(&mut self) {
+        if let Some(session) = self.tcp_session.get_mut().take() {
+            session.kill();
+        }
+        if let Some(session) = self.udp_session.get_mut().take() {
             session.kill();
         }
     }

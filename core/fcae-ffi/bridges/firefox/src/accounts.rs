@@ -300,13 +300,28 @@ async fn execute(services: &Services, raw: &str) -> Result<Value> {
     }
 }
 
-fn locations_json(countries: Vec<fcae_firefox::types::Country>) -> Value {
+fn locations_json(mut countries: Vec<fcae_firefox::types::Country>) -> Value {
+    countries.sort_by_key(|country| country.name.to_lowercase());
     let mut locations = Vec::with_capacity(countries.len() + countries.iter().map(|country| country.cities.len()).sum::<usize>());
     for country in countries {
-        let country_name = country.name;
-        locations.push(json!({"value":country.code, "label":country_name.clone()}));
+        if country.code.eq_ignore_ascii_case(fcae_firefox::server_list::RECOMMENDED_COUNTRY) {
+            continue;
+        }
+        let country_name = country.name.trim();
+        let single_matching_city = country.cities.len() == 1
+            && country.cities[0].name.trim().eq_ignore_ascii_case(country_name);
+        let alias = if single_matching_city { country.cities[0].code.as_str() } else { "" };
+        locations.push(json!({"value":&country.code, "label":country_name, "alias":alias}));
+        if single_matching_city {
+            continue;
+        }
         for city in country.cities {
-            locations.push(json!({"value":city.code, "label":format!("{} — {}", country_name, city.name)}));
+            if city.code.eq_ignore_ascii_case(&country.code) {
+                continue;
+            }
+            let city_name = city.name.trim();
+            let city_label = if city_name.eq_ignore_ascii_case(country_name) { &city.code } else { city_name };
+            locations.push(json!({"value":&city.code, "label":format!("{} — {}", country_name, city_label)}));
         }
     }
     json!({"locations":locations})
@@ -340,6 +355,31 @@ fn optional(request: &Value, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn location_choices_collapse_only_equivalent_single_city() {
+        use fcae_firefox::types::{City, Country};
+        let city = |code: &str, name: &str| City {
+            code: code.into(), name: name.into(), servers: Vec::new(),
+        };
+        let country = |code: &str, name: &str, cities: Vec<City>| Country {
+            code: code.into(), name: name.into(), cities, locked: false, filter_expression: None,
+        };
+        let output = locations_json(vec![
+            country("REC", "Recommended", vec![city("AUTO", "Recommended")]),
+            country("DE", "Germany", vec![city("MUC", "Germany")]),
+            country("US", "United States", vec![city("USX", "United States"), city("NYC", "New York")]),
+            country("GB", "United Kingdom", vec![city("LON", "London")]),
+        ]);
+        assert_eq!(output["locations"], json!([
+            {"value":"DE", "label":"Germany", "alias":"MUC"},
+            {"value":"GB", "label":"United Kingdom", "alias":""},
+            {"value":"LON", "label":"United Kingdom — London"},
+            {"value":"US", "label":"United States", "alias":""},
+            {"value":"USX", "label":"United States — USX"},
+            {"value":"NYC", "label":"United States — New York"}
+        ]));
+    }
 
     #[test]
     fn finishing_a_released_job_does_not_recreate_it() {

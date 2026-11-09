@@ -50,6 +50,7 @@ pub struct EngineConfig {
     pub server: Option<String>,
     pub transport: TransportPreference,
     pub require_udp: bool,
+    pub udp_probe_targets: Vec<String>,
     pub socks_addr: Option<std::net::SocketAddr>,
     pub http_addr: Option<std::net::SocketAddr>,
     pub upstream_proxy: Option<String>,
