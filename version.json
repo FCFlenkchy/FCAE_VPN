@@ -1,9 +1,9 @@
 [
   {
-    "version": "1.4.2",
-    "date": "2026-10-25",
-    "notes": "bump aether to 2.4.0 (fixed failed to load native library)",
-    "url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/1.4.2"
+    "version": "1.4.3",
+    "date": "2026-11-09",
+    "notes": "New protocol Firefox ip protection (TCP-only and new credits) and better settings and sync settings and better settings ui",
+    "url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/1.4.3"
   },
   {
     "version": "1.3.5.3_pre-release",
