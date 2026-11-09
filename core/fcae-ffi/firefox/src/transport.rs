@@ -1,9 +1,10 @@
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use h2::{RecvStream, SendStream};
@@ -526,6 +527,92 @@ async fn send_h2_bytes(send: &mut SendStream<Bytes>, mut bytes: Bytes) -> Result
     Ok(())
 }
 
+const STREAM_FAILURE_WINDOW: Duration = Duration::from_secs(30);
+const STREAM_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct StreamHealth {
+    ambiguous_since: Option<Instant>,
+    ambiguous_targets: Vec<u64>,
+    last_destination_log: Option<Instant>,
+    last_server_log: Option<Instant>,
+    last_other_log: Option<Instant>,
+}
+
+impl StreamHealth {
+    fn clear_ambiguous(&mut self) {
+        self.ambiguous_since = None;
+        self.ambiguous_targets.clear();
+    }
+
+    fn observe_ambiguous(&mut self, protocol: &str, target: &str, now: Instant) -> bool {
+        if self.ambiguous_since.is_none_or(|start| now.saturating_duration_since(start) >= STREAM_FAILURE_WINDOW) {
+            self.clear_ambiguous();
+            self.ambiguous_since = Some(now);
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        protocol.hash(&mut hasher);
+        target.hash(&mut hasher);
+        let key = hasher.finish();
+        if self.ambiguous_targets.len() < 3 && !self.ambiguous_targets.contains(&key) {
+            self.ambiguous_targets.push(key);
+        }
+        self.ambiguous_targets.len() >= 3
+    }
+
+    fn take_ambiguous_threshold(&mut self, now: Instant) -> bool {
+        let reached = self.ambiguous_targets.len() >= 3
+            && self.ambiguous_since.is_some_and(|start| now.saturating_duration_since(start) < STREAM_FAILURE_WINDOW);
+        self.clear_ambiguous();
+        reached
+    }
+
+    fn should_log(&mut self, destination: bool, server: bool, now: Instant) -> bool {
+        let last = if destination { &mut self.last_destination_log }
+            else if server { &mut self.last_server_log }
+            else { &mut self.last_other_log };
+        if last.is_none_or(|at| now.saturating_duration_since(at) >= STREAM_LOG_INTERVAL) {
+            *last = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+pub(crate) fn destination_error(error: &FirefoxError) -> Option<&'static str> {
+    let FirefoxError::Http { status, message, .. } = error else { return None };
+    if *status != 502 && *status != 503 && *status != 504 { return None; }
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut parameter = false;
+    for (index, ch) in message.char_indices().chain(std::iter::once((message.len(), ','))) {
+        if escaped { escaped = false; continue; }
+        if quoted && ch == '\\' { escaped = true; continue; }
+        if ch == '"' { quoted = !quoted; continue; }
+        if !quoted && (ch == ';' || ch == ',') {
+            if parameter {
+                if let Some((key, value)) = message[start..index].trim().split_once('=') {
+                    if key.trim().eq_ignore_ascii_case("error") {
+                        match value.trim() {
+                            "destination_ip_prohibited" => return Some("destination_ip_prohibited"),
+                            "destination_ip_unroutable" => return Some("destination_ip_unroutable"),
+                            "destination_not_found" => return Some("destination_not_found"),
+                            "destination_unavailable" => return Some("destination_unavailable"),
+                            "connection_refused" => return Some("connection_refused"),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            parameter = ch == ';';
+            start = index + ch.len_utf8();
+        }
+    }
+    None
+}
+
 pub struct Upstream {
     candidate: RwLock<Candidate>,
     candidates: RwLock<Vec<Candidate>>,
@@ -537,7 +624,7 @@ pub struct Upstream {
     renewal: Mutex<()>,
     failover: Mutex<()>,
     failures: AtomicU32,
-    logged_failures: AtomicU64,
+    stream_health: SyncMutex<StreamHealth>,
     tcp_session: Mutex<Option<H2Session>>,
     udp_session: Mutex<Option<H2Session>>,
     traffic: Arc<Traffic>,
@@ -560,7 +647,7 @@ impl Upstream {
             renewal: Mutex::new(()),
             failover: Mutex::new(()),
             failures: AtomicU32::new(0),
-            logged_failures: AtomicU64::new(0),
+            stream_health: SyncMutex::new(StreamHealth::default()),
             tcp_session: Mutex::new(None),
             udp_session: Mutex::new(None),
             traffic: Arc::new(Traffic::default()),
@@ -626,7 +713,7 @@ impl Upstream {
 
     pub async fn open_tcp(&self, target: &str) -> Result<BoxedTunnel> {
         let result = self.open_tcp_inner(target).await;
-        self.observe_result(result.as_ref().err()).await;
+        self.observe_result("TCP", target, result.as_ref().err()).await;
         result.map(|inner| Box::new(MeteredTunnel { inner, traffic: self.traffic.clone() }) as BoxedTunnel)
     }
 
@@ -748,7 +835,7 @@ impl Upstream {
 
     pub async fn open_udp(&self, target: &str) -> Result<UdpTunnel> {
         let result = self.open_udp_inner(target).await;
-        self.observe_result(result.as_ref().err()).await;
+        self.observe_result("UDP", target, result.as_ref().err()).await;
         result
     }
 
@@ -797,22 +884,44 @@ impl Upstream {
         Ok(session)
     }
 
-    async fn observe_result(&self, error: Option<&FirefoxError>) {
-        match error {
-            None => {
-                self.failures.store(0, Ordering::Release);
-                self.logged_failures.store(0, Ordering::Relaxed);
-            }
-            Some(error) => {
-                let count = self.logged_failures.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-                if count.is_power_of_two() {
-                    match error {
-                        FirefoxError::Http { status, .. } => log::warn!("[firefox] proxy stream failed: HTTP {status} (occurrence {count})"),
-                        _ => log::warn!("[firefox] proxy stream failed: {} (occurrence {count})", error.reason_code()),
-                    }
+    async fn observe_result(&self, protocol: &str, target: &str, error: Option<&FirefoxError>) {
+        let Some(error) = error else {
+            self.failures.store(0, Ordering::Release);
+            self.stream_health.lock().clear_ambiguous();
+            return;
+        };
+        let destination_reason = destination_error(error);
+        let port = split_authority(target, 0).map(|(_, port)| port).unwrap_or(0);
+        let now = Instant::now();
+        let ambiguous = matches!(error, FirefoxError::Http { status, .. } if *status == 408 || *status >= 500)
+            && destination_reason.is_none();
+        let (should_log, rotate) = {
+            let mut health = self.stream_health.lock();
+            let important = matches!(error, FirefoxError::PassRejected | FirefoxError::ReauthRequired
+                | FirefoxError::NotEntitled | FirefoxError::QuotaExhausted(_)
+                | FirefoxError::RegionUnavailable | FirefoxError::TlsCertificate { .. });
+            let should_log = important || health.should_log(destination_reason.is_some(), ambiguous, now);
+            let rotate = ambiguous && health.observe_ambiguous(protocol, target, now);
+            (should_log, rotate)
+        };
+        if should_log {
+            if let Some(reason) = destination_reason {
+                log::info!("[firefox] {protocol} destination on port {port} rejected by proxy ({reason}); other connections may still work");
+            } else {
+                match error {
+                    FirefoxError::Http { status, .. } => log::warn!("[firefox] {protocol} proxy stream to port {port} failed: HTTP {status}; carrier health is assessed separately"),
+                    _ => log::warn!("[firefox] {protocol} proxy stream to port {port} failed: {}", error.reason_code()),
                 }
-                self.note_error(error).await;
             }
+        }
+        if rotate {
+            let _guard = self.failover.lock().await;
+            let rotate = self.stream_health.lock().take_ambiguous_threshold(Instant::now());
+            if rotate {
+                self.rotate_proxy().await;
+            }
+        } else if !ambiguous && destination_reason.is_none() {
+            self.note_error(error).await;
         }
     }
 
@@ -834,6 +943,11 @@ impl Upstream {
         if self.failures.load(Ordering::Acquire) < 3 {
             return;
         }
+        self.rotate_proxy().await;
+    }
+
+    async fn rotate_proxy(&self) {
+        self.stream_health.lock().clear_ambiguous();
         let candidates = self.candidates.read().clone();
         if candidates.len() < 2 {
             self.failures.store(0, Ordering::Release);
@@ -1011,6 +1125,55 @@ fn h2_error(error: h2::Error) -> FirefoxError {
 #[cfg(test)]
 mod traffic_tests {
     use super::*;
+
+    fn http_error(status: u16, message: &str) -> FirefoxError {
+        FirefoxError::Http { host: "proxy".into(), status, errno: None, retry_after: None, message: message.into() }
+    }
+
+    #[test]
+    fn destination_error_is_classified_without_treating_opaque_502_as_policy() {
+        let policy = http_error(502, "Fastly; error=destination_ip_prohibited");
+        assert_eq!(destination_error(&policy), Some("destination_ip_prohibited"));
+        let quoted = http_error(502, "Fastly; details=\"ignored; error=destination_ip_prohibited\"; error=connection_refused");
+        assert_eq!(destination_error(&quoted), Some("connection_refused"));
+        assert_eq!(destination_error(&http_error(502, "Bad Gateway")), None);
+        assert_eq!(destination_error(&http_error(502, "Fastly; error=destination_ip_prohibited_extra")), None);
+        assert_eq!(destination_error(&http_error(401, "Fastly; error=destination_ip_prohibited")), None);
+        assert_eq!(destination_error(&FirefoxError::PassRejected), None);
+        let mut headers = http::HeaderMap::new();
+        headers.insert("proxy-status", HeaderValue::from_static("Fastly; error=destination_ip_prohibited"));
+        assert_eq!(destination_error(&proxy_status_error("proxy", 502, &headers)), Some("destination_ip_prohibited"));
+        assert!(matches!(proxy_status_error("proxy", 407, &headers), FirefoxError::PassRejected));
+    }
+
+    #[test]
+    fn repeated_single_target_does_not_trigger_failover() {
+        let now = Instant::now();
+        let mut health = StreamHealth::default();
+        for _ in 0..100 {
+            assert!(!health.observe_ambiguous("UDP", "1.1.1.1:53", now));
+        }
+        assert!(!health.observe_ambiguous("TCP", "1.1.1.1:443", now));
+        assert!(health.observe_ambiguous("TCP", "8.8.8.8:443", now));
+        assert!(health.take_ambiguous_threshold(now));
+        assert!(!health.take_ambiguous_threshold(now));
+        assert!(!health.observe_ambiguous("TCP", "a:443", now));
+        assert!(!health.observe_ambiguous("TCP", "b:443", now + STREAM_FAILURE_WINDOW));
+        health.clear_ambiguous();
+        assert!(!health.observe_ambiguous("TCP", "c:443", now + STREAM_FAILURE_WINDOW));
+    }
+
+    #[test]
+    fn log_throttle_is_not_reset_by_success_and_keeps_categories_separate() {
+        let now = Instant::now();
+        let mut health = StreamHealth::default();
+        assert!(health.should_log(true, false, now));
+        health.clear_ambiguous();
+        assert!(!health.should_log(true, false, now));
+        assert!(health.should_log(false, true, now));
+        assert!(health.should_log(false, false, now));
+        assert!(health.should_log(true, false, now + STREAM_LOG_INTERVAL));
+    }
 
     #[tokio::test]
     async fn metered_tunnel_counts_bytes_in_both_directions() {

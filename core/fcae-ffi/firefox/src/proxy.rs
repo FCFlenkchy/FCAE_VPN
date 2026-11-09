@@ -14,6 +14,7 @@ use crate::types::{authority, valid_dns_name};
 const MAX_HEAD: usize = 32 * 1024;
 const MAX_UDP_FLOWS: usize = 256;
 const MAX_DATAGRAM: usize = 65_535;
+const UDP_REFUSAL_TTL: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub struct LocalProxies {
     upstream: Arc<Upstream>,
@@ -240,11 +241,34 @@ fn socks_reply_code(error: &FirefoxError) -> u8 {
     }
 }
 
+#[derive(Default)]
+struct UdpRefusals {
+    entries: HashMap<(String, String), std::time::Instant>,
+}
+
+impl UdpRefusals {
+    fn contains(&mut self, key: &(String, String), now: std::time::Instant) -> bool {
+        if self.entries.get(key).is_some_and(|until| *until > now) {
+            return true;
+        }
+        self.entries.remove(key);
+        false
+    }
+
+    fn record(&mut self, key: (String, String), now: std::time::Instant) {
+        self.entries.retain(|_, until| *until > now);
+        if self.entries.len() < MAX_UDP_FLOWS {
+            self.entries.insert(key, now + UDP_REFUSAL_TTL);
+        }
+    }
+}
+
 struct UdpAssociation {
     socket: Arc<UdpSocket>,
     upstream: Arc<Upstream>,
     client_ip: IpAddr,
     flows: Mutex<HashMap<String, Arc<crate::transport::UdpTunnel>>>,
+    refused: Mutex<UdpRefusals>,
     opening: Mutex<()>,
     client: Mutex<Option<SocketAddr>>,
     readers: Mutex<Vec<AbortHandle>>,
@@ -258,6 +282,7 @@ impl UdpAssociation {
             upstream,
             client_ip,
             flows: Mutex::new(HashMap::new()),
+            refused: Mutex::new(UdpRefusals::default()),
             opening: Mutex::new(()),
             client: Mutex::new(None),
             readers: Mutex::new(Vec::new()),
@@ -345,7 +370,19 @@ impl UdpAssociation {
         let tunnel = if let Some(tunnel) = existing {
             tunnel
         } else {
-            let tunnel = Arc::new(self.upstream.open_udp(&target).await?);
+            let refusal_key = (self.upstream.candidate().address, target.clone());
+            if self.refused.lock().await.contains(&refusal_key, std::time::Instant::now()) {
+                return Ok(());
+            }
+            let tunnel = match self.upstream.open_udp(&target).await {
+                Ok(tunnel) => Arc::new(tunnel),
+                Err(error) => {
+                    if crate::transport::destination_error(&error) == Some("destination_ip_prohibited") {
+                        self.refused.lock().await.record(refusal_key, std::time::Instant::now());
+                    }
+                    return Err(error);
+                }
+            };
             self.flows.lock().await.insert(target.clone(), tunnel.clone());
             let association = self.clone();
             let reader_tunnel = tunnel.clone();
@@ -573,4 +610,25 @@ async fn write_http_error<S: AsyncWrite + Unpin>(stream: &mut S, status: u16, me
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod udp_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn refusal_cache_is_bounded_temporary_and_scoped_to_proxy_and_destination() {
+        let now = std::time::Instant::now();
+        let key = ("proxy-a".to_string(), "1.1.1.1:123".to_string());
+        let mut cache = UdpRefusals::default();
+        cache.record(key.clone(), now);
+        assert!(cache.contains(&key, now));
+        assert!(!cache.contains(&("proxy-b".into(), key.1.clone()), now));
+        assert!(!cache.contains(&(key.0.clone(), "1.1.1.1:443".into()), now));
+        assert!(!cache.contains(&key, now + UDP_REFUSAL_TTL));
+        for n in 0..MAX_UDP_FLOWS + 10 {
+            cache.record(("proxy".into(), n.to_string()), now);
+        }
+        assert_eq!(cache.entries.len(), MAX_UDP_FLOWS);
+    }
 }
