@@ -45,12 +45,6 @@ Aether supports custom routing rules directly in the UI (Routes tab) without nee
 | Private | `private` | All LAN/private IPs |
 | IP with port | `192.33.45.6:400` | IP address with specific port |
 
-**On Desktop:** Open the **Routes** tab and paste rules into the "Inline Routing Rules" text box.
-
-**On Android:** Scroll to "Inline routing rules" and enter your rules. Tap **CONNECT** to apply.
-
-Rules set via inline input take priority and are merged with any rules file specified in the "Routing Rules File" field.
-
 ## Platforms
 
 | Platform | Backend | UI |

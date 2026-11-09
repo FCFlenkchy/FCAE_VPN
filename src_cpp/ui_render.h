@@ -64,10 +64,8 @@ struct AppState {
     uint16_t firefox_http_port  = kFirefoxDefaultHttpPort;
     bool socks_enabled   = true;
     bool http_enabled    = false;
-    bool tun_http_enabled = false;
     bool firefox_socks_enabled = true;
     bool firefox_http_enabled = false;
-    bool firefox_tun_http_enabled = false;
     bool psiphon_socks_enabled = true;
     bool psiphon_http_enabled = true;
     bool tor_socks_enabled = true;
@@ -287,10 +285,7 @@ struct AppState {
     }
 
     bool listener_socks_enabled() const { return final_listener_is_firefox() ? firefox_socks_enabled : socks_enabled; }
-    bool listener_http_enabled() const {
-        return final_listener_is_firefox() ? (mode == 1 ? firefox_tun_http_enabled : firefox_http_enabled)
-                                           : (mode == 1 ? tun_http_enabled : http_enabled);
-    }
+    bool listener_http_enabled() const { return final_listener_is_firefox() ? firefox_http_enabled : http_enabled; }
 
     FcaeConfig to_config() {
         FcaeConfig c;

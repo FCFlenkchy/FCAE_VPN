@@ -230,13 +230,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchLan: SwitchMaterial
     private lateinit var switchLogging: SwitchMaterial
     private lateinit var switchSocks: SwitchMaterial
-    private lateinit var switchAetherTunHttp: SwitchMaterial
     private lateinit var switchTorSocks: SwitchMaterial
     private lateinit var switchPsiphonSocks: SwitchMaterial
     private lateinit var switchPsiphonHttp: SwitchMaterial
     private var firefoxSocksEnabled = true
     private var firefoxHttpEnabled = true
-    private var firefoxTunHttpEnabled = false
     private lateinit var switchTorHttp: SwitchMaterial
     private lateinit var editTorHttpPort: android.widget.EditText
     private lateinit var switchHttp: SwitchMaterial
@@ -381,13 +379,14 @@ class MainActivity : AppCompatActivity() {
         rtt: Int,
     ) {
         if (!::statsText.isInitialized) return
+        val latency = if (rtt > 0) "${rtt}ms" else "--"
         statsText.text =
-            "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  ${rtt}ms"
+            "↓ ${fmt(rx)}/s (${fmt(totalRx)})  |  ↑ ${fmt(tx)}/s (${fmt(totalTx)})  |  $latency"
         downloadRateText.text = "${fmt(rx)}/s"
         downloadTotalText.text = "Total ${fmt(totalRx)}"
         uploadRateText.text = "${fmt(tx)}/s"
         uploadTotalText.text = "Total ${fmt(totalTx)}"
-        rttText.text = "${rtt.coerceAtLeast(0)}ms"
+        rttText.text = if (rtt > 0) "${rtt}ms" else "--"
     }
 
     private fun resetStats() {
@@ -1351,7 +1350,6 @@ class MainActivity : AppCompatActivity() {
         }
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
-        switchAetherTunHttp = findViewById(R.id.switchAetherTunHttp)
         switchTorSocks = findViewById(R.id.switchTorSocks)
         switchPsiphonSocks = findViewById(R.id.switchPsiphonSocks)
         switchPsiphonHttp = findViewById(R.id.switchPsiphonHttp)
@@ -2426,11 +2424,7 @@ class MainActivity : AppCompatActivity() {
     private fun finalListenerIsFirefox(): Boolean = routeBackends().lastOrNull() == 2
 
     private fun finalSocksEnabled(): Boolean = if (finalListenerIsFirefox()) firefoxSocksEnabled else switchSocks.isChecked
-    private fun finalHttpEnabled(): Boolean = if (finalListenerIsFirefox()) {
-        if (isTunModeSelected()) firefoxTunHttpEnabled else firefoxHttpEnabled
-    } else {
-        if (isTunModeSelected()) switchAetherTunHttp.isChecked else switchHttp.isChecked
-    }
+    private fun finalHttpEnabled(): Boolean = if (finalListenerIsFirefox()) firefoxHttpEnabled else switchHttp.isChecked
 
     private fun selectedSocksPort(): android.widget.EditText =
         if (finalListenerIsFirefox()) editFirefoxSocksPort else editSocksPort
@@ -2823,20 +2817,11 @@ class MainActivity : AppCompatActivity() {
             isChecked = firefoxSocksEnabled
         }
         val firefoxHttpSwitch = SwitchMaterial(this).apply {
-            text = "Firefox HTTP proxy in Proxy mode"
+            text = "Firefox HTTP proxy"
             isChecked = firefoxHttpEnabled
-        }
-        val firefoxTunHttpSwitch = SwitchMaterial(this).apply {
-            text = "Firefox HTTP proxy in TUN mode"
-            isChecked = firefoxTunHttpEnabled
         }
         box.addView(firefoxSocksSwitch)
         box.addView(firefoxHttpSwitch)
-        box.addView(firefoxTunHttpSwitch)
-        box.addView(TextView(this).apply {
-            text = "SOCKS5 is required for TUN exits and UDP-dependent hops."
-            setTextColor(Color.parseColor("#FF9AA3B5"))
-        })
         val firefoxSocksPort = addDialogInput(box, "SOCKS5 port", editFirefoxSocksPort.text.toString())
         firefoxSocksPort.inputType = android.text.InputType.TYPE_CLASS_NUMBER
         val firefoxHttpPort = addDialogInput(box, "HTTP proxy port", editFirefoxHttpPort.text.toString())
@@ -2874,7 +2859,6 @@ class MainActivity : AppCompatActivity() {
                 }
                 firefoxSocksEnabled = firefoxSocksSwitch.isChecked
                 firefoxHttpEnabled = firefoxHttpSwitch.isChecked
-                firefoxTunHttpEnabled = firefoxTunHttpSwitch.isChecked
                 editFirefoxSocksPort.setText(firefoxSocksPort.text.toString())
                 editFirefoxHttpPort.setText(firefoxHttpPort.text.toString())
                 val selectedEmail = firefoxAccountChoices.firstOrNull { it.id == firefoxSelectedAccountId }?.email
@@ -3562,11 +3546,9 @@ class MainActivity : AppCompatActivity() {
             putBoolean("lan", switchLan.isChecked)
             putBoolean("logging", switchLogging.isChecked)
             putBoolean("socks", switchSocks.isChecked)
-            putBoolean("aetherHttp", switchHttp.isChecked)
+            putBoolean("aetherHttpUnified", switchHttp.isChecked)
             putBoolean("firefoxSocks", firefoxSocksEnabled)
-            putBoolean("firefoxHttp", firefoxHttpEnabled)
-            putBoolean("firefoxTunHttp", firefoxTunHttpEnabled)
-            putBoolean("tunHttp", switchAetherTunHttp.isChecked)
+            putBoolean("firefoxHttpUnified", firefoxHttpEnabled)
             putBoolean("torSocks", switchTorSocks.isChecked)
             putBoolean("psiphonSocks", switchPsiphonSocks.isChecked)
             putBoolean("psiphonHttp", switchPsiphonHttp.isChecked)
@@ -3701,11 +3683,13 @@ class MainActivity : AppCompatActivity() {
         switchTorHttp.isChecked = prefs.getBoolean("torHttp", false)
         editTorHttpPort.setText(prefs.getString("torHttpPort", "1822"))
         val legacyHttp = prefs.getBoolean("http", true)
-        switchHttp.isChecked = prefs.getBoolean("aetherHttp", legacyHttp)
-        switchAetherTunHttp.isChecked = prefs.getBoolean("tunHttp", false)
+        val wasTun = prefs.getInt("mode", 1) == 1
+        val legacyTunHttp = prefs.getBoolean("tunHttp", false)
+        switchHttp.isChecked = prefs.getBoolean("aetherHttpUnified",
+            if (wasTun) legacyTunHttp else prefs.getBoolean("aetherHttp", legacyHttp))
         firefoxSocksEnabled = prefs.getBoolean("firefoxSocks", prefs.getBoolean("socks", true))
-        firefoxHttpEnabled = prefs.getBoolean("firefoxHttp", legacyHttp)
-        firefoxTunHttpEnabled = prefs.getBoolean("firefoxTunHttp", prefs.getBoolean("tunHttp", false))
+        firefoxHttpEnabled = prefs.getBoolean("firefoxHttpUnified",
+            if (wasTun) prefs.getBoolean("firefoxTunHttp", legacyTunHttp) else prefs.getBoolean("firefoxHttp", legacyHttp))
         switchTorSocks.isChecked = prefs.getBoolean("torSocks", true)
         switchPsiphonSocks.isChecked = prefs.getBoolean("psiphonSocks", true)
         switchPsiphonHttp.isChecked = prefs.getBoolean("psiphonHttp", true)

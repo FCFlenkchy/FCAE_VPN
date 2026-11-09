@@ -558,23 +558,9 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
             engines,
         });
 
-        log::info!(
-            "[ffi] fcae initialised (abi v{FCAE_ABI_VERSION}, tun2socks: {})",
-            tun_backend_description()
-        );
+        log::info!("[ffi] fcae initialised (abi v{FCAE_ABI_VERSION})");
         Ok(())
     })
-}
-
-fn tun_backend_description() -> String {
-    #[cfg(feature = "tun")]
-    {
-        fcae_bridge_tun2socks::version()
-    }
-    #[cfg(not(feature = "tun"))]
-    {
-        "disabled".to_string()
-    }
 }
 
 fn sponsor_proxy_for(config: &config::SessionConfig) -> Option<String> {

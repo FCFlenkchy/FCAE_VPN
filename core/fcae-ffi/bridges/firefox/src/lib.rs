@@ -247,7 +247,7 @@ impl BackendHandle for RunningFirefox {
             sample.tx = tx;
             sample.at = Instant::now();
         }
-        Counters { total_rx: rx, total_tx: tx, rx_bytes_sec: sample.rates.0, tx_bytes_sec: sample.rates.1, rtt_ms: 0 }
+        Counters { total_rx: rx, total_tx: tx, rx_bytes_sec: sample.rates.0, tx_bytes_sec: sample.rates.1, rtt_ms: self.engine.rtt_ms() }
     }
 
     async fn wait(&self) -> Result<()> {

@@ -66,7 +66,11 @@ static bool s_loaded_firefox_http_port = false;
 static bool s_loaded_firefox_socks_enabled = false;
 static bool s_loaded_firefox_http_enabled = false;
 static bool s_loaded_aether_http_enabled = false;
-static bool s_loaded_firefox_tun_http_enabled = false;
+static bool s_loaded_unified_aether_http = false;
+static bool s_loaded_unified_firefox_http = false;
+static bool s_legacy_tun_http = false;
+static bool s_legacy_firefox_tun_http = false;
+static bool s_loaded_legacy_firefox_tun_http = false;
 static int s_loaded_legacy_chain_count = -1;
 static int s_loaded_legacy_chain_exits[3] = {};
 
@@ -435,10 +439,8 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.quick_reconnect);
     h = fnv_value(h, g_app.socks_enabled);
     h = fnv_value(h, g_app.http_enabled);
-    h = fnv_value(h, g_app.tun_http_enabled);
     h = fnv_value(h, g_app.firefox_socks_enabled);
     h = fnv_value(h, g_app.firefox_http_enabled);
-    h = fnv_value(h, g_app.firefox_tun_http_enabled);
     h = fnv_value(h, g_app.psiphon_socks_enabled);
     h = fnv_value(h, g_app.psiphon_http_enabled);
     h = fnv_value(h, g_app.tor_socks_enabled);
@@ -974,18 +976,20 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         g_app.firefox_http_port = (uint16_t)parse_port(val, g_app.firefox_http_port);
         s_loaded_firefox_http_port = true;
     }
-    else if (key == "aether_http_enabled") { g_app.http_enabled = atoi(val.c_str()) != 0; s_loaded_aether_http_enabled = true; }
+    else if (key == "aether_http_unified") { g_app.http_enabled = atoi(val.c_str()) != 0; s_loaded_unified_aether_http = true; }
+    else if (key == "firefox_http_unified") { g_app.firefox_http_enabled = atoi(val.c_str()) != 0; s_loaded_unified_firefox_http = true; }
+    else if (key == "aether_http_enabled" && !s_loaded_unified_aether_http) { g_app.http_enabled = atoi(val.c_str()) != 0; s_loaded_aether_http_enabled = true; }
     else if (key == "firefox_socks_enabled") { g_app.firefox_socks_enabled = atoi(val.c_str()) != 0; s_loaded_firefox_socks_enabled = true; }
-    else if (key == "firefox_http_enabled") { g_app.firefox_http_enabled = atoi(val.c_str()) != 0; s_loaded_firefox_http_enabled = true; }
-    else if (key == "firefox_tun_http_enabled") { g_app.firefox_tun_http_enabled = atoi(val.c_str()) != 0; s_loaded_firefox_tun_http_enabled = true; }
+    else if (key == "firefox_http_enabled" && !s_loaded_unified_firefox_http) { g_app.firefox_http_enabled = atoi(val.c_str()) != 0; s_loaded_firefox_http_enabled = true; }
+    else if (key == "firefox_tun_http_enabled") { s_legacy_firefox_tun_http = atoi(val.c_str()) != 0; s_loaded_legacy_firefox_tun_http = true; }
     else if (key == "psiphon_socks_enabled") g_app.psiphon_socks_enabled = atoi(val.c_str()) != 0;
     else if (key == "psiphon_http_enabled") g_app.psiphon_http_enabled = atoi(val.c_str()) != 0;
     else if (key == "tor_socks_enabled") g_app.tor_socks_enabled = atoi(val.c_str()) != 0;
     else if (key == "socks_enabled") g_app.socks_enabled = atoi(val.c_str()) != 0;
     else if (key == "tor_http_port") g_app.tor_http_port = parse_port(val, g_app.tor_http_port);
     else if (key == "tor_http_enabled") g_app.tor_http_enabled = atoi(val.c_str()) != 0;
-    else if (key == "http_enabled" && !s_loaded_aether_http_enabled) g_app.http_enabled = atoi(val.c_str()) != 0;
-    else if (key == "tun_http_enabled") g_app.tun_http_enabled = atoi(val.c_str()) != 0;
+    else if (key == "http_enabled" && !s_loaded_aether_http_enabled && !s_loaded_unified_aether_http) g_app.http_enabled = atoi(val.c_str()) != 0;
+    else if (key == "tun_http_enabled") s_legacy_tun_http = atoi(val.c_str()) != 0;
     else if (key == "force_peer")
         snprintf(g_app.force_peer, sizeof(g_app.force_peer), "%s", val.c_str());
     else if (key == "upstream_proxy")
@@ -1091,12 +1095,9 @@ static void save_config() {
     fprintf(f, "tor_http_port=%u\n", (unsigned)g_app.tor_http_port);
     fprintf(f, "tor_http_enabled=%d\n", g_app.tor_http_enabled ? 1 : 0);
     fprintf(f, "socks_enabled=%d\n", g_app.socks_enabled ? 1 : 0);
-    fprintf(f, "http_enabled=%d\n", g_app.http_enabled ? 1 : 0);
-    fprintf(f, "tun_http_enabled=%d\n", g_app.tun_http_enabled ? 1 : 0);
-    fprintf(f, "aether_http_enabled=%d\n", g_app.http_enabled ? 1 : 0);
+    fprintf(f, "aether_http_unified=%d\n", g_app.http_enabled ? 1 : 0);
     fprintf(f, "firefox_socks_enabled=%d\n", g_app.firefox_socks_enabled ? 1 : 0);
-    fprintf(f, "firefox_http_enabled=%d\n", g_app.firefox_http_enabled ? 1 : 0);
-    fprintf(f, "firefox_tun_http_enabled=%d\n", g_app.firefox_tun_http_enabled ? 1 : 0);
+    fprintf(f, "firefox_http_unified=%d\n", g_app.firefox_http_enabled ? 1 : 0);
     fprintf(f, "psiphon_socks_enabled=%d\n", g_app.psiphon_socks_enabled ? 1 : 0);
     fprintf(f, "psiphon_http_enabled=%d\n", g_app.psiphon_http_enabled ? 1 : 0);
     fprintf(f, "tor_socks_enabled=%d\n", g_app.tor_socks_enabled ? 1 : 0);
@@ -1183,7 +1184,11 @@ static bool load_config_from(const std::string& path) {
     s_loaded_firefox_socks_enabled = false;
     s_loaded_firefox_http_enabled = false;
     s_loaded_aether_http_enabled = false;
-    s_loaded_firefox_tun_http_enabled = false;
+    s_loaded_unified_aether_http = false;
+    s_loaded_unified_firefox_http = false;
+    s_legacy_tun_http = false;
+    s_legacy_firefox_tun_http = false;
+    s_loaded_legacy_firefox_tun_http = false;
     s_loaded_legacy_chain_count = -1;
     int applied = 0;
     while (fgets(line, sizeof(line), f)) {
@@ -1214,8 +1219,13 @@ static bool load_config_from(const std::string& path) {
 
     if (applied == 0) return false;
     if (!s_loaded_firefox_socks_enabled) g_app.firefox_socks_enabled = g_app.socks_enabled;
-    if (!s_loaded_firefox_http_enabled) g_app.firefox_http_enabled = g_app.http_enabled;
-    if (!s_loaded_firefox_tun_http_enabled) g_app.firefox_tun_http_enabled = g_app.tun_http_enabled;
+    if (!s_loaded_unified_firefox_http && !s_loaded_firefox_http_enabled)
+        g_app.firefox_http_enabled = g_app.http_enabled;
+    if (g_app.mode == 1) {
+        if (!s_loaded_unified_aether_http) g_app.http_enabled = s_legacy_tun_http;
+        if (!s_loaded_unified_firefox_http)
+            g_app.firefox_http_enabled = s_loaded_legacy_firefox_tun_http ? s_legacy_firefox_tun_http : s_legacy_tun_http;
+    }
     // Preserve explicit Firefox values and custom legacy ports; migrate old defaults.
     if (!s_loaded_firefox_socks_port)
         g_app.firefox_socks_port = s_loaded_socks_port && g_app.socks_port != 1819
@@ -2719,9 +2729,7 @@ static void render_firefox_settings() {
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     ImGui::PushItemWidth(100);
     ImGui::Checkbox("Enable SOCKS5##firefox", &g_app.firefox_socks_enabled);
-    ImGui::Checkbox("Enable HTTP proxy in Proxy mode##firefox", &g_app.firefox_http_enabled);
-    ImGui::Checkbox("Enable HTTP proxy in TUN mode##firefox", &g_app.firefox_tun_http_enabled);
-    if (!g_app.firefox_socks_enabled) ImGui::TextDisabled("SOCKS5 is required for TUN exits and UDP-dependent hops.");
+    ImGui::Checkbox("Enable HTTP proxy##firefox", &g_app.firefox_http_enabled);
     ImGui::InputScalar("SOCKS5 port", ImGuiDataType_U16, &g_app.firefox_socks_port);
     ImGui::InputScalar("HTTP proxy port", ImGuiDataType_U16, &g_app.firefox_http_port);
     ImGui::PopItemWidth();
@@ -3577,8 +3585,10 @@ void render_ui() {
 
             ImGui::Spacing();
             char rtt_buf[24];
-            snprintf(rtt_buf, sizeof(rtt_buf), "%ums",
-                     telem.state == FCAE_STATE_CONNECTED ? telem.rtt_ms : 0u);
+            if (telem.state == FCAE_STATE_CONNECTED && telem.rtt_ms > 0)
+                snprintf(rtt_buf, sizeof(rtt_buf), "%ums", telem.rtt_ms);
+            else
+                snprintf(rtt_buf, sizeof(rtt_buf), "--");
             ImGui::TextColored(ImVec4(0.70f, 0.90f, 0.70f, 1.0f), "%s", rtt_buf);
             ImGui::SameLine(0, 10);
             if (ImGui::SmallButton("INFO")) {
@@ -3978,9 +3988,7 @@ void render_ui() {
             ImGui::Separator();
             ImGui::PushItemWidth(100);
             ImGui::Checkbox("Aether SOCKS5 proxy", &g_app.socks_enabled);
-            ImGui::Checkbox("Aether HTTP proxy in Proxy mode", &g_app.http_enabled);
-            ImGui::Checkbox("Aether HTTP proxy in TUN mode", &g_app.tun_http_enabled);
-            if (!g_app.socks_enabled) ImGui::TextDisabled("Aether currently requires SOCKS5 to start.");
+            ImGui::Checkbox("Aether HTTP proxy", &g_app.http_enabled);
             ImGui::InputScalar("Aether SOCKS5 port", ImGuiDataType_U16, &g_app.socks_port);
             ImGui::InputScalar("Aether HTTP port", ImGuiDataType_U16, &g_app.http_port);
             ImGui::PopItemWidth();
@@ -4141,7 +4149,6 @@ void render_ui() {
             // Psiphon's own listeners, kept off the engine's and Tor's ports.
             ImGui::Checkbox("Psiphon SOCKS5 proxy", &g_app.psiphon_socks_enabled);
             ImGui::Checkbox("Psiphon HTTP proxy", &g_app.psiphon_http_enabled);
-            if (!g_app.psiphon_socks_enabled) ImGui::TextDisabled("Psiphon SOCKS5 is required for TUN exits.");
             ImGui::InputInt("Psiphon SOCKS port", &g_app.psiphon_socks_port);
             ImGui::InputInt("Psiphon HTTP port", &g_app.psiphon_http_port);
             ImGui::TextDisabled("0 restores the built-in value (fixed, never auto-picked).");
@@ -4159,7 +4166,6 @@ void render_ui() {
             // All Tor knobs stay editable in every combo; the engine
             // ignores them when no Tor is in play (to_config normalises).
             ImGui::Checkbox("Tor SOCKS5 proxy", &g_app.tor_socks_enabled);
-            if (!g_app.tor_socks_enabled) ImGui::TextDisabled("Tor currently requires SOCKS5 to start.");
             ImGui::Checkbox("Tor HTTP proxy", &g_app.tor_http_enabled);
             ImGui::InputInt("Tor HTTP port", &g_app.tor_http_port);
             if (g_app.tor_http_enabled && g_app.tor_http_port == 0) g_app.tor_http_port = 1822;

@@ -39,11 +39,20 @@ pub type BoxedTunnel = Box<dyn TunnelIo>;
 pub struct Traffic {
     rx: AtomicU64,
     tx: AtomicU64,
+    rtt_ms: AtomicU32,
 }
 
 impl Traffic {
     pub fn totals(&self) -> (u64, u64) {
         (self.rx.load(Ordering::Relaxed), self.tx.load(Ordering::Relaxed))
+    }
+
+    pub fn rtt_ms(&self) -> u32 {
+        self.rtt_ms.load(Ordering::Relaxed)
+    }
+
+    fn record_rtt(&self, elapsed: Duration) {
+        self.rtt_ms.store(elapsed.as_millis().clamp(1, u32::MAX as u128) as u32, Ordering::Relaxed);
     }
 }
 
@@ -120,7 +129,7 @@ struct H2Session {
 }
 
 impl H2Session {
-    async fn connect(dialer: &Dialer, candidate: &Candidate, token: String) -> Result<Self> {
+    async fn connect(dialer: &Dialer, candidate: &Candidate, token: String, traffic: Arc<Traffic>) -> Result<Self> {
         let tls = crate::tls::connect(dialer, &candidate.host, candidate.port, ALPN_H2).await?;
         crate::tls::require_h2(&tls)?;
         let mut builder = h2::client::Builder::new();
@@ -153,7 +162,6 @@ impl H2Session {
         let keepalive = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            interval.tick().await;
             let mut misses = 0;
             loop {
                 interval.tick().await;
@@ -162,6 +170,7 @@ impl H2Session {
                     break;
                 }
                 let sent = now_millis();
+                let started = Instant::now();
                 if let Err(error) = ping_pong.send_ping(h2::Ping::opaque()) {
                     log::debug!("[firefox] H2 PING send failed: {error}");
                     inner.kill();
@@ -169,7 +178,10 @@ impl H2Session {
                 }
                 let pong = std::future::poll_fn(|cx| ping_pong.poll_pong(cx));
                 match tokio::time::timeout(Duration::from_secs(5), pong).await {
-                    Ok(Ok(_)) => misses = 0,
+                    Ok(Ok(_)) => {
+                        traffic.record_rtt(started.elapsed());
+                        misses = 0;
+                    },
                     Ok(Err(error)) => {
                         log::debug!("[firefox] H2 PING failed: {error}");
                         inner.kill();
@@ -792,7 +804,7 @@ impl Upstream {
         }
         *slot = None;
         let candidate = self.candidate();
-        let session = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string()))
+        let session = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
             .await.map_err(|_| FirefoxError::Timeout(self.timeout))??;
         *slot = Some(session.clone());
         Ok(Some(session))
@@ -801,11 +813,16 @@ impl Upstream {
     async fn open_h1_authorized(&self, target: &str) -> Result<BufReader<SslStream<TcpStream>>> {
         for attempt in 0..2 {
             let token = self.current_token().await?;
+            let started = Instant::now();
             match self.open_h1(target, &token).await {
                 Err(FirefoxError::PassRejected) if attempt == 0 => {
                     self.renew(true).await?;
                 }
-                result => return result,
+                Ok(stream) => {
+                    self.traffic.record_rtt(started.elapsed());
+                    return Ok(stream);
+                }
+                Err(error) => return Err(error),
             }
         }
         Err(FirefoxError::PassRejected)
@@ -897,7 +914,7 @@ impl Upstream {
         }
         *slot = None;
         let candidate = self.candidate();
-        let session = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string()))
+        let session = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
             .await.map_err(|_| FirefoxError::Timeout(self.timeout))??;
         *slot = Some(session.clone());
         Ok(session)
@@ -1207,6 +1224,18 @@ mod traffic_tests {
         assert!(health.should_log(false, true, now));
         assert!(health.should_log(false, false, now));
         assert!(health.should_log(true, false, now + STREAM_LOG_INTERVAL));
+    }
+
+    #[test]
+    fn latency_samples_are_nonzero_and_clamped() {
+        let traffic = Traffic::default();
+        assert_eq!(traffic.rtt_ms(), 0);
+        traffic.record_rtt(Duration::ZERO);
+        assert_eq!(traffic.rtt_ms(), 1);
+        traffic.record_rtt(Duration::from_millis(42));
+        assert_eq!(traffic.rtt_ms(), 42);
+        traffic.record_rtt(Duration::from_secs(u64::MAX));
+        assert_eq!(traffic.rtt_ms(), u32::MAX);
     }
 
     #[tokio::test]

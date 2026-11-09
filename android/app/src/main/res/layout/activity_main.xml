@@ -219,7 +219,7 @@
                             android:gravity="center"
                             android:paddingTop="10dp"
                             android:paddingBottom="10dp"
-                            android:text="0ms"
+                            android:text="--"
                             android:textColor="#FFF0F3FA"
                             android:textSize="13sp"
                             android:textStyle="bold" />
@@ -668,22 +668,16 @@
                 android:checked="true"
                 android:text="Aether SOCKS5 proxy"
                 android:textColor="#FFE0E4EE" />
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:text="Aether currently requires SOCKS5 to start." android:textColor="#FF9AA3B5" android:textSize="12sp" />
+
             <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/switchHttp"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
                 android:checked="true"
-                android:text="Aether HTTP proxy in Proxy mode"
+                android:text="Aether HTTP proxy"
                 android:textColor="#FFE0E4EE" />
-            <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/switchAetherTunHttp"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Aether HTTP proxy in TUN mode"
-                android:textColor="#FFE0E4EE" />
+
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -1639,8 +1633,7 @@
                 android:checked="true"
                 android:text="Tor SOCKS5 proxy"
                 android:textColor="#FFE8ECF4" />
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:text="Tor currently requires SOCKS5 to start." android:textColor="#FF9AA3B5" android:textSize="12sp" />
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -1763,8 +1756,7 @@
                 android:checked="true"
                 android:text="Psiphon HTTP proxy"
                 android:textColor="#FFE8ECF4" />
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:text="Psiphon SOCKS5 is required for TUN exits." android:textColor="#FF9AA3B5" android:textSize="12sp" />
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

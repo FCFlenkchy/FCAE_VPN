@@ -142,6 +142,10 @@ impl FirefoxEngine {
         self.upstream.traffic().totals()
     }
 
+    pub fn rtt_ms(&self) -> u32 {
+        self.upstream.traffic().rtt_ms()
+    }
+
     pub fn carrier_up(&self) -> bool {
         self.carrier_up.load(Ordering::Acquire) && !self.stopped.load(Ordering::Acquire)
     }

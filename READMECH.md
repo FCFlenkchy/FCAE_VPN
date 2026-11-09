@@ -47,12 +47,6 @@ FCAE VPN 是一款适用于 Windows、Linux、macOS 和 Android 的审查绕过�
 | 私有地址 | `private` | 所有局域网/私有 IP |
 | IP 带端口 | `192.33.45.6:400` | 带指定端口的 IP 地址 |
 
-**桌面端：** 打开 **Routes** 选项卡，将规则粘贴到 "Inline Routing Rules" 文本框中。
-
-**Android 端：** 滚动到 "Inline routing rules" 并输入您的规则。点击 **CONNECT** 应用。
-
-通过内联输入设置的规则优先级更高，并与 "Routing Rules File" 字段中指定的任何规则文件合并。
-
 ## 支持平台
 
 | 平台 | 后端 | UI |
