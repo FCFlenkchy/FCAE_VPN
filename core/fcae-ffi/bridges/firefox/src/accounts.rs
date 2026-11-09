@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use fcae_firefox::{Account, Accounts, ChallengeService, ControlPlane, Dialer, FirefoxError, Fxa, LoginOutcome, Result};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OnceCell};
 
 use super::{captcha_solver, protect_callback};
 
@@ -14,6 +14,8 @@ pub struct JobSnapshot {
     pub status: &'static str,
     pub result: Value,
 }
+
+type Services = Arc<tokio::sync::Mutex<HashMap<String, Arc<OnceCell<Accounts>>>>>;
 
 struct Command {
     id: u64,
@@ -136,17 +138,21 @@ fn account_worker(mut receiver: mpsc::UnboundedReceiver<Command>, jobs: Arc<Mute
         }
     };
     runtime.block_on(async move {
-        let mut services: HashMap<String, Accounts> = HashMap::new();
+        let services: Services = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         while let Some(command) = receiver.recv().await {
-            let result = execute(&mut services, &command.request).await;
-            finish(&jobs, command.id, result);
-            let mut states = jobs.lock();
-            if states.len() > 128 {
-                let completed: Vec<u64> = states.iter().filter(|(_, state)| state.status != "running").map(|(id, _)| *id).collect();
-                for id in completed.into_iter().take(states.len().saturating_sub(128)) {
-                    states.remove(&id);
+            let services = services.clone();
+            let jobs = jobs.clone();
+            tokio::spawn(async move {
+                let result = execute(&services, &command.request).await;
+                finish(&jobs, command.id, result);
+                let mut states = jobs.lock();
+                if states.len() > 128 {
+                    let completed: Vec<u64> = states.iter().filter(|(_, state)| state.status != "running").map(|(id, _)| *id).collect();
+                    for id in completed.into_iter().take(states.len().saturating_sub(128)) {
+                        states.remove(&id);
+                    }
                 }
-            }
+            });
         }
     });
 }
@@ -159,7 +165,9 @@ fn finish(jobs: &Mutex<HashMap<u64, JobSnapshot>>, id: u64, result: Result<Value
             result: json!({"code": error.reason_code(), "message": error.to_string()}),
         },
     };
-    jobs.lock().insert(id, snapshot);
+    if let Some(state) = jobs.lock().get_mut(&id) {
+        *state = snapshot;
+    }
 }
 
 fn format_bytes(bytes: i64) -> String {
@@ -194,27 +202,29 @@ fn account_json(account: Account) -> Result<Value> {
     Ok(value)
 }
 
-async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<Value> {
+async fn execute(services: &Services, raw: &str) -> Result<Value> {
     let request: Value = serde_json::from_str(raw)?;
     let operation = required(&request, "op")?;
     let data_dir = optional(&request, "data_dir").unwrap_or_else(|| "fcae-data".into());
+    if operation == "list" {
+        let store = fcae_firefox::AccountStore::new(&data_dir)?;
+        let values = store.list()?.into_iter().map(account_json).collect::<Result<Vec<_>>>()?;
+        return Ok(json!({"accounts": values}));
+    }
+    if operation == "locations_cached" {
+        let store = fcae_firefox::AccountStore::new(&data_dir)?;
+        let countries = fcae_firefox::server_list::RemoteSettings::cached(&store).unwrap_or_default();
+        return Ok(locations_json(countries));
+    }
     let accounts = service(services, &data_dir).await?;
     match operation.as_str() {
-        "list" => {
-            let values = accounts.list()?.into_iter().map(account_json).collect::<Result<Vec<_>>>()?;
-            Ok(json!({"accounts": values}))
-        }
         "locations" => {
-            let countries = accounts.locations().await?;
-            let mut locations = Vec::with_capacity(countries.len() + countries.iter().map(|country| country.cities.len()).sum::<usize>());
-            for country in countries {
-                let country_name = country.name;
-                locations.push(json!({"value":country.code, "label":country_name.clone()}));
-                for city in country.cities {
-                    locations.push(json!({"value":city.code, "label":format!("{} — {}", country_name, city.name)}));
-                }
-            }
-            Ok(json!({"locations":locations}))
+            let countries = if request.get("refresh").and_then(Value::as_bool).unwrap_or(false) {
+                accounts.refresh_locations().await?
+            } else {
+                accounts.locations().await?
+            };
+            Ok(locations_json(countries))
         }
         "login" => {
             let outcome = accounts.login(
@@ -268,7 +278,11 @@ async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<
             accounts.remove(&required(&request, "account_id")?).await?;
             Ok(json!({"ok":true}))
         }
-        "usage" => Ok(json!({"usage":accounts.tokens(&required(&request, "account_id")?)?.usage().await?})),
+        "usage" => {
+            let id = required(&request, "account_id")?;
+            let usage = accounts.tokens(&id)?.usage().await?;
+            Ok(json!({"usage":usage, "account":account_json(accounts.store().get(&id)?)?}))
+        },
         "entitlement" => {
             let entitlement = accounts.tokens(&required(&request, "account_id")?)?.entitlement().await?;
             Ok(json!({"entitlement":{
@@ -286,16 +300,32 @@ async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<
     }
 }
 
-async fn service<'a>(services: &'a mut HashMap<String, Accounts>, data_dir: &str) -> Result<&'a Accounts> {
-    if !services.contains_key(data_dir) {
+fn locations_json(countries: Vec<fcae_firefox::types::Country>) -> Value {
+    let mut locations = Vec::with_capacity(countries.len() + countries.iter().map(|country| country.cities.len()).sum::<usize>());
+    for country in countries {
+        let country_name = country.name;
+        locations.push(json!({"value":country.code, "label":country_name.clone()}));
+        for city in country.cities {
+            locations.push(json!({"value":city.code, "label":format!("{} — {}", country_name, city.name)}));
+        }
+    }
+    json!({"locations":locations})
+}
+
+async fn service(services: &Services, data_dir: &str) -> Result<Accounts> {
+    let cell = {
+        let mut services = services.lock().await;
+        services.entry(data_dir.to_string()).or_insert_with(|| Arc::new(OnceCell::new())).clone()
+    };
+    let accounts = cell.get_or_try_init(|| async {
         let store = fcae_firefox::AccountStore::new(data_dir)?;
         let dialer = Dialer::new(None, protect_callback(), 10)?;
         let control = ControlPlane::new(dialer).with_current_firefox_user_agent().await;
         let challenges = Arc::new(ChallengeService::new(Some(captcha_solver())));
         let fxa = Fxa::new(control.clone()).with_challenges(challenges);
-        services.insert(data_dir.to_string(), Accounts::new(store, control, fxa));
-    }
-    Ok(services.get(data_dir).unwrap())
+        Ok::<_, FirefoxError>(Accounts::new(store, control, fxa))
+    }).await?;
+    Ok(accounts.clone())
 }
 
 fn required(request: &Value, key: &str) -> Result<String> {
@@ -305,4 +335,19 @@ fn required(request: &Value, key: &str) -> Result<String> {
 
 fn optional(request: &Value, key: &str) -> Option<String> {
     request.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finishing_a_released_job_does_not_recreate_it() {
+        let jobs = Mutex::new(HashMap::new());
+        finish(&jobs, 42, Ok(json!({"ok": true})));
+        assert!(jobs.lock().is_empty());
+        jobs.lock().insert(43, JobSnapshot { status: "running", result: json!({}) });
+        finish(&jobs, 43, Ok(json!({"ok": true})));
+        assert_eq!(jobs.lock().get(&43).unwrap().status, "complete");
+    }
 }

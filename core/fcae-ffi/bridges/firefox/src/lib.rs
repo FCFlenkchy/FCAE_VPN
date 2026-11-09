@@ -3,14 +3,14 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub mod accounts;
 
 use async_trait::async_trait;
 use fcae_abi::{FcaeBackend, FcaeMode};
 use fcae_firefox::{EngineConfig, FirefoxEngine, TransportPreference};
-use fcae_runtime::backend::{Backend, BackendContext, BackendHandle, BackendId, Capabilities, Endpoints};
+use fcae_runtime::backend::{Backend, BackendContext, BackendHandle, BackendId, Capabilities, Counters, Endpoints};
 use fcae_runtime::{CoreError, Result};
 
 static PROTECT: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -35,15 +35,26 @@ pub fn set_protect_callback(callback: Option<ProtectFn>) {
 }
 
 fn protect_callback() -> Option<fcae_firefox::dialer::ProtectCallback> {
-    let pointer = PROTECT.load(Ordering::SeqCst);
-    if pointer.is_null() {
-        return None;
+    #[cfg(target_os = "android")]
+    {
+        Some(Arc::new(move |fd| {
+            let pointer = PROTECT.load(Ordering::SeqCst);
+            if pointer.is_null() {
+                return true;
+            }
+            let callback: ProtectFn = unsafe { std::mem::transmute(pointer) };
+            unsafe { callback(fd) == 1 }
+        }))
     }
-    // The function is installed by the host before starting a session and is
-    // cleared only after teardown. The pointer representation is identical to
-    // the C function pointer supplied through the ABI.
-    let callback: ProtectFn = unsafe { std::mem::transmute(pointer) };
-    Some(Arc::new(move |fd| unsafe { callback(fd) == 1 }))
+    #[cfg(not(target_os = "android"))]
+    {
+        let pointer = PROTECT.load(Ordering::SeqCst);
+        if pointer.is_null() {
+            return None;
+        }
+        let callback: ProtectFn = unsafe { std::mem::transmute(pointer) };
+        Some(Arc::new(move |fd| unsafe { callback(fd) == 1 }))
+    }
 }
 
 pub fn set_captcha_callback(callback: Option<CaptchaFn>, user_data: *mut std::ffi::c_void) {
@@ -131,6 +142,7 @@ impl Backend for FirefoxBackend {
             location: config.firefox.location.clone(),
             server: config.firefox.server.clone(),
             transport,
+            require_udp: config.mode == FcaeMode::Tun,
             socks_addr,
             http_addr,
             upstream_proxy: config.upstream_proxy.as_ref().map(|proxy| proxy.url()),
@@ -141,7 +153,11 @@ impl Backend for FirefoxBackend {
         cx.report(fcae_abi::FcaeState::Connecting, "Connecting to Firefox IP Protection");
         let engine = FirefoxEngine::start(engine_config, protect_callback(), Some(captcha_solver()))
             .await
-            .map_err(|error| CoreError::StartFailed(error.to_string()))?;
+            .map_err(|error| {
+                log::error!("[firefox] connection startup failed: {error}");
+                if error.is_transient() { CoreError::StartFailed(error.to_string()) }
+                else { CoreError::InvalidConfig(error.to_string()) }
+            })?;
         let peers = engine.peers();
         let peer_ip = (!peers.selected.is_empty()).then(|| {
             peers.selected.iter().map(IpAddr::to_string).collect::<Vec<_>>().join(",")
@@ -161,7 +177,11 @@ impl Backend for FirefoxBackend {
                 "Firefox did not expose the required SOCKS endpoint".into()
             }));
         }
-        Ok(Box::new(RunningFirefox { engine, endpoints }))
+        Ok(Box::new(RunningFirefox {
+            engine,
+            endpoints,
+            rates: parking_lot::Mutex::new(RateSample { at: Instant::now(), rx: 0, tx: 0, rates: (0, 0) }),
+        }))
     }
 }
 
@@ -169,9 +189,17 @@ fn parse_bind(host: &str, port: u16) -> Result<SocketAddr> {
     format!("{host}:{port}").parse().map_err(|error| CoreError::InvalidConfig(format!("invalid Firefox listener {host}:{port}: {error}")))
 }
 
+struct RateSample {
+    at: Instant,
+    rx: u64,
+    tx: u64,
+    rates: (u64, u64),
+}
+
 struct RunningFirefox {
     engine: Arc<FirefoxEngine>,
     endpoints: Endpoints,
+    rates: parking_lot::Mutex<RateSample>,
 }
 
 #[async_trait]
@@ -182,6 +210,21 @@ impl BackendHandle for RunningFirefox {
 
     fn carrier_up(&self) -> bool {
         self.engine.carrier_up()
+    }
+
+    fn counters(&self) -> Counters {
+        let (rx, tx) = self.engine.traffic();
+        let mut sample = self.rates.lock();
+        let elapsed = sample.at.elapsed();
+        if elapsed >= Duration::from_millis(100) {
+            let seconds = elapsed.as_secs_f64();
+            sample.rates = ((rx.saturating_sub(sample.rx) as f64 / seconds) as u64,
+                            (tx.saturating_sub(sample.tx) as f64 / seconds) as u64);
+            sample.rx = rx;
+            sample.tx = tx;
+            sample.at = Instant::now();
+        }
+        Counters { total_rx: rx, total_tx: tx, rx_bytes_sec: sample.rates.0, tx_bytes_sec: sample.rates.1, rtt_ms: 0 }
     }
 
     async fn wait(&self) -> Result<()> {

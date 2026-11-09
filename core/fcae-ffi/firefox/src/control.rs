@@ -470,10 +470,10 @@ where
         }
         raw.extend_from_slice(&chunk[..read]);
     }
-    parse_h1_response(&raw)
+    parse_h1_response(&raw, request.method == Method::HEAD)
 }
 
-fn parse_h1_response(raw: &[u8]) -> Result<ControlResponse> {
+fn parse_h1_response(raw: &[u8], is_head: bool) -> Result<ControlResponse> {
     let split = raw.windows(4).position(|window| window == b"\r\n\r\n")
         .ok_or_else(|| FirefoxError::Protocol("truncated HTTP/1.1 response head".into()))?;
     let head = &raw[..split + 4];
@@ -502,7 +502,7 @@ fn parse_h1_response(raw: &[u8]) -> Result<ControlResponse> {
     if status / 100 == 1 {
         return Err(FirefoxError::Protocol("unexpected interim-only HTTP response".into()));
     }
-    let body = if chunked { dechunk(body)? } else {
+    let body = if is_head || status == 204 || status == 304 { Vec::new() } else if chunked { dechunk(body)? } else {
         let length = content_length.unwrap_or(body.len());
         if body.len() < length {
             return Err(FirefoxError::Protocol("truncated HTTP response body".into()));
@@ -563,9 +563,18 @@ mod tests {
     }
 
     #[test]
+    fn head_response_does_not_require_the_advertised_body() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 1234\r\nX-Quota-Limit: 100\r\n\r\n";
+        let response = parse_h1_response(raw, true).unwrap();
+        assert!(response.body.is_empty());
+        assert_eq!(response.headers.get("x-quota-limit").unwrap(), "100");
+        assert!(parse_h1_response(raw, false).is_err());
+    }
+
+    #[test]
     fn challenge_cookie_is_sent_only_while_valid() {
         let control = ControlPlane::new(Dialer::new(None, None, 10).unwrap());
-        let response = parse_h1_response(b"HTTP/1.1 200 OK\r\nSet-Cookie: _fs_ch_st_test=state; Max-Age=10; Path=/\r\nContent-Length: 0\r\n\r\n").unwrap();
+        let response = parse_h1_response(b"HTTP/1.1 200 OK\r\nSet-Cookie: _fs_ch_st_test=state; Max-Age=10; Path=/\r\nContent-Length: 0\r\n\r\n", false).unwrap();
         control.store_cookies("accounts.firefox.com", &response.headers);
         let request = ControlRequest::new(Method::GET, "https://accounts.firefox.com/_fs-ch-test/script.js?reload=true").unwrap();
         let decorated = control.decorate(request.clone());

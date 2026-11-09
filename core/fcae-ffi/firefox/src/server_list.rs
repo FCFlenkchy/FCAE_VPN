@@ -14,6 +14,7 @@ use crate::types::{split_authority, valid_dns_name, Candidate, Country};
 pub const REMOTE_SETTINGS_URL: &str = "https://firefox.settings.services.mozilla.com/v1/buckets/main/collections/vpn-serverlist/records";
 pub const RECOMMENDED_COUNTRY: &str = "REC";
 const CACHE_NAME: &str = "server-list.json";
+const CACHE_MAX_AGE: chrono::Duration = chrono::Duration::hours(12);
 const FIREFOX_VERSION: &str = "158.0";
 
 #[derive(Clone)]
@@ -60,7 +61,26 @@ impl RemoteSettings {
         Ok(countries)
     }
 
+    pub fn cached(store: &AccountStore) -> Option<Vec<Country>> {
+        let cache = store.read_cache::<ServerListCache>(CACHE_NAME).ok()?;
+        let countries = filter_countries(cache.countries, FIREFOX_VERSION, "");
+        (!countries.is_empty()).then_some(countries)
+    }
+
     pub async fn load(&self, store: &AccountStore) -> Result<Vec<Country>> {
+        if let Ok(cache) = store.read_cache::<ServerListCache>(CACHE_NAME) {
+            let age = Utc::now().signed_duration_since(cache.saved_at);
+            if age >= chrono::Duration::zero() && age < CACHE_MAX_AGE {
+                let countries = filter_countries(cache.countries, FIREFOX_VERSION, "");
+                if !countries.is_empty() {
+                    return Ok(countries);
+                }
+            }
+        }
+        self.refresh(store).await
+    }
+
+    pub async fn refresh(&self, store: &AccountStore) -> Result<Vec<Country>> {
         match self.fetch().await {
             Ok(countries) => {
                 let cache = ServerListCache { saved_at: Utc::now(), countries: countries.clone() };
@@ -72,7 +92,12 @@ impl RemoteSettings {
             Err(network_error) => match store.read_cache::<ServerListCache>(CACHE_NAME) {
                 Ok(cache) if !cache.countries.is_empty() => {
                     let countries = filter_countries(cache.countries, FIREFOX_VERSION, "");
-                    if countries.is_empty() { Err(network_error) } else { Ok(countries) }
+                    if countries.is_empty() {
+                        Err(network_error)
+                    } else {
+                        log::warn!("[firefox] using cached Mozilla locations after refresh failed: {network_error}");
+                        Ok(countries)
+                    }
                 }
                 _ => Err(network_error),
             },
@@ -374,5 +399,30 @@ fn compare_optional_string(left: &str, has_left: bool, right: &str, has_right: b
         (false, true) => Ordering::Greater,
         (true, false) => Ordering::Less,
         (true, true) => left.cmp(right),
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::types::City;
+
+    #[test]
+    fn cached_locations_survive_a_new_store_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path()).unwrap();
+        let cache = ServerListCache {
+            saved_at: Utc::now(),
+            countries: vec![Country {
+                name: "Example".into(), code: "EX".into(),
+                cities: vec![City { name: "City".into(), code: "CT".into(), servers: vec![] }],
+                locked: false, filter_expression: None,
+            }],
+        };
+        store.write_cache(CACHE_NAME, &cache).unwrap();
+        let reopened = AccountStore::new(dir.path()).unwrap();
+        let countries = RemoteSettings::cached(&reopened).unwrap();
+        assert_eq!(countries[0].code, "EX");
+        assert_eq!(countries[0].cities[0].code, "CT");
     }
 }

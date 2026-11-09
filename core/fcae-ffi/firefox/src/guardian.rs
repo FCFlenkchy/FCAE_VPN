@@ -95,7 +95,9 @@ impl Guardian {
 
     pub async fn usage(&self, access_token: &str) -> Result<Usage> {
         let response = self.get(Method::HEAD, "/api/v1/fpn/token", access_token).await?;
-        if response.status == 403 {
+        if matches!(response.status, 403 | 405 | 501)
+            || (response.status == 200 && parse_usage(&response.headers).is_err())
+        {
             let response = self.get(Method::GET, "/api/v1/fpn/token", access_token).await?;
             if response.status == 403 {
                 return Err(FirefoxError::NotEntitled);
@@ -169,12 +171,12 @@ fn parse_usage(headers: &HeaderMap) -> Result<Usage> {
     let remaining = get("x-quota-remaining").ok_or_else(|| FirefoxError::Protocol("remaining quota is missing".into()))?
         .parse::<i64>().ok().filter(|value| *value >= 0 && *value <= limit)
         .ok_or_else(|| FirefoxError::Protocol("invalid remaining quota".into()))?;
-    let raw_reset = get("x-quota-reset").ok_or_else(|| FirefoxError::Protocol("quota reset is missing".into()))?;
-    let reset = DateTime::parse_from_rfc3339(raw_reset).map(|value| value.with_timezone(&Utc)).ok()
-        .or_else(|| raw_reset.parse::<i64>().ok().filter(|seconds| *seconds > 0)
-            .and_then(|seconds| DateTime::from_timestamp(seconds, 0)));
-    let reset = reset.ok_or_else(|| FirefoxError::Protocol("invalid quota reset time".into()))?;
-    Ok(Usage { unlimited: false, limit, remaining, reset: Some(reset) })
+    let reset = get("x-quota-reset").and_then(|raw| {
+        DateTime::parse_from_rfc3339(raw).map(|value| value.with_timezone(&Utc)).ok()
+            .or_else(|| raw.parse::<i64>().ok().filter(|seconds| *seconds > 0)
+                .and_then(|seconds| DateTime::from_timestamp(seconds, 0)))
+    });
+    Ok(Usage { unlimited: false, limit, remaining, reset })
 }
 
 fn guardian_error(response: ControlResponse) -> FirefoxError {
@@ -191,5 +193,30 @@ fn guardian_error(response: ControlResponse) -> FirefoxError {
             retry_after: response.retry_after(),
             message: response.message(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_does_not_require_a_reset_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-quota-limit", "1000".parse().unwrap());
+        headers.insert("x-quota-remaining", "750".parse().unwrap());
+        let usage = parse_usage(&headers).unwrap();
+        assert_eq!((usage.limit, usage.remaining), (1000, 750));
+        assert!(usage.reset.is_none());
+        headers.insert("x-quota-reset", "invalid".parse().unwrap());
+        assert!(parse_usage(&headers).unwrap().reset.is_none());
+    }
+
+    #[test]
+    fn quota_rejects_invalid_remaining_bytes() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-quota-limit", "100".parse().unwrap());
+        headers.insert("x-quota-remaining", "101".parse().unwrap());
+        assert!(parse_usage(&headers).is_err());
     }
 }

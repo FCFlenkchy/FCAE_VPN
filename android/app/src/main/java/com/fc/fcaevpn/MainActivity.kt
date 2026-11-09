@@ -92,6 +92,11 @@ class MainActivity : AppCompatActivity() {
     private var firefoxRegionChoices: List<Pair<String, String>> = listOf("" to "Automatic (recommended)")
     private var firefoxJob = 0L
     private var firefoxOperation = ""
+    private var firefoxRegionJob = 0L
+    private var firefoxRegionOperation = ""
+    private var firefoxUsageJob = 0L
+    private var firefoxUsageAccountId = ""
+    private val firefoxUsageQueue = java.util.ArrayDeque<String>()
     private var firefoxPendingId = ""
     private var firefoxTotp = false
     private var firefoxEmailLink = false
@@ -104,7 +109,9 @@ class MainActivity : AppCompatActivity() {
         override fun run() {
             pollFirefoxCaptcha()
             pollFirefoxAccountJob()
-            if (firefoxJob != 0L) handler.postDelayed(this, 250L)
+            pollFirefoxBackgroundJobs()
+            handler.removeCallbacks(this)
+            if (firefoxJob != 0L || firefoxRegionJob != 0L || firefoxUsageJob != 0L) handler.postDelayed(this, 250L)
         }
     }
     private val connectionInfoSync = object : Runnable {
@@ -2710,7 +2717,7 @@ class MainActivity : AppCompatActivity() {
             firefoxRegionAdapter = this
         }
         firefoxRegionSpinner = location
-        updateFirefoxRegionChoices(emptyList(), prefs.getString("firefoxLocation", "").orEmpty())
+        updateFirefoxRegionChoices(firefoxRegionChoices, prefs.getString("firefoxLocation", "").orEmpty())
         box.addView(location)
 
         dialogLabel(box, "Firefox accounts")
@@ -2774,6 +2781,7 @@ class MainActivity : AppCompatActivity() {
             if (firefoxJob == 0L) {
                 firefoxSubmit(JSONObject().put("op", "list"), "Loading saved Firefox accounts…")
             }
+            startFirefoxRegions("locations_cached")
         }
         dialog.setOnDismissListener {
             if (firefoxStatusView === status) firefoxStatusView = null
@@ -3036,6 +3044,88 @@ class MainActivity : AppCompatActivity() {
         handler.post(firefoxJobPoll)
     }
 
+    private fun startFirefoxRegions(operation: String) {
+        if (firefoxRegionJob != 0L) return
+        val request = JSONObject().put("op", operation).put("data_dir", filesDir.absolutePath)
+        if (operation == "locations") request.put("refresh", true)
+        val id = try { NativeEngine.nativeFirefoxAccountSubmit(request.toString()) } catch (_: Throwable) { 0L }
+        if (id == 0L) return
+        firefoxRegionJob = id
+        firefoxRegionOperation = operation
+        handler.removeCallbacks(firefoxJobPoll)
+        handler.post(firefoxJobPoll)
+    }
+
+    private fun queueFirefoxUsage(ids: List<String>) {
+        for (id in ids) {
+            if (id.isNotBlank() && id != firefoxUsageAccountId && !firefoxUsageQueue.contains(id)) firefoxUsageQueue.addLast(id)
+        }
+        startNextFirefoxUsage()
+    }
+
+    private fun startNextFirefoxUsage() {
+        if (firefoxUsageJob != 0L) return
+        while (firefoxUsageQueue.isNotEmpty()) {
+            val accountId = firefoxUsageQueue.removeFirst()
+            if (firefoxAccountChoices.none { it.id == accountId }) continue
+            val request = JSONObject().put("op", "usage").put("account_id", accountId).put("data_dir", filesDir.absolutePath)
+            val id = try { NativeEngine.nativeFirefoxAccountSubmit(request.toString()) } catch (_: Throwable) { 0L }
+            if (id == 0L) continue
+            firefoxUsageJob = id
+            firefoxUsageAccountId = accountId
+            handler.removeCallbacks(firefoxJobPoll)
+            handler.post(firefoxJobPoll)
+            break
+        }
+    }
+
+    private fun pollFirefoxBackgroundJobs() {
+        if (firefoxRegionJob != 0L) {
+            val id = firefoxRegionJob
+            val raw = try { NativeEngine.nativeFirefoxJobPoll(id) } catch (_: Throwable) { "" }
+            val result = try { JSONObject(raw) } catch (_: Throwable) { null }
+            if (result?.optString("status") != "running") {
+                firefoxRegionJob = 0L
+                try { NativeEngine.nativeFirefoxJobRelease(id) } catch (_: Throwable) {}
+                if (result?.optString("status") == "complete") {
+                    val locations = result.optJSONObject("result")?.optJSONArray("locations")
+                    val options = mutableListOf<Pair<String, String>>()
+                    if (locations != null) for (index in 0 until locations.length()) {
+                        val location = locations.optJSONObject(index) ?: continue
+                        val value = location.optString("value").trim()
+                        val label = location.optString("label").trim()
+                        if (value.isNotEmpty() && label.isNotEmpty()) options.add(value to label)
+                    }
+                    if (options.isNotEmpty()) updateFirefoxRegionChoices(options)
+                }
+                if (firefoxRegionOperation == "locations_cached") startFirefoxRegions("locations")
+                else if (result?.optString("status") != "complete" && firefoxJob == 0L && firefoxStatusView != null) {
+                    firefoxSetStatus("Could not refresh Mozilla regions; saved regions remain available.")
+                }
+            }
+        }
+        if (firefoxUsageJob != 0L) {
+            val id = firefoxUsageJob
+            val raw = try { NativeEngine.nativeFirefoxJobPoll(id) } catch (_: Throwable) { "" }
+            val result = try { JSONObject(raw) } catch (_: Throwable) { null }
+            if (result?.optString("status") != "running") {
+                val accountId = firefoxUsageAccountId
+                firefoxUsageJob = 0L
+                firefoxUsageAccountId = ""
+                try { NativeEngine.nativeFirefoxJobRelease(id) } catch (_: Throwable) {}
+                val account = result?.optJSONObject("result")?.optJSONObject("account")
+                val usage = account?.optString("monthly_usage").orEmpty()
+                firefoxAccountChoices = firefoxAccountChoices.map { choice ->
+                    if (choice.id == accountId && usage.isNotBlank()) choice.copy(monthlyUsage = usage)
+                    else if (choice.id == accountId && choice.monthlyUsage == "Not reported") choice.copy(monthlyUsage = "Usage unavailable")
+                    else choice
+                }
+                renderFirefoxAccountRows()
+                startNextFirefoxUsage()
+            }
+        }
+    }
+
     private fun firefoxSetStatus(message: String, success: Boolean = false) {
         val color = Color.parseColor(if (success) "#9CE6B4" else "#D7C9E3")
         firefoxStatusView?.apply {
@@ -3176,11 +3266,6 @@ class MainActivity : AppCompatActivity() {
             }
             if (restartDirectLogin) firefoxCodeDialog?.dismiss()
             firefoxSetStatus(payload.optString("message").ifEmpty { "Firefox account operation failed (${payload.optString("code")})." })
-            if (failedOperation == "list" && firefoxAccountRows != null) {
-                firefoxSubmit(JSONObject()
-                    .put("op", "locations")
-                    .put("base_url", "https://api.vpn.mozilla.org"), "Loading Mozilla regions…")
-            }
             renderFirefoxAccountRows()
             return
         }
@@ -3238,6 +3323,7 @@ class MainActivity : AppCompatActivity() {
                             FirefoxAccountChoice(accountId, accountEmail, account?.optString("monthly_usage").orEmpty()),
                     )
                     saveSettings()
+                    queueFirefoxUsage(listOf(accountId))
                 }
                 firefoxSetStatus("${accountEmail.ifBlank { "Firefox account" }} is ready for Firefox connections.", true)
             }
@@ -3274,11 +3360,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     updateFirefoxAccountChoices(accounts)
                     firefoxSetStatus(if (accounts.isEmpty()) "No saved Firefox accounts. Choose Add new account to sign in." else "Saved Firefox accounts loaded.")
-                    if (firefoxAccountRows != null) {
-                        firefoxSubmit(JSONObject()
-                            .put("op", "locations")
-                            .put("base_url", "https://api.vpn.mozilla.org"), "Loading Mozilla regions…")
-                    }
+                    queueFirefoxUsage(accounts.map { it.id })
                 }
                 "remove" -> {
                     val removedId = firefoxRemovingAccountId

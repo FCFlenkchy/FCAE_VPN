@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -16,6 +16,19 @@ use crate::types::{Account, Country, Credentials, ProxyPass, Usage};
 
 const PENDING_LIFETIME: Duration = Duration::from_secs(15 * 60);
 const OAUTH_CONFIRM_RETRY: Duration = Duration::from_secs(3);
+static TOKEN_LOCKS: OnceLock<parking_lot::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+
+fn token_lock(store: &AccountStore, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let key = store.root().join("accounts").join(id).to_string_lossy().into_owned();
+    let mut locks = TOKEN_LOCKS.get_or_init(|| parking_lot::Mutex::new(HashMap::new())).lock();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
 
 #[derive(Debug, Clone)]
 pub enum LoginOutcome {
@@ -72,6 +85,10 @@ impl Accounts {
 
     pub async fn locations(&self) -> Result<Vec<Country>> {
         self.remote.load(&self.store).await
+    }
+
+    pub async fn refresh_locations(&self) -> Result<Vec<Country>> {
+        self.remote.refresh(&self.store).await
     }
 
     pub fn list(&self) -> Result<Vec<Account>> {
@@ -163,6 +180,8 @@ impl Accounts {
         let mut removed = Vec::new();
         for account in self.store.list()? {
             if account.email.eq_ignore_ascii_case(&normalized) {
+                let lock = token_lock(&self.store, &account.id);
+                let _guard = lock.lock().await;
                 self.store.remove(&account.id)?;
                 removed.push(account.id);
             }
@@ -171,6 +190,8 @@ impl Accounts {
     }
 
     pub async fn remove(&self, id: &str) -> Result<()> {
+        let lock = token_lock(&self.store, id);
+        let _guard = lock.lock().await;
         if let Ok(credentials) = self.store.credentials(id) {
             if let Err(error) = self.fxa.revoke_token(&credentials.refresh_token, credentials.oauth_client_id()).await {
                 log::warn!("[firefox] OAuth revocation failed during account removal: {error}");
@@ -186,7 +207,7 @@ impl Accounts {
             store: self.store.clone(),
             fxa: self.fxa.clone(),
             guardian: self.guardian.clone(),
-            credentials: Arc::new(tokio::sync::Mutex::new(None)),
+            credentials: token_lock(&self.store, account_id),
         })
     }
 
@@ -247,7 +268,14 @@ impl Accounts {
             obtained_at: Utc::now(),
             expires_in: tokens.expires_in,
         };
-        let account = self.store.add(&login.email, &credentials)?;
+        let existing = self.store.list()?.into_iter().find(|account| account.email.eq_ignore_ascii_case(&login.email));
+        let account = if let Some(existing) = existing {
+            let lock = token_lock(&self.store, &existing.id);
+            let _guard = lock.lock().await;
+            self.store.add(&login.email, &credentials)?
+        } else {
+            self.store.add(&login.email, &credentials)?
+        };
         if let Err(error) = self.fxa.destroy_session(&login.session_token).await {
             log::debug!("[firefox] FxA session cleanup failed: {error}");
         }
@@ -265,7 +293,7 @@ pub struct TokenManager {
     store: AccountStore,
     fxa: Fxa,
     guardian: Guardian,
-    credentials: Arc<tokio::sync::Mutex<Option<Credentials>>>,
+    credentials: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl TokenManager {
@@ -274,27 +302,21 @@ impl TokenManager {
     }
 
     async fn access_token(&self) -> Result<Zeroizing<String>> {
-        let mut cached = self.credentials.lock().await;
-        if cached.is_none() {
-            *cached = Some(self.store.credentials(&self.account_id)?);
-        }
-        let credentials = cached.as_mut().unwrap();
+        let _guard = self.credentials.lock().await;
+        let mut credentials = self.store.credentials(&self.account_id)?;
         if credentials.needs_refresh(Utc::now()) {
-            self.refresh_locked(credentials).await?;
+            self.refresh_locked(&mut credentials).await?;
         }
         Ok(Zeroizing::new(credentials.access_token.clone()))
     }
 
     async fn refresh_rejected(&self, rejected: &str) -> Result<Zeroizing<String>> {
-        let mut cached = self.credentials.lock().await;
-        if cached.is_none() {
-            *cached = Some(self.store.credentials(&self.account_id)?);
-        }
-        let credentials = cached.as_mut().unwrap();
+        let _guard = self.credentials.lock().await;
+        let mut credentials = self.store.credentials(&self.account_id)?;
         if credentials.access_token != rejected {
             return Ok(Zeroizing::new(credentials.access_token.clone()));
         }
-        self.refresh_locked(credentials).await?;
+        self.refresh_locked(&mut credentials).await?;
         Ok(Zeroizing::new(credentials.access_token.clone()))
     }
 
@@ -327,7 +349,16 @@ impl TokenManager {
                 Err(FirefoxError::ReauthRequired) if attempt == 0 => {
                     let _ = self.refresh_rejected(&token).await?;
                 }
-                result => return result,
+                result => {
+                    if let Ok(pass) = &result {
+                        if let Some(usage) = &pass.usage {
+                            if let Err(error) = self.store.set_usage(&self.account_id, usage) {
+                                log::warn!("[firefox] could not cache account quota: {error}");
+                            }
+                        }
+                    }
+                    return result;
+                }
             }
         }
         Err(FirefoxError::ReauthRequired)

@@ -34,6 +34,52 @@ pub trait TunnelIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> TunnelIo for T {}
 pub type BoxedTunnel = Box<dyn TunnelIo>;
 
+#[derive(Default)]
+pub struct Traffic {
+    rx: AtomicU64,
+    tx: AtomicU64,
+}
+
+impl Traffic {
+    pub fn totals(&self) -> (u64, u64) {
+        (self.rx.load(Ordering::Relaxed), self.tx.load(Ordering::Relaxed))
+    }
+}
+
+struct MeteredTunnel {
+    inner: BoxedTunnel,
+    traffic: Arc<Traffic>,
+}
+
+impl AsyncRead for MeteredTunnel {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, output: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        let before = output.filled().len();
+        let result = Pin::new(&mut *self.inner).poll_read(cx, output);
+        if matches!(&result, Poll::Ready(Ok(()))) {
+            self.traffic.rx.fetch_add((output.filled().len() - before) as u64, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+impl AsyncWrite for MeteredTunnel {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut *self.inner).poll_write(cx, bytes);
+        if let Poll::Ready(Ok(count)) = &result {
+            self.traffic.tx.fetch_add(*count as u64, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.inner).poll_shutdown(cx)
+    }
+}
+
 struct SessionInner {
     alive: AtomicBool,
     token: RwLock<Zeroizing<String>>,
@@ -192,7 +238,7 @@ impl H2Session {
         })
     }
 
-    async fn open_udp(&self, target: &str) -> Result<UdpTunnel> {
+    async fn open_udp(&self, target: &str, traffic: Arc<Traffic>) -> Result<UdpTunnel> {
         let (host, port) = split_authority(target, 53).ok_or_else(|| FirefoxError::UnsupportedDestination(target.into()))?;
         if !self.alive() {
             return Err(FirefoxError::H2("UDP session is closed".into()));
@@ -211,7 +257,7 @@ impl H2Session {
             return Err(proxy_response_error(&self.authority_host(), parts.status.as_u16(), &parts.headers, recv).await);
         }
         self.inner.active_streams.fetch_add(1, Ordering::Relaxed);
-        Ok(UdpTunnel::new(send, recv, self.inner.clone()))
+        Ok(UdpTunnel::new(send, recv, self.inner.clone(), traffic))
     }
 
     fn authority(&self) -> String {
@@ -282,24 +328,22 @@ impl AsyncWrite for H2Tunnel {
         if buffer.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        self.send.reserve_capacity(buffer.len());
-        match self.send.poll_capacity(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "H2 stream is closed"))),
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, error))),
-            Poll::Ready(Some(Ok(_))) => {
-                let count = buffer.len().min(self.send.capacity()).min(MAX_FRAME as usize);
-                if count == 0 {
-                    return Poll::Pending;
-                }
-                match self.send.send_data(Bytes::copy_from_slice(&buffer[..count]), false) {
-                    Ok(()) => {
-                        self.inner.last_activity.store(now_millis(), Ordering::Release);
-                        Poll::Ready(Ok(count))
-                    }
-                    Err(error) => Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, error))),
-                }
+        self.send.reserve_capacity(buffer.len().min(MAX_FRAME as usize));
+        while self.send.capacity() == 0 {
+            match self.send.poll_capacity(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "H2 stream is closed"))),
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, error))),
+                Poll::Ready(Some(Ok(_))) => {}
             }
+        }
+        let count = buffer.len().min(self.send.capacity()).min(MAX_FRAME as usize);
+        match self.send.send_data(Bytes::copy_from_slice(&buffer[..count]), false) {
+            Ok(()) => {
+                self.inner.last_activity.store(now_millis(), Ordering::Release);
+                Poll::Ready(Ok(count))
+            }
+            Err(error) => Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, error))),
         }
     }
 
@@ -336,10 +380,11 @@ pub struct UdpTunnel {
     state: Arc<UdpState>,
     tasks: Vec<AbortHandle>,
     inner: Arc<SessionInner>,
+    traffic: Arc<Traffic>,
 }
 
 impl UdpTunnel {
-    fn new(mut send: SendStream<Bytes>, mut recv: RecvStream, inner: Arc<SessionInner>) -> Self {
+    fn new(mut send: SendStream<Bytes>, mut recv: RecvStream, inner: Arc<SessionInner>, traffic: Arc<Traffic>) -> Self {
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<Bytes>(256);
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(256);
         let state = Arc::new(UdpState { queued: AtomicUsize::new(0), closed: AtomicBool::new(false) });
@@ -407,6 +452,7 @@ impl UdpTunnel {
             state,
             tasks: vec![writer.abort_handle(), reader.abort_handle()],
             inner,
+            traffic,
         }
     }
 
@@ -429,7 +475,10 @@ impl UdpTunnel {
             }
         }
         match self.outgoing.try_send(Bytes::from(capsule)) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.traffic.tx.fetch_add(packet.len() as u64, Ordering::Relaxed);
+                Ok(())
+            }
             Err(mpsc::error::TrySendError::Full(capsule)) => {
                 self.state.queued.fetch_sub(capsule.len(), Ordering::AcqRel);
                 Ok(())
@@ -445,7 +494,9 @@ impl UdpTunnel {
         if self.state.closed.load(Ordering::Acquire) && self.incoming.lock().await.is_empty() {
             return Err(FirefoxError::H2("UDP stream is closed".into()));
         }
-        self.incoming.lock().await.recv().await.ok_or_else(|| FirefoxError::H2("UDP stream ended".into()))
+        let packet = self.incoming.lock().await.recv().await.ok_or_else(|| FirefoxError::H2("UDP stream ended".into()))?;
+        self.traffic.rx.fetch_add(packet.len() as u64, Ordering::Relaxed);
+        Ok(packet)
     }
 }
 
@@ -459,19 +510,20 @@ impl Drop for UdpTunnel {
     }
 }
 
-async fn send_h2_bytes(send: &mut SendStream<Bytes>, bytes: Bytes) -> Result<()> {
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    send.reserve_capacity(bytes.len());
-    while send.capacity() < bytes.len() {
-        match std::future::poll_fn(|cx| send.poll_capacity(cx)).await {
-            Some(Ok(_)) => {}
-            Some(Err(error)) => return Err(h2_error(error)),
-            None => return Err(FirefoxError::H2("stream closed while waiting for capacity".into())),
+async fn send_h2_bytes(send: &mut SendStream<Bytes>, mut bytes: Bytes) -> Result<()> {
+    while !bytes.is_empty() {
+        send.reserve_capacity(bytes.len().min(MAX_FRAME as usize));
+        while send.capacity() == 0 {
+            match std::future::poll_fn(|cx| send.poll_capacity(cx)).await {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Err(h2_error(error)),
+                None => return Err(FirefoxError::H2("stream closed while waiting for capacity".into())),
+            }
         }
+        let count = bytes.len().min(send.capacity()).min(MAX_FRAME as usize);
+        send.send_data(bytes.split_to(count), false).map_err(h2_error)?;
     }
-    send.send_data(bytes, false).map_err(h2_error)
+    Ok(())
 }
 
 pub struct Upstream {
@@ -485,8 +537,10 @@ pub struct Upstream {
     renewal: Mutex<()>,
     failover: Mutex<()>,
     failures: AtomicU32,
+    logged_failures: AtomicU64,
     tcp_session: Mutex<Option<H2Session>>,
     udp_session: Mutex<Option<H2Session>>,
+    traffic: Arc<Traffic>,
 }
 
 impl Upstream {
@@ -506,8 +560,10 @@ impl Upstream {
             renewal: Mutex::new(()),
             failover: Mutex::new(()),
             failures: AtomicU32::new(0),
+            logged_failures: AtomicU64::new(0),
             tcp_session: Mutex::new(None),
             udp_session: Mutex::new(None),
+            traffic: Arc::new(Traffic::default()),
         })
     }
 
@@ -515,6 +571,10 @@ impl Upstream {
         if !candidates.is_empty() {
             *self.candidates.write() = candidates;
         }
+    }
+
+    pub fn traffic(&self) -> Arc<Traffic> {
+        self.traffic.clone()
     }
 
     pub fn candidate(&self) -> Candidate {
@@ -557,7 +617,7 @@ impl Upstream {
     pub async fn open_tcp(&self, target: &str) -> Result<BoxedTunnel> {
         let result = self.open_tcp_inner(target).await;
         self.observe_result(result.as_ref().err()).await;
-        result
+        result.map(|inner| Box::new(MeteredTunnel { inner, traffic: self.traffic.clone() }) as BoxedTunnel)
     }
 
     async fn open_tcp_inner(&self, target: &str) -> Result<BoxedTunnel> {
@@ -691,7 +751,7 @@ impl Upstream {
         let mut last_error = None;
         for attempt in 0..2 {
             let session = self.get_udp_session().await?;
-            match tokio::time::timeout(self.timeout, session.open_udp(target)).await {
+            match tokio::time::timeout(self.timeout, session.open_udp(target, self.traffic.clone())).await {
                 Ok(Ok(tunnel)) => return Ok(tunnel),
                 Ok(Err(FirefoxError::PassRejected)) if attempt == 0 => {
                     self.renew(true).await?;
@@ -729,8 +789,20 @@ impl Upstream {
 
     async fn observe_result(&self, error: Option<&FirefoxError>) {
         match error {
-            None => self.failures.store(0, Ordering::Release),
-            Some(error) => self.note_error(error).await,
+            None => {
+                self.failures.store(0, Ordering::Release);
+                self.logged_failures.store(0, Ordering::Relaxed);
+            }
+            Some(error) => {
+                let count = self.logged_failures.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+                if count.is_power_of_two() {
+                    match error {
+                        FirefoxError::Http { status, .. } => log::warn!("[firefox] proxy stream failed: HTTP {status} (occurrence {count})"),
+                        _ => log::warn!("[firefox] proxy stream failed: {} (occurrence {count})", error.reason_code()),
+                    }
+                }
+                self.note_error(error).await;
+            }
         }
     }
 
@@ -913,4 +985,25 @@ fn now_millis() -> u64 {
 
 fn h2_error(error: h2::Error) -> FirefoxError {
     FirefoxError::H2(error.to_string())
+}
+
+#[cfg(test)]
+mod traffic_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn metered_tunnel_counts_bytes_in_both_directions() {
+        let (local, mut remote) = tokio::io::duplex(128);
+        let traffic = Arc::new(Traffic::default());
+        let mut tunnel = MeteredTunnel { inner: Box::new(local), traffic: traffic.clone() };
+        tunnel.write_all(b"hello").await.unwrap();
+        let mut received = [0; 5];
+        remote.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"hello");
+        remote.write_all(b"world!").await.unwrap();
+        let mut received = [0; 6];
+        tunnel.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"world!");
+        assert_eq!(traffic.totals(), (6, 5));
+    }
 }

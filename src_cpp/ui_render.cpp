@@ -556,6 +556,10 @@ void ui_set_window_focused(bool focused) {
     s_ui_window_focused.store(focused);
 }
 
+static void firefox_poll_captcha();
+static void firefox_poll_job();
+static void firefox_poll_background();
+
 bool ui_should_render(bool interacting) {
     const double now = ui_now_seconds();
 
@@ -568,6 +572,9 @@ bool ui_should_render(bool interacting) {
     // Telemetry and locally animated sponsor frames change without input.
     ui_poll_telemetry(now);
     poll_sponsor();
+    firefox_poll_captcha();
+    firefox_poll_job();
+    firefox_poll_background();
     s_tun_paused = fcae_tun_paused();
 
     // A redraw request is only cleared once a frame is really painted, so it
@@ -1949,6 +1956,8 @@ static std::vector<FirefoxLocationOption> s_firefox_location_options = {
 };
 static std::vector<FirefoxAccountOption> s_firefox_account_options;
 static void firefox_submit(const std::string& request, const char* pending);
+static void firefox_start_regions(bool cached);
+static void firefox_queue_usage(const std::string& id);
 static bool s_firefox_accounts_loaded = false;
 static std::string s_firefox_removing_account_id;
 static bool s_firefox_settings_popup_open = false;
@@ -2165,10 +2174,6 @@ static void firefox_poll_job() {
                 s_firefox_add_should_close = false;
             }
         }
-        if (strcmp(g_app.firefox_operation, "list") == 0) {
-            firefox_submit("{\"op\":\"locations\",\"data_dir\":\"" + firefox_json_escape(data_dir().c_str()) + "\"}",
-                           "Loading Mozilla regions…");
-        }
         return;
     }
     if (strcmp(g_app.firefox_operation, "locations") == 0) {
@@ -2205,8 +2210,7 @@ static void firefox_poll_job() {
         } else {
             snprintf(g_app.firefox_email, sizeof(g_app.firefox_email), "%s", selected->email.c_str());
         }
-        firefox_submit("{\"op\":\"locations\",\"data_dir\":\"" + firefox_json_escape(data_dir().c_str()) + "\"}",
-                       "Loading Mozilla regions…");
+        for (const auto& account : s_firefox_account_options) firefox_queue_usage(account.id);
         return;
     }
     const std::string state = firefox_json_string(json, "state");
@@ -2261,6 +2265,7 @@ static void firefox_poll_job() {
                 existing->monthly_usage = monthly_usage;
             }
             save_config();
+            firefox_queue_usage(id);
         }
         g_app.firefox_password[0] = 0;
         g_app.firefox_code[0] = 0;
@@ -2304,6 +2309,102 @@ static void firefox_poll_job() {
     }
     snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
              strcmp(g_app.firefox_operation, "cancel") == 0 ? "Sign-in verification cancelled" : "Firefox account operation completed");
+}
+
+static uint64_t s_firefox_region_job = 0;
+static bool s_firefox_region_cached = false;
+static uint64_t s_firefox_usage_job = 0;
+static std::string s_firefox_usage_account;
+static std::vector<std::string> s_firefox_usage_queue;
+
+static void firefox_start_regions(bool cached) {
+    if (s_firefox_region_job) return;
+    const std::string request = "{\"op\":\"" + std::string(cached ? "locations_cached" : "locations")
+        + "\",\"refresh\":true,\"data_dir\":\"" + firefox_json_escape(data_dir().c_str()) + "\"}";
+    s_firefox_region_job = fcae_firefox_account_submit(request.c_str());
+    s_firefox_region_cached = cached;
+}
+
+static void firefox_start_next_usage() {
+    if (s_firefox_usage_job) return;
+    while (!s_firefox_usage_queue.empty()) {
+        std::string id = s_firefox_usage_queue.front();
+        s_firefox_usage_queue.erase(s_firefox_usage_queue.begin());
+        const auto account = std::find_if(s_firefox_account_options.begin(), s_firefox_account_options.end(),
+            [&](const FirefoxAccountOption& item) { return item.id == id; });
+        if (account == s_firefox_account_options.end()) continue;
+        const std::string request = "{\"op\":\"usage\",\"data_dir\":\"" + firefox_json_escape(data_dir().c_str())
+            + "\",\"account_id\":\"" + firefox_json_escape(id.c_str()) + "\"}";
+        s_firefox_usage_job = fcae_firefox_account_submit(request.c_str());
+        if (s_firefox_usage_job) { s_firefox_usage_account = std::move(id); break; }
+    }
+}
+
+static void firefox_queue_usage(const std::string& id) {
+    if (id.empty() || id == s_firefox_usage_account || std::find(s_firefox_usage_queue.begin(), s_firefox_usage_queue.end(), id) != s_firefox_usage_queue.end()) return;
+    s_firefox_usage_queue.push_back(id);
+    firefox_start_next_usage();
+}
+
+static bool firefox_background_snapshot(uint64_t id, std::string& json) {
+    uint32_t needed = fcae_firefox_job_poll(id, nullptr, 0);
+    for (int attempt = 0; attempt < 4 && needed && needed <= 1024 * 1024; ++attempt) {
+        json.assign(needed + 1, '\0');
+        const uint32_t written = fcae_firefox_job_poll(id, json.data(), (uint32_t)json.size());
+        if (!written || written > 1024 * 1024) break;
+        if (written <= needed) { json.resize(written); return true; }
+        needed = written;
+    }
+    json.clear();
+    return false;
+}
+
+static void firefox_poll_background() {
+    if (s_firefox_region_job) {
+        std::string json;
+        const bool valid = firefox_background_snapshot(s_firefox_region_job, json);
+        const std::string status = valid ? firefox_json_string(json, "status") : "error";
+        if (status != "running") {
+            fcae_firefox_job_release(s_firefox_region_job);
+            s_firefox_region_job = 0;
+            if (status == "complete") {
+                auto options = firefox_parse_locations(json);
+                if (!options.empty()) {
+                    std::vector<FirefoxLocationOption> unique = {{"", "Automatic (recommended)"}};
+                    for (auto& option : options) {
+                        if (std::none_of(unique.begin(), unique.end(), [&](const FirefoxLocationOption& x) { return x.value == option.value; })) unique.push_back(std::move(option));
+                    }
+                    s_firefox_location_options = std::move(unique);
+                }
+            }
+            if (s_firefox_region_cached) firefox_start_regions(false);
+            else if (status != "complete" && !g_app.firefox_job)
+                snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Could not refresh Mozilla regions; saved regions remain available");
+            g_app.redraw_requested.store(true);
+        }
+    }
+    if (s_firefox_usage_job) {
+        std::string json;
+        const bool valid = firefox_background_snapshot(s_firefox_usage_job, json);
+        const std::string status = valid ? firefox_json_string(json, "status") : "error";
+        if (status != "running") {
+            fcae_firefox_job_release(s_firefox_usage_job);
+            s_firefox_usage_job = 0;
+            const size_t account_pos = json.find("\"account\"");
+            const std::string usage = status == "complete" && account_pos != std::string::npos
+                ? firefox_json_string(json, "monthly_usage", account_pos) : std::string();
+            for (auto& account : s_firefox_account_options) {
+                if (account.id == s_firefox_usage_account) {
+                    if (!usage.empty()) account.monthly_usage = usage;
+                    else if (account.monthly_usage == "Not reported") account.monthly_usage = "Usage unavailable";
+                    break;
+                }
+            }
+            s_firefox_usage_account.clear();
+            firefox_start_next_usage();
+            g_app.redraw_requested.store(true);
+        }
+    }
 }
 
 static void firefox_poll_captcha() {
@@ -2421,6 +2522,7 @@ static void render_protocol_editor() {
 
 static void open_firefox_settings() {
     s_firefox_settings_popup_open = true;
+    firefox_start_regions(true);
     if (!g_app.firefox_job) {
         firefox_submit("{\"op\":\"list\",\"data_dir\":\"" + firefox_json_escape(data_dir().c_str()) + "\"}",
                        "Loading saved Firefox accounts…");
@@ -2446,12 +2548,7 @@ static void render_firefox_settings() {
     const std::string root = firefox_json_escape(data_dir().c_str());
     firefox_location_combo();
     ImGui::SameLine();
-    ImGui::BeginDisabled(g_app.firefox_job != 0);
-    if (ImGui::Button("Refresh regions")) {
-        firefox_submit("{\"op\":\"locations\",\"data_dir\":\"" + root + "\"}",
-                       "Loading Mozilla regions…");
-    }
-    ImGui::EndDisabled();
+    if (ImGui::Button("Refresh regions")) firefox_start_regions(false);
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     firefox_account_rows(root);
     if (g_app.firefox_captcha_id) {
@@ -2655,8 +2752,6 @@ void render_ui() {
     // poll the render gate (ui_should_render) uses, so it never double-polls.
     const double now = ui_now_seconds();
     ui_poll_telemetry(now);
-    firefox_poll_captcha();
-    firefox_poll_job();
     const FcaeTelemetry& telem = g_app.telem;
 
     FcaeState cur = (FcaeState)telem.state;

@@ -13,6 +13,7 @@ use crate::types::{Account, Credentials};
 
 const MAX_ACCOUNT_FILE: u64 = 256 * 1024;
 const MAX_CACHE_FILE: u64 = 8 * 1024 * 1024;
+static ACCOUNT_MUTATION: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 #[derive(Clone)]
 pub struct AccountStore {
@@ -74,6 +75,7 @@ impl AccountStore {
     }
 
     pub fn add(&self, email: &str, credentials: &Credentials) -> Result<Account> {
+        let _guard = ACCOUNT_MUTATION.lock();
         if credentials.refresh_token.is_empty() {
             return Err(FirefoxError::Protocol("OAuth response has no refresh token".into()));
         }
@@ -109,6 +111,7 @@ impl AccountStore {
     }
 
     pub fn remove(&self, id: &str) -> Result<()> {
+        let _guard = ACCOUNT_MUTATION.lock();
         self.validate_id(id)?;
         let path = self.account_dir(id);
         match fs::remove_dir_all(path) {
@@ -132,6 +135,7 @@ impl AccountStore {
     }
 
     pub fn set_device(&self, id: &str, device_id: &str, token_fingerprint: &str) -> Result<()> {
+        let _guard = ACCOUNT_MUTATION.lock();
         let mut account = self.get(id)?;
         account.device_id = Some(device_id.to_string());
         account.device_token = Some(token_fingerprint.to_string());
@@ -139,6 +143,7 @@ impl AccountStore {
     }
 
     pub fn set_usage(&self, id: &str, usage: &crate::types::Usage) -> Result<()> {
+        let _guard = ACCOUNT_MUTATION.lock();
         let mut account = self.get(id)?;
         account.usage = Some(usage.clone());
         self.save(&account)

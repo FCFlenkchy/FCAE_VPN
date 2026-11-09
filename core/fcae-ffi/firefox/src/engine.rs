@@ -38,6 +38,7 @@ impl FirefoxEngine {
         if config.account_id.as_deref().is_some_and(|id| id.is_empty()) {
             return Err(FirefoxError::InvalidConfig("Firefox account ID cannot be empty".into()));
         }
+        log::info!("[firefox] loading account and Mozilla locations");
         let store = AccountStore::new(&config.data_dir)?;
         let account = store.resolve(config.account_id.as_deref())?;
         let dialer = Dialer::new(config.upstream_proxy.as_deref(), protect, config.ip_version)?;
@@ -58,12 +59,26 @@ impl FirefoxEngine {
         let mut selected = None;
         let mut last_error = None;
         for candidate in candidates.iter().take(3) {
-            match Upstream::new(candidate.clone(), config.transport, dialer.clone(), tokens.clone(), config.connect_timeout).await {
+            log::info!("[firefox] checking Mozilla proxy {}", candidate.address);
+            let attempt = async {
+                let upstream = Upstream::new(candidate.clone(), config.transport, dialer.clone(), tokens.clone(), config.connect_timeout).await?;
+                let probe = upstream.open_tcp("www.mozilla.org:443").await?;
+                drop(probe);
+                if config.require_udp {
+                    let probe = upstream.open_udp("1.1.1.1:53").await?;
+                    drop(probe);
+                }
+                Ok::<_, FirefoxError>(upstream)
+            }.await;
+            match attempt {
                 Ok(upstream) => {
                     selected = Some(upstream);
                     break;
                 }
-                Err(error) if error.is_transient() => last_error = Some(error),
+                Err(error) if error.is_transient() => {
+                    log::warn!("[firefox] proxy check failed: {error}");
+                    last_error = Some(error);
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -72,8 +87,9 @@ impl FirefoxEngine {
         upstream.set_candidates(candidates);
         let socks_addr = Some(config.socks_addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()));
         let proxies = LocalProxies::start(upstream.clone(), socks_addr, config.http_addr).await?;
+        log::info!("[firefox] proxy check passed; local SOCKS {:?}, HTTP {:?}", proxies.socks_addr, proxies.http_addr);
         if let Err(error) = accounts.ensure_device(&account.id).await {
-            log::debug!("[firefox] device registration was not refreshed: {error}");
+            log::warn!("[firefox] device registration was not refreshed: {error}");
         }
         let engine = Arc::new(Self {
             upstream,
@@ -104,6 +120,10 @@ impl FirefoxEngine {
 
     pub fn candidate(&self) -> Candidate {
         self.upstream.candidate()
+    }
+
+    pub fn traffic(&self) -> (u64, u64) {
+        self.upstream.traffic().totals()
     }
 
     pub fn carrier_up(&self) -> bool {

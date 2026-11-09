@@ -49,6 +49,7 @@ pub struct EngineConfig {
     pub location: Option<String>,
     pub server: Option<String>,
     pub transport: TransportPreference,
+    pub require_udp: bool,
     pub socks_addr: Option<std::net::SocketAddr>,
     pub http_addr: Option<std::net::SocketAddr>,
     pub upstream_proxy: Option<String>,
