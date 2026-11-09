@@ -820,6 +820,15 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         cfg.chain.push(ChainHop::new(FcaeBackend::Psiphon, cfg.protocol, cfg.obfuscation.h2_enabled));
     }
     cfg.psiphon.through_tunnel = cfg.chain.len() == 1 && cfg.chain[0].backend == FcaeBackend::Psiphon;
+    // A Tor carrier can have an Aether/Firefox exit with its own listeners.
+    if cfg.chain.last().is_some_and(|hop| {
+        hop.backend == FcaeBackend::Firefox
+            || (hop.backend == FcaeBackend::Aether && hop.protocol != FcaeProtocol::Tor)
+    }) && cfg.http_port != 0 && cfg.http_port == cfg.socks_port {
+        return Err(CoreError::InvalidConfig(format!(
+            "socks_port and http_port are both {}; they must differ", cfg.socks_port
+        )));
+    }
     if cfg.exit_backend() == FcaeBackend::Firefox && cfg.is_tun() && cfg.firefox.transport == "h1" {
         return Err(CoreError::InvalidConfig(
             "Firefox TUN requires UDP-safe H2; select firefox.transport auto or h2".into(),
@@ -1759,6 +1768,24 @@ mod tests {
             assert_eq!(actual.protocol, expected.protocol);
             assert_eq!(actual.h2_enabled, expected.h2_enabled);
         }
+    }
+
+    #[test]
+    fn tor_carrier_still_validates_final_firefox_listener_ports() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.protocol = FcaeProtocol::Tor;
+        raw.socks_port = 1819;
+        raw.http_port = 1819;
+        let hops = [FcaeChainHop {
+            backend: FcaeBackend::Firefox, protocol: FcaeProtocol::Auto, h2_enabled: true,
+        }];
+        raw.chain.hops = hops.as_ptr();
+        raw.chain.hop_count = 1;
+        assert!(unsafe { parse(&raw) }.is_err());
+        raw.http_port = 1820;
+        assert!(unsafe { parse(&raw) }.is_ok());
     }
 
     #[test]

@@ -154,7 +154,6 @@ class MainActivity : AppCompatActivity() {
     private var sponsorAnimated = true
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
-    private lateinit var spinnerSharedMode: Spinner
     private lateinit var spinnerScan: Spinner
     private lateinit var spinnerIpVersion: Spinner
     private lateinit var spinnerNoize: Spinner
@@ -235,6 +234,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editUpstreamProxy: android.widget.EditText
     private lateinit var editSocksPort: android.widget.EditText
     private lateinit var editHttpPort: android.widget.EditText
+    private lateinit var editFirefoxSocksPort: android.widget.EditText
+    private lateinit var editFirefoxHttpPort: android.widget.EditText
     private lateinit var editTunMtu: android.widget.EditText
     private lateinit var editTunTcpSndbuf: android.widget.EditText
     private lateinit var editTunTcpRcvbuf: android.widget.EditText
@@ -1249,7 +1250,6 @@ class MainActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.btnProtocolSettings).setOnClickListener { showProtocolSettings() }
         findViewById<MaterialButton>(R.id.btnFirefoxSettings).setOnClickListener { showFirefoxSettings() }
         spinnerMode = findViewById(R.id.spinnerMode)
-        spinnerSharedMode = findViewById(R.id.spinnerSharedMode)
         spinnerScan = findViewById(R.id.spinnerScan)
         spinnerIpVersion = findViewById(R.id.spinnerIpVersion)
         spinnerNoize = findViewById(R.id.spinnerNoize)
@@ -1354,6 +1354,8 @@ class MainActivity : AppCompatActivity() {
         })
         editSocksPort = findViewById(R.id.editSocksPort)
         editHttpPort = findViewById(R.id.editHttpPort)
+        editFirefoxSocksPort = findViewById(R.id.editFirefoxSocksPort)
+        editFirefoxHttpPort = findViewById(R.id.editFirefoxHttpPort)
         editTunMtu = findViewById(R.id.editTunMtu)
         editTunTcpSndbuf = findViewById(R.id.editTunTcpSndbuf)
         editTunTcpRcvbuf = findViewById(R.id.editTunTcpRcvbuf)
@@ -1437,7 +1439,7 @@ class MainActivity : AppCompatActivity() {
         // cursor.  This covers every focus-loss path (taps outside, back
         // button, keyboard dismissal, spinner selection) regardless of how
         // the focus was moved.
-        val editTexts = listOf(editTunMtu, editSni, editForcePeer, editUpstreamProxy, editSocksPort, editHttpPort, editTorHttpPort, editTunTcpSndbuf, editTunTcpRcvbuf,
+        val editTexts = listOf(editTunMtu, editSni, editForcePeer, editUpstreamProxy, editSocksPort, editHttpPort, editFirefoxSocksPort, editFirefoxHttpPort, editTorHttpPort, editTunTcpSndbuf, editTunTcpRcvbuf,
             editTeam, editAccessToken, editAccessEmail, editRoutesFile, editRoutesInline,
             editEchDns, editEchDomain, editGoolInner, editApiAddress, editApiHost, editApiSni, editExitLoc,
             editTlsCiphers, editTls13Ciphers, editTlsGroups, editTlsKeyShares, editTlsSigalgs,
@@ -1469,7 +1471,6 @@ class MainActivity : AppCompatActivity() {
             listOf("Proxy (SOCKS/HTTP)", "TUN (system VPN)"),
         )
         spinnerMode.adapter = modeAdapter
-        spinnerSharedMode.adapter = modeAdapter
         spinnerSplitTunnel.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
             listOf("Off", "Only Selected Apps (Whitelist)", "Bypass Selected Apps (Blacklist)"),
@@ -1627,14 +1628,6 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<android.view.View>(R.id.aboutButton).setOnClickListener { showAboutDialog() }
 
-        spinnerSharedMode.setSelection(spinnerMode.selectedItemPosition.coerceIn(0, 1))
-        spinnerSharedMode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
-                val selected = spinnerSharedMode.selectedItemPosition
-                if (selected in 0..1 && spinnerMode.selectedItemPosition != selected) spinnerMode.setSelection(selected)
-            }
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
-        }
         spinnerMode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: android.widget.AdapterView<*>?,
@@ -1642,8 +1635,6 @@ class MainActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
-                val selected = spinnerMode.selectedItemPosition
-                if (selected in 0..1 && spinnerSharedMode.selectedItemPosition != selected) spinnerSharedMode.setSelection(selected)
                 applyModeSocksLock()
                 applyTunEngineVisibility()
                 updateButton()
@@ -2301,8 +2292,7 @@ class MainActivity : AppCompatActivity() {
         }
         lastProxyUiMode = mode
         switchSocks.isEnabled = mode == 0
-        editSocksPort.isEnabled = mode == 0
-        if (mode == 1) switchSocks.isChecked = false
+        if (mode == 1) switchSocks.isChecked = true
     }
 
     private fun t2sLogValue(): Int = spinnerT2sLog.selectedItemPosition + 1
@@ -2404,6 +2394,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun routeBackends(): List<Int> =
         listOf(backendFromSelection()) + selectedChain().map { backendForProtocolPosition(it) }
+
+    private fun finalListenerIsFirefox(): Boolean = routeBackends().lastOrNull() == 2
+
+    private fun selectedSocksPort(): android.widget.EditText =
+        if (finalListenerIsFirefox()) editFirefoxSocksPort else editSocksPort
+
+    private fun selectedHttpPort(): android.widget.EditText =
+        if (finalListenerIsFirefox()) editFirefoxHttpPort else editHttpPort
+
+    private fun defaultSocksPort(): Int = if (finalListenerIsFirefox()) FIREFOX_SOCKS_PORT else 1819
+    private fun defaultHttpPort(): Int = if (finalListenerIsFirefox()) FIREFOX_HTTP_PORT else 1820
+
+    private fun effectiveSocksPort(): Int {
+        val port = selectedSocksPort().text.toString().toIntOrNull() ?: defaultSocksPort()
+        return if (isTunModeSelected() && port == 0) defaultSocksPort() else port
+    }
+
+    private fun effectiveHttpPort(): Int =
+        selectedHttpPort().text.toString().toIntOrNull() ?: defaultHttpPort()
+
+    // Preserve explicit Firefox values and custom legacy ports; migrate old defaults.
+    private fun firefoxPortPreference(key: String, legacyKey: String, legacyDefault: Int, newDefault: Int): String {
+        return prefs.getString(key, null)
+            ?: prefs.getString(legacyKey, null)?.takeUnless { it.trim().toIntOrNull() == legacyDefault }
+            ?: newDefault.toString()
+    }
 
     private fun updateProtocolButton() {
         if (!::spinnerProtocol.isInitialized) return
@@ -2790,7 +2806,7 @@ class MainActivity : AppCompatActivity() {
             .setTitle("FIREFOX IP PROTECTION SETTINGS")
             .setView(ScrollView(this).apply { addView(box) })
             .setNegativeButton("Close", null)
-            .setPositiveButton("Save connection settings", null)
+            .setPositiveButton("SAVE", null)
             .create()
         dialog.setOnShowListener {
             styleDialogButtons(dialog)
@@ -3490,6 +3506,8 @@ class MainActivity : AppCompatActivity() {
             putInt("sysprofile", spinnerSysprofile.selectedItemPosition)
             putString("socksPort", editSocksPort.text.toString())
             putString("httpPort", editHttpPort.text.toString())
+            putString("firefoxSocksPort", editFirefoxSocksPort.text.toString())
+            putString("firefoxHttpPort", editFirefoxHttpPort.text.toString())
             putString("tunMtu", editTunMtu.text.toString())
             putInt("splitTunnelMode", spinnerSplitTunnel.selectedItemPosition)
             putStringSet("splitTunnelApps", HashSet(splitTunnelSelectedApps))
@@ -3617,6 +3635,8 @@ class MainActivity : AppCompatActivity() {
         spinnerSysprofile.setSelection(prefs.getInt("sysprofile", 0))
         editSocksPort.setText(prefs.getString("socksPort", "1819"))
         editHttpPort.setText(prefs.getString("httpPort", "1820"))
+        editFirefoxSocksPort.setText(firefoxPortPreference("firefoxSocksPort", "socksPort", 1819, FIREFOX_SOCKS_PORT))
+        editFirefoxHttpPort.setText(firefoxPortPreference("firefoxHttpPort", "httpPort", 1820, FIREFOX_HTTP_PORT))
         editTunMtu.setText(prefs.getString("tunMtu", "1500"))
         editTunTcpSndbuf.setText(prefs.getString("tunTcpSndbuf", "256000"))
         editTunTcpRcvbuf.setText(prefs.getString("tunTcpRcvbuf", "256000"))
@@ -3890,9 +3910,9 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("disableExtensionPermutation", switchDisableExtensionPermutation.isChecked)
         i.putExtra("fragmentSni", switchFragmentSni.isChecked)
         // TUN requires SOCKS for its data plane; HTTP is a separate opt-in.
-        i.putExtra("socksPort", if (isTunModeSelected() || switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0)
+        i.putExtra("socksPort", if (isTunModeSelected() || switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) effectiveSocksPort() else 0)
         i.putExtra("tunHttpEnabled", isTunModeSelected() && switchHttp.isChecked)
-        i.putExtra("httpPort", if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0)
+        i.putExtra("httpPort", if (switchHttp.isChecked) effectiveHttpPort() else 0)
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
         i.putExtra("forcePeer", editForcePeer.text.toString().trim())
         i.putExtra("sysProfile", spinnerSysprofile.selectedItemPosition)
@@ -3994,8 +4014,8 @@ class MainActivity : AppCompatActivity() {
         val cfgPath = filesDir.resolve("aether.toml").absolutePath
         // Extract ALL UI values on the main thread — never read Views from bg.
         val noizeProfile = spinnerNoize.selectedItem.toString()
-        val socksPort = if (mode == 1 || switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0
-        val httpPort = if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0
+        val socksPort = if (mode == 1 || switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) effectiveSocksPort() else 0
+        val httpPort = if (switchHttp.isChecked) effectiveHttpPort() else 0
         val forcePeer = editForcePeer.text.toString().trim()
         val sysProfile = spinnerSysprofile.selectedItemPosition
         val teamName = editTeam.text.toString().trim()
@@ -4905,8 +4925,8 @@ class MainActivity : AppCompatActivity() {
                 if (finalBackend != 1) {
                     endpoints(if (finalBackend == 2) "Firefox" else "Aether",
                         if (switchSocks.isChecked || tun || effectiveTorMode() in 1..2)
-                            editSocksPort.text.toString().trim().ifEmpty { "1819" } else null,
-                        if (switchHttp.isChecked) editHttpPort.text.toString().trim().ifEmpty { "1820" } else null,
+                            effectiveSocksPort().toString() else null,
+                        if (switchHttp.isChecked) effectiveHttpPort().toString() else null,
                         if (tun) "internal SOCKS5" else "SOCKS5")
                 }
             }
@@ -5360,6 +5380,8 @@ class MainActivity : AppCompatActivity() {
         // engine's own default (config.rs DEFAULT_TOR_SOCKS_PORT). A field
         // holding this value defers to the engine (see deferredTorSocksPort).
         private const val TOR_SOCKS_ENGINE_DEFAULT = 1821
+        private const val FIREFOX_SOCKS_PORT = 1825
+        private const val FIREFOX_HTTP_PORT = 1826
 
         private const val LINK_TELEGRAM = "https://t.me/FCAE_VPN"
         private const val LINK_GITHUB = "https://github.com/FCFlenkchy/FCAE_VPN"

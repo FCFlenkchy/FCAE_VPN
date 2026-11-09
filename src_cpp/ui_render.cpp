@@ -59,6 +59,10 @@ static std::vector<int> parse_chain_transports(const std::string& value) {
 
 AppState g_app;
 static bool s_loaded_chain_transports = false;
+static bool s_loaded_socks_port = false;
+static bool s_loaded_http_port = false;
+static bool s_loaded_firefox_socks_port = false;
+static bool s_loaded_firefox_http_port = false;
 static int s_loaded_legacy_chain_count = -1;
 static int s_loaded_legacy_chain_exits[3] = {};
 
@@ -431,6 +435,8 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.tor_http_port);
     h = fnv_value(h, g_app.socks_port);
     h = fnv_value(h, g_app.http_port);
+    h = fnv_value(h, g_app.firefox_socks_port);
+    h = fnv_value(h, g_app.firefox_http_port);
     h = fnv_value(h, g_app.h2_enabled);
     h = fnv_value(h, g_app.ech_enabled);
     h = fnv_value(h, g_app.sys_profile);
@@ -933,8 +939,16 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "frag_max_size") g_app.frag_max_size = atoi(val.c_str());
     else if (key == "frag_min_delay") g_app.frag_min_delay = atoi(val.c_str());
     else if (key == "frag_max_delay") g_app.frag_max_delay = atoi(val.c_str());
-    else if (key == "socks_port") g_app.socks_port = (uint16_t)parse_port(val, g_app.socks_port);
-    else if (key == "http_port") g_app.http_port = (uint16_t)parse_port(val, g_app.http_port);
+    else if (key == "socks_port") { g_app.socks_port = (uint16_t)parse_port(val, g_app.socks_port); s_loaded_socks_port = true; }
+    else if (key == "http_port") { g_app.http_port = (uint16_t)parse_port(val, g_app.http_port); s_loaded_http_port = true; }
+    else if (key == "firefox_socks_port") {
+        g_app.firefox_socks_port = (uint16_t)parse_port(val, g_app.firefox_socks_port);
+        s_loaded_firefox_socks_port = true;
+    }
+    else if (key == "firefox_http_port") {
+        g_app.firefox_http_port = (uint16_t)parse_port(val, g_app.firefox_http_port);
+        s_loaded_firefox_http_port = true;
+    }
     else if (key == "socks_enabled") g_app.socks_enabled = atoi(val.c_str()) != 0;
     else if (key == "tor_http_port") g_app.tor_http_port = parse_port(val, g_app.tor_http_port);
     else if (key == "tor_http_enabled") g_app.tor_http_enabled = atoi(val.c_str()) != 0;
@@ -1040,6 +1054,8 @@ static void save_config() {
     fprintf(f, "frag_max_delay=%d\n", g_app.frag_max_delay);
     fprintf(f, "socks_port=%u\n", (unsigned)g_app.socks_port);
     fprintf(f, "http_port=%u\n", (unsigned)g_app.http_port);
+    fprintf(f, "firefox_socks_port=%u\n", (unsigned)g_app.firefox_socks_port);
+    fprintf(f, "firefox_http_port=%u\n", (unsigned)g_app.firefox_http_port);
     fprintf(f, "tor_http_port=%u\n", (unsigned)g_app.tor_http_port);
     fprintf(f, "tor_http_enabled=%d\n", g_app.tor_http_enabled ? 1 : 0);
     fprintf(f, "socks_enabled=%d\n", g_app.socks_enabled ? 1 : 0);
@@ -1121,6 +1137,10 @@ static bool load_config_from(const std::string& path) {
 
     static char line[8192];
     s_loaded_chain_transports = false;
+    s_loaded_socks_port = false;
+    s_loaded_http_port = false;
+    s_loaded_firefox_socks_port = false;
+    s_loaded_firefox_http_port = false;
     s_loaded_legacy_chain_count = -1;
     int applied = 0;
     while (fgets(line, sizeof(line), f)) {
@@ -1150,6 +1170,13 @@ static bool load_config_from(const std::string& path) {
     fclose(f);
 
     if (applied == 0) return false;
+    // Preserve explicit Firefox values and custom legacy ports; migrate old defaults.
+    if (!s_loaded_firefox_socks_port)
+        g_app.firefox_socks_port = s_loaded_socks_port && g_app.socks_port != 1819
+            ? g_app.socks_port : AppState::kFirefoxDefaultSocksPort;
+    if (!s_loaded_firefox_http_port)
+        g_app.firefox_http_port = s_loaded_http_port && g_app.http_port != 1820
+            ? g_app.http_port : AppState::kFirefoxDefaultHttpPort;
     if (!s_loaded_chain_transports && s_loaded_legacy_chain_count > 0) {
         g_app.chain_transports.clear();
         const int count = std::min(s_loaded_legacy_chain_count, 3);
@@ -2559,8 +2586,6 @@ static void render_firefox_settings() {
     ImGui::BeginChild("##firefox_scroll",
         ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8.0f),
         ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.25f, 1.0f), "FIREFOX IP PROTECTION SETTINGS");
-    ImGui::Separator();
     const std::string root = firefox_json_escape(data_dir().c_str());
     firefox_location_combo();
     ImGui::SameLine();
@@ -2596,7 +2621,7 @@ static void render_firefox_settings() {
     ImGui::Combo("Firefox transport", &g_app.firefox_transport, firefox_transports, 3);
     ImGui::TextDisabled("UDP uses a separate MASQUE CONNECT-UDP session over HTTP/2.");
     ImGui::EndChild();
-    if (ImGui::Button("Save connection settings")) {
+    if (ImGui::Button("SAVE")) {
         save_config();
         if (!g_app.firefox_job && !s_firefox_unblock_required) {
             g_app.firefox_password[0] = 0;
@@ -3669,9 +3694,9 @@ void render_ui() {
             if (final_backend != FCAE_BACKEND_PSIPHON) {
                 if (g_app.protocol != 4 && (g_app.socks_enabled || g_app.mode == 1 || g_app.tor_mode != 0))
                     endpoint(final_name, g_app.mode == 1 ? "internal SOCKS5" : "SOCKS5",
-                             g_app.socks_port ? g_app.socks_port : 1819);
+                             g_app.listener_socks_port() ? g_app.listener_socks_port() : g_app.default_listener_socks_port());
                 if (g_app.protocol != 4 && (g_app.mode == 1 ? g_app.tun_http_enabled : g_app.http_enabled))
-                    endpoint(final_name, "HTTP", g_app.http_port);
+                    endpoint(final_name, "HTTP", g_app.listener_http_port());
                 if (g_app.tor_http_enabled && (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2))
                     endpoint("Tor", "HTTP", g_app.tor_http_port);
                 if (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2)
@@ -3706,12 +3731,28 @@ void render_ui() {
             if (!narrow) ImGui::SameLine();
             if (ImGui::Button("Firefox settings")) open_firefox_settings();
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "APP SETTINGS");
+            ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
+            if (ImGui::Checkbox("Also check for pre-releases", &g_app.check_prereleases)) {
+                // Channel change takes effect immediately, like the Android
+                // switch: without a re-check the panel keeps serving the
+                // previous channel's cached result, and while an update is
+                // available the "Check for Updates" button is replaced by the
+                // result button — there would be no way to re-check without
+                // a restart.
+                if (!s_update_in_progress) {
+                    fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
+                    s_update_checked = false;
+                    s_update_available = false;
+                    s_check_start_time = std::chrono::steady_clock::now();
+                }
+            }
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "SHARED SETTINGS");
             ImGui::Text("Mode");
             ImGui::RadioButton("Proxy", &g_app.mode, 0);
             ImGui::RadioButton("TUN",   &g_app.mode, 1);
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
-            ImGui::TextWrapped("LAN sharing exposes unauthenticated proxy listeners to your local network, including the required TUN SOCKS listener. Use only on trusted networks.");
             ImGui::Checkbox("Enable logging##shared", &g_app.logging_enabled);
             ImGui::Spacing();
             ImGui::Text("Outbound IP version (Aether / Firefox)");
@@ -3723,7 +3764,7 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Upstream Proxy");
             ImGui::PushItemWidth(-FLT_MIN);
-            ImGui::InputTextWithHint("##upstream_proxy", "socks5 & http & ip:port & @user:pass",
+            ImGui::InputTextWithHint("##upstream_proxy", "socks5://host:port or http://host:port",
                                      g_app.upstream_proxy, sizeof(g_app.upstream_proxy));
             ImGui::PopItemWidth();
             {
@@ -3740,18 +3781,12 @@ void render_ui() {
                     ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", proxy_err);
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::TextWrapped("Proxy listeners (Aether / Firefox; Psiphon and Tor use their own ports)");
+            bool socks_active = g_app.mode == 1 || g_app.socks_enabled;
             ImGui::BeginDisabled(g_app.mode == 1);
-            ImGui::PushItemWidth(100);
-            ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
-            ImGui::SameLine(0, 20);
-            ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
+            if (ImGui::Checkbox("SOCKS5 proxy (Aether / Firefox; required in TUN)", &socks_active))
+                g_app.socks_enabled = socks_active;
             ImGui::EndDisabled();
-            ImGui::Checkbox("HTTP proxy", g_app.mode == 1 ? &g_app.tun_http_enabled : &g_app.http_enabled);
-            ImGui::SameLine(0, 20);
-            ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
-            ImGui::PopItemWidth();
-            if (g_app.mode == 1) ImGui::TextDisabled("TUN uses its own internal SOCKS listener.");
+            ImGui::Checkbox("HTTP proxy (Aether / Firefox)", g_app.mode == 1 ? &g_app.tun_http_enabled : &g_app.http_enabled);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             if (g_app.mode == 1 && ImGui::CollapsingHeader("TUN Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Text("TUN engine");
@@ -3806,6 +3841,10 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "AETHER SETTINGS");
             ImGui::Separator();
+            ImGui::PushItemWidth(100);
+            ImGui::InputScalar("Aether SOCKS5 port", ImGuiDataType_U16, &g_app.socks_port);
+            ImGui::InputScalar("Aether HTTP port", ImGuiDataType_U16, &g_app.http_port);
+            ImGui::PopItemWidth();
             ImGui::Text("Transport Options");
             ImGui::Checkbox("ECH", &g_app.ech_enabled);
             if (g_app.ech_enabled) {
@@ -3825,21 +3864,25 @@ void render_ui() {
                 ImGui::PopItemWidth();
             }
             ImGui::Spacing();
-            ImGui::InputTextWithHint("##force_peer", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));
+            ImGui::InputTextWithHint("Force peer (optional)", "ip:port", g_app.force_peer, sizeof(g_app.force_peer));
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Text("Sysprofile (performance tuning)");
             const char* sysprofiles[] = { "Auto", "Low", "Medium", "High" };
-            ImGui::Combo("Sysprofile", &g_app.sys_profile, sysprofiles, 4);
+            ImGui::Combo("Performance profile", &g_app.sys_profile, sysprofiles, 4);
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Text("Engine log level");
             // Verbosity of the aether engine itself, not of this UI's log
             // pane -- the FFI always reports to the host at info.
             const char* engine_logs[] = {
                 "Off", "Error", "Warn", "Info", "Debug", "Trace",
             };
-            ImGui::Combo("Engine log", &g_app.engine_log, engine_logs, 6);
+            ImGui::Combo("Aether engine log level", &g_app.engine_log, engine_logs, 6);
 
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.25f, 1.0f), "FIREFOX LISTENER PORTS");
+            ImGui::PushItemWidth(100);
+            ImGui::InputScalar("Firefox SOCKS5 port", ImGuiDataType_U16, &g_app.firefox_socks_port);
+            ImGui::InputScalar("Firefox HTTP port", ImGuiDataType_U16, &g_app.firefox_http_port);
+            ImGui::PopItemWidth();
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.65f, 0.55f, 1.0f, 1.0f), "PSIPHON SETTINGS");
             ImGui::Separator();
@@ -3970,7 +4013,6 @@ void render_ui() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.25f, 1.0f), "TOR SETTINGS (AETHER)");
             ImGui::Separator();
-            ImGui::Text("Tor routing");
             static const char* kTorRoutingModes[3] = {
                 "Off",
                 "Tor through the tunnel",
@@ -4065,7 +4107,7 @@ void render_ui() {
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("TLS Fingerprint");
-            ImGui::Checkbox("Verify TLS certificates", &g_app.tls_verify);
+            ImGui::Checkbox("Verify Aether TLS certificates", &g_app.tls_verify);
             ImGui::Checkbox("Disable GREASE", &g_app.disable_grease);
             ImGui::Checkbox("Enable GREASE signature algorithms", &g_app.enable_grease_sigalgs);
             ImGui::Checkbox("Enable ECH GREASE", &g_app.enable_ech_grease);
@@ -4092,10 +4134,9 @@ void render_ui() {
         if (ImGui::BeginTabItem("Scanner")) {
             ImGui::BeginChild("##scan_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImGui::Spacing();
-            ImGui::Text("Scan Mode");
             const char* modes[] = { "Turbo", "Balanced", "Thorough", "Verified", "Ironclad" };
             if (g_app.scan_mode > 4) g_app.scan_mode = 1;
-            ImGui::Combo("Mode", &g_app.scan_mode, modes, 5);
+            ImGui::Combo("Scan mode", &g_app.scan_mode, modes, 5);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("MASQUE SNI");
             ImGui::InputText("##sni", g_app.sni, sizeof(g_app.sni));
@@ -4120,27 +4161,8 @@ void render_ui() {
             static bool follow_tail = true;
             static bool manual_scroll_last_frame = false;
             static uint64_t rendered_revision = 0;
-            ImGui::Checkbox("Logging", &g_app.logging_enabled);
-            ImGui::SameLine(0, 12);
             if (ImGui::Checkbox("Auto-scroll", &g_app.auto_scroll))
                 follow_tail = g_app.auto_scroll;
-            ImGui::SameLine(0, 12);
-            ImGui::Checkbox("Auto update check", &g_app.auto_update_check);
-            ImGui::SameLine(0, 20);
-            if (ImGui::Checkbox("Also check for pre-releases", &g_app.check_prereleases)) {
-                // Channel change takes effect immediately, like the Android
-                // switch: without a re-check the panel keeps serving the
-                // previous channel's cached result, and while an update is
-                // available the "Check for Updates" button is replaced by the
-                // result button — there would be no way to re-check without
-                // a restart.
-                if (!s_update_in_progress) {
-                    fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
-                    s_update_checked = false;
-                    s_update_available = false;
-                    s_check_start_time = std::chrono::steady_clock::now();
-                }
-            }
             ImGui::SameLine(0, 12);
             if (ImGui::Button("Clear")) {
                 g_app.clear_logs();

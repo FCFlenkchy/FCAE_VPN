@@ -233,6 +233,13 @@ async fn socks_reply_addr<S: AsyncWrite + Unpin>(stream: &mut S, code: u8, addre
 }
 
 fn socks_reply_code(error: &FirefoxError) -> u8 {
+    match crate::transport::destination_error(error) {
+        Some("destination_ip_prohibited") => return 2,
+        Some("destination_ip_unroutable") => return 3,
+        Some("destination_not_found" | "destination_unavailable") => return 4,
+        Some("connection_refused") => return 5,
+        _ => {}
+    }
     match error {
         FirefoxError::UnsupportedDestination(_) => 8,
         FirefoxError::Timeout(_) => 6,
@@ -615,6 +622,22 @@ async fn write_http_error<S: AsyncWrite + Unpin>(stream: &mut S, status: u16, me
 #[cfg(test)]
 mod udp_refusal_tests {
     use super::*;
+
+    #[test]
+    fn socks_replies_reflect_upstream_destination_errors() {
+        for (reason, expected) in [
+            ("destination_ip_prohibited", 2), ("destination_ip_unroutable", 3),
+            ("destination_not_found", 4), ("destination_unavailable", 4),
+            ("connection_refused", 5), ("unknown", 5),
+        ] {
+            let error = FirefoxError::Http {
+                host: "proxy".into(), status: 502, errno: None, retry_after: None,
+                message: format!("Fastly; error={reason}"),
+            };
+            assert_eq!(socks_reply_code(&error), expected, "{reason}");
+        }
+        assert_eq!(socks_reply_code(&FirefoxError::Timeout(std::time::Duration::from_secs(1))), 6);
+    }
 
     #[test]
     fn refusal_cache_is_bounded_temporary_and_scoped_to_proxy_and_destination() {

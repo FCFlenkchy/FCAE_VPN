@@ -58,6 +58,10 @@ struct AppState {
     int  frag_max_delay  = 10;
     uint16_t socks_port  = 1819;
     uint16_t http_port   = 1820;
+    static constexpr uint16_t kFirefoxDefaultSocksPort = 1825;
+    static constexpr uint16_t kFirefoxDefaultHttpPort = 1826;
+    uint16_t firefox_socks_port = kFirefoxDefaultSocksPort;
+    uint16_t firefox_http_port  = kFirefoxDefaultHttpPort;
     bool socks_enabled   = true;
     bool http_enabled    = true;
     bool tun_http_enabled = false;
@@ -259,6 +263,23 @@ struct AppState {
         return mtu_valid && mtu >= 1280 && mtu <= 9000 ? mtu : 0xffffffffu;
     }
 
+    bool final_listener_is_firefox() const {
+        if (!chain_transports.empty()) return chain_transports.back() == 10;
+        return backend == 2 && tor_mode != 3;
+    }
+
+    uint16_t default_listener_socks_port() const {
+        return final_listener_is_firefox() ? kFirefoxDefaultSocksPort : 1819;
+    }
+
+    uint16_t listener_socks_port() const {
+        return final_listener_is_firefox() ? firefox_socks_port : socks_port;
+    }
+
+    uint16_t listener_http_port() const {
+        return final_listener_is_firefox() ? firefox_http_port : http_port;
+    }
+
     FcaeConfig to_config() {
         FcaeConfig c;
         fcae_config_default(&c);
@@ -311,10 +332,11 @@ struct AppState {
         // the checkbox is ignored in that mode: a port is always sent (same
         // rule as Android's FCAEVpnService). Port 0 means "off" for proxy
         // mode only.
+        const uint16_t selected_socks_port = listener_socks_port();
         c.socks_port       = (mode == 1 || (backend != 1 && tor_mode != 0))
-                                   ? (socks_port != 0 ? socks_port : (uint16_t)1819)
-                                   : (socks_enabled ? socks_port : (uint16_t)0);
-        c.http_port        = (mode == 1 ? tun_http_enabled : http_enabled) ? http_port : 0;
+                                   ? (selected_socks_port != 0 ? selected_socks_port : default_listener_socks_port())
+                                   : (socks_enabled ? selected_socks_port : (uint16_t)0);
+        c.http_port        = (mode == 1 ? tun_http_enabled : http_enabled) ? listener_http_port() : 0;
         c.tor_http_port    = tor_http_enabled ? tor_http_port : 0;
         c.force_peer       = force_peer[0] ? force_peer : nullptr;
         c.upstream_proxy   = upstream_proxy[0] ? upstream_proxy : nullptr;

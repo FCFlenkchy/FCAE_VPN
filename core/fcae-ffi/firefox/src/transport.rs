@@ -580,6 +580,25 @@ impl StreamHealth {
     }
 }
 
+fn destination_kind(target: &str) -> &'static str {
+    use std::net::IpAddr;
+    let Some((host, _)) = split_authority(target, 0) else { return "unknown destination" };
+    let Ok(ip) = host.parse::<IpAddr>() else { return "hostname" };
+    let local_v4 = |ip: std::net::Ipv4Addr| {
+        ip.is_private() || ip.is_loopback() || ip.is_link_local()
+            || ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast()
+    };
+    let local = match ip {
+        IpAddr::V4(ip) => local_v4(ip),
+        IpAddr::V6(ip) => ip.to_ipv4_mapped().map(local_v4).unwrap_or_else(|| {
+            ip.is_loopback() || ip.is_unspecified() || ip.is_multicast()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }),
+    };
+    if local { "local or non-unicast IP" } else { "IP address" }
+}
+
 pub(crate) fn destination_error(error: &FirefoxError) -> Option<&'static str> {
     let FirefoxError::Http { status, message, .. } = error else { return None };
     if *status != 502 && *status != 503 && *status != 504 { return None; }
@@ -906,7 +925,12 @@ impl Upstream {
         };
         if should_log {
             if let Some(reason) = destination_reason {
-                log::info!("[firefox] {protocol} destination on port {port} rejected by proxy ({reason}); other connections may still work");
+                if reason == "destination_ip_prohibited" {
+                    let kind = destination_kind(target);
+                    log::info!("[firefox] {protocol} {kind} on port {port} denied by upstream proxy policy ({reason}); other connections may still work. Check the destination and, for local addresses, split-tunnel settings.");
+                } else {
+                    log::info!("[firefox] {protocol} destination on port {port} rejected by proxy ({reason}); other connections may still work");
+                }
             } else {
                 match error {
                     FirefoxError::Http { status, .. } => log::warn!("[firefox] {protocol} proxy stream to port {port} failed: HTTP {status}; carrier health is assessed separately"),
@@ -1128,6 +1152,16 @@ mod traffic_tests {
 
     fn http_error(status: u16, message: &str) -> FirefoxError {
         FirefoxError::Http { host: "proxy".into(), status, errno: None, retry_after: None, message: message.into() }
+    }
+
+    #[test]
+    fn destination_diagnostics_do_not_disclose_addresses() {
+        for target in ["192.168.1.1:5228", "127.0.0.1:443", "169.254.1.2:443", "[::1]:443", "[fd00::1]:443", "[::ffff:10.0.0.1]:443"] {
+            assert_eq!(destination_kind(target), "local or non-unicast IP");
+        }
+        assert_eq!(destination_kind("8.8.8.8:5228"), "IP address");
+        assert_eq!(destination_kind("example.com:5228"), "hostname");
+        assert_eq!(destination_kind("bad target"), "unknown destination");
     }
 
     #[test]
