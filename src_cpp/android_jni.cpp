@@ -430,12 +430,18 @@ Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxAccountSubmit(JNIEnv* env, jclass,
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxJobPoll(JNIEnv* env, jclass, jlong id) {
-    const uint32_t needed = fcae_firefox_job_poll((uint64_t)id, nullptr, 0);
-    if (!needed || needed > 1024 * 1024) return env->NewStringUTF("");
-    std::string json(needed + 1, '\0');
-    fcae_firefox_job_poll((uint64_t)id, json.data(), (uint32_t)json.size());
-    json.resize(needed);
-    return env->NewStringUTF(json.c_str());
+    uint32_t needed = fcae_firefox_job_poll((uint64_t)id, nullptr, 0);
+    for (int attempt = 0; attempt < 4 && needed && needed <= 1024 * 1024; ++attempt) {
+        std::string json(needed + 1, '\0');
+        const uint32_t written = fcae_firefox_job_poll((uint64_t)id, json.data(), (uint32_t)json.size());
+        if (!written || written > 1024 * 1024) return env->NewStringUTF("");
+        if (written <= needed) {
+            json.resize(written);
+            return env->NewStringUTF(json.c_str());
+        }
+        needed = written;
+    }
+    return env->NewStringUTF("");
 }
 
 extern "C" JNIEXPORT void JNICALL

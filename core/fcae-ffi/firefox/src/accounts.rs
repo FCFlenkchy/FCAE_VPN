@@ -15,11 +15,13 @@ use crate::store::AccountStore;
 use crate::types::{Account, Country, Credentials, ProxyPass, Usage};
 
 const PENDING_LIFETIME: Duration = Duration::from_secs(15 * 60);
+const OAUTH_CONFIRM_RETRY: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub enum LoginOutcome {
     Complete(Account),
     EmailCode(PendingLogin),
+    EmailLink(PendingLogin),
     Totp(PendingLogin),
     UnblockCode(UnblockCodePrompt),
 }
@@ -59,7 +61,7 @@ pub struct Accounts {
 
 impl Accounts {
     pub fn new(store: AccountStore, http: ControlPlane, fxa: Fxa) -> Self {
-        let guardian = Guardian::new(http.clone());
+        let guardian = Guardian::new(http.clone()).with_challenges(fxa.challenge_service());
         let remote = RemoteSettings::new(http);
         Self { store, fxa, guardian, remote, pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())) }
     }
@@ -78,8 +80,8 @@ impl Accounts {
 
     pub async fn login(&self, email: &str, password: &str, unblock_code: Option<&str>) -> Result<LoginOutcome> {
         self.pending.lock().await.retain(|_, pending| pending.created.elapsed() < PENDING_LIFETIME);
-        let sent = unblock_code.map(str::trim).filter(|code| !code.is_empty()).is_none();
-        let login = match self.fxa.login(email, password, unblock_code).await {
+        let sent = unblock_code.map(crate::crypto::normalize_code).filter(|code| !code.is_empty()).is_none();
+        let mut login = match self.fxa.login(email, password, unblock_code).await {
             Err(FirefoxError::UnblockCodeRequired(email)) => {
                 if sent {
                     self.fxa.send_unblock_code(&email).await?;
@@ -93,16 +95,16 @@ impl Accounts {
         }
         let id = crate::crypto::random_urlsafe(24);
         let prompt = PendingLogin { id: id.clone(), email: login.email.clone() };
-        let method = login.verification_method.clone();
+        let method = login.verification_method.take();
         self.pending.lock().await.insert(id, PendingSession {
-            email: login.email,
-            session_token: login.session_token,
+            email: std::mem::take(&mut login.email),
+            session_token: std::mem::take(&mut login.session_token),
             created: Instant::now(),
         });
-        if method.as_deref() == Some("totp-2fa") {
-            Ok(LoginOutcome::Totp(prompt))
-        } else {
-            Ok(LoginOutcome::EmailCode(prompt))
+        match method.as_deref() {
+            Some("totp-2fa") => Ok(LoginOutcome::Totp(prompt)),
+            Some("email") => Ok(LoginOutcome::EmailLink(prompt)),
+            _ => Ok(LoginOutcome::EmailCode(prompt)),
         }
     }
 
@@ -121,13 +123,26 @@ impl Accounts {
         self.finish_pending(id, email, token).await
     }
 
+    pub async fn confirm_email_link(&self, id: &str) -> Result<Account> {
+        let (email, token) = self.pending_parts(id).await?;
+        if !self.fxa.session_verified(&token).await? {
+            return Err(FirefoxError::Protocol("the emailed confirmation link has not been opened yet".into()));
+        }
+        self.finish_pending(id, email, token).await
+    }
+
     pub async fn resend_email(&self, id: &str) -> Result<()> {
         let (_, token) = self.pending_parts(id).await?;
         self.fxa.resend_email_code(&token).await
     }
 
     pub async fn cancel_login(&self, id: &str) {
-        self.pending.lock().await.remove(id);
+        let pending = self.pending.lock().await.remove(id);
+        if let Some(pending) = pending {
+            if let Err(error) = self.fxa.destroy_session(&pending.session_token).await {
+                log::debug!("[firefox] cancelled FxA session cleanup failed: {error}");
+            }
+        }
     }
 
     pub async fn send_unblock_code(&self, email: &str) -> Result<()> {
@@ -157,7 +172,9 @@ impl Accounts {
 
     pub async fn remove(&self, id: &str) -> Result<()> {
         if let Ok(credentials) = self.store.credentials(id) {
-            self.fxa.revoke_token(&credentials.refresh_token, credentials.oauth_client_id()).await?;
+            if let Err(error) = self.fxa.revoke_token(&credentials.refresh_token, credentials.oauth_client_id()).await {
+                log::warn!("[firefox] OAuth revocation failed during account removal: {error}");
+            }
         }
         self.store.remove(id)
     }
@@ -207,7 +224,17 @@ impl Accounts {
     }
 
     async fn finish_login(&self, login: LoginResponse) -> Result<Account> {
-        let tokens = self.fxa.oauth_from_session(&login.session_token).await?;
+        let mut token_attempt = 0;
+        let tokens = loop {
+            match self.fxa.oauth_from_session(&login.session_token).await {
+                Ok(tokens) => break tokens,
+                Err(FirefoxError::Http { errno: Some(104 | 138), .. }) if token_attempt < 9 => {
+                    token_attempt += 1;
+                    tokio::time::sleep(OAUTH_CONFIRM_RETRY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let refresh_token = tokens.refresh_token.clone().filter(|token| !token.is_empty())
             .ok_or_else(|| FirefoxError::Protocol("OAuth sign-in response has no offline refresh token".into()))?;
         let scope = if tokens.scope.is_empty() { crate::fxa::FIREFOX_SCOPE.to_string() } else { tokens.scope };

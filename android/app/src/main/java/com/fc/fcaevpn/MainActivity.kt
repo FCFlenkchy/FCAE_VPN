@@ -94,6 +94,7 @@ class MainActivity : AppCompatActivity() {
     private var firefoxOperation = ""
     private var firefoxPendingId = ""
     private var firefoxTotp = false
+    private var firefoxEmailLink = false
     private var firefoxRemovingAccountId = ""
     private var firefoxCaptchaDialog: androidx.appcompat.app.AlertDialog? = null
     private var firefoxCaptchaId = 0L
@@ -2616,7 +2617,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (firefoxPendingId.isNotBlank()) {
             addDialogButton(rows, "Continue verification") {
-                showFirefoxVerificationPrompt(firefoxTotp)
+                showFirefoxVerificationPrompt()
             }
         }
         if (firefoxUnblockEmail.isNotBlank()) {
@@ -2662,8 +2663,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateFirefoxVerificationControls() {
-        firefoxVerifyButton?.text = if (firefoxTotp) "Verify authenticator code" else "Verify emailed code"
-        firefoxResendButton?.visibility = if (firefoxTotp) android.view.View.GONE else android.view.View.VISIBLE
+        firefoxVerifyButton?.text = when {
+            firefoxTotp -> "Verify authenticator code"
+            firefoxEmailLink -> "Continue after opening link"
+            else -> "Verify emailed code"
+        }
+        firefoxResendButton?.visibility = if (firefoxTotp || firefoxEmailLink) android.view.View.GONE else android.view.View.VISIBLE
     }
 
     private fun dialogContent(): LinearLayout = LinearLayout(this).apply {
@@ -2787,7 +2792,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (firefoxPendingId.isNotBlank()) {
-            showFirefoxVerificationPrompt(firefoxTotp)
+            showFirefoxVerificationPrompt()
             return
         }
         if (firefoxUnblockEmail.isNotBlank()) {
@@ -2839,20 +2844,27 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun showFirefoxVerificationPrompt(totp: Boolean) {
+    private fun showFirefoxVerificationPrompt() {
         if (firefoxCodeDialog?.isShowing == true) return
         firefoxAddDialog?.dismiss()
+        val totp = firefoxTotp
+        val emailLink = firefoxEmailLink
         val box = dialogContent()
-        dialogLabel(box, if (totp) "Authenticator verification" else "Verify your email")
-        dialogMessage(box, if (totp) {
-            "Enter the six-digit code from your authenticator app."
-        } else {
-            "Mozilla sent a verification code to your email. Enter it here to finish adding the account."
+        dialogLabel(box, when {
+            totp -> "Authenticator verification"
+            emailLink -> "Confirm your email"
+            else -> "Verify your email"
         })
-        val code = addDialogInput(box, "Verification code")
-        code.hint = if (totp) "6-digit authenticator code" else "8-digit emailed code"
-        code.inputType = android.text.InputType.TYPE_CLASS_NUMBER
-        val status = dialogMessage(box, "Waiting for the verification code.")
+        dialogMessage(box, when {
+            totp -> "Enter the six-digit code from your authenticator app."
+            emailLink -> "Mozilla sent a confirmation link to your email. Open that link, then continue here to finish adding the account."
+            else -> "Mozilla sent a verification code to your email. Enter it here to finish adding the account."
+        })
+        val code = if (emailLink) null else addDialogInput(box, "Verification code").apply {
+            hint = if (totp) "6-digit authenticator code" else "8-digit emailed code"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        val status = dialogMessage(box, if (emailLink) "No code is required for this verification method." else "Waiting for the verification code.")
         firefoxDetailStatusView = status
         val dialog = dialogBuilder()
             .setTitle("Account verification")
@@ -2860,23 +2872,47 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Later", null)
             .create()
         firefoxCodeDialog = dialog
-        firefoxVerifyButton = addDialogButton(box, if (totp) "Verify authenticator code" else "Verify emailed code") {
+        firefoxVerifyButton = addDialogButton(box, when {
+            totp -> "Verify authenticator code"
+            emailLink -> "Continue after opening link"
+            else -> "Verify emailed code"
+        }) {
             val pending = firefoxPendingId
             if (pending.isBlank()) {
                 firefoxSetStatus("This verification request has expired. Start sign-in again.")
                 return@addDialogButton
             }
-            firefoxSubmit(JSONObject()
-                .put("op", if (totp) "verify_totp" else "verify_email")
+            val verificationCode = code?.text?.toString()?.trim().orEmpty()
+            if (!emailLink && verificationCode.isEmpty()) {
+                code?.error = "Enter the verification code"
+                return@addDialogButton
+            }
+            val operation = when {
+                totp -> "verify_totp"
+                emailLink -> "confirm_email_link"
+                else -> "verify_email"
+            }
+            val request = JSONObject()
+                .put("op", operation)
                 .put("pending_id", pending)
-                .put("code", code.text.toString().trim())
-                .put("base_url", "https://api.vpn.mozilla.org"))
+                .put("base_url", "https://api.vpn.mozilla.org")
+            if (!emailLink) request.put("code", verificationCode)
+            firefoxSubmit(request)
         }
         firefoxResendButton = addDialogButton(box, "Resend email") {
             val pending = firefoxPendingId
             if (pending.isNotBlank()) {
                 firefoxSubmit(JSONObject()
                     .put("op", "resend")
+                    .put("pending_id", pending)
+                    .put("base_url", "https://api.vpn.mozilla.org"))
+            }
+        }
+        addDialogButton(box, "Cancel verification") {
+            val pending = firefoxPendingId
+            if (pending.isNotBlank()) {
+                firefoxSubmit(JSONObject()
+                    .put("op", "cancel")
                     .put("pending_id", pending)
                     .put("base_url", "https://api.vpn.mozilla.org"))
             }
@@ -2914,11 +2950,16 @@ class MainActivity : AppCompatActivity() {
             .create()
         firefoxCodeDialog = dialog
         addDialogButton(box, "Sign in with code") {
+            val unblockCode = code.text.toString().trim()
+            if (unblockCode.isEmpty()) {
+                code.error = "Enter the unblock code"
+                return@addDialogButton
+            }
             firefoxSubmit(JSONObject()
                 .put("op", "login")
                 .put("email", firefoxUnblockEmail)
                 .put("password", firefoxLoginPassword)
-                .put("unblock_code", code.text.toString().trim())
+                .put("unblock_code", unblockCode)
                 .put("base_url", "https://api.vpn.mozilla.org"))
         }
         addDialogButton(box, "Resend unblock code") {
@@ -2926,6 +2967,20 @@ class MainActivity : AppCompatActivity() {
                 .put("op", "unblock")
                 .put("email", firefoxUnblockEmail)
                 .put("base_url", "https://api.vpn.mozilla.org"))
+        }
+        addDialogButton(box, "Cancel sign-in") {
+            if (firefoxJob != 0L) {
+                firefoxSetStatus("Please wait for the current Firefox account operation.")
+                return@addDialogButton
+            }
+            firefoxPendingId = ""
+            firefoxTotp = false
+            firefoxEmailLink = false
+            firefoxUnblockEmail = ""
+            firefoxLoginPassword = ""
+            dialog.dismiss()
+            renderFirefoxAccountRows()
+            firefoxSetStatus("Direct sign-in cancelled.")
         }
         dialog.setOnShowListener { styleDialogButtons(dialog) }
         dialog.setOnDismissListener {
@@ -2945,11 +3000,13 @@ class MainActivity : AppCompatActivity() {
         if (firefoxJob == 0L && (operation == "login")) {
             firefoxPendingId = ""
             firefoxTotp = false
+            firefoxEmailLink = false
         }
         val message = when (operation) {
             "login" -> "Signing in to Firefox…"
-            "verify_email", "verify_totp" -> "Checking the verification code…"
+            "verify_email", "verify_totp", "confirm_email_link" -> "Checking Firefox account verification…"
             "unblock" -> "Requesting another unblock code…"
+            "cancel" -> "Cancelling sign-in verification…"
             "remove" -> "Removing the saved Firefox account…"
             "list" -> "Loading saved Firefox accounts…"
             "locations" -> "Loading Mozilla regions…"
@@ -3094,15 +3151,19 @@ class MainActivity : AppCompatActivity() {
         if (id == 0L) return
         val raw = try { NativeEngine.nativeFirefoxJobPoll(id) } catch (error: Throwable) {
             firefoxJob = 0L
+            try { NativeEngine.nativeFirefoxJobRelease(id) } catch (_: Throwable) {}
             firefoxSetStatus("Firefox account polling failed: ${error.message}")
             return
         }
-        if (raw.isEmpty()) return
-        val result = try { JSONObject(raw) } catch (_: Throwable) { return }
-        val state = result.optString("status")
+        val result = if (raw.isEmpty()) null else try { JSONObject(raw) } catch (_: Throwable) { null }
+        val state = result?.optString("status").orEmpty()
         if (state == "running") return
         firefoxJob = 0L
         try { NativeEngine.nativeFirefoxJobRelease(id) } catch (_: Throwable) {}
+        if (result == null || (state != "complete" && state != "error")) {
+            firefoxSetStatus("Firefox account polling returned an invalid or missing job.")
+            return
+        }
         val payload = result.optJSONObject("result") ?: result
         if (state == "error") {
             val failedOperation = firefoxOperation
@@ -3111,6 +3172,7 @@ class MainActivity : AppCompatActivity() {
             if (failedOperation == "login") {
                 firefoxLoginPassword = ""
                 firefoxUnblockEmail = ""
+                firefoxEmailLink = false
             }
             if (restartDirectLogin) firefoxCodeDialog?.dismiss()
             firefoxSetStatus(payload.optString("message").ifEmpty { "Firefox account operation failed (${payload.optString("code")})." })
@@ -3123,18 +3185,19 @@ class MainActivity : AppCompatActivity() {
             return
         }
         when (payload.optString("state")) {
-            "email_code", "totp" -> {
+            "email_code", "email_link", "totp" -> {
                 firefoxPendingId = payload.optString("pending_id")
                 firefoxTotp = payload.optString("state") == "totp"
+                firefoxEmailLink = payload.optString("state") == "email_link"
                 firefoxUnblockEmail = ""
                 firefoxLoginPassword = ""
                 dismissFirefoxFlowDialogs()
-                firefoxSetStatus(if (firefoxTotp) {
-                    "Enter the code from your authenticator app."
-                } else {
-                    "Mozilla sent a verification code to your email."
+                firefoxSetStatus(when {
+                    firefoxTotp -> "Enter the code from your authenticator app."
+                    firefoxEmailLink -> "Open Mozilla's emailed confirmation link, then continue."
+                    else -> "Mozilla sent a verification code to your email."
                 }, true)
-                showFirefoxVerificationPrompt(firefoxTotp)
+                showFirefoxVerificationPrompt()
                 renderFirefoxAccountRows()
             }
             "unblock_code" -> {
@@ -3144,6 +3207,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 firefoxPendingId = ""
                 firefoxTotp = false
+                firefoxEmailLink = false
                 dismissFirefoxFlowDialogs()
                 firefoxSetStatus(if (payload.optBoolean("sent")) {
                     "Mozilla blocked this sign-in as unusual and emailed an unblock code."
@@ -3160,6 +3224,7 @@ class MainActivity : AppCompatActivity() {
                 dismissFirefoxFlowDialogs()
                 firefoxPendingId = ""
                 firefoxTotp = false
+                firefoxEmailLink = false
                 firefoxUnblockEmail = ""
                 firefoxLoginPassword = ""
                 if (accountId.isNotEmpty()) {
@@ -3222,14 +3287,18 @@ class MainActivity : AppCompatActivity() {
                     prefs.edit().putString("firefoxAccountId", firefoxSelectedAccountId).apply()
                     firefoxRemovingAccountId = ""
                     firefoxPendingId = ""
+                    firefoxTotp = false
+                    firefoxEmailLink = false
                     firefoxUnblockEmail = ""
                     firefoxLoginPassword = ""
                     saveSettings()
                     firefoxSetStatus("Saved Firefox account removed.", true)
                 }
                 "cancel" -> {
+                    dismissFirefoxFlowDialogs()
                     firefoxPendingId = ""
                     firefoxTotp = false
+                    firefoxEmailLink = false
                     firefoxUnblockEmail = ""
                     firefoxLoginPassword = ""
                     renderFirefoxAccountRows()
@@ -3244,6 +3313,8 @@ class MainActivity : AppCompatActivity() {
                         saveSettings()
                     }
                     firefoxPendingId = ""
+                    firefoxTotp = false
+                    firefoxEmailLink = false
                     firefoxSetStatus("Password reset. Existing sessions were revoked; sign in with the new password.")
                 }
                 else -> {

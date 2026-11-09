@@ -225,6 +225,7 @@ async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<
             match outcome {
                 LoginOutcome::Complete(account) => Ok(json!({"state":"complete", "account": account_json(account)?})),
                 LoginOutcome::EmailCode(pending) => Ok(json!({"state":"email_code", "pending_id":pending.id, "email":pending.email})),
+                LoginOutcome::EmailLink(pending) => Ok(json!({"state":"email_link", "pending_id":pending.id, "email":pending.email})),
                 LoginOutcome::Totp(pending) => Ok(json!({"state":"totp", "pending_id":pending.id, "email":pending.email})),
                 LoginOutcome::UnblockCode(prompt) => Ok(json!({"state":"unblock_code", "email":prompt.email, "sent":prompt.sent})),
             }
@@ -235,6 +236,10 @@ async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<
         }
         "verify_totp" => {
             let account = accounts.verify_totp(&required(&request, "pending_id")?, &required(&request, "code")?).await?;
+            Ok(json!({"state":"complete", "account":account_json(account)?}))
+        }
+        "confirm_email_link" => {
+            let account = accounts.confirm_email_link(&required(&request, "pending_id")?).await?;
             Ok(json!({"state":"complete", "account":account_json(account)?}))
         }
         "resend" => {

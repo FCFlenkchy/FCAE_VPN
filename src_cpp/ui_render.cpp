@@ -1957,6 +1957,7 @@ static bool s_firefox_code_popup_open = false;
 static bool s_firefox_add_should_close = false;
 static bool s_firefox_code_should_close = false;
 static bool s_firefox_unblock_required = false;
+static bool s_firefox_email_link = false;
 static bool s_chain_editor_popup_open = false;
 static int s_protocol_draft = 0;
 static std::vector<int> s_chain_draft;
@@ -2028,6 +2029,7 @@ static void firefox_clear_login_form() {
     g_app.firefox_totp = false;
     g_app.firefox_email[0] = 0;
     s_firefox_unblock_required = false;
+    s_firefox_email_link = false;
 }
 
 static void firefox_select_account(const FirefoxAccountOption& account) {
@@ -2117,20 +2119,34 @@ static void firefox_submit(const std::string& request, const char* pending) {
 static void firefox_poll_job() {
     if (!g_app.firefox_job) return;
     const uint64_t job = g_app.firefox_job;
-    const uint32_t needed = fcae_firefox_job_poll(job, nullptr, 0);
-    if (!needed || needed > 1024 * 1024) {
+    uint32_t needed = fcae_firefox_job_poll(job, nullptr, 0);
+    std::string json;
+    bool valid_snapshot = false;
+    for (int attempt = 0; attempt < 4 && needed && needed <= 1024 * 1024; ++attempt) {
+        json.assign(needed + 1, '\0');
+        const uint32_t written = fcae_firefox_job_poll(job, json.data(), (uint32_t)json.size());
+        if (!written || written > 1024 * 1024) break;
+        if (written <= needed) {
+            json.resize(written);
+            valid_snapshot = true;
+            break;
+        }
+        needed = written;
+    }
+    if (!valid_snapshot) {
         fcae_firefox_job_release(job);
         g_app.firefox_job = 0;
-        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Firefox account job is missing or too large");
+        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Firefox account job is missing, invalid, or too large");
         return;
     }
-    std::string json(needed + 1, '\0');
-    fcae_firefox_job_poll(job, json.data(), (uint32_t)json.size());
-    json.resize(needed);
     const std::string status = firefox_json_string(json, "status");
     if (status == "running") return;
     fcae_firefox_job_release(job);
     g_app.firefox_job = 0;
+    if (status != "complete" && status != "error") {
+        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Firefox account job returned an invalid snapshot");
+        return;
+    }
     if (status == "error") {
         g_app.firefox_remove_in_flight = false;
         s_firefox_removing_account_id.clear();
@@ -2142,6 +2158,7 @@ static void firefox_poll_job() {
             g_app.firefox_password[0] = 0;
             g_app.firefox_code[0] = 0;
             s_firefox_unblock_required = false;
+            s_firefox_email_link = false;
             if (reopen_add) {
                 s_firefox_code_should_close = true;
                 s_firefox_add_popup_open = true;
@@ -2193,18 +2210,21 @@ static void firefox_poll_job() {
         return;
     }
     const std::string state = firefox_json_string(json, "state");
-    if (state == "email_code" || state == "totp") {
+    if (state == "email_code" || state == "email_link" || state == "totp") {
         const std::string pending = firefox_json_string(json, "pending_id");
         snprintf(g_app.firefox_pending_id, sizeof(g_app.firefox_pending_id), "%s", pending.c_str());
         g_app.firefox_totp = state == "totp";
         g_app.firefox_password[0] = 0;
         g_app.firefox_code[0] = 0;
         s_firefox_unblock_required = false;
+        s_firefox_email_link = state == "email_link";
         s_firefox_add_should_close = true;
         s_firefox_code_popup_open = true;
         s_firefox_code_should_close = false;
         snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
-                 g_app.firefox_totp ? "Enter the authenticator code" : "Enter the code sent to your email");
+                 g_app.firefox_totp ? "Enter the authenticator code"
+                    : s_firefox_email_link ? "Open Mozilla's emailed confirmation link, then continue"
+                    : "Enter the code sent to your email");
         return;
     }
     if (state == "unblock_code") {
@@ -2214,6 +2234,7 @@ static void firefox_poll_job() {
         g_app.firefox_totp = false;
         g_app.firefox_code[0] = 0;
         s_firefox_unblock_required = true;
+        s_firefox_email_link = false;
         s_firefox_add_should_close = true;
         s_firefox_code_popup_open = true;
         s_firefox_code_should_close = false;
@@ -2246,6 +2267,7 @@ static void firefox_poll_job() {
         g_app.firefox_pending_id[0] = 0;
         g_app.firefox_totp = false;
         s_firefox_unblock_required = false;
+        s_firefox_email_link = false;
         s_firefox_add_should_close = true;
         s_firefox_code_should_close = true;
         snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Firefox account signed in and selected for connections");
@@ -2265,10 +2287,13 @@ static void firefox_poll_job() {
         g_app.firefox_pending_id[0] = 0;
         g_app.firefox_totp = false;
         s_firefox_unblock_required = false;
+        s_firefox_email_link = false;
+        s_firefox_code_should_close = true;
     } else if (strcmp(g_app.firefox_operation, "reset") == 0) {
         g_app.firefox_password[0] = 0;
         g_app.firefox_code[0] = 0;
         g_app.firefox_pending_id[0] = 0;
+        s_firefox_email_link = false;
         if (json.find("\"account_removed\":true") != std::string::npos) {
             g_app.firefox_account_id[0] = 0;
             s_firefox_account_options.erase(std::remove_if(s_firefox_account_options.begin(), s_firefox_account_options.end(),
@@ -2277,7 +2302,8 @@ static void firefox_poll_job() {
             save_config();
         }
     }
-    snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Firefox account operation completed");
+    snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
+             strcmp(g_app.firefox_operation, "cancel") == 0 ? "Sign-in verification cancelled" : "Firefox account operation completed");
 }
 
 static void firefox_poll_captcha() {
@@ -2533,21 +2559,27 @@ static void render_firefox_code_prompt() {
         return;
     }
     const std::string root = firefox_json_escape(data_dir().c_str());
+    const bool email_link = verification && s_firefox_email_link;
     if (verification) {
         ImGui::TextWrapped("%s", g_app.firefox_totp
             ? "Enter the six-digit code from your authenticator app."
+            : email_link ? "Mozilla sent a confirmation link to your email. Open that link, then continue here. No code is required."
             : "Mozilla sent a verification code to your email. Enter it to finish adding the account.");
     } else {
         ImGui::TextWrapped("Mozilla blocked this direct sign-in as unusual and sent an unblock code to %s.", g_app.firefox_email);
     }
-    ImGui::InputText(verification ? "Verification code" : "Unblock code", g_app.firefox_code, sizeof(g_app.firefox_code));
+    if (!email_link) {
+        ImGui::InputText(verification ? "Verification code" : "Unblock code", g_app.firefox_code, sizeof(g_app.firefox_code));
+    }
     if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
-    ImGui::BeginDisabled(g_app.firefox_job != 0 || !g_app.firefox_code[0]);
-    if (verification && ImGui::Button("Verify")) {
-        const char* operation = g_app.firefox_totp ? "verify_totp" : "verify_email";
-        firefox_submit(std::string("{\"op\":\"") + operation + "\",\"data_dir\":\"" + root
-            + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id)
-            + "\",\"code\":\"" + firefox_json_escape(g_app.firefox_code) + "\"}", "Verifying Firefox account…");
+    ImGui::BeginDisabled(g_app.firefox_job != 0 || (!email_link && !g_app.firefox_code[0]));
+    if (verification && ImGui::Button(email_link ? "Continue after opening link" : "Verify")) {
+        const char* operation = g_app.firefox_totp ? "verify_totp" : email_link ? "confirm_email_link" : "verify_email";
+        std::string request = std::string("{\"op\":\"") + operation + "\",\"data_dir\":\"" + root
+            + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"";
+        if (!email_link) request += ",\"code\":\"" + firefox_json_escape(g_app.firefox_code) + "\"";
+        request += "}";
+        firefox_submit(request, "Checking Firefox account verification…");
     }
     if (!verification && ImGui::Button("Sign in with code")) {
         if (!g_app.firefox_password[0]) {
@@ -2564,7 +2596,7 @@ static void render_firefox_code_prompt() {
     }
     ImGui::EndDisabled();
     ImGui::BeginDisabled(g_app.firefox_job != 0);
-    if (verification && !g_app.firefox_totp) {
+    if (verification && !g_app.firefox_totp && !email_link) {
         ImGui::SameLine();
         if (ImGui::Button("Resend email")) {
             firefox_submit("{\"op\":\"resend\",\"data_dir\":\"" + root
@@ -2581,6 +2613,26 @@ static void render_firefox_code_prompt() {
         }
     }
     ImGui::EndDisabled();
+    if (verification) {
+        ImGui::BeginDisabled(g_app.firefox_job != 0);
+        if (ImGui::Button("Cancel verification")) {
+            firefox_submit("{\"op\":\"cancel\",\"data_dir\":\"" + root
+                + "\",\"pending_id\":\"" + firefox_json_escape(g_app.firefox_pending_id) + "\"}",
+                "Cancelling sign-in verification…");
+        }
+        ImGui::EndDisabled();
+    } else {
+        ImGui::BeginDisabled(g_app.firefox_job != 0);
+        if (ImGui::Button("Cancel sign-in")) {
+            g_app.firefox_password[0] = 0;
+            g_app.firefox_code[0] = 0;
+            s_firefox_unblock_required = false;
+            s_firefox_email_link = false;
+            snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Direct sign-in cancelled");
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+    }
     ImGui::SameLine();
     if (ImGui::Button("Later")) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();

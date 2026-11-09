@@ -155,6 +155,10 @@ impl ControlPlane {
         self.cookies.lock().extend(imported);
     }
 
+    pub fn has_cookies(&self) -> bool {
+        self.cookies.lock().values().any(|cookie| !cookie.value.is_empty())
+    }
+
     pub fn import_cookies_for_hosts(&self, other: &ControlPlane, hosts: &[&str]) {
         let imported = other.cookies.lock().clone();
         let mut target = self.cookies.lock();
@@ -180,7 +184,7 @@ impl ControlPlane {
         let cookies = self.cookies.lock();
         let mut values = cookies.values().filter(|cookie| {
             domain_matches(&request.host, &cookie.domain)
-                && request.path.starts_with(&cookie.path)
+                && path_matches(&request.path, &cookie.path)
                 && !cookie.value.is_empty()
         }).map(|cookie| format!("{}={}", cookie.name, cookie.value)).collect::<Vec<_>>();
         values.sort();
@@ -241,6 +245,16 @@ impl ControlPlane {
 
 fn has_header(request: &ControlRequest, name: &str) -> bool {
     request.headers.iter().any(|(key, _)| key.as_str().eq_ignore_ascii_case(name))
+}
+
+fn path_matches(request_path: &str, cookie_path: &str) -> bool {
+    let path = request_path.split('?').next().unwrap_or(request_path);
+    if cookie_path == "/" || path == cookie_path {
+        return true;
+    }
+    path.strip_prefix(cookie_path).is_some_and(|suffix| {
+        !suffix.is_empty() && (cookie_path.ends_with('/') || suffix.starts_with('/'))
+    })
 }
 
 fn domain_matches(host: &str, domain: &str) -> bool {

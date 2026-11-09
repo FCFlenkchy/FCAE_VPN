@@ -6,7 +6,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use crate::challenge::ChallengeService;
+use crate::challenge::{recover_406, ChallengeService};
 use crate::control::{ControlPlane, ControlRequest, ControlResponse};
 use crate::crypto::{derive_auth_pw, derive_hawk, hawk_header, normalize_code, normalize_email, random_urlsafe, valid_email};
 use crate::error::{FirefoxError, Result};
@@ -32,6 +32,12 @@ pub struct LoginResponse {
     pub verification_reason: Option<String>,
     #[serde(default, rename = "authAt")]
     pub auth_at: u64,
+}
+
+impl Drop for LoginResponse {
+    fn drop(&mut self) {
+        self.session_token.zeroize();
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,24 +67,13 @@ impl Fxa {
         self
     }
 
-    async fn request(&self, request: ControlRequest) -> Result<ControlResponse> {
-        let response = self.http.send(request.clone()).await?;
-        self.recover_406(request, response).await
+    pub(crate) fn challenge_service(&self) -> Option<Arc<ChallengeService>> {
+        self.challenges.clone()
     }
 
-    async fn recover_406(&self, request: ControlRequest, mut response: ControlResponse) -> Result<ControlResponse> {
-        let mut attempts = 0;
-        while response.status == 406 {
-            if attempts >= 3 {
-                return Err(FirefoxError::ChallengeRequired);
-            }
-            let Some(challenges) = &self.challenges else { return Err(FirefoxError::ChallengeRequired) };
-            let origin = format!("https://{}", request.host);
-            challenges.solve(&self.http, &response, &origin).await?;
-            attempts += 1;
-            response = self.http.send(request.clone()).await?;
-        }
-        Ok(response)
+    async fn request(&self, request: ControlRequest) -> Result<ControlResponse> {
+        let response = self.http.send(request.clone()).await?;
+        recover_406(&self.http, self.challenges.as_deref(), request, response).await
     }
 
     pub async fn login(&self, email: &str, password: &str, unblock_code: Option<&str>) -> Result<LoginResponse> {
@@ -87,7 +82,7 @@ impl Fxa {
             return Err(FirefoxError::InvalidConfig("a valid email and non-empty password are required".into()));
         }
         match self.login_as(&email, None, password, unblock_code, true).await {
-            Err(FirefoxError::EmailCaseCorrection(corrected)) if corrected != email => {
+            Err(FirefoxError::EmailCaseCorrection(corrected)) if !corrected.is_empty() && corrected != email => {
                 match self.login_as(&corrected, Some(&email), password, unblock_code, true).await {
                     Err(error) if is_request_blocked(&error) => {
                         Err(FirefoxError::UnblockCodeRequired(corrected))
@@ -122,8 +117,8 @@ impl Fxa {
         if verification {
             body["verificationMethod"] = serde_json::Value::String("email-2fa".into());
         }
-        if let Some(code) = unblock_code.filter(|code| !code.is_empty()) {
-            body["unblockCode"] = serde_json::Value::String(normalize_code(code).to_ascii_uppercase());
+        if let Some(code) = unblock_code.map(normalize_code).filter(|code| !code.is_empty()) {
+            body["unblockCode"] = serde_json::Value::String(code.to_ascii_uppercase());
         }
         auth_pw.zeroize();
         let request = ControlRequest::new(Method::POST, &format!("{FXA_AUTH}/account/login"))?.json(&body)?;
@@ -149,7 +144,11 @@ impl Fxa {
     }
 
     pub async fn verify_email_code(&self, session_token: &str, code: &str) -> Result<()> {
-        let body = serde_json::to_vec(&serde_json::json!({"code": normalize_code(code)}))?;
+        let code = normalize_code(code);
+        if code.is_empty() {
+            return Err(FirefoxError::InvalidConfig("the emailed verification code cannot be empty".into()));
+        }
+        let body = serde_json::to_vec(&serde_json::json!({"code": code}))?;
         self.hawk_json(Method::POST, &format!("{FXA_AUTH}/session/verify_code"), session_token, body).await?;
         Ok(())
     }
@@ -160,7 +159,11 @@ impl Fxa {
     }
 
     pub async fn verify_totp(&self, session_token: &str, code: &str) -> Result<()> {
-        let body = serde_json::to_vec(&serde_json::json!({"code": normalize_code(code)}))?;
+        let code = normalize_code(code);
+        if code.is_empty() {
+            return Err(FirefoxError::InvalidConfig("the authenticator code cannot be empty".into()));
+        }
+        let body = serde_json::to_vec(&serde_json::json!({"code": code}))?;
         let response = self.hawk_json(Method::POST, &format!("{FXA_AUTH}/session/verify/totp"), session_token, body).await?;
         let result: serde_json::Value = response.json()?;
         if result.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
@@ -203,7 +206,10 @@ impl Fxa {
                     Ok(response) if response.status == 200 => parse_tokens(response),
                     Ok(response) if response.status == 406 => self.oauth_code(session_token).await,
                     Ok(response) => Err(api_error("api.accounts.firefox.com", response)),
-                    Err(error) => Err(error),
+                    Err(error) => {
+                        log::debug!("[firefox] direct OAuth HTTP/2 retry failed; using authorization code flow: {error}");
+                        self.oauth_code(session_token).await
+                    },
                 }
             }
             Ok(response) => Err(api_error("api.accounts.firefox.com", response)),
@@ -258,19 +264,24 @@ impl Fxa {
         }))?;
         let request = oauth_request(&format!("{FXA_AUTH}/oauth/token"), body.clone())?;
         let primary = self.http.send(request.clone()).await?;
-        let response = if primary.status == 406 {
+        let (response, response_host) = if primary.status == 406 {
             let alternate = self.http.send(oauth_request(&format!("{FXA_OAUTH}/token"), body)?).await;
             match alternate {
-                Ok(response) if response.status != 406 => response,
-                _ => self.recover_406(request, primary).await?,
+                Ok(response) if response.status != 406 => (response, "oauth.accounts.firefox.com"),
+                _ => (recover_406(&self.http, self.challenges.as_deref(), request, primary).await?, "api.accounts.firefox.com"),
             }
         } else {
-            primary
+            (primary, "api.accounts.firefox.com")
         };
-        if matches!(response.status, 400 | 401 | 403) && response.errno() != Some(102) {
+        let rejected = if response_host == "oauth.accounts.firefox.com" {
+            response.status == 400 && response.errno() == Some(108)
+        } else {
+            matches!(response.status, 400 | 401 | 403) && response.errno() != Some(107)
+        };
+        if rejected {
             return Err(FirefoxError::ReauthRequired);
         }
-        ensure_success(&response, "oauth.accounts.firefox.com")?;
+        ensure_success(&response, response_host)?;
         parse_tokens(response)
     }
 
@@ -290,7 +301,7 @@ impl Fxa {
         let response = self.request(ControlRequest::new(Method::POST, &format!("{FXA_AUTH}/account/device"))?
             .header("authorization", format!("Bearer {refresh_token}"))?
             .json(&body)?).await?;
-        if matches!(response.status, 400 | 401 | 403) {
+        if matches!(response.status, 400 | 401 | 403) && response.errno() != Some(107) {
             return Err(FirefoxError::ReauthRequired);
         }
         ensure_success(&response, "api.accounts.firefox.com")?;

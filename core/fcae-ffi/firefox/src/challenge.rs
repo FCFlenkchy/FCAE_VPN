@@ -24,6 +24,26 @@ pub struct ChallengeService {
     slot: tokio::sync::Mutex<()>,
 }
 
+pub(crate) async fn recover_406(
+    http: &ControlPlane,
+    challenges: Option<&ChallengeService>,
+    request: ControlRequest,
+    mut response: ControlResponse,
+) -> Result<ControlResponse> {
+    let mut attempts = 0;
+    while response.status == 406 {
+        if attempts >= 3 {
+            return Err(FirefoxError::ChallengeRequired);
+        }
+        let challenges = challenges.ok_or(FirefoxError::ChallengeRequired)?;
+        let origin = format!("https://{}", request.host);
+        challenges.solve(http, &response, &origin).await?;
+        attempts += 1;
+        response = http.send(request.clone()).await?;
+    }
+    Ok(response)
+}
+
 impl ChallengeService {
     pub fn new(captcha: Option<Arc<dyn CaptchaSolver>>) -> Self {
         Self { captcha, slot: tokio::sync::Mutex::new(()) }
@@ -53,6 +73,9 @@ impl ChallengeService {
                     self.solve_host(&solver_http, base).await
                 };
                 match solved {
+                    Ok(()) if !solver_http.has_cookies() => {
+                        last = FirefoxError::Protocol("challenge completed but no cookies were issued".into());
+                    }
                     Ok(()) => {
                         parent.import_cookies_for_hosts(&solver_http, &[
                             "accounts.firefox.com",
@@ -229,7 +252,7 @@ async fn fetch_pat(http: &ControlPlane, prefix: &str, token: &str) -> Result<Str
         return Err(FirefoxError::Protocol(format!("PAT request returned HTTP {}", response.status)));
     }
     let value: serde_json::Value = response.json()?;
-    value.get("auth").and_then(serde_json::Value::as_str).map(str::to_string)
+    value.get("auth").and_then(serde_json::Value::as_str).filter(|auth| !auth.is_empty()).map(str::to_string)
         .ok_or_else(|| FirefoxError::Protocol("PAT response has no auth token".into()))
 }
 
@@ -260,8 +283,9 @@ fn challenge_prefix(page: &str) -> Option<String> {
 }
 
 fn parse_challenge_init(script: &str, prefix: &str) -> Result<(Vec<Challenge>, String)> {
+    let mut legacy = None;
     for (index, _) in script.rmatch_indices("init") {
-        if index > 0 && script.as_bytes()[index - 1].is_ascii_alphanumeric() {
+        if index > 0 && (script.as_bytes()[index - 1].is_ascii_alphanumeric() || script.as_bytes()[index - 1] == b'_') {
             continue;
         }
         let mut rest = &script[index + 4..];
@@ -272,10 +296,24 @@ fn parse_challenge_init(script: &str, prefix: &str) -> Result<(Vec<Challenge>, S
             continue;
         }
         let Some((challenges, used)) = decode_one::<Vec<Challenge>>(rest) else { continue };
+        if challenges.is_empty() || challenges.len() > 16
+            || challenges.iter().any(|challenge| challenge.ty.trim().is_empty())
+        {
+            continue;
+        }
         rest = rest[used..].trim_start();
         let Some(after_comma) = rest.strip_prefix(',') else { continue };
         let Some((token, used)) = decode_one::<String>(after_comma.trim_start()) else { continue };
+        if token.trim().is_empty() {
+            continue;
+        }
         rest = after_comma.trim_start()[used..].trim_start();
+        if rest.starts_with(')') {
+            if legacy.is_none() {
+                legacy = Some((challenges, token));
+            }
+            continue;
+        }
         let Some(after_comma) = rest.strip_prefix(',') else { continue };
         let Some((script_prefix, used)) = decode_one::<String>(after_comma.trim_start()) else { continue };
         rest = after_comma.trim_start()[used..].trim_start();
@@ -283,14 +321,15 @@ fn parse_challenge_init(script: &str, prefix: &str) -> Result<(Vec<Challenge>, S
             let Some(end) = comment.find("*/") else { break };
             rest = comment[end + 2..].trim_start();
         }
-        if script_prefix == prefix && !token.is_empty() && !challenges.is_empty()
-            && challenges.iter().all(|challenge| !challenge.ty.is_empty())
-            && (rest.starts_with(')') || rest.starts_with(','))
-        {
+        if script_prefix == prefix && has_init_delimiter(rest) {
             return Ok((challenges, token));
         }
     }
-    Err(FirefoxError::Protocol("valid Fastly challenge init call was not found".into()))
+    legacy.ok_or_else(|| FirefoxError::Protocol("valid Fastly challenge init call was not found".into()))
+}
+
+fn has_init_delimiter(rest: &str) -> bool {
+    rest.starts_with(')') || rest.strip_prefix(',').is_some_and(|tail| !tail.trim_start().is_empty())
 }
 
 fn decode_one<T: DeserializeOwned>(input: &str) -> Option<(T, usize)> {

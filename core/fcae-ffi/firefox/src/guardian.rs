@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -5,6 +6,7 @@ use chrono::{DateTime, Utc};
 use http::{HeaderMap, Method};
 use serde::Deserialize;
 
+use crate::challenge::{recover_406, ChallengeService};
 use crate::control::{ControlPlane, ControlRequest, ControlResponse};
 use crate::error::{FirefoxError, Result};
 use crate::types::{ProxyPass, ProxyPassClaims, Usage};
@@ -29,11 +31,17 @@ pub struct Entitlement {
 pub struct Guardian {
     http: ControlPlane,
     endpoint: String,
+    challenges: Option<Arc<ChallengeService>>,
 }
 
 impl Guardian {
     pub fn new(http: ControlPlane) -> Self {
-        Self { http, endpoint: DEFAULT_ENDPOINT.into() }
+        Self { http, endpoint: DEFAULT_ENDPOINT.into(), challenges: None }
+    }
+
+    pub fn with_challenges(mut self, challenges: Option<Arc<ChallengeService>>) -> Self {
+        self.challenges = challenges;
+        self
     }
 
     pub fn with_endpoint(http: ControlPlane, endpoint: &str) -> Result<Self> {
@@ -41,7 +49,7 @@ impl Guardian {
         if parsed.scheme() != "https" || parsed.host_str().is_none() || !parsed.username().is_empty() || parsed.password().is_some() {
             return Err(FirefoxError::InvalidConfig("Guardian endpoint must be a credential-free HTTPS URL".into()));
         }
-        Ok(Self { http, endpoint: endpoint.trim_end_matches('/').into() })
+        Ok(Self { http, endpoint: endpoint.trim_end_matches('/').into(), challenges: None })
     }
 
     async fn get(&self, method: Method, path: &str, access_token: &str) -> Result<ControlResponse> {
@@ -49,7 +57,8 @@ impl Guardian {
             .header("authorization", format!("Bearer {access_token}"))?
             .header("content-type", "application/json")?
             .header("cache-control", "max-age=0")?;
-        self.http.send(request).await
+        let response = self.http.send(request.clone()).await?;
+        recover_406(&self.http, self.challenges.as_deref(), request, response).await
     }
 
     pub async fn fetch_pass(&self, access_token: &str) -> Result<ProxyPass> {
