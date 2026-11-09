@@ -10,6 +10,7 @@
 #include <new>
 #include <cerrno>
 #include <cstring>
+#include <cstdarg>
 #include <utility>
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -58,6 +59,16 @@ static std::vector<int> parse_chain_transports(const std::string& value) {
 }
 
 AppState g_app;
+static uint64_t s_save_status_revision = 0;
+static uint64_t s_save_status_painted_revision = 0;
+
+static void set_save_status(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    vsnprintf(g_app.save_status, sizeof(g_app.save_status), format, args);
+    va_end(args);
+    ++s_save_status_revision;
+}
 static bool s_loaded_chain_transports = false;
 static bool s_loaded_socks_port = false;
 static bool s_loaded_http_port = false;
@@ -492,6 +503,8 @@ static uint64_t config_signature() {
 
 /// Fingerprint of everything the UI paints. Unchanged fingerprint + no input ⇒
 /// the next frame would be pixel-identical, so it can be skipped.
+static bool s_error_detail_visible = false;
+
 static uint64_t ui_content_signature() {
     uint64_t h = 1469598103934665603ull;   // FNV-1a offset basis
 
@@ -505,6 +518,7 @@ static uint64_t ui_content_signature() {
     h = fnv_cstr(h, t.connected_peer);
     h = fnv_cstr(h, t.lan_ip);
     h = fnv_cstr(h, t.last_error);
+    h = fnv_value(h, s_error_detail_visible);
 
     // Log revision also detects identical new lines after the ring fills.
     {
@@ -676,6 +690,40 @@ void ui_set_window_focused(bool focused) {
     s_ui_window_focused.store(focused);
 }
 
+static void update_error_detail(double now) {
+    static std::string previous_error;
+    static bool was_error = false;
+    static double deadline = 0.0;
+    const bool is_error = g_app.telem.state == FCAE_STATE_ERROR;
+    const std::string error = is_error ? g_app.telem.last_error : "";
+    if (!is_error || error.empty()) {
+        previous_error.clear();
+        was_error = is_error;
+        s_error_detail_visible = false;
+        deadline = 0.0;
+        return;
+    }
+    if (!was_error || error != previous_error) {
+        previous_error = error;
+        deadline = now + 3.0;
+    }
+    was_error = true;
+    s_error_detail_visible = now < deadline;
+}
+
+static void expire_save_status(double now) {
+    static uint64_t observed_revision = 0;
+    static double deadline = 0.0;
+    if (observed_revision != s_save_status_revision) {
+        observed_revision = s_save_status_revision;
+        deadline = g_app.save_status[0] ? now + 3.0 : 0.0;
+    }
+    if (deadline && now >= deadline) {
+        g_app.save_status[0] = 0;
+        deadline = 0.0;
+    }
+}
+
 static void firefox_poll_captcha();
 static void firefox_poll_job();
 static void firefox_poll_background();
@@ -702,6 +750,8 @@ bool ui_should_render(bool interacting) {
 
     // Telemetry and locally animated sponsor frames change without input.
     ui_poll_telemetry(now);
+    update_error_detail(now);
+    expire_save_status(now);
     poll_sponsor();
     firefox_poll_captcha();
     firefox_poll_job();
@@ -716,7 +766,8 @@ bool ui_should_render(bool interacting) {
 
     // A redraw request is only cleared once a frame is really painted, so it
     // cannot be lost while the window is minimized.
-    if (g_app.redraw_requested.load() || s_log_scroll_pending) return true;
+    if (g_app.redraw_requested.load() || s_log_scroll_pending ||
+        (g_app.save_status[0] && s_save_status_painted_revision != s_save_status_revision)) return true;
 
     // The user is interacting: paint every frame the caller offers (hover,
     // drag, typing, scroll). The platform caps this at ~30 FPS.
@@ -1200,7 +1251,7 @@ static bool save_config(bool quiet = false) {
     FILE* f = open_cfg(temporary, "wb");
     if (!f) {
         s_config_needs_retry = true;
-        snprintf(g_app.save_status, sizeof(g_app.save_status), "Save failed");
+        set_save_status("Save failed");
         g_app.add_log(1, ("[ui] save failed: " + path).c_str());
         return false;
     }
@@ -1319,13 +1370,13 @@ static bool save_config(bool quiet = false) {
 #endif
     if (!replaced) {
         s_config_needs_retry = true;
-        snprintf(g_app.save_status, sizeof(g_app.save_status), "Save failed");
+        set_save_status("Save failed");
         g_app.add_log(1, ("[ui] save failed: " + path).c_str());
         return false;
     }
     s_config_needs_retry = false;
     if (!quiet) {
-        snprintf(g_app.save_status, sizeof(g_app.save_status), "Config saved!");
+        set_save_status("Config saved!");
         g_app.add_log(4, ("[ui] config saved: " + path).c_str());
     }
     return true;
@@ -1435,7 +1486,7 @@ static bool load_config_from(const std::string& path) {
             return transport < 0 || transport > 10;
         }),
         g_app.chain_transports.end());
-    snprintf(g_app.save_status, sizeof(g_app.save_status), "Config loaded!");
+    set_save_status("Config loaded!");
     g_app.add_log(4, ("[ui] config loaded (" + std::to_string(applied) + " keys): " + path).c_str());
     return true;
 }
@@ -1626,7 +1677,7 @@ void ui_init() {
             // TUN (full-system) mode on every desktop platform; a saved config
             // keeps whatever the user last chose.
             if (save_config()) {
-                snprintf(g_app.save_status, sizeof(g_app.save_status), "Created FCAE_VPN.cfg");
+                set_save_status("Created FCAE_VPN.cfg");
                 g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
             }
         }
@@ -2136,7 +2187,7 @@ static void open_link(const char* url) {
 
 static ImVec2 viewport_center() {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    return ImVec2(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y * 0.5f);
+    return ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f);
 }
 
 static const char* const kLinkTelegram = "https://t.me/FCAE_VPN";
@@ -2241,10 +2292,21 @@ struct FirefoxAccountOption {
     bool usage_exhausted = false;
 };
 
+static bool s_firefox_has_locations = false;
 static std::vector<FirefoxLocationOption> s_firefox_location_options = {
     {"", "Automatic (recommended)", ""},
 };
 static std::vector<FirefoxAccountOption> s_firefox_account_options;
+static uint64_t s_firefox_status_revision = 0;
+
+static void set_firefox_status(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    vsnprintf(g_app.firefox_status, sizeof(g_app.firefox_status), format, args);
+    va_end(args);
+    ++s_firefox_status_revision;
+}
+
 static void firefox_submit(const std::string& request, const char* pending);
 static void firefox_start_regions(bool cached);
 static void firefox_queue_usage(const std::string& id);
@@ -2428,14 +2490,16 @@ static void firefox_submit(const std::string& request, const char* pending) {
         g_app.firefox_operation[0] = 0;
         g_app.firefox_remove_in_flight = false;
     }
-    snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
+    set_firefox_status("%s",
              g_app.firefox_job ? pending : "Could not submit the Firefox account operation");
 }
 
 static void firefox_expire_status(double now) {
     static std::string observed;
+    static uint64_t observed_revision = 0;
     static double deadline = 0.0;
-    if (observed != g_app.firefox_status) {
+    if (observed_revision != s_firefox_status_revision || observed != g_app.firefox_status) {
+        observed_revision = s_firefox_status_revision;
         observed = g_app.firefox_status;
         deadline = 0.0;
     }
@@ -2471,7 +2535,7 @@ static void firefox_poll_job() {
     if (!valid_snapshot) {
         fcae_firefox_job_release(job);
         g_app.firefox_job = 0;
-        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Firefox account job is missing, invalid, or too large");
+        set_firefox_status("Firefox account job is missing, invalid, or too large");
         return;
     }
     const std::string status = firefox_json_string(json, "status");
@@ -2479,14 +2543,14 @@ static void firefox_poll_job() {
     fcae_firefox_job_release(job);
     g_app.firefox_job = 0;
     if (status != "complete" && status != "error") {
-        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Firefox account job returned an invalid snapshot");
+        set_firefox_status("Firefox account job returned an invalid snapshot");
         return;
     }
     if (status == "error") {
         g_app.firefox_remove_in_flight = false;
         s_firefox_removing_account_id.clear();
         const std::string message = firefox_json_string(json, "message");
-        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
+        set_firefox_status("%s",
                  message.empty() ? "Firefox account operation failed" : message.c_str());
         if (strcmp(g_app.firefox_operation, "login") == 0) {
             const bool reopen_add = s_firefox_unblock_required;
@@ -2516,9 +2580,10 @@ static void firefox_poll_job() {
             }
             options = std::move(unique);
             s_firefox_location_options = std::move(options);
-            snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Mozilla region list updated");
+            s_firefox_has_locations = true;
+            set_firefox_status("Mozilla region list updated");
         } else {
-            snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
+            set_firefox_status(
                      "No Mozilla regions are available; the saved location is preserved");
         }
         return;
@@ -2537,7 +2602,7 @@ static void firefox_poll_job() {
             snprintf(g_app.firefox_email, sizeof(g_app.firefox_email), "%s", selected->email.c_str());
         }
         for (const auto& account : s_firefox_account_options) firefox_queue_usage(account.id);
-        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
+        set_firefox_status("%s",
                  s_firefox_account_options.empty() ? "No saved Firefox accounts" : "Saved Firefox accounts loaded");
         return;
     }
@@ -2553,7 +2618,7 @@ static void firefox_poll_job() {
         s_firefox_add_should_close = true;
         s_firefox_code_popup_open = true;
         s_firefox_code_should_close = false;
-        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
+        set_firefox_status("%s",
                  g_app.firefox_totp ? "Enter the authenticator code"
                     : s_firefox_email_link ? "Open Mozilla's emailed confirmation link, then continue"
                     : "Enter the code sent to your email");
@@ -2570,7 +2635,7 @@ static void firefox_poll_job() {
         s_firefox_add_should_close = true;
         s_firefox_code_popup_open = true;
         s_firefox_code_should_close = false;
-        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
+        set_firefox_status("%s",
                  json.find("\"sent\":true") != std::string::npos
                     ? "Mozilla emailed an unblock code. Enter it to continue sign-in."
                     : "That unblock code was not accepted. Check the latest email from Mozilla.");
@@ -2605,7 +2670,7 @@ static void firefox_poll_job() {
         s_firefox_email_link = false;
         s_firefox_add_should_close = true;
         s_firefox_code_should_close = true;
-        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Firefox account signed in and selected for connections");
+        set_firefox_status("Firefox account signed in and selected for connections");
         return;
     }
     if (g_app.firefox_remove_in_flight) {
@@ -2637,7 +2702,7 @@ static void firefox_poll_job() {
             save_config();
         }
     }
-    snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
+    set_firefox_status("%s",
              strcmp(g_app.firefox_operation, "cancel") == 0 ? "Sign-in verification cancelled" : "Firefox account operation completed");
 }
 
@@ -2711,11 +2776,21 @@ static void firefox_poll_background() {
                         if (std::none_of(unique.begin(), unique.end(), [&](const FirefoxLocationOption& x) { return x.value == option.value; })) unique.push_back(std::move(option));
                     }
                     s_firefox_location_options = std::move(unique);
+                    s_firefox_has_locations = true;
                 }
             }
             if (s_firefox_region_cached) firefox_start_regions(false);
-            else if (status != "complete" && !g_app.firefox_job)
-                snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Could not refresh Mozilla regions; saved regions remain available");
+            else if (status != "complete") {
+                std::string reason = firefox_json_string(json, "message");
+                if (reason.empty()) reason = "Could not read the region refresh result";
+                const std::string log = "[firefox] Mozilla regions refresh failed: " + reason;
+                g_app.add_log(FCAE_LOG_WARN, log.c_str());
+                if (!g_app.firefox_job) {
+                    set_firefox_status("%s: %s",
+                        s_firefox_has_locations ? "Region refresh failed; using previous regions" : "Region refresh failed",
+                        reason.c_str());
+                }
+            }
             g_app.redraw_requested.store(true);
         }
     }
@@ -2751,13 +2826,13 @@ static void firefox_poll_captcha() {
         g_app.firefox_captcha_id = id;
         g_app.firefox_captcha_opened = 0;
         g_app.firefox_captcha_answer[0] = 0;
-        if (id) snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
+        if (id) set_firefox_status(
                          "Enter the CAPTCHA in Firefox settings to continue sign-in");
     }
     if (id && g_app.firefox_captcha_opened != id) {
         g_app.firefox_captcha_opened = id;
         if (!firefox_open_captcha(id)) {
-            snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
+            set_firefox_status(
                      "Could not open the CAPTCHA viewer; use Open CAPTCHA image to retry");
         }
     }
@@ -2810,6 +2885,16 @@ static void apply_transport(int transport) {
     }
 }
 
+static ImVec2 modal_size(float width, float height) {
+    const ImVec2 work = ImGui::GetMainViewport()->WorkSize;
+    return ImVec2(std::max(1.0f, std::min(width, work.x - 24.0f)),
+                  std::max(1.0f, std::min(height, work.y - 24.0f)));
+}
+
+static void constrain_modal() {
+    ImGui::SetNextWindowSizeConstraints(ImVec2(1, 1), modal_size(10000.0f, 10000.0f));
+}
+
 static void open_protocol_editor() {
     s_protocol_draft = current_transport();
     s_chain_draft = g_app.chain_transports;
@@ -2821,24 +2906,28 @@ static void render_protocol_editor() {
         ImGui::OpenPopup("##protocol-editor");
         s_chain_editor_popup_open = false;
     }
-    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(600, 0), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("##protocol-editor", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(modal_size(600.0f, 650.0f), ImGuiCond_Always);
+    if (!ImGui::BeginPopupModal("##protocol-editor", nullptr, ImGuiWindowFlags_NoResize)) return;
 
     bool changed = false;
+    const float footer_width = ImGui::CalcTextSize("+ Add exit").x + ImGui::CalcTextSize("Close").x
+        + 4.0f * ImGui::GetStyle().FramePadding.x + ImGui::GetStyle().ItemSpacing.x;
+    const bool compact_footer = ImGui::GetContentRegionAvail().x < footer_width;
+    const float footer_height = ImGui::GetFrameHeightWithSpacing() * (compact_footer ? 2.0f : 1.0f) + 8.0f;
+    ImGui::BeginChild("##protocol-scroll", ImVec2(0, -footer_height),
+                      ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
     for (int i = 0; i < (int)IM_ARRAYSIZE(kTransportNames); ++i) {
         changed |= ImGui::RadioButton(kTransportNames[i], &s_protocol_draft, i);
     }
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     ImGui::Text("Additional exits (optional)");
-    const float exit_list_height = std::min(240.0f, ImGui::GetMainViewport()->WorkSize.y * 0.35f);
-    ImGui::BeginChild("##exit-list", ImVec2(0, exit_list_height), ImGuiChildFlags_None);
     int remove_index = -1;
     for (size_t i = 0; i < s_chain_draft.size(); ++i) {
         ImGui::PushID((int)i);
         ImGui::Text("Exit %d", (int)i + 1);
-        ImGui::SameLine(90);
-        ImGui::SetNextItemWidth(350);
+        const float remove_width = ImGui::CalcTextSize("Remove").x + 2.0f * ImGui::GetStyle().FramePadding.x;
+        ImGui::SetNextItemWidth(std::max(1.0f, ImGui::GetContentRegionAvail().x - remove_width - ImGui::GetStyle().ItemSpacing.x));
         changed |= ImGui::Combo("##transport", &s_chain_draft[i], kTransportNames, IM_ARRAYSIZE(kTransportNames));
         ImGui::SameLine();
         if (ImGui::Button("Remove")) remove_index = (int)i;
@@ -2847,12 +2936,12 @@ static void render_protocol_editor() {
     ImGui::EndChild();
     if (remove_index >= 0) { s_chain_draft.erase(s_chain_draft.begin() + remove_index); changed = true; }
     if (ImGui::Button("+ Add exit")) { s_chain_draft.push_back(0); changed = true; }
+    if (!compact_footer) ImGui::SameLine();
+    if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
     if (changed) {
         apply_transport(s_protocol_draft);
         g_app.chain_transports = s_chain_draft;
     }
-    ImGui::Spacing();
-    if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
 
@@ -2871,19 +2960,16 @@ static void render_firefox_settings() {
         ImGui::OpenPopup("Firefox IP Protection settings");
         s_firefox_settings_popup_open = false;
     }
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(
-        std::max(320.0f, std::min(680.0f, viewport->Size.x - 24.0f)),
-        std::max(320.0f, std::min(620.0f, viewport->Size.y - 24.0f))), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Firefox IP Protection settings", nullptr)) {
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(modal_size(680.0f, 620.0f), ImGuiCond_Always);
+    if (!ImGui::BeginPopupModal("Firefox IP Protection settings", nullptr, ImGuiWindowFlags_NoResize)) {
         s_firefox_settings_visible = false;
         return;
     }
     s_firefox_settings_visible = true;
     ImGui::BeginChild("##firefox_scroll",
         ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8.0f),
-        ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
     const std::string root = firefox_json_escape(data_dir().c_str());
     firefox_location_combo();
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
@@ -2894,10 +2980,10 @@ static void render_firefox_settings() {
         if (ImGui::Button("Submit CAPTCHA answer")) {
             if (fcae_firefox_captcha_answer(g_app.firefox_captcha_id, g_app.firefox_captcha_answer)) {
                 g_app.firefox_captcha_answer[0] = 0;
-                snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
+                set_firefox_status(
                          "CAPTCHA answer submitted; continuing Firefox account sign-in");
             } else {
-                snprintf(g_app.firefox_status, sizeof(g_app.firefox_status),
+                set_firefox_status(
                          "CAPTCHA answer is empty, expired, or already submitted");
             }
         }
@@ -2905,7 +2991,7 @@ static void render_firefox_settings() {
         if (ImGui::Button("Open CAPTCHA image")) {
             g_app.firefox_captcha_opened = g_app.firefox_captcha_id;
             if (!firefox_open_captcha(g_app.firefox_captcha_id)) {
-                snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Could not open the CAPTCHA image");
+                set_firefox_status("Could not open the CAPTCHA image");
             }
         }
     }
@@ -2940,7 +3026,8 @@ static void render_firefox_add_account() {
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Add Firefox account", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    constrain_modal();
+    if (!ImGui::BeginPopupModal("Add Firefox account", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
     if (s_firefox_add_should_close) {
         s_firefox_add_should_close = false;
         ImGui::CloseCurrentPopup();
@@ -2982,7 +3069,8 @@ static void render_firefox_code_prompt() {
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(500, 0), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Firefox account security code", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    constrain_modal();
+    if (!ImGui::BeginPopupModal("Firefox account security code", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) return;
     if (s_firefox_code_should_close) {
         s_firefox_code_should_close = false;
         ImGui::CloseCurrentPopup();
@@ -3014,7 +3102,7 @@ static void render_firefox_code_prompt() {
     }
     if (!verification && ImGui::Button("Sign in with code")) {
         if (!g_app.firefox_password[0]) {
-            snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Restart direct sign-in to enter the password again");
+            set_firefox_status("Restart direct sign-in to enter the password again");
             s_firefox_unblock_required = false;
             ImGui::CloseCurrentPopup();
         } else {
@@ -3059,7 +3147,7 @@ static void render_firefox_code_prompt() {
             g_app.firefox_code[0] = 0;
             s_firefox_unblock_required = false;
             s_firefox_email_link = false;
-            snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "Direct sign-in cancelled");
+            set_firefox_status("Direct sign-in cancelled");
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndDisabled();
@@ -3168,7 +3256,7 @@ void render_ui() {
                     char msg[256];
                     snprintf(msg, sizeof(msg), "Cannot start: enable %s for this session.", disabled);
                     g_app.add_log(FCAE_LOG_ERROR, msg);
-                    snprintf(g_app.save_status, sizeof(g_app.save_status), "%s", msg);
+                    set_save_status("%s", msg);
                     ImGui::PopStyleColor(3);
                     ImGui::PopStyleVar(2);
                     ImGui::PopStyleVar(2);
@@ -3209,7 +3297,7 @@ void render_ui() {
                             static_cast<unsigned long>(child_pid));
                         if (sei.hProcess) CloseHandle(sei.hProcess);
                         g_app.add_log(FCAE_LOG_INFO, msg);
-                        snprintf(g_app.save_status, sizeof(g_app.save_status),
+                        set_save_status(
                             "Restarting elevated -- current copy will close");
                         std::thread([] {
                             // Hand-off window: enough for UAC to dismiss and
@@ -3241,10 +3329,8 @@ void render_ui() {
                             "elevated once and the elevated copy will handle every future start.",
                             why, static_cast<unsigned long>(err));
                         g_app.add_log(FCAE_LOG_ERROR, msg);
-                        // The status string is shown next to the CONNECT button
-                        // until cleared, so the user gets persistent feedback
-                        // even if the log scrolls.
-                        snprintf(g_app.save_status, sizeof(g_app.save_status),
+                        // The transient status is backed by the log entry above.
+                        set_save_status(
                             "TUN needs Admin (error %lu) -- click CONNECT to retry UAC",
                             static_cast<unsigned long>(err));
                         ImGui::PopStyleColor(3);  // button colors
@@ -3257,7 +3343,7 @@ void render_ui() {
                     g_app.add_log(FCAE_LOG_ERROR,
                         "[ui] TUN mode requires root privileges on this platform. "
                         "Restart the app with sudo (or as Administrator via pkexec/polkit) and try again.");
-                    snprintf(g_app.save_status, sizeof(g_app.save_status),
+                    set_save_status(
                         "TUN needs root -- restart with sudo");
                     ImGui::PopStyleColor(3);  // button colors
                     ImGui::PopStyleVar(2);    // status bar FrameRounding/FramePadding
@@ -3443,7 +3529,7 @@ void render_ui() {
 
         ImGui::SameLine(0, 10);
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
-        if (errored && telem.last_error[0]) {
+        if (errored && telem.last_error[0] && s_error_detail_visible) {
             ImGui::Text("ERROR: %s", telem.last_error);
         } else {
             ImGui::Text("%s", state_label(cur));
@@ -3455,7 +3541,7 @@ void render_ui() {
         if (g_app.save_status[0]) {
             ImGui::SameLine(0, 8);
             ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "%s", g_app.save_status);
-            g_app.save_status[0] = '\0';
+            s_save_status_painted_revision = s_save_status_revision;
         }
 
         {
@@ -3558,8 +3644,9 @@ void render_ui() {
                 s_update_popup_open = false;
             }
             ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            constrain_modal();
             if (ImGui::BeginPopupModal("##update_popup", nullptr,
-                    ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) {
                 ImGui::Text("Update Available");
                 ImGui::Spacing();
                 ImGui::Text("Current: %s  (%s)", fcae_display_version(),
@@ -3615,8 +3702,9 @@ void render_ui() {
             }
             ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
             ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
+            constrain_modal();
             if (ImGui::BeginPopupModal("##update_decode_popup", nullptr,
-                    ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) {
                 ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "JSON DECODING FAILED");
                 ImGui::Spacing();
                 ImGui::TextWrapped("The update manifest could not be decoded, so no version could be compared.");
@@ -3647,8 +3735,9 @@ void render_ui() {
             }
             ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
             ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_Appearing);
+            constrain_modal();
             if (ImGui::BeginPopupModal("##update_error_popup", nullptr,
-                    ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) {
                 ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "Update Check Failed");
                 ImGui::Spacing();
                 ImGui::TextWrapped("%s", s_update_status[0]
@@ -3672,8 +3761,9 @@ void render_ui() {
                 s_about_popup_open = false;
             }
             ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            constrain_modal();
             if (ImGui::BeginPopupModal("##about_popup", nullptr,
-                    ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) {
                 ImGui::TextUnformatted("FCAE VPN");
                 ImGui::TextColored(build_is_prerelease() ? ImVec4(1.0f, 0.72f, 0.20f, 1.0f)
                                                          : ImVec4(0.62f, 0.66f, 0.74f, 1.0f),
@@ -3986,8 +4076,9 @@ void render_ui() {
     }
     ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Appearing);
+    constrain_modal();
     if (ImGui::BeginPopupModal("##connection_info_popup", nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_HorizontalScrollbar)) {
         ImGui::TextUnformatted("Connection info");
         ImGui::Spacing();
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
@@ -4045,7 +4136,7 @@ void render_ui() {
     if (ImGui::BeginTabBar("##Tabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
 
         if (ImGui::BeginTabItem("Connection")) {
-            ImGui::BeginChild("##proto_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            ImGui::BeginChild("##proto_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
             ImGui::Spacing();
             if (ImGui::Button("Protocol")) open_protocol_editor();
             if (!narrow) ImGui::SameLine();
@@ -4354,7 +4445,7 @@ void render_ui() {
         }
 
         if (ImGui::BeginTabItem("Zero Trust")) {
-            ImGui::BeginChild("##zt_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            ImGui::BeginChild("##zt_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Cloudflare Zero Trust (Teams)");
             ImGui::InputTextWithHint("##team_name", "team-name", g_app.team_name, sizeof(g_app.team_name));
@@ -4376,7 +4467,7 @@ void render_ui() {
         }
 
         if (ImGui::BeginTabItem("Routes")) {
-            ImGui::BeginChild("##routes_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            ImGui::BeginChild("##routes_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Routing Rules File (Aether only)");
             ImGui::InputTextWithHint("##routes_file", "path/to/routes.txt", g_app.routes_file, sizeof(g_app.routes_file));
@@ -4397,7 +4488,7 @@ void render_ui() {
         }
 
         if (ImGui::BeginTabItem("Obfuscation")) {
-            ImGui::BeginChild("##obf_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            ImGui::BeginChild("##obf_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
             ImGui::Spacing();
             ImGui::Text("Noize Profile");
             const char* profiles[] = { "off", "light", "balanced", "aggressive", "firewall", "gfw" };
@@ -4446,7 +4537,7 @@ void render_ui() {
         }
 
         if (ImGui::BeginTabItem("Scanner")) {
-            ImGui::BeginChild("##scan_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            ImGui::BeginChild("##scan_scroll", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
             ImGui::Spacing();
             const char* modes[] = { "Turbo", "Balanced", "Thorough", "Verified", "Ironclad" };
             if (g_app.scan_mode > 4) g_app.scan_mode = 1;

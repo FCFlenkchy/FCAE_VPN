@@ -45,6 +45,12 @@ fn is_fastly_proxy(host: &str) -> bool {
     host.ends_with(".m1.fastly-masque.net")
 }
 
+fn is_mozilla_service(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    ["mozilla.com", "mozilla.org", "firefox.com"].iter()
+        .any(|domain| host == *domain || host.strip_suffix(*domain).is_some_and(|prefix| prefix.ends_with('.')))
+}
+
 fn mozilla_roots() -> Result<&'static X509Store> {
     static ROOTS: OnceLock<std::result::Result<X509Store, String>> = OnceLock::new();
     ROOTS.get_or_init(|| {
@@ -74,9 +80,9 @@ fn configuration(alpn: &[u8], host: &str) -> Result<ConnectConfiguration> {
     fingerprint
         .apply(&mut builder, alpn)
         .map_err(|error| FirefoxError::Protocol(format!("configuring Firefox TLS fingerprint: {error}")))?;
-    if is_fastly_proxy(host) {
-        // Mozilla's proxy certificates can use roots missing from older device stores.
-        // Keep this store scoped to Fastly proxy names and update it with the app.
+    if cfg!(any(target_os = "windows", target_os = "macos")) || is_fastly_proxy(host) || is_mozilla_service(host) {
+        // BoringSSL default paths do not load native Windows or macOS stores.
+        // Use Mozilla roots for its services and retain certificate and hostname checks.
         builder.set_cert_store_ref(mozilla_roots()?);
     } else {
         #[cfg(target_os = "android")]
@@ -163,12 +169,21 @@ mod tests {
     }
 
     #[test]
-    fn mozilla_store_is_scoped_to_fastly_proxy_hosts() {
+    fn fastly_proxy_host_matching_is_scoped() {
         assert!(is_fastly_proxy("muc139.m1.fastly-masque.net"));
         assert!(is_fastly_proxy("P.M1.FASTLY-MASQUE.NET."));
         assert!(!is_fastly_proxy("m1.fastly-masque.net"));
         assert!(!is_fastly_proxy("muc139.m1.fastly-masque.net.example.com"));
         assert!(!is_fastly_proxy("accounts.firefox.com"));
+    }
+
+    #[test]
+    fn mozilla_service_host_matching_respects_domain_boundaries() {
+        assert!(is_mozilla_service("firefox.settings.services.mozilla.com"));
+        assert!(is_mozilla_service("ACCOUNTS.FIREFOX.COM."));
+        assert!(is_mozilla_service("product-details.mozilla.org"));
+        assert!(!is_mozilla_service("notmozilla.com"));
+        assert!(!is_mozilla_service("mozilla.org.example.com"));
     }
 
     #[test]

@@ -469,8 +469,77 @@ where
             return Err(FirefoxError::Protocol("control-plane response is too large".into()));
         }
         raw.extend_from_slice(&chunk[..read]);
+        if h1_response_complete(&raw, request.method == Method::HEAD)? {
+            break;
+        }
     }
     parse_h1_response(&raw, request.method == Method::HEAD)
+}
+
+fn h1_response_complete(raw: &[u8], is_head: bool) -> Result<bool> {
+    let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Ok(false);
+    };
+    let mut headers = [httparse::EMPTY_HEADER; 128];
+    let mut response = httparse::Response::new(&mut headers);
+    if !matches!(response.parse(&raw[..split + 4])
+        .map_err(|error| FirefoxError::Protocol(error.to_string()))?, httparse::Status::Complete(_)) {
+        return Ok(false);
+    }
+    let status = response.code.ok_or_else(|| FirefoxError::Protocol("HTTP response has no status".into()))?;
+    if status / 100 == 1 {
+        return Err(FirefoxError::Protocol("unexpected interim-only HTTP response".into()));
+    }
+    if is_head || status == 204 || status == 304 {
+        return Ok(true);
+    }
+    let mut length = None;
+    let mut chunked = false;
+    for field in response.headers.iter() {
+        if field.name.eq_ignore_ascii_case("transfer-encoding") {
+            chunked |= std::str::from_utf8(field.value).ok()
+                .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+        } else if field.name.eq_ignore_ascii_case("content-length") {
+            let value = std::str::from_utf8(field.value).ok().and_then(|v| v.trim().parse::<usize>().ok())
+                .ok_or_else(|| FirefoxError::Protocol("invalid HTTP content length".into()))?;
+            if length.is_some_and(|previous| previous != value) {
+                return Err(FirefoxError::Protocol("conflicting HTTP content lengths".into()));
+            }
+            length = Some(value);
+        }
+    }
+    let body = &raw[split + 4..];
+    if chunked {
+        return h1_chunked_complete(body);
+    }
+    match length {
+        Some(value) if value > MAX_BODY => Err(FirefoxError::Protocol("control-plane response is too large".into())),
+        Some(value) => Ok(body.len() >= value),
+        None => Ok(false),
+    }
+}
+
+fn h1_chunked_complete(mut raw: &[u8]) -> Result<bool> {
+    let mut total = 0usize;
+    loop {
+        let Some(end) = raw.windows(2).position(|window| window == b"\r\n") else { return Ok(false) };
+        let line = std::str::from_utf8(&raw[..end]).map_err(|_| FirefoxError::Protocol("invalid chunk size".into()))?;
+        let size = usize::from_str_radix(line.split(';').next().unwrap_or("").trim(), 16)
+            .map_err(|_| FirefoxError::Protocol("invalid chunk size".into()))?;
+        raw = &raw[end + 2..];
+        if size == 0 {
+            return Ok(raw.starts_with(b"\r\n") || raw.windows(4).any(|window| window == b"\r\n\r\n"));
+        }
+        total = total.checked_add(size).ok_or_else(|| FirefoxError::Protocol("oversized chunk".into()))?;
+        if total > MAX_BODY {
+            return Err(FirefoxError::Protocol("control-plane response is too large".into()));
+        }
+        if raw.len() < size + 2 { return Ok(false) }
+        if &raw[size..size + 2] != b"\r\n" {
+            return Err(FirefoxError::Protocol("missing chunk terminator".into()));
+        }
+        raw = &raw[size + 2..];
+    }
 }
 
 fn parse_h1_response(raw: &[u8], is_head: bool) -> Result<ControlResponse> {
@@ -560,6 +629,36 @@ mod tests {
         ] {
             assert_eq!(firefox_release_major(body), None);
         }
+    }
+
+    #[test]
+    fn h1_framing_completes_without_a_connection_close() {
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n";
+        assert!(!h1_response_complete(head, false).unwrap());
+        assert!(h1_response_complete(&[&head[..], b"abc"].concat(), false).unwrap());
+        assert!(h1_response_complete(head, true).unwrap());
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n";
+        assert!(!h1_response_complete(chunked, false).unwrap());
+        assert!(h1_response_complete(&[&chunked[..], b"\r\n"].concat(), false).unwrap());
+        assert!(h1_response_complete(&[&chunked[..], b"X-Foo: bar\r\n\r\n"].concat(), false).unwrap());
+        assert!(!h1_response_complete(b"HTTP/1.1 200 OK\r\n\r\nabc", false).unwrap());
+        assert!(h1_response_complete(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n", false).is_err());
+    }
+
+    #[tokio::test]
+    async fn h1_returns_a_framed_response_while_the_peer_is_still_open() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let peer = tokio::spawn(async move {
+            let mut request = [0; 1024];
+            server.read(&mut request).await.unwrap();
+            server.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc").await.unwrap();
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+        let request = ControlRequest::new(Method::GET, "https://example.com/").unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(1), over_h1(client, &request))
+            .await.unwrap().unwrap();
+        assert_eq!(response.body, b"abc");
+        peer.abort();
     }
 
     #[test]

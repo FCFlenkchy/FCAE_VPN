@@ -54,6 +54,45 @@ class MainActivity : AppCompatActivity() {
     private var logTouchStartY = 0f
     private var inForeground = false
 
+    private var transientErrorKey = ""
+    private var transientErrorDeadline = 0L
+    private var transientErrorExpiry: Runnable? = null
+
+    private fun clearTransientError() {
+        transientErrorExpiry?.let(handler::removeCallbacks)
+        transientErrorExpiry = null
+        transientErrorKey = ""
+        transientErrorDeadline = 0L
+    }
+
+    private fun transientErrorVisible(key: String, status: String, fallback: String, peerSuffix: String = ""): Boolean {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (key != transientErrorKey) {
+            clearTransientError()
+            transientErrorKey = key
+            transientErrorDeadline = now + 3_000L
+            val expiry = Runnable {
+                if (status.isNotEmpty() && statusText.text.toString() == status) {
+                    statusText.text = fallback
+                    if (fallback == "DISCONNECTED") statusText.setTextColor(COLOR_DISCONNECTED)
+                }
+                if (peerSuffix.isNotEmpty()) {
+                    val peer = peerText.text.toString()
+                    if (peer.endsWith(peerSuffix)) peerText.text = peer.removeSuffix(peerSuffix)
+                }
+                transientErrorExpiry = null
+            }
+            transientErrorExpiry = expiry
+            handler.postDelayed(expiry, 3_000L)
+        }
+        return now < transientErrorDeadline
+    }
+
+    private fun showTransientError(message: String, fallback: String) {
+        if (transientErrorVisible("notice:$message", message, fallback)) statusText.text = message
+        else statusText.text = fallback
+    }
+
     private lateinit var statusText: TextView
     private lateinit var statsText: TextView
     private lateinit var downloadRateText: TextView
@@ -97,6 +136,7 @@ class MainActivity : AppCompatActivity() {
     private var firefoxRegionAdapter: ArrayAdapter<String>? = null
     private var firefoxRegionChoices: List<Pair<String, String>> = listOf("" to "Automatic (recommended)")
     private var firefoxRegionAliases: Map<String, String> = emptyMap()
+    private var firefoxHasRegions = false
     private var firefoxJob = 0L
     private var firefoxOperation = ""
     private var firefoxRegionJob = 0L
@@ -537,12 +577,8 @@ class MainActivity : AppCompatActivity() {
                         engineRunning = false
                         vpnActive = false
                         updateButton()
-                        statusText.text = "ERROR: $err"
+                        showTransientError("ERROR: $err", "ERROR")
                         statusText.setTextColor(COLOR_ERROR)
-                        // No Toast: the status line is the persistent error
-                        // surface, and Psiphon chain churn (rebinds, egress
-                        // retries) must not pop up over whatever the user is
-                        // doing — especially while the app is backgrounded.
                     }
                 }
                 PsiphonTunnelService.BROADCAST_STOPPED -> {
@@ -730,7 +766,7 @@ class MainActivity : AppCompatActivity() {
                     handler.post { applyStatus(state, rtt, rx, tx, totalRx, totalTx, peer, lan, statusMsg, errMsg) }
                 } catch (e: Throwable) {
                     handler.post {
-                        statusText.text = "UI error: ${e.message}"
+                        showTransientError("UI error: ${e.message}", statusText.text.toString())
                     }
                 } finally {
                     pollBusy.set(false)
@@ -2310,6 +2346,7 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(sponsorManifestRefresh)
         firefoxStatusExpiry?.let(handler::removeCallbacks)
         firefoxStatusExpiry = null
+        clearTransientError()
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
         if (isFinishing && !isChangingConfigurations
             && !FCAEVpnService.sessionActive() && !ProxyNotification.sessionActive()) {
@@ -2665,6 +2702,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (options.isEmpty()) return false
         firefoxRegionAliases = aliases
+        firefoxHasRegions = true
         updateFirefoxRegionChoices(options)
         return true
     }
@@ -3224,8 +3262,14 @@ class MainActivity : AppCompatActivity() {
                     updateFirefoxRegions(result.optJSONObject("result")?.optJSONArray("locations"))
                 }
                 if (firefoxRegionOperation == "locations_cached") startFirefoxRegions("locations")
-                else if (result?.optString("status") != "complete" && firefoxJob == 0L && firefoxStatusView != null) {
-                    firefoxSetStatus("Could not refresh Mozilla regions; saved regions remain available.")
+                else if (result?.optString("status") != "complete") {
+                    val reason = result?.optJSONObject("result")?.optString("message")
+                        ?.takeIf { it.isNotBlank() } ?: "Could not read the region refresh result"
+                    try { NativeEngine.nativeAppendLog("[firefox] Mozilla regions refresh failed: $reason\n") } catch (_: Throwable) {}
+                    if (firefoxJob == 0L && firefoxStatusView != null) {
+                        val prefix = if (firefoxHasRegions) "Region refresh failed; using previous regions" else "Region refresh failed"
+                        firefoxSetStatus("$prefix: $reason")
+                    }
                 }
             }
         }
@@ -3987,6 +4031,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectClicked() {
         if (connecting || engineRunning || vpnActive) return
+        clearTransientError()
         val route = routeBackends()
         val transports = listOf(spinnerProtocol.selectedItemPosition) + selectedChain()
         val disabled = when {
@@ -4002,7 +4047,7 @@ class MainActivity : AppCompatActivity() {
         if (disabled != null) {
             val message = "Cannot start: enable $disabled for this session."
             ingestPsiphonLog("[ui] $message\n")
-            statusText.text = message
+            showTransientError(message, "DISCONNECTED")
             statusText.setTextColor(COLOR_PROGRESS)
             Toast.makeText(this, message, Toast.LENGTH_LONG).show()
             return
@@ -5357,7 +5402,14 @@ class MainActivity : AppCompatActivity() {
                 state == 6 -> "RECONNECTING"
                 else -> "UNKNOWN"
             }
-            if (state == 5 && errMsg.isNotEmpty()) {
+            val peerErrorSuffix = if (errMsg.isNotEmpty() && state != 5) "\nError: $errMsg" else ""
+            val errorDetailVisible = if (errMsg.isNotEmpty()) {
+                transientErrorVisible("state:$state:$errMsg", if (state == 5) "ERROR: $errMsg" else "", "ERROR", peerErrorSuffix)
+            } else {
+                clearTransientError()
+                false
+            }
+            if (state == 5 && errorDetailVisible) {
                 statusText.text = "ERROR: $errMsg"
             } else {
                 // Show the same dial state for every backend and mode.
@@ -5382,13 +5434,12 @@ class MainActivity : AppCompatActivity() {
 
             // Gate listeners on the native state; Notification Stop renders them after polling stops.
             val peerLine = StringBuilder(sessionEndpointText(peer, lan, state == 4 || state == 6))
-            // Only append error here if not already shown in statusText (state 5 = ERROR)
-            if (errMsg.isNotEmpty() && state != 5) peerLine.append("\nError: $errMsg")
+            if (errorDetailVisible) peerLine.append(peerErrorSuffix)
             peerText.text = peerLine.toString()
 
             updateButton()
         } catch (e: Throwable) {
-            statusText.text = "UI error: ${e.message}"
+            showTransientError("UI error: ${e.message}", statusText.text.toString())
         }
     }
 

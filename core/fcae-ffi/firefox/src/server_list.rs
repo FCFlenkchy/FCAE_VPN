@@ -89,18 +89,21 @@ impl RemoteSettings {
                 }
                 Ok(countries)
             }
-            Err(network_error) => match store.read_cache::<ServerListCache>(CACHE_NAME) {
-                Ok(cache) if !cache.countries.is_empty() => {
-                    let countries = filter_countries(cache.countries, FIREFOX_VERSION, "");
-                    if countries.is_empty() {
-                        Err(network_error)
-                    } else {
-                        log::warn!("[firefox] using cached Mozilla locations after refresh failed: {network_error}");
-                        Ok(countries)
+            Err(network_error) => {
+                log::warn!("[firefox] Mozilla regions refresh failed: {network_error}");
+                match store.read_cache::<ServerListCache>(CACHE_NAME) {
+                    Ok(cache) if !cache.countries.is_empty() => {
+                        let countries = filter_countries(cache.countries, FIREFOX_VERSION, "");
+                        if countries.is_empty() {
+                            Err(network_error)
+                        } else {
+                            log::warn!("[firefox] using cached Mozilla locations");
+                            Ok(countries)
+                        }
                     }
+                    _ => Err(network_error),
                 }
-                _ => Err(network_error),
-            },
+            }
         }
     }
 }
