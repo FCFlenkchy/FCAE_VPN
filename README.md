@@ -10,77 +10,16 @@
   </a>
 </p>
 
-A censorship circumvention client designed for heavily restricted networks. It automatically discovers reachable routes, establishes an encrypted tunnel, and exposes a local SOCKS5/HTTP proxy for your applications.
+A censorship circumvention client for Windows, Linux, macOS, and Android, with TUN and local proxy modes.
 
-Built on top of **[Aether](https://github.com/CluvexStudio/aether)** with native GUI frontends for Windows, Linux, macOS, and Android.
+## Available cores
 
-## How It Works
-
-FCAE VPN connects to **Cloudflare's WARP network** — the same infrastructure behind Cloudflare's 1.1.1.1 DNS service. Here's the flow:
-
-1. **Account provisioning** — On first launch, the client creates a WARP device identity and obtains dedicated IPv4/IPv6 addresses plus WireGuard keypairs from Cloudflare's registration API.
-2. **Endpoint scanning** — The client probes a list of Cloudflare edge IPs across multiple ports to find a reachable gateway. Each candidate is validated with a real handshake (and optionally a full HTTP request in ironclad mode) to confirm the route actually passes traffic.
-3. **Tunnel establishment** — Once a working edge is found, an encrypted tunnel is opened:
-   - **MASQUE** — Traffic is encapsulated inside HTTP/3 (QUIC) or HTTP/2 (TLS) sessions using the `CONNECT-IP` method, making it look like normal HTTPS traffic to DPI systems.
-   - **WireGuard** — A standard WireGuard UDP tunnel is established directly to the edge node.
-   - **WARP-in-WARP (gool)** — Two nested WireGuard tunnels for an additional encryption layer.
-   - **WARP-in-MASQUE** — A WireGuard tunnel carried inside a MASQUE (HTTP/3 or HTTP/2) session, so the outer traffic still looks like HTTPS.
-4. **Local proxy** — The tunnel exposes a local SOCKS5 proxy (port 1819) and HTTP proxy (port 1820). Applications configured to use these proxies route their traffic through the encrypted tunnel to the internet via Cloudflare's network.
-
-All traffic between the client and Cloudflare is encrypted. From Cloudflare onward, traffic exits to the public internet normally.
-
-### Architecture Diagram
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Your Application                             │
-│              (browser, app, or system traffic via TUN)              │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ SOCKS5 :1819 / HTTP :1820
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                       FCAE VPN Client                               │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌──────────────┐   │
-│  │  Netstack  │  │  Scanner   │  │  Obfuscat. │  │  Health Mon. │   │
-│  │ (TCP/IP)   │  │ (endpoint  │  │  (aether-  │  │  (reconnect  │   │
-│  │            │  │  discovery)│  │   noize)   │  │   on fail)   │   │
-│  └──────┬─────┘  └────────────┘  └────────────┘  └──────────────┘   │
-│         │                                                           │
-│         ▼                                                           │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │                    Encrypted Tunnel                          │   │
-│  │   ┌───────────┐   ┌──────────────┐   ┌──────────────────┐    │   │
-│  │   │  MASQUE   │   │  WireGuard   │   │  WARP-in-WARP    │    │   │
-│  │   │ HTTP/3/2  │   │   (UDP)      │   │  (WG inside WG)  │    │   │
-│  │   └─────┬─────┘   └──────┬───────┘   └────────┬─────────┘    │   │
-│  └─────────┼────────────────┼────────────────────┼──────────────┘   │
-└────────────┼────────────────┼────────────────────┼──────────────────┘
-             │                │                    │
-             ▼                ▼                    ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                   Cloudflare WARP Edge                              │
-│          (162.159.192.x — automatic discovery)                      │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                       Public Internet                               │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### Protocol Comparison
-
-| Protocol | Transport | DPI Resistance | Speed | Use Case |
-|----------|-----------|---------------|-------|----------|
-| **MASQUE (HTTP/3)** | QUIC over UDP | Best — looks like HTTPS | Fast | Default, most censorship-resistant |
-| **MASQUE (HTTP/2)** | TLS over TCP | Best — looks like HTTPS | Fast | Fallback when QUIC is blocked |
-| **WireGuard** | UDP | Moderate — encrypted but detectable | Fastest | When UDP is allowed |
-| **WARP-in-WARP** | Nested UDP | High — double encryption | Moderate | Extra layer when WG alone is blocked |
-| **WARP-in-MASQUE** | WireGuard inside MASQUE | Best — looks like HTTPS, double encryption | Moderate | Double encryption where only HTTPS gets through |
+- **Aether (WARP)** — Cloudflare WARP support, including Tor routing.
+- **Firefox IP Protection** — Rust-based support for Mozilla's Firefox IP Protection service.
+- **Psiphon** — Psiphon tunnel core.
 
 ## Features
 
-- Automatic endpoint discovery with end-to-end data-plane validation
 - MASQUE (HTTP/3 QUIC / HTTP/2), WireGuard, WARP-in-WARP (gool) and WARP-in-MASQUE support
 - Traffic obfuscation with configurable profiles
 - Automatic reconnection with quick-reconnect
@@ -168,6 +107,7 @@ Open `android/` in Android Studio and build. The Gradle config invokes CMake wit
 
 ## Credits
 
+- **Firefox IP Protection** — Implemented in Rust, informed by [FoxyVPN](https://github.com/Vauth/FoxyVPN) and [Arman VPN](https://github.com/armanlife/arman-vpn-client). Thanks to both projects.
 - **[Aether](https://github.com/CluvexStudio/aether)** — The core censorship circumvention engine by CluvexStudio. Provides MASQUE, WireGuard, WARP-in-WARP and WARP-in-MASQUE protocols.
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — Immediate-mode GUI library Used for all native desktop rendering.
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C SOCKS5 tunnel engine, runs in-process.

@@ -12,77 +12,16 @@
 
 **[English](README.md)** | **[فارسی](READMEFA.md)** | **中文**
 
-一款为高度受限网络设计的审查绕过客户端。它会自动发现可达路由，建立加密隧道，并为您的应用程序暴露本地 SOCKS5/HTTP 代理。
+FCAE VPN 是一款适用于 Windows、Linux、macOS 和 Android 的审查绕过客户端，支持 TUN 和本地代理模式。
 
-基于 **[Aether](https://github.com/CluvexStudio/aether)** 构建，提供 Windows、Linux、macOS 和 Android 的原生 GUI 前端。
+## 可用核心
 
-## 工作原理
-
-FCAE VPN 连接到 **Cloudflare 的 WARP 网络** — 与 Cloudflare 1.1.1.1 DNS 服务背后相同的基础设施。流程如下：
-
-1. **账户配置** — 首次启动时，客户端会创建一个 WARP 设备身份，并从 Cloudflare 的注册 API 获取专用的 IPv4/IPv6 地址和 WireGuard 密钥对。
-2. **端点扫描** — 客户端会在多个端口上探测一系列 Cloudflare 边缘 IP，以找到可达的网关。每个候选节点都会通过真实的握手（在 ironclad 模式下可选完整的 HTTP 请求）进行验证，以确认该路由确实可以传输流量。
-3. **隧道建立** — 找到可用的边缘节点后，会建立一条加密隧道：
-   - **MASQUE** — 流量使用 `CONNECT-IP` 方法封装在 HTTP/3 (QUIC) 或 HTTP/2 (TLS) 会话中，使其在 DPI 系统看来像普通的 HTTPS 流量。
-   - **WireGuard** — 直接向边缘节点建立标准的 WireGuard UDP 隧道。
-   - **WARP-in-WARP (gool)** — 两层嵌套的 WireGuard 隧道，提供额外的加密层。
-   - **WARP-in-MASQUE** — 在 MASQUE（HTTP/3 或 HTTP/2）会话中承载的 WireGuard 隧道，因此外层流量仍然看起来像 HTTPS。
-4. **本地代理** — 隧道暴露一个本地 SOCKS5 代理（端口 1819）和 HTTP 代理（端口 1820）。配置为使用这些代理的应用程序会将其流量通过加密隧道经由 Cloudflare 网络传输到互联网。
-
-客户端与 Cloudflare 之间的所有流量均已加密。从 Cloudflare 之后，流量正常出口到公共互联网。
-
-### 架构图
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         您的应用程序                                  │
-│              （浏览器、应用或通过 TUN 的系统流量）                      │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ SOCKS5 :1819 / HTTP :1820
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                       FCAE VPN 客户端                                │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌──────────────┐   │
-│  │  网络栈     │  │  扫描器     │  │  混淆模块   │  │  健康监控     │   │
-│  │ (TCP/IP)   │  │ (端点       │  │  (aether-  │  │  (故障时     │   │
-│  │            │  │  发现)      │  │   noize)   │  │   自动重连)  │   │
-│  └──────┬─────┘  └────────────┘  └────────────┘  └──────────────┘   │
-│         │                                                           │
-│         ▼                                                           │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │                      加密隧道                                 │   │
-│  │   ┌───────────┐   ┌──────────────┐   ┌──────────────────┐    │   │
-│  │   │  MASQUE   │   │  WireGuard   │   │  WARP-in-WARP    │    │   │
-│  │   │ HTTP/3/2  │   │   (UDP)      │   │  (WG 套 WG)      │    │   │
-│  │   └─────┬─────┘   └──────┬───────┘   └────────┬─────────┘    │   │
-│  └─────────┼────────────────┼────────────────────┼──────────────┘   │
-└────────────┼────────────────┼────────────────────┼──────────────────┘
-             │                │                    │
-             ▼                ▼                    ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Cloudflare WARP 边缘节点                          │
-│              (162.159.192.x — 自动发现)                              │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                         公共互联网                                   │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### 协议对比
-
-| 协议 | 传输方式 | DPI 抗性 | 速度 | 适用场景 |
-|----------|-----------|-------------------|-------|----------|
-| **MASQUE (HTTP/3)** | QUIC over UDP | 最佳 — 看起来像 HTTPS | 快 | 默认，最强抗审查能力 |
-| **MASQUE (HTTP/2)** | TLS over TCP | 最佳 — 看起来像 HTTPS | 快 | QUIC 被封禁时的备选 |
-| **WireGuard** | UDP | 中等 — 加密但可被检测 | 最快 | UDP 被允许时使用 |
-| **WARP-in-WARP** | 嵌套 UDP | 高 — 双重加密 | 中等 | 单独 WG 被封禁时的额外层 |
-| **WARP-in-MASQUE** | MASQUE 中的 WireGuard | 最佳 — 看起来像 HTTPS，双重加密 | 中等 | 仅 HTTPS 可通时使用双重加密 |
+- **Aether (WARP)** — 支持 Cloudflare WARP，包括 Tor 路由。
+- **Firefox IP Protection** — 使用 Rust 实现对 Mozilla Firefox IP Protection 服务的支持。
+- **Psiphon** — Psiphon 隧道核心。
 
 ## 功能特性
 
-- 自动端点发现，端到端数据面验证
 - 支持 MASQUE (HTTP/3 QUIC / HTTP/2)、WireGuard、WARP-in-WARP (gool) 和 WARP-in-MASQUE
 - 可配置的流量混淆配置文件
 - 自动重连，支持快速重连
@@ -170,6 +109,7 @@ cmake --build build --config Release
 
 ## 致谢
 
+- **Firefox IP Protection** — 使用 Rust 实现，并参考了 [FoxyVPN](https://github.com/Vauth/FoxyVPN) 和 [Arman VPN](https://github.com/armanlife/arman-vpn-client)。感谢这两个项目。
 - **[Aether](https://github.com/CluvexStudio/aether)** — 由 CluvexStudio 开发的核心审查绕过引擎。提供 MASQUE、WireGuard、WARP-in-WARP 和 WARP-in-MASQUE 协议。
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — 即时模式 GUI 库，用于所有原生桌面渲染。
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C 语言 SOCKS5 隧道引擎，进程内运行。
