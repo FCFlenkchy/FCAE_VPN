@@ -148,18 +148,19 @@ impl ChallengeService {
                 return Err(FirefoxError::Protocol(format!("challenge post-back returned HTTP {}", response.status)));
             }
             let result: PostBackResponse = response.json()?;
-            if result.status == "success" {
-                let (_, still_challenged) = fetch_challenge_page(http, &page_url).await?;
-                if still_challenged {
-                    return Err(FirefoxError::Protocol("challenge cookie was not accepted".into()));
+            match result.next_round()? {
+                None => {
+                    let (_, still_challenged) = fetch_challenge_page(http, &page_url).await?;
+                    if still_challenged {
+                        return Err(FirefoxError::Protocol("challenge cookie was not accepted".into()));
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                Some((next_challenges, next_token)) => {
+                    challenges = next_challenges;
+                    token = next_token;
+                }
             }
-            if result.ch.is_empty() || result.tok.is_empty() {
-                return Err(FirefoxError::Protocol("challenge did not provide another round".into()));
-            }
-            challenges = result.ch;
-            token = result.tok;
         }
         Err(FirefoxError::Protocol("Fastly challenge exceeded its round limit".into()))
     }
@@ -217,11 +218,24 @@ struct CaptchaData {
 
 #[derive(Debug, Deserialize)]
 struct PostBackResponse {
+    #[serde(default)]
     status: String,
     #[serde(default)]
     ch: Vec<Challenge>,
     #[serde(default)]
     tok: String,
+}
+
+impl PostBackResponse {
+    fn next_round(self) -> Result<Option<(Vec<Challenge>, String)>> {
+        if self.status == "success" {
+            return Ok(None);
+        }
+        if self.ch.is_empty() || self.tok.is_empty() {
+            return Err(FirefoxError::Protocol("challenge did not provide another round".into()));
+        }
+        Ok(Some((self.ch, self.tok)))
+    }
 }
 
 fn is_script_state_rejection(error: &FirefoxError) -> bool {
@@ -385,6 +399,37 @@ mod tests {
 
     fn response(status: u16, body: &[u8]) -> ControlResponse {
         ControlResponse { status, headers: HeaderMap::new(), body: body.to_vec() }
+    }
+
+    #[test]
+    fn post_back_accepts_next_round_without_status() {
+        let result: PostBackResponse = serde_json::from_str(
+            r#"{"ch":[{"ty":"pow","data":{"base":"seed","hash":"target","hmac":"signature","expires":"later"}},{"ty":"clientmetrics","data":{}}],"tok":"next-token"}"#,
+        ).unwrap();
+        let (challenges, token) = result.next_round().unwrap().unwrap();
+        assert_eq!(challenges.len(), 2);
+        assert_eq!(challenges[0].ty, "pow");
+        assert_eq!(challenges[1].ty, "clientmetrics");
+        assert_eq!(token, "next-token");
+    }
+
+    #[test]
+    fn post_back_accepts_success_without_next_round() {
+        let result: PostBackResponse = serde_json::from_str(r#"{"status":"success"}"#).unwrap();
+        assert!(result.next_round().unwrap().is_none());
+    }
+
+    #[test]
+    fn post_back_rejects_incomplete_next_round() {
+        for body in [r#"{}"#, r#"{"ch":[{"ty":"pat","data":{}}]}"#, r#"{"tok":"next-token"}"#] {
+            let result: PostBackResponse = serde_json::from_str(body).unwrap();
+            assert!(result.next_round().is_err());
+        }
+    }
+
+    #[test]
+    fn post_back_rejects_invalid_status_type() {
+        assert!(serde_json::from_str::<PostBackResponse>(r#"{"status":42}"#).is_err());
     }
 
     #[test]
