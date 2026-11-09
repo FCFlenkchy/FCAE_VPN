@@ -5,6 +5,7 @@ pub mod challenge;
 pub mod control;
 pub mod crypto;
 pub mod dialer;
+mod doh;
 pub mod engine;
 pub mod error;
 pub mod fxa;

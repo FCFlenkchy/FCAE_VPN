@@ -435,7 +435,7 @@ async fn exchange_h2(client: h2::client::SendRequest<Bytes>, request: &ControlRe
     Ok(ControlResponse { status: parts.status.as_u16(), headers: parts.headers, body: data })
 }
 
-async fn over_h1<S>(mut tls: S, request: &ControlRequest) -> Result<ControlResponse>
+pub(crate) async fn over_h1<S>(mut tls: S, request: &ControlRequest) -> Result<ControlResponse>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {

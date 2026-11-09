@@ -140,6 +140,10 @@ async fn handle_socks(stream: TcpStream, upstream: Arc<Upstream>) -> Result<()> 
     let target = authority(&host, port);
     match header[1] {
         1 => {
+            if port == 53 && crate::doh::provider(&host).is_some() {
+                socks_reply(&mut stream, 0).await?;
+                return serve_dns_tcp(&mut stream, &upstream, &host).await;
+            }
             match upstream.open_tcp(&target).await {
                 Ok(mut tunnel) => {
                     socks_reply(&mut stream, 0).await?;
@@ -244,6 +248,7 @@ struct UdpAssociation {
     opening: Mutex<()>,
     client: Mutex<Option<SocketAddr>>,
     readers: Mutex<Vec<AbortHandle>>,
+    dns_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl UdpAssociation {
@@ -256,6 +261,7 @@ impl UdpAssociation {
             opening: Mutex::new(()),
             client: Mutex::new(None),
             readers: Mutex::new(Vec::new()),
+            dns_slots: Arc::new(tokio::sync::Semaphore::new(32)),
         })
     }
 
@@ -303,6 +309,29 @@ impl UdpAssociation {
         let target = authority(&host, port);
         let payload = &packet[payload_offset..];
         if payload.len() > MAX_DATAGRAM {
+            return Ok(());
+        }
+        if port == 53 && crate::doh::provider(&host).is_some() {
+            let Ok(permit) = self.dns_slots.clone().try_acquire_owned() else { return Ok(()) };
+            let query = payload.to_vec();
+            let header = packet[..payload_offset].to_vec();
+            let upstream = self.upstream.clone();
+            let socket = self.socket.clone();
+            let task = tokio::spawn(async move {
+                let _permit = permit;
+                match tokio::time::timeout(crate::doh::QUERY_TIMEOUT, crate::doh::exchange(&upstream, &host, &query)).await {
+                    Ok(Ok(answer)) => {
+                        let mut response = header;
+                        response.extend_from_slice(&answer);
+                        let _ = socket.send_to(&response, source).await;
+                    }
+                    Ok(Err(error)) => log::debug!("[firefox] encrypted DNS query failed: {error}"),
+                    Err(_) => log::debug!("[firefox] encrypted DNS query timed out"),
+                }
+            });
+            let mut readers = self.readers.lock().await;
+            readers.retain(|reader| !reader.is_finished());
+            readers.push(task.abort_handle());
             return Ok(());
         }
         let _opening = self.opening.lock().await;
@@ -362,6 +391,28 @@ impl UdpAssociation {
         if flows.get(&target).is_some_and(|current| Arc::ptr_eq(current, &tunnel)) {
             flows.remove(&target);
         }
+    }
+}
+
+async fn serve_dns_tcp<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, upstream: &Upstream, host: &str) -> Result<()> {
+    loop {
+        let length = match tokio::time::timeout(std::time::Duration::from_secs(30), stream.read_u16()).await {
+            Ok(Ok(length)) => length as usize,
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) => return Ok(()),
+        };
+        if length < 12 {
+            return Err(FirefoxError::Protocol("invalid DNS query length".into()));
+        }
+        let mut query = vec![0; length];
+        tokio::time::timeout(crate::doh::QUERY_TIMEOUT, stream.read_exact(&mut query)).await
+            .map_err(|_| FirefoxError::Timeout(crate::doh::QUERY_TIMEOUT))??;
+        let response = tokio::time::timeout(crate::doh::QUERY_TIMEOUT, crate::doh::exchange(upstream, host, &query)).await
+            .map_err(|_| FirefoxError::Timeout(crate::doh::QUERY_TIMEOUT))??;
+        stream.write_u16(response.len() as u16).await?;
+        stream.write_all(&response).await?;
+        stream.flush().await?;
     }
 }
 
@@ -454,6 +505,11 @@ async fn handle_http(stream: TcpStream, upstream: Arc<Upstream>) -> Result<()> {
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = crate::types::split_authority(target, 443).ok_or_else(|| FirefoxError::UnsupportedDestination(target.into()))?;
         let target = authority(&host, port);
+        if port == 53 && crate::doh::provider(&host).is_some() {
+            stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+            stream.flush().await?;
+            return serve_dns_tcp(&mut stream, &upstream, &host).await;
+        }
         match upstream.open_tcp(&target).await {
             Ok(mut tunnel) => {
                 stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;

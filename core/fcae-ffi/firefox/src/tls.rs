@@ -102,9 +102,16 @@ fn configuration(alpn: &[u8], host: &str) -> Result<ConnectConfiguration> {
 }
 
 pub async fn connect(dialer: &Dialer, host: &str, port: u16, alpn: &[u8]) -> Result<SslStream<TcpStream>> {
-    let config = configuration(alpn, host)?;
     let tcp = dialer.connect_tcp(host, port).await?;
-    tokio_boring::connect(config, host, tcp).await.map_err(|error| {
+    connect_stream(tcp, host, alpn).await
+}
+
+pub(crate) async fn connect_stream<S>(stream: S, host: &str, alpn: &[u8]) -> Result<SslStream<S>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let config = configuration(alpn, host)?;
+    tokio_boring::connect(config, host, stream).await.map_err(|error| {
         if error.ssl().is_some_and(|ssl| ssl.verify_result().is_err()) {
             FirefoxError::TlsCertificate { host: host.into(), message: error.to_string() }
         } else {

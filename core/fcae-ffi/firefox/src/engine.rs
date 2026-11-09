@@ -70,8 +70,17 @@ impl FirefoxEngine {
                     proxy.probe_tcp(&target).await
                 }).await?;
                 if config.require_udp {
-                    probe_destinations("UDP", &config.udp_probe_targets, timeout, |target| async move {
+                    let udp_targets = ["1.1.1.1:443".to_string(), "8.8.8.8:443".to_string()];
+                    probe_destinations("UDP", &udp_targets, timeout, |target| async move {
                         proxy.probe_udp(&target).await
+                    }).await?;
+                    probe_destinations("DNS", &config.dns_servers, timeout, |server| async move {
+                        if crate::doh::provider(&server).is_some() {
+                            crate::doh::check(proxy, &server).await
+                        } else {
+                            log::info!("[firefox] DNS resolver {server} has no encrypted mapping; checking UDP port 53 without changing the configured resolver");
+                            proxy.probe_udp(&crate::types::authority(&server, 53)).await
+                        }
                     }).await?;
                 }
                 Ok::<_, FirefoxError>(upstream)
@@ -189,7 +198,8 @@ where
             Err(error) => {
                 let another = index + 1 < targets.len();
                 let destination_failure = matches!(&error,
-                    FirefoxError::Http { status: 502 | 503 | 504, .. } | FirefoxError::Timeout(_));
+                    FirefoxError::Http { status: 502 | 503 | 504, .. } | FirefoxError::Timeout(_))
+                    || (stage == "DNS" && error.is_transient());
                 if another && destination_failure {
                     log::info!("[firefox] {stage} proxy check for {target} failed: {error}; trying another destination");
                 } else {
