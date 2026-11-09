@@ -93,7 +93,7 @@ Open `android/` in Android Studio and build. The Gradle config invokes CMake wit
 
 ## Credits
 
-- **Firefox IP Protection** — Implemented in Rust. See the [Firefox IP Protection source code](https://searchfox.org/firefox-main/source/toolkit/components/ipprotection/).
+- **Firefox IP Protection** — Implemented in Rust. See the [Firefox IP Protection source code](https://searchfox.org/firefox-main/source/toolkit/components/ipprotection/) (used [Arman VPN](https://github.com/armanlife/arman-vpn-client) and [FoxyVPN](https://github.com/Vauth/FoxyVPN) as references).
 - **[Aether](https://github.com/CluvexStudio/aether)** — The core censorship circumvention engine by CluvexStudio. Provides MASQUE, WireGuard, WARP-in-WARP and WARP-in-MASQUE protocols.
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — Immediate-mode GUI library Used for all native desktop rendering.
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C SOCKS5 tunnel engine, runs in-process.

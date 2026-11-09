@@ -95,7 +95,7 @@ cmake --build build --config Release
 
 ## قدردانی
 
-- **Firefox IP Protection** — پیاده‌سازی‌شده با Rust. [کد منبع Firefox IP Protection](https://searchfox.org/firefox-main/source/toolkit/components/ipprotection/) را ببینید.
+- **Firefox IP Protection** — پیاده‌سازی‌شده با Rust. [کد منبع Firefox IP Protection](https://searchfox.org/firefox-main/source/toolkit/components/ipprotection/) را ببینید (با استفاده از [Arman VPN](https://github.com/armanlife/arman-vpn-client) و [FoxyVPN](https://github.com/Vauth/FoxyVPN) به‌عنوان مرجع).
 - **[Aether](https://github.com/CluvexStudio/aether)** — موتور اصلی دور زدن سانسور توسط CluvexStudio. پروتکل‌های MASQUE، WireGuard، WARP-in-WARP و WARP-in-MASQUE را فراهم می‌کند.
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — کتابخانه رابط گرافیکی حالت فوری. برای تمام رندرهای بومی دسکتاپ استفاده می‌شود.
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — موتور تونل SOCKS5 به زبان C، داخل فرایند اجرا می‌شود.
