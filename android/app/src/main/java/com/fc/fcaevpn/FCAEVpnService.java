@@ -818,10 +818,9 @@ public class FCAEVpnService extends VpnService {
         }
         Intent src = intent;
         if (src == null || !src.hasExtra("protocol")) {
-            if (lastStartIntent != null) {
+            src = recalledStart();
+            if (src == null && !getSharedPreferences(PREFS_LAST, MODE_PRIVATE).getBoolean("blocked", false)) {
                 src = lastStartIntent;
-            } else {
-                src = recalledStart();
             }
         }
         if (src == null || !src.hasExtra("protocol")) {
@@ -1742,7 +1741,15 @@ public class FCAEVpnService extends VpnService {
      */
     public static void rememberSession(Context context, Intent session) {
         if (context == null || session == null || !session.hasExtra("protocol")) return;
+        context.getSharedPreferences(PREFS_LAST, MODE_PRIVATE).edit().putBoolean("blocked", false).apply();
         writeSession(context, session);
+    }
+
+    public static void invalidateRecalledSession(Context context) {
+        if (context == null) return;
+        SharedPreferences prefs = context.getSharedPreferences(PREFS_LAST, MODE_PRIVATE);
+        if (prefs.getBoolean("blocked", false)) return;
+        prefs.edit().putBoolean("blocked", true).putBoolean("has", false).apply();
     }
 
     /** The persisted session as an ACTION_START intent, or null if none. */
@@ -1759,7 +1766,8 @@ public class FCAEVpnService extends VpnService {
     }
 
     private void rememberStart(Intent i) {
-        if (i == null) return;
+        SharedPreferences prefs = getSharedPreferences(PREFS_LAST, MODE_PRIVATE);
+        if (i == null || prefs.getBoolean("blocked", false) || prefs.getBoolean("has", false)) return;
         writeSession(this, i);
     }
 

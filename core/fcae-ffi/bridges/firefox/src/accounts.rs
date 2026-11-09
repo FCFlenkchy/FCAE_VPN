@@ -172,9 +172,9 @@ fn finish(jobs: &Mutex<HashMap<u64, JobSnapshot>>, id: u64, result: Result<Value
 
 fn format_bytes(bytes: i64, precision: u32) -> String {
     const UNITS: [(&str, u128); 7] = [
-        ("EB", 1_000_000_000_000_000_000), ("PB", 1_000_000_000_000_000),
-        ("TB", 1_000_000_000_000), ("GB", 1_000_000_000),
-        ("MB", 1_000_000), ("KB", 1_000), ("B", 1),
+        ("EiB", 1 << 60), ("PiB", 1 << 50),
+        ("TiB", 1 << 40), ("GiB", 1 << 30),
+        ("MiB", 1 << 20), ("KiB", 1 << 10), ("B", 1),
     ];
     let bytes = bytes.max(0) as u128;
     let &(unit, divisor) = UNITS.iter().find(|(_, divisor)| bytes >= *divisor).unwrap_or(&UNITS[6]);
@@ -374,10 +374,16 @@ mod tests {
     fn quota_display_uses_reported_bytes_and_exact_exhaustion() {
         use fcae_firefox::types::Usage;
         let quota = |limit, remaining| Usage { limit, remaining, ..Usage::default() };
-        assert_eq!(usage_display(Some(&quota(50_000_000_000, 49_940_000_000))), ("60 MB / 50 GB".into(), false));
-        assert_eq!(usage_display(Some(&quota(50_000_000_000, 0))), ("50 GB / 50 GB".into(), true));
-        assert_eq!(usage_display(Some(&quota(50_000_000_000, 1))), ("49.99 GB / 50 GB".into(), false));
-        assert_eq!(usage_display(Some(&quota(50_000_000_001, 1))), ("50 GB / 50.000000001 GB".into(), false));
+        assert_eq!(format_bytes(1024, 2), "1 KiB");
+        assert_eq!(format_bytes(1024_i64.pow(2), 2), "1 MiB");
+        assert_eq!(format_bytes(1024_i64.pow(3), 2), "1 GiB");
+        let limit = 53_687_091_200_i64;
+        assert_eq!(usage_display(Some(&quota(limit, limit - 60 * 1024_i64.pow(2)))), ("60 MiB / 50 GiB".into(), false));
+        assert_eq!(usage_display(Some(&quota(limit, 0))), ("50 GiB / 50 GiB".into(), true));
+        assert_eq!(usage_display(Some(&quota(limit, 1))), ("49.99 GiB / 50 GiB".into(), false));
+        let (near_limit, exhausted) = usage_display(Some(&quota(limit + 1, 1)));
+        assert_ne!(near_limit.split(" / ").next(), near_limit.split(" / ").nth(1));
+        assert!(!exhausted);
         assert_eq!(usage_display(Some(&quota(0, 0))), ("0 B / 0 B".into(), true));
         assert_eq!(usage_display(Some(&Usage { unlimited: true, ..Usage::default() })), ("Unlimited".into(), false));
         assert_eq!(usage_display(None), ("Not reported".into(), false));

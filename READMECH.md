@@ -95,7 +95,7 @@ cmake --build build --config Release
 
 ## 致谢
 
-- **Firefox IP Protection** — 使用 Rust 实现，并参考了 [FoxyVPN](https://github.com/Vauth/FoxyVPN) 和 [Arman VPN](https://github.com/armanlife/arman-vpn-client)。感谢这两个项目。
+- **Firefox IP Protection** — 使用 Rust 实现。请参阅 [Firefox IP Protection 源代码](https://searchfox.org/firefox-main/source/toolkit/components/ipprotection/)。
 - **[Aether](https://github.com/CluvexStudio/aether)** — 由 CluvexStudio 开发的核心审查绕过引擎。提供 MASQUE、WireGuard、WARP-in-WARP 和 WARP-in-MASQUE 协议。
 - **[Dear ImGui](https://github.com/ocornut/imgui)** — 即时模式 GUI 库，用于所有原生桌面渲染。
 - **[hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)** — C 语言 SOCKS5 隧道引擎，进程内运行。

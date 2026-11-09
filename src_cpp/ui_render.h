@@ -572,6 +572,7 @@ void log_callback(FcaeLogLevel level, const char* message, void* user_data);
 /// painted content would differ, for a pending redraw request, a running
 /// connect spinner, or while `interacting` is true.
 bool ui_should_render(bool interacting);
+void ui_autosave_tick();
 
 // Implemented by each desktop renderer (OpenGL or DX11).
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot);

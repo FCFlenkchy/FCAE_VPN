@@ -391,6 +391,105 @@ static uint64_t fnv_value(uint64_t h, const T& v) {
     return fnv_bytes(h, &v, sizeof(T));
 }
 
+static uint64_t config_signature() {
+    uint64_t h = 1469598103934665603ull;
+    h = fnv_value(h, g_app.chain_transports.size());
+    for (int transport : g_app.chain_transports) h = fnv_value(h, transport);
+    h = fnv_value(h, g_app.protocol);
+    h = fnv_value(h, g_app.backend);
+    h = fnv_cstr(h, g_app.firefox_account_id);
+    h = fnv_cstr(h, g_app.firefox_location);
+    h = fnv_cstr(h, g_app.firefox_server);
+    h = fnv_value(h, g_app.firefox_transport);
+    h = fnv_value(h, g_app.tor_socks_port);
+    h = fnv_cstr(h, g_app.psiphon_region);
+    h = fnv_cstr(h, g_app.psiphon_region_list);
+    h = fnv_value(h, g_app.psiphon_transport);
+    h = fnv_cstr(h, g_app.psiphon_data_dir);
+    h = fnv_value(h, g_app.psiphon_socks_port);
+    h = fnv_value(h, g_app.psiphon_http_port);
+    h = fnv_value(h, g_app.mode);
+    h = fnv_value(h, g_app.tun_engine);
+    h = fnv_value(h, g_app.lan_sharing);
+    h = fnv_value(h, g_app.scan_mode);
+    h = fnv_value(h, g_app.ip_version);
+    h = fnv_value(h, g_app.quick_reconnect);
+    h = fnv_cstr(h, g_app.noize_profile);
+    h = fnv_value(h, g_app.fragment_enabled);
+    h = fnv_value(h, g_app.frag_min_size);
+    h = fnv_value(h, g_app.frag_max_size);
+    h = fnv_value(h, g_app.frag_min_delay);
+    h = fnv_value(h, g_app.frag_max_delay);
+    h = fnv_value(h, g_app.socks_port);
+    h = fnv_value(h, g_app.http_port);
+    h = fnv_value(h, g_app.firefox_socks_port);
+    h = fnv_value(h, g_app.firefox_http_port);
+    h = fnv_value(h, g_app.tor_http_port);
+    h = fnv_value(h, g_app.tor_http_enabled);
+    h = fnv_value(h, g_app.socks_enabled);
+    h = fnv_value(h, g_app.http_enabled);
+    h = fnv_value(h, g_app.firefox_socks_enabled);
+    h = fnv_value(h, g_app.firefox_http_enabled);
+    h = fnv_value(h, g_app.psiphon_socks_enabled);
+    h = fnv_value(h, g_app.psiphon_http_enabled);
+    h = fnv_value(h, g_app.tor_socks_enabled);
+    h = fnv_cstr(h, g_app.force_peer);
+    h = fnv_cstr(h, g_app.upstream_proxy);
+    h = fnv_cstr(h, g_app.config_path);
+    h = fnv_value(h, g_app.h2_enabled);
+    h = fnv_value(h, g_app.ech_enabled);
+    h = fnv_cstr(h, g_app.sni);
+    h = fnv_cstr(h, g_app.ech_dns);
+    h = fnv_cstr(h, g_app.ech_domain);
+    h = fnv_cstr(h, g_app.gool_inner);
+    h = fnv_cstr(h, g_app.tls_ciphers);
+    h = fnv_cstr(h, g_app.api_address);
+    h = fnv_cstr(h, g_app.api_host);
+    h = fnv_cstr(h, g_app.api_sni);
+    h = fnv_cstr(h, g_app.exit_loc);
+    h = fnv_cstr(h, g_app.tls_groups);
+    h = fnv_cstr(h, g_app.tls13_ciphers);
+    h = fnv_cstr(h, g_app.tls_key_shares);
+    h = fnv_cstr(h, g_app.tls_sigalgs);
+    h = fnv_cstr(h, g_app.tls_cert_compression);
+    h = fnv_cstr(h, g_app.tls_alps);
+    h = fnv_cstr(h, g_app.tls_trust_anchors);
+    h = fnv_cstr(h, g_app.tls_server_padding);
+    h = fnv_value(h, g_app.tls_verify);
+    h = fnv_value(h, g_app.disable_grease);
+    h = fnv_value(h, g_app.fragment_sni);
+    h = fnv_value(h, g_app.enable_grease_sigalgs);
+    h = fnv_value(h, g_app.enable_ech_grease);
+    h = fnv_value(h, g_app.disable_ocsp_stapling);
+    h = fnv_value(h, g_app.disable_sct);
+    h = fnv_value(h, g_app.disable_session_ticket);
+    h = fnv_value(h, g_app.disable_extension_permutation);
+    h = fnv_cstr(h, g_app.tun_mtu);
+    h = fnv_cstr(h, g_app.tun_tcp_sndbuf);
+    h = fnv_cstr(h, g_app.tun_tcp_rcvbuf);
+    h = fnv_value(h, g_app.tun_tcp_auto_tuning);
+    h = fnv_cstr(h, g_app.tun_dns4);
+    h = fnv_cstr(h, g_app.tun_dns6);
+    h = fnv_value(h, g_app.logging_enabled.load());
+    h = fnv_value(h, g_app.auto_scroll);
+    h = fnv_value(h, g_app.auto_update_check);
+    h = fnv_value(h, g_app.check_prereleases);
+    h = fnv_value(h, g_app.sys_profile);
+    h = fnv_value(h, g_app.engine_log);
+    h = fnv_value(h, g_app.t2s_log);
+    h = fnv_value(h, g_app.tor_mode);
+    h = fnv_value(h, g_app.tor_bridges);
+    h = fnv_cstr(h, g_app.tor_bridge_lines);
+    h = fnv_cstr(h, g_app.team_name);
+    h = fnv_cstr(h, g_app.access_token);
+    h = fnv_cstr(h, g_app.access_client_id);
+    h = fnv_cstr(h, g_app.access_client_secret);
+    h = fnv_cstr(h, g_app.access_email);
+    h = fnv_cstr(h, g_app.routes_file);
+    h = fnv_cstr(h, g_app.routes_inline);
+    return h;
+}
+
 /// Fingerprint of everything the UI paints. Unchanged fingerprint + no input ⇒
 /// the next frame would be pixel-identical, so it can be skipped.
 static uint64_t ui_content_signature() {
@@ -583,6 +682,13 @@ static void firefox_poll_background();
 static void firefox_expire_status(double now);
 static void firefox_refresh_usage(double now);
 
+static void autosave_config(double now);
+
+void ui_autosave_tick() {
+    if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Ready)
+        autosave_config(ui_now_seconds());
+}
+
 bool ui_should_render(bool interacting) {
     const double now = ui_now_seconds();
 
@@ -591,6 +697,8 @@ bool ui_should_render(bool interacting) {
     if (s_runtime_init.load(std::memory_order_acquire) != RuntimeInitState::Ready) {
         return g_app.redraw_requested.load() || interacting || !s_painted_once;
     }
+
+    autosave_config(now);
 
     // Telemetry and locally animated sponsor frames change without input.
     ui_poll_telemetry(now);
@@ -925,6 +1033,35 @@ static int parse_port(const std::string& v, int fallback) {
     return (p > 0 && p < 65536) ? p : fallback;
 }
 
+static std::string encode_config_text(const char* text) {
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string result;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p; ++p) {
+        result.push_back(hex[*p >> 4]);
+        result.push_back(hex[*p & 15]);
+    }
+    return result;
+}
+
+static bool decode_config_text(const std::string& encoded, char* out, size_t size) {
+    if (encoded.size() % 2 || encoded.size() / 2 >= size) return false;
+    const auto digit = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string decoded;
+    decoded.reserve(encoded.size() / 2);
+    for (size_t i = 0; i < encoded.size(); i += 2) {
+        const int hi = digit(encoded[i]), lo = digit(encoded[i + 1]);
+        if (hi < 0 || lo < 0 || (hi == 0 && lo == 0)) return false;
+        decoded.push_back(static_cast<char>((hi << 4) | lo));
+    }
+    memcpy(out, decoded.c_str(), decoded.size() + 1);
+    return true;
+}
+
 static void apply_config_kv(const std::string& key, const std::string& val) {
     if (key == "protocol") g_app.protocol = atoi(val.c_str());
     else if (key == "backend") g_app.backend = atoi(val.c_str());
@@ -1051,15 +1188,21 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
         snprintf(g_app.routes_file, sizeof(g_app.routes_file), "%s", val.c_str());
     else if (key == "routes_inline")
         snprintf(g_app.routes_inline, sizeof(g_app.routes_inline), "%s", val.c_str());
+    else if (key == "routes_inline_hex")
+        decode_config_text(val, g_app.routes_inline, sizeof(g_app.routes_inline));
 }
 
-static void save_config() {
+static bool s_config_needs_retry = false;
+
+static bool save_config(bool quiet = false) {
     const std::string path = get_config_path();
-    FILE* f = open_cfg(path, "wb");
+    const std::string temporary = path + ".tmp";
+    FILE* f = open_cfg(temporary, "wb");
     if (!f) {
+        s_config_needs_retry = true;
         snprintf(g_app.save_status, sizeof(g_app.save_status), "Save failed");
         g_app.add_log(1, ("[ui] save failed: " + path).c_str());
-        return;
+        return false;
     }
     // Always LF; empty values allowed. Line-based load is robust on Win/Linux.
     fprintf(f, "protocol=%d\n", g_app.protocol);
@@ -1149,8 +1292,7 @@ static void save_config() {
     fprintf(f, "tor_bridges=%d\n", g_app.tor_bridges);
     // The cfg file is line-based, so newlines in a value would corrupt it on
     // reload. The engine accepts ';' as a bridge-line separator too, so store
-    // the multi-line box that way. (routes_inline has the same shape and the
-    // same pre-existing caveat.)
+    // the multi-line box that way.
     {
         char tor_lines[sizeof(g_app.tor_bridge_lines)];
         snprintf(tor_lines, sizeof(tor_lines), "%s", g_app.tor_bridge_lines);
@@ -1165,10 +1307,53 @@ static void save_config() {
     fprintf(f, "access_client_secret=%s\n", g_app.access_client_secret);
     fprintf(f, "access_email=%s\n", g_app.access_email);
     fprintf(f, "routes_file=%s\n", g_app.routes_file);
-    fprintf(f, "routes_inline=%s\n", g_app.routes_inline);
-    fclose(f);
-    snprintf(g_app.save_status, sizeof(g_app.save_status), "Config saved!");
-    g_app.add_log(4, ("[ui] config saved: " + path).c_str());
+    fprintf(f, "routes_inline_hex=%s\n", encode_config_text(g_app.routes_inline).c_str());
+    const bool write_ok = !ferror(f);
+    const bool close_ok = fclose(f) == 0;
+#if defined(_WIN32)
+    const bool replaced = write_ok && close_ok && MoveFileExW(widen(temporary).c_str(), widen(path).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    if (!replaced) _wremove(widen(temporary).c_str());
+#else
+    const bool replaced = write_ok && close_ok && rename(temporary.c_str(), path.c_str()) == 0;
+    if (!replaced) remove(temporary.c_str());
+#endif
+    if (!replaced) {
+        s_config_needs_retry = true;
+        snprintf(g_app.save_status, sizeof(g_app.save_status), "Save failed");
+        g_app.add_log(1, ("[ui] save failed: " + path).c_str());
+        return false;
+    }
+    s_config_needs_retry = false;
+    if (!quiet) {
+        snprintf(g_app.save_status, sizeof(g_app.save_status), "Config saved!");
+        g_app.add_log(4, ("[ui] config saved: " + path).c_str());
+    }
+    return true;
+}
+
+static uint64_t s_config_observed = 0;
+static uint64_t s_config_persisted = 0;
+static double s_config_changed_at = 0;
+static double s_config_retry_at = 0;
+static bool s_config_tracking = false;
+
+static void autosave_config(double now) {
+    const uint64_t signature = config_signature();
+    if (!s_config_tracking) {
+        s_config_observed = signature;
+        s_config_persisted = s_config_needs_retry ? ~signature : signature;
+        s_config_changed_at = now;
+        s_config_tracking = true;
+        return;
+    }
+    if (signature != s_config_observed) {
+        s_config_observed = signature;
+        s_config_changed_at = now;
+    }
+    if ((s_config_needs_retry || signature != s_config_persisted) && now >= s_config_retry_at && now - s_config_changed_at >= 0.6) {
+        if (save_config(true)) s_config_persisted = signature;
+        else s_config_retry_at = now + 5.0;
+    }
 }
 
 static bool load_config_from(const std::string& path) {
@@ -1440,9 +1625,10 @@ void ui_init() {
             // Android). AppState defaults mode = 1, so a fresh install starts in
             // TUN (full-system) mode on every desktop platform; a saved config
             // keeps whatever the user last chose.
-            save_config();
-            snprintf(g_app.save_status, sizeof(g_app.save_status), "Created FCAE_VPN.cfg");
-            g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
+            if (save_config()) {
+                snprintf(g_app.save_status, sizeof(g_app.save_status), "Created FCAE_VPN.cfg");
+                g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
+            }
         }
         // Data paths stay relative to data_dir() so the folder can move
         // between machines; resolve_data_path() anchors them at use.
@@ -1532,6 +1718,7 @@ void ui_shutdown() {
     // Initialization may still own AppState and the runtime. Join it before
     // teardown so neither configuration state nor FFI lifetime can race exit.
     if (s_runtime_init_thread.joinable()) s_runtime_init_thread.join();
+    if (s_config_tracking && (s_config_needs_retry || config_signature() != s_config_persisted)) save_config(true);
 
     // fcae_shutdown() stops any running session and then waits (bounded) for
     // the background worker to finish its OS restore — routes and DNS back —
@@ -2638,8 +2825,9 @@ static void render_protocol_editor() {
     ImGui::SetNextWindowSize(ImVec2(600, 0), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal("##protocol-editor", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
+    bool changed = false;
     for (int i = 0; i < (int)IM_ARRAYSIZE(kTransportNames); ++i) {
-        ImGui::RadioButton(kTransportNames[i], &s_protocol_draft, i);
+        changed |= ImGui::RadioButton(kTransportNames[i], &s_protocol_draft, i);
     }
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     ImGui::Text("Additional exits (optional)");
@@ -2651,23 +2839,20 @@ static void render_protocol_editor() {
         ImGui::Text("Exit %d", (int)i + 1);
         ImGui::SameLine(90);
         ImGui::SetNextItemWidth(350);
-        ImGui::Combo("##transport", &s_chain_draft[i], kTransportNames, IM_ARRAYSIZE(kTransportNames));
+        changed |= ImGui::Combo("##transport", &s_chain_draft[i], kTransportNames, IM_ARRAYSIZE(kTransportNames));
         ImGui::SameLine();
         if (ImGui::Button("Remove")) remove_index = (int)i;
         ImGui::PopID();
     }
     ImGui::EndChild();
-    if (remove_index >= 0) s_chain_draft.erase(s_chain_draft.begin() + remove_index);
-    if (ImGui::Button("+ Add exit")) s_chain_draft.push_back(0);
-    ImGui::Spacing();
-    if (ImGui::Button("Apply")) {
+    if (remove_index >= 0) { s_chain_draft.erase(s_chain_draft.begin() + remove_index); changed = true; }
+    if (ImGui::Button("+ Add exit")) { s_chain_draft.push_back(0); changed = true; }
+    if (changed) {
         apply_transport(s_protocol_draft);
         g_app.chain_transports = s_chain_draft;
-        save_config();
-        ImGui::CloseCurrentPopup();
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+    ImGui::Spacing();
+    if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
 
@@ -2737,16 +2922,6 @@ static void render_firefox_settings() {
     static const char* const firefox_transports[] = {"Auto (H2 with H1 fallback)", "HTTP/2", "HTTP/1.1"};
     ImGui::Combo("Firefox transport", &g_app.firefox_transport, firefox_transports, 3);
     ImGui::EndChild();
-    if (ImGui::Button("SAVE")) {
-        save_config();
-        if (!g_app.firefox_job && !s_firefox_unblock_required) {
-            g_app.firefox_password[0] = 0;
-            g_app.firefox_code[0] = 0;
-        }
-        s_firefox_settings_visible = false;
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::SameLine();
     if (ImGui::Button("Close")) {
         if (!g_app.firefox_job && !s_firefox_unblock_required) {
             g_app.firefox_password[0] = 0;
@@ -3264,11 +3439,6 @@ void render_ui() {
                 }
                 ImGui::PopStyleColor(3);
             }
-        }
-
-        ImGui::SameLine(0, 6);
-        if (ImGui::Button("Save", ImVec2(54, 32))) {
-            save_config();
         }
 
         ImGui::SameLine(0, 10);

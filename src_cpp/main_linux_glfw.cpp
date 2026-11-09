@@ -202,6 +202,7 @@ int main(int argc, char** argv) {
 
         hidden = window_hidden(window);
         if (hidden) {
+            ui_autosave_tick();
             if (sponsor_window_visible) {
                 ui_set_window_visible(false);
                 sponsor_window_visible = false;

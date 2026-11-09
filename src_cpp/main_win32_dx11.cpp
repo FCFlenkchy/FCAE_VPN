@@ -345,6 +345,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
         // Hidden windows release sponsor audio; visible windows claim it again.
         if (!paintable) {
+            ui_autosave_tick();
             if (sponsor_window_visible) {
                 ui_set_window_visible(false);
                 sponsor_window_visible = false;

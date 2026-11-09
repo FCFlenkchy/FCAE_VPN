@@ -1307,6 +1307,7 @@ class MainActivity : AppCompatActivity() {
         editEchDomain = findViewById(R.id.editEchDomain)
         switchEch.setOnCheckedChangeListener { _, on ->
             layoutEch.visibility = if (on) android.view.View.VISIBLE else android.view.View.GONE
+            scheduleSettingsSave()
         }
         switchFragmentSni = findViewById(R.id.switchFragmentSni)
         layoutGoolInner = findViewById(R.id.layoutGoolInner)
@@ -1340,6 +1341,7 @@ class MainActivity : AppCompatActivity() {
         editFragMaxDelay = findViewById(R.id.editFragMaxDelay)
         switchFragment.setOnCheckedChangeListener { _, on ->
             layoutFragment.visibility = if (on) android.view.View.VISIBLE else android.view.View.GONE
+            scheduleSettingsSave()
         }
         switchQuick = findViewById(R.id.switchQuick)
         switchLan = findViewById(R.id.switchLan)
@@ -1347,6 +1349,7 @@ class MainActivity : AppCompatActivity() {
         switchLogging.setOnCheckedChangeListener { _, _ ->
             logViewGeneration++
             restartLogPoll()
+            scheduleSettingsSave()
         }
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
@@ -1709,6 +1712,7 @@ class MainActivity : AppCompatActivity() {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
 
+        installSettingsAutosave()
         onBackPressedDispatcher.addCallback(this, backPressedCallback)
 
         logText.text = ""
@@ -2294,6 +2298,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        if (settingsAutosaveReady) saveSettings()
+        handler.removeCallbacks(settingsAutosave)
+        settingsAutosaveReady = false
         releaseSponsorUi()
         releaseSponsorMedia(!isChangingConfigurations)
         handler.removeCallbacks(poll)
@@ -2493,6 +2500,16 @@ class MainActivity : AppCompatActivity() {
         val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         box.addView(rows)
 
+        fun persistProtocol() {
+            spinnerProtocol.setSelection(draftProtocol)
+            prefs.edit()
+                .putString("chainTransports", NativeEngine.encodeChainTransports(draft.toIntArray()))
+                .remove("chainCount").remove("chainExit0").remove("chainExit1").remove("chainExit2")
+                .apply()
+            updateProtocolButton()
+            scheduleSettingsSave()
+        }
+
         fun renderRows() {
             rows.removeAllViews()
             draft.forEachIndexed { index, transport ->
@@ -2513,7 +2530,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
                     override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
-                        if (index < draft.size) draft[index] = position
+                        if (row.parent === rows && index < draft.size && draft[index] != position) {
+                            draft[index] = position
+                            persistProtocol()
+                        }
                     }
                     override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
                 }
@@ -2521,6 +2541,7 @@ class MainActivity : AppCompatActivity() {
                 addDialogButton(row, "Remove") {
                     if (index < draft.size) {
                         draft.removeAt(index)
+                        persistProtocol()
                         renderRows()
                     }
                 }
@@ -2529,35 +2550,23 @@ class MainActivity : AppCompatActivity() {
         }
 
         protocols.setOnCheckedChangeListener { _, checkedId ->
-            if (checkedId in protocolChoices.indices) draftProtocol = checkedId
+            if (checkedId in protocolChoices.indices && draftProtocol != checkedId) {
+                draftProtocol = checkedId
+                persistProtocol()
+            }
         }
         addDialogButton(box, "+ Add exit") {
             draft.add(0)
+            persistProtocol()
             renderRows()
         }
         renderRows()
 
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setView(ScrollView(this).apply { addView(box) })
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Apply", null)
+            .setPositiveButton("Close", null)
             .create()
-        dialog.setOnShowListener {
-            styleDialogButtons(dialog)
-            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                spinnerProtocol.setSelection(draftProtocol)
-                prefs.edit()
-                    .putString("chainTransports", NativeEngine.encodeChainTransports(draft.toIntArray()))
-                    .remove("chainCount")
-                    .remove("chainExit0")
-                    .remove("chainExit1")
-                    .remove("chainExit2")
-                    .apply()
-                saveSettings()
-                updateProtocolButton()
-                dialog.dismiss()
-            }
-        }
+        dialog.setOnShowListener { styleDialogButtons(dialog) }
         dialog.show()
     }
 
@@ -2609,6 +2618,8 @@ class MainActivity : AppCompatActivity() {
             ?: prefs.getString("firefoxLocation", "").orEmpty()
     }
 
+    private var updatingFirefoxRegions = false
+
     private fun updateFirefoxRegionChoices(options: List<Pair<String, String>>, preferred: String? = null) {
         val saved = preferred ?: firefoxRegionSpinner?.let {
             firefoxRegionChoices.getOrNull(it.selectedItemPosition)?.first
@@ -2629,6 +2640,7 @@ class MainActivity : AppCompatActivity() {
             merged[selected] = "$selected (saved location)"
         }
         firefoxRegionChoices = merged.map { it.key to it.value }
+        updatingFirefoxRegions = true
         firefoxRegionAdapter?.apply {
             clear()
             addAll(firefoxRegionChoices.map { it.second })
@@ -2636,6 +2648,7 @@ class MainActivity : AppCompatActivity() {
         }
         val selectedPosition = firefoxRegionChoices.indexOfFirst { it.first == selected }.coerceAtLeast(0)
         firefoxRegionSpinner?.setSelection(selectedPosition)
+        updatingFirefoxRegions = false
     }
 
     private fun updateFirefoxRegions(locations: org.json.JSONArray?): Boolean {
@@ -2841,38 +2854,58 @@ class MainActivity : AppCompatActivity() {
             else -> 0
         })
         box.addView(transport)
+        firefoxSocksSwitch.setOnCheckedChangeListener { _, checked ->
+            firefoxSocksEnabled = checked
+            scheduleSettingsSave()
+        }
+        firefoxHttpSwitch.setOnCheckedChangeListener { _, checked ->
+            firefoxHttpEnabled = checked
+            scheduleSettingsSave()
+        }
+        fun bindPort(field: android.widget.EditText, target: android.widget.EditText) {
+            fun validate() {
+                field.error = if (field.text.toString().toIntOrNull()?.let { it in 1..65535 } == true) null else "Use a port from 1 to 65535"
+            }
+            validate()
+            watchSettingsText(field) {
+                target.setText(field.text.toString())
+                validate()
+            }
+        }
+        bindPort(firefoxSocksPort, editFirefoxSocksPort)
+        bindPort(firefoxHttpPort, editFirefoxHttpPort)
+        watchSettingsText(server) {
+            prefs.edit().putString("firefoxServer", server.text.toString().trim()).apply()
+        }
+        location.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                if (!updatingFirefoxRegions && firefoxRegionSpinner === location && position == location.selectedItemPosition) {
+                    val region = selectedFirefoxRegion()
+                    if (region != prefs.getString("firefoxLocation", "").orEmpty()) {
+                        prefs.edit().putString("firefoxLocation", region).apply()
+                        scheduleSettingsSave()
+                    }
+                }
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+        transport.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                val value = listOf("auto", "h2", "h1").getOrNull(position) ?: return
+                if (value != prefs.getString("firefoxTransport", "auto")) {
+                    prefs.edit().putString("firefoxTransport", value).apply()
+                    scheduleSettingsSave()
+                }
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
         val dialog = dialogBuilder()
             .setTitle("FIREFOX IP PROTECTION SETTINGS")
             .setView(ScrollView(this).apply { addView(box) })
             .setNegativeButton("Close", null)
-            .setPositiveButton("SAVE", null)
             .create()
         dialog.setOnShowListener {
             styleDialogButtons(dialog)
-            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                for (field in listOf(firefoxSocksPort, firefoxHttpPort)) {
-                    val port = field.text.toString().toIntOrNull()
-                    if (port == null || port !in 1..65535) {
-                        field.error = "Use a port from 1 to 65535"
-                        return@setOnClickListener
-                    }
-                }
-                firefoxSocksEnabled = firefoxSocksSwitch.isChecked
-                firefoxHttpEnabled = firefoxHttpSwitch.isChecked
-                editFirefoxSocksPort.setText(firefoxSocksPort.text.toString())
-                editFirefoxHttpPort.setText(firefoxHttpPort.text.toString())
-                val selectedEmail = firefoxAccountChoices.firstOrNull { it.id == firefoxSelectedAccountId }?.email
-                    ?: prefs.getString("firefoxEmail", "").orEmpty()
-                prefs.edit()
-                    .putString("firefoxAccountId", firefoxSelectedAccountId)
-                    .putString("firefoxEmail", selectedEmail)
-                    .putString("firefoxLocation", selectedFirefoxRegion())
-                    .putString("firefoxServer", server.text.toString().trim())
-                    .putString("firefoxTransport", listOf("auto", "h2", "h1")[transport.selectedItemPosition.coerceIn(0, 2)])
-                    .apply()
-                saveSettings()
-                dialog.dismiss()
-            }
             if (firefoxJob == 0L) {
                 firefoxSubmit(JSONObject().put("op", "list"), "Loading saved Firefox accounts…")
             }
@@ -3516,7 +3549,169 @@ class MainActivity : AppCompatActivity() {
         updateFirefoxVerificationControls()
     }
 
+    private var settingsAutosaveReady = false
+    private val settingsAutosave = Runnable { saveSettings() }
+
+    private fun scheduleSettingsSave() {
+        if (!settingsAutosaveReady) return
+        // Do not allow a widget to replay an older or partially edited session.
+        FCAEVpnService.invalidateRecalledSession(this)
+        handler.removeCallbacks(settingsAutosave)
+        handler.postDelayed(settingsAutosave, 600L)
+    }
+
+    private fun watchSettingsText(field: android.widget.EditText, changed: () -> Unit = {}) {
+        field.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                changed()
+                scheduleSettingsSave()
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+    }
+
+    private fun installSettingsAutosave() {
+        listOf(
+            editTorBridgeLines,
+            editTorSocksPort,
+            editPsiphonSocksPort,
+            editPsiphonHttpPort,
+            editFragMinSize,
+            editFragMaxSize,
+            editFragMinDelay,
+            editFragMaxDelay,
+            editTorHttpPort,
+            editSni,
+            editEchDns,
+            editEchDomain,
+            editGoolInner,
+            editTlsCiphers,
+            editApiAddress,
+            editApiHost,
+            editApiSni,
+            editExitLoc,
+            editTls13Ciphers,
+            editTlsGroups,
+            editTlsKeyShares,
+            editTlsSigalgs,
+            editTlsCertCompression,
+            editTlsAlps,
+            editTlsTrustAnchors,
+            editTlsServerPadding,
+            editForcePeer,
+            editSocksPort,
+            editHttpPort,
+            editFirefoxSocksPort,
+            editFirefoxHttpPort,
+            editTunMtu,
+            editTunTcpSndbuf,
+            editTunTcpRcvbuf,
+            editTunDnsV4,
+            editTunDnsV6,
+            editTeam,
+            editAccessToken,
+            editAccessEmail,
+            editRoutesFile,
+            editRoutesInline,
+            editUpstreamProxy,
+        ).forEach { watchSettingsText(it) }
+        listOf(
+            switchQuick,
+            switchLan,
+            switchSocks,
+            switchHttp,
+            switchTorSocks,
+            switchPsiphonSocks,
+            switchPsiphonHttp,
+            switchTorHttp,
+            switchAutoUpdate,
+            switchPreReleases,
+            switchTlsVerify,
+            switchDisableGrease,
+            switchGreaseSigalgs,
+            switchEchGrease,
+            switchDisableOcspStapling,
+            switchDisableSct,
+            switchDisableSessionTicket,
+            switchDisableExtensionPermutation,
+            switchFragmentSni,
+            switchTunTcpAutoTuning,
+        ).forEach { it.setOnCheckedChangeListener { _, _ -> scheduleSettingsSave() } }
+        listOf(
+            spinnerMode,
+            spinnerTunEngine,
+            spinnerScan,
+            spinnerIpVersion,
+            spinnerNoize,
+            spinnerTor,
+            spinnerTorBridges,
+            spinnerEngineLog,
+            spinnerT2sLog,
+            spinnerSysprofile,
+            spinnerSplitTunnel,
+            spinnerProtocol,
+            spinnerPsiphonRegion,
+            spinnerPsiphonTransport,
+        ).forEach { spinner ->
+            val previous = spinner.onItemSelectedListener
+            var lastPosition = spinner.selectedItemPosition
+            spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                    previous?.onItemSelected(parent, view, position, id)
+                    if (position == spinner.selectedItemPosition && position != lastPosition) {
+                        lastPosition = position
+                        scheduleSettingsSave()
+                    }
+                }
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {
+                    previous?.onNothingSelected(parent)
+                }
+            }
+        }
+        settingsAutosaveReady = true
+    }
+
+    private fun invalidPortSetting(): Triple<Boolean, android.widget.EditText, Boolean>? {
+        val route = routeBackends()
+        val transports = listOf(spinnerProtocol.selectedItemPosition) + selectedChain()
+        val torUsed = 4 in transports || effectiveTorMode() in 1..2
+        val firefoxFinal = finalListenerIsFirefox()
+        return listOf(
+            Triple(!firefoxFinal && switchSocks.isChecked, editSocksPort, false),
+            Triple(!firefoxFinal && switchHttp.isChecked, editHttpPort, false),
+            Triple(firefoxFinal && firefoxSocksEnabled, editFirefoxSocksPort, false),
+            Triple(firefoxFinal && firefoxHttpEnabled, editFirefoxHttpPort, false),
+            Triple(torUsed && switchTorSocks.isChecked, editTorSocksPort, true),
+            Triple(switchTorHttp.isChecked, editTorHttpPort, false),
+            Triple(1 in route && switchPsiphonSocks.isChecked, editPsiphonSocksPort, true),
+            Triple(1 in route && switchPsiphonHttp.isChecked, editPsiphonHttpPort, true),
+        ).firstOrNull { (enabled, field, allowZero) ->
+            val value = field.text.toString().trim().toIntOrNull()
+            enabled && (value == null || value !in (if (allowZero) 0 else 1)..65535)
+        }
+    }
+
+    private fun settingsValidForReplay(): Boolean {
+        if (invalidPortSetting() != null) return false
+        if (tunMtuBytes() !in 1280..9000 || tcpBufferBytes(editTunTcpSndbuf) < 0 || tcpBufferBytes(editTunTcpRcvbuf) < 0) return false
+        val proxyText = upstreamProxyText()
+        val proxyValid = try { NativeEngine.nativeCheckUpstreamProxy(proxyText).isEmpty() }
+            catch (_: Throwable) { proxyText.isEmpty() }
+        if (!proxyValid) return false
+        if (switchFragment.isChecked) {
+            val minSize = fragmentValue(editFragMinSize)
+            val maxSize = fragmentValue(editFragMaxSize)
+            val minDelay = fragmentValue(editFragMinDelay)
+            val maxDelay = fragmentValue(editFragMaxDelay)
+            if (minSize !in 8..64 || maxSize !in 16..128 || maxSize < minSize ||
+                minDelay !in 0..20 || maxDelay !in 1..50 || maxDelay < minDelay) return false
+        }
+        return true
+    }
+
     private fun saveSettings() {
+        handler.removeCallbacks(settingsAutosave)
         prefs.edit().apply {
             putInt("protocol", coreProtocolFromSelection())
             putInt("mode", spinnerMode.selectedItemPosition)
@@ -3608,7 +3803,15 @@ class MainActivity : AppCompatActivity() {
         // The widget and Quick Settings replay this service-owned snapshot.
         // Keep it aligned with the UI settings whenever the screen is saved,
         // not only after Connect is pressed.
-        FCAEVpnService.rememberSession(this, buildStartIntent())
+        if (settingsValidForReplay()) {
+            val session = buildStartIntent()
+            // Snapshot configured ports, not live ephemeral ports from an older session.
+            session.putExtra("psiphonSocksPort", editPsiphonSocksPort.text.toString().toIntOrNull() ?: 0)
+            session.putExtra("psiphonHttpPort", editPsiphonHttpPort.text.toString().toIntOrNull() ?: 0)
+            FCAEVpnService.rememberSession(this, session)
+        } else {
+            FCAEVpnService.invalidateRecalledSession(this)
+        }
     }
 
     private fun loadSettings() {
@@ -3776,9 +3979,11 @@ class MainActivity : AppCompatActivity() {
         isTunModeSelected() && spinnerTunEngine.selectedItemPosition == 0
 
     private fun tcpBufferBytes(field: android.widget.EditText): Int =
-        if (usesTun2socksSettings())
-            NativeEngine.nativeParseTcpBufferSize(field.text.toString()).let { if (it == 0) -1 else it }
-        else 256000
+        if (usesTun2socksSettings()) {
+            val text = field.text.toString().trim()
+            val value = if (text.isNotEmpty() && text.all { it in '0'..'9' }) text.toIntOrNull() else null
+            if (value != null && value in 4096..4194304) value else -1
+        } else 256000
 
     private fun connectClicked() {
         if (connecting || engineRunning || vpnActive) return
@@ -3800,6 +4005,22 @@ class MainActivity : AppCompatActivity() {
             statusText.text = message
             statusText.setTextColor(COLOR_PROGRESS)
             Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            return
+        }
+        val invalidPort = invalidPortSetting()
+        if (invalidPort != null) {
+            invalidPort.second.error = "Use a valid port from ${if (invalidPort.third) 0 else 1} to 65535"
+            val name = when (invalidPort.second) {
+                editSocksPort -> "Aether SOCKS5"
+                editHttpPort -> "Aether HTTP"
+                editFirefoxSocksPort -> "Firefox SOCKS5"
+                editFirefoxHttpPort -> "Firefox HTTP"
+                editTorSocksPort -> "Tor SOCKS5"
+                editTorHttpPort -> "Tor HTTP"
+                editPsiphonSocksPort -> "Psiphon SOCKS5"
+                else -> "Psiphon HTTP"
+            }
+            Toast.makeText(this, "Check the $name port before connecting.", Toast.LENGTH_LONG).show()
             return
         }
         ProcessExit.cancel()
