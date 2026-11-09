@@ -2515,7 +2515,6 @@ static void render_firefox_add_account() {
         ImGui::EndPopup();
         return;
     }
-    ImGui::TextDisabled("Direct email/password sign-in. Credentials are sent to Mozilla and are never saved in the UI configuration.");
     ImGui::InputText("Email", g_app.firefox_email, sizeof(g_app.firefox_email));
     ImGui::InputText("Password", g_app.firefox_password, sizeof(g_app.firefox_password), ImGuiInputTextFlags_Password);
     ImGui::BeginDisabled(g_app.firefox_job != 0 || !g_app.firefox_email[0] || !g_app.firefox_password[0]);

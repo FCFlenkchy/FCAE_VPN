@@ -2801,14 +2801,13 @@ class MainActivity : AppCompatActivity() {
         }
         val box = dialogContent()
         dialogLabel(box, "Add Firefox account")
-        dialogMessage(box, "Sign in with your Firefox account email and password. Credentials are sent directly to Mozilla and are not saved by the app.")
         val email = addDialogInput(box, "Email")
         email.hint = "name@example.com"
         email.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
         firefoxEmailView = email
         val password = addDialogInput(box, "Password", "", true)
         password.hint = "Firefox account password"
-        val status = dialogMessage(box, "Verification or unblock codes will be requested separately only if Mozilla requires them.")
+        val status = dialogMessage(box, "")
         firefoxDetailStatusView = status
         val dialog = dialogBuilder()
             .setTitle("Add new account")

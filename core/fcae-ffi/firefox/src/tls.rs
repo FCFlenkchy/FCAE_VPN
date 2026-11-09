@@ -83,6 +83,10 @@ pub fn require_h2(stream: &SslStream<TcpStream>) -> Result<()> {
 }
 
 pub fn firefox_user_agent() -> String {
+    firefox_user_agent_for_major(159)
+}
+
+pub(crate) fn firefox_user_agent_for_major(major: u16) -> String {
     let platform = if cfg!(target_os = "windows") || cfg!(target_os = "android") {
         "Windows NT 10.0; Win64; x64"
     } else if cfg!(target_os = "macos") {
@@ -92,5 +96,5 @@ pub fn firefox_user_agent() -> String {
     } else {
         "X11; Linux x86_64"
     };
-    format!("Mozilla/5.0 ({platform}; rv:158.0) Gecko/20100101 Firefox/158.0")
+    format!("Mozilla/5.0 ({platform}; rv:{major}.0) Gecko/20100101 Firefox/{major}.0")
 }

@@ -198,7 +198,7 @@ async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<
     let request: Value = serde_json::from_str(raw)?;
     let operation = required(&request, "op")?;
     let data_dir = optional(&request, "data_dir").unwrap_or_else(|| "fcae-data".into());
-    let accounts = service(services, &data_dir)?;
+    let accounts = service(services, &data_dir).await?;
     match operation.as_str() {
         "list" => {
             let values = accounts.list()?.into_iter().map(account_json).collect::<Result<Vec<_>>>()?;
@@ -286,11 +286,11 @@ async fn execute(services: &mut HashMap<String, Accounts>, raw: &str) -> Result<
     }
 }
 
-fn service<'a>(services: &'a mut HashMap<String, Accounts>, data_dir: &str) -> Result<&'a Accounts> {
+async fn service<'a>(services: &'a mut HashMap<String, Accounts>, data_dir: &str) -> Result<&'a Accounts> {
     if !services.contains_key(data_dir) {
         let store = fcae_firefox::AccountStore::new(data_dir)?;
         let dialer = Dialer::new(None, protect_callback(), 10)?;
-        let control = ControlPlane::new(dialer);
+        let control = ControlPlane::new(dialer).with_current_firefox_user_agent().await;
         let challenges = Arc::new(ChallengeService::new(Some(captcha_solver())));
         let fxa = Fxa::new(control.clone()).with_challenges(challenges);
         services.insert(data_dir.to_string(), Accounts::new(store, control, fxa));

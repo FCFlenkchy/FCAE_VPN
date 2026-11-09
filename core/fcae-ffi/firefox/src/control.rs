@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::dialer::Dialer;
 use crate::error::{FirefoxError, Result};
-use crate::tls::{firefox_user_agent, ALPN_H1, ALPN_H2_H1};
+use crate::tls::{firefox_user_agent, firefox_user_agent_for_major, ALPN_H1, ALPN_H2_H1};
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_HEADER_LIST: u32 = 128 * 1024;
@@ -115,12 +115,13 @@ struct Cookie {
 pub struct ControlPlane {
     dialer: Dialer,
     timeout: Duration,
+    user_agent: String,
     cookies: Arc<Mutex<BTreeMap<String, Cookie>>>,
 }
 
 impl ControlPlane {
     pub fn new(dialer: Dialer) -> Self {
-        Self { dialer, timeout: Duration::from_secs(20), cookies: Arc::new(Mutex::new(BTreeMap::new())) }
+        Self { dialer, timeout: Duration::from_secs(20), user_agent: firefox_user_agent(), cookies: Arc::new(Mutex::new(BTreeMap::new())) }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -129,7 +130,27 @@ impl ControlPlane {
     }
 
     pub fn fresh_jar(&self) -> Self {
-        Self { dialer: self.dialer.clone(), timeout: self.timeout, cookies: Arc::new(Mutex::new(BTreeMap::new())) }
+        Self {
+            dialer: self.dialer.clone(),
+            timeout: self.timeout,
+            user_agent: self.user_agent.clone(),
+            cookies: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    pub async fn with_current_firefox_user_agent(mut self) -> Self {
+        const VERSION_URL: &str = "https://product-details.mozilla.org/1.0/firefox_versions.json";
+        let probe = self.fresh_jar().with_timeout(Duration::from_secs(3));
+        if let Ok(request) = ControlRequest::new(Method::GET, VERSION_URL) {
+            if let Ok(response) = probe.send(request).await {
+                if response.status == 200 {
+                    if let Some(major) = firefox_release_major(&response.body) {
+                        self.user_agent = firefox_user_agent_for_major(major);
+                    }
+                }
+            }
+        }
+        self
     }
 
     pub fn dialer(&self) -> &Dialer {
@@ -173,7 +194,7 @@ impl ControlPlane {
 
     fn decorate(&self, mut request: ControlRequest) -> ControlRequest {
         if !has_header(&request, "user-agent") {
-            request.headers.push((http::header::USER_AGENT, HeaderValue::from_str(&firefox_user_agent()).unwrap()));
+            request.headers.push((http::header::USER_AGENT, HeaderValue::from_str(&self.user_agent).unwrap()));
         }
         if !has_header(&request, "accept") {
             request.headers.push((http::header::ACCEPT, HeaderValue::from_static("*/*")));
@@ -207,7 +228,7 @@ impl ControlPlane {
         Ok(response)
     }
 
-    fn store_cookies(&self, request_host: &str, headers: &HeaderMap) {
+    pub(crate) fn store_cookies(&self, request_host: &str, headers: &HeaderMap) {
         for value in headers.get_all(http::header::SET_COOKIE) {
             let Ok(value) = value.to_str() else { continue };
             let mut parts = value.split(';');
@@ -241,6 +262,20 @@ impl ControlPlane {
             }
         }
     }
+}
+
+fn firefox_release_major(body: &[u8]) -> Option<u16> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let release = value.get("LATEST_FIREFOX_VERSION")?.as_str()?.trim();
+    if release.len() > 24 {
+        return None;
+    }
+    let parts: Vec<_> = release.split('.').collect();
+    if !(2..=4).contains(&parts.len()) || parts.iter().any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit())) {
+        return None;
+    }
+    let major = parts[0].parse::<u16>().ok()?;
+    (1..=999).contains(&major).then_some(major)
 }
 
 fn has_header(request: &ControlRequest, name: &str) -> bool {
@@ -415,4 +450,40 @@ fn dechunk(mut raw: &[u8]) -> Result<Vec<u8>> {
 
 fn h2_error(error: h2::Error) -> FirefoxError {
     FirefoxError::H2(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_version_is_validated() {
+        assert_eq!(firefox_release_major(br#"{"LATEST_FIREFOX_VERSION":"159.0.1"}"#), Some(159));
+        assert_eq!(firefox_release_major(br#"{"LATEST_FIREFOX_VERSION":"160.0"}"#), Some(160));
+        for body in [
+            &b"{}"[..],
+            &br#"{"LATEST_FIREFOX_VERSION":""}"#[..],
+            &br#"{"LATEST_FIREFOX_VERSION":"159.0a1"}"#[..],
+            &br#"{"LATEST_FIREFOX_VERSION":"0.0"}"#[..],
+            &br#"{"LATEST_FIREFOX_VERSION":"1000.0"}"#[..],
+            &br#"{"LATEST_FIREFOX_VERSION":"159..0"}"#[..],
+        ] {
+            assert_eq!(firefox_release_major(body), None);
+        }
+    }
+
+    #[test]
+    fn fresh_challenge_jar_uses_same_agent_and_encoding() {
+        let mut control = ControlPlane::new(Dialer::new(None, None, 10).unwrap());
+        control.user_agent = firefox_user_agent_for_major(160);
+        let request = ControlRequest::new(Method::POST, "https://api.accounts.firefox.com/v1/account/login").unwrap();
+        let decorated = control.decorate(request.clone());
+        let solver_request = control.fresh_jar().decorate(request);
+        for request in [&decorated, &solver_request] {
+            let agent = request.headers.iter().find(|(name, _)| name.as_str() == "user-agent").unwrap().1.to_str().unwrap();
+            let encoding = request.headers.iter().find(|(name, _)| name.as_str() == "accept-encoding").unwrap().1.to_str().unwrap();
+            assert_eq!(agent, control.user_agent.as_str());
+            assert_eq!(encoding, "identity");
+        }
+    }
 }

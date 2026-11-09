@@ -30,6 +30,14 @@ pub(crate) async fn recover_406(
     request: ControlRequest,
     mut response: ControlResponse,
 ) -> Result<ControlResponse> {
+    if should_retry_h2(&request, &response) {
+        match http.send_h2(request.clone()).await {
+            Ok(alternate) if alternate.status != 406 => return Ok(alternate),
+            Ok(alternate) if !alternate.body.is_empty() => response = alternate,
+            Ok(_) => {}
+            Err(error) => log::debug!("[firefox] HTTP/2 challenge fallback failed: {error}"),
+        }
+    }
     let mut attempts = 0;
     while response.status == 406 {
         if attempts >= 3 {
@@ -44,6 +52,13 @@ pub(crate) async fn recover_406(
     Ok(response)
 }
 
+fn should_retry_h2(request: &ControlRequest, response: &ControlResponse) -> bool {
+    response.status == 406
+        && response.body.is_empty()
+        && request.port == 443
+        && trusted_challenge_base(&format!("https://{}", request.host))
+}
+
 impl ChallengeService {
     pub fn new(captcha: Option<Arc<dyn CaptchaSolver>>) -> Self {
         Self { captcha, slot: tokio::sync::Mutex::new(()) }
@@ -52,7 +67,7 @@ impl ChallengeService {
     pub async fn solve(&self, parent: &ControlPlane, rejection: &ControlResponse, rejection_origin: &str) -> Result<()> {
         let result = tokio::time::timeout(SOLVE_TIMEOUT, async {
             let _slot = self.slot.lock().await;
-            let mut last = FirefoxError::ChallengeRequired;
+            let mut failures = Vec::new();
             let rejection_page = std::str::from_utf8(&rejection.body).ok().filter(|body| is_challenge_page(body));
             let mut bases = Vec::new();
             for base in [rejection_origin, "https://api.accounts.firefox.com", "https://accounts.firefox.com"] {
@@ -65,6 +80,9 @@ impl ChallengeService {
                 let solver_http = parent.fresh_jar().with_timeout(SOLVE_TIMEOUT);
                 let solved = if index == 0 && rejected_base {
                     if let Some(page) = rejection_page {
+                        if let Some(host) = base.strip_prefix("https://") {
+                            solver_http.store_cookies(host, &rejection.headers);
+                        }
                         self.solve_page(&solver_http, base, page).await
                     } else {
                         self.solve_host(&solver_http, base).await
@@ -74,7 +92,7 @@ impl ChallengeService {
                 };
                 match solved {
                     Ok(()) if !solver_http.has_cookies() => {
-                        last = FirefoxError::Protocol("challenge completed but no cookies were issued".into());
+                        failures.push(format!("{base}: challenge completed but no cookies were issued"));
                     }
                     Ok(()) => {
                         parent.import_cookies_for_hosts(&solver_http, &[
@@ -85,10 +103,11 @@ impl ChallengeService {
                         ]);
                         return Ok(());
                     }
-                    Err(error) => last = error,
+                    Err(FirefoxError::ChallengeRequired) => return Err(FirefoxError::ChallengeRequired),
+                    Err(error) => failures.push(format!("{base}: {error}")),
                 }
             }
-            Err(last)
+            Err(FirefoxError::Protocol(format!("Fastly challenge failed ({})", failures.join("; "))))
         }).await.map_err(|_| FirefoxError::Timeout(SOLVE_TIMEOUT))?;
         result
     }
@@ -221,7 +240,7 @@ async fn fetch_challenge_page(http: &ControlPlane, url: &str) -> Result<(String,
     let body = String::from_utf8(response.body).map_err(|_| FirefoxError::Protocol("challenge resource is not UTF-8".into()))?;
     let challenged = is_challenge_page(&body);
     if response.status != 200 && !challenged {
-        return Err(FirefoxError::Protocol(format!("challenge resource returned HTTP {}", response.status)));
+        return Err(FirefoxError::Protocol(format!("challenge page returned HTTP {}", response.status)));
     }
     Ok((body, challenged))
 }
@@ -231,20 +250,25 @@ async fn fetch_text(http: &ControlPlane, url: &str) -> Result<String> {
         .header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")?;
     let response = http.send(request).await?;
     if response.status != 200 {
-        return Err(FirefoxError::Protocol(format!("challenge resource returned HTTP {}", response.status)));
+        return Err(FirefoxError::Protocol(format!("challenge script returned HTTP {}", response.status)));
     }
     String::from_utf8(response.body).map_err(|_| FirefoxError::Protocol("challenge resource is not UTF-8".into()))
 }
 
-async fn fetch_pat(http: &ControlPlane, prefix: &str, token: &str) -> Result<String> {
+fn pat_request(prefix: &str, token: &str) -> Result<ControlRequest> {
     let mut url = url::Url::parse(&format!("{prefix}/pat"))?;
     url.query_pairs_mut().append_pair("token", token);
     let origin = prefix.split("/_fs-ch-").next().unwrap_or(prefix);
-    let request = ControlRequest::new(Method::POST, url.as_str())?
+    let mut request = ControlRequest::new(Method::POST, url.as_str())?
         .header("accept", "text/plain")?
         .header("content-type", "application/json")?
         .header("origin", origin)?;
-    let response = http.send(request).await?;
+    request.body = Some(Vec::new());
+    Ok(request)
+}
+
+async fn fetch_pat(http: &ControlPlane, prefix: &str, token: &str) -> Result<String> {
+    let response = http.send(pat_request(prefix, token)?).await?;
     if matches!(response.status, 400 | 401) {
         return Ok(String::new());
     }
@@ -336,4 +360,46 @@ fn decode_one<T: DeserializeOwned>(input: &str) -> Option<(T, usize)> {
     let mut stream = serde_json::Deserializer::from_str(input).into_iter::<T>();
     let value = stream.next()?.ok()?;
     Some((value, stream.byte_offset()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderMap;
+
+    fn response(status: u16, body: &[u8]) -> ControlResponse {
+        ControlResponse { status, headers: HeaderMap::new(), body: body.to_vec() }
+    }
+
+    #[test]
+    fn pat_post_has_explicit_empty_body() {
+        let request = pat_request("https://accounts.firefox.com/_fs-ch-test", "a+b /?").unwrap();
+        assert_eq!(request.method, Method::POST);
+        assert_eq!(request.body.as_deref(), Some(&b""[..]));
+        assert_eq!(request.path, "/_fs-ch-test/pat?token=a%2Bb+%2F%3F");
+    }
+
+    #[test]
+    fn rejection_cookies_can_seed_an_isolated_solver_jar() {
+        let parent = ControlPlane::new(crate::dialer::Dialer::new(None, None, 10).unwrap());
+        let solver = parent.fresh_jar();
+        let mut headers = HeaderMap::new();
+        headers.append(http::header::SET_COOKIE, "challenge_session=value; Path=/; Secure".parse().unwrap());
+        solver.store_cookies("api.accounts.firefox.com", &headers);
+        assert!(solver.has_cookies());
+        assert!(!parent.has_cookies());
+    }
+
+    #[test]
+    fn h2_retry_only_for_empty_406_from_trusted_origins() {
+        let request = ControlRequest::new(Method::POST, "https://api.accounts.firefox.com/v1/account/login").unwrap();
+        assert!(should_retry_h2(&request, &response(406, b"")));
+        assert!(!should_retry_h2(&request, &response(400, b"")));
+        assert!(!should_retry_h2(&request, &response(429, b"")));
+        assert!(!should_retry_h2(&request, &response(406, b"challenge")));
+        let untrusted = ControlRequest::new(Method::POST, "https://example.com/").unwrap();
+        assert!(!should_retry_h2(&untrusted, &response(406, b"")));
+        let other_port = ControlRequest::new(Method::POST, "https://api.accounts.firefox.com:8443/").unwrap();
+        assert!(!should_retry_h2(&other_port, &response(406, b"")));
+    }
 }
