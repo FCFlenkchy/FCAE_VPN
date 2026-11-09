@@ -170,34 +170,48 @@ fn finish(jobs: &Mutex<HashMap<u64, JobSnapshot>>, id: u64, result: Result<Value
     }
 }
 
-fn format_bytes(bytes: i64) -> String {
-    let value = bytes.max(0) as f64;
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    if value >= GIB {
-        format!("{:.2} GiB", value / GIB)
-    } else if value >= MIB {
-        format!("{:.2} MiB", value / MIB)
-    } else if value >= KIB {
-        format!("{:.1} KiB", value / KIB)
+fn format_bytes(bytes: i64, precision: u32) -> String {
+    const UNITS: [(&str, u128); 7] = [
+        ("EB", 1_000_000_000_000_000_000), ("PB", 1_000_000_000_000_000),
+        ("TB", 1_000_000_000_000), ("GB", 1_000_000_000),
+        ("MB", 1_000_000), ("KB", 1_000), ("B", 1),
+    ];
+    let bytes = bytes.max(0) as u128;
+    let &(unit, divisor) = UNITS.iter().find(|(_, divisor)| bytes >= *divisor).unwrap_or(&UNITS[6]);
+    if divisor == 1 { return format!("{bytes} B"); }
+    let scale = 10u128.pow(precision);
+    let scaled = bytes * scale / divisor;
+    let fraction = format!("{:0width$}", scaled % scale, width = precision as usize);
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        format!("{} {unit}", scaled / scale)
     } else {
-        format!("{} B", value as i64)
+        format!("{}.{fraction} {unit}", scaled / scale)
     }
 }
 
-fn account_json(account: Account) -> Result<Value> {
-    let monthly_usage = match &account.usage {
-        Some(usage) if usage.unlimited => "Unlimited".into(),
-        Some(usage) => {
-            let used = usage.limit.saturating_sub(usage.remaining).max(0);
-            format!("{} used of {}", format_bytes(used), format_bytes(usage.limit))
+fn usage_display(usage: Option<&fcae_firefox::types::Usage>) -> (String, bool) {
+    let Some(usage) = usage else { return ("Not reported".into(), false) };
+    if usage.unlimited { return ("Unlimited".into(), false); }
+    let limit = usage.limit.max(0);
+    let used = limit.saturating_sub(usage.remaining.max(0)).clamp(0, limit);
+    let exhausted = usage.exhausted();
+    for precision in 2..=18 {
+        let used_text = format_bytes(used, precision);
+        let limit_text = format_bytes(limit, precision);
+        if used == limit || used_text != limit_text {
+            return (format!("{used_text} / {limit_text}"), exhausted);
         }
-        None => "Not reported".into(),
-    };
+    }
+    (format!("{used} B / {limit} B"), exhausted)
+}
+
+fn account_json(account: Account) -> Result<Value> {
+    let (monthly_usage, exhausted) = usage_display(account.usage.as_ref());
     let mut value = serde_json::to_value(account)?;
     if let Some(object) = value.as_object_mut() {
         object.insert("monthly_usage".into(), json!(monthly_usage));
+        object.insert("monthly_usage_exhausted".into(), json!(exhausted));
     }
     Ok(value)
 }
@@ -355,6 +369,19 @@ fn optional(request: &Value, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_display_uses_reported_bytes_and_exact_exhaustion() {
+        use fcae_firefox::types::Usage;
+        let quota = |limit, remaining| Usage { limit, remaining, ..Usage::default() };
+        assert_eq!(usage_display(Some(&quota(50_000_000_000, 49_940_000_000))), ("60 MB / 50 GB".into(), false));
+        assert_eq!(usage_display(Some(&quota(50_000_000_000, 0))), ("50 GB / 50 GB".into(), true));
+        assert_eq!(usage_display(Some(&quota(50_000_000_000, 1))), ("49.99 GB / 50 GB".into(), false));
+        assert_eq!(usage_display(Some(&quota(50_000_000_001, 1))), ("50 GB / 50.000000001 GB".into(), false));
+        assert_eq!(usage_display(Some(&quota(0, 0))), ("0 B / 0 B".into(), true));
+        assert_eq!(usage_display(Some(&Usage { unlimited: true, ..Usage::default() })), ("Unlimited".into(), false));
+        assert_eq!(usage_display(None), ("Not reported".into(), false));
+    }
 
     #[test]
     fn location_choices_collapse_only_equivalent_single_city() {

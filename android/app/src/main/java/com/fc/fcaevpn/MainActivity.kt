@@ -73,10 +73,16 @@ class MainActivity : AppCompatActivity() {
     private var updateAvailableInfo: FcaeUpdateInfo? = null
     private var updateResultDialog: androidx.appcompat.app.AlertDialog? = null
     private var connectionInfoDialog: androidx.appcompat.app.AlertDialog? = null
-    private data class FirefoxAccountChoice(val id: String, val email: String, val monthlyUsage: String = "")
+    private data class FirefoxAccountChoice(
+        val id: String,
+        val email: String,
+        val monthlyUsage: String = "",
+        val usageExhausted: Boolean = false,
+    )
 
     private var firefoxStatusView: TextView? = null
     private var firefoxDetailStatusView: TextView? = null
+    private var firefoxStatusExpiry: Runnable? = null
     private var firefoxAccountRows: LinearLayout? = null
     private var firefoxAccountChoices: List<FirefoxAccountChoice> = emptyList()
     private var firefoxSelectedAccountId = ""
@@ -98,6 +104,13 @@ class MainActivity : AppCompatActivity() {
     private var firefoxUsageJob = 0L
     private var firefoxUsageAccountId = ""
     private val firefoxUsageQueue = java.util.ArrayDeque<String>()
+    private val firefoxUsageRefresh = object : Runnable {
+        override fun run() {
+            if (!inForeground || firefoxAccountRows == null) return
+            queueFirefoxUsage(firefoxAccountChoices.map { it.id })
+            handler.postDelayed(this, 60_000L)
+        }
+    }
     private var firefoxPendingId = ""
     private var firefoxTotp = false
     private var firefoxEmailLink = false
@@ -282,6 +295,32 @@ class MainActivity : AppCompatActivity() {
         t
     }
     private val pollBusy = AtomicBoolean(false)
+    private val logPollBusy = AtomicBoolean(false)
+    private var logsVisible = false
+    private var logViewGeneration = 0L
+
+    private val logPoll = object : Runnable {
+        override fun run() {
+            if (!inForeground || !logsVisible) return
+            if (switchLogging.isChecked && logPollBusy.compareAndSet(false, true)) {
+                val generation = logViewGeneration
+                bgExecutor.execute {
+                    val logs = try { NativeEngine.nativeGetLogs() } catch (_: Throwable) { null }
+                    handler.post {
+                        logPollBusy.set(false)
+                        if (logs != null && inForeground && logsVisible && switchLogging.isChecked &&
+                            generation == logViewGeneration) renderLogs(logs)
+                    }
+                }
+            }
+            handler.postDelayed(this, POLL_INTERVAL_MS)
+        }
+    }
+
+    private fun restartLogPoll() {
+        handler.removeCallbacks(logPoll)
+        if (inForeground && logsVisible) handler.post(logPoll)
+    }
     private lateinit var prefs: SharedPreferences
 
     private val vpnPermissionLauncher = registerForActivityResult(
@@ -520,10 +559,6 @@ class MainActivity : AppCompatActivity() {
                         statusText.text = "DISCONNECTED"
                     }
                 }
-                PsiphonTunnelService.BROADCAST_LOG -> {
-                    val chunk = intent.getStringExtra(PsiphonTunnelService.EXTRA_LOG) ?: return
-                    handler.post { ingestPsiphonLog(chunk) }
-                }
                 FCAEVpnService.BROADCAST_VPN_DISCONNECTED,
                 FCAEVpnService.BROADCAST_VPN_STATE_CHANGED -> {
                     val isRunning = intent.getBooleanExtra("running", false)
@@ -690,9 +725,7 @@ class MainActivity : AppCompatActivity() {
                     val lan = NativeEngine.nativeGetLanIp()
                     val statusMsg = NativeEngine.nativeGetStatusMsg()
                     val errMsg = NativeEngine.nativeGetLastError()
-                    val logs = if (switchLogging.isChecked) NativeEngine.nativeGetLogs() else ""
-
-                    handler.post { applyStatus(state, rtt, rx, tx, totalRx, totalTx, peer, lan, statusMsg, errMsg, logs) }
+                    handler.post { applyStatus(state, rtt, rx, tx, totalRx, totalTx, peer, lan, statusMsg, errMsg) }
                 } catch (e: Throwable) {
                     handler.post {
                         statusText.text = "UI error: ${e.message}"
@@ -1309,6 +1342,10 @@ class MainActivity : AppCompatActivity() {
         switchQuick = findViewById(R.id.switchQuick)
         switchLan = findViewById(R.id.switchLan)
         switchLogging = findViewById(R.id.switchLogging)
+        switchLogging.setOnCheckedChangeListener { _, _ ->
+            logViewGeneration++
+            restartLogPoll()
+        }
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
         switchTorHttp = findViewById(R.id.switchTorHttp)
@@ -1404,6 +1441,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         fun switchTab(tab: Int) {
+            logsVisible = tab == 2
+            logViewGeneration++
+            restartLogPoll()
             val showContent = tab != 2
             outerScroll.visibility = if (showContent) android.view.View.VISIBLE else android.view.View.GONE
             layoutLogsContainer.visibility = if (tab == 2) android.view.View.VISIBLE else android.view.View.GONE
@@ -1719,6 +1759,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<MaterialButton>(R.id.btnLatestLogs).setOnClickListener {
+            logViewGeneration++
             logText.clearFocus()
             if (logText.text is android.text.Spannable)
                 android.text.Selection.removeSelection(logText.text as android.text.Spannable)
@@ -1729,6 +1770,7 @@ class MainActivity : AppCompatActivity() {
             logScroll.invalidate()
         }
         findViewById<MaterialButton>(R.id.btnClearLogs).setOnClickListener {
+            logViewGeneration++
             NativeEngine.nativeClearLogs()
             wasAtBottom = true
             logText.text = ""
@@ -1775,7 +1817,6 @@ class MainActivity : AppCompatActivity() {
             addAction(PsiphonTunnelService.BROADCAST_REGIONS)
             addAction(PsiphonTunnelService.BROADCAST_FAILED)
             addAction(PsiphonTunnelService.BROADCAST_STOPPED)
-            addAction(PsiphonTunnelService.BROADCAST_LOG)
             addAction(PsiphonTunnelService.BROADCAST_STAGE)
             addAction(PsiphonTunnelService.BROADCAST_STATS)
         }
@@ -1904,6 +1945,9 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         inForeground = false
+        logViewGeneration++
+        handler.removeCallbacks(logPoll)
+        handler.removeCallbacks(firefoxUsageRefresh)
         logTouchActive = false
         // Keyboard gone, cursor gone with it.
         clearEditTextFocus()
@@ -2071,6 +2115,9 @@ class MainActivity : AppCompatActivity() {
         catch (_: Throwable) {}
         handleWidgetIntent(intent)
         inForeground = true
+        restartLogPoll()
+        handler.removeCallbacks(firefoxUsageRefresh)
+        if (firefoxAccountRows != null) handler.post(firefoxUsageRefresh)
         handler.removeCallbacks(sponsorManifestRefresh)
         handler.post(sponsorManifestRefresh)
         if (routeIncludesPsiphon()) {
@@ -2247,8 +2294,12 @@ class MainActivity : AppCompatActivity() {
         releaseSponsorUi()
         releaseSponsorMedia(!isChangingConfigurations)
         handler.removeCallbacks(poll)
+        handler.removeCallbacks(logPoll)
+        handler.removeCallbacks(firefoxUsageRefresh)
         handler.removeCallbacks(sponsorPoll)
         handler.removeCallbacks(sponsorManifestRefresh)
+        firefoxStatusExpiry?.let(handler::removeCallbacks)
+        firefoxStatusExpiry = null
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
         if (isFinishing && !isChangingConfigurations
             && !FCAEVpnService.sessionActive() && !ProxyNotification.sessionActive()) {
@@ -2650,8 +2701,8 @@ class MainActivity : AppCompatActivity() {
             entry.addView(email)
             if (choice.monthlyUsage.isNotBlank()) {
                 val usage = TextView(this)
-                usage.text = choice.monthlyUsage
-                usage.setTextColor(Color.parseColor("#B9A8C9"))
+                usage.text = "Monthly usage: ${choice.monthlyUsage}"
+                usage.setTextColor(Color.parseColor(if (choice.usageExhausted) "#FF6B6B" else "#B9A8C9"))
                 usage.textSize = 12f
                 usage.setPadding(0, dp(4), 0, 0)
                 entry.addView(usage)
@@ -2740,6 +2791,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun dialogMessage(box: LinearLayout, text: String): TextView = TextView(this).apply {
         this.text = text
+        visibility = if (text.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
         setTextColor(Color.parseColor("#FF9AA3B5"))
         textSize = 13f
         setPadding(0, dp(6), 0, dp(8))
@@ -2779,7 +2831,7 @@ class MainActivity : AppCompatActivity() {
         }
         renderFirefoxAccountRows()
         addDialogButton(box, "Add new account") { showFirefoxAddAccount() }
-        val status = dialogMessage(box, "Use an account for Firefox connections.")
+        val status = dialogMessage(box, "")
         firefoxStatusView = status
 
         val server = addDialogInput(box, "Server override (optional host[:port])", prefs.getString("firefoxServer", "").orEmpty())
@@ -2797,11 +2849,6 @@ class MainActivity : AppCompatActivity() {
             else -> 0
         })
         box.addView(transport)
-        box.addView(TextView(this).apply {
-            text = "UDP uses a separate MASQUE CONNECT-UDP session over HTTP/2. HTTP/1.1 is TCP fallback only."
-            setTextColor(Color.parseColor("#FF9AA3B5"))
-            setPadding(0, dp(8), 0, dp(8))
-        })
         val dialog = dialogBuilder()
             .setTitle("FIREFOX IP PROTECTION SETTINGS")
             .setView(ScrollView(this).apply { addView(box) })
@@ -2827,10 +2874,15 @@ class MainActivity : AppCompatActivity() {
                 firefoxSubmit(JSONObject().put("op", "list"), "Loading saved Firefox accounts…")
             }
             startFirefoxRegions("locations_cached")
+            handler.removeCallbacks(firefoxUsageRefresh)
+            if (inForeground) handler.postDelayed(firefoxUsageRefresh, 60_000L)
         }
         dialog.setOnDismissListener {
             if (firefoxStatusView === status) firefoxStatusView = null
-            if (firefoxAccountRows === accounts) firefoxAccountRows = null
+            if (firefoxAccountRows === accounts) {
+                handler.removeCallbacks(firefoxUsageRefresh)
+                firefoxAccountRows = null
+            }
             if (firefoxRegionSpinner === location) {
                 firefoxRegionSpinner = null
                 firefoxRegionAdapter = null
@@ -3153,7 +3205,10 @@ class MainActivity : AppCompatActivity() {
                 val account = result?.optJSONObject("result")?.optJSONObject("account")
                 val usage = account?.optString("monthly_usage").orEmpty()
                 firefoxAccountChoices = firefoxAccountChoices.map { choice ->
-                    if (choice.id == accountId && usage.isNotBlank()) choice.copy(monthlyUsage = usage)
+                    if (choice.id == accountId && usage.isNotBlank()) choice.copy(
+                        monthlyUsage = usage,
+                        usageExhausted = account?.optBoolean("monthly_usage_exhausted", false) == true,
+                    )
                     else if (choice.id == accountId && choice.monthlyUsage == "Not reported") choice.copy(monthlyUsage = "Usage unavailable")
                     else choice
                 }
@@ -3164,17 +3219,32 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun firefoxSetStatus(message: String, success: Boolean = false) {
+        firefoxStatusExpiry?.let(handler::removeCallbacks)
+        firefoxStatusExpiry = null
+        val mainView = firefoxStatusView
+        val detailView = firefoxDetailStatusView
         val color = Color.parseColor(if (success) "#9CE6B4" else "#D7C9E3")
-        firefoxStatusView?.apply {
-            text = message
-            setTextColor(color)
+        for (view in listOfNotNull(mainView, detailView)) {
+            view.text = message
+            view.visibility = if (message.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
+            view.setTextColor(color)
         }
-        firefoxDetailStatusView?.apply {
-            text = message
-            setTextColor(color)
-        }
-        if (firefoxStatusView == null && firefoxDetailStatusView == null && message.isNotEmpty()) {
+        if (mainView == null && detailView == null && message.isNotEmpty()) {
             Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        } else if (message.isNotEmpty() && firefoxJob == 0L) {
+            val expiry = Runnable {
+                if (mainView != null && firefoxStatusView === mainView && mainView.text.toString() == message) {
+                    mainView.text = ""
+                    mainView.visibility = android.view.View.GONE
+                }
+                if (detailView != null && firefoxDetailStatusView === detailView && detailView.text.toString() == message) {
+                    detailView.text = ""
+                    detailView.visibility = android.view.View.GONE
+                }
+                firefoxStatusExpiry = null
+            }
+            firefoxStatusExpiry = expiry
+            handler.postDelayed(expiry, 3_000L)
         }
     }
 
@@ -3357,7 +3427,10 @@ class MainActivity : AppCompatActivity() {
                         .apply()
                     updateFirefoxAccountChoices(
                         firefoxAccountChoices.filter { it.id != accountId } +
-                            FirefoxAccountChoice(accountId, accountEmail, account?.optString("monthly_usage").orEmpty()),
+                            FirefoxAccountChoice(
+                                accountId, accountEmail, account?.optString("monthly_usage").orEmpty(),
+                                account?.optBoolean("monthly_usage_exhausted", false) == true,
+                            ),
                     )
                     saveSettings()
                     queueFirefoxUsage(listOf(accountId))
@@ -3381,6 +3454,7 @@ class MainActivity : AppCompatActivity() {
                                     accountId,
                                     value.optString("email").trim(),
                                     value.optString("monthly_usage").trim(),
+                                    value.optBoolean("monthly_usage_exhausted", false),
                                 ))
                             }
                         }
@@ -4835,13 +4909,11 @@ class MainActivity : AppCompatActivity() {
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
     }
 
-    /** AAR notices arrive from :psiphon. The engine log deque lives here. */
     private fun ingestPsiphonLog(chunk: String) {
         if (chunk.isBlank()) return
         try { NativeEngine.nativeAppendLog(chunk) } catch (_: Throwable) {}
-        if (!::switchLogging.isInitialized || !switchLogging.isChecked) return
-        val logs = try { NativeEngine.nativeGetLogs().takeLast(MAX_LOG_CHARS) } catch (_: Throwable) { return }
-        renderLogs(logs)
+        logViewGeneration++
+        restartLogPoll()
     }
 
     private fun logBottomTolerance() = (4 * resources.displayMetrics.density).toInt()
@@ -4882,14 +4954,14 @@ class MainActivity : AppCompatActivity() {
         return super.dispatchTouchEvent(event)
     }
 
-    /** Both native polling and AAR notices use this one layout-safe path. */
+    /** Render a snapshot of the shared log ring without disturbing selection. */
     private fun renderLogs(logs: String) {
         // Keep selection stable while copying. The native ring still receives
         // every notice; the next poll catches up when interaction ends.
         if (logTouchActive || logText.hasSelection()) return
         val shown = logs.takeLast(MAX_LOG_CHARS)
         val h = shown.hashCode().toLong()
-        if (h == lastLogHash) return
+        if (h == lastLogHash && android.text.TextUtils.equals(logText.text, shown)) return
         lastLogHash = h
         logText.text = shown
         // The pre-draw listener follows using the newly laid-out child height.
@@ -4949,8 +5021,7 @@ class MainActivity : AppCompatActivity() {
         peer: String,
         lan: String,
         statusMsg: String,
-        errMsg: String,
-        logs: String
+        errMsg: String
     ) {
         val connectedForSponsors = state == 4
         if (connectedForSponsors != sponsorConnected) {
@@ -5044,7 +5115,6 @@ class MainActivity : AppCompatActivity() {
             if (errMsg.isNotEmpty() && state != 5) peerLine.append("\nError: $errMsg")
             peerText.text = peerLine.toString()
 
-            renderLogs(logs)
             updateButton()
         } catch (e: Throwable) {
             statusText.text = "UI error: ${e.message}"

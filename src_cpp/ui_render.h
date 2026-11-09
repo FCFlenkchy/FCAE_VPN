@@ -198,7 +198,7 @@ struct AppState {
     int  max_logs    = 200;
     bool auto_scroll = true;
     uint64_t logs_revision = 0; // guarded by logs_mutex, including ring eviction
-    bool logging_enabled = true;
+    std::atomic<bool> logging_enabled{true};
     bool auto_update_check  = true;
     // Update channel: off = stable slot only; on = pre-releases also compete
     // (engine picks the higher of the two). Default off. Toggling the Logs-tab

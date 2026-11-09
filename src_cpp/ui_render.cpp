@@ -318,6 +318,7 @@ static void draw_sponsor_text(const SponsorText& t, const ImVec2& origin, const 
 
 // What the last painted frame looked like / when it was painted.
 static uint64_t s_painted_sig = 0;
+static uint64_t s_frame_log_revision = 0;
 static bool s_log_scroll_pending = false;
 static bool     s_painted_once = false;
 
@@ -567,6 +568,8 @@ void ui_set_window_focused(bool focused) {
 static void firefox_poll_captcha();
 static void firefox_poll_job();
 static void firefox_poll_background();
+static void firefox_expire_status(double now);
+static void firefox_refresh_usage(double now);
 
 bool ui_should_render(bool interacting) {
     const double now = ui_now_seconds();
@@ -583,7 +586,13 @@ bool ui_should_render(bool interacting) {
     firefox_poll_captcha();
     firefox_poll_job();
     firefox_poll_background();
+    firefox_expire_status(now);
+    firefox_refresh_usage(now);
     s_tun_paused = fcae_tun_paused();
+    {
+        std::lock_guard<std::mutex> lock(g_app.logs_mutex);
+        s_frame_log_revision = g_app.logs_revision;
+    }
 
     // A redraw request is only cleared once a frame is really painted, so it
     // cannot be lost while the window is minimized.
@@ -616,6 +625,12 @@ void ui_note_frame_drawn() {
         s_painted_sig = ui_content_signature();
     s_painted_once = true;
     g_app.redraw_requested.store(false);
+    // A callback during the frame may have missed the rendered snapshot while
+    // already being included in the painted signature above.
+    if (s_runtime_init.load(std::memory_order_acquire) == RuntimeInitState::Ready) {
+        std::lock_guard<std::mutex> lock(g_app.logs_mutex);
+        if (g_app.logs_revision != s_frame_log_revision) g_app.redraw_requested.store(true);
+    }
 }
 
 
@@ -1213,7 +1228,10 @@ static bool load_config() {
 
 void log_callback(FcaeLogLevel level, const char* message, void* user_data) {
     (void)user_data;
-    if (g_app.logging_enabled) g_app.add_log((int)level, message);
+    if (g_app.logging_enabled.load(std::memory_order_relaxed)) {
+        g_app.add_log((int)level, message);
+        ui_request_redraw();
+    }
 }
 
 // GetContentRegionAvail() after an item reports the next line's width, so
@@ -1971,6 +1989,17 @@ static std::string firefox_json_string(const std::string& json, const char* key,
     }
 }
 
+static bool firefox_json_bool(const std::string& json, const char* key, size_t from = 0) {
+    const std::string needle = std::string("\"") + key + "\"";
+    size_t pos = json.find(needle, from);
+    if (pos == std::string::npos) return false;
+    pos = json.find(':', pos + needle.size());
+    if (pos == std::string::npos) return false;
+    ++pos;
+    while (pos < json.size() && isspace((unsigned char)json[pos])) ++pos;
+    return json.compare(pos, 4, "true") == 0;
+}
+
 struct FirefoxLocationOption {
     std::string value;
     std::string label;
@@ -1981,6 +2010,7 @@ struct FirefoxAccountOption {
     std::string id;
     std::string email;
     std::string monthly_usage;
+    bool usage_exhausted = false;
 };
 
 static std::vector<FirefoxLocationOption> s_firefox_location_options = {
@@ -1993,6 +2023,8 @@ static void firefox_queue_usage(const std::string& id);
 static bool s_firefox_accounts_loaded = false;
 static std::string s_firefox_removing_account_id;
 static bool s_firefox_settings_popup_open = false;
+static bool s_firefox_settings_visible = false;
+static double s_firefox_usage_refresh_at = 0.0;
 static bool s_firefox_add_popup_open = false;
 static bool s_firefox_code_popup_open = false;
 static bool s_firefox_add_should_close = false;
@@ -2058,6 +2090,7 @@ static std::vector<FirefoxAccountOption> firefox_parse_accounts(const std::strin
             firefox_json_string(object, "id"),
             firefox_json_string(object, "email"),
             firefox_json_string(object, "monthly_usage"),
+            firefox_json_bool(object, "monthly_usage_exhausted"),
         };
         if (!account.id.empty()) accounts.push_back(std::move(account));
     }
@@ -2089,7 +2122,10 @@ static void firefox_account_rows(const std::string& root) {
         const std::string email = account.email.empty() ? account.id : account.email;
         const bool selected = g_app.firefox_account_id == account.id;
         ImGui::TextUnformatted(email.c_str());
-        ImGui::TextDisabled("Monthly usage: %s", account.monthly_usage.empty() ? "Unavailable" : account.monthly_usage.c_str());
+        if (account.usage_exhausted)
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Monthly usage: %s", account.monthly_usage.c_str());
+        else
+            ImGui::TextDisabled("Monthly usage: %s", account.monthly_usage.empty() ? "Unavailable" : account.monthly_usage.c_str());
         ImGui::BeginDisabled(selected);
         if (ImGui::SmallButton(selected ? "Selected" : "Use")) firefox_select_account(account);
         ImGui::EndDisabled();
@@ -2166,6 +2202,25 @@ static void firefox_submit(const std::string& request, const char* pending) {
     }
     snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
              g_app.firefox_job ? pending : "Could not submit the Firefox account operation");
+}
+
+static void firefox_expire_status(double now) {
+    static std::string observed;
+    static double deadline = 0.0;
+    if (observed != g_app.firefox_status) {
+        observed = g_app.firefox_status;
+        deadline = 0.0;
+    }
+    if (observed.empty() || g_app.firefox_job) {
+        deadline = 0.0;
+        return;
+    }
+    if (deadline == 0.0) deadline = now + 3.0;
+    if (now >= deadline) {
+        g_app.firefox_status[0] = 0;
+        observed.clear();
+        deadline = 0.0;
+    }
 }
 
 static void firefox_poll_job() {
@@ -2254,6 +2309,8 @@ static void firefox_poll_job() {
             snprintf(g_app.firefox_email, sizeof(g_app.firefox_email), "%s", selected->email.c_str());
         }
         for (const auto& account : s_firefox_account_options) firefox_queue_usage(account.id);
+        snprintf(g_app.firefox_status, sizeof(g_app.firefox_status), "%s",
+                 s_firefox_account_options.empty() ? "No saved Firefox accounts" : "Saved Firefox accounts loaded");
         return;
     }
     const std::string state = firefox_json_string(json, "state");
@@ -2296,16 +2353,18 @@ static void firefox_poll_job() {
         const std::string id = account == std::string::npos ? std::string() : firefox_json_string(json, "id", account);
         const std::string email = account == std::string::npos ? std::string() : firefox_json_string(json, "email", account);
         const std::string monthly_usage = account == std::string::npos ? std::string() : firefox_json_string(json, "monthly_usage", account);
+        const bool usage_exhausted = account != std::string::npos && firefox_json_bool(json, "monthly_usage_exhausted", account);
         if (!id.empty()) {
             snprintf(g_app.firefox_account_id, sizeof(g_app.firefox_account_id), "%s", id.c_str());
             snprintf(g_app.firefox_email, sizeof(g_app.firefox_email), "%s", email.c_str());
             const auto existing = std::find_if(s_firefox_account_options.begin(), s_firefox_account_options.end(),
                 [&](const FirefoxAccountOption& option) { return option.id == id; });
             if (existing == s_firefox_account_options.end()) {
-                s_firefox_account_options.push_back({id, email, monthly_usage});
+                s_firefox_account_options.push_back({id, email, monthly_usage, usage_exhausted});
             } else {
                 existing->email = email;
                 existing->monthly_usage = monthly_usage;
+                existing->usage_exhausted = usage_exhausted;
             }
             save_config();
             firefox_queue_usage(id);
@@ -2389,6 +2448,12 @@ static void firefox_queue_usage(const std::string& id) {
     firefox_start_next_usage();
 }
 
+static void firefox_refresh_usage(double now) {
+    if (!s_firefox_settings_visible || !s_ui_window_visible.load() || now < s_firefox_usage_refresh_at) return;
+    s_firefox_usage_refresh_at = now + 60.0;
+    for (const auto& account : s_firefox_account_options) firefox_queue_usage(account.id);
+}
+
 static bool firefox_background_snapshot(uint64_t id, std::string& json) {
     uint32_t needed = fcae_firefox_job_poll(id, nullptr, 0);
     for (int attempt = 0; attempt < 4 && needed && needed <= 1024 * 1024; ++attempt) {
@@ -2438,8 +2503,10 @@ static void firefox_poll_background() {
                 ? firefox_json_string(json, "monthly_usage", account_pos) : std::string();
             for (auto& account : s_firefox_account_options) {
                 if (account.id == s_firefox_usage_account) {
-                    if (!usage.empty()) account.monthly_usage = usage;
-                    else if (account.monthly_usage == "Not reported") account.monthly_usage = "Usage unavailable";
+                    if (!usage.empty()) {
+                        account.monthly_usage = usage;
+                        account.usage_exhausted = firefox_json_bool(json, "monthly_usage_exhausted", account_pos);
+                    } else if (account.monthly_usage == "Not reported") account.monthly_usage = "Usage unavailable";
                     break;
                 }
             }
@@ -2565,6 +2632,7 @@ static void render_protocol_editor() {
 
 static void open_firefox_settings() {
     s_firefox_settings_popup_open = true;
+    s_firefox_usage_refresh_at = ui_now_seconds() + 60.0;
     firefox_start_regions(true);
     if (!g_app.firefox_job) {
         firefox_submit("{\"op\":\"list\",\"data_dir\":\"" + firefox_json_escape(data_dir().c_str()) + "\"}",
@@ -2582,7 +2650,11 @@ static void render_firefox_settings() {
     ImGui::SetNextWindowSize(ImVec2(
         std::max(320.0f, std::min(680.0f, viewport->Size.x - 24.0f)),
         std::max(320.0f, std::min(620.0f, viewport->Size.y - 24.0f))), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Firefox IP Protection settings", nullptr)) return;
+    if (!ImGui::BeginPopupModal("Firefox IP Protection settings", nullptr)) {
+        s_firefox_settings_visible = false;
+        return;
+    }
+    s_firefox_settings_visible = true;
     ImGui::BeginChild("##firefox_scroll",
         ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8.0f),
         ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar);
@@ -2619,7 +2691,6 @@ static void render_firefox_settings() {
     ImGui::InputTextWithHint("Server override", "Optional proxy host[:port]", g_app.firefox_server, sizeof(g_app.firefox_server));
     static const char* const firefox_transports[] = {"Auto (H2 with H1 fallback)", "HTTP/2", "HTTP/1.1"};
     ImGui::Combo("Firefox transport", &g_app.firefox_transport, firefox_transports, 3);
-    ImGui::TextDisabled("UDP uses a separate MASQUE CONNECT-UDP session over HTTP/2.");
     ImGui::EndChild();
     if (ImGui::Button("SAVE")) {
         save_config();
@@ -2627,6 +2698,7 @@ static void render_firefox_settings() {
             g_app.firefox_password[0] = 0;
             g_app.firefox_code[0] = 0;
         }
+        s_firefox_settings_visible = false;
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
@@ -2635,6 +2707,7 @@ static void render_firefox_settings() {
             g_app.firefox_password[0] = 0;
             g_app.firefox_code[0] = 0;
         }
+        s_firefox_settings_visible = false;
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -3753,7 +3826,9 @@ void render_ui() {
             ImGui::RadioButton("Proxy", &g_app.mode, 0);
             ImGui::RadioButton("TUN",   &g_app.mode, 1);
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
-            ImGui::Checkbox("Enable logging##shared", &g_app.logging_enabled);
+            bool logging_enabled = g_app.logging_enabled.load(std::memory_order_relaxed);
+            if (ImGui::Checkbox("Enable logging##shared", &logging_enabled))
+                g_app.logging_enabled.store(logging_enabled, std::memory_order_relaxed);
             ImGui::Spacing();
             ImGui::Text("Outbound IP version (Aether / Firefox)");
             ImGui::RadioButton("IPv4", &g_app.ip_version, 4);
