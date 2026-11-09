@@ -18,6 +18,7 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.telephony.TelephonyManager;
 import android.util.Log;
+import android.widget.Toast;
 import java.net.InetAddress;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -99,6 +100,7 @@ public class FCAEVpnService extends VpnService {
     private Handler handler;
     /** True only after every JNI library and service callback registered. */
     private volatile boolean nativeReady;
+    private boolean replayHandedOff;
 
     private final Object cmdLock = new Object();
     private volatile boolean engineOpInFlight = false;
@@ -585,26 +587,10 @@ public class FCAEVpnService extends VpnService {
         startFg(notification.build(VpnNotification.zeroTrafficText(),
                 VpnNotification.BUTTONS_RUNNING));
 
-                // Load the native libraries before any native call on this class: the
-                // JNI entry points live in libfcaevpn_native.so, and only
-                // NativeEngine's static initialiser loads it. Without this touch,
-                // nativeRegisterVpnService() could be the first native call and throw
-                // UnsatisfiedLinkError on launch. Wrapped, so a build without the
-                // libraries degrades to no tunnel instead of crashing.
-        nativeReady = NativeEngine.ensureLoaded();
-        if (nativeReady) {
-            try {
-                // Register before any tunnel starts: Psiphon may call protect()
-                // as soon as it begins dialling.
-                nativeRegisterVpnService();
-            } catch (Throwable t) {
-                nativeReady = false;
-                android.util.Log.e("FCAE_VPN", "native register failed", t);
-            }
-        } else {
-            android.util.Log.e("FCAE_VPN", "native libraries unavailable: "
-                    + NativeEngine.nativeLoadFailure());
-        }
+        // An existing engine may survive service recreation and still needs
+        // its protect callback rebound. A cold start must not load the native
+        // libraries until the replay command has painted its connecting state.
+        if (NativeEngine.Loaded.value) initializeNative();
 
         handler = new Handler(Looper.getMainLooper());
         android.content.IntentFilter psiphonFilter = new android.content.IntentFilter();
@@ -617,6 +603,9 @@ public class FCAEVpnService extends VpnService {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // Preserve eager registration for non-replay lifecycle and control
+        // paths; only a cold replay publishes its first frame before loading.
+        if (intent == null || !ACTION_REPLAY.equals(intent.getAction())) initializeNative();
         if (intent != null && intent.getAction() != null) {
             switch (intent.getAction()) {
                 case ACTION_STOP:
@@ -677,9 +666,22 @@ public class FCAEVpnService extends VpnService {
                     return START_STICKY;
 
                 case ACTION_REPLAY:
+                    // The widget's foreground-service PendingIntent reaches the
+                    // owner directly, not the widget receiver. Publish before
+                    // native library loading or saved-session disk access.
+                    if (sessionActive()) return START_STICKY;
+                    if (replayHandedOff || ProxyNotification.sessionActive()) {
+                        notification.dismiss();
+                        stopForeground(STOP_FOREGROUND_REMOVE);
+                        stopSelf(startId);
+                        return START_NOT_STICKY;
+                    }
+                    SessionState.command(SessionState.Command.CONNECT);
+                    SessionState.markConnecting(this, 1);
                     if (!requireNativeEngine(startId)) return START_NOT_STICKY;
                     Intent recalled = recalledSession(this);
                     if (recalled == null || !recalled.hasExtra("protocol")) {
+                        Toast.makeText(this, "Open FCAE VPN and check your settings before connecting.", Toast.LENGTH_LONG).show();
                         SessionState.command(SessionState.Command.NONE);
                         SessionState.markIdle(this);
                         notification.dismiss();
@@ -688,12 +690,26 @@ public class FCAEVpnService extends VpnService {
                         return START_NOT_STICKY;
                     }
                     if (recalled.getIntExtra("mode", 1) == 0) {
+                        SessionState.markConnecting(this, 0);
+                        replayHandedOff = true;
                         Intent proxy = new Intent(this, ProxyNotification.class)
                                 .setAction(ProxyNotification.ACTION_START);
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            startForegroundService(proxy);
-                        } else {
-                            startService(proxy);
+                        try {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(proxy);
+                            } else {
+                                startService(proxy);
+                            }
+                        } catch (RuntimeException error) {
+                            replayHandedOff = false;
+                            Log.e(TAG, "proxy replay could not start", error);
+                            Toast.makeText(this, "Could not start proxy. Open FCAE VPN to retry.", Toast.LENGTH_LONG).show();
+                            SessionState.command(SessionState.Command.NONE);
+                            SessionState.markIdle(this);
+                            notification.dismiss();
+                            stopForeground(STOP_FOREGROUND_REMOVE);
+                            stopSelf(startId);
+                            return START_NOT_STICKY;
                         }
                         notification.dismiss();
                         stopForeground(STOP_FOREGROUND_REMOVE);
@@ -701,6 +717,7 @@ public class FCAEVpnService extends VpnService {
                         return START_NOT_STICKY;
                     }
                     if (VpnService.prepare(this) != null) {
+                        Toast.makeText(this, "Open FCAE VPN to grant VPN permission.", Toast.LENGTH_LONG).show();
                         SessionState.command(SessionState.Command.NONE);
                         SessionState.markIdle(this);
                         notification.dismiss();
@@ -739,12 +756,26 @@ public class FCAEVpnService extends VpnService {
         return START_STICKY;
     }
 
+    private boolean initializeNative() {
+        if (nativeReady) return true;
+        if (!NativeEngine.ensureLoaded()) return false;
+        try {
+            nativeRegisterVpnService();
+            nativeReady = true;
+            return true;
+        } catch (Throwable t) {
+            Log.e(TAG, "native register failed", t);
+            return false;
+        }
+    }
+
     /** Stop and remove this owner when JNI could not be loaded. */
     private boolean requireNativeEngine(int startId) {
-        if (nativeReady && NativeEngine.ensureLoaded()) return true;
+        if (initializeNative()) return true;
         String detail = NativeEngine.nativeLoadFailure();
         Log.e(TAG, "refusing VPN start: native engine is unavailable"
                 + (detail.isEmpty() ? "" : " (" + detail + ")"));
+        Toast.makeText(this, "VPN engine unavailable. Open FCAE VPN for details.", Toast.LENGTH_LONG).show();
         handler.removeCallbacks(connectWatchdog);
         SessionState.command(SessionState.Command.NONE);
         SessionState.markIdle(this);
