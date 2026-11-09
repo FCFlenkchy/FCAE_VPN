@@ -154,6 +154,7 @@ class MainActivity : AppCompatActivity() {
     private var sponsorAnimated = true
     private lateinit var spinnerProtocol: Spinner
     private lateinit var spinnerMode: Spinner
+    private lateinit var spinnerSharedMode: Spinner
     private lateinit var spinnerScan: Spinner
     private lateinit var spinnerIpVersion: Spinner
     private lateinit var spinnerNoize: Spinner
@@ -1247,6 +1248,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.btnProtocolSettings).setOnClickListener { showProtocolSettings() }
         findViewById<MaterialButton>(R.id.btnFirefoxSettings).setOnClickListener { showFirefoxSettings() }
         spinnerMode = findViewById(R.id.spinnerMode)
+        spinnerSharedMode = findViewById(R.id.spinnerSharedMode)
         spinnerScan = findViewById(R.id.spinnerScan)
         spinnerIpVersion = findViewById(R.id.spinnerIpVersion)
         spinnerNoize = findViewById(R.id.spinnerNoize)
@@ -1462,10 +1464,12 @@ class MainActivity : AppCompatActivity() {
                 "Firefox IP Protection",
             ),
         )
-        spinnerMode.adapter = ArrayAdapter(
+        val modeAdapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
             listOf("Proxy (SOCKS/HTTP)", "TUN (system VPN)"),
         )
+        spinnerMode.adapter = modeAdapter
+        spinnerSharedMode.adapter = modeAdapter
         spinnerSplitTunnel.adapter = ArrayAdapter(
             this, R.layout.spinner_dark_item,
             listOf("Off", "Only Selected Apps (Whitelist)", "Bypass Selected Apps (Blacklist)"),
@@ -1623,7 +1627,14 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<android.view.View>(R.id.aboutButton).setOnClickListener { showAboutDialog() }
 
-        // Mode changes only update which controls are applicable.
+        spinnerSharedMode.setSelection(spinnerMode.selectedItemPosition.coerceIn(0, 1))
+        spinnerSharedMode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                val selected = spinnerSharedMode.selectedItemPosition
+                if (selected in 0..1 && spinnerMode.selectedItemPosition != selected) spinnerMode.setSelection(selected)
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
         spinnerMode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: android.widget.AdapterView<*>?,
@@ -1631,6 +1642,8 @@ class MainActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
+                val selected = spinnerMode.selectedItemPosition
+                if (selected in 0..1 && spinnerSharedMode.selectedItemPosition != selected) spinnerSharedMode.setSelection(selected)
                 applyModeSocksLock()
                 applyTunEngineVisibility()
                 updateButton()

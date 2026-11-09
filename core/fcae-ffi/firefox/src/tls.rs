@@ -1,5 +1,5 @@
 use boring::ssl::{ConnectConfiguration, SslConnector, SslMethod, SslVerifyMode};
-use boring::x509::{store::{X509Store, X509StoreBuilder}, X509};
+use boring::x509::{store::{X509Store, X509StoreBuilder}, X509VerifyError, X509VerifyResult, X509};
 #[cfg(target_os = "android")]
 use std::path::Path;
 use std::sync::OnceLock;
@@ -112,12 +112,16 @@ where
 {
     let config = configuration(alpn, host)?;
     tokio_boring::connect(config, host, stream).await.map_err(|error| {
-        if error.ssl().is_some_and(|ssl| ssl.verify_result().is_err()) {
+        if certificate_verification_failed(error.ssl().map(|ssl| ssl.verify_result())) {
             FirefoxError::TlsCertificate { host: host.into(), message: error.to_string() }
         } else {
             FirefoxError::Tls { host: host.into(), message: error.to_string() }
         }
     })
+}
+
+fn certificate_verification_failed(result: Option<X509VerifyResult>) -> bool {
+    matches!(result, Some(Err(error)) if error != X509VerifyError::INVALID_CALL)
 }
 
 pub fn require_h2(stream: &SslStream<TcpStream>) -> Result<()> {
@@ -165,6 +169,17 @@ mod tests {
         assert!(!is_fastly_proxy("m1.fastly-masque.net"));
         assert!(!is_fastly_proxy("muc139.m1.fastly-masque.net.example.com"));
         assert!(!is_fastly_proxy("accounts.firefox.com"));
+    }
+
+    #[test]
+    fn incomplete_handshake_is_not_a_certificate_failure() {
+        assert!(!certificate_verification_failed(None));
+        assert!(!certificate_verification_failed(Some(Ok(()))));
+        assert!(!certificate_verification_failed(Some(Err(X509VerifyError::INVALID_CALL))));
+        assert!(certificate_verification_failed(Some(Err(X509VerifyError::CERT_HAS_EXPIRED))));
+        assert!(certificate_verification_failed(Some(Err(X509VerifyError::HOSTNAME_MISMATCH))));
+        let reset = FirefoxError::Tls { host: "proxy".into(), message: "connection reset by peer".into() };
+        assert!(reset.is_transient());
     }
 
     #[test]

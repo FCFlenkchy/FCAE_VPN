@@ -3708,6 +3708,15 @@ void render_ui() {
             ImGui::RadioButton("Proxy", &g_app.mode, 0);
             ImGui::RadioButton("TUN",   &g_app.mode, 1);
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
+            ImGui::TextWrapped("LAN sharing exposes unauthenticated proxy listeners to your local network. Use only on trusted networks.");
+            ImGui::Checkbox("Enable logging##shared", &g_app.logging_enabled);
+            ImGui::Spacing();
+            ImGui::Text("Outbound IP version (Aether / Firefox)");
+            ImGui::RadioButton("IPv4", &g_app.ip_version, 4);
+            ImGui::SameLine();
+            ImGui::RadioButton("IPv6", &g_app.ip_version, 6);
+            ImGui::SameLine();
+            ImGui::RadioButton("Dual-Stack", &g_app.ip_version, 10);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Upstream Proxy");
             ImGui::PushItemWidth(-FLT_MIN);
@@ -3727,6 +3736,19 @@ void render_ui() {
                 if (proxy_err[0])
                     ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", proxy_err);
             }
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ImGui::TextWrapped("Proxy listeners (Aether / Firefox; Psiphon and Tor use their own ports)");
+            ImGui::BeginDisabled(g_app.mode == 1);
+            ImGui::PushItemWidth(100);
+            ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
+            ImGui::SameLine(0, 20);
+            ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
+            ImGui::Checkbox("HTTP proxy", &g_app.http_enabled);
+            ImGui::SameLine(0, 20);
+            ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
+            ImGui::PopItemWidth();
+            ImGui::EndDisabled();
+            if (g_app.mode == 1) ImGui::TextDisabled("TUN uses its own internal SOCKS listener.");
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             if (g_app.mode == 1 && ImGui::CollapsingHeader("TUN Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Text("TUN engine");
@@ -3797,18 +3819,6 @@ void render_ui() {
                 ImGui::PushItemWidth(260);
                 ImGui::InputTextWithHint("Inner WireGuard endpoint", "auto (ip:port)",
                                          g_app.gool_inner, sizeof(g_app.gool_inner));
-                ImGui::PopItemWidth();
-            }
-            if (g_app.mode == 0) {
-                ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-                ImGui::Text("Proxy Ports");
-                ImGui::PushItemWidth(100);
-                ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
-                ImGui::SameLine(0, 20);
-                ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
-                ImGui::Checkbox("Aether HTTP proxy", &g_app.http_enabled);
-                ImGui::SameLine(0, 20);
-                ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
                 ImGui::PopItemWidth();
             }
             ImGui::Spacing();
@@ -4083,13 +4093,6 @@ void render_ui() {
             const char* modes[] = { "Turbo", "Balanced", "Thorough", "Verified", "Ironclad" };
             if (g_app.scan_mode > 4) g_app.scan_mode = 1;
             ImGui::Combo("Mode", &g_app.scan_mode, modes, 5);
-            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-            ImGui::Text("IP Version");
-            ImGui::RadioButton("IPv4",       &g_app.ip_version, 4);
-            ImGui::SameLine();
-            ImGui::RadioButton("IPv6",       &g_app.ip_version, 6);
-            ImGui::SameLine();
-            ImGui::RadioButton("Dual-Stack", &g_app.ip_version, 10);
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("MASQUE SNI");
             ImGui::InputText("##sni", g_app.sni, sizeof(g_app.sni));

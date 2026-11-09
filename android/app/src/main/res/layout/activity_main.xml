@@ -407,11 +407,126 @@
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
                 android:visibility="gone">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="12dp" android:text="SHARED SETTINGS"
+                android:textColor="#FF60A5FA" android:textSize="16sp" android:textStyle="bold" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="12dp" android:text="Mode"
+                android:textColor="#FF9AA3B5" android:textSize="13sp" />
+            <Spinner android:id="@+id/spinnerSharedMode"
+                android:layout_width="match_parent" android:layout_height="48dp"
+                android:layout_marginTop="4dp" android:background="#FF1E1E2C"
+                android:popupBackground="#FF1E1E2C" />
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchLan"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="LAN sharing"
+                android:textColor="#FFE0E4EE" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="LAN sharing exposes unauthenticated proxy listeners to your local network. Use only on trusted networks."
+                android:textColor="#FFB87333" android:textSize="12sp" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Outbound IP version (Aether / Firefox)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+            <Spinner
+                android:id="@+id/spinnerIpVersion"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:popupBackground="#FF1E1E2C" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Upstream proxy (optional)"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+            <EditText
+                android:id="@+id/editUpstreamProxy"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:hint="socks5 &amp; http &amp; ip:port &amp; @user:pass"
+                android:ellipsize="end"
+                android:importantForAutofill="no"
+                android:inputType="textUri|textNoSuggestions"
+                android:padding="12dp"
+                android:singleLine="true"
+                android:textColor="#FFE8ECF4"
+                android:textColorHint="#FF5A6478"
+                android:textSize="14sp" />
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchLogging"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:checked="true"
+                android:text="Enable logging"
+                android:textColor="#FFE0E4EE" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="12dp" android:text="Proxy listeners (Aether / Firefox; Psiphon and Tor use their own ports). TUN uses an internal SOCKS listener."
+                android:textColor="#FF9AA3B5" android:textSize="13sp" />
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchSocks"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:checked="true"
+                android:text="SOCKS5 proxy"
+                android:textColor="#FFE0E4EE" />
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchHttp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:checked="true"
+                android:text="HTTP proxy"
+                android:textColor="#FFE0E4EE" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="SOCKS5 port"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+            <EditText
+                android:id="@+id/editSocksPort"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:inputType="number"
+                android:padding="12dp"
+                android:text="1819"
+                android:textColor="#FFE8ECF4"
+                android:textSize="14sp" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="HTTP proxy port"
+                android:textColor="#FF9AA3B5"
+                android:textSize="13sp" />
+            <EditText
+                android:id="@+id/editHttpPort"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="4dp"
+                android:background="#FF1E1E2C"
+                android:inputType="number"
+                android:padding="12dp"
+                android:text="1820"
+                android:textColor="#FFE8ECF4"
+                android:textSize="14sp" />
             <LinearLayout android:id="@+id/layoutTunSettings" android:layout_width="match_parent"
                 android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
-                <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp" android:text="SHARED SETTINGS"
-                    android:textColor="#FF60A5FA" android:textSize="16sp" android:textStyle="bold" />
                 <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:layout_marginTop="16dp" android:text="TUN Settings"
                     android:textColor="#FF60A5FA" android:textSize="16sp" android:textStyle="bold" />
@@ -628,22 +743,6 @@
                 android:popupBackground="#FF1E1E2C" />
 
             <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="IP Version"
-                android:textColor="#FF9AA3B5"
-                android:textSize="13sp" />
-
-            <Spinner
-                android:id="@+id/spinnerIpVersion"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="4dp"
-                android:background="#FF1E1E2C"
-                android:popupBackground="#FF1E1E2C" />
-
-            <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
@@ -658,6 +757,13 @@
                 android:layout_marginTop="4dp"
                 android:background="#FF1E1E2C"
                 android:popupBackground="#FF1E1E2C" />
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchQuick"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Quick reconnect"
+                android:textColor="#FFE0E4EE" />
 
             <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/switchFragment"
@@ -1092,44 +1198,6 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
-            <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/switchQuick"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Quick reconnect"
-                android:textColor="#FFE0E4EE" />
-
-            <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/switchLan"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="LAN sharing"
-                android:textColor="#FFE0E4EE" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="Upstream proxy (optional)"
-                android:textColor="#FF9AA3B5"
-                android:textSize="13sp" />
-
-            <EditText
-                android:id="@+id/editUpstreamProxy"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="4dp"
-                android:background="#FF1E1E2C"
-                android:hint="socks5 &amp; http &amp; ip:port &amp; @user:pass"
-                android:ellipsize="end"
-                android:importantForAutofill="no"
-                android:inputType="textUri|textNoSuggestions"
-                android:padding="12dp"
-                android:singleLine="true"
-                android:textColor="#FFE8ECF4"
-                android:textColorHint="#FF5A6478"
-                android:textSize="14sp" />
-
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -1543,73 +1611,6 @@
                 android:padding="12dp"
                 android:textColor="#FFE8ECF4"
                 android:textColorHint="#FF5A6478"
-                android:textSize="14sp" />
-
-            <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/switchLogging"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:checked="true"
-                android:text="Enable logging"
-                android:textColor="#FFE0E4EE" />
-
-            <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/switchSocks"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:checked="true"
-                android:text="SOCKS5 proxy"
-                android:textColor="#FFE0E4EE" />
-
-            <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/switchHttp"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:checked="true"
-                android:text="HTTP proxy"
-                android:textColor="#FFE0E4EE" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="SOCKS5 port"
-                android:textColor="#FF9AA3B5"
-                android:textSize="13sp" />
-
-            <EditText
-                android:id="@+id/editSocksPort"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="4dp"
-                android:background="#FF1E1E2C"
-                android:inputType="number"
-                android:padding="12dp"
-                android:text="1819"
-                android:textColor="#FFE8ECF4"
-                android:textSize="14sp" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="HTTP proxy port"
-                android:textColor="#FF9AA3B5"
-                android:textSize="13sp" />
-
-            <EditText
-                android:id="@+id/editHttpPort"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="4dp"
-                android:background="#FF1E1E2C"
-                android:inputType="number"
-                android:padding="12dp"
-                android:text="1820"
-                android:textColor="#FFE8ECF4"
                 android:textSize="14sp" />
 
             <TextView
