@@ -2839,8 +2839,8 @@ static void firefox_poll_captcha() {
 }
 
 static const char* const kTransportNames[] = {
-    "MASQUE (HTTP/3 QUIC)",
-    "MASQUE H2 (Aether)",
+    "MASQUE (HTTP/3)",
+    "MASQUE (HTTP/2)",
     "WireGuard",
     "WARP-in-WARP (Gool)",
     "Tor",
