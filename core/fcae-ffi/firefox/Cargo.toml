@@ -39,4 +39,5 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-boring = "5.3"
 url = "2"
+webpki-root-certs = "1.0.11"
 zeroize = "1"

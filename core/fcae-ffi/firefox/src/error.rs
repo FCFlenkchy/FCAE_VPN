@@ -40,6 +40,8 @@ pub enum FirefoxError {
     Dns { host: String, message: String },
     #[error("TLS connection to {host} failed: {message}")]
     Tls { host: String, message: String },
+    #[error("TLS certificate verification for {host} failed: {message}. Check the device clock and network; do not bypass certificate verification")]
+    TlsCertificate { host: String, message: String },
     #[error("HTTP request to {host} failed with status {status}: {message}")]
     Http {
         host: String,
@@ -106,6 +108,7 @@ impl FirefoxError {
             Self::Timeout(_) => "timeout",
             Self::Dns { .. } => "dns",
             Self::Tls { .. } => "tls",
+            Self::TlsCertificate { .. } => "tls_certificate",
             Self::Http { .. } => "http",
             Self::H2(_) => "h2",
             Self::H3Unavailable => "h3_unavailable",

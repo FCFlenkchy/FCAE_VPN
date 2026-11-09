@@ -98,6 +98,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // this binding alive.
     private static volatile android.content.ServiceConnection connection;
     private static final java.util.concurrent.atomic.AtomicLong bindingEpoch = new java.util.concurrent.atomic.AtomicLong();
+    private static final Object bindingLock = new Object();
     private static volatile long activeSession;
     // EVERY live binder, not just the latest: a rebind that was already
     // accepted can outlive a session switch, and a leaked binder reference
@@ -222,32 +223,34 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         return intent.getLongExtra("psiSession", -1) == activeSession;
     }
     public static void startBound(Context context, Intent intent) {
-        terminalStopSent.set(false);
         Context app = context.getApplicationContext();
-        final long epoch = bindingEpoch.incrementAndGet();
+        final long epoch;
+        synchronized (bindingLock) {
+            terminalStopSent.set(false);
+            epoch = bindingEpoch.incrementAndGet();
+        }
         new Handler(Looper.getMainLooper()).post(() -> {
-            if (epoch != bindingEpoch.get() || connection != null) return;
-            activeSession = android.os.SystemClock.elapsedRealtimeNanos();
-            intent.putExtra("psiSession", activeSession);
-            android.content.ServiceConnection next = makeConnection(app, intent);
-            connection = next;
-            liveConnections.add(next);
-                        // Kept both started and bound so an orphaned service can be
-                        // stopped explicitly; its lifetime belongs to the owner, which is
-                        // also the party whose notification it posts. A region refresh is
-                        // bind-only: starting the component again would reset Psiphon.
-            if (!ACTION_REGIONS.equals(intent.getAction())) {
-                try { app.startService(intent); } catch (Throwable ignored) {}
-            }
-            if (!app.bindService(intent, next,
-                    Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT)) {
-                connection = null;
-                liveConnections.remove(next);
-                Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
-                failed.putExtra("psiSession", activeSession);
-                failed.putExtra("requestId", intent.getLongExtra("requestId", 0));
-                failed.putExtra(EXTRA_ERROR, "Unable to bind Psiphon service");
-                app.sendBroadcast(failed);
+            synchronized (bindingLock) {
+                if (epoch != bindingEpoch.get() || connection != null) return;
+                activeSession = android.os.SystemClock.elapsedRealtimeNanos();
+                intent.putExtra("psiSession", activeSession);
+                android.content.ServiceConnection next = makeConnection(app, intent);
+                connection = next;
+                liveConnections.add(next);
+                // A region refresh is bind-only; a tunnel also owns a started service.
+                if (!ACTION_REGIONS.equals(intent.getAction())) {
+                    try { app.startService(intent); } catch (Throwable ignored) {}
+                }
+                if (!app.bindService(intent, next,
+                        Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT)) {
+                    connection = null;
+                    liveConnections.remove(next);
+                    Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
+                    failed.putExtra("psiSession", activeSession);
+                    failed.putExtra("requestId", intent.getLongExtra("requestId", 0));
+                    failed.putExtra(EXTRA_ERROR, "Unable to bind Psiphon service");
+                    app.sendBroadcast(failed);
+                }
             }
         });
     }
@@ -286,45 +289,49 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         // moved on. clientAttachId == 0 means the request was dropped.
         final long epoch = bindingEpoch.get();
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            if (connection != null || clientAttachId == 0 || epoch != bindingEpoch.get()) return;
-            if (rebindAttempts >= MAX_REBIND_ATTEMPTS) {
-                rebindAttempts = 0;
-                long req = clientAttachId;
-                Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
-                failed.putExtra("psiSession", activeSession);
-                failed.putExtra("requestId", req);
-                failed.putExtra(EXTRA_ERROR, "Psiphon process exited (rebind exhausted)");
-                app.sendBroadcast(failed);
-                NativeEngine.nativePsiphonAttachComplete(req, 0, 0);
-                return;
-            }
-            rebindAttempts++;
-            Log.w(TAG, "Psiphon rebind attempt " + rebindAttempts + "/" + MAX_REBIND_ATTEMPTS);
-            try { app.startService(original); } catch (Throwable ignored) {}
-            android.content.ServiceConnection rebinding = makeConnection(app, original);
-            if (!app.bindService(original, rebinding,
-                    Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT)) {
-                Log.w(TAG, "Psiphon rebind " + rebindAttempts + " refused; retrying");
-                scheduleRebind(app, original);
-            } else {
-                liveConnections.add(rebinding);
-                // Watchdog: if the bind was accepted but the process never
-                // connects (creation failed), no ServiceConnection callback
-                // ever fires, so 20 s of silence counts as a failed attempt.
-                new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                    if (connection == null && clientAttachId != 0) scheduleRebind(app, original);
-                }, 20000L);
+            synchronized (bindingLock) {
+                if (connection != null || clientAttachId == 0 || epoch != bindingEpoch.get()) return;
+                if (rebindAttempts >= MAX_REBIND_ATTEMPTS) {
+                    rebindAttempts = 0;
+                    long req = clientAttachId;
+                    Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
+                    failed.putExtra("psiSession", activeSession);
+                    failed.putExtra("requestId", req);
+                    failed.putExtra(EXTRA_ERROR, "Psiphon process exited (rebind exhausted)");
+                    app.sendBroadcast(failed);
+                    NativeEngine.nativePsiphonAttachComplete(req, 0, 0);
+                    return;
+                }
+                rebindAttempts++;
+                Log.w(TAG, "Psiphon rebind attempt " + rebindAttempts + "/" + MAX_REBIND_ATTEMPTS);
+                try { app.startService(original); } catch (Throwable ignored) {}
+                android.content.ServiceConnection rebinding = makeConnection(app, original);
+                if (!app.bindService(original, rebinding,
+                        Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT)) {
+                    Log.w(TAG, "Psiphon rebind " + rebindAttempts + " refused; retrying");
+                    scheduleRebind(app, original);
+                } else {
+                    liveConnections.add(rebinding);
+                    // Watchdog: if the bind was accepted but the process never
+                    // connects (creation failed), no ServiceConnection callback
+                    // ever fires, so 20 s of silence counts as a failed attempt.
+                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                        if (connection == null && clientAttachId != 0) scheduleRebind(app, original);
+                    }, 20000L);
+                }
             }
         }, REBIND_DELAY_MS);
     }
 
     public static void stopBound(Context context) {
         Context app = context.getApplicationContext();
-        boolean delivered = deliverStop(app, false);
-        releaseBindings(app);
-        if (!delivered) {
-            try { app.stopService(new Intent(app, PsiphonTunnelService.class)); }
-            catch (Throwable ignored) {}
+        synchronized (bindingLock) {
+            boolean delivered = deliverStop(app, false);
+            releaseBindings(app);
+            if (!delivered) {
+                try { app.stopService(new Intent(app, PsiphonTunnelService.class)); }
+                catch (Throwable ignored) {}
+            }
         }
     }
 
@@ -823,36 +830,60 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
          */
     public static void killProcessOnExit(Context context) {
         Context app = context.getApplicationContext();
-        if (!terminalStopSent.compareAndSet(false, true)) return;
-        boolean delivered = deliverStop(app, true);
-        releaseBindings(app);
-        if (!delivered) {
-            terminalStopSent.set(false);
-            try { app.stopService(new Intent(app, PsiphonTunnelService.class)); }
-            catch (Throwable ignored) {}
+        final long stoppedEpoch;
+        synchronized (bindingLock) {
+            if (!terminalStopSent.compareAndSet(false, true)) return;
+            boolean delivered = deliverStop(app, true);
+            releaseBindings(app);
+            if (!delivered) {
+                terminalStopSent.set(false);
+                try { app.stopService(new Intent(app, PsiphonTunnelService.class)); }
+                catch (Throwable ignored) {}
+            }
+            stoppedEpoch = bindingEpoch.get();
         }
-        long stoppedEpoch = bindingEpoch.get();
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            if (stoppedEpoch != bindingEpoch.get()) return;
-            try {
-                android.app.ActivityManager manager =
-                        (android.app.ActivityManager) app.getSystemService(Context.ACTIVITY_SERVICE);
-                if (manager == null) return;
-                java.util.List<android.app.ActivityManager.RunningAppProcessInfo> running =
-                        manager.getRunningAppProcesses();
-                if (running == null) return;
-                for (android.app.ActivityManager.RunningAppProcessInfo info : running) {
-                    if (info.uid == android.os.Process.myUid()
-                            && info.pid != android.os.Process.myPid()
-                            && (app.getPackageName() + ":psiphon").equals(info.processName)) {
-                        android.os.Process.killProcess(info.pid);
+            synchronized (bindingLock) {
+                if (stoppedEpoch != bindingEpoch.get()) return;
+                try {
+                    android.app.ActivityManager manager =
+                            (android.app.ActivityManager) app.getSystemService(Context.ACTIVITY_SERVICE);
+                    if (manager == null) return;
+                    java.util.List<android.app.ActivityManager.RunningAppProcessInfo> running =
+                            manager.getRunningAppProcesses();
+                    if (running == null) return;
+                    for (android.app.ActivityManager.RunningAppProcessInfo info : running) {
+                        if (info.uid == android.os.Process.myUid()
+                                && info.pid != android.os.Process.myPid()
+                                && (app.getPackageName() + ":psiphon").equals(info.processName)) {
+                            android.os.Process.killProcess(info.pid);
+                        }
                     }
-                }
-            } catch (Throwable ignored) {}
+                } catch (Throwable ignored) {}
+            }
         }, EXIT_FALLBACK_MS);
     }
 
+    @SuppressWarnings("deprecation")
+    private static boolean serviceExists(Context app) {
+        if (connection != null || !liveConnections.isEmpty()) return true;
+        try {
+            android.app.ActivityManager manager =
+                    (android.app.ActivityManager) app.getSystemService(Context.ACTIVITY_SERVICE);
+            if (manager == null) return false;
+            java.util.List<android.app.ActivityManager.RunningServiceInfo> services =
+                    manager.getRunningServices(256);
+            if (services == null) return false;
+            android.content.ComponentName target = new android.content.ComponentName(app, PsiphonTunnelService.class);
+            for (android.app.ActivityManager.RunningServiceInfo service : services) {
+                if (target.equals(service.service)) return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
     private static boolean deliverStop(Context app, boolean die) {
+        if (!serviceExists(app)) return false;
         try {
             app.startService(new Intent(app, PsiphonTunnelService.class)
                     .setAction(ACTION_STOP)

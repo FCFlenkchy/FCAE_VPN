@@ -75,7 +75,7 @@ impl FirefoxEngine {
                     selected = Some(upstream);
                     break;
                 }
-                Err(error) if error.is_transient() => {
+                Err(error) if error.is_transient() || matches!(error, FirefoxError::TlsCertificate { .. }) => {
                     log::warn!("[firefox] proxy check failed: {error}");
                     last_error = Some(error);
                 }

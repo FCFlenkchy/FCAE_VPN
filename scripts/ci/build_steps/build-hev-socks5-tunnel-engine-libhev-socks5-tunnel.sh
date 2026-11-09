@@ -18,20 +18,10 @@ case "${FCAE_MATRIX_NAME}" in
     # FCAE links with MinGW, while upstream's native static archives
     # target the MSVC ABI. Keep the DLL as the C ABI boundary, but
     # cross-compile it here instead of using a second Windows job.
-    XWIN_VERSION=0.10.0
-    XWIN_PACKAGE="xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl"
-    XWIN_ARCHIVE="${XWIN_PACKAGE}.tar.gz"
-    XWIN_SHA256=d870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88
-    XWIN_ARCHIVE_PATH="$RUNNER_TEMP/$XWIN_ARCHIVE"
-    curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 \
-      --connect-timeout 30 \
-      "https://github.com/Jake-Shadle/xwin/releases/download/${XWIN_VERSION}/${XWIN_ARCHIVE}" \
-      -o "$XWIN_ARCHIVE_PATH"
-    printf '%s  %s\n' "$XWIN_SHA256" "$XWIN_ARCHIVE_PATH" | sha256sum -c -
-    tar -xzf "$XWIN_ARCHIVE_PATH" -C "$RUNNER_TEMP" "$XWIN_PACKAGE/xwin"
+    bash --noprofile --norc "$ROOT/scripts/ci/build_steps/install-xwin.sh"
 
     MSVC_ROOT="$RUNNER_TEMP/hev-msvc-sysroot"
-    "$RUNNER_TEMP/$XWIN_PACKAGE/xwin" --accept-license --arch x86_64 \
+    "$RUNNER_TEMP/fcae-xwin/bin/xwin" --accept-license --arch x86_64 \
       --cache-dir "$RUNNER_TEMP/hev-xwin-cache" splat --output "$MSVC_ROOT"
     clang --version
     llvm-ar --version

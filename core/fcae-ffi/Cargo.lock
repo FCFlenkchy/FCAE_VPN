@@ -1818,6 +1818,7 @@ dependencies = [
  "tokio",
  "tokio-boring",
  "url",
+ "webpki-root-certs",
  "zeroize",
 ]
 
@@ -6924,6 +6925,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6ab47578e1cd38415489592da29326341e272bd281f4ddbc0c10b654a425ad7"
 dependencies = [
  "web-time",
+]
+
+[[package]]
+name = "webpki-root-certs"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

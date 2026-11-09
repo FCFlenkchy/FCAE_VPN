@@ -631,7 +631,7 @@ impl Upstream {
                 Ok(None) => {
                     return self.open_h1_authorized(target).await.map(|stream| Box::new(stream) as BoxedTunnel);
                 }
-                Err(error) if self.preference == TransportPreference::Auto => {
+                Err(error) if self.preference == TransportPreference::Auto && !matches!(error, FirefoxError::TlsCertificate { .. }) => {
                     log::debug!("[firefox] H2 session unavailable, using H1: {error}");
                     return self.open_h1_authorized(target).await.map(|stream| Box::new(stream) as BoxedTunnel);
                 }
