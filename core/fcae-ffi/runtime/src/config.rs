@@ -133,7 +133,7 @@ pub struct PsiphonConfig {
     /// with UpstreamProxyURL = Aether's SOCKS. User traffic then enters
     /// Psiphon (tun2socks → Psiphon → Aether → Psiphon servers).
     ///
-    /// Signalled via FcaeConfig._reserved[0] != 0 so the ABI does not shift.
+    /// Signalled via the legacy bits of FcaeConfig._reserved[0] so the ABI does not shift.
     pub through_tunnel: bool,
 }
 
@@ -655,14 +655,12 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
     // Ports
     // TUN mode needs an internal SOCKS endpoint even if the user zeroed the
     // port, so fall back rather than failing.
-    if cfg.socks_port == 0 && (cfg.mode == FcaeMode::Tun || raw._reserved[0] != 0
+    if cfg.socks_port == 0 && (cfg.mode == FcaeMode::Tun || raw._reserved[0] & !FCAE_CONFIG_TUN_HTTP != 0
         || matches!(raw.tor.mode, FcaeTorMode::Chain | FcaeTorMode::Reverse)) {
         cfg.socks_port = 1819;
     }
-    // The SOCKS listener is the private tun2socks bridge in TUN mode. The
-    // public HTTP listener has no TUN data-plane role and must not be started
-    // merely because a stale UI or headless caller supplied its old port.
-    if cfg.mode == FcaeMode::Tun {
+    // An old TUN caller may carry a default HTTP port without requesting a listener.
+    if cfg.mode == FcaeMode::Tun && raw._reserved[0] & FCAE_CONFIG_TUN_HTTP == 0 {
         cfg.http_port = 0;
     }
     if cfg.protocol != FcaeProtocol::Tor && raw.tor.mode != FcaeTorMode::Only
@@ -775,7 +773,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         // This used to be dropped here — the flag was set by the UI, parsed
         // by nothing, and the supervisor chained nothing, so Psiphon always
         // dialled the underlay directly instead of through Aether.
-        through_tunnel: raw._reserved[0] != 0,
+        through_tunnel: raw._reserved[0] & !FCAE_CONFIG_TUN_HTTP != 0,
     };
 
     cfg.aether = parse_aether(&raw.aether)?;
@@ -1761,6 +1759,55 @@ mod tests {
             assert_eq!(actual.protocol, expected.protocol);
             assert_eq!(actual.h2_enabled, expected.h2_enabled);
         }
+    }
+
+    #[test]
+    fn tun_http_requires_an_explicit_opt_in() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.mode = FcaeMode::Tun;
+        raw.http_port = 1820;
+        raw.lan_sharing = true;
+
+        let cfg = unsafe { parse(&raw) }.unwrap();
+        assert_eq!(cfg.http_port, 0);
+        assert!(!cfg.psiphon.through_tunnel);
+
+        raw._reserved[0] = 1;
+        let cfg = unsafe { parse(&raw) }.unwrap();
+        assert_eq!(cfg.http_port, 0);
+        assert!(cfg.psiphon.through_tunnel);
+
+        raw._reserved[0] = FCAE_CONFIG_TUN_HTTP;
+        let cfg = unsafe { parse(&raw) }.unwrap();
+        assert_eq!(cfg.http_port, 1820);
+        assert_eq!(cfg.socks_port, 1819);
+        assert!(!cfg.psiphon.through_tunnel);
+        assert!(cfg.lan_sharing);
+
+        raw._reserved[0] |= 1;
+        let cfg = unsafe { parse(&raw) }.unwrap();
+        assert_eq!(cfg.http_port, 1820);
+        assert!(cfg.psiphon.through_tunnel);
+
+        raw.http_port = 1819;
+        assert!(unsafe { parse(&raw) }.is_err());
+        raw.http_port = 0;
+        assert_eq!(unsafe { parse(&raw) }.unwrap().http_port, 0);
+    }
+
+    #[test]
+    fn tun_http_flag_does_not_change_proxy_mode_or_enable_psiphon() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.http_port = 1820;
+        raw._reserved[0] = FCAE_CONFIG_TUN_HTTP;
+        let cfg = unsafe { parse(&raw) }.unwrap();
+        assert_eq!(cfg.http_port, 1820);
+        assert_eq!(cfg.socks_port, 0);
+        assert!(!cfg.psiphon.through_tunnel);
     }
 
     #[test]

@@ -21,6 +21,8 @@ use core::ffi::{c_char, c_void};
 
 /// Bumped on every layout-affecting change to the types in this crate.
 pub const FCAE_ABI_VERSION: u32 = 23;
+/// Explicitly allow `http_port` to open an HTTP listener in TUN mode.
+pub const FCAE_CONFIG_TUN_HTTP: u64 = 0x8000_0000_0000_0000;
 
 /// `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
 /// backend's SOCKS endpoint into a TUN device.
@@ -501,7 +503,7 @@ pub struct FcaeConfig {
     /// and never closes the original — Android's ParcelFileDescriptor owns it.
     pub tun_fd: i32,
 
-    pub _reserved: [u64; 1], // slot 0 remains the Psiphon chain flag
+    pub _reserved: [u64; 1], // slot 0: legacy Psiphon chain flag and FCAE_CONFIG_TUN_HTTP
     /// TUN TCP defaults in bytes. 0 = 256000 bytes; valid range 4096..4194304 bytes.
     /// These two fields occupy former reserved slot 1.
     pub tun_tcp_sndbuf: u32,

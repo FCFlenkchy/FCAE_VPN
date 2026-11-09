@@ -60,6 +60,7 @@ struct AppState {
     uint16_t http_port   = 1820;
     bool socks_enabled   = true;
     bool http_enabled    = true;
+    bool tun_http_enabled = false;
     bool tor_http_enabled = false;
     int tor_http_port = 1822;
     char force_peer[128] = {};
@@ -313,9 +314,7 @@ struct AppState {
         c.socks_port       = (mode == 1 || (backend != 1 && tor_mode != 0))
                                    ? (socks_port != 0 ? socks_port : (uint16_t)1819)
                                    : (socks_enabled ? socks_port : (uint16_t)0);
-        // TUN exposes only the loopback SOCKS bridge required by tun2socks;
-        // do not start a user-facing HTTP proxy in that mode.
-        c.http_port        = mode == 1 ? 0 : (http_enabled ? http_port : 0);
+        c.http_port        = (mode == 1 ? tun_http_enabled : http_enabled) ? http_port : 0;
         c.tor_http_port    = tor_http_enabled ? tor_http_port : 0;
         c.force_peer       = force_peer[0] ? force_peer : nullptr;
         c.upstream_proxy   = upstream_proxy[0] ? upstream_proxy : nullptr;
@@ -409,8 +408,10 @@ struct AppState {
         // (so WARP comes up first). _reserved[0] tells the supervisor to
         // start Psiphon next with UpstreamProxyURL = Aether SOCKS.
         if (egress_psiphon) {
-            c._reserved[0] = 1;
+            c._reserved[0] |= 1;
         }
+
+        if (mode == 1 && tun_http_enabled) c._reserved[0] |= FCAE_CONFIG_TUN_HTTP;
 
         // Built in-process. Process-lifetime pointer is safe for fcae_start.
         static const char kDefaultPsiphonConfig[] =

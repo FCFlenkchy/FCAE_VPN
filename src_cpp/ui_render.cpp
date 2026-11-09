@@ -426,6 +426,7 @@ static uint64_t ui_content_signature() {
     h = fnv_value(h, g_app.quick_reconnect);
     h = fnv_value(h, g_app.socks_enabled);
     h = fnv_value(h, g_app.http_enabled);
+    h = fnv_value(h, g_app.tun_http_enabled);
     h = fnv_value(h, g_app.tor_http_enabled);
     h = fnv_value(h, g_app.tor_http_port);
     h = fnv_value(h, g_app.socks_port);
@@ -938,6 +939,7 @@ static void apply_config_kv(const std::string& key, const std::string& val) {
     else if (key == "tor_http_port") g_app.tor_http_port = parse_port(val, g_app.tor_http_port);
     else if (key == "tor_http_enabled") g_app.tor_http_enabled = atoi(val.c_str()) != 0;
     else if (key == "http_enabled") g_app.http_enabled = atoi(val.c_str()) != 0;
+    else if (key == "tun_http_enabled") g_app.tun_http_enabled = atoi(val.c_str()) != 0;
     else if (key == "force_peer")
         snprintf(g_app.force_peer, sizeof(g_app.force_peer), "%s", val.c_str());
     else if (key == "upstream_proxy")
@@ -1042,6 +1044,7 @@ static void save_config() {
     fprintf(f, "tor_http_enabled=%d\n", g_app.tor_http_enabled ? 1 : 0);
     fprintf(f, "socks_enabled=%d\n", g_app.socks_enabled ? 1 : 0);
     fprintf(f, "http_enabled=%d\n", g_app.http_enabled ? 1 : 0);
+    fprintf(f, "tun_http_enabled=%d\n", g_app.tun_http_enabled ? 1 : 0);
     fprintf(f, "force_peer=%s\n", g_app.force_peer);
     fprintf(f, "upstream_proxy=%s\n", g_app.upstream_proxy);
     fprintf(f, "config_path=%s\n", g_app.config_path);
@@ -3667,7 +3670,7 @@ void render_ui() {
                 if (g_app.protocol != 4 && (g_app.socks_enabled || g_app.mode == 1 || g_app.tor_mode != 0))
                     endpoint(final_name, g_app.mode == 1 ? "internal SOCKS5" : "SOCKS5",
                              g_app.socks_port ? g_app.socks_port : 1819);
-                if (g_app.protocol != 4 && g_app.mode == 0 && g_app.http_enabled)
+                if (g_app.protocol != 4 && (g_app.mode == 1 ? g_app.tun_http_enabled : g_app.http_enabled))
                     endpoint(final_name, "HTTP", g_app.http_port);
                 if (g_app.tor_http_enabled && (g_app.protocol == 4 || g_app.tor_mode == 1 || g_app.tor_mode == 2))
                     endpoint("Tor", "HTTP", g_app.tor_http_port);
@@ -3708,7 +3711,7 @@ void render_ui() {
             ImGui::RadioButton("Proxy", &g_app.mode, 0);
             ImGui::RadioButton("TUN",   &g_app.mode, 1);
             ImGui::Checkbox("LAN Sharing", &g_app.lan_sharing);
-            ImGui::TextWrapped("LAN sharing exposes unauthenticated proxy listeners to your local network. Use only on trusted networks.");
+            ImGui::TextWrapped("LAN sharing exposes unauthenticated proxy listeners to your local network, including the required TUN SOCKS listener. Use only on trusted networks.");
             ImGui::Checkbox("Enable logging##shared", &g_app.logging_enabled);
             ImGui::Spacing();
             ImGui::Text("Outbound IP version (Aether / Firefox)");
@@ -3743,11 +3746,11 @@ void render_ui() {
             ImGui::Checkbox("SOCKS5", &g_app.socks_enabled);
             ImGui::SameLine(0, 20);
             ImGui::InputScalar("##socks", ImGuiDataType_U16, &g_app.socks_port);
-            ImGui::Checkbox("HTTP proxy", &g_app.http_enabled);
+            ImGui::EndDisabled();
+            ImGui::Checkbox("HTTP proxy", g_app.mode == 1 ? &g_app.tun_http_enabled : &g_app.http_enabled);
             ImGui::SameLine(0, 20);
             ImGui::InputScalar("##http", ImGuiDataType_U16, &g_app.http_port);
             ImGui::PopItemWidth();
-            ImGui::EndDisabled();
             if (g_app.mode == 1) ImGui::TextDisabled("TUN uses its own internal SOCKS listener.");
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             if (g_app.mode == 1 && ImGui::CollapsingHeader("TUN Settings", ImGuiTreeNodeFlags_DefaultOpen)) {

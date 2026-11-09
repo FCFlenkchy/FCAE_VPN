@@ -45,6 +45,8 @@ extern "C" {
 
 /* Bumped on ANY layout change. Compare with fcae_abi_version() at runtime. */
 #define FCAE_ABI_VERSION 23
+/* Opt in to an HTTP listener in TUN mode when http_port is nonzero. */
+#define FCAE_CONFIG_TUN_HTTP (UINT64_C(1) << 63)
 
 /* `FcaeConfig::tun_engine` values: which in-process TUN engine converts the
  * backend's SOCKS endpoint into a TUN device. */
@@ -368,7 +370,7 @@ typedef struct {
     uint32_t        tun_mtu;       /* 1280..9000, or 0 for 1500             */
     int32_t         tun_fd;        /* Android VpnService fd, else -1       */
 
-    uint64_t        _reserved[1]; /* slot 0 remains Psiphon chain flag */
+    uint64_t        _reserved[1]; /* legacy Psiphon chain flag; OR FCAE_CONFIG_TUN_HTTP to opt in */
     uint32_t        tun_tcp_sndbuf; /* bytes; 0 = 256000; 4096..4194304 bytes */
     uint32_t        tun_tcp_rcvbuf; /* bytes; 0 = 256000; 4096..4194304 bytes */
     uint64_t        tun_tcp_auto_tuning; /* 0=default(off), 1=on, 2=off */
@@ -710,4 +712,4 @@ FcaeStatus fcae_sponsor_copy_background_rgba(uint8_t *out, size_t capacity);
 
 #endif /* FCAE_H */
 
-/* fcae-abi-fingerprint: 0x39590b2e5c7fb3b4 */
+/* fcae-abi-fingerprint: 0x88bf06b0fc4fcbc3 */

@@ -220,6 +220,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchSocks: SwitchMaterial
     private var proxySocksChoice = true
     private var proxyHttpChoice = true
+    private var tunHttpChoice = false
     private var lastProxyUiMode: Int? = null
     private lateinit var switchTorHttp: SwitchMaterial
     private lateinit var editTorHttpPort: android.widget.EditText
@@ -1310,7 +1311,6 @@ class MainActivity : AppCompatActivity() {
         switchLogging = findViewById(R.id.switchLogging)
         switchSocks = findViewById(R.id.switchSocks)
         switchHttp = findViewById(R.id.switchHttp)
-        switchHttp.text = "Aether HTTP proxy"
         switchTorHttp = findViewById(R.id.switchTorHttp)
         editTorHttpPort = findViewById(R.id.editTorHttpPort)
         switchAutoUpdate = findViewById(R.id.switchAutoUpdate)
@@ -2276,12 +2276,7 @@ class MainActivity : AppCompatActivity() {
         return if (session.active) session.mode == 1 else isTunModeSelected()
     }
 
-    /**
-     * TUN uses an internal loopback SOCKS listener for tun2socks, not a user
-     * proxy. Keep the public SOCKS/HTTP controls off and unavailable while TUN
-     * is selected, without changing the user's saved proxy choices when they
-     * switch back to Proxy mode.
-     */
+    /** Keep the Proxy and TUN HTTP choices independent across mode switches. */
     private fun applyModeSocksLock() {
         if (!::spinnerMode.isInitialized || !::switchSocks.isInitialized ||
             !::switchHttp.isInitialized || !::editSocksPort.isInitialized ||
@@ -2291,26 +2286,23 @@ class MainActivity : AppCompatActivity() {
             lastProxyUiMode == null -> {
                 proxySocksChoice = switchSocks.isChecked
                 proxyHttpChoice = switchHttp.isChecked
+                if (mode == 1) switchHttp.isChecked = tunHttpChoice
             }
             lastProxyUiMode == 0 && mode == 1 -> {
                 proxySocksChoice = switchSocks.isChecked
                 proxyHttpChoice = switchHttp.isChecked
+                switchHttp.isChecked = tunHttpChoice
             }
             lastProxyUiMode == 1 && mode == 0 -> {
+                tunHttpChoice = switchHttp.isChecked
                 switchSocks.isChecked = proxySocksChoice
                 switchHttp.isChecked = proxyHttpChoice
             }
         }
         lastProxyUiMode = mode
-        val proxyMode = mode == 0
-        switchSocks.isEnabled = proxyMode
-        switchHttp.isEnabled = proxyMode
-        editSocksPort.isEnabled = proxyMode
-        editHttpPort.isEnabled = proxyMode
-        if (!proxyMode) {
-            switchSocks.isChecked = false
-            switchHttp.isChecked = false
-        }
+        switchSocks.isEnabled = mode == 0
+        editSocksPort.isEnabled = mode == 0
+        if (mode == 1) switchSocks.isChecked = false
     }
 
     private fun t2sLogValue(): Int = spinnerT2sLog.selectedItemPosition + 1
@@ -3464,6 +3456,7 @@ class MainActivity : AppCompatActivity() {
             putBoolean("torHttp", switchTorHttp.isChecked)
             putString("torHttpPort", editTorHttpPort.text.toString())
             putBoolean("http", if (isTunModeSelected()) proxyHttpChoice else switchHttp.isChecked)
+            putBoolean("tunHttp", if (isTunModeSelected()) switchHttp.isChecked else tunHttpChoice)
             putBoolean("autoUpdate", switchAutoUpdate.isChecked)
             putBoolean("checkPreReleases", switchPreReleases.isChecked)
             putString("sni", editSni.text.toString().trim())
@@ -3589,6 +3582,7 @@ class MainActivity : AppCompatActivity() {
         switchSocks.isChecked = prefs.getBoolean("socks", true)
         switchTorHttp.isChecked = prefs.getBoolean("torHttp", false)
         editTorHttpPort.setText(prefs.getString("torHttpPort", "1822"))
+        tunHttpChoice = prefs.getBoolean("tunHttp", false)
         switchHttp.isChecked = prefs.getBoolean("http", true)
         switchAutoUpdate.isChecked = prefs.getBoolean("autoUpdate", true)
         switchPreReleases.isChecked = prefs.getBoolean("checkPreReleases", false)
@@ -3895,10 +3889,10 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("disableSessionTicket", switchDisableSessionTicket.isChecked)
         i.putExtra("disableExtensionPermutation", switchDisableExtensionPermutation.isChecked)
         i.putExtra("fragmentSni", switchFragmentSni.isChecked)
-        // TUN needs a loopback SOCKS listener internally, but it must not
-        // expose the public proxy controls. HTTP proxying is disabled in TUN.
+        // TUN requires SOCKS for its data plane; HTTP is a separate opt-in.
         i.putExtra("socksPort", if (isTunModeSelected() || switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0)
-        i.putExtra("httpPort", if (!isTunModeSelected() && switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0)
+        i.putExtra("tunHttpEnabled", isTunModeSelected() && switchHttp.isChecked)
+        i.putExtra("httpPort", if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0)
         i.putExtra("noizeProfile", spinnerNoize.selectedItem.toString())
         i.putExtra("forcePeer", editForcePeer.text.toString().trim())
         i.putExtra("sysProfile", spinnerSysprofile.selectedItemPosition)
@@ -4001,7 +3995,7 @@ class MainActivity : AppCompatActivity() {
         // Extract ALL UI values on the main thread — never read Views from bg.
         val noizeProfile = spinnerNoize.selectedItem.toString()
         val socksPort = if (mode == 1 || switchSocks.isChecked || isEgressPsiphon() || effectiveTorMode() in 1..2) editSocksPort.text.toString().toIntOrNull() ?: 1819 else 0
-        val httpPort = if (mode == 0 && switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0
+        val httpPort = if (switchHttp.isChecked) editHttpPort.text.toString().toIntOrNull() ?: 1820 else 0
         val forcePeer = editForcePeer.text.toString().trim()
         val sysProfile = spinnerSysprofile.selectedItemPosition
         val teamName = editTeam.text.toString().trim()
@@ -4912,7 +4906,7 @@ class MainActivity : AppCompatActivity() {
                     endpoints(if (finalBackend == 2) "Firefox" else "Aether",
                         if (switchSocks.isChecked || tun || effectiveTorMode() in 1..2)
                             editSocksPort.text.toString().trim().ifEmpty { "1819" } else null,
-                        if (!tun && switchHttp.isChecked) editHttpPort.text.toString().trim().ifEmpty { "1820" } else null,
+                        if (switchHttp.isChecked) editHttpPort.text.toString().trim().ifEmpty { "1820" } else null,
                         if (tun) "internal SOCKS5" else "SOCKS5")
                 }
             }

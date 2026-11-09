@@ -1025,9 +1025,8 @@ public class FCAEVpnService extends VpnService {
         final int fragMaxDelay = intent.getIntExtra("fragMaxDelay", 10);
         final boolean lan     = intent.getBooleanExtra("lanSharing", false);
         final int socks       = intent.getIntExtra("socksPort", 1819);
-        // TUN's SOCKS listener is an internal tun2socks bridge. It is not the
-        // user's public proxy, and TUN never starts the public HTTP listener.
-        final int http        = mode == 1 ? 0 : intent.getIntExtra("httpPort", 1820);
+        final int http        = mode == 1 && !intent.getBooleanExtra("tunHttpEnabled", false)
+                ? 0 : intent.getIntExtra("httpPort", 1820);
         // SOCKS5 is mandatory in TUN mode because tun2socks dials the local
         // listener for every connection. Keep that internal bridge alive even
         // if a stale or headless caller supplies zero.
@@ -1785,6 +1784,7 @@ public class FCAEVpnService extends VpnService {
         putBool(e, i, "lanSharing", false);
         putInt(e, i, "socksPort", 1819);
         putInt(e, i, "httpPort", 1820);
+        putBool(e, i, "tunHttpEnabled", false);
         putStr(e, i, "noizeProfile");
         putStr(e, i, "forcePeer");
         putStr(e, i, "configPath");
@@ -1870,6 +1870,7 @@ public class FCAEVpnService extends VpnService {
         copyBool(p, i, "lanSharing", false);
         copyInt(p, i, "socksPort", 1819);
         copyInt(p, i, "httpPort", 1820);
+        copyBool(p, i, "tunHttpEnabled", false);
         copyStr(p, i, "noizeProfile");
         copyStr(p, i, "forcePeer");
         copyStr(p, i, "configPath");

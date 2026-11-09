@@ -730,6 +730,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeStart(
     if (!psiCfgOwned.empty()) cfg.psiphon.config_json = psiCfgOwned.c_str();
     if (!psiRegionOwned.empty()) cfg.psiphon.egress_region = psiRegionOwned.c_str();
     cfg._reserved[0] = cfg.chain.hop_count == 0 && psiphonThroughTunnel == JNI_TRUE ? 1 : 0;
+    if (cfg.mode == FCAE_MODE_TUN && cfg.http_port != 0) cfg._reserved[0] |= FCAE_CONFIG_TUN_HTTP;
     cfg.psiphon.socks_port = clamp_port(psiphonSocksPort);
     cfg.psiphon.http_port = clamp_port(psiphonHttpPort);
     cfg.tun_tcp_sndbuf = (uint32_t)tunTcpSndbuf;

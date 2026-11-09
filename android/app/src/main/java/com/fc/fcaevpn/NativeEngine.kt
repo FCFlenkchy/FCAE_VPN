@@ -260,7 +260,8 @@ object NativeEngine {
             fragMinDelay = session.getIntExtra("fragMinDelay", 2),
             fragMaxDelay = session.getIntExtra("fragMaxDelay", 10),
             socksPort = if (mode == 1 && socks == 0) 1819 else socks,
-            httpPort = session.getIntExtra("httpPort", 1820),
+            httpPort = if (mode == 1 && !session.getBooleanExtra("tunHttpEnabled", false)) 0
+                else session.getIntExtra("httpPort", 1820),
             forcePeer = session.getStringExtra("forcePeer").orEmpty(),
             configPath = session.getStringExtra("configPath").orEmpty().ifEmpty { "aether.toml" },
             h2Enabled = session.getBooleanExtra("h2Enabled", true),

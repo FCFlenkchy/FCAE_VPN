@@ -424,7 +424,7 @@
                 android:text="LAN sharing"
                 android:textColor="#FFE0E4EE" />
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:text="LAN sharing exposes unauthenticated proxy listeners to your local network. Use only on trusted networks."
+                android:text="LAN sharing exposes unauthenticated proxy listeners to your local network, including the required TUN SOCKS listener. Use only on trusted networks."
                 android:textColor="#FFB87333" android:textSize="12sp" />
             <TextView
                 android:layout_width="match_parent"
