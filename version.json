@@ -2,7 +2,7 @@
   {
     "version": "1.4.4",
     "date": "2026-11-10",
-    "notes": "Default relay for firefox",
+    "notes": "Default relay for firefox and auto activation Firefox vpn if already not",
     "url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/1.4.4"
   },
   {
