@@ -648,6 +648,8 @@ pub struct Upstream {
     candidate: RwLock<Candidate>,
     candidates: RwLock<Vec<Candidate>>,
     preference: TransportPreference,
+    h1_reported: AtomicBool,
+    h2_reported: AtomicBool,
     dialer: Dialer,
     tokens: TokenManager,
     timeout: Duration,
@@ -671,6 +673,8 @@ impl Upstream {
             candidate: RwLock::new(candidate.clone()),
             candidates: RwLock::new(vec![candidate]),
             preference,
+            h1_reported: AtomicBool::new(false),
+            h2_reported: AtomicBool::new(false),
             dialer,
             tokens,
             timeout,
@@ -689,6 +693,17 @@ impl Upstream {
         if !candidates.is_empty() {
             *self.candidates.write() = candidates;
         }
+    }
+
+    fn report_tunnel_protocol(&self, h2: bool) {
+        let reported = if h2 { &self.h2_reported } else { &self.h1_reported };
+        if !reported.swap(true, Ordering::Relaxed) {
+            log::info!("[firefox] ({}) proxy tunnel connected", if h2 { "h2" } else { "h1" });
+        }
+    }
+
+    pub(crate) fn transport_preference(&self) -> TransportPreference {
+        self.preference
     }
 
     pub fn traffic(&self) -> Arc<Traffic> {
@@ -766,7 +781,10 @@ impl Upstream {
                 }
             };
             match tokio::time::timeout(self.timeout, session.open_tcp(target)).await {
-                Ok(Ok(stream)) => return Ok(Box::new(stream)),
+                Ok(Ok(stream)) => {
+                    self.report_tunnel_protocol(true);
+                    return Ok(Box::new(stream));
+                }
                 Ok(Err(FirefoxError::PassRejected)) if attempt == 0 => {
                     self.renew(true).await?;
                 }
@@ -799,7 +817,7 @@ impl Upstream {
     }
 
     async fn fallback_h1(&self, target: &str, h2_error: FirefoxError) -> Result<BoxedTunnel> {
-        log::debug!("[firefox] H2 unavailable, trying H1: {h2_error}");
+        log::warn!("[firefox] (h2) proxy unavailable reason={}; trying (h1)", h2_error.reason_code());
         match self.open_h1_authorized(target).await {
             Ok(stream) => Ok(Box::new(stream)),
             Err(error) if !error.is_transient() => Err(error),
@@ -814,8 +832,12 @@ impl Upstream {
         }
         *slot = None;
         let candidate = self.candidate();
-        let session = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
-            .await.map_err(|_| FirefoxError::Timeout(self.timeout))??;
+        let result = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
+            .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(self.timeout)));
+        let session = result.map_err(|error| {
+            log::warn!("[firefox] (h2) proxy connection failed reason={}", error.reason_code());
+            error
+        })?;
         *slot = Some(session.clone());
         Ok(session)
     }
@@ -830,6 +852,7 @@ impl Upstream {
                 }
                 Ok(stream) => {
                     self.traffic.record_rtt(started.elapsed());
+                    self.report_tunnel_protocol(false);
                     return Ok(stream);
                 }
                 Err(error) => return Err(error),
@@ -839,9 +862,12 @@ impl Upstream {
     }
 
     async fn open_h1(&self, target: &str, token: &str) -> Result<BufReader<SslStream<TcpStream>>> {
-        tokio::time::timeout(self.timeout, self.open_h1_inner(target, token))
-            .await
-            .map_err(|_| FirefoxError::Timeout(self.timeout))?
+        let result = tokio::time::timeout(self.timeout, self.open_h1_inner(target, token))
+            .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(self.timeout)));
+        if let Err(error) = &result {
+            log::warn!("[firefox] (h1) proxy connection failed reason={}", error.reason_code());
+        }
+        result
     }
 
     async fn open_h1_inner(&self, target: &str, token: &str) -> Result<BufReader<SslStream<TcpStream>>> {
@@ -895,7 +921,10 @@ impl Upstream {
         for attempt in 0..2 {
             let session = self.get_udp_session().await?;
             match tokio::time::timeout(self.timeout, session.open_udp(target, self.traffic.clone())).await {
-                Ok(Ok(tunnel)) => return Ok(tunnel),
+                Ok(Ok(tunnel)) => {
+                    self.report_tunnel_protocol(true);
+                    return Ok(tunnel);
+                }
                 Ok(Err(FirefoxError::PassRejected)) if attempt == 0 => {
                     self.renew(true).await?;
                 }
@@ -924,8 +953,12 @@ impl Upstream {
         }
         *slot = None;
         let candidate = self.candidate();
-        let session = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
-            .await.map_err(|_| FirefoxError::Timeout(self.timeout))??;
+        let result = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
+            .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(self.timeout)));
+        let session = result.map_err(|error| {
+            log::warn!("[firefox] (h2) proxy connection failed reason={}", error.reason_code());
+            error
+        })?;
         *slot = Some(session.clone());
         Ok(session)
     }

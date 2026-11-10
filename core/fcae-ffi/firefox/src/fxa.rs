@@ -197,21 +197,11 @@ impl Fxa {
         let url = format!("{FXA_AUTH}/oauth/token");
         let authorization = hawk_header("POST", &url, &id, &key, Some(&body))?;
         let request = oauth_request(&url, body.clone())?.header("authorization", &authorization)?;
-        let response = self.http.send(request.clone()).await;
+        let response = self.http.send(request).await;
         key.zeroize();
         match response {
             Ok(response) if response.status == 200 => parse_tokens(response),
-            Ok(response) if response.status == 406 => {
-                match self.http.send_h2(request).await {
-                    Ok(response) if response.status == 200 => parse_tokens(response),
-                    Ok(response) if response.status == 406 => self.oauth_code(session_token).await,
-                    Ok(response) => Err(api_error("api.accounts.firefox.com", response)),
-                    Err(error) => {
-                        log::debug!("[firefox] direct OAuth HTTP/2 retry failed; using authorization code flow: {error}");
-                        self.oauth_code(session_token).await
-                    },
-                }
-            }
+            Ok(response) if response.status == 406 => self.oauth_code(session_token).await,
             Ok(response) => Err(api_error("api.accounts.firefox.com", response)),
             Err(error) => Err(error),
         }

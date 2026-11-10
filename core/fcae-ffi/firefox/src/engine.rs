@@ -43,7 +43,7 @@ impl FirefoxEngine {
         let store = AccountStore::new(&config.data_dir)?;
         let account = store.resolve(config.account_id.as_deref())?;
         let dialer = Dialer::new(config.upstream_proxy.as_deref(), protect, config.ip_version)?;
-        let control = ControlPlane::new(dialer.clone()).with_relay_store(store.clone()).with_timeout(config.connect_timeout);
+        let control = ControlPlane::new(dialer.clone()).with_transport(config.transport).with_relay_store(store.clone()).with_timeout(config.connect_timeout);
         let challenges = Arc::new(ChallengeService::new(captcha));
         let fxa = Fxa::new(control.clone()).with_challenges(challenges);
         let accounts = Accounts::new(store.clone(), control.clone(), fxa);

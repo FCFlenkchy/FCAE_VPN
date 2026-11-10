@@ -2480,9 +2480,20 @@ static void firefox_location_combo() {
     }
 }
 
+static uint64_t firefox_account_submit(const std::string& request) {
+    static const char* const transports[] = {"auto", "h2", "h1"};
+    const int selected = g_app.firefox_transport;
+    const char* transport = transports[(selected >= 0 && selected <= 2) ? selected : 0];
+    const size_t end = request.rfind('}');
+    if (end == std::string::npos) return 0;
+    std::string with_transport = request;
+    with_transport.insert(end, std::string(",\"transport\":\"") + transport + "\"");
+    return fcae_firefox_account_submit(with_transport.c_str());
+}
+
 static void firefox_submit(const std::string& request, const char* pending) {
     if (g_app.firefox_job != 0) return;
-    g_app.firefox_job = fcae_firefox_account_submit(request.c_str());
+    g_app.firefox_job = firefox_account_submit(request);
     if (g_app.firefox_job) {
         const std::string operation = firefox_json_string(request, "op");
         snprintf(g_app.firefox_operation, sizeof(g_app.firefox_operation), "%s", operation.c_str());
@@ -2716,7 +2727,7 @@ static void firefox_start_regions(bool cached) {
     if (s_firefox_region_job) return;
     const std::string request = "{\"op\":\"" + std::string(cached ? "locations_cached" : "locations")
         + "\",\"refresh\":true,\"data_dir\":\"" + firefox_json_escape(data_dir().c_str()) + "\"}";
-    s_firefox_region_job = fcae_firefox_account_submit(request.c_str());
+    s_firefox_region_job = firefox_account_submit(request);
     s_firefox_region_cached = cached;
 }
 
@@ -2730,7 +2741,7 @@ static void firefox_start_next_usage() {
         if (account == s_firefox_account_options.end()) continue;
         const std::string request = "{\"op\":\"usage\",\"data_dir\":\"" + firefox_json_escape(data_dir().c_str())
             + "\",\"account_id\":\"" + firefox_json_escape(id.c_str()) + "\"}";
-        s_firefox_usage_job = fcae_firefox_account_submit(request.c_str());
+        s_firefox_usage_job = firefox_account_submit(request);
         if (s_firefox_usage_job) { s_firefox_usage_account = std::move(id); break; }
     }
 }

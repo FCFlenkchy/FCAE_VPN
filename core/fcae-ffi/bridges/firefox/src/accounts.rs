@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use fcae_firefox::{Account, Accounts, ChallengeService, ControlPlane, Dialer, FirefoxError, Fxa, LoginOutcome, Result};
+use fcae_firefox::{Account, Accounts, ChallengeService, ControlPlane, Dialer, FirefoxError, Fxa, LoginOutcome, Result, TransportPreference};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, OnceCell};
@@ -230,7 +230,11 @@ async fn execute(services: &Services, raw: &str) -> Result<Value> {
         let countries = fcae_firefox::server_list::RemoteSettings::cached(&store).unwrap_or_default();
         return Ok(locations_json(countries));
     }
-    let accounts = service(services, &data_dir).await?;
+    let raw_transport = optional(&request, "transport").unwrap_or_else(|| "auto".into());
+    let transport = TransportPreference::parse(&raw_transport)
+        .ok_or_else(|| FirefoxError::InvalidConfig("invalid Firefox transport".into()))?;
+    if transport == TransportPreference::H3 { return Err(FirefoxError::H3Unavailable); }
+    let accounts = service(services, &data_dir, transport).await?;
     match operation.as_str() {
         "locations" => {
             let countries = if request.get("refresh").and_then(Value::as_bool).unwrap_or(false) {
@@ -344,7 +348,7 @@ fn locations_json(mut countries: Vec<fcae_firefox::types::Country>) -> Value {
     json!({"locations":locations})
 }
 
-async fn service(services: &Services, data_dir: &str) -> Result<Accounts> {
+async fn service(services: &Services, data_dir: &str, transport: TransportPreference) -> Result<Accounts> {
     let cell = {
         let mut services = services.lock().await;
         services.entry(data_dir.to_string()).or_insert_with(|| Arc::new(OnceCell::new())).clone()
@@ -352,11 +356,12 @@ async fn service(services: &Services, data_dir: &str) -> Result<Accounts> {
     let accounts = cell.get_or_try_init(|| async {
         let store = fcae_firefox::AccountStore::new(data_dir)?;
         let dialer = Dialer::new(None, protect_callback(), 10)?;
-        let control = ControlPlane::new(dialer).with_relay_store(store.clone()).with_current_firefox_user_agent().await;
+        let control = ControlPlane::new(dialer).with_transport(transport).with_relay_store(store.clone()).with_current_firefox_user_agent().await;
         let challenges = Arc::new(ChallengeService::new(Some(captcha_solver())));
         let fxa = Fxa::new(control.clone()).with_challenges(challenges);
         Ok::<_, FirefoxError>(Accounts::new(store, control, fxa))
     }).await?;
+    accounts.set_transport(transport);
     Ok(accounts.clone())
 }
 

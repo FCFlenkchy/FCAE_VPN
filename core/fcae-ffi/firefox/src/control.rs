@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_boring::SslStream;
@@ -13,7 +13,8 @@ use url::Url;
 use crate::dialer::Dialer;
 use crate::error::{FirefoxError, Result};
 use crate::store::AccountStore;
-use crate::tls::{firefox_user_agent, firefox_user_agent_for_major, ALPN_H1, ALPN_H2_H1};
+use crate::tls::{firefox_user_agent, firefox_user_agent_for_major, ALPN_H1, ALPN_H2, ALPN_H2_H1};
+use crate::types::TransportPreference;
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_HEADER_LIST: u32 = 128 * 1024;
@@ -137,6 +138,7 @@ pub struct ControlPlane {
     cookies: Arc<Mutex<BTreeMap<String, Cookie>>>,
     challenge_h2: Option<Arc<tokio::sync::Mutex<Option<ReusableH2>>>>,
     relay_store: Option<AccountStore>,
+    transport: Arc<RwLock<TransportPreference>>,
 }
 
 impl ControlPlane {
@@ -144,6 +146,7 @@ impl ControlPlane {
         Self {
             dialer, timeout: Duration::from_secs(20), user_agent: firefox_user_agent(),
             cookies: Arc::new(Mutex::new(BTreeMap::new())), challenge_h2: None, relay_store: None,
+            transport: Arc::new(RwLock::new(TransportPreference::Auto)),
         }
     }
 
@@ -160,7 +163,17 @@ impl ControlPlane {
             cookies: Arc::new(Mutex::new(BTreeMap::new())),
             challenge_h2: None,
             relay_store: self.relay_store.clone(),
+            transport: self.transport.clone(),
         }
+    }
+
+    pub fn with_transport(self, transport: TransportPreference) -> Self {
+        self.set_transport(transport);
+        self
+    }
+
+    pub fn set_transport(&self, transport: TransportPreference) {
+        *self.transport.write() = transport;
     }
 
     pub fn with_relay_store(mut self, store: AccountStore) -> Self {
@@ -194,50 +207,45 @@ impl ControlPlane {
 
     pub async fn send(&self, request: ControlRequest) -> Result<ControlResponse> {
         let request = self.decorate(request);
-        tokio::time::timeout(self.timeout, self.send_inner(request, false))
+        tokio::time::timeout(self.timeout, self.send_inner(request))
             .await.map_err(|_| FirefoxError::Timeout(self.timeout))?
     }
 
-    async fn send_inner(&self, request: ControlRequest, require_h2: bool) -> Result<ControlResponse> {
+    async fn send_inner(&self, request: ControlRequest) -> Result<ControlResponse> {
+        let transport = *self.transport.read();
+        if transport == TransportPreference::H3 { return Err(FirefoxError::H3Unavailable); }
         let relay = match &self.relay_store {
             Some(store) if relay_target_allowed(&request) => store.relay_url()?,
             _ => None,
         };
         let Some(relay) = relay else {
-            let host = request.host.clone();
-            let response = if require_h2 {
-                self.exchange(request, ALPN_H2_H1, true).await?
-            } else if let Some(pool) = &self.challenge_h2 {
-                self.exchange_challenge(request, pool).await?
+            let response = if let Some(pool) = self.challenge_h2.as_ref().filter(|_| transport != TransportPreference::H1) {
+                self.exchange_challenge(request, pool, transport).await?
             } else {
-                self.exchange(request, ALPN_H1, false).await?
+                self.exchange(request, transport).await?
             };
-            log_http_status(&host, &response, false);
             return Ok(response);
         };
         let safe = request.method == Method::GET || request.method == Method::HEAD;
-        let direct = if let Some(pool) = self.challenge_h2.as_ref().filter(|_| !require_h2) {
+        let direct = if let Some(pool) = self.challenge_h2.as_ref().filter(|_| transport != TransportPreference::H1) {
             // A challenge session may have transmitted the request when it fails.
             if safe {
-                tokio::time::timeout(Duration::from_secs(8), self.exchange_challenge(request.clone(), pool))
+                tokio::time::timeout(Duration::from_secs(8), self.exchange_challenge(request.clone(), pool, transport))
                     .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(Duration::from_secs(8))))
             } else {
-                self.exchange_challenge(request.clone(), pool).await
+                self.exchange_challenge(request.clone(), pool, transport).await
             }
         } else {
             // Only the connection is timed here; no request bytes have been sent yet.
             match tokio::time::timeout(Duration::from_secs(4),
-                crate::tls::connect(&self.dialer, &request.host, request.port,
-                    if require_h2 { ALPN_H2_H1 } else { ALPN_H1 })).await {
+                connect_control(&self.dialer, &request.host, request.port, transport)).await {
                 Ok(Ok(tls)) => {
                     let is_h2 = tls.ssl().selected_alpn_protocol() == Some(b"h2");
-                    if require_h2 && !is_h2 {
-                        log::warn!("[firefox] direct service did not negotiate HTTP/2; trying the configured relay");
-                        return self.exchange_relay(&request, &relay).await;
+                    if transport == TransportPreference::H2 && !is_h2 {
+                        log::warn!("[firefox] (h2) direct service did not negotiate HTTP/2; trying the configured relay");
+                        return self.exchange_relay(&request, &relay, transport).await;
                     }
-                    let exchange = async {
-                        if is_h2 { over_h2(tls, &request).await } else { over_h1(tls, &request).await }
-                    };
+                    let exchange = self.exchange_tls(tls, &request, transport, "direct");
                     let result = if safe {
                         tokio::time::timeout(Duration::from_secs(8), exchange)
                             .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(Duration::from_secs(8))))
@@ -251,17 +259,16 @@ impl ControlPlane {
                 },
                 Ok(Err(error @ FirefoxError::TlsCertificate { .. })) => return Err(error),
                 Ok(Err(_)) | Err(_) => {
-                    log::warn!("[firefox] direct service connection failed; trying the configured relay");
-                    return self.exchange_relay(&request, &relay).await;
+                    log::warn!("[firefox] (mode={}) direct service connection failed; trying the configured relay", transport.as_str());
+                    return self.exchange_relay(&request, &relay, transport).await;
                 }
             }
         };
         match direct {
             Ok(response) => {
-                log_http_status(&request.host, &response, false);
                 if should_relay_response(&request, response.status) {
                     log::warn!("[firefox] service returned HTTP {}; trying the configured relay", response.status);
-                    match self.exchange_relay(&request, &relay).await {
+                    match self.exchange_relay(&request, &relay, transport).await {
                         Ok(relayed) => Ok(relayed),
                         Err(error) => {
                             log::warn!("[firefox] relay retry failed reason={}; keeping the direct response", error.reason_code());
@@ -274,45 +281,62 @@ impl ControlPlane {
             }
             Err(error @ FirefoxError::TlsCertificate { .. }) => Err(error),
             Err(_) if safe => {
-                log::warn!("[firefox] service request failed; trying the configured relay");
-                self.exchange_relay(&request, &relay).await
+                log::warn!("[firefox] (mode={}) service request failed; trying the configured relay", transport.as_str());
+                self.exchange_relay(&request, &relay, transport).await
             }
             Err(error) => Err(error),
         }
     }
 
-    async fn exchange_relay(&self, request: &ControlRequest, relay: &Url) -> Result<ControlResponse> {
+    async fn exchange_relay(&self, request: &ControlRequest, relay: &Url, transport: TransportPreference) -> Result<ControlResponse> {
         let forwarded = relay_request(request, relay)?;
         let response = async {
             if forwarded.secure {
-                let tls = crate::tls::connect(&self.dialer, &forwarded.host, forwarded.port, ALPN_H2_H1).await?;
-                if tls.ssl().selected_alpn_protocol() == Some(b"h2") {
-                    over_h2(tls, &forwarded).await
-                } else {
-                    over_h1(tls, &forwarded).await
+                let tls = connect_control(&self.dialer, &forwarded.host, forwarded.port, transport).await?;
+                let is_h2 = tls.ssl().selected_alpn_protocol() == Some(b"h2");
+                if transport == TransportPreference::H2 && !is_h2 {
+                    log::warn!("[firefox] (h2) relay did not negotiate HTTP/2");
+                    return Err(FirefoxError::Protocol("relay did not negotiate HTTP/2".into()));
                 }
+                self.exchange_tls(tls, &forwarded, transport, "relay").await
+            } else if transport == TransportPreference::H1 {
+                let stream = self.dialer.connect_tcp(&forwarded.host, forwarded.port).await?;
+                logged_h1(stream, &forwarded, "relay").await
             } else {
                 let stream = self.dialer.connect_tcp(&forwarded.host, forwarded.port).await?;
-                over_h1(stream, &forwarded).await
+                match open_h2(stream, true).await {
+                    Ok((sender, driver)) => {
+                        let response = logged_h2(sender, &forwarded, "relay").await;
+                        drop(driver);
+                        if transport == TransportPreference::Auto && matches!(&response, Err(FirefoxError::H2(_)))
+                            && (request.method == Method::GET || request.method == Method::HEAD) {
+                            let stream = self.dialer.connect_tcp(&forwarded.host, forwarded.port).await?;
+                            logged_h1(stream, &forwarded, "relay").await
+                        } else {
+                            response
+                        }
+                    }
+                    Err(error) if transport == TransportPreference::Auto => {
+                        log::warn!("[firefox] (h2) relay setup failed reason={}; trying (h1)", error.reason_code());
+                        let stream = self.dialer.connect_tcp(&forwarded.host, forwarded.port).await?;
+                        logged_h1(stream, &forwarded, "relay").await
+                    }
+                    Err(error) => {
+                        log::warn!("[firefox] (h2) relay setup failed reason={}", error.reason_code());
+                        Err(error)
+                    },
+                }
             }
         }.await.map_err(|error| {
             log::warn!("[firefox] relay request failed reason={}", error.reason_code());
             error
         })?;
-        log_http_status(&request.host, &response, true);
         if response.headers.contains_key("x-relay-error") ||
             (response.status >= 400 && !is_relay_response(&response.headers)) {
             return Err(FirefoxError::Protocol(format!("relay or service request failed (HTTP {})", response.status)));
         }
         self.store_cookies(&request.host, &response.headers);
-        log::info!("[firefox] Firefox service request used the configured relay (HTTP {})", response.status);
         Ok(response)
-    }
-
-    pub async fn send_h2(&self, request: ControlRequest) -> Result<ControlResponse> {
-        let request = self.decorate(request);
-        tokio::time::timeout(self.timeout, self.send_inner(request, true))
-            .await.map_err(|_| FirefoxError::Timeout(self.timeout))?
     }
 
     pub fn import_cookies(&self, other: &ControlPlane) {
@@ -363,38 +387,64 @@ impl ControlPlane {
         request
     }
 
-    async fn exchange(&self, request: ControlRequest, alpn: &[u8], require_h2: bool) -> Result<ControlResponse> {
-        let tls = crate::tls::connect(&self.dialer, &request.host, request.port, alpn).await?;
-        let is_h2 = tls.ssl().selected_alpn_protocol() == Some(b"h2");
-        if require_h2 && !is_h2 {
-            return Err(FirefoxError::Protocol("Mozilla did not negotiate HTTP/2".into()));
-        }
-        let response = if is_h2 { over_h2(tls, &request).await? } else { over_h1(tls, &request).await? };
+    async fn exchange(&self, request: ControlRequest, transport: TransportPreference) -> Result<ControlResponse> {
+        let tls = connect_control(&self.dialer, &request.host, request.port, transport).await?;
+        let response = self.exchange_tls(tls, &request, transport, "direct").await?;
         self.store_cookies(&request.host, &response.headers);
         Ok(response)
+    }
+
+    async fn exchange_tls(&self, tls: SslStream<TcpStream>, request: &ControlRequest, transport: TransportPreference, route: &'static str) -> Result<ControlResponse> {
+        let is_h2 = tls.ssl().selected_alpn_protocol() == Some(b"h2");
+        if !is_h2 {
+            if transport == TransportPreference::H2 {
+                return Err(FirefoxError::Protocol("peer did not negotiate HTTP/2".into()));
+            }
+            return logged_h1(tls, request, route).await;
+        }
+        let opened = open_h2(tls, transport == TransportPreference::Auto).await;
+        let error = match opened {
+            Ok((sender, driver)) => {
+                let result = logged_h2(sender, request, route).await;
+                drop(driver);
+                match result {
+                    Err(error @ FirefoxError::H2(_)) if transport == TransportPreference::Auto
+                        && (request.method == Method::GET || request.method == Method::HEAD) => error,
+                    result => return result,
+                }
+            }
+            Err(error) if transport != TransportPreference::Auto => {
+                log::warn!("[firefox] (h2) control setup failed route={} reason={}", route, error.reason_code());
+                return Err(error);
+            }
+            Err(error) => error,
+        };
+        log::warn!("[firefox] (h2) control request failed route={} reason={}; trying (h1)", route, error.reason_code());
+        let tls = connect_control(&self.dialer, &request.host, request.port, TransportPreference::H1).await?;
+        logged_h1(tls, request, route).await
     }
 
     async fn exchange_challenge(
         &self,
         request: ControlRequest,
         pool: &tokio::sync::Mutex<Option<ReusableH2>>,
+        transport: TransportPreference,
     ) -> Result<ControlResponse> {
         let mut session = pool.lock().await;
         if session.as_ref().is_some_and(|current| current.host != request.host || current.port != request.port) {
             *session = None;
         }
         if session.is_none() {
-            let tls = match crate::tls::connect(&self.dialer, &request.host, request.port, ALPN_H2_H1).await {
+            let tls = match connect_control(&self.dialer, &request.host, request.port, transport).await {
                 Ok(tls) => tls,
-                Err(error) => {
-                    log::debug!("[firefox] challenge HTTP/2 setup failed: {error}");
-                    drop(session);
-                    return self.exchange(request, ALPN_H1, false).await;
-                }
+                Err(error) => return Err(error),
             };
             if tls.ssl().selected_alpn_protocol() != Some(b"h2") {
+                if transport == TransportPreference::H2 {
+                    return Err(FirefoxError::Protocol("Mozilla did not negotiate HTTP/2".into()));
+                }
                 drop(session);
-                let response = over_h1(tls, &request).await?;
+                let response = logged_h1(tls, &request, "direct").await?;
                 self.store_cookies(&request.host, &response.headers);
                 return Ok(response);
             }
@@ -403,23 +453,34 @@ impl ControlPlane {
             let (sender, connection) = match builder.handshake(tls).await {
                 Ok(connection) => connection,
                 Err(error) => {
-                    log::debug!("[firefox] challenge HTTP/2 handshake failed: {error}");
+                    let error = h2_error(error);
+                    if transport != TransportPreference::Auto {
+                        log::warn!("[firefox] (h2) challenge setup failed reason={}", error.reason_code());
+                        return Err(error);
+                    }
+                    log::warn!("[firefox] (h2) challenge setup failed reason={}; trying (h1)", error.reason_code());
                     drop(session);
-                    return self.exchange(request, ALPN_H1, false).await;
+                    return self.exchange(request, TransportPreference::H1).await;
                 }
             };
             let driver = ConnectionDriver(tokio::spawn(async move { let _ = connection.await; }));
             *session = Some(ReusableH2 { host: request.host.clone(), port: request.port, sender, _driver: driver });
         }
         let sender = session.as_ref().unwrap().sender.clone();
-        match exchange_h2(sender, &request).await {
+        match logged_h2(sender, &request, "direct").await {
             Ok(response) => {
                 self.store_cookies(&request.host, &response.headers);
                 Ok(response)
             }
             Err(error) => {
                 *session = None;
-                Err(error)
+                if transport == TransportPreference::Auto && matches!(&error, FirefoxError::H2(_))
+                    && (request.method == Method::GET || request.method == Method::HEAD) {
+                    drop(session);
+                    self.exchange(request, TransportPreference::H1).await
+                } else {
+                    Err(error)
+                }
             }
         }
     }
@@ -533,11 +594,28 @@ fn is_relay_response(headers: &HeaderMap) -> bool {
     })
 }
 
-fn log_http_status(host: &str, response: &ControlResponse, relayed: bool) {
-    if response.status >= 400 {
-        log::warn!("[firefox] service HTTP {} host={} route={}", response.status, host,
-            if relayed { "relay" } else { "direct" });
+fn log_control_exchange(route: &str, host: &str, protocol: &str, result: &Result<ControlResponse>) {
+    let host = if route == "relay" { "relay" } else { host };
+    match result {
+        Ok(response) if response.status >= 400 => log::warn!("[firefox] ({}) control HTTP {} route={} host={}", protocol, response.status, route, host),
+        Ok(response) => log::info!("[firefox] ({}) control HTTP {} route={} host={}", protocol, response.status, route, host),
+        Err(error) => log::warn!("[firefox] ({}) control request failed route={} host={} reason={}", protocol, route, host, error.reason_code()),
     }
+}
+
+async fn logged_h1<S>(stream: S, request: &ControlRequest, route: &str) -> Result<ControlResponse>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let result = over_h1(stream, request).await;
+    log_control_exchange(route, &request.host, "h1", &result);
+    result
+}
+
+async fn logged_h2(sender: h2::client::SendRequest<Bytes>, request: &ControlRequest, route: &str) -> Result<ControlResponse> {
+    let result = exchange_h2(sender, request).await;
+    log_control_exchange(route, &request.host, "h2", &result);
+    result
 }
 
 struct ConnectionDriver(tokio::task::JoinHandle<()>);
@@ -555,11 +633,45 @@ struct ReusableH2 {
     _driver: ConnectionDriver,
 }
 
-async fn over_h2(tls: SslStream<TcpStream>, request: &ControlRequest) -> Result<ControlResponse> {
+pub(crate) fn control_alpn(transport: TransportPreference) -> &'static [u8] {
+    match transport {
+        TransportPreference::H1 => ALPN_H1,
+        TransportPreference::H2 => ALPN_H2,
+        TransportPreference::Auto => ALPN_H2_H1,
+        TransportPreference::H3 => ALPN_H2,
+    }
+}
+
+async fn connect_control(dialer: &Dialer, host: &str, port: u16, transport: TransportPreference) -> Result<SslStream<TcpStream>> {
+    match crate::tls::connect(dialer, host, port, control_alpn(transport)).await {
+        Err(FirefoxError::TlsCertificate { host, message }) => Err(FirefoxError::TlsCertificate { host, message }),
+        Err(_) if transport == TransportPreference::Auto => crate::tls::connect(dialer, host, port, ALPN_H1).await,
+        result => result,
+    }
+}
+
+async fn open_h2<S>(stream: S, probe: bool) -> Result<(h2::client::SendRequest<Bytes>, ConnectionDriver)>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let mut builder = h2::client::Builder::new();
     builder.enable_push(false).max_header_list_size(MAX_HEADER_LIST);
-    let (client, connection) = builder.handshake(tls).await.map_err(h2_error)?;
+    let (client, mut connection) = builder.handshake(stream).await.map_err(h2_error)?;
+    let mut ping = if probe { connection.ping_pong() } else { None };
     let driver = ConnectionDriver(tokio::spawn(async move { let _ = connection.await; }));
+    if probe {
+        let ping = ping.as_mut().ok_or_else(|| FirefoxError::Protocol("HTTP/2 probe unavailable".into()))?;
+        tokio::time::timeout(Duration::from_secs(3), ping.ping(h2::Ping::opaque()))
+            .await.map_err(|_| FirefoxError::Timeout(Duration::from_secs(3)))?.map_err(h2_error)?;
+    }
+    Ok((client, driver))
+}
+
+pub(crate) async fn over_h2<S>(stream: S, request: &ControlRequest) -> Result<ControlResponse>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (client, driver) = open_h2(stream, false).await?;
     let result = exchange_h2(client, request).await;
     drop(driver);
     result
@@ -567,8 +679,11 @@ async fn over_h2(tls: SslStream<TcpStream>, request: &ControlRequest) -> Result<
 
 async fn exchange_h2(client: h2::client::SendRequest<Bytes>, request: &ControlRequest) -> Result<ControlResponse> {
     let mut client = client.ready().await.map_err(h2_error)?;
-    let authority = if request.port == 443 { request.host.clone() } else { crate::types::authority(&request.host, request.port) };
-    let uri = format!("https://{authority}{}", request.path);
+    let default_port = if request.secure { 443 } else { 80 };
+    let authority = if request.port == default_port && !request.host.contains(':') { request.host.clone() }
+        else { crate::types::authority(&request.host, request.port) };
+    let scheme = if request.secure { "https" } else { "http" };
+    let uri = format!("{scheme}://{authority}{}", request.path);
     let mut head = http::Request::builder().method(request.method.clone()).uri(uri);
     for (name, value) in &request.headers {
         head = head.header(name, value);
@@ -775,6 +890,21 @@ fn h2_error(error: h2::Error) -> FirefoxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_transport_policy_is_shared_by_clones_and_fresh_jars() {
+        assert_eq!(control_alpn(TransportPreference::Auto), ALPN_H2_H1);
+        assert_eq!(control_alpn(TransportPreference::H2), ALPN_H2);
+        assert_eq!(control_alpn(TransportPreference::H1), ALPN_H1);
+        let parent = ControlPlane::new(Dialer::new(None, None, 10).unwrap());
+        let clone = parent.clone();
+        let fresh = parent.fresh_jar();
+        parent.set_transport(TransportPreference::H1);
+        assert_eq!(*clone.transport.read(), TransportPreference::H1);
+        assert_eq!(*fresh.transport.read(), TransportPreference::H1);
+        clone.set_transport(TransportPreference::H2);
+        assert_eq!(*parent.transport.read(), TransportPreference::H2);
+    }
 
     #[test]
     fn relay_preserves_target_request_without_forwarding_host() {

@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use http::Method;
 
-use crate::control::{over_h1, ControlRequest, ControlResponse};
+use crate::control::{control_alpn, over_h1, over_h2, ControlRequest, ControlResponse};
 use crate::error::{FirefoxError, Result};
 use crate::transport::Upstream;
-use crate::types::authority;
+use crate::types::{authority, TransportPreference};
 
 pub(crate) fn provider(server: &str) -> Option<&'static str> {
     let address = server.parse::<IpAddr>().ok()?;
@@ -22,13 +22,40 @@ pub(crate) async fn exchange(upstream: &Upstream, server: &str, query: &[u8]) ->
     if query.len() < 12 || query.len() > u16::MAX as usize || query[2] & 0x80 != 0 {
         return Err(FirefoxError::Protocol("invalid DNS query".into()));
     }
+    let transport = upstream.transport_preference();
     let tunnel = upstream.open_tcp(&authority(server, 443)).await?;
-    let tls = crate::tls::connect_stream(tunnel, host, crate::tls::ALPN_H1).await?;
+    let tls = match crate::tls::connect_stream(tunnel, host, control_alpn(transport)).await {
+        Err(error @ FirefoxError::TlsCertificate { .. }) => return Err(error),
+        Err(_) if transport == TransportPreference::Auto => {
+            let tunnel = upstream.open_tcp(&authority(server, 443)).await?;
+            crate::tls::connect_stream(tunnel, host, crate::tls::ALPN_H1).await?
+        }
+        result => result?,
+    };
+    let is_h2 = tls.ssl().selected_alpn_protocol() == Some(b"h2");
+    if transport == TransportPreference::H2 && !is_h2 {
+        log::warn!("[firefox] (h2) DNS resolver did not negotiate HTTP/2");
+        return Err(FirefoxError::Protocol("DNS resolver did not negotiate HTTP/2".into()));
+    }
+    log::debug!("[firefox] ({}) DNS-over-HTTPS", if is_h2 { "h2" } else { "h1" });
     let mut request = ControlRequest::new(Method::POST, &format!("https://{host}/dns-query"))?
         .header("content-type", "application/dns-message")?
         .header("accept", "application/dns-message")?;
     request.body = Some(query.to_vec());
-    validate_response(query, over_h1(tls, &request).await?)
+    let response = if is_h2 {
+        match over_h2(tls, &request).await {
+            Err(FirefoxError::H2(_)) if transport == TransportPreference::Auto => {
+                log::warn!("[firefox] (h2) DNS-over-HTTPS failed; trying (h1)");
+                let tunnel = upstream.open_tcp(&authority(server, 443)).await?;
+                let tls = crate::tls::connect_stream(tunnel, host, crate::tls::ALPN_H1).await?;
+                over_h1(tls, &request).await?
+            }
+            result => result?,
+        }
+    } else {
+        over_h1(tls, &request).await?
+    };
+    validate_response(query, response)
 }
 
 fn validate_response(query: &[u8], response: ControlResponse) -> Result<Vec<u8>> {

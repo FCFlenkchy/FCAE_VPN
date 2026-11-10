@@ -3222,6 +3222,11 @@ class MainActivity : AppCompatActivity() {
         firefoxSubmit(request, message)
     }
 
+    private fun submitFirefoxAccount(request: JSONObject): Long {
+        request.put("transport", prefs.getString("firefoxTransport", "auto").orEmpty().ifEmpty { "auto" })
+        return NativeEngine.nativeFirefoxAccountSubmit(request.toString())
+    }
+
     private fun firefoxSubmit(request: org.json.JSONObject, message: String) {
         if (!request.has("data_dir")) request.put("data_dir", filesDir.absolutePath)
         request.remove("base_url")
@@ -3229,7 +3234,7 @@ class MainActivity : AppCompatActivity() {
             firefoxSetStatus("Another Firefox account operation is still running.")
             return
         }
-        firefoxJob = try { NativeEngine.nativeFirefoxAccountSubmit(request.toString()) } catch (error: Throwable) {
+        firefoxJob = try { submitFirefoxAccount(request) } catch (error: Throwable) {
             firefoxSetStatus("Firefox account operation is unavailable: ${error.message}")
             return
         }
@@ -3247,7 +3252,7 @@ class MainActivity : AppCompatActivity() {
         if (firefoxRegionJob != 0L) return
         val request = JSONObject().put("op", operation).put("data_dir", filesDir.absolutePath)
         if (operation == "locations") request.put("refresh", true)
-        val id = try { NativeEngine.nativeFirefoxAccountSubmit(request.toString()) } catch (_: Throwable) { 0L }
+        val id = try { submitFirefoxAccount(request) } catch (_: Throwable) { 0L }
         if (id == 0L) return
         firefoxRegionJob = id
         firefoxRegionOperation = operation
@@ -3268,7 +3273,7 @@ class MainActivity : AppCompatActivity() {
             val accountId = firefoxUsageQueue.removeFirst()
             if (firefoxAccountChoices.none { it.id == accountId }) continue
             val request = JSONObject().put("op", "usage").put("account_id", accountId).put("data_dir", filesDir.absolutePath)
-            val id = try { NativeEngine.nativeFirefoxAccountSubmit(request.toString()) } catch (_: Throwable) { 0L }
+            val id = try { submitFirefoxAccount(request) } catch (_: Throwable) { 0L }
             if (id == 0L) continue
             firefoxUsageJob = id
             firefoxUsageAccountId = accountId

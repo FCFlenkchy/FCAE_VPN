@@ -12,7 +12,7 @@ use crate::fxa::{Fxa, LoginResponse};
 use crate::guardian::{Entitlement, Guardian};
 use crate::server_list::RemoteSettings;
 use crate::store::AccountStore;
-use crate::types::{Account, Country, Credentials, ProxyPass, Usage};
+use crate::types::{Account, Country, Credentials, ProxyPass, TransportPreference, Usage};
 
 const PENDING_LIFETIME: Duration = Duration::from_secs(15 * 60);
 const OAUTH_CONFIRM_RETRY: Duration = Duration::from_secs(3);
@@ -66,6 +66,7 @@ impl Drop for PendingSession {
 #[derive(Clone)]
 pub struct Accounts {
     store: AccountStore,
+    http: ControlPlane,
     fxa: Fxa,
     guardian: Guardian,
     remote: RemoteSettings,
@@ -75,8 +76,12 @@ pub struct Accounts {
 impl Accounts {
     pub fn new(store: AccountStore, http: ControlPlane, fxa: Fxa) -> Self {
         let guardian = Guardian::new(http.clone()).with_challenges(fxa.challenge_service());
-        let remote = RemoteSettings::new(http);
-        Self { store, fxa, guardian, remote, pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())) }
+        let remote = RemoteSettings::new(http.clone());
+        Self { store, http, fxa, guardian, remote, pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())) }
+    }
+
+    pub fn set_transport(&self, transport: TransportPreference) {
+        self.http.set_transport(transport);
     }
 
     pub fn store(&self) -> &AccountStore {

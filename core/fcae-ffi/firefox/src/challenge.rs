@@ -32,14 +32,6 @@ pub(crate) async fn recover_406(
     request: ControlRequest,
     mut response: ControlResponse,
 ) -> Result<ControlResponse> {
-    if should_retry_h2(&request, &response) {
-        match http.send_h2(request.clone()).await {
-            Ok(alternate) if alternate.status != 406 => return Ok(alternate),
-            Ok(alternate) if !alternate.body.is_empty() => response = alternate,
-            Ok(_) => {}
-            Err(error) => log::debug!("[firefox] HTTP/2 challenge fallback failed: {error}"),
-        }
-    }
     let mut attempts = 0;
     while response.status == 406 {
         if attempts >= 3 {
@@ -52,13 +44,6 @@ pub(crate) async fn recover_406(
         response = http.send(request.clone()).await?;
     }
     Ok(response)
-}
-
-fn should_retry_h2(request: &ControlRequest, response: &ControlResponse) -> bool {
-    response.status == 406
-        && response.body.is_empty()
-        && request.port == 443
-        && trusted_challenge_base(&format!("https://{}", request.host))
 }
 
 impl ChallengeService {
@@ -397,10 +382,6 @@ mod tests {
     use super::*;
     use http::HeaderMap;
 
-    fn response(status: u16, body: &[u8]) -> ControlResponse {
-        ControlResponse { status, headers: HeaderMap::new(), body: body.to_vec() }
-    }
-
     #[test]
     fn post_back_accepts_next_round_without_status() {
         let result: PostBackResponse = serde_json::from_str(
@@ -461,18 +442,5 @@ mod tests {
         assert!(!is_script_state_rejection(&FirefoxError::Http {
             host: "api.accounts.firefox.com".into(), status: 400, errno: Some(125), retry_after: None, message: String::new(),
         }));
-    }
-
-    #[test]
-    fn h2_retry_only_for_empty_406_from_trusted_origins() {
-        let request = ControlRequest::new(Method::POST, "https://api.accounts.firefox.com/v1/account/login").unwrap();
-        assert!(should_retry_h2(&request, &response(406, b"")));
-        assert!(!should_retry_h2(&request, &response(400, b"")));
-        assert!(!should_retry_h2(&request, &response(429, b"")));
-        assert!(!should_retry_h2(&request, &response(406, b"challenge")));
-        let untrusted = ControlRequest::new(Method::POST, "https://example.com/").unwrap();
-        assert!(!should_retry_h2(&untrusted, &response(406, b"")));
-        let other_port = ControlRequest::new(Method::POST, "https://api.accounts.firefox.com:8443/").unwrap();
-        assert!(!should_retry_h2(&other_port, &response(406, b"")));
     }
 }
