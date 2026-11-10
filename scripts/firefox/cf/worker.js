@@ -7,7 +7,8 @@ const HOP_HEADERS = new Set([
   "host", "connection", "content-length", "keep-alive", "proxy-authenticate",
   "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
   "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
-  "x-real-ip", "true-client-ip", "cdn-loop", "referer",
+  "x-real-ip", "true-client-ip", "x-client-ip", "x-cluster-client-ip",
+  "x-original-forwarded-for", "via", "cdn-loop", "referer",
 ]);
 
 function failure(status, message) {
@@ -32,12 +33,20 @@ function allowedTarget(raw) {
   return target;
 }
 
+const INTERNAL_HEADER_PREFIXES = ["cf-", "x-forwarded-", "proxy-", "x-proxy-", "x-fcae-"];
+const INTERNAL_HEADERS = new Set(["x-proxy", "x-fcae"]);
+
+function isRelayHeader(name) {
+  return name.startsWith("x-") && name.split("-").includes("relay");
+}
+
 function requestHeaders(input) {
   const headers = new Headers();
   const connectionHeaders = new Set((input.get("connection") || "").split(",").map((name) => name.trim().toLowerCase()));
   for (const [name, value] of input) {
     const lower = name.toLowerCase();
-    if (!HOP_HEADERS.has(lower) && !connectionHeaders.has(lower) && !lower.startsWith("cf-") && !lower.startsWith("x-forwarded-")) {
+    if (!HOP_HEADERS.has(lower) && !connectionHeaders.has(lower) && !INTERNAL_HEADERS.has(lower) &&
+        !isRelayHeader(lower) && !INTERNAL_HEADER_PREFIXES.some((prefix) => lower.startsWith(prefix))) {
       headers.append(name, value);
     }
   }
@@ -77,8 +86,7 @@ export default {
       const connectionHeaders = (headers.get("connection") || "").split(",").map((name) => name.trim());
       for (const name of connectionHeaders) if (name) headers.delete(name);
       for (const name of HOP_HEADERS) headers.delete(name);
-      headers.delete("x-relay-error");
-      headers.delete("x-arman-relay");
+      for (const name of [...headers.keys()]) if (isRelayHeader(name)) headers.delete(name);
       headers.set("X-FCAE-Relay", "1");
       headers.set("Cache-Control", "no-store");
       return new Response(request.method === "HEAD" ? null : upstream.body, {

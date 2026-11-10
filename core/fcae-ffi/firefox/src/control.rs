@@ -496,8 +496,10 @@ fn relay_target_allowed(request: &ControlRequest) -> bool {
 }
 
 fn is_relay_response(headers: &HeaderMap) -> bool {
-    ["x-fcae-relay", "x-arman-relay"].iter()
-        .any(|name| headers.get(*name).is_some_and(|value| value == "1"))
+    headers.iter().any(|(name, value)| {
+        let name = name.as_str();
+        name.starts_with("x-") && name.ends_with("-relay") && value == "1"
+    })
 }
 
 fn log_http_status(host: &str, response: &ControlResponse, relayed: bool) {
@@ -778,7 +780,7 @@ mod tests {
         assert!(!response.message().contains("secret"));
         response.headers.insert("x-fcae-relay", HeaderValue::from_static("0"));
         assert!(!is_relay_response(&response.headers));
-        response.headers.insert("x-arman-relay", HeaderValue::from_static("1"));
+        response.headers.insert("x-example-relay", HeaderValue::from_static("1"));
         assert!(is_relay_response(&response.headers));
     }
 
