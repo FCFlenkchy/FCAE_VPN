@@ -17,10 +17,15 @@ use crate::types::{Account, Country, Credentials, ProxyPass, TransportPreference
 const PENDING_LIFETIME: Duration = Duration::from_secs(15 * 60);
 const OAUTH_CONFIRM_RETRY: Duration = Duration::from_secs(3);
 static TOKEN_LOCKS: OnceLock<parking_lot::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+static ACTIVATION_LOCKS: OnceLock<parking_lot::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
 
-fn token_lock(store: &AccountStore, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+fn account_lock(
+    registry: &OnceLock<parking_lot::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
+    store: &AccountStore,
+    id: &str,
+) -> Arc<tokio::sync::Mutex<()>> {
     let key = store.root().join("accounts").join(id).to_string_lossy().into_owned();
-    let mut locks = TOKEN_LOCKS.get_or_init(|| parking_lot::Mutex::new(HashMap::new())).lock();
+    let mut locks = registry.get_or_init(|| parking_lot::Mutex::new(HashMap::new())).lock();
     locks.retain(|_, lock| lock.strong_count() > 0);
     if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
         return lock;
@@ -28,6 +33,14 @@ fn token_lock(store: &AccountStore, id: &str) -> Arc<tokio::sync::Mutex<()>> {
     let lock = Arc::new(tokio::sync::Mutex::new(()));
     locks.insert(key, Arc::downgrade(&lock));
     lock
+}
+
+fn token_lock(store: &AccountStore, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    account_lock(&TOKEN_LOCKS, store, id)
+}
+
+fn activation_lock(store: &AccountStore, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    account_lock(&ACTIVATION_LOCKS, store, id)
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +226,7 @@ impl Accounts {
             fxa: self.fxa.clone(),
             guardian: self.guardian.clone(),
             credentials: token_lock(&self.store, account_id),
+            activation: activation_lock(&self.store, account_id),
         })
     }
 
@@ -288,7 +302,13 @@ impl Accounts {
         if let Err(error) = self.ensure_device(&account.id).await {
             log::warn!("[firefox] connected-services registration failed: {error}");
         }
-        Ok(account)
+        match self.tokens(&account.id)?.usage_with_activation().await {
+            Ok(_) => self.store.get(&account.id),
+            Err(error) => {
+                log::warn!("[firefox] initial account usage unavailable reason={}", error.reason_code());
+                Ok(account)
+            }
+        }
     }
 }
 
@@ -299,6 +319,7 @@ pub struct TokenManager {
     fxa: Fxa,
     guardian: Guardian,
     credentials: Arc<tokio::sync::Mutex<()>>,
+    activation: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl TokenManager {
@@ -348,6 +369,16 @@ impl TokenManager {
     }
 
     pub async fn fetch_pass(&self) -> Result<ProxyPass> {
+        match self.fetch_pass_once().await {
+            Err(FirefoxError::NotEntitled) => {
+                self.activate_if_needed().await?;
+                self.fetch_pass_once().await
+            }
+            result => result,
+        }
+    }
+
+    async fn fetch_pass_once(&self) -> Result<ProxyPass> {
         for attempt in 0..2 {
             let token = self.access_token().await?;
             match self.guardian.fetch_pass(&token).await {
@@ -367,6 +398,36 @@ impl TokenManager {
             }
         }
         Err(FirefoxError::ReauthRequired)
+    }
+
+    async fn activate_if_needed(&self) -> Result<()> {
+        let _guard = self.activation.lock().await;
+        for attempt in 0..2 {
+            let token = self.access_token().await?;
+            match self.guardian.activation_check(&token).await {
+                Err(FirefoxError::ReauthRequired) if attempt == 0 => {
+                    let _ = self.refresh_rejected(&token).await?;
+                }
+                Ok((false, _)) => return Ok(()),
+                Ok((true, relay)) => {
+                    log::info!("[firefox] activating account VPN entitlement");
+                    self.guardian.activate_on_route(&token, relay).await?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(FirefoxError::ReauthRequired)
+    }
+
+    async fn usage_with_activation(&self) -> Result<Usage> {
+        match self.usage().await {
+            Err(FirefoxError::NotEntitled) => {
+                self.activate_if_needed().await?;
+                self.usage().await
+            }
+            result => result,
+        }
     }
 
     pub async fn entitlement(&self) -> Result<Entitlement> {
@@ -411,5 +472,23 @@ impl TokenManager {
             }
         }
         Err(FirefoxError::ReauthRequired)
+    }
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::*;
+
+    #[test]
+    fn activation_lock_is_shared_per_account_but_separate_from_token_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path()).unwrap();
+        let first = activation_lock(&store, "account-a");
+        let second = activation_lock(&store, "account-a");
+        let other = activation_lock(&store, "account-b");
+        let credentials = token_lock(&store, "account-a");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
+        assert!(!Arc::ptr_eq(&first, &credentials));
     }
 }

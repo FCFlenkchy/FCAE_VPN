@@ -30,7 +30,17 @@ pub(crate) async fn recover_406(
     http: &ControlPlane,
     challenges: Option<&ChallengeService>,
     request: ControlRequest,
+    response: ControlResponse,
+) -> Result<ControlResponse> {
+    recover_406_on_route(http, challenges, request, response, false).await
+}
+
+pub(crate) async fn recover_406_on_route(
+    http: &ControlPlane,
+    challenges: Option<&ChallengeService>,
+    request: ControlRequest,
     mut response: ControlResponse,
+    relay: bool,
 ) -> Result<ControlResponse> {
     let mut attempts = 0;
     while response.status == 406 {
@@ -41,7 +51,11 @@ pub(crate) async fn recover_406(
         let origin = format!("https://{}", request.host);
         challenges.solve(http, &response, &origin).await?;
         attempts += 1;
-        response = http.send(request.clone()).await?;
+        response = if relay {
+            http.send_via_relay(request.clone()).await?
+        } else {
+            http.send(request.clone()).await?
+        };
     }
     Ok(response)
 }

@@ -211,6 +211,21 @@ impl ControlPlane {
             .await.map_err(|_| FirefoxError::Timeout(self.timeout))?
     }
 
+    pub(crate) async fn send_via_relay(&self, request: ControlRequest) -> Result<ControlResponse> {
+        let request = self.decorate(request);
+        if !relay_target_allowed(&request) {
+            return Err(FirefoxError::InvalidConfig("relay target is not allowed".into()));
+        }
+        let relay = match &self.relay_store {
+            Some(store) => store.relay_url()?,
+            None => None,
+        }.ok_or_else(|| FirefoxError::InvalidConfig("Firefox relay is not configured".into()))?;
+        let transport = *self.transport.read();
+        if transport == TransportPreference::H3 { return Err(FirefoxError::H3Unavailable); }
+        tokio::time::timeout(self.timeout, self.exchange_relay(&request, &relay, transport))
+            .await.map_err(|_| FirefoxError::Timeout(self.timeout))?
+    }
+
     async fn send_inner(&self, request: ControlRequest) -> Result<ControlResponse> {
         let transport = *self.transport.read();
         if transport == TransportPreference::H3 { return Err(FirefoxError::H3Unavailable); }
@@ -587,7 +602,7 @@ fn relay_target_allowed(request: &ControlRequest) -> bool {
         .iter().any(|domain| domain_matches(&request.host, domain))
 }
 
-fn is_relay_response(headers: &HeaderMap) -> bool {
+pub(crate) fn is_relay_response(headers: &HeaderMap) -> bool {
     headers.iter().any(|(name, value)| {
         let name = name.as_str();
         name.starts_with("x-") && name.ends_with("-relay") && value == "1"
@@ -890,6 +905,18 @@ fn h2_error(error: h2::Error) -> FirefoxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn relay_only_rejects_disabled_or_disallowed_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path()).unwrap();
+        store.set_relay_url("").unwrap();
+        let http = ControlPlane::new(Dialer::new(None, None, 0).unwrap()).with_relay_store(store);
+        let activation = ControlRequest::new(Method::POST, "https://vpn.mozilla.org/api/v1/fpn/activate").unwrap();
+        assert!(matches!(http.send_via_relay(activation).await, Err(FirefoxError::InvalidConfig(_))));
+        let disallowed = ControlRequest::new(Method::POST, "https://example.com/").unwrap();
+        assert!(matches!(http.send_via_relay(disallowed).await, Err(FirefoxError::InvalidConfig(_))));
+    }
 
     #[test]
     fn control_transport_policy_is_shared_by_clones_and_fresh_jars() {

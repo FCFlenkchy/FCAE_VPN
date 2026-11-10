@@ -6,8 +6,8 @@ use chrono::{DateTime, Utc};
 use http::{HeaderMap, Method};
 use serde::Deserialize;
 
-use crate::challenge::{recover_406, ChallengeService};
-use crate::control::{ControlPlane, ControlRequest, ControlResponse};
+use crate::challenge::{recover_406, recover_406_on_route, ChallengeService};
+use crate::control::{is_relay_response, ControlPlane, ControlRequest, ControlResponse};
 use crate::error::{FirefoxError, Result};
 use crate::types::{ProxyPass, ProxyPassClaims, Usage};
 
@@ -85,6 +85,23 @@ impl Guardian {
         Ok(response.json()?)
     }
 
+    pub(crate) async fn activation_check(&self, access_token: &str) -> Result<(bool, bool)> {
+        let response = self.get(Method::GET, "/api/v1/fpn/status", access_token).await?;
+        activation_decision(response)
+    }
+
+    pub(crate) async fn activate_on_route(&self, access_token: &str, relay: bool) -> Result<Entitlement> {
+        if !relay { return self.activate(access_token).await; }
+        let request = ControlRequest::new(Method::POST, &format!("{}/api/v1/fpn/activate", self.endpoint))?
+            .header("authorization", format!("Bearer {access_token}"))?
+            .header("content-type", "application/json")?
+            .header("cache-control", "max-age=0")?;
+        let response = self.http.send_via_relay(request.clone()).await?;
+        let response = recover_406_on_route(&self.http, self.challenges.as_deref(), request, response, true).await?;
+        if response.status != 200 { return Err(guardian_error(response)); }
+        Ok(response.json()?)
+    }
+
     pub async fn activate(&self, access_token: &str) -> Result<Entitlement> {
         let response = self.get(Method::POST, "/api/v1/fpn/activate", access_token).await?;
         if response.status != 200 {
@@ -102,6 +119,20 @@ impl Guardian {
             return parse_usage(&response.headers);
         }
         Err(guardian_error(response))
+    }
+}
+
+fn activation_decision(response: ControlResponse) -> Result<(bool, bool)> {
+    let relay = is_relay_response(&response.headers);
+    match response.status {
+        200 => {
+            let value: serde_json::Value = response.json()?;
+            let subscribed = value.get("subscribed").and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| FirefoxError::Protocol("Guardian entitlement status is missing subscribed state".into()))?;
+            Ok((!subscribed, relay))
+        }
+        403 => Ok((true, relay)),
+        _ => Err(guardian_error(response)),
     }
 }
 
@@ -190,6 +221,24 @@ fn guardian_error(response: ControlResponse) -> FirefoxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activation_check_requires_definite_status_and_preserves_route() {
+        let response = |status: u16, body: &[u8], relay: bool| {
+            let mut headers = HeaderMap::new();
+            if relay { headers.insert("x-fcae-relay", "1".parse().unwrap()); }
+            ControlResponse { status, headers, body: body.to_vec() }
+        };
+        assert_eq!(activation_decision(response(200, br#"{"subscribed":false}"#, false)).unwrap(), (true, false));
+        assert_eq!(activation_decision(response(200, br#"{"subscribed":true}"#, true)).unwrap(), (false, true));
+        assert_eq!(activation_decision(response(403, b"", true)).unwrap(), (true, true));
+        assert_eq!(activation_decision(response(403, b"", false)).unwrap(), (true, false));
+        assert!(matches!(activation_decision(response(200, b"{}", false)), Err(FirefoxError::Protocol(_))));
+        assert!(matches!(activation_decision(response(401, b"", false)), Err(FirefoxError::ReauthRequired)));
+        assert!(matches!(activation_decision(response(429, b"", false)), Err(FirefoxError::QuotaExhausted(_))));
+        assert!(matches!(activation_decision(response(451, b"", false)), Err(FirefoxError::RegionUnavailable)));
+        assert!(matches!(activation_decision(response(500, b"", false)), Err(FirefoxError::Http { status: 500, .. })));
+    }
 
     #[test]
     fn quota_does_not_require_a_reset_header() {
