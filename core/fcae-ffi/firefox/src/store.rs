@@ -197,10 +197,10 @@ impl AccountStore {
 pub fn validate_relay_url(raw: &str) -> Result<Option<url::Url>> {
     let raw = raw.trim();
     if raw.is_empty() { return Ok(None); }
-    let invalid = || FirefoxError::InvalidConfig("relay URL must be a valid HTTPS URL without credentials, fragment, url or health parameters".into());
+    let invalid = || FirefoxError::InvalidConfig("relay URL must be a valid HTTP or HTTPS URL without credentials, fragment, url or health parameters".into());
     if raw.len() > 4096 || raw.chars().any(char::is_control) { return Err(invalid()); }
     let url = url::Url::parse(raw).map_err(|_| invalid())?;
-    if url.scheme() != "https" || url.host_str().is_none() || !url.username().is_empty()
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty()
         || url.password().is_some() || url.fragment().is_some()
         || url.query_pairs().any(|(key, _)| key == "url" || key == "health") || url.as_str().len() > 4096 {
         return Err(invalid());
@@ -270,13 +270,13 @@ mod relay_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = AccountStore::new(dir.path()).unwrap();
         assert_eq!(store.relay_url().unwrap().unwrap().as_str(), DEFAULT_RELAY_URL);
-        for invalid in ["http://relay.example/", "https://user:pass@relay.example/", "https://relay.example/#fragment", "https://relay.example/?url=x", "https://relay.example/?health=1"] {
+        for invalid in ["ftp://relay.example/", "https://user:pass@relay.example/", "https://relay.example/#fragment", "https://relay.example/?url=x", "https://relay.example/?health=1"] {
             assert!(store.set_relay_url(invalid).is_err());
             assert_eq!(store.relay_url().unwrap().unwrap().as_str(), DEFAULT_RELAY_URL);
         }
-        store.set_relay_url("https://relay.example/?secret=private").unwrap();
-        assert_eq!(store.relay_url().unwrap().unwrap().as_str(), "https://relay.example/?secret=private");
-        assert!(store.set_relay_url("http://bad.example/").is_err());
+        store.set_relay_url("http://relay.example/private").unwrap();
+        assert_eq!(store.relay_url().unwrap().unwrap().as_str(), "http://relay.example/private");
+        assert!(store.set_relay_url("ftp://bad.example/").is_err());
         assert!(store.relay_url().unwrap().is_some());
         #[cfg(unix)]
         {

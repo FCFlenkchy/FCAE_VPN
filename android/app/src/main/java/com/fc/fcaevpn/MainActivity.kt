@@ -2851,7 +2851,7 @@ class MainActivity : AppCompatActivity() {
         var relayLoaded = savedRelay != null
         val relay = addDialogInput(box, "Firefox relay URL (optional)", savedRelay.orEmpty())
         relay.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
-        relay.hint = "HTTPS URL"
+        relay.hint = "HTTP or HTTPS URL"
         relay.filters = arrayOf(android.text.InputFilter.LengthFilter(4096))
         if (savedRelay == null) relay.error = "Could not load the relay setting"
         fun commitRelay(): Boolean {
@@ -2863,7 +2863,7 @@ class MainActivity : AppCompatActivity() {
                 relayLoaded = true
                 relay.error = null
             } else {
-                relay.error = "Use a valid HTTPS URL; the previous setting may still be active"
+                relay.error = "Use a valid HTTP or HTTPS URL; the previous setting may still be active"
             }
             return saved
         }
@@ -3317,7 +3317,7 @@ class MainActivity : AppCompatActivity() {
                         monthlyUsage = usage,
                         usageExhausted = account?.optBoolean("monthly_usage_exhausted", false) == true,
                     )
-                    else if (choice.id == accountId && choice.monthlyUsage == "Not reported") choice.copy(monthlyUsage = "Usage unavailable")
+                    else if (choice.id == accountId) choice.copy(monthlyUsage = "Usage unavailable", usageExhausted = false)
                     else choice
                 }
                 renderFirefoxAccountRows()

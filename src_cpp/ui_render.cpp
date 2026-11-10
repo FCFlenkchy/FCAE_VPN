@@ -2809,7 +2809,10 @@ static void firefox_poll_background() {
                     if (!usage.empty()) {
                         account.monthly_usage = usage;
                         account.usage_exhausted = firefox_json_bool(json, "monthly_usage_exhausted", account_pos);
-                    } else if (account.monthly_usage == "Not reported") account.monthly_usage = "Usage unavailable";
+                    } else {
+                        account.monthly_usage = "Usage unavailable";
+                        account.usage_exhausted = false;
+                    }
                     break;
                 }
             }
@@ -2980,13 +2983,13 @@ static void render_firefox_settings() {
     const std::string root = firefox_json_escape(data_dir().c_str());
     firefox_location_combo();
     ImGui::Spacing();
-    ImGui::InputTextWithHint("Firefox relay URL", "Optional HTTPS URL", s_firefox_relay_url,
+    ImGui::InputTextWithHint("Firefox relay URL", "Optional HTTP or HTTPS URL", s_firefox_relay_url,
         sizeof(s_firefox_relay_url));
     if (ImGui::IsItemDeactivatedAfterEdit()) {
         s_firefox_relay_error = !fcae_firefox_relay_set(data_dir().c_str(), s_firefox_relay_url);
     }
     if (s_firefox_relay_error)
-        ImGui::TextWrapped("Could not save or load the relay URL. Use a valid HTTPS URL; the previous setting may still be active.");
+        ImGui::TextWrapped("Could not save or load the relay URL. Use a valid HTTP or HTTPS URL; the previous setting may still be active.");
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     firefox_account_rows(root);
     if (g_app.firefox_captcha_id) {

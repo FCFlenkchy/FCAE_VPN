@@ -94,18 +94,9 @@ impl Guardian {
     }
 
     pub async fn usage(&self, access_token: &str) -> Result<Usage> {
-        let response = self.get(Method::HEAD, "/api/v1/fpn/token", access_token).await?;
-        if matches!(response.status, 403 | 405 | 501)
-            || (response.status == 200 && parse_usage(&response.headers).is_err())
-        {
-            let response = self.get(Method::GET, "/api/v1/fpn/token", access_token).await?;
-            if response.status == 403 {
-                return Err(FirefoxError::NotEntitled);
-            }
-            if response.status == 200 || response.status == 429 {
-                return parse_usage(&response.headers);
-            }
-            return Err(guardian_error(response));
+        let mut response = self.get(Method::GET, "/api/v1/fpn/token", access_token).await?;
+        if matches!(response.status, 405 | 501) {
+            response = self.get(Method::HEAD, "/api/v1/fpn/token", access_token).await?;
         }
         if response.status == 200 || response.status == 429 {
             return parse_usage(&response.headers);
@@ -210,6 +201,16 @@ mod tests {
         assert!(usage.reset.is_none());
         headers.insert("x-quota-reset", "invalid".parse().unwrap());
         assert!(parse_usage(&headers).unwrap().reset.is_none());
+    }
+
+    #[test]
+    fn unlimited_requires_an_explicit_service_header() {
+        let mut headers = HeaderMap::new();
+        assert!(parse_usage(&headers).is_err());
+        headers.insert("x-quota-unlimited", "true".parse().unwrap());
+        assert!(parse_usage(&headers).unwrap().unlimited);
+        headers.insert("x-quota-unlimited", "false".parse().unwrap());
+        assert!(parse_usage(&headers).is_err());
     }
 
     #[test]

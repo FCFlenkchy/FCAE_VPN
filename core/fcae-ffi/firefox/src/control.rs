@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::dialer::Dialer;
 use crate::error::{FirefoxError, Result};
-use crate::store::{AccountStore, DEFAULT_RELAY_URL};
+use crate::store::AccountStore;
 use crate::tls::{firefox_user_agent, firefox_user_agent_for_major, ALPN_H1, ALPN_H2_H1};
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
@@ -72,24 +72,31 @@ pub struct ControlRequest {
     pub host: String,
     pub port: u16,
     pub path: String,
+    secure: bool,
     pub headers: Vec<(HeaderName, HeaderValue)>,
     pub body: Option<Vec<u8>>,
 }
 
 impl ControlRequest {
     pub fn new(method: Method, raw_url: &str) -> Result<Self> {
+        Self::from_url(method, raw_url, false)
+    }
+
+    fn from_url(method: Method, raw_url: &str, relay: bool) -> Result<Self> {
         let url = Url::parse(raw_url)?;
-        if url.scheme() != "https" || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
-            return Err(FirefoxError::InvalidConfig("only credential-free HTTPS control-plane URLs are accepted".into()));
+        let secure = url.scheme() == "https";
+        if (!secure && !(relay && url.scheme() == "http")) || url.host_str().is_none()
+            || !url.username().is_empty() || url.password().is_some() {
+            return Err(FirefoxError::InvalidConfig("invalid control-plane URL".into()));
         }
         let host = url.host_str().unwrap().trim_matches(['[', ']']).to_string();
-        let port = url.port().unwrap_or(443);
+        let port = url.port_or_known_default().ok_or_else(|| FirefoxError::InvalidConfig("URL has no port".into()))?;
         let path = match url.query() {
             Some(query) => format!("{}?{query}", url.path()),
             None if url.path().is_empty() => "/".into(),
             None => url.path().to_string(),
         };
-        Ok(Self { method, host, port, path, headers: Vec::new(), body: None })
+        Ok(Self { method, host, port, path, secure, headers: Vec::new(), body: None })
     }
 
     pub fn header(mut self, name: &'static str, value: impl AsRef<str>) -> Result<Self> {
@@ -187,18 +194,20 @@ impl ControlPlane {
 
     pub async fn send(&self, request: ControlRequest) -> Result<ControlResponse> {
         let request = self.decorate(request);
-        tokio::time::timeout(self.timeout, self.send_inner(request))
+        tokio::time::timeout(self.timeout, self.send_inner(request, false))
             .await.map_err(|_| FirefoxError::Timeout(self.timeout))?
     }
 
-    async fn send_inner(&self, request: ControlRequest) -> Result<ControlResponse> {
+    async fn send_inner(&self, request: ControlRequest, require_h2: bool) -> Result<ControlResponse> {
         let relay = match &self.relay_store {
             Some(store) if relay_target_allowed(&request) => store.relay_url()?,
             _ => None,
         };
         let Some(relay) = relay else {
             let host = request.host.clone();
-            let response = if let Some(pool) = &self.challenge_h2 {
+            let response = if require_h2 {
+                self.exchange(request, ALPN_H2_H1, true).await?
+            } else if let Some(pool) = &self.challenge_h2 {
                 self.exchange_challenge(request, pool).await?
             } else {
                 self.exchange(request, ALPN_H1, false).await?
@@ -207,7 +216,7 @@ impl ControlPlane {
             return Ok(response);
         };
         let safe = request.method == Method::GET || request.method == Method::HEAD;
-        let direct = if let Some(pool) = &self.challenge_h2 {
+        let direct = if let Some(pool) = self.challenge_h2.as_ref().filter(|_| !require_h2) {
             // A challenge session may have transmitted the request when it fails.
             if safe {
                 tokio::time::timeout(Duration::from_secs(8), self.exchange_challenge(request.clone(), pool))
@@ -218,13 +227,22 @@ impl ControlPlane {
         } else {
             // Only the connection is timed here; no request bytes have been sent yet.
             match tokio::time::timeout(Duration::from_secs(4),
-                crate::tls::connect(&self.dialer, &request.host, request.port, ALPN_H1)).await {
+                crate::tls::connect(&self.dialer, &request.host, request.port,
+                    if require_h2 { ALPN_H2_H1 } else { ALPN_H1 })).await {
                 Ok(Ok(tls)) => {
+                    let is_h2 = tls.ssl().selected_alpn_protocol() == Some(b"h2");
+                    if require_h2 && !is_h2 {
+                        log::warn!("[firefox] direct service did not negotiate HTTP/2; trying the configured relay");
+                        return self.exchange_relay(&request, &relay).await;
+                    }
+                    let exchange = async {
+                        if is_h2 { over_h2(tls, &request).await } else { over_h1(tls, &request).await }
+                    };
                     let result = if safe {
-                        tokio::time::timeout(Duration::from_secs(8), over_h1(tls, &request))
+                        tokio::time::timeout(Duration::from_secs(8), exchange)
                             .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(Duration::from_secs(8))))
                     } else {
-                        over_h1(tls, &request).await
+                        exchange.await
                     };
                     if let Ok(response) = &result {
                         self.store_cookies(&request.host, &response.headers);
@@ -266,8 +284,17 @@ impl ControlPlane {
     async fn exchange_relay(&self, request: &ControlRequest, relay: &Url) -> Result<ControlResponse> {
         let forwarded = relay_request(request, relay)?;
         let response = async {
-            let tls = crate::tls::connect(&self.dialer, &forwarded.host, forwarded.port, ALPN_H1).await?;
-            over_h1(tls, &forwarded).await
+            if forwarded.secure {
+                let tls = crate::tls::connect(&self.dialer, &forwarded.host, forwarded.port, ALPN_H2_H1).await?;
+                if tls.ssl().selected_alpn_protocol() == Some(b"h2") {
+                    over_h2(tls, &forwarded).await
+                } else {
+                    over_h1(tls, &forwarded).await
+                }
+            } else {
+                let stream = self.dialer.connect_tcp(&forwarded.host, forwarded.port).await?;
+                over_h1(stream, &forwarded).await
+            }
         }.await.map_err(|error| {
             log::warn!("[firefox] relay request failed reason={}", error.reason_code());
             error
@@ -284,11 +311,8 @@ impl ControlPlane {
 
     pub async fn send_h2(&self, request: ControlRequest) -> Result<ControlResponse> {
         let request = self.decorate(request);
-        let host = request.host.clone();
-        let response = tokio::time::timeout(self.timeout, self.exchange(request, ALPN_H2_H1, true))
-            .await.map_err(|_| FirefoxError::Timeout(self.timeout))??;
-        log_http_status(&host, &response, false);
-        Ok(response)
+        tokio::time::timeout(self.timeout, self.send_inner(request, true))
+            .await.map_err(|_| FirefoxError::Timeout(self.timeout))?
     }
 
     pub fn import_cookies(&self, other: &ControlPlane) {
@@ -485,14 +509,8 @@ fn relay_request(request: &ControlRequest, relay: &Url) -> Result<ControlRequest
         else { crate::types::authority(&request.host, request.port) };
     let target = format!("https://{authority}{}", request.path);
     let mut url = relay.clone();
-    if url.as_str() == DEFAULT_RELAY_URL {
-        // The currently deployed default accepts its access value as a query parameter.
-        let secret = url.path().trim_start_matches('/').to_owned();
-        url.set_path("/");
-        url.query_pairs_mut().append_pair("secret", &secret);
-    }
     url.query_pairs_mut().append_pair("url", &target);
-    let mut forwarded = ControlRequest::new(request.method.clone(), url.as_str())?;
+    let mut forwarded = ControlRequest::from_url(request.method.clone(), url.as_str(), true)?;
     forwarded.headers = request.headers.iter().filter(|(name, _)| name.as_str() != "host").cloned().collect();
     forwarded.body = request.body.clone();
     Ok(forwarded)
@@ -580,7 +598,9 @@ pub(crate) async fn over_h1<S>(mut tls: S, request: &ControlRequest) -> Result<C
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let host = if request.port == 443 { request.host.clone() } else { crate::types::authority(&request.host, request.port) };
+    let host = if (request.secure && request.port == 443) || (!request.secure && request.port == 80) {
+        if request.host.contains(':') { format!("[{}]", request.host) } else { request.host.clone() }
+    } else { crate::types::authority(&request.host, request.port) };
     let mut head = format!("{} {} HTTP/1.1\r\nHost: {host}\r\n", request.method, request.path);
     for (name, value) in &request.headers {
         head.push_str(name.as_str());
@@ -762,7 +782,7 @@ mod tests {
             .header("authorization", "Bearer sensitive").unwrap()
             .header("host", "vpn.mozilla.org").unwrap()
             .json(&serde_json::json!({"test": true})).unwrap();
-        let relay = Url::parse("https://relay.example/path?secret=private").unwrap();
+        let relay = Url::parse("https://relay.example/private").unwrap();
         let forwarded = relay_request(&request, &relay).unwrap();
         assert_eq!(forwarded.method, request.method);
         assert_eq!(forwarded.body, request.body);
@@ -771,7 +791,7 @@ mod tests {
         assert!(!forwarded.headers.iter().any(|(key, _)| key.as_str() == "host"));
         let url = Url::parse(&format!("https://{}{}", forwarded.host, forwarded.path)).unwrap();
         let pairs: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(pairs.get("secret").map(String::as_str), Some("private"));
+        assert_eq!(url.path(), "/private");
         assert_eq!(pairs.get("url").map(String::as_str), Some("https://vpn.mozilla.org/api/v1/fpn/activate?x=1"));
     }
 
@@ -791,18 +811,20 @@ mod tests {
     }
 
     #[test]
-    fn default_relay_supports_the_currently_deployed_query_authentication() {
+    fn relay_url_uses_path_authentication_and_supports_http() {
         let request = ControlRequest::new(Method::GET, "https://vpn.mozilla.org/api/v1/fpn/token").unwrap();
-        let relay = Url::parse(DEFAULT_RELAY_URL).unwrap();
-        let forwarded = relay_request(&request, &relay).unwrap();
-        let url = Url::parse(&format!("https://{}{}", forwarded.host, forwarded.path)).unwrap();
-        assert_eq!(url.path(), "/");
-        let pairs: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(pairs.get("secret").map(String::as_str), Some("fcaevpn"));
-        assert_eq!(pairs.get("url").map(String::as_str), Some("https://vpn.mozilla.org/api/v1/fpn/token"));
-        let custom = Url::parse("https://relay.example/custom-secret").unwrap();
-        let forwarded = relay_request(&request, &custom).unwrap();
-        assert!(forwarded.path.starts_with("/custom-secret?"));
+        for (relay_url, secure, port) in [
+            (crate::store::DEFAULT_RELAY_URL, true, 443),
+            ("http://relay.example/private", false, 80),
+            ("http://relay.example:8080/private", false, 8080),
+        ] {
+            let forwarded = relay_request(&request, &Url::parse(relay_url).unwrap()).unwrap();
+            assert_eq!(forwarded.secure, secure);
+            assert_eq!(forwarded.port, port);
+            assert!(forwarded.path.starts_with(if relay_url == crate::store::DEFAULT_RELAY_URL { "/fcaevpn?" } else { "/private?" }));
+            assert!(!forwarded.path.contains("secret="));
+        }
+        assert!(ControlRequest::new(Method::GET, "http://vpn.mozilla.org/").is_err());
     }
 
     #[test]

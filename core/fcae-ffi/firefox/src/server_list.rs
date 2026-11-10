@@ -77,34 +77,25 @@ impl RemoteSettings {
                 }
             }
         }
-        self.refresh(store).await
+        match self.refresh(store).await {
+            Ok(countries) => Ok(countries),
+            Err(error) => match Self::cached(store) {
+                Some(countries) => {
+                    log::warn!("[firefox] Mozilla regions refresh failed; using cached locations: {error}");
+                    Ok(countries)
+                }
+                None => Err(error),
+            },
+        }
     }
 
     pub async fn refresh(&self, store: &AccountStore) -> Result<Vec<Country>> {
-        match self.fetch().await {
-            Ok(countries) => {
-                let cache = ServerListCache { saved_at: Utc::now(), countries: countries.clone() };
-                if let Err(error) = store.write_cache(CACHE_NAME, &cache) {
-                    log::warn!("[firefox] could not cache Remote Settings locations: {error}");
-                }
-                Ok(countries)
-            }
-            Err(network_error) => {
-                log::warn!("[firefox] Mozilla regions refresh failed: {network_error}");
-                match store.read_cache::<ServerListCache>(CACHE_NAME) {
-                    Ok(cache) if !cache.countries.is_empty() => {
-                        let countries = filter_countries(cache.countries, FIREFOX_VERSION, "");
-                        if countries.is_empty() {
-                            Err(network_error)
-                        } else {
-                            log::warn!("[firefox] using cached Mozilla locations");
-                            Ok(countries)
-                        }
-                    }
-                    _ => Err(network_error),
-                }
-            }
+        let countries = self.fetch().await?;
+        let cache = ServerListCache { saved_at: Utc::now(), countries: countries.clone() };
+        if let Err(error) = store.write_cache(CACHE_NAME, &cache) {
+            log::warn!("[firefox] could not cache Remote Settings locations: {error}");
         }
+        Ok(countries)
     }
 }
 

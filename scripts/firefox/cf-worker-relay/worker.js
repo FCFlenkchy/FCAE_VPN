@@ -54,8 +54,7 @@ function requestHeaders(input) {
 }
 
 function authorized(incoming, secret) {
-  const supplied = incoming.searchParams.getAll("secret");
-  if (supplied.length > 0) return supplied.length === 1 && supplied[0] === secret;
+  if (incoming.searchParams.has("secret")) return false;
 
   const segments = incoming.pathname.split("/");
   if (segments.length < 2 || segments.length > 3 || !segments[1] ||
