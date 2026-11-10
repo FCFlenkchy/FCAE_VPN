@@ -11,6 +11,8 @@ use tempfile::NamedTempFile;
 use crate::error::{FirefoxError, Result};
 use crate::types::{Account, Credentials};
 
+pub const DEFAULT_RELAY_URL: &str = "https://fcaevpn.fcaevpn.workers.dev/fcaevpn";
+
 const MAX_ACCOUNT_FILE: u64 = 256 * 1024;
 const MAX_CACHE_FILE: u64 = 8 * 1024 * 1024;
 static ACCOUNT_MUTATION: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
@@ -166,7 +168,7 @@ impl AccountStore {
     pub fn relay_url(&self) -> Result<Option<url::Url>> {
         let path = self.root.join("relay.json");
         match fs::metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return validate_relay_url(DEFAULT_RELAY_URL),
             Err(error) => return Err(storage(error)),
             Ok(_) => {}
         }
@@ -267,10 +269,10 @@ mod relay_tests {
     fn relay_validation_and_storage() {
         let dir = tempfile::tempdir().unwrap();
         let store = AccountStore::new(dir.path()).unwrap();
-        assert!(store.relay_url().unwrap().is_none());
+        assert_eq!(store.relay_url().unwrap().unwrap().as_str(), DEFAULT_RELAY_URL);
         for invalid in ["http://relay.example/", "https://user:pass@relay.example/", "https://relay.example/#fragment", "https://relay.example/?url=x", "https://relay.example/?health=1"] {
             assert!(store.set_relay_url(invalid).is_err());
-            assert!(store.relay_url().unwrap().is_none());
+            assert_eq!(store.relay_url().unwrap().unwrap().as_str(), DEFAULT_RELAY_URL);
         }
         store.set_relay_url("https://relay.example/?secret=private").unwrap();
         assert_eq!(store.relay_url().unwrap().unwrap().as_str(), "https://relay.example/?secret=private");

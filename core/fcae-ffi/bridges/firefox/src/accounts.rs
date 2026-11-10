@@ -294,7 +294,10 @@ async fn execute(services: &Services, raw: &str) -> Result<Value> {
         }
         "usage" => {
             let id = required(&request, "account_id")?;
-            let usage = accounts.tokens(&id)?.usage().await?;
+            let usage = accounts.tokens(&id)?.usage().await.map_err(|error| {
+                log::warn!("[firefox] usage refresh failed reason={}", error.reason_code());
+                error
+            })?;
             Ok(json!({"usage":usage, "account":account_json(accounts.store().get(&id)?)?}))
         },
         "entitlement" => {

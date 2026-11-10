@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::dialer::Dialer;
 use crate::error::{FirefoxError, Result};
-use crate::store::AccountStore;
+use crate::store::{AccountStore, DEFAULT_RELAY_URL};
 use crate::tls::{firefox_user_agent, firefox_user_agent_for_major, ALPN_H1, ALPN_H2_H1};
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
@@ -241,9 +241,15 @@ impl ControlPlane {
         match direct {
             Ok(response) => {
                 log_http_status(&request.host, &response, false);
-                if should_relay_region_rejection(&request, response.status) {
-                    log::warn!("[firefox] service rejected the region (HTTP 451); trying the configured relay");
-                    self.exchange_relay(&request, &relay).await
+                if should_relay_response(&request, response.status) {
+                    log::warn!("[firefox] service returned HTTP {}; trying the configured relay", response.status);
+                    match self.exchange_relay(&request, &relay).await {
+                        Ok(relayed) => Ok(relayed),
+                        Err(error) => {
+                            log::warn!("[firefox] relay retry failed reason={}; keeping the direct response", error.reason_code());
+                            Ok(response)
+                        }
+                    }
                 } else {
                     Ok(response)
                 }
@@ -479,6 +485,12 @@ fn relay_request(request: &ControlRequest, relay: &Url) -> Result<ControlRequest
         else { crate::types::authority(&request.host, request.port) };
     let target = format!("https://{authority}{}", request.path);
     let mut url = relay.clone();
+    if url.as_str() == DEFAULT_RELAY_URL {
+        // The currently deployed default accepts its access value as a query parameter.
+        let secret = url.path().trim_start_matches('/').to_owned();
+        url.set_path("/");
+        url.query_pairs_mut().append_pair("secret", &secret);
+    }
     url.query_pairs_mut().append_pair("url", &target);
     let mut forwarded = ControlRequest::new(request.method.clone(), url.as_str())?;
     forwarded.headers = request.headers.iter().filter(|(name, _)| name.as_str() != "host").cloned().collect();
@@ -486,8 +498,9 @@ fn relay_request(request: &ControlRequest, relay: &Url) -> Result<ControlRequest
     Ok(forwarded)
 }
 
-fn should_relay_region_rejection(request: &ControlRequest, status: u16) -> bool {
-    status == 451 && (request.method == Method::GET || request.method == Method::HEAD)
+fn should_relay_response(request: &ControlRequest, status: u16) -> bool {
+    (request.method == Method::GET || request.method == Method::HEAD) &&
+        (matches!(status, 403 | 404 | 405 | 408 | 451) || (500..=599).contains(&status))
 }
 
 fn relay_target_allowed(request: &ControlRequest) -> bool {
@@ -763,13 +776,33 @@ mod tests {
     }
 
     #[test]
-    fn region_recovery_only_replays_safe_requests() {
+    fn failed_safe_requests_can_use_the_relay() {
         let get = ControlRequest::new(Method::GET, "https://vpn.mozilla.org/api/v1/fpn/token").unwrap();
+        let head = ControlRequest::new(Method::HEAD, "https://vpn.mozilla.org/api/v1/fpn/token").unwrap();
         let post = ControlRequest::new(Method::POST, "https://vpn.mozilla.org/api/v1/fpn/activate").unwrap();
-        assert!(should_relay_region_rejection(&get, 451));
-        assert!(!should_relay_region_rejection(&get, 404));
-        assert!(!should_relay_region_rejection(&get, 405));
-        assert!(!should_relay_region_rejection(&post, 451));
+        for status in [403, 404, 405, 408, 451, 500, 503] {
+            assert!(should_relay_response(&get, status));
+            assert!(should_relay_response(&head, status));
+            assert!(!should_relay_response(&post, status));
+        }
+        for status in [200, 400, 401, 406, 429] {
+            assert!(!should_relay_response(&get, status));
+        }
+    }
+
+    #[test]
+    fn default_relay_supports_the_currently_deployed_query_authentication() {
+        let request = ControlRequest::new(Method::GET, "https://vpn.mozilla.org/api/v1/fpn/token").unwrap();
+        let relay = Url::parse(DEFAULT_RELAY_URL).unwrap();
+        let forwarded = relay_request(&request, &relay).unwrap();
+        let url = Url::parse(&format!("https://{}{}", forwarded.host, forwarded.path)).unwrap();
+        assert_eq!(url.path(), "/");
+        let pairs: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("secret").map(String::as_str), Some("fcaevpn"));
+        assert_eq!(pairs.get("url").map(String::as_str), Some("https://vpn.mozilla.org/api/v1/fpn/token"));
+        let custom = Url::parse("https://relay.example/custom-secret").unwrap();
+        let forwarded = relay_request(&request, &custom).unwrap();
+        assert!(forwarded.path.starts_with("/custom-secret?"));
     }
 
     #[test]

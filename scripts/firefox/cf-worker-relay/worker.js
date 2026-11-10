@@ -53,13 +53,26 @@ function requestHeaders(input) {
   return headers;
 }
 
+function authorized(incoming, secret) {
+  const supplied = incoming.searchParams.getAll("secret");
+  if (supplied.length > 0) return supplied.length === 1 && supplied[0] === secret;
+
+  const segments = incoming.pathname.split("/");
+  if (segments.length < 2 || segments.length > 3 || !segments[1] ||
+      (segments.length === 3 && segments[2] !== "")) return false;
+  try {
+    return decodeURIComponent(segments[1]) === secret;
+  } catch {
+    return false;
+  }
+}
+
 export default {
   async fetch(request, env) {
     const secret = env?.SECRET;
     if (typeof secret !== "string" || secret.length === 0) return failure(503, "relay secret is not configured");
     const incoming = new URL(request.url);
-    const supplied = incoming.searchParams.getAll("secret");
-    if (supplied.length !== 1 || supplied[0] !== secret) return failure(403, "relay access denied");
+    if (!authorized(incoming, secret)) return failure(403, "relay access denied");
 
     if (incoming.searchParams.get("health") === "1") {
       if (request.method !== "GET") return failure(405, "health requires GET");
