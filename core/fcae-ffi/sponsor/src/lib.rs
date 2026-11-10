@@ -370,7 +370,7 @@ static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
 }));
 static CONNECTED: AtomicBool = AtomicBool::new(false);
 static SPONSOR_PROXY: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
-static CLIENT_CACHE: Lazy<Mutex<Option<(String, reqwest::blocking::Client)>>> =
+static CLIENT_CACHE: Lazy<Mutex<Option<SponsorClient>>> =
     Lazy::new(|| Mutex::new(None));
 static MANIFEST_BUSY: AtomicBool = AtomicBool::new(false);
 static MANIFEST_FORCE_PENDING: AtomicBool = AtomicBool::new(false);
@@ -1966,9 +1966,7 @@ fn demo_frame() -> Option<SponsorFrame> {
 pub fn last_error() -> String { STATE.lock().last_error.clone() }
 
 fn fetch_manifest() -> Result<Vec<u8>, String> {
-    let response = client()?.get(MANIFEST_URL).send().map_err(|e| e.to_string())?;
-    if !response.status().is_success() { return Err(format!("manifest HTTP {}", response.status())); }
-    read_limited(response, MAX_MANIFEST_BYTES)
+    fetch_bytes(&client()?, MANIFEST_URL, "manifest", MAX_MANIFEST_BYTES)
 }
 
 fn parse_manifest(body: &[u8]) -> Result<Vec<Campaign>, String> {
@@ -2547,7 +2545,7 @@ fn load_campaign_payload(
     reuse_media: bool,
     reuse_background: bool,
     load_audio: bool,
-    client: Option<&reqwest::blocking::Client>,
+    client: Option<&SponsorClient>,
 ) -> Option<CampaignPayload> {
     let media = (!reuse_media).then(|| load_payload(
         campaign.icon_url.as_deref(),
@@ -2641,7 +2639,7 @@ fn load_payload(
     path: PathBuf,
     cache_dir: &Path,
     suffix: &str,
-    client: Option<&reqwest::blocking::Client>,
+    client: Option<&SponsorClient>,
 ) -> Option<MediaPayload> {
     let url = url?;
     let _ = fs::create_dir_all(cache_dir);
@@ -2808,7 +2806,7 @@ fn decode_payload(
     campaign: &Campaign,
     url: &str,
     payload: MediaPayload,
-    client: Option<&reqwest::blocking::Client>,
+    client: Option<&SponsorClient>,
 ) -> Option<ReadyCampaign> {
     let MediaPayload { path, bytes, mut cached, fallback } = payload;
     let decoded_path = decoded_cache_path(&path);
@@ -2878,7 +2876,7 @@ fn decode_media(
     campaign: &Campaign,
     url: &str,
     payload: MediaPayload,
-    client: Option<&reqwest::blocking::Client>,
+    client: Option<&SponsorClient>,
     decode_missing: bool,
 ) -> Option<ReadyCampaign> {
     if !decode_missing {
@@ -2915,7 +2913,7 @@ fn decode_video_payload(
     campaign: &Campaign,
     url: &str,
     payload: MediaPayload,
-    client: Option<&reqwest::blocking::Client>,
+    client: Option<&SponsorClient>,
 ) -> Option<ReadyCampaign> {
     let MediaPayload { path, bytes, cached, fallback } = payload;
     let decoded_path = decoded_cache_path(&path);
@@ -3454,7 +3452,7 @@ fn decode_background(
     campaign: &Campaign,
     url: &str,
     payload: MediaPayload,
-    client: Option<&reqwest::blocking::Client>,
+    client: Option<&SponsorClient>,
     decode_missing: bool,
 ) -> Option<BackgroundImage> {
     let decoded = decode_media(campaign, url, payload, client, decode_missing)?;
@@ -3504,23 +3502,64 @@ fn audio_cache_name(campaign: &Campaign) -> PathBuf {
     cache_name_for(campaign, "audio")
 }
 
-fn download_media(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
-    let response = client.get(url).send().map_err(|e| e.to_string())?;
-    if !response.status().is_success() { return Err(format!("media HTTP {}", response.status())); }
-    read_limited(response, MAX_MEDIA_BYTES)
+fn download_media(client: &SponsorClient, url: &str) -> Result<Vec<u8>, String> {
+    fetch_bytes(client, url, "media", MAX_MEDIA_BYTES)
 }
 
-fn read_limited(mut response: reqwest::blocking::Response, limit: usize) -> Result<Vec<u8>, String> {
+struct FetchError {
+    message: String,
+    retry_h1: bool,
+}
+
+fn fetch_once(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    kind: &str,
+    limit: usize,
+) -> Result<Vec<u8>, FetchError> {
+    let mut response = client.get(url).send().map_err(|error| FetchError {
+        retry_h1: !error.is_builder() && !error.is_redirect()
+            && (error.is_connect() || error.is_timeout() || error.is_request()),
+        message: error.to_string(),
+    })?;
+    if !response.status().is_success() {
+        return Err(FetchError {
+            message: format!("{kind} HTTP {}", response.status()),
+            retry_h1: false,
+        });
+    }
+    let is_h2 = response.version() == reqwest::Version::HTTP_2;
     let content_length = response.content_length();
-    if content_length.is_some_and(|length| length > limit as u64) { return Err("response too large".into()); }
+    if content_length.is_some_and(|length| length > limit as u64) {
+        return Err(FetchError { message: "response too large".into(), retry_h1: false });
+    }
     let reserve = content_length
         .and_then(|length| usize::try_from(length).ok())
         .unwrap_or(0)
         .min(limit);
     let mut bytes = Vec::with_capacity(reserve);
-    response.by_ref().take(limit as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    if bytes.len() > limit { return Err("response too large".into()); }
+    response.by_ref().take(limit as u64 + 1).read_to_end(&mut bytes).map_err(|error| FetchError {
+        message: error.to_string(),
+        retry_h1: is_h2,
+    })?;
+    if bytes.len() > limit {
+        return Err(FetchError { message: "response too large".into(), retry_h1: false });
+    }
     Ok(bytes)
+}
+
+fn fetch_bytes(client: &SponsorClient, url: &str, kind: &str, limit: usize) -> Result<Vec<u8>, String> {
+    match fetch_once(&client.preferred, url, kind, limit) {
+        Ok(bytes) => Ok(bytes),
+        Err(first) if first.retry_h1
+            && CONNECTED.load(Ordering::Acquire)
+            && SPONSOR_PROXY.read().as_deref() == Some(client.proxy_url.as_str()) => {
+            log::debug!("[sponsor] request failed; retrying with (h1)");
+            fetch_once(&client.h1, url, kind, limit)
+                .map_err(|second| format!("{}; HTTP/1.1 retry: {}", first.message, second.message))
+        }
+        Err(error) => Err(error.message),
+    }
 }
 
 /// Decode the encoded bytes held in memory (a fresh download, or a plane the
@@ -3671,35 +3710,51 @@ fn validate_dimensions(width: u32, height: u32, frames: usize) -> Result<(), Str
     Ok(())
 }
 
-fn client() -> Result<reqwest::blocking::Client, String> {
+#[derive(Clone)]
+struct SponsorClient {
+    proxy_url: String,
+    preferred: reqwest::blocking::Client,
+    h1: reqwest::blocking::Client,
+}
+
+fn client() -> Result<SponsorClient, String> {
     let proxy_url = SPONSOR_PROXY
         .read()
         .clone()
         .ok_or_else(|| "sponsor network is unavailable without a connected tunnel".to_string())?;
     let mut cached = CLIENT_CACHE.lock();
-    if let Some((cached_proxy, client)) = cached.as_ref() {
-        if cached_proxy == &proxy_url {
+    if let Some(client) = cached.as_ref() {
+        if client.proxy_url == proxy_url {
             return Ok(client.clone());
         }
     }
-    let proxy = reqwest::Proxy::all(&proxy_url)
-        .map_err(|e| format!("invalid sponsor tunnel proxy: {e}"))?;
-    let client = reqwest::blocking::Client::builder()
-        .proxy(proxy)
-        .timeout(Duration::from_secs(12))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.url().scheme() != "https" {
-                attempt.error("refusing non-HTTPS redirect")
-            } else if attempt.previous().len() >= 3 {
-                attempt.stop()
-            } else {
-                attempt.follow()
-            }
-        }))
-        .user_agent("FCAE-VPN sponsor client")
-        .build()
-        .map_err(|e| format!("cannot create sponsor tunnel client: {e}"))?;
-    *cached = Some((proxy_url, client.clone()));
+    let build = |h1_only: bool| -> Result<reqwest::blocking::Client, String> {
+        let proxy = reqwest::Proxy::all(&proxy_url)
+            .map_err(|e| format!("invalid sponsor tunnel proxy: {e}"))?;
+        let mut builder = reqwest::blocking::Client::builder()
+            .proxy(proxy)
+            .timeout(Duration::from_secs(12))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.url().scheme() != "https" {
+                    attempt.error("refusing non-HTTPS redirect")
+                } else if attempt.previous().len() >= 3 {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
+            .user_agent("FCAE-VPN sponsor client");
+        if h1_only {
+            builder = builder.http1_only();
+        }
+        builder.build().map_err(|e| format!("cannot create sponsor tunnel client: {e}"))
+    };
+    let client = SponsorClient {
+        preferred: build(false)?,
+        h1: build(true)?,
+        proxy_url,
+    };
+    *cached = Some(client.clone());
     Ok(client)
 }
 
