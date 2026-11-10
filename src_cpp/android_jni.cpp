@@ -422,6 +422,21 @@ Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxCaptchaAnswer(JNIEnv* env, jclass,
     return fcae_firefox_captcha_answer((uint64_t)id, owned.c_str()) ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxRelaySet(JNIEnv* env, jclass, jstring data_dir, jstring url) {
+    const std::string dir = jstr(env, data_dir), value = jstr(env, url);
+    return fcae_firefox_relay_set(dir.c_str(), value.c_str()) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxRelayGet(JNIEnv* env, jclass, jstring data_dir) {
+    const std::string dir = jstr(env, data_dir);
+    char value[4097] = {};
+    const uint32_t size = fcae_firefox_relay_get(dir.c_str(), value, sizeof(value));
+    if (size == UINT32_MAX || size >= sizeof(value)) return nullptr;
+    return env->NewStringUTF(value);
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxAccountSubmit(JNIEnv* env, jclass, jstring request) {
     const std::string owned = jstr(env, request);

@@ -12,6 +12,7 @@ use url::Url;
 
 use crate::dialer::Dialer;
 use crate::error::{FirefoxError, Result};
+use crate::store::AccountStore;
 use crate::tls::{firefox_user_agent, firefox_user_agent_for_major, ALPN_H1, ALPN_H2_H1};
 
 const MAX_BODY: usize = 2 * 1024 * 1024;
@@ -31,6 +32,9 @@ impl ControlResponse {
     }
 
     pub fn message(&self) -> String {
+        if is_relay_response(&self.headers) {
+            return "relayed service request failed".into();
+        }
         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&self.body) {
             for key in ["message", "error", "detail"] {
                 if let Some(message) = value.get(key).and_then(serde_json::Value::as_str) {
@@ -125,13 +129,14 @@ pub struct ControlPlane {
     user_agent: String,
     cookies: Arc<Mutex<BTreeMap<String, Cookie>>>,
     challenge_h2: Option<Arc<tokio::sync::Mutex<Option<ReusableH2>>>>,
+    relay_store: Option<AccountStore>,
 }
 
 impl ControlPlane {
     pub fn new(dialer: Dialer) -> Self {
         Self {
             dialer, timeout: Duration::from_secs(20), user_agent: firefox_user_agent(),
-            cookies: Arc::new(Mutex::new(BTreeMap::new())), challenge_h2: None,
+            cookies: Arc::new(Mutex::new(BTreeMap::new())), challenge_h2: None, relay_store: None,
         }
     }
 
@@ -147,7 +152,13 @@ impl ControlPlane {
             user_agent: self.user_agent.clone(),
             cookies: Arc::new(Mutex::new(BTreeMap::new())),
             challenge_h2: None,
+            relay_store: self.relay_store.clone(),
         }
+    }
+
+    pub fn with_relay_store(mut self, store: AccountStore) -> Self {
+        self.relay_store = Some(store);
+        self
     }
 
     pub(crate) fn with_challenge_h2(mut self) -> Self {
@@ -176,20 +187,102 @@ impl ControlPlane {
 
     pub async fn send(&self, request: ControlRequest) -> Result<ControlResponse> {
         let request = self.decorate(request);
-        tokio::time::timeout(self.timeout, async {
-            if let Some(pool) = &self.challenge_h2 {
-                self.exchange_challenge(request, pool).await
+        tokio::time::timeout(self.timeout, self.send_inner(request))
+            .await.map_err(|_| FirefoxError::Timeout(self.timeout))?
+    }
+
+    async fn send_inner(&self, request: ControlRequest) -> Result<ControlResponse> {
+        let relay = match &self.relay_store {
+            Some(store) if relay_target_allowed(&request) => store.relay_url()?,
+            _ => None,
+        };
+        let Some(relay) = relay else {
+            let host = request.host.clone();
+            let response = if let Some(pool) = &self.challenge_h2 {
+                self.exchange_challenge(request, pool).await?
             } else {
-                self.exchange(request, ALPN_H1, false).await
+                self.exchange(request, ALPN_H1, false).await?
+            };
+            log_http_status(&host, &response, false);
+            return Ok(response);
+        };
+        let safe = request.method == Method::GET || request.method == Method::HEAD;
+        let direct = if let Some(pool) = &self.challenge_h2 {
+            // A challenge session may have transmitted the request when it fails.
+            if safe {
+                tokio::time::timeout(Duration::from_secs(8), self.exchange_challenge(request.clone(), pool))
+                    .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(Duration::from_secs(8))))
+            } else {
+                self.exchange_challenge(request.clone(), pool).await
             }
-        }).await.map_err(|_| FirefoxError::Timeout(self.timeout))?
+        } else {
+            // Only the connection is timed here; no request bytes have been sent yet.
+            match tokio::time::timeout(Duration::from_secs(4),
+                crate::tls::connect(&self.dialer, &request.host, request.port, ALPN_H1)).await {
+                Ok(Ok(tls)) => {
+                    let result = if safe {
+                        tokio::time::timeout(Duration::from_secs(8), over_h1(tls, &request))
+                            .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(Duration::from_secs(8))))
+                    } else {
+                        over_h1(tls, &request).await
+                    };
+                    if let Ok(response) = &result {
+                        self.store_cookies(&request.host, &response.headers);
+                    }
+                    result
+                },
+                Ok(Err(error @ FirefoxError::TlsCertificate { .. })) => return Err(error),
+                Ok(Err(_)) | Err(_) => {
+                    log::warn!("[firefox] direct service connection failed; trying the configured relay");
+                    return self.exchange_relay(&request, &relay).await;
+                }
+            }
+        };
+        match direct {
+            Ok(response) => {
+                log_http_status(&request.host, &response, false);
+                if should_relay_region_rejection(&request, response.status) {
+                    log::warn!("[firefox] service rejected the region (HTTP 451); trying the configured relay");
+                    self.exchange_relay(&request, &relay).await
+                } else {
+                    Ok(response)
+                }
+            }
+            Err(error @ FirefoxError::TlsCertificate { .. }) => Err(error),
+            Err(_) if safe => {
+                log::warn!("[firefox] service request failed; trying the configured relay");
+                self.exchange_relay(&request, &relay).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn exchange_relay(&self, request: &ControlRequest, relay: &Url) -> Result<ControlResponse> {
+        let forwarded = relay_request(request, relay)?;
+        let response = async {
+            let tls = crate::tls::connect(&self.dialer, &forwarded.host, forwarded.port, ALPN_H1).await?;
+            over_h1(tls, &forwarded).await
+        }.await.map_err(|error| {
+            log::warn!("[firefox] relay request failed reason={}", error.reason_code());
+            error
+        })?;
+        log_http_status(&request.host, &response, true);
+        if response.headers.contains_key("x-relay-error") ||
+            (response.status >= 400 && !is_relay_response(&response.headers)) {
+            return Err(FirefoxError::Protocol(format!("relay or service request failed (HTTP {})", response.status)));
+        }
+        self.store_cookies(&request.host, &response.headers);
+        log::info!("[firefox] Firefox service request used the configured relay (HTTP {})", response.status);
+        Ok(response)
     }
 
     pub async fn send_h2(&self, request: ControlRequest) -> Result<ControlResponse> {
         let request = self.decorate(request);
-        tokio::time::timeout(self.timeout, self.exchange(request, ALPN_H2_H1, true))
-            .await
-            .map_err(|_| FirefoxError::Timeout(self.timeout))?
+        let host = request.host.clone();
+        let response = tokio::time::timeout(self.timeout, self.exchange(request, ALPN_H2_H1, true))
+            .await.map_err(|_| FirefoxError::Timeout(self.timeout))??;
+        log_http_status(&host, &response, false);
+        Ok(response)
     }
 
     pub fn import_cookies(&self, other: &ControlPlane) {
@@ -379,6 +472,39 @@ fn domain_matches(host: &str, domain: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     let domain = domain.trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase();
     host == domain || host.strip_suffix(&domain).is_some_and(|prefix| prefix.ends_with('.'))
+}
+
+fn relay_request(request: &ControlRequest, relay: &Url) -> Result<ControlRequest> {
+    let authority = if request.port == 443 { request.host.clone() }
+        else { crate::types::authority(&request.host, request.port) };
+    let target = format!("https://{authority}{}", request.path);
+    let mut url = relay.clone();
+    url.query_pairs_mut().append_pair("url", &target);
+    let mut forwarded = ControlRequest::new(request.method.clone(), url.as_str())?;
+    forwarded.headers = request.headers.iter().filter(|(name, _)| name.as_str() != "host").cloned().collect();
+    forwarded.body = request.body.clone();
+    Ok(forwarded)
+}
+
+fn should_relay_region_rejection(request: &ControlRequest, status: u16) -> bool {
+    status == 451 && (request.method == Method::GET || request.method == Method::HEAD)
+}
+
+fn relay_target_allowed(request: &ControlRequest) -> bool {
+    request.port == 443 && ["mozilla.org", "mozilla.com", "firefox.com", "github.com", "githubusercontent.com", "jsdelivr.net"]
+        .iter().any(|domain| domain_matches(&request.host, domain))
+}
+
+fn is_relay_response(headers: &HeaderMap) -> bool {
+    ["x-fcae-relay", "x-arman-relay"].iter()
+        .any(|name| headers.get(*name).is_some_and(|value| value == "1"))
+}
+
+fn log_http_status(host: &str, response: &ControlResponse, relayed: bool) {
+    if response.status >= 400 {
+        log::warn!("[firefox] service HTTP {} host={} route={}", response.status, host,
+            if relayed { "relay" } else { "direct" });
+    }
 }
 
 struct ConnectionDriver(tokio::task::JoinHandle<()>);
@@ -614,6 +740,58 @@ fn h2_error(error: h2::Error) -> FirefoxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_preserves_target_request_without_forwarding_host() {
+        let request = ControlRequest::new(Method::POST, "https://vpn.mozilla.org/api/v1/fpn/activate?x=1").unwrap()
+            .header("authorization", "Bearer sensitive").unwrap()
+            .header("host", "vpn.mozilla.org").unwrap()
+            .json(&serde_json::json!({"test": true})).unwrap();
+        let relay = Url::parse("https://relay.example/path?secret=private").unwrap();
+        let forwarded = relay_request(&request, &relay).unwrap();
+        assert_eq!(forwarded.method, request.method);
+        assert_eq!(forwarded.body, request.body);
+        assert_eq!(forwarded.host, "relay.example");
+        assert!(forwarded.headers.iter().any(|(key, _)| key.as_str() == "authorization"));
+        assert!(!forwarded.headers.iter().any(|(key, _)| key.as_str() == "host"));
+        let url = Url::parse(&format!("https://{}{}", forwarded.host, forwarded.path)).unwrap();
+        let pairs: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("secret").map(String::as_str), Some("private"));
+        assert_eq!(pairs.get("url").map(String::as_str), Some("https://vpn.mozilla.org/api/v1/fpn/activate?x=1"));
+    }
+
+    #[test]
+    fn region_recovery_only_replays_safe_requests() {
+        let get = ControlRequest::new(Method::GET, "https://vpn.mozilla.org/api/v1/fpn/token").unwrap();
+        let post = ControlRequest::new(Method::POST, "https://vpn.mozilla.org/api/v1/fpn/activate").unwrap();
+        assert!(should_relay_region_rejection(&get, 451));
+        assert!(!should_relay_region_rejection(&get, 404));
+        assert!(!should_relay_region_rejection(&get, 405));
+        assert!(!should_relay_region_rejection(&post, 451));
+    }
+
+    #[test]
+    fn relay_markers_require_the_expected_value_and_hide_error_bodies() {
+        let mut response = ControlResponse { status: 404, headers: HeaderMap::new(), body: b"secret in response".to_vec() };
+        response.headers.insert("x-fcae-relay", HeaderValue::from_static("1"));
+        assert!(is_relay_response(&response.headers));
+        assert!(!response.message().contains("secret"));
+        response.headers.insert("x-fcae-relay", HeaderValue::from_static("0"));
+        assert!(!is_relay_response(&response.headers));
+        response.headers.insert("x-arman-relay", HeaderValue::from_static("1"));
+        assert!(is_relay_response(&response.headers));
+    }
+
+    #[test]
+    fn relay_targets_are_restricted_to_service_hosts() {
+        for host in ["vpn.mozilla.org", "api.accounts.firefox.com", "raw.githubusercontent.com"] {
+            assert!(relay_target_allowed(&ControlRequest::new(Method::GET, &format!("https://{host}/")).unwrap()));
+        }
+        for host in ["notmozilla.org", "vpn.mozilla.org.example.com", "example.com"] {
+            assert!(!relay_target_allowed(&ControlRequest::new(Method::GET, &format!("https://{host}/")).unwrap()));
+        }
+        assert!(!relay_target_allowed(&ControlRequest::new(Method::GET, "https://vpn.mozilla.org:8443/").unwrap()));
+    }
 
     #[test]
     fn release_version_is_validated() {

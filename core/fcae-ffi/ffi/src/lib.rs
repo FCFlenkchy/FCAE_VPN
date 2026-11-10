@@ -1222,6 +1222,42 @@ pub unsafe extern "C" fn fcae_firefox_captcha_answer(id: u64, answer: *const c_c
     { let _ = (id, answer); false }
 }
 
+/// The relay URL may contain a secret. Never log it or include it in errors.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_firefox_relay_set(data_dir: *const c_char, url: *const c_char) -> bool {
+    #[cfg(feature = "firefox")]
+    {
+        return guard_value("fcae_firefox_relay_set", false, || {
+            if data_dir.is_null() || url.is_null() { return false; }
+            let (Ok(dir), Ok(url)) = (CStr::from_ptr(data_dir).to_str(), CStr::from_ptr(url).to_str()) else { return false };
+            if dir.is_empty() { return false; }
+            fcae_firefox_bridge::set_relay_url(dir, url).is_ok()
+        });
+    }
+    #[cfg(not(feature = "firefox"))]
+    { let _ = (data_dir, url); false }
+}
+
+/// Returns the required byte length, or UINT32_MAX on failure.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_firefox_relay_get(data_dir: *const c_char, out: *mut c_char, cap: u32) -> u32 {
+    #[cfg(feature = "firefox")]
+    {
+        return guard_value("fcae_firefox_relay_get", u32::MAX, || {
+            if data_dir.is_null() { return u32::MAX; }
+            let Ok(dir) = CStr::from_ptr(data_dir).to_str() else { return u32::MAX };
+            if dir.is_empty() { return u32::MAX; }
+            let Ok(value) = fcae_firefox_bridge::relay_url(dir) else { return u32::MAX };
+            if !out.is_null() && cap > 0 {
+                fill(std::slice::from_raw_parts_mut(out, cap as usize), &value);
+            }
+            value.len() as u32
+        });
+    }
+    #[cfg(not(feature = "firefox"))]
+    { let _ = (data_dir, out, cap); u32::MAX }
+}
+
 /// Submit a Firefox account operation JSON request. Returns an opaque job ID,
 /// or 0 for a null request / unavailable feature. Secrets are consumed by the
 /// account worker and are never returned by `fcae_firefox_job_poll`.

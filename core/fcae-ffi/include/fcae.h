@@ -619,6 +619,9 @@ bool       fcae_firefox_captcha_answer(uint64_t id, const char *answer);
 /* Submit a native Rust Firefox account operation JSON request. Passwords and
  * codes are consumed by the account worker and are absent from job snapshots.
  * Returns an opaque job ID, or 0 when the request cannot be queued. */
+/* The relay URL may contain a secret. get returns UINT32_MAX on failure. */
+bool       fcae_firefox_relay_set(const char *data_dir, const char *url);
+uint32_t   fcae_firefox_relay_get(const char *data_dir, char *out, uint32_t cap);
 uint64_t   fcae_firefox_account_submit(const char *request);
 /* Poll returns the required JSON byte count excluding NUL. Use a second call
  * with a buffer of required+1 bytes. Zero means the job no longer exists. */

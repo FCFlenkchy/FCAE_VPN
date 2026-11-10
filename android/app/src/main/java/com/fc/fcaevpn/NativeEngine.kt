@@ -155,6 +155,8 @@ object NativeEngine {
     @JvmStatic external fun nativeFirefoxCaptchaPending(): Long
     @JvmStatic external fun nativeFirefoxCaptchaImage(id: Long): String
     @JvmStatic external fun nativeFirefoxCaptchaAnswer(id: Long, answer: String): Boolean
+    @JvmStatic external fun nativeFirefoxRelaySet(dataDir: String, url: String): Boolean
+    @JvmStatic external fun nativeFirefoxRelayGet(dataDir: String): String?
     @JvmStatic external fun nativeFirefoxAccountSubmit(requestJson: String): Long
     @JvmStatic external fun nativeFirefoxJobPoll(id: Long): String
     @JvmStatic external fun nativeFirefoxJobRelease(id: Long)

@@ -25,6 +25,14 @@ pub type CaptchaFn = unsafe extern "C" fn(
     *mut std::ffi::c_void,
 ) -> std::ffi::c_int;
 
+pub fn relay_url(data_dir: &str) -> fcae_firefox::Result<String> {
+    Ok(fcae_firefox::AccountStore::new(data_dir)?.relay_url()?.map(|url| url.to_string()).unwrap_or_default())
+}
+
+pub fn set_relay_url(data_dir: &str, url: &str) -> fcae_firefox::Result<()> {
+    fcae_firefox::AccountStore::new(data_dir)?.set_relay_url(url)
+}
+
 pub fn register() {
     fcae_runtime::registry::register(FcaeBackend::Firefox, || Arc::new(FirefoxBackend));
 }

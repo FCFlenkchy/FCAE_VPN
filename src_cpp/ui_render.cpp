@@ -2945,7 +2945,14 @@ static void render_protocol_editor() {
     ImGui::EndPopup();
 }
 
+static char s_firefox_relay_url[4097] = {};
+static bool s_firefox_relay_error = false;
+
 static void open_firefox_settings() {
+    s_firefox_relay_url[0] = 0;
+    const uint32_t size = fcae_firefox_relay_get(data_dir().c_str(), s_firefox_relay_url, sizeof(s_firefox_relay_url));
+    s_firefox_relay_error = size == UINT32_MAX || size >= sizeof(s_firefox_relay_url);
+    if (s_firefox_relay_error) s_firefox_relay_url[0] = 0;
     s_firefox_settings_popup_open = true;
     s_firefox_usage_refresh_at = ui_now_seconds() + 60.0;
     firefox_start_regions(true);
@@ -2972,6 +2979,15 @@ static void render_firefox_settings() {
         ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
     const std::string root = firefox_json_escape(data_dir().c_str());
     firefox_location_combo();
+    ImGui::Spacing();
+    ImGui::InputTextWithHint("Firefox relay URL", "Optional HTTPS URL", s_firefox_relay_url,
+        sizeof(s_firefox_relay_url), ImGuiInputTextFlags_Password);
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        s_firefox_relay_error = !fcae_firefox_relay_set(data_dir().c_str(), s_firefox_relay_url);
+    }
+    if (s_firefox_relay_error)
+        ImGui::TextWrapped("Could not save or load the relay URL. Use a valid HTTPS URL; the previous setting may still be active.");
+    ImGui::TextWrapped("Used only when Firefox services cannot be reached or reject the region. The relay operator can see account requests and tokens. VPN traffic does not use it.");
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     firefox_account_rows(root);
     if (g_app.firefox_captcha_id) {

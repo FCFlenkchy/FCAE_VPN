@@ -163,6 +163,22 @@ impl AccountStore {
         write_json(&self.root.join(name), value)
     }
 
+    pub fn relay_url(&self) -> Result<Option<url::Url>> {
+        let path = self.root.join("relay.json");
+        match fs::metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(storage(error)),
+            Ok(_) => {}
+        }
+        let raw: String = read_json(&path, 8192)?;
+        validate_relay_url(&raw)
+    }
+
+    pub fn set_relay_url(&self, raw: &str) -> Result<()> {
+        let relay = validate_relay_url(raw)?;
+        write_json(&self.root.join("relay.json"), &relay.map(|url| url.to_string()).unwrap_or_default())
+    }
+
     fn account_dir(&self, id: &str) -> PathBuf {
         self.root.join("accounts").join(id)
     }
@@ -174,6 +190,20 @@ impl AccountStore {
             Err(FirefoxError::InvalidConfig("invalid Firefox Account ID".into()))
         }
     }
+}
+
+pub fn validate_relay_url(raw: &str) -> Result<Option<url::Url>> {
+    let raw = raw.trim();
+    if raw.is_empty() { return Ok(None); }
+    let invalid = || FirefoxError::InvalidConfig("relay URL must be a valid HTTPS URL without credentials, fragment, url or health parameters".into());
+    if raw.len() > 4096 || raw.chars().any(char::is_control) { return Err(invalid()); }
+    let url = url::Url::parse(raw).map_err(|_| invalid())?;
+    if url.scheme() != "https" || url.host_str().is_none() || !url.username().is_empty()
+        || url.password().is_some() || url.fragment().is_some()
+        || url.query_pairs().any(|(key, _)| key == "url" || key == "health") || url.as_str().len() > 4096 {
+        return Err(invalid());
+    }
+    Ok(Some(url))
 }
 
 fn valid_id(id: &str) -> bool {
@@ -227,4 +257,31 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         let _ = dir.sync_all();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+
+    #[test]
+    fn relay_validation_and_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path()).unwrap();
+        assert!(store.relay_url().unwrap().is_none());
+        for invalid in ["http://relay.example/", "https://user:pass@relay.example/", "https://relay.example/#fragment", "https://relay.example/?url=x", "https://relay.example/?health=1"] {
+            assert!(store.set_relay_url(invalid).is_err());
+            assert!(store.relay_url().unwrap().is_none());
+        }
+        store.set_relay_url("https://relay.example/?secret=private").unwrap();
+        assert_eq!(store.relay_url().unwrap().unwrap().as_str(), "https://relay.example/?secret=private");
+        assert!(store.set_relay_url("http://bad.example/").is_err());
+        assert!(store.relay_url().unwrap().is_some());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(store.root().join("relay.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        store.set_relay_url("").unwrap();
+        assert!(store.relay_url().unwrap().is_none());
+    }
 }

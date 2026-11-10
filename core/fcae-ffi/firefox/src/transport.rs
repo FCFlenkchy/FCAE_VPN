@@ -1075,6 +1075,7 @@ async fn proxy_response_error(host: &str, status: u16, headers: &http::HeaderMap
 }
 
 fn proxy_status_error(host: &str, status: u16, headers: &http::HeaderMap) -> FirefoxError {
+    log::warn!("[firefox] proxy CONNECT failed: HTTP {status} host={host}");
     match status {
         401 | 407 => FirefoxError::PassRejected,
         403 => FirefoxError::NotEntitled,

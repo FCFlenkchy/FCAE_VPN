@@ -349,7 +349,7 @@ async fn service(services: &Services, data_dir: &str) -> Result<Accounts> {
     let accounts = cell.get_or_try_init(|| async {
         let store = fcae_firefox::AccountStore::new(data_dir)?;
         let dialer = Dialer::new(None, protect_callback(), 10)?;
-        let control = ControlPlane::new(dialer).with_current_firefox_user_agent().await;
+        let control = ControlPlane::new(dialer).with_relay_store(store.clone()).with_current_firefox_user_agent().await;
         let challenges = Arc::new(ChallengeService::new(Some(captcha_solver())));
         let fxa = Fxa::new(control.clone()).with_challenges(challenges);
         Ok::<_, FirefoxError>(Accounts::new(store, control, fxa))

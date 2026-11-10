@@ -2846,6 +2846,33 @@ class MainActivity : AppCompatActivity() {
         updateFirefoxRegionChoices(firefoxRegionChoices, prefs.getString("firefoxLocation", "").orEmpty())
         box.addView(location)
 
+        val savedRelay = try { NativeEngine.nativeFirefoxRelayGet(filesDir.absolutePath) } catch (_: Throwable) { null }
+        var committedRelay = savedRelay.orEmpty()
+        var relayLoaded = savedRelay != null
+        val relay = addDialogInput(box, "Firefox relay URL (optional)", savedRelay.orEmpty(), password = true)
+        relay.hint = "HTTPS URL"
+        relay.filters = arrayOf(android.text.InputFilter.LengthFilter(4096))
+        if (savedRelay == null) relay.error = "Could not load the relay setting"
+        fun commitRelay(): Boolean {
+            val value = relay.text.toString().trim()
+            if (value == committedRelay && relayLoaded) return true
+            val saved = try { NativeEngine.nativeFirefoxRelaySet(filesDir.absolutePath, value) } catch (_: Throwable) { false }
+            if (saved) {
+                committedRelay = value
+                relayLoaded = true
+                relay.error = null
+            } else {
+                relay.error = "Use a valid HTTPS URL; the previous setting may still be active"
+            }
+            return saved
+        }
+        relay.setOnFocusChangeListener { _, focused -> if (!focused) commitRelay() }
+        box.addView(TextView(this).apply {
+            text = "Used only when Firefox services cannot be reached or reject the region. The relay operator can see account requests and tokens. VPN traffic does not use it."
+            setTextColor(Color.parseColor("#FF9AA3B5"))
+            setPadding(0, dp(4), 0, dp(8))
+        })
+
         dialogLabel(box, "Firefox accounts")
         val accounts = LinearLayout(this)
         accounts.orientation = LinearLayout.VERTICAL
@@ -2859,7 +2886,7 @@ class MainActivity : AppCompatActivity() {
             ))
         }
         renderFirefoxAccountRows()
-        addDialogButton(box, "Add new account") { showFirefoxAddAccount() }
+        addDialogButton(box, "Add new account") { if (commitRelay()) showFirefoxAddAccount() }
         val status = dialogMessage(box, "")
         firefoxStatusView = status
 
@@ -2952,6 +2979,11 @@ class MainActivity : AppCompatActivity() {
             if (inForeground) handler.postDelayed(firefoxUsageRefresh, 60_000L)
         }
         dialog.setOnDismissListener {
+            if (relay.text.toString().trim() != committedRelay) {
+                commitRelay()
+                if (relay.text.toString().trim() != committedRelay)
+                    Toast.makeText(this, "Relay URL was not saved; the previous setting may still be active", Toast.LENGTH_LONG).show()
+            }
             if (firefoxStatusView === status) firefoxStatusView = null
             if (firefoxAccountRows === accounts) {
                 handler.removeCallbacks(firefoxUsageRefresh)
