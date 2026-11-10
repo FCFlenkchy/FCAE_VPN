@@ -238,7 +238,11 @@ impl H2Session {
         let response = response.await.map_err(h2_error)?;
         let (parts, recv) = response.into_parts();
         if !parts.status.is_success() {
-            return Err(proxy_response_error(&self.authority_host(), parts.status.as_u16(), &parts.headers, recv).await);
+            let host = self.authority_host();
+            let status = parts.status.as_u16();
+            let error = proxy_response_error(&host, status, &parts.headers, recv).await;
+            log_proxy_failure("h2", "TCP", target, &host, status, &error);
+            return Err(error);
         }
         self.inner.active_streams.fetch_add(1, Ordering::Relaxed);
         Ok(H2Tunnel {
@@ -267,7 +271,11 @@ impl H2Session {
         let response = response.await.map_err(h2_error)?;
         let (parts, recv) = response.into_parts();
         if !parts.status.is_success() {
-            return Err(proxy_response_error(&self.authority_host(), parts.status.as_u16(), &parts.headers, recv).await);
+            let host = self.authority_host();
+            let status = parts.status.as_u16();
+            let error = proxy_response_error(&host, status, &parts.headers, recv).await;
+            log_proxy_failure("h2", "UDP", target, &host, status, &error);
+            return Err(error);
         }
         self.inner.active_streams.fetch_add(1, Ordering::Relaxed);
         Ok(UdpTunnel::new(send, recv, self.inner.clone(), traffic))
@@ -540,15 +548,11 @@ async fn send_h2_bytes(send: &mut SendStream<Bytes>, mut bytes: Bytes) -> Result
 }
 
 const STREAM_FAILURE_WINDOW: Duration = Duration::from_secs(30);
-const STREAM_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 struct StreamHealth {
     ambiguous_since: Option<Instant>,
     ambiguous_targets: Vec<u64>,
-    last_destination_log: Option<Instant>,
-    last_server_log: Option<Instant>,
-    last_other_log: Option<Instant>,
 }
 
 impl StreamHealth {
@@ -578,24 +582,22 @@ impl StreamHealth {
         self.clear_ambiguous();
         reached
     }
-
-    fn should_log(&mut self, destination: bool, server: bool, now: Instant) -> bool {
-        let last = if destination { &mut self.last_destination_log }
-            else if server { &mut self.last_server_log }
-            else { &mut self.last_other_log };
-        if last.is_none_or(|at| now.saturating_duration_since(at) >= STREAM_LOG_INTERVAL) {
-            *last = Some(now);
-            true
-        } else {
-            false
-        }
-    }
 }
 
 fn destination_kind(target: &str) -> &'static str {
     use std::net::IpAddr;
     let Some((host, _)) = split_authority(target, 0) else { return "unknown destination" };
     let Ok(ip) = host.parse::<IpAddr>() else { return "hostname" };
+    let is_benchmark = |ip: std::net::Ipv4Addr| {
+        let octets = ip.octets();
+        octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
+    };
+    if match ip {
+        IpAddr::V4(ip) => is_benchmark(ip),
+        IpAddr::V6(ip) => ip.to_ipv4_mapped().is_some_and(is_benchmark),
+    } {
+        return "benchmark-range IP";
+    }
     let local_v4 = |ip: std::net::Ipv4Addr| {
         ip.is_private() || ip.is_loopback() || ip.is_link_local()
             || ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast()
@@ -900,7 +902,9 @@ impl Upstream {
         }
         let (status, headers) = parse_response_head(&head)?;
         if !(200..300).contains(&status) {
-            return Err(proxy_status_error(&candidate.host, status, &headers));
+            let error = proxy_status_error(&candidate.host, status, &headers);
+            log_proxy_failure("h1", "TCP", target, &candidate.host, status, &error);
+            return Err(error);
         }
         Ok(stream)
     }
@@ -974,29 +978,12 @@ impl Upstream {
         let now = Instant::now();
         let ambiguous = matches!(error, FirefoxError::Http { status, .. } if *status == 408 || *status >= 500)
             && destination_reason.is_none();
-        let (should_log, rotate) = {
+        let rotate = {
             let mut health = self.stream_health.lock();
-            let important = matches!(error, FirefoxError::PassRejected | FirefoxError::ReauthRequired
-                | FirefoxError::NotEntitled | FirefoxError::QuotaExhausted(_)
-                | FirefoxError::RegionUnavailable | FirefoxError::TlsCertificate { .. });
-            let should_log = important || health.should_log(destination_reason.is_some(), ambiguous, now);
-            let rotate = ambiguous && health.observe_ambiguous(protocol, target, now);
-            (should_log, rotate)
+            ambiguous && health.observe_ambiguous(protocol, target, now)
         };
-        if should_log {
-            if let Some(reason) = destination_reason {
-                if reason == "destination_ip_prohibited" {
-                    let kind = destination_kind(target);
-                    log::info!("[firefox] {protocol} {kind} on port {port} denied by upstream proxy policy ({reason}); other connections may still work. Check the destination and, for local addresses, split-tunnel settings.");
-                } else {
-                    log::info!("[firefox] {protocol} destination on port {port} rejected by proxy ({reason}); other connections may still work");
-                }
-            } else {
-                match error {
-                    FirefoxError::Http { status, .. } => log::warn!("[firefox] {protocol} proxy stream to port {port} failed: HTTP {status}; carrier health is assessed separately"),
-                    _ => log::warn!("[firefox] {protocol} proxy stream to port {port} failed: {}", error.reason_code()),
-                }
-            }
+        if !matches!(error, FirefoxError::Http { .. }) {
+            log::warn!("[firefox] {protocol} proxy stream to port {port} failed: {}", error.reason_code());
         }
         if rotate {
             let _guard = self.failover.lock().await;
@@ -1085,19 +1072,21 @@ async fn proxy_response_error(host: &str, status: u16, headers: &http::HeaderMap
     let mut message = headers.get("proxy-status").and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
     if message.is_empty() {
         let mut bytes = Vec::new();
-        while let Some(chunk) = body.data().await {
-            match chunk {
-                Ok(chunk) => {
-                    let remaining = 2048usize.saturating_sub(bytes.len());
-                    bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-                    let _ = body.flow_control().release_capacity(chunk.len());
-                    if bytes.len() >= 2048 {
-                        break;
+        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            while let Some(chunk) = body.data().await {
+                match chunk {
+                    Ok(chunk) => {
+                        let remaining = 2048usize.saturating_sub(bytes.len());
+                        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                        let _ = body.flow_control().release_capacity(chunk.len());
+                        if bytes.len() >= 2048 {
+                            break;
+                        }
                     }
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
-        }
+        }).await;
         message = String::from_utf8_lossy(&bytes).chars().filter(|c| !c.is_control()).take(512).collect();
     }
     let mut error = proxy_status_error(host, status, headers);
@@ -1107,8 +1096,18 @@ async fn proxy_response_error(host: &str, status: u16, headers: &http::HeaderMap
     error
 }
 
+fn proxy_failure_description(http: &str, protocol: &str, target: &str, host: &str, status: u16, error: &FirefoxError) -> String {
+    let port = split_authority(target, 0).map(|(_, port)| port).unwrap_or(0);
+    let kind = destination_kind(target);
+    let reason = destination_error(error).unwrap_or("unspecified");
+    format!("[firefox] ({http}) {protocol} proxy CONNECT failed: HTTP {status} proxy={host} destination={kind} port={port} reason={reason}")
+}
+
+fn log_proxy_failure(http: &str, protocol: &str, target: &str, host: &str, status: u16, error: &FirefoxError) {
+    log::warn!("{}", proxy_failure_description(http, protocol, target, host, status, error));
+}
+
 fn proxy_status_error(host: &str, status: u16, headers: &http::HeaderMap) -> FirefoxError {
-    log::warn!("[firefox] proxy CONNECT failed: HTTP {status} host={host}");
     match status {
         401 | 407 => FirefoxError::PassRejected,
         403 => FirefoxError::NotEntitled,
@@ -1236,6 +1235,9 @@ mod traffic_tests {
         for target in ["192.168.1.1:5228", "127.0.0.1:443", "169.254.1.2:443", "[::1]:443", "[fd00::1]:443", "[::ffff:10.0.0.1]:443"] {
             assert_eq!(destination_kind(target), "local or non-unicast IP");
         }
+        assert_eq!(destination_kind("198.18.0.1:5228"), "benchmark-range IP");
+        assert_eq!(destination_kind("198.19.255.255:443"), "benchmark-range IP");
+        assert_eq!(destination_kind("[::ffff:198.18.0.1]:443"), "benchmark-range IP");
         assert_eq!(destination_kind("8.8.8.8:5228"), "IP address");
         assert_eq!(destination_kind("example.com:5228"), "hostname");
         assert_eq!(destination_kind("bad target"), "unknown destination");
@@ -1258,6 +1260,23 @@ mod traffic_tests {
     }
 
     #[test]
+    fn connect_diagnostics_identify_policy_without_exposing_destination_or_proxy_details() {
+        let error = http_error(502, "Fastly; error=destination_ip_prohibited; details=secret");
+        let message = proxy_failure_description("h2", "UDP", "private.example:42139", "proxy.example", 502, &error);
+        assert!(message.contains("(h2) UDP"));
+        assert!(message.contains("HTTP 502"));
+        assert!(message.contains("destination=hostname port=42139"));
+        assert!(message.contains("reason=destination_ip_prohibited"));
+        assert!(!message.contains("private.example"));
+        assert!(!message.contains("secret"));
+        let unknown = http_error(502, "private.example or token");
+        let message = proxy_failure_description("h1", "TCP", "192.168.1.8:80", "proxy.example", 502, &unknown);
+        assert!(message.contains("reason=unspecified"));
+        assert!(!message.contains("192.168.1.8"));
+        assert!(!message.contains("token"));
+    }
+
+    #[test]
     fn repeated_single_target_does_not_trigger_failover() {
         let now = Instant::now();
         let mut health = StreamHealth::default();
@@ -1272,18 +1291,6 @@ mod traffic_tests {
         assert!(!health.observe_ambiguous("TCP", "b:443", now + STREAM_FAILURE_WINDOW));
         health.clear_ambiguous();
         assert!(!health.observe_ambiguous("TCP", "c:443", now + STREAM_FAILURE_WINDOW));
-    }
-
-    #[test]
-    fn log_throttle_is_not_reset_by_success_and_keeps_categories_separate() {
-        let now = Instant::now();
-        let mut health = StreamHealth::default();
-        assert!(health.should_log(true, false, now));
-        health.clear_ambiguous();
-        assert!(!health.should_log(true, false, now));
-        assert!(health.should_log(false, true, now));
-        assert!(health.should_log(false, false, now));
-        assert!(health.should_log(true, false, now + STREAM_LOG_INTERVAL));
     }
 
     #[test]
