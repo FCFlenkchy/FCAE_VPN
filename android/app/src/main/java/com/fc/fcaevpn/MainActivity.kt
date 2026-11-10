@@ -2867,11 +2867,6 @@ class MainActivity : AppCompatActivity() {
             return saved
         }
         relay.setOnFocusChangeListener { _, focused -> if (!focused) commitRelay() }
-        box.addView(TextView(this).apply {
-            text = "Used only when Firefox services cannot be reached or reject the region. The relay operator can see account requests and tokens. VPN traffic does not use it."
-            setTextColor(Color.parseColor("#FF9AA3B5"))
-            setPadding(0, dp(4), 0, dp(8))
-        })
 
         dialogLabel(box, "Firefox accounts")
         val accounts = LinearLayout(this)

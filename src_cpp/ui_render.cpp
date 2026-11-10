@@ -2987,7 +2987,6 @@ static void render_firefox_settings() {
     }
     if (s_firefox_relay_error)
         ImGui::TextWrapped("Could not save or load the relay URL. Use a valid HTTPS URL; the previous setting may still be active.");
-    ImGui::TextWrapped("Used only when Firefox services cannot be reached or reject the region. The relay operator can see account requests and tokens. VPN traffic does not use it.");
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     firefox_account_rows(root);
     if (g_app.firefox_captcha_id) {
