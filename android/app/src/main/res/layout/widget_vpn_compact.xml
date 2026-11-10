@@ -7,11 +7,11 @@
         android:id="@+id/widget_compact_connect"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="@drawable/widget_btn_connect"
+        android:background="#FF15803D"
         android:contentDescription="@string/widget_connect"
         android:gravity="center"
         android:orientation="vertical"
-        android:padding="3dp">
+        android:padding="1dp">
         <ImageView
             android:layout_width="match_parent"
             android:layout_height="0dp"
@@ -21,9 +21,9 @@
             android:src="@drawable/ic_fcae_vpn" />
         <TextView
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:autoSizeMaxTextSize="9sp"
-            android:autoSizeMinTextSize="5sp"
+            android:layout_height="10dp"
+            android:autoSizeMaxTextSize="8sp"
+            android:autoSizeMinTextSize="3sp"
             android:autoSizeStepGranularity="1sp"
             android:autoSizeTextType="uniform"
             android:gravity="center"
@@ -31,7 +31,7 @@
             android:singleLine="true"
             android:text="@string/widget_connect"
             android:textColor="#FFFFFFFF"
-            android:textSize="9sp"
+            android:textSize="7sp"
             android:textStyle="bold" />
     </LinearLayout>
 
@@ -39,11 +39,11 @@
         android:id="@+id/widget_compact_disconnect"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="@drawable/widget_btn_disconnect"
+        android:background="#FFB91C1C"
         android:contentDescription="@string/widget_disconnect"
         android:gravity="center"
         android:orientation="vertical"
-        android:padding="3dp"
+        android:padding="1dp"
         android:visibility="gone">
         <ImageView
             android:layout_width="match_parent"
@@ -54,9 +54,9 @@
             android:src="@drawable/ic_fcae_vpn" />
         <TextView
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:autoSizeMaxTextSize="9sp"
-            android:autoSizeMinTextSize="5sp"
+            android:layout_height="10dp"
+            android:autoSizeMaxTextSize="8sp"
+            android:autoSizeMinTextSize="3sp"
             android:autoSizeStepGranularity="1sp"
             android:autoSizeTextType="uniform"
             android:gravity="center"
@@ -64,7 +64,7 @@
             android:singleLine="true"
             android:text="@string/widget_disconnect"
             android:textColor="#FFFFFFFF"
-            android:textSize="9sp"
+            android:textSize="7sp"
             android:textStyle="bold" />
     </LinearLayout>
 </FrameLayout>
