@@ -191,6 +191,7 @@ extern "C" {
     fn zeptun_start(tun: *mut c_void) -> c_int;
     fn zeptun_stop(tun: *mut c_void) -> c_int;
     fn zeptun_stats(tun: *mut c_void, out: *mut ZeptunStats) -> c_int;
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     fn zeptun_interface_name(tun: *mut c_void, buffer: *mut c_char, len: usize) -> c_int;
     #[cfg(windows)]
     fn zeptun_set_adapter_guid(tun: *mut c_void, guid: *const c_char) -> c_int;
@@ -233,6 +234,7 @@ mod stub {
     pub unsafe fn zeptun_stats(_t: *mut c_void, _o: *mut ZeptunStats) -> c_int {
         -100
     }
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     pub unsafe fn zeptun_interface_name(_t: *mut c_void, _b: *mut c_char, _l: usize) -> c_int {
         -100
     }
@@ -243,11 +245,12 @@ mod stub {
 }
 
 #[cfg(not(zeptun_linked))]
-#[allow(unused_imports)]
 use stub::{
     zeptun_config_init, zeptun_create, zeptun_destroy, zeptun_set_log_callback, zeptun_start,
-    zeptun_stats, zeptun_stop, zeptun_strerror, zeptun_version_string, zeptun_interface_name,
+    zeptun_stats, zeptun_stop, zeptun_strerror, zeptun_version_string,
 };
+#[cfg(all(not(zeptun_linked), any(windows, target_os = "linux", target_os = "macos")))]
+use stub::zeptun_interface_name;
 #[cfg(all(not(zeptun_linked), windows))]
 use stub::zeptun_set_adapter_guid;
 
@@ -564,7 +567,7 @@ impl TunBridge for ZeptunBridge {
             platform::close_dup(fd, &config);
             CoreError::Internal("zeptun_create returned NULL".into())
         })?;
-        let mut handle = Handle {
+        let handle = Handle {
             engine: handle,
             fd: fd.map(|_| config.tun_fd),
             _psiphon_adapter: psiphon_adapter,
@@ -588,6 +591,8 @@ impl TunBridge for ZeptunBridge {
             return Err(zeptun_err("start", rc)); // Handle drops: stop+destroy.
         }
 
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        let mut handle = handle;
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         if fd.is_none() {
             let mut name = [0 as c_char; 64];
