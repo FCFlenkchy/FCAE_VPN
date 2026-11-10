@@ -2981,7 +2981,7 @@ static void render_firefox_settings() {
     firefox_location_combo();
     ImGui::Spacing();
     ImGui::InputTextWithHint("Firefox relay URL", "Optional HTTPS URL", s_firefox_relay_url,
-        sizeof(s_firefox_relay_url), ImGuiInputTextFlags_Password);
+        sizeof(s_firefox_relay_url));
     if (ImGui::IsItemDeactivatedAfterEdit()) {
         s_firefox_relay_error = !fcae_firefox_relay_set(data_dir().c_str(), s_firefox_relay_url);
     }

@@ -2849,7 +2849,8 @@ class MainActivity : AppCompatActivity() {
         val savedRelay = try { NativeEngine.nativeFirefoxRelayGet(filesDir.absolutePath) } catch (_: Throwable) { null }
         var committedRelay = savedRelay.orEmpty()
         var relayLoaded = savedRelay != null
-        val relay = addDialogInput(box, "Firefox relay URL (optional)", savedRelay.orEmpty(), password = true)
+        val relay = addDialogInput(box, "Firefox relay URL (optional)", savedRelay.orEmpty())
+        relay.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
         relay.hint = "HTTPS URL"
         relay.filters = arrayOf(android.text.InputFilter.LengthFilter(4096))
         if (savedRelay == null) relay.error = "Could not load the relay setting"
