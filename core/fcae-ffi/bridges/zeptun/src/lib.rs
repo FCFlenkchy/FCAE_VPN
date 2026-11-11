@@ -260,7 +260,7 @@ pub fn is_supported() -> bool {
 }
 
 #[cfg(windows)]
-const WINTUN_ADAPTER_GUID: &str = "24198F4C-7895-434C-AD65-9E29A92DDC61";
+use fcae_runtime::config::WINTUN_ADAPTER_GUID;
 
 pub fn platform_enabled() -> bool {
     is_supported()

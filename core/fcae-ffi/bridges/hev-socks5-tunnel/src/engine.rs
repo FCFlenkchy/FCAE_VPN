@@ -21,7 +21,7 @@ extern "C" {
     fn hev_socks5_tunnel_stats(tx_packets: *mut usize, tx_bytes: *mut usize, rx_packets: *mut usize, rx_bytes: *mut usize);
 }
 
-#[cfg(not(any(hev_linked, hev_dynamic)))]
+#[cfg(not(hev_linked))]
 mod stub {
     use std::ffi::{c_int, c_uchar, c_uint};
     pub unsafe fn hev_socks5_tunnel_main_from_str(_config_str: *const c_uchar, _config_len: c_uint, _tun_fd: c_int) -> c_int { -100 }
@@ -32,37 +32,29 @@ mod stub {
 unsafe fn engine_main_from_str(config_str: *const c_uchar, config_len: c_uint, tun_fd: c_int) -> c_int {
     #[cfg(hev_linked)]
     { hev_socks5_tunnel_main_from_str(config_str, config_len, tun_fd) }
-    #[cfg(not(any(hev_linked, hev_dynamic)))]
+    #[cfg(not(hev_linked))]
     { stub::hev_socks5_tunnel_main_from_str(config_str, config_len, tun_fd) }
-    #[cfg(hev_dynamic)]
-    { let _ = (config_str, config_len, tun_fd); -100 }
 }
 
 fn engine_quit() -> bool {
     #[cfg(hev_linked)]
     { unsafe { hev_socks5_tunnel_quit() }; true }
-    #[cfg(not(any(hev_linked, hev_dynamic)))]
+    #[cfg(not(hev_linked))]
     { stub::hev_socks5_tunnel_quit(); true }
-    #[cfg(hev_dynamic)]
-    { true }
 }
 
 unsafe fn engine_stats(tx_packets: *mut usize, tx_bytes: *mut usize, rx_packets: *mut usize, rx_bytes: *mut usize) -> bool {
     #[cfg(hev_linked)]
     { hev_socks5_tunnel_stats(tx_packets, tx_bytes, rx_packets, rx_bytes); true }
-    #[cfg(not(any(hev_linked, hev_dynamic)))]
+    #[cfg(not(hev_linked))]
     { stub::hev_socks5_tunnel_stats(tx_packets, tx_bytes, rx_packets, rx_bytes); true }
-    #[cfg(hev_dynamic)]
-    { let _ = (tx_packets, tx_bytes, rx_packets, rx_bytes); false }
 }
 
 pub fn unavailable_reason() -> Option<&'static str> {
     #[cfg(hev_linked)]
     { None }
-    #[cfg(not(any(hev_linked, hev_dynamic)))]
+    #[cfg(not(hev_linked))]
     { Some("hev-socks5-tunnel not linked (stub build)") }
-    #[cfg(hev_dynamic)]
-    { Some("hev-socks5-tunnel dynamic loading is Windows-only") }
 }
 
 pub fn is_supported() -> bool { unavailable_reason().is_none() }

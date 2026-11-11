@@ -187,11 +187,27 @@ impl TunBridge for TunEngines {
         cfg: &config::SessionConfig,
         endpoints: &fcae_runtime::backend::Endpoints,
     ) -> Result<(), CoreError> {
-        match cfg.tun.engine {
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        crash_log::record(match cfg.tun.engine {
+            config::TunEngine::Tun2socks => "tun2socks: starting\n",
+            config::TunEngine::Zeptun => "zeptun: starting\n",
+            config::TunEngine::Hev => "hev: starting\n",
+        });
+        let result = match cfg.tun.engine {
             config::TunEngine::Tun2socks => self.t2s_start(cfg, endpoints),
             config::TunEngine::Zeptun => self.zeptun_start(cfg, endpoints),
             config::TunEngine::Hev => self.hev_start(cfg, endpoints),
-        }
+        };
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        crash_log::record(match (cfg.tun.engine, result.is_ok()) {
+            (config::TunEngine::Tun2socks, true) => "tun2socks: started\n",
+            (config::TunEngine::Tun2socks, false) => "tun2socks: start failed\n",
+            (config::TunEngine::Zeptun, true) => "zeptun: started\n",
+            (config::TunEngine::Zeptun, false) => "zeptun: start failed\n",
+            (config::TunEngine::Hev, true) => "hev: started\n",
+            (config::TunEngine::Hev, false) => "hev: start failed\n",
+        });
+        result
     }
 
     fn stop(&self, timeout: std::time::Duration) {

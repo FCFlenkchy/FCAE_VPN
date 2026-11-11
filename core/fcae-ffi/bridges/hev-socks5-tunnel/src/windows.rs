@@ -1,9 +1,7 @@
-//! Windows backend: the native MSVC engine DLL is hosted in this process.
-//! Loading is lazy, a dedicated call thread serializes `quit`/`stats`, and each
-//! engine run gets its own thread.
+//! Windows backend: HEV is statically linked and runs in this process.
+//! A dedicated call thread serializes quit/stats; each run gets its own thread.
 
 use std::ffi::{c_int, c_uchar, c_uint, CString};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -12,7 +10,6 @@ use fcae_runtime::backend::Endpoints;
 use fcae_runtime::config::SessionConfig;
 use fcae_runtime::error::{CoreError, Result};
 use fcae_runtime::session::TunBridge;
-use fcae_runtime::windows_dll::{EmbeddedFiles, Library};
 use parking_lot::Mutex;
 
 use fcae_runtime::socks5p;
@@ -20,7 +17,6 @@ use crate::{generate_config, run_engine, HevStats};
 
 const RESTART_GRACE: Duration = Duration::from_secs(2);
 const STATS_TIMEOUT: Duration = Duration::from_millis(250);
-const DLL_NAME: &str = "libhev-socks5-tunnel.dll";
 
 fn begin_run(running: &AtomicBool, closing: &AtomicBool) -> Result<()> {
     running.store(true, Ordering::SeqCst);
@@ -31,24 +27,27 @@ fn begin_run(running: &AtomicBool, closing: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
-#[cfg(hev_dynamic)]
-const EMBEDDED: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/engine_files.rs"));
-
 type MainFn = unsafe extern "C" fn(*const c_uchar, c_uint, c_int) -> c_int;
 type QuitFn = unsafe extern "C" fn();
 type StatsFn = unsafe extern "C" fn(*mut usize, *mut usize, *mut usize, *mut usize);
+
+#[cfg(hev_linked)]
+extern "C" {
+    fn hev_socks5_tunnel_main_from_str(config: *const c_uchar, len: c_uint, fd: c_int) -> c_int;
+    fn hev_socks5_tunnel_quit();
+    fn hev_socks5_tunnel_stats(tx_packets: *mut usize, tx_bytes: *mut usize, rx_packets: *mut usize, rx_bytes: *mut usize);
+}
 
 struct Ffi {
     main_from_str: MainFn,
     quit: QuitFn,
     stats: StatsFn,
-    _engine: Library,
-    _embedded: Option<EmbeddedFiles>,
 }
 
 enum Call {
     Quit,
     Stats(mpsc::SyncSender<HevStats>),
+    Barrier(mpsc::SyncSender<()>),
 }
 
 struct Runtime {
@@ -56,49 +55,34 @@ struct Runtime {
     calls: mpsc::Sender<Call>,
 }
 
+fn drain_calls(calls: &mpsc::Sender<Call>, enqueue: &Mutex<()>, timeout: Duration) -> Result<()> {
+    let (reply, done) = mpsc::sync_channel(1);
+    {
+        // A stop that observed the previous run must enqueue its quit before
+        // this barrier, even if that run has already exited.
+        let _enqueue = enqueue.lock();
+        calls.send(Call::Barrier(reply))
+            .map_err(|_| CoreError::Internal("hev call thread stopped".into()))?;
+    }
+    done.recv_timeout(timeout)
+        .map_err(|_| CoreError::Internal("hev calls from the previous run did not finish".into()))
+}
+
 static RUNTIME: OnceLock<std::result::Result<Runtime, String>> = OnceLock::new();
 
-fn load_from_dir(dir: &Path) -> Result<Ffi> {
-    let engine_path = dir.join(DLL_NAME);
-    if !engine_path.is_file() {
-        return Err(CoreError::Internal(format!("{DLL_NAME} not found")));
-    }
-    let engine = Library::from_path(&engine_path)?;
-    unsafe {
+fn load() -> Result<Ffi> {
+    #[cfg(hev_linked)]
+    {
         Ok(Ffi {
-            main_from_str: engine.symbol(c"hev_socks5_tunnel_main_from_str")?,
-            quit: engine.symbol(c"hev_socks5_tunnel_quit")?,
-            stats: engine.symbol(c"hev_socks5_tunnel_stats")?,
-            _engine: engine,
-            _embedded: None,
+            main_from_str: hev_socks5_tunnel_main_from_str,
+            quit: hev_socks5_tunnel_quit,
+            stats: hev_socks5_tunnel_stats,
         })
     }
-}
-
-fn load_embedded() -> Result<Ffi> {
-    #[cfg(hev_dynamic)]
+    #[cfg(not(hev_linked))]
     {
-        let embedded = EmbeddedFiles::stage("hev", EMBEDDED).map_err(|e| CoreError::Internal(e.to_string()))?;
-        let mut ffi = load_from_dir(embedded.directory())?;
-        ffi._embedded = Some(embedded);
-        Ok(ffi)
+        Err(CoreError::Internal("hev-socks5-tunnel not linked (stub build)".into()))
     }
-    #[cfg(not(hev_dynamic))]
-    {
-        Err(CoreError::Internal("HEV Windows DLL not embedded in this build".into()))
-    }
-}
-
-fn load() -> Result<Ffi> {
-    if let Some(path) = std::env::var_os("FCAE_HEV_DLL") {
-        let path = PathBuf::from(path);
-        if !path.is_file() {
-            return Err(CoreError::Internal(format!("FCAE_HEV_DLL points at {}, not a file", path.display())));
-        }
-        let dir = path.parent().ok_or_else(|| CoreError::Internal("FCAE_HEV_DLL has no parent".into()))?;
-        return load_from_dir(dir);
-    }
-    load_embedded()
 }
 
 fn serve(queue: mpsc::Receiver<Call>, quit: QuitFn, stats: StatsFn) {
@@ -110,6 +94,7 @@ fn serve(queue: mpsc::Receiver<Call>, quit: QuitFn, stats: StatsFn) {
                 unsafe { stats(&mut s.tx_packets, &mut s.tx_bytes, &mut s.rx_packets, &mut s.rx_bytes) };
                 let _ = reply.send(s);
             }
+            Call::Barrier(reply) => { let _ = reply.send(()); }
         }
     }
 }
@@ -118,7 +103,7 @@ fn runtime() -> Result<&'static Runtime> {
     RUNTIME
         .get_or_init(|| {
             std::panic::catch_unwind(load)
-                .unwrap_or_else(|_| Err(CoreError::Internal("loading the hev DLL panicked".into())))
+                .unwrap_or_else(|_| Err(CoreError::Internal("initializing the hev runtime panicked".into())))
                 .and_then(|ffi| {
                     let (calls, queue) = mpsc::channel();
                     let (quit, stats) = (ffi.quit, ffi.stats);
@@ -137,15 +122,16 @@ fn runtime() -> Result<&'static Runtime> {
         .map_err(|e| CoreError::Internal(e.clone()))
 }
 
-/// The runtime if a start already loaded it; never triggers the load.
+/// The runtime if a start already initialized it.
 fn loaded() -> Option<&'static Runtime> {
     RUNTIME.get()?.as_ref().ok()
 }
 
 pub fn unavailable_reason() -> Option<&'static str> {
-    // Keep UI capability checks passive; load the DLL on explicit session start.
-    if !cfg!(all(hev_dynamic, wintun_staged)) {
-        Some("HEV Windows DLL or Wintun not embedded")
+    if !cfg!(hev_linked) {
+        Some("hev-socks5-tunnel not linked (stub build)")
+    } else if !cfg!(wintun_staged) {
+        Some("Wintun not embedded")
     } else {
         None
     }
@@ -166,6 +152,7 @@ struct Active {
 
 pub struct HevSocks5TunnelBridge {
     lifecycle: Mutex<()>,
+    enqueue: Mutex<()>,
     active: Mutex<Option<Active>>,
     running: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
@@ -180,6 +167,7 @@ impl HevSocks5TunnelBridge {
     pub fn new() -> Self {
         Self {
             lifecycle: Mutex::new(()),
+            enqueue: Mutex::new(()),
             active: Mutex::new(None),
             running: Arc::new(AtomicBool::new(false)),
             closing: Arc::new(AtomicBool::new(false)),
@@ -195,8 +183,9 @@ impl HevSocks5TunnelBridge {
         loaded()?.calls.send(Call::Stats(reply)).ok()?;
         result.recv_timeout(STATS_TIMEOUT).ok()
     }
-    /// Non-blocking: `quit` is queued to the call thread.
+    /// `quit` is queued to the call thread rather than called on the UI thread.
     fn signal_stop(&self) -> bool {
+        let _enqueue = self.enqueue.lock();
         if !self.running.swap(false, Ordering::SeqCst) { return false; }
         loaded().is_some_and(|rt| rt.calls.send(Call::Quit).is_ok())
     }
@@ -270,6 +259,7 @@ impl TunBridge for HevSocks5TunnelBridge {
         // Resolve the native bridge before changing engine state or spawning a
         // worker so a missing/incompatible DLL becomes a normal start error.
         let rt = runtime()?;
+        drain_calls(&rt.calls, &self.enqueue, RESTART_GRACE)?;
         let base_socks = endpoints.socks.ok_or_else(|| CoreError::Internal("TUN needs SOCKS endpoint".into()))?;
         let psiphon = if endpoints.psiphon_dns {
             let resolvers = fcae_runtime::tun_dns::psiphon_resolvers(cfg)?;
@@ -320,6 +310,32 @@ impl TunBridge for HevSocks5TunnelBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn barrier_waits_for_a_stop_enqueued_by_an_exiting_run() {
+        let enqueue = Arc::new(Mutex::new(()));
+        let (calls, queue) = mpsc::channel();
+        let lock = enqueue.lock();
+        let calls_for_barrier = calls.clone();
+        let enqueue_for_barrier = enqueue.clone();
+        let waiter = std::thread::spawn(move || {
+            drain_calls(&calls_for_barrier, &enqueue_for_barrier, Duration::from_secs(2))
+        });
+        assert!(calls.send(Call::Quit).is_ok());
+        drop(lock);
+        assert!(matches!(queue.recv_timeout(Duration::from_secs(1)).unwrap(), Call::Quit));
+        match queue.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Call::Barrier(reply) => { reply.send(()).unwrap(); }
+            _ => panic!("barrier must follow quit"),
+        }
+        assert!(waiter.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn barrier_fails_if_the_call_thread_is_stuck() {
+        let (calls, _queue) = mpsc::channel();
+        assert!(drain_calls(&calls, &Mutex::new(()), Duration::from_millis(5)).is_err());
+    }
 
     #[test]
     fn cancelled_start_does_not_mark_engine_running() {

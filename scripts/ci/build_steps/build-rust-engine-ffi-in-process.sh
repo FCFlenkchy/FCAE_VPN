@@ -122,9 +122,7 @@ if [[ "${FCAE_MATRIX_NAME}" == android-* ]]; then
   fi
 else
   case "${FCAE_MATRIX_NAME}" in
-    # Windows runs hev-socks5-tunnel in-process through the DLL staged
-    # above; FCAE_HEV_DLL marks it for embedding and selects the
-    # dynamic backend.
+    # Desktop engines are linked in-process.
     windows-x64|linux-x64|macos-arm64|macos-x64) FEATURES=aether,tor,psiphon-live,firefox,zeptun,hev ;;
     *) echo "::error::Unsupported desktop target: ${FCAE_MATRIX_NAME}"; exit 1 ;;
   esac

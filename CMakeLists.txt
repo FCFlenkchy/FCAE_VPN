@@ -470,6 +470,22 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
     target_link_options(fcaevpn PRIVATE "-Wl,-Bstatic")
     target_link_libraries(fcaevpn PRIVATE "${FCAE_ZEPTUN_A}")
     target_link_options(fcaevpn PRIVATE "-Wl,-Bdynamic")
+    # Cargo's native-link metadata is not forwarded to this CMake link.
+    # Keep the HEV archives after the Rust staticlib and group them because
+    # the engine and its task/lwIP dependencies refer to one another.
+    set(FCAE_HEV_ARCHIVE_DIR "$ENV{FCAE_HEV_LIBDIR}")
+    if(FCAE_HEV_ARCHIVE_DIR STREQUAL "")
+        set(FCAE_HEV_ARCHIVE_DIR "${CMAKE_SOURCE_DIR}/core/hev-socks5-tunnel/bin/fcae-windows")
+    endif()
+    set(FCAE_HEV_ARCHIVES)
+    foreach(name hev-socks5-tunnel yaml lwip hev-task-system)
+        set(archive "${FCAE_HEV_ARCHIVE_DIR}/lib${name}.a")
+        if(NOT EXISTS "${archive}")
+            message(FATAL_ERROR "static HEV archive missing: ${archive}")
+        endif()
+        list(APPEND FCAE_HEV_ARCHIVES "${archive}")
+    endforeach()
+    target_link_libraries(fcaevpn PRIVATE -Wl,--start-group ${FCAE_HEV_ARCHIVES} -Wl,--end-group)
     fcae_link_psiphon(fcaevpn x86_64-pc-windows-gnu)
 
     # System libs only — crypto lives in the Rust staticlib (BoringSSL).
@@ -477,7 +493,7 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
     target_link_libraries(fcaevpn PRIVATE
         d3d11 dxgi d3dcompiler dwmapi ntdll
         ws2_32 userenv bcrypt shell32 ole32 uuid crypt32 secur32 ncrypt
-        iphlpapi
+        iphlpapi advapi32
         # fwpuclnt: the statically linked zeptun engine drives the Windows
         # Filtering Platform (Fwpm*) to keep the tunnel's own sockets out of
         # the tunnel; its imports land in libfcae_ffi.a, and cargo's link

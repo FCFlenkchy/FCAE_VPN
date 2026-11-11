@@ -12,28 +12,13 @@
 //! | platform | backend | why |
 //! |----------|---------|-----|
 //! | Linux, macOS, Android | linked in-process, C ABI | the engine's own TUN code compiles for these |
-//! | Windows | native DLL loaded in-process at runtime | the MSVC C ABI interoperates with the MinGW host without a POSIX runtime |
-//!
-//! The Ubuntu `windows-x64` CI leg runs upstream's native Windows build with
-//! Clang targeting MSVC. The resulting DLL embeds yaml, lwip and hev-task-system
-//! and is loaded with `LoadLibraryExW` at first use: same process and same
-//! wintun adapter identity as the other engines, while the app remains a MinGW
-//! binary.
-//!
-//! Loading is lazy and isolated: a missing or unloadable DLL surfaces as
-//! "engine unavailable" (or a specific start error) instead of taking the app
-//! down at startup.
+//! | Windows | linked in-process, C ABI | Wintun remains a separate runtime DLL/driver |
 //!
 //! ## Build requirements
 //!
-//! * in-process: an archive built outside the cargo graph (see `build.rs`), i.e.
-//!   `make -C core/hev-socks5-tunnel static`, or `FCAE_HEV_LIBDIR=<dir>`.
-//! * Windows: `FCAE_HEV_DLL=<path to libhev-socks5-tunnel.dll>` during the
-//!   build tells the crate the DLL is part of the install. At runtime it is
-//!   loaded from beside the executable, or from the path in `FCAE_HEV_DLL`
-//!   when that variable is set. Without the build-time variable a Windows
-//!   build must use the stub:
-//!   `cargo build --features fcae-bridge-hev-socks5-tunnel/stub`.
+//! Build the engine and dependency archives outside Cargo, or set
+//! `FCAE_HEV_LIBDIR` to a directory containing them. The Windows CI build
+//! stages MinGW-targeted archives there; Wintun is still staged separately.
 //!
 //! Do not ship a stub build: it reports the engine as unavailable in the UI.
 
@@ -51,20 +36,11 @@ pub mod platform;
 
 pub use engine::{HevSocks5TunnelBridge, unavailable_reason};
 
-/// The wintun adapter GUID every FCAE TUN engine pins.
-///
-/// Wintun identifies an adapter by name *and* GUID: the GUID decides the NLA
-/// entry and the NetCfgInstanceId, so a stable one keeps the firewall profile,
-/// DNS assignment and registered-network settings across engines, sessions and
-/// reinstalls, and makes repeated creation idempotent instead of accruing
-/// `FCAE_VPN 2`, `FCAE_VPN 3` duplicates. `fcae-bridge-tun2socks` passes it in
-/// the device URL, `fcae-bridge-zeptun` through `zeptun_set_adapter_guid`, and
-/// the hev engine (every platform) receives it as `tunnel.guid` in the config
-/// this bridge renders.
-pub const WINTUN_ADAPTER_GUID: &str = "24198F4C-7895-434C-AD65-9E29A92DDC61";
+/// The requested Wintun identity shared by FCAE's Windows TUN engines.
+pub use fcae_runtime::config::WINTUN_ADAPTER_GUID;
 
 /// True when this build can actually run the engine: the C engine is linked
-/// in, or (Windows) the engine DLL loads from beside the running binary.
+/// in and, on Windows, Wintun is staged.
 pub fn is_supported() -> bool {
     engine::is_supported()
 }
@@ -126,6 +102,12 @@ pub(crate) fn run_engine(closing: &std::sync::atomic::AtomicBool, mut main: impl
 }
 
 pub(crate) fn generate_config(cfg: &fcae_runtime::config::SessionConfig, socks: std::net::SocketAddr) -> fcae_runtime::error::Result<(std::net::SocketAddr, String)> {
+    #[cfg(not(target_os = "android"))]
+    if cfg.tun.name.is_empty() || cfg.tun.name.len() > 63 || cfg.tun.name.chars().any(char::is_control) {
+        return Err(fcae_runtime::error::CoreError::InvalidConfig(
+            "HEV TUN name must be 1–63 UTF-8 bytes without control characters".into(),
+        ));
+    }
     let mut yaml = String::with_capacity(256);
     yaml.push_str("tunnel:\n");
     yaml.push_str(&format!("  name: '{}'\n", cfg.tun.name.replace('\'', "''")));
@@ -163,6 +145,30 @@ mod tests {
         assert!(!yaml.contains("  ipv4:"));
         assert!(!yaml.contains("  ipv6:"));
         assert!(yaml.contains("  mtu:"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_config_uses_the_shared_adapter_identity() {
+        let config = fcae_runtime::config::SessionConfig::default();
+        let (_, yaml) = generate_config(&config, "127.0.0.1:1080".parse().unwrap()).unwrap();
+        assert!(yaml.contains(&format!("  guid: {}\n", fcae_runtime::config::WINTUN_ADAPTER_GUID)));
+        assert!(yaml.contains(&format!("  name: '{}'\n", config.tun.name.replace('\'', "''"))));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    fn invalid_names_do_not_reach_the_native_engine() {
+        let mut config = fcae_runtime::config::SessionConfig::default();
+        let socks = "127.0.0.1:1080".parse().unwrap();
+        for name in [String::new(), "x".repeat(64), "bad\nname".to_owned(), "é".repeat(32)] {
+            config.tun.name = name;
+            assert!(generate_config(&config, socks).is_err());
+        }
+        config.tun.name = "x".repeat(63);
+        assert!(generate_config(&config, socks).is_ok());
+        config.tun.name = "test's".into();
+        assert!(generate_config(&config, socks).unwrap().1.contains("name: 'test''s'"));
     }
 
     /// Only levels the engine understands may be emitted: an unknown string

@@ -15,39 +15,38 @@ case "${FCAE_MATRIX_NAME}" in
     make static CFLAGS="-arch x86_64 -mmacosx-version-min=13.0"
     ;;
   windows-x64)
-    # FCAE links with MinGW, while upstream's native static archives
-    # target the MSVC ABI. Keep the DLL as the C ABI boundary, but
-    # cross-compile it here instead of using a second Windows job.
-    bash --noprofile --norc "$ROOT/scripts/ci/build_steps/install-xwin.sh"
+    # Use the same Windows GNU ABI/CRT as the final FCAE link. Clang is
+    # needed here because HEV's lwIP fallback allocators use its COFF weak
+    # symbols; GCC's Windows branch makes those definitions strong.
+    CC="clang --target=x86_64-w64-windows-gnu"
+    AR=x86_64-w64-mingw32-ar
+    NM=x86_64-w64-mingw32-nm
+    OBJCOPY=x86_64-w64-mingw32-objcopy
+    COMPAT="$ROOT/scripts/ci/hev/mingw-compat.h"
+    make clean OS=Windows_NT ARCH=x64
+    make static OS=Windows_NT ARCH=x64 \
+      CC="$CC" PP="$CC -E" AR="$AR" \
+      CFLAGS="-include $COMPAT -Wno-error" -j"$(nproc)"
 
-    MSVC_ROOT="$RUNNER_TEMP/hev-msvc-sysroot"
-    "$RUNNER_TEMP/fcae-xwin/bin/xwin" --accept-license --arch x86_64 \
-      --cache-dir "$RUNNER_TEMP/hev-xwin-cache" splat --output "$MSVC_ROOT"
-    clang --version
-    llvm-ar --version
-    lld-link --version
-
-    MSVC_CC="clang --target=x86_64-pc-windows-msvc -fuse-ld=lld-link"
-    MSVC_CFLAGS="-isystem $MSVC_ROOT/crt/include -isystem $MSVC_ROOT/sdk/include/ucrt -isystem $MSVC_ROOT/sdk/include/um -isystem $MSVC_ROOT/sdk/include/shared"
-    MSVC_LFLAGS="-L$MSVC_ROOT/crt/lib/x86_64 -L$MSVC_ROOT/sdk/lib/ucrt/x86_64 -L$MSVC_ROOT/sdk/lib/um/x86_64"
-    make shared OS=Windows_NT ARCH=x64 \
-      CC="$MSVC_CC" AR=llvm-ar \
-      CFLAGS="$MSVC_CFLAGS" LFLAGS="$MSVC_LFLAGS" \
-      -j"$(nproc)"
-    test -s bin/hev-socks5-tunnel.dll
-    test -s bin/hev-socks5-tunnel.dll.lib
-    IMPORTS="$(x86_64-w64-mingw32-objdump -p bin/hev-socks5-tunnel.dll)"
-    if grep -qiE 'DLL Name:[[:space:]]*msys-2[.]0[.]dll([[:space:]]|$)' <<< "$IMPORTS"; then
-      echo "::error::HEV DLL unexpectedly depends on the MSYS2 runtime"
-      exit 1
-    fi
-
-    ENGINE="$ROOT/engine"
-    rm -rf "$ENGINE"
-    install -D -m 644 bin/hev-socks5-tunnel.dll \
-      "$ENGINE/libhev-socks5-tunnel.dll"
-    echo "FCAE_HEV_DLL=$ENGINE/libhev-socks5-tunnel.dll" >> "$GITHUB_ENV"
-    echo "FCAE_HEV_ENGINE_DIR=$ENGINE" >> "$GITHUB_ENV"
+    # Upstream produces four independent .lib archives. Copy them under GNU
+    # archive names and namespace its libyaml symbols to avoid collisions with
+    # any other YAML implementation in the final process.
+    STAGE="$ROOT/core/hev-socks5-tunnel/bin/fcae-windows"
+    mkdir -p "$STAGE"
+    install -m 644 bin/hev-socks5-tunnel.lib "$STAGE/libhev-socks5-tunnel.a"
+    for name in yaml lwip hev-task-system; do
+      install -m 644 "third-part/$name/bin/$name.lib" "$STAGE/lib$name.a"
+    done
+    MAP="$RUNNER_TEMP/fcae-hev-yaml-symbols.txt"
+    "$NM" -g --defined-only "$STAGE/libyaml.a" | \
+      awk 'NF >= 3 && $(NF-1) ~ /^[A-Za-z]$/ && $NF ~ /^yaml_/ { print $NF, "fcae_hev_" $NF }' | \
+      sort -u > "$MAP"
+    test -s "$MAP" || { echo "::error::HEV libyaml has no symbols to namespace"; exit 1; }
+    for archive in "$STAGE"/*.a; do
+      "$OBJCOPY" --redefine-syms="$MAP" "$archive"
+      "$AR" s "$archive"
+    done
+    echo "FCAE_HEV_LIBDIR=$STAGE" >> "$GITHUB_ENV"
     ;;
   android-*)
     if [ -z "${ANDROID_NDK_HOME:-}" ]; then
@@ -113,7 +112,7 @@ case "${FCAE_MATRIX_NAME}" in
   *) echo "::error::Unsupported hev target: ${FCAE_MATRIX_NAME}"; exit 1 ;;
 esac
 case "${FCAE_MATRIX_NAME}" in
-  windows-x64) ls -lh "$GITHUB_WORKSPACE/engine" ;;
+  windows-x64) ls -lh "$STAGE"/*.a ;;
   android-universal) ls -lh bin/android/*/lib*.a ;;
   *) ls -lh bin/libhev-socks5-tunnel.a ;;
 esac

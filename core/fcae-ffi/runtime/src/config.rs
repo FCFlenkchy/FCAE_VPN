@@ -21,6 +21,10 @@ use fcae_abi::*;
 use crate::error::{CoreError, Result};
 use crate::upstream::UpstreamProxy;
 
+/// Shared requested Windows Wintun identity for every TUN engine.
+pub const WINTUN_ADAPTER_GUID: &str = "24198F4C-7895-434C-AD65-9E29A92DDC61";
+pub const WINTUN_ADAPTER_GUID_U128: u128 = 0x24198f4c_7895_434c_ad65_9e29a92ddc61;
+
 /// Read an optional C string: NULL, invalid UTF-8 and empty/whitespace all
 /// collapse to `None` so callers never have to distinguish "" from NULL.
 ///
@@ -1456,6 +1460,12 @@ pub mod env_compat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wintun_guid_text_and_windows_identity_match() {
+        let digits = WINTUN_ADAPTER_GUID.replace('-', "");
+        assert_eq!(u128::from_str_radix(&digits, 16).unwrap(), WINTUN_ADAPTER_GUID_U128);
+    }
 
     fn raw_test_config() -> FcaeConfig {
         // Initialize nonzero-only enums before creating a typed value.

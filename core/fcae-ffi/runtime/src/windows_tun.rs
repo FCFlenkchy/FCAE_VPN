@@ -29,7 +29,7 @@ pub fn is_privileged() -> bool {
     }
 }
 
-const ADAPTER_GUID: GUID = GUID::from_u128(0x24198f4c_7895_434c_ad65_9e29a92ddc61);
+const ADAPTER_GUID: GUID = GUID::from_u128(crate::config::WINTUN_ADAPTER_GUID_U128);
 
 fn checked(code: u32, operation: &str) -> Result<()> {
     if code == 0 { return Ok(()); }

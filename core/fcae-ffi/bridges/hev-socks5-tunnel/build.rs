@@ -1,27 +1,12 @@
-//! Wires the hev-socks5-tunnel engine into the crate.
-//!
-//! Two backends, one per platform family:
-//!
-//! * **In-process, linked** (Linux, macOS, Android): the engine is built with
-//!   its own Makefile outside the cargo graph — `make -C core/hev-socks5-tunnel
-//!   static`, cross-compiled with the NDK on Android — and the archive is
-//!   linked into libfcae_ffi. `FCAE_HEV_LIBDIR=<dir>` overrides the search path.
-//! * **In-process, DLL** (Windows): the Ubuntu `windows-x64` CI leg builds the
-//!   engine with Clang targeting MSVC, this script embeds the resulting DLL in
-//!   the binary, and the app loads it at runtime: same process, no child
-//!   process, no exe, no files beside the exe.
-//!   `FCAE_HEV_DLL` says that DLL is part of the build, which is what makes
-//!   the crate compile the dynamic backend and report the engine as available.
-//!   Without it a Windows build must use `stub`.
+//! Link the HEV archives built outside Cargo on all supported platforms.
+//! FCAE_HEV_LIBDIR may point at a directory containing all four archives.
 
 use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(hev_linked)");
     println!("cargo::rustc-check-cfg=cfg(wintun_staged)");
-    println!("cargo::rustc-check-cfg=cfg(hev_dynamic)");
     fcae_build::rerun_if_env_changed("FCAE_HEV_LIBDIR");
-    fcae_build::rerun_if_env_changed("FCAE_HEV_DLL");
     fcae_build::rerun_if_env_changed("ANDROID_NDK_HOME");
 
     // Checked before anything else: a stub build links no engine, so it must
@@ -43,34 +28,6 @@ fn main() {
     if let Some(dll) = fcae_build::wintun::stage(target) {
         println!("cargo:rustc-cfg=wintun_staged");
         println!("cargo:rustc-env=FCAE_HEV_WINTUN_DLL={}", dll.display());
-    }
-
-    // The native engine DLL is embedded and extracted before loading.
-    if target.os == fcae_build::target::Os::Windows {
-        let staged = std::env::var("FCAE_HEV_DLL").unwrap_or_default();
-        let staged = staged.trim();
-        if !staged.is_empty() && Path::new(staged).is_file() {
-            let out_dir = Path::new(&std::env::var_os("OUT_DIR").expect("cargo must set OUT_DIR")).join("engine");
-            std::fs::create_dir_all(&out_dir).expect("cannot create OUT_DIR/engine");
-            fcae_build::rerun_if_changed(Path::new(staged));
-            std::fs::copy(staged, out_dir.join("libhev-socks5-tunnel.dll"))
-                .expect("cannot embed HEV DLL");
-            std::fs::write(
-                Path::new(&std::env::var_os("OUT_DIR").expect("cargo must set OUT_DIR")).join("engine_files.rs"),
-                r#"&[("libhev-socks5-tunnel.dll", include_bytes!(concat!(env!("OUT_DIR"), "/engine/libhev-socks5-tunnel.dll")))]"#,
-            ).expect("cannot generate embedded engine file list");
-            println!("cargo:rustc-cfg=hev_dynamic");
-            fcae_build::note(format!(
-                "hev-socks5-tunnel loads as an embedded DLL in-process on Windows ({staged})"
-            ));
-            return;
-        }
-        panic!(
-            "the native Windows HEV DLL is missing. The Ubuntu windows-x64 CI leg cross-compiles \
-             it with Clang targeting MSVC; point FCAE_HEV_DLL at the staged \
-             libhev-socks5-tunnel.dll, or build with \
-             `--features fcae-bridge-hev-socks5-tunnel/stub` to report the engine unavailable."
-        );
     }
 
     let submodule = fcae_build::repo_root().join("core/hev-socks5-tunnel");
@@ -106,6 +63,7 @@ fn main() {
         );
     }
 
+    fcae_build::rerun_if_changed(&archive);
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static=hev-socks5-tunnel");
 
@@ -136,7 +94,13 @@ fn main() {
         println!("cargo:rustc-link-lib=static={name}");
     }
 
-    println!("cargo:rustc-link-lib=pthread");
+    if target.os == fcae_build::target::Os::Windows {
+        for lib in ["ws2_32", "iphlpapi", "advapi32"] {
+            println!("cargo:rustc-link-lib={lib}");
+        }
+    } else {
+        println!("cargo:rustc-link-lib=pthread");
+    }
 
     println!("cargo:rustc-cfg=hev_linked");
     println!("cargo:rustc-env=FCAE_HEV_HEADER={}", header.display());
@@ -155,6 +119,8 @@ fn locate_lib_dir(submodule: &Path, target: fcae_build::target::Target) -> PathB
     }
     if target.os == fcae_build::target::Os::Android {
         submodule.join("bin/android").join(android_abi_dir(target.arch))
+    } else if target.os == fcae_build::target::Os::Windows {
+        submodule.join("bin/fcae-windows")
     } else {
         submodule.join("bin")
     }

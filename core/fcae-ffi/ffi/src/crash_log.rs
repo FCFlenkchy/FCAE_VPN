@@ -99,7 +99,7 @@ fn open_log(dir: &Path) -> std::io::Result<(File, usize)> {
     Ok((file, size as usize))
 }
 
-fn record(message: &str) {
+pub(crate) fn record(message: &str) {
     if let Some(log) = LOG.get() {
         // The panic may have interrupted a thread holding the log lock.
         if let Ok(mut log) = log.try_lock() {

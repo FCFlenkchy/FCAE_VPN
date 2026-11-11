@@ -390,12 +390,10 @@ impl Tun2SocksBridge {
         // Desktop: tun2socks creates the device itself.
         #[cfg(windows)]
         {
-            // A stable GUID keeps Windows from creating "FCAE_VPN 2", "…3"
-            // adapters on every reconnect.
             Ok((
                 format!(
-                    "tun://{}?guid={{24198F4C-7895-434C-AD65-9E29A92DDC61}}",
-                    cfg.tun.name
+                    "tun://{}?guid={{{}}}",
+                    cfg.tun.name, fcae_runtime::config::WINTUN_ADAPTER_GUID
                 ),
                 None,
             ))
@@ -687,17 +685,7 @@ mod tests {
         assert!(version().contains("fcae-bridge-tun2socks-bridge"));
     }
 
-    /// The Windows device string must carry the persistent adapter GUID.
-    ///
-    /// Without `?guid=`, Wintun allocates a *new* adapter every time the name
-    /// is already taken by a leftover from an unclean shutdown, so users
-    /// accumulate "FCAE_VPN", "FCAE_VPN 2", "FCAE_VPN 3"... each with its own
-    /// stale routes and DNS registration. The GUID pins one adapter that gets
-    /// reused across reconnects.
-    ///
-    /// The value is deliberately identical to the one the old subprocess
-    /// passed, so an upgrade adopts the existing adapter instead of stranding
-    /// it. Changing it is a breaking change for anyone mid-upgrade.
+    /// The requested GUID remains compatible with previous FCAE releases.
     #[cfg(windows)]
     #[test]
     fn windows_device_pins_the_persistent_adapter_guid() {

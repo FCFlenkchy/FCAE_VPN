@@ -12,11 +12,8 @@ esac
 chmod +x package/* 2>/dev/null || true
 
 if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
-  # The released app is the exe alone, and that is now literally
-  # true: the hev engine set, wintun.dll and the second Go runtime
-  # (libfcae_psiphon) are all embedded and extracted to temp at
-  # runtime, and zeptun links statically. Nothing is copied beside
-  # it.
+  # HEV and Zeptun are linked statically. Wintun and the Psiphon runtime
+  # retain their existing runtime staging and loading behavior.
   echo "Windows package:"
   ls -la package/
 fi
@@ -81,17 +78,20 @@ if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
     fi
   fi
 
-  # There is deliberately no "are the engine bytes really in here"
-  # check. The engine set is embedded with include_bytes!, which is a
-  # compile-time copy into the binary: if the dir is empty, stale or
-  # absent, cargo fails and this step never runs. The import check
-  # above already catches the one failure that would survive a
-  # successful build - a link that names one of those files.
-  #
-  # The engine dir is still asserted: it is exported by the engine
-  # build step, and if that link broke the failure would otherwise
-  # surface as a confusing rustc error.
-  : "${FCAE_HEV_ENGINE_DIR:?the hev engine dir was not exported}"
+  : "${FCAE_HEV_LIBDIR:?the HEV static archive directory was not exported}"
+  for name in hev-socks5-tunnel yaml lwip hev-task-system; do
+    test -s "$FCAE_HEV_LIBDIR/lib$name.a" || {
+      echo "::error::missing HEV archive lib$name.a"; exit 1;
+    }
+  done
+  # The task-system coroutine switch cannot run with a CET shadow stack.
+  # GNU PE links normally leave this flag unset; reject an incompatible EXE.
+  CET_INFO="$(llvm-readobj --coff-debug-directory "$EXE")"
+  if grep -qi 'CET_COMPAT' <<< "$CET_INFO"; then
+    echo "::error::$EXE is marked CET shadow-stack compatible"
+    exit 1
+  fi
+
 fi
 
 if [ "${FCAE_MATRIX_NAME}" = "linux-x64" ]; then
