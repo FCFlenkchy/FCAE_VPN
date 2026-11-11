@@ -1,11 +1,26 @@
-//! Links Zeptun on non-Windows platforms and embeds its executable on Windows.
+//! Locates the prebuilt zeptun engine (libzeptun.a) and links it statically.
+//!
+//! Unlike the Go bridges, this deliberately does NOT invoke `zig build` from
+//! the cargo graph: Zig's per-target invocations (cross SDKs, NDK toolchains,
+//! `-Dtarget` triples) are zeptun's own concern and it already ships the
+//! entry points — `make` / `zig build android` / `scripts/build_android.sh`.
+//! This build script just consumes the artifacts:
+//!
+//! | target  | produced by                            | consumed from                                   |
+//! |---------|----------------------------------------|-------------------------------------------------|
+//! | desktop | `make -C core/zeptun`                  | `core/zeptun/zig-out/lib/libzeptun.a`           |
+//! | android | `sh core/zeptun/scripts/build_android.sh` | `core/zeptun/zig-out/android/prebuilt/<abi>/libzeptun.a` |
+//!
+//! `FCAE_ZEPTUN_LIBDIR=/path/to/dir` overrides both. On Android the static
+//! archive links straight into libfcae_ffi — no jniLibs staging, unlike the
+//! Go bridge, which is forced into c-shared there.
+//!
+//! All the heavy lifting lives in `fcae-build`; this stays readable.
 
 use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(zeptun_linked)");
-    println!("cargo::rustc-check-cfg=cfg(zeptun_sidecar)");
-    fcae_build::rerun_if_env_changed("FCAE_ZEPTUN_EXE");
     println!("cargo::rustc-check-cfg=cfg(wintun_staged)");
     fcae_build::rerun_if_env_changed("FCAE_ZEPTUN_LIBDIR");
 
@@ -23,15 +38,6 @@ fn main() {
     // Features reach build scripts as CARGO_FEATURE_* env, never as cfg().
     if std::env::var_os("CARGO_FEATURE_STUB").is_some() {
         fcae_build::note("fcae-bridge-zeptun: `stub` feature enabled — zeptun engine NOT linked");
-        return;
-    }
-
-    if target.os == fcae_build::target::Os::Windows {
-        let exe = std::env::var_os("FCAE_ZEPTUN_EXE").map(PathBuf::from)
-            .filter(|p| p.is_file()).expect("FCAE_ZEPTUN_EXE must point to the built Windows zeptun executable");
-        fcae_build::rerun_if_changed(&exe);
-        println!("cargo:rustc-env=FCAE_ZEPTUN_EXE={}", exe.display());
-        println!("cargo:rustc-cfg=zeptun_sidecar");
         return;
     }
 
@@ -67,20 +73,7 @@ fn main() {
     let search_dir = isolate_static_archive(&archive);
 
     println!("cargo:rustc-link-search=native={}", search_dir.display());
-    // Force the Windows GNU linker to consume the staged archive itself.
-    // Without the mode switch, a DLL import archive can still win resolution
-    // and leave zeptun.dll in the final executable's PE imports.
-    if target.os == fcae_build::target::Os::Windows {
-        println!("cargo:rustc-link-arg=-Wl,-Bstatic");
-    }
-    // On Windows GNU, name the exact staged archive. `-lfoo` still permits
-    // the linker to consider import-library variants; `-l:filename` cannot.
-    if target.os == fcae_build::target::Os::Windows {
-        println!("cargo:rustc-link-arg=-Wl,-l:libfcae_zeptun_static.a");
-        println!("cargo:rustc-link-arg=-Wl,-Bdynamic");
-    } else {
-        println!("cargo:rustc-link-lib=static=fcae_zeptun_static");
-    }
+    println!("cargo:rustc-link-lib=static=fcae_zeptun_static");
     println!("cargo:rustc-cfg=zeptun_linked");
     println!("cargo:rustc-env=FCAE_ZEPTUN_HEADER={}", header.display());
     fcae_build::note(format!(

@@ -81,9 +81,17 @@ if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
     fi
   fi
 
-  test -s "${FCAE_HEV_EXE:?HEV sidecar was not built}"
-  test -s "${FCAE_ZEPTUN_EXE:?Zeptun sidecar was not built}"
-
+  # There is deliberately no "are the engine bytes really in here"
+  # check. The engine set is embedded with include_bytes!, which is a
+  # compile-time copy into the binary: if the dir is empty, stale or
+  # absent, cargo fails and this step never runs. The import check
+  # above already catches the one failure that would survive a
+  # successful build - a link that names one of those files.
+  #
+  # The engine dir is still asserted: it is exported by the engine
+  # build step, and if that link broke the failure would otherwise
+  # surface as a confusing rustc error.
+  : "${FCAE_HEV_ENGINE_DIR:?the hev engine dir was not exported}"
 fi
 
 if [ "${FCAE_MATRIX_NAME}" = "linux-x64" ]; then

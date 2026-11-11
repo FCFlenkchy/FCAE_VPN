@@ -1,5 +1,41 @@
-//! TUN bridge over hev-socks5-tunnel. Windows runs the upstream executable
-//! as a supervised sidecar; other platforms use the in-process C ABI.
+//! # fcae-bridge-hev-socks5-tunnel — TUN bridge over the hev-socks5-tunnel engine
+//!
+//! Implements [`fcae_runtime::session::TunBridge`] with **hev-socks5-tunnel**, a
+//! C SOCKS5 tunnel engine (coroutine I/O over lwip) that converts the local
+//! SOCKS5 endpoint a backend already exposes into a TUN device. It is a drop-in
+//! sibling of `fcae-bridge-tun2socks` and `fcae-bridge-zeptun`: no Go runtime,
+//! no subprocess, and every engine shares one wintun adapter identity
+//! (see [`WINTUN_ADAPTER_GUID`]).
+//!
+//! ## Backends
+//!
+//! | platform | backend | why |
+//! |----------|---------|-----|
+//! | Linux, macOS, Android | linked in-process, C ABI | the engine's own TUN code compiles for these |
+//! | Windows | native DLL loaded in-process at runtime | the MSVC C ABI interoperates with the MinGW host without a POSIX runtime |
+//!
+//! The Ubuntu `windows-x64` CI leg runs upstream's native Windows build with
+//! Clang targeting MSVC. The resulting DLL embeds yaml, lwip and hev-task-system
+//! and is loaded with `LoadLibraryExW` at first use: same process and same
+//! wintun adapter identity as the other engines, while the app remains a MinGW
+//! binary.
+//!
+//! Loading is lazy and isolated: a missing or unloadable DLL surfaces as
+//! "engine unavailable" (or a specific start error) instead of taking the app
+//! down at startup.
+//!
+//! ## Build requirements
+//!
+//! * in-process: an archive built outside the cargo graph (see `build.rs`), i.e.
+//!   `make -C core/hev-socks5-tunnel static`, or `FCAE_HEV_LIBDIR=<dir>`.
+//! * Windows: `FCAE_HEV_DLL=<path to libhev-socks5-tunnel.dll>` during the
+//!   build tells the crate the DLL is part of the install. At runtime it is
+//!   loaded from beside the executable, or from the path in `FCAE_HEV_DLL`
+//!   when that variable is set. Without the build-time variable a Windows
+//!   build must use the stub:
+//!   `cargo build --features fcae-bridge-hev-socks5-tunnel/stub`.
+//!
+//! Do not ship a stub build: it reports the engine as unavailable in the UI.
 
 #[cfg(not(windows))]
 mod engine;
@@ -27,7 +63,8 @@ pub use engine::{HevSocks5TunnelBridge, unavailable_reason};
 /// this bridge renders.
 pub const WINTUN_ADAPTER_GUID: &str = "24198F4C-7895-434C-AD65-9E29A92DDC61";
 
-/// True when the engine is linked or its Windows sidecar is embedded.
+/// True when this build can actually run the engine: the C engine is linked
+/// in, or (Windows) the engine DLL loads from beside the running binary.
 pub fn is_supported() -> bool {
     engine::is_supported()
 }
@@ -40,7 +77,8 @@ pub fn is_privileged() -> bool {
 
 /// Traffic statistics from the engine.
 ///
-/// The Windows sidecar does not expose counters through its CLI.
+/// The in-process backend reads the engine's counters directly, on every
+/// platform including Windows (the engine runs inside this process).
 #[derive(Default, Clone, Copy, Debug)]
 pub struct HevStats {
     pub tx_packets: usize,

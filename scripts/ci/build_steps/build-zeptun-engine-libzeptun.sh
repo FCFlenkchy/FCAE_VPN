@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd core/zeptun
+ZIG_CACHE=""
+if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
+  ZIG_CACHE="$(mktemp -d "${RUNNER_TEMP:?}/zeptun-cache.XXXXXX")"
+  trap 'rm -rf "$ZIG_CACHE"' EXIT
+fi
 case "${FCAE_MATRIX_NAME}" in
   linux-x64)   zig build -Dtarget=x86_64-linux-gnu -Doptimize=small ;;
-  windows-x64) zig build -Dtarget=x86_64-windows-gnu -Doptimize=small ;;
+  windows-x64) zig build -Dtarget=x86_64-windows-gnu -Doptimize=small --cache-dir "$ZIG_CACHE" ;;
   macos-arm64) zig build -Dtarget=aarch64-macos -Doptimize=small ;;
   macos-x64)   zig build -Dtarget=x86_64-macos -Doptimize=small ;;
   android-*)
@@ -38,9 +43,30 @@ case "${FCAE_MATRIX_NAME}" in
   *) echo "::error::Unsupported zeptun target: ${FCAE_MATRIX_NAME}"; exit 1 ;;
 esac
 if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
-  test -s zig-out/bin/zeptun.exe
-  echo "FCAE_ZEPTUN_EXE=$PWD/zig-out/bin/zeptun.exe" >> "$GITHUB_ENV"
-  exit 0
+  # The installed filename can collide with an import library. Pick the
+  # real GNU archive from this build's isolated cache instead of editing
+  # the upstream build file.
+  STATIC_ZEPTUN=""
+  while IFS= read -r -d '' candidate; do
+    if ! llvm-nm --defined-only "$candidate" > "$ZIG_CACHE/symbols.txt" 2>/dev/null; then
+      continue
+    fi
+    if ! grep -Eq '[[:space:]]T[[:space:]]+zeptun_create$' "$ZIG_CACHE/symbols.txt" ||
+       grep -q '__imp_zeptun_create' "$ZIG_CACHE/symbols.txt"; then
+      continue
+    fi
+    if [ -n "$STATIC_ZEPTUN" ] && ! cmp -s "$STATIC_ZEPTUN" "$candidate"; then
+      echo "::error::multiple different Zeptun static archives found"
+      exit 1
+    fi
+    STATIC_ZEPTUN="$candidate"
+  done < <(find "$ZIG_CACHE/o" -type f -name 'libzeptun.a' -print0)
+  if [ -z "$STATIC_ZEPTUN" ]; then
+    echo "::error::the Zeptun static archive was not found in the build cache"
+    exit 1
+  fi
+  mkdir -p zig-out/lib
+  cp "$STATIC_ZEPTUN" zig-out/lib/libzeptun.a
 fi
 
 # `-lzeptun` must resolve to the static archive. On Windows-gnu the
