@@ -614,6 +614,7 @@ FcaeStatus fcae_set_firefox_protect(int (*protect)(int fd));
  * only the human answer. Request ID 0 means no challenge is pending. */
 uint64_t   fcae_firefox_captcha_pending(void);
 uint32_t   fcae_firefox_captcha_image(uint64_t id, char *out, uint32_t cap);
+uint32_t   fcae_firefox_captcha_rgba(uint64_t id, uint8_t *out, uint32_t cap, uint32_t *width, uint32_t *height);
 bool       fcae_firefox_captcha_answer(uint64_t id, const char *answer);
 
 /* Submit a native Rust Firefox account operation JSON request. Passwords and

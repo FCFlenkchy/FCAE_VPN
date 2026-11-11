@@ -911,7 +911,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = AccountStore::new(dir.path()).unwrap();
         store.set_relay_url("").unwrap();
-        let http = ControlPlane::new(Dialer::new(None, None, 0).unwrap()).with_relay_store(store);
+        let http = ControlPlane::new(Dialer::new(None, None, 10).unwrap()).with_relay_store(store);
         let activation = ControlRequest::new(Method::POST, "https://vpn.mozilla.org/api/v1/fpn/activate").unwrap();
         assert!(matches!(http.send_via_relay(activation).await, Err(FirefoxError::InvalidConfig(_))));
         let disallowed = ControlRequest::new(Method::POST, "https://example.com/").unwrap();

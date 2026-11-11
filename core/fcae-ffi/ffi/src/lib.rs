@@ -1206,6 +1206,29 @@ pub unsafe extern "C" fn fcae_firefox_captcha_image(id: u64, out: *mut c_char, c
     text.len() as u32
 }
 
+/// Returns the number of RGBA bytes for a pending visual CAPTCHA, or zero.
+/// The dimensions are written when available; a buffer of the returned size
+/// receives the pixels on a second call.
+#[no_mangle]
+pub unsafe extern "C" fn fcae_firefox_captcha_rgba(
+    id: u64, out: *mut u8, cap: u32, width: *mut u32, height: *mut u32,
+) -> u32 {
+    #[cfg(feature = "firefox")]
+    {
+        let image = guard_value("fcae_firefox_captcha_rgba", None, ||
+            fcae_firefox_bridge::accounts::captcha_rgba(id));
+        let Some((w, h, pixels)) = image else { return 0 };
+        if !width.is_null() { *width = w; }
+        if !height.is_null() { *height = h; }
+        if !out.is_null() && cap as usize >= pixels.len() {
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), out, pixels.len());
+        }
+        pixels.len() as u32
+    }
+    #[cfg(not(feature = "firefox"))]
+    { let _ = (id, out, cap, width, height); 0 }
+}
+
 /// Submits a trimmed, non-empty human answer. Returns false for an unknown,
 /// expired, already answered, or invalid request. Answers never enter snapshots.
 #[no_mangle]

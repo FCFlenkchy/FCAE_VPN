@@ -61,14 +61,13 @@ fn adapter(name: &str) -> Result<(NET_LUID_LH, u32, GUID)> {
     if name.is_empty() || name.contains('\0') {
         return Err(CoreError::InvalidConfig("invalid TUN adapter name".into()));
     }
-    let name_wide = wide(name);
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut luid = NET_LUID_LH::default();
     loop {
-        let code = unsafe { ConvertInterfaceAliasToLuid(name_wide.as_ptr(), &mut luid) };
+        let code = unsafe { ConvertInterfaceGuidToLuid(&ADAPTER_GUID, &mut luid) };
         if code == 0 { break; }
         if Instant::now() >= deadline {
-            checked(code, &format!("waiting for TUN adapter {name}"))?;
+            checked(code, &format!("waiting for FCAE TUN adapter {name} (fixed GUID)"))?;
         }
         std::thread::sleep(Duration::from_millis(20));
     }

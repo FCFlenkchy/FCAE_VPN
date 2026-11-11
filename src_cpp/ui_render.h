@@ -183,7 +183,6 @@ struct AppState {
     char firefox_status[256] = {};
     uint64_t firefox_job = 0;
     uint64_t firefox_captcha_id = 0;
-    uint64_t firefox_captcha_opened = 0;
     char firefox_captcha_answer[257] = {};
     char firefox_operation[24] = {};
     bool firefox_totp = false;

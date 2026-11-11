@@ -27,11 +27,11 @@ static bool window_hidden(GLFWwindow* window) {
 }
 
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
-    static GLuint textures[2] = {};
-    static uint64_t loaded[2] = {};
-    static int texture_width[2] = {};
-    static int texture_height[2] = {};
-    const int index = slot == 1 ? 1 : 0;
+    static GLuint textures[3] = {};
+    static uint64_t loaded[3] = {};
+    static int texture_width[3] = {};
+    static int texture_height[3] = {};
+    const int index = slot >= 0 && slot < 3 ? slot : 0;
     GLuint& texture = textures[index];
     if (!rgba || width <= 0 || height <= 0) return (ImTextureID)0;
     if (!texture) {

@@ -17,15 +17,15 @@ static ID3D11Device*           g_pd3dDevice       = nullptr;
 static ID3D11DeviceContext*    g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain*         g_pSwapChain       = nullptr;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
-static ID3D11Texture2D*        g_sponsor_textures[2] = {};
-static ID3D11ShaderResourceView* g_sponsor_views[2] = {};
-static uint64_t g_sponsor_loaded[2] = {};
-static int g_sponsor_texture_width[2] = {};
-static int g_sponsor_texture_height[2] = {};
+static ID3D11Texture2D*        g_sponsor_textures[3] = {};
+static ID3D11ShaderResourceView* g_sponsor_views[3] = {};
+static uint64_t g_sponsor_loaded[3] = {};
+static int g_sponsor_texture_width[3] = {};
+static int g_sponsor_texture_height[3] = {};
 static bool g_imgui_win32_ready = false;
 
 ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, uint64_t generation, int slot) {
-    const int index = slot == 1 ? 1 : 0;
+    const int index = slot >= 0 && slot < 3 ? slot : 0;
     ID3D11Texture2D*& texture = g_sponsor_textures[index];
     ID3D11ShaderResourceView*& view = g_sponsor_views[index];
     if (!rgba || width <= 0 || height <= 0 || !g_pd3dDevice || !g_pd3dDeviceContext)
@@ -62,7 +62,7 @@ ImTextureID sponsor_texture_update(const uint8_t* rgba, int width, int height, u
 }
 
 static void release_sponsor_textures() {
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 3; ++i) {
         if (g_sponsor_views[i]) { g_sponsor_views[i]->Release(); g_sponsor_views[i] = nullptr; }
         if (g_sponsor_textures[i]) { g_sponsor_textures[i]->Release(); g_sponsor_textures[i] = nullptr; }
         g_sponsor_loaded[i] = 0;

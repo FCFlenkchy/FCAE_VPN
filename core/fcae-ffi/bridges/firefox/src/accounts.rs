@@ -63,6 +63,37 @@ pub fn captcha_image(id: u64) -> Option<String> {
     captcha_requests().lock().get(&id).map(|request| request.image.clone())
 }
 
+pub fn captcha_rgba(id: u64) -> Option<(u32, u32, Vec<u8>)> {
+    decode_captcha_rgba(&captcha_image(id)?)
+}
+
+fn decode_captcha_rgba(data: &str) -> Option<(u32, u32, Vec<u8>)> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use image::{ImageFormat, ImageReader, Limits};
+    use std::io::Cursor;
+
+    if data.len() > 8 * 1024 * 1024 { return None; }
+    let (prefix, payload) = data.split_once(',')?;
+    let format = match prefix {
+        "data:image/png;base64" => ImageFormat::Png,
+        "data:image/jpeg;base64" => ImageFormat::Jpeg,
+        "data:image/gif;base64" => ImageFormat::Gif,
+        "data:image/webp;base64" => ImageFormat::WebP,
+        _ => return None,
+    };
+    let bytes = STANDARD.decode(payload).ok()?;
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(2048);
+    limits.max_image_height = Some(2048);
+    limits.max_alloc = Some(32 * 1024 * 1024);
+    reader.limits(limits);
+    let image = reader.decode().ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 || width > 2048 || height > 2048 { return None; }
+    Some((width, height, image.into_raw()))
+}
+
 pub fn captcha_answer(id: u64, answer: &str) -> bool {
     let answer = answer.trim();
     if id == 0 || answer.is_empty() || answer.len() > 256 {
@@ -377,6 +408,16 @@ fn optional(request: &Value, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captcha_decoder_checks_format_and_size() {
+        const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgZGL+DwABFAEG1rmmRQAAAABJRU5ErkJggg==";
+        assert!(decode_captcha_rgba("data:text/html;base64,AA==").is_none());
+        assert!(decode_captcha_rgba("data:image/png;base64,@@@").is_none());
+        assert!(decode_captcha_rgba(&format!("data:image/png;base64,{}", "A".repeat(8 * 1024 * 1024))).is_none());
+        let (width, height, pixels) = decode_captcha_rgba(PNG).unwrap();
+        assert_eq!((width, height, pixels), (1, 1, vec![1, 2, 3, 255]));
+    }
 
     #[test]
     fn quota_display_uses_reported_bytes_and_exact_exhaustion() {

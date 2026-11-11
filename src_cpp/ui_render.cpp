@@ -2107,78 +2107,6 @@ static bool open_external_url(const char* url) {
 #endif
 }
 
-static bool open_local_file(const std::string& path) {
-    if (path.empty() || path.find_first_of("\n\r") != std::string::npos) return false;
-#if defined(_WIN32)
-    return (INT_PTR)ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL) > 32;
-#elif defined(ANDROID)
-    return false;
-#else
-    pid_t pid = fork();
-    if (pid == 0) {
-#if defined(__APPLE__)
-        execlp("open", "open", path.c_str(), static_cast<char*>(nullptr));
-#else
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
-        execlp("xdg-open", "xdg-open", path.c_str(), static_cast<char*>(nullptr));
-#endif
-        _exit(127);
-    }
-    if (pid < 0) return false;
-    int status = 0;
-    waitpid(pid, &status, 0);
-    return status == 0;
-#endif
-}
-
-static bool firefox_open_captcha(uint64_t id) {
-    const uint32_t needed = fcae_firefox_captcha_image(id, nullptr, 0);
-    if (!needed || needed > 8 * 1024 * 1024) return false;
-    std::string image(needed + 1, '\0');
-    if (fcae_firefox_captcha_image(id, image.data(), (uint32_t)image.size()) != needed) return false;
-    image.resize(needed);
-    static const char* const formats[] = {
-        "data:image/png;base64,", "data:image/jpeg;base64,",
-        "data:image/gif;base64,", "data:image/webp;base64,"
-    };
-    size_t payload = std::string::npos;
-    for (const char* format : formats) {
-        const size_t length = strlen(format);
-        if (image.compare(0, length, format) == 0) { payload = length; break; }
-    }
-    if (payload == std::string::npos || payload == image.size() || (image.size() - payload) % 4 != 0) return false;
-    size_t padding = 0;
-    for (size_t i = payload; i < image.size(); ++i) {
-        const unsigned char c = (unsigned char)image[i];
-        if (isalnum(c) || c == '+' || c == '/') {
-            if (padding) return false;
-        } else if (c == '=' && i + 2 >= image.size()) {
-            ++padding;
-        } else {
-            return false;
-        }
-    }
-    static std::string previous_path;
-    const std::string filename = "firefox-captcha-" + std::to_string(id) + ".html";
-    const std::string path = join_path(data_dir(), filename.c_str());
-    if (!previous_path.empty() && previous_path != path) std::remove(previous_path.c_str());
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output) return false;
-    output << "<!doctype html><meta charset=utf-8><meta http-equiv=Content-Security-Policy "
-              "content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\">"
-              "<title>Firefox Account CAPTCHA</title><style>body{background:#151922;color:#edf1f7;"
-              "font:16px system-ui;margin:32px;text-align:center}img{max-width:100%;height:auto;"
-              "image-rendering:auto}p{color:#aeb8ca}</style><h1>Firefox Account CAPTCHA</h1>"
-              "<p>Return to FCAE VPN and enter these characters in Firefox settings.</p><img src=\"";
-    output.write(image.data(), (std::streamsize)image.size());
-    output << "\" alt=\"CAPTCHA challenge\">";
-    output.close();
-    if (!output) return false;
-    previous_path = path;
-    return open_local_file(path);
-}
-
 static void open_link(const char* url) {
     if (open_external_url(url)) return;
     ImGui::SetClipboardText(url);
@@ -2834,22 +2762,88 @@ static void firefox_poll_background() {
     }
 }
 
+static std::vector<uint8_t> s_firefox_captcha_rgba;
+static uint32_t s_firefox_captcha_width = 0;
+static uint32_t s_firefox_captcha_height = 0;
+static bool s_firefox_captcha_embedded = false;
+
 static void firefox_poll_captcha() {
     const uint64_t id = fcae_firefox_captcha_pending();
-    if (id != g_app.firefox_captcha_id) {
-        g_app.firefox_captcha_id = id;
-        g_app.firefox_captcha_opened = 0;
-        g_app.firefox_captcha_answer[0] = 0;
-        if (id) set_firefox_status(
-                         "Enter the CAPTCHA in Firefox settings to continue sign-in");
+    if (id == g_app.firefox_captcha_id) return;
+    g_app.firefox_captcha_id = id;
+    g_app.firefox_captcha_answer[0] = 0;
+    s_firefox_captcha_rgba.clear();
+    s_firefox_captcha_width = s_firefox_captcha_height = 0;
+    if (id) {
+        uint32_t width = 0, height = 0;
+        const uint32_t size = fcae_firefox_captcha_rgba(id, nullptr, 0, &width, &height);
+        if (size && size <= 16 * 1024 * 1024 && width && height &&
+            (uint64_t)width * height * 4 == size) {
+            s_firefox_captcha_rgba.resize(size);
+            uint32_t actual_width = 0, actual_height = 0;
+            if (fcae_firefox_captcha_rgba(id, s_firefox_captcha_rgba.data(), size,
+                    &actual_width, &actual_height) == size && width == actual_width && height == actual_height) {
+                s_firefox_captcha_width = width;
+                s_firefox_captcha_height = height;
+            } else {
+                s_firefox_captcha_rgba.clear();
+            }
+        }
+        set_firefox_status(s_firefox_captcha_rgba.empty()
+            ? "The Firefox CAPTCHA image could not be decoded."
+            : "Enter the CAPTCHA shown in the app to continue.");
     }
-    if (id && g_app.firefox_captcha_opened != id) {
-        g_app.firefox_captcha_opened = id;
-        if (!firefox_open_captcha(id)) {
-            set_firefox_status(
-                     "Could not open the CAPTCHA viewer; use Open CAPTCHA image to retry");
+    g_app.redraw_requested.store(true);
+}
+
+static void render_firefox_captcha_content() {
+    if (!g_app.firefox_captcha_id) return;
+    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.3f, 1.0f), "Firefox account CAPTCHA");
+    if (!s_firefox_captcha_rgba.empty()) {
+        const ImTextureID texture = sponsor_texture_update(s_firefox_captcha_rgba.data(),
+            (int)s_firefox_captcha_width, (int)s_firefox_captcha_height, g_app.firefox_captcha_id, 2);
+        if (texture) {
+            const float scale = std::min(1.0f, std::min(
+                std::max(1.0f, ImGui::GetContentRegionAvail().x) / s_firefox_captcha_width,
+                220.0f / s_firefox_captcha_height));
+            ImGui::Image(texture, ImVec2(s_firefox_captcha_width * scale, s_firefox_captcha_height * scale));
+        } else {
+            ImGui::TextWrapped("Could not display the CAPTCHA image.");
+        }
+    } else {
+        ImGui::TextWrapped("The CAPTCHA image is unavailable or uses an unsupported format.");
+    }
+    ImGui::InputText("CAPTCHA answer", g_app.firefox_captcha_answer, sizeof(g_app.firefox_captcha_answer));
+    if (ImGui::Button("Submit CAPTCHA answer")) {
+        if (fcae_firefox_captcha_answer(g_app.firefox_captcha_id, g_app.firefox_captcha_answer)) {
+            g_app.firefox_captcha_answer[0] = 0;
+            set_firefox_status("CAPTCHA answer submitted; continuing Firefox account sign-in");
+        } else {
+            set_firefox_status("CAPTCHA answer is empty, expired, or already submitted");
         }
     }
+    ImGui::Spacing();
+}
+
+static void constrain_modal();
+
+static void render_firefox_captcha_popup() {
+    const char* name = "Firefox account CAPTCHA";
+    const bool open = ImGui::IsPopupOpen(name);
+    if (g_app.firefox_captcha_id && !s_firefox_captcha_embedded && !open &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
+        ImGui::OpenPopup(name);
+    }
+    ImGui::SetNextWindowPos(viewport_center(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Appearing);
+    constrain_modal();
+    if (!ImGui::BeginPopupModal(name, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    if (!g_app.firefox_captcha_id) {
+        ImGui::CloseCurrentPopup();
+    } else {
+        render_firefox_captcha_content();
+    }
+    ImGui::EndPopup();
 }
 
 static const char* const kTransportNames[] = {
@@ -2988,6 +2982,8 @@ static void render_firefox_settings() {
         return;
     }
     s_firefox_settings_visible = true;
+    s_firefox_captcha_embedded = true;
+    render_firefox_captcha_content();
     ImGui::BeginChild("##firefox_scroll",
         ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8.0f),
         ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
@@ -3003,27 +2999,6 @@ static void render_firefox_settings() {
         ImGui::TextWrapped("Could not save or load the relay URL. Use a valid HTTP or HTTPS URL; the previous setting may still be active.");
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     firefox_account_rows(root);
-    if (g_app.firefox_captcha_id) {
-        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.3f, 1.0f), "CAPTCHA required");
-        ImGui::InputText("CAPTCHA answer", g_app.firefox_captcha_answer, sizeof(g_app.firefox_captcha_answer));
-        if (ImGui::Button("Submit CAPTCHA answer")) {
-            if (fcae_firefox_captcha_answer(g_app.firefox_captcha_id, g_app.firefox_captcha_answer)) {
-                g_app.firefox_captcha_answer[0] = 0;
-                set_firefox_status(
-                         "CAPTCHA answer submitted; continuing Firefox account sign-in");
-            } else {
-                set_firefox_status(
-                         "CAPTCHA answer is empty, expired, or already submitted");
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Open CAPTCHA image")) {
-            g_app.firefox_captcha_opened = g_app.firefox_captcha_id;
-            if (!firefox_open_captcha(g_app.firefox_captcha_id)) {
-                set_firefox_status("Could not open the CAPTCHA image");
-            }
-        }
-    }
     if (g_app.firefox_job) ImGui::TextDisabled("Account operation in progress…");
     if (g_app.firefox_status[0]) ImGui::TextWrapped("%s", g_app.firefox_status);
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
@@ -3063,6 +3038,8 @@ static void render_firefox_add_account() {
         ImGui::EndPopup();
         return;
     }
+    s_firefox_captcha_embedded = true;
+    render_firefox_captcha_content();
     ImGui::InputText("Email", g_app.firefox_email, sizeof(g_app.firefox_email));
     ImGui::InputText("Password", g_app.firefox_password, sizeof(g_app.firefox_password), ImGuiInputTextFlags_Password);
     ImGui::BeginDisabled(g_app.firefox_job != 0 || !g_app.firefox_email[0] || !g_app.firefox_password[0]);
@@ -3106,6 +3083,8 @@ static void render_firefox_code_prompt() {
         ImGui::EndPopup();
         return;
     }
+    s_firefox_captcha_embedded = true;
+    render_firefox_captcha_content();
     const std::string root = firefox_json_escape(data_dir().c_str());
     const bool email_link = verification && s_firefox_email_link;
     if (verification) {
@@ -4439,8 +4418,8 @@ void render_ui() {
             // Psiphon's own listeners, kept off the engine's and Tor's ports.
             ImGui::Checkbox("Psiphon SOCKS5 proxy", &g_app.psiphon_socks_enabled);
             ImGui::Checkbox("Psiphon HTTP proxy", &g_app.psiphon_http_enabled);
-            ImGui::InputInt("Psiphon SOCKS port", &g_app.psiphon_socks_port);
-            ImGui::InputInt("Psiphon HTTP port", &g_app.psiphon_http_port);
+            ImGui::InputInt("Psiphon SOCKS port", &g_app.psiphon_socks_port, 0, 0);
+            ImGui::InputInt("Psiphon HTTP port", &g_app.psiphon_http_port, 0, 0);
             ImGui::TextDisabled("0 restores the built-in value (fixed, never auto-picked).");
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
@@ -4457,9 +4436,9 @@ void render_ui() {
             // ignores them when no Tor is in play (to_config normalises).
             ImGui::Checkbox("Tor SOCKS5 proxy", &g_app.tor_socks_enabled);
             ImGui::Checkbox("Tor HTTP proxy", &g_app.tor_http_enabled);
-            ImGui::InputInt("Tor HTTP port", &g_app.tor_http_port);
+            ImGui::InputInt("Tor HTTP port", &g_app.tor_http_port, 0, 0);
             if (g_app.tor_http_enabled && g_app.tor_http_port == 0) g_app.tor_http_port = 1822;
-            ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port);
+            ImGui::InputInt("Tor SOCKS port", &g_app.tor_socks_port, 0, 0);
             const char* tor_bridges[] = { "No bridges", "obfs4", "snowflake", "Custom lines" };
             ImGui::Combo("Bridges", &g_app.tor_bridges, tor_bridges, 4);
             // Writable even with "No bridges": pasted lines override the
@@ -4708,9 +4687,11 @@ void render_ui() {
     ImGui::EndChild();
 
     render_protocol_editor();
+    s_firefox_captcha_embedded = false;
     render_firefox_settings();
     render_firefox_add_account();
     render_firefox_code_prompt();
+    render_firefox_captcha_popup();
 
     ImGui::PopStyleVar(2);
     ImGui::End();

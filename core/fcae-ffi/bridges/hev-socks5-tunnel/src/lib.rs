@@ -90,6 +90,7 @@ pub struct HevStats {
 /// `tunnel.ipv4`/`tunnel.ipv6` take bare addresses: the engine derives the
 /// netmask itself (`inet_pton` plus a fixed /32 and /128), so a CIDR from the
 /// session config is reduced to its address.
+#[cfg(target_os = "android")]
 pub(crate) fn bare_address(cidr: &str) -> &str {
     cidr.split('/').next().unwrap_or(cidr)
 }
@@ -132,9 +133,12 @@ pub(crate) fn generate_config(cfg: &fcae_runtime::config::SessionConfig, socks: 
     yaml.push_str(&format!("  guid: {}\n", crate::WINTUN_ADAPTER_GUID));
     yaml.push_str(&format!("  mtu: {}\n", cfg.tun.mtu));
     yaml.push_str("  multi-queue: false\n");
-    yaml.push_str(&format!("  ipv4: {}\n", bare_address(&cfg.tun.ipv4)));
-    if let Some(ipv6) = &cfg.tun.ipv6 {
-        yaml.push_str(&format!("  ipv6: '{}'\n", bare_address(ipv6)));
+    #[cfg(target_os = "android")]
+    {
+        yaml.push_str(&format!("  ipv4: {}\n", bare_address(&cfg.tun.ipv4)));
+        if let Some(ipv6) = &cfg.tun.ipv6 {
+            yaml.push_str(&format!("  ipv6: '{}'\n", bare_address(ipv6)));
+        }
     }
     yaml.push_str("  icmp: 'off'\n\n");
     yaml.push_str("socks5:\n");
@@ -150,6 +154,16 @@ pub(crate) fn generate_config(cfg: &fcae_runtime::config::SessionConfig, socks: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    fn desktop_host_guard_owns_address_configuration() {
+        let config = fcae_runtime::config::SessionConfig::default();
+        let (_, yaml) = generate_config(&config, "127.0.0.1:1080".parse().unwrap()).unwrap();
+        assert!(!yaml.contains("  ipv4:"));
+        assert!(!yaml.contains("  ipv6:"));
+        assert!(yaml.contains("  mtu:"));
+    }
 
     /// Only levels the engine understands may be emitted: an unknown string
     /// silently becomes `warn`, which would hide the errors a failed start is
