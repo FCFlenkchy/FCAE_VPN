@@ -23,6 +23,7 @@ fcae-runtime.workspace = true
 libc.workspace = true
 log.workspace = true
 parking_lot.workspace = true
+serde_json.workspace = true
 
 [build-dependencies]
 fcae-build.workspace = true

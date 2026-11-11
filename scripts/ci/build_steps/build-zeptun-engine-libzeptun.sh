@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd core/zeptun
-if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
-  # Static and shared Windows artifacts otherwise share a basename;
-  # the DLL import library can overwrite the static archive.
-  sed -i 's/\.name = if (target\.result\.abi == \.msvc) "zeptun_static" else "zeptun"/.name = "fcae_zeptun_static"/' build.zig
-fi
 case "${FCAE_MATRIX_NAME}" in
   linux-x64)   zig build -Dtarget=x86_64-linux-gnu -Doptimize=small ;;
   windows-x64) zig build -Dtarget=x86_64-windows-gnu -Doptimize=small ;;
@@ -43,20 +38,9 @@ case "${FCAE_MATRIX_NAME}" in
   *) echo "::error::Unsupported zeptun target: ${FCAE_MATRIX_NAME}"; exit 1 ;;
 esac
 if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
-  STATIC_ZEPTUN=""
-  for candidate in zig-out/lib/libfcae_zeptun_static.a zig-out/lib/libfcae_zeptun_static.lib zig-out/lib/fcae_zeptun_static.lib; do
-    if [ -s "$candidate" ]; then STATIC_ZEPTUN="$candidate"; break; fi
-  done
-  if [ -z "$STATIC_ZEPTUN" ]; then
-    echo "::error::Zig did not emit the uniquely named static zeptun archive"
-    ls -la zig-out/lib
-    exit 1
-  fi
-  if strings "$STATIC_ZEPTUN" | grep -qiE '(^|[^[:alnum:]_])zeptun\.dll([^[:alnum:]_]|$)'; then
-    echo "::error::the uniquely named zeptun archive is an import library"
-    exit 1
-  fi
-  cp "$STATIC_ZEPTUN" zig-out/lib/libzeptun.a
+  test -s zig-out/bin/zeptun.exe
+  echo "FCAE_ZEPTUN_EXE=$PWD/zig-out/bin/zeptun.exe" >> "$GITHUB_ENV"
+  exit 0
 fi
 
 # `-lzeptun` must resolve to the static archive. On Windows-gnu the

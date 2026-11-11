@@ -1,30 +1,13 @@
-//! Wires the hev-socks5-tunnel engine into the crate.
-//!
-//! Two backends, one per platform family:
-//!
-//! * **In-process, linked** (Linux, macOS, Android): the engine is built with
-//!   its own Makefile outside the cargo graph — `make -C core/hev-socks5-tunnel
-//!   static`, cross-compiled with the NDK on Android — and the archive is
-//!   linked into libfcae_ffi. `FCAE_HEV_LIBDIR=<dir>` overrides the search path.
-//! * **In-process, DLL** (Windows): the Ubuntu `windows-x64` CI leg builds the
-//!   engine with Clang targeting MSVC, this script embeds the resulting DLL in
-//!   the binary, and the app loads it at runtime: same process, no child
-//!   process, no exe, no files beside the exe.
-//!   `FCAE_HEV_DLL` says that DLL is part of the build, which is what makes
-//!   the crate compile the dynamic backend and report the engine as available.
-//!   Without it a Windows build must use `stub`.
+//! Links HEV on non-Windows platforms and embeds its executable on Windows.
 
 use std::path::{Path, PathBuf};
-
-/// Embed every staged engine file so any runtime files added by upstream stay
-/// beside the DLL when the bridge extracts it.
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(hev_linked)");
     println!("cargo::rustc-check-cfg=cfg(wintun_staged)");
     println!("cargo::rustc-check-cfg=cfg(hev_dynamic)");
     fcae_build::rerun_if_env_changed("FCAE_HEV_LIBDIR");
-    fcae_build::rerun_if_env_changed("FCAE_HEV_DLL");
+    fcae_build::rerun_if_env_changed("FCAE_HEV_EXE");
     fcae_build::rerun_if_env_changed("ANDROID_NDK_HOME");
 
     // Checked before anything else: a stub build links no engine, so it must
@@ -48,65 +31,13 @@ fn main() {
         println!("cargo:rustc-env=FCAE_HEV_WINTUN_DLL={}", dll.display());
     }
 
-    // Nothing ships beside the app: the native DLL and any staged runtime files
-    // are embedded here and extracted by the bridge before loading.
     if target.os == fcae_build::target::Os::Windows {
-        let staged = std::env::var("FCAE_HEV_DLL").unwrap_or_default();
-        let staged = staged.trim();
-        if !staged.is_empty() && Path::new(staged).is_file() {
-            let engine_dir = Path::new(staged)
-                .parent()
-                .expect("FCAE_HEV_DLL must point inside the engine directory");
-            let out_dir =
-                Path::new(&std::env::var_os("OUT_DIR").expect("cargo must set OUT_DIR"))
-                    .join("engine");
-            std::fs::create_dir_all(&out_dir).expect("cannot create OUT_DIR/engine");
-            let mut names = Vec::new();
-            for entry in std::fs::read_dir(engine_dir)
-                .unwrap_or_else(|e| panic!("cannot read engine directory {}: {e}", engine_dir.display()))
-            {
-                let entry = entry.expect("cannot inspect staged engine file");
-                let file = entry.path();
-                if !file.is_file() {
-                    continue;
-                }
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if Path::new(&name).file_name() != Some(std::ffi::OsStr::new(&name)) {
-                    panic!("invalid staged engine filename: {name}");
-                }
-                fcae_build::rerun_if_changed(&file);
-                std::fs::copy(&file, out_dir.join(&name)).unwrap_or_else(|e| {
-                    panic!("cannot embed {name} from {}: {e}", file.display())
-                });
-                names.push(name);
-            }
-            names.sort();
-            if !names.iter().any(|name| name == "libhev-socks5-tunnel.dll") {
-                panic!("the staged engine set is missing the HEV DLL");
-            }
-            let generated = names.iter().map(|name| {
-                format!(
-                    "    ({name:?}, include_bytes!(concat!(env!(\"OUT_DIR\"), \"/engine/{name}\"))),\n"
-                )
-            }).collect::<String>();
-            std::fs::write(
-                Path::new(&std::env::var_os("OUT_DIR").expect("cargo must set OUT_DIR"))
-                    .join("engine_files.rs"),
-                format!("&[\n{generated}]"),
-            ).expect("cannot generate embedded engine file list");
-            println!("cargo:rustc-cfg=hev_dynamic");
-            fcae_build::note(format!(
-                "hev-socks5-tunnel loads as a DLL in-process on Windows ({staged}); the full \
-                 engine set is embedded in the binary and extracted at load time"
-            ));
-            return;
-        }
-        panic!(
-            "the native Windows HEV DLL is missing. The Ubuntu windows-x64 CI leg cross-compiles \
-             it with Clang targeting MSVC; point FCAE_HEV_DLL at the staged \
-             libhev-socks5-tunnel.dll, or build with \
-             `--features fcae-bridge-hev-socks5-tunnel/stub` to report the engine unavailable."
-        );
+        let exe = std::env::var_os("FCAE_HEV_EXE").map(PathBuf::from)
+            .filter(|p| p.is_file()).expect("FCAE_HEV_EXE must point to the built Windows HEV executable");
+        fcae_build::rerun_if_changed(&exe);
+        println!("cargo:rustc-env=FCAE_HEV_EXE={}", exe.display());
+        println!("cargo:rustc-cfg=hev_dynamic");
+        return;
     }
 
     let submodule = fcae_build::repo_root().join("core/hev-socks5-tunnel");

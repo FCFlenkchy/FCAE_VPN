@@ -37,3 +37,6 @@ pub use error::{CoreError, Result};
 pub mod windows_dll;
 #[cfg(windows)]
 pub mod windows_tun;
+
+#[cfg(windows)]
+pub mod windows_sidecar;

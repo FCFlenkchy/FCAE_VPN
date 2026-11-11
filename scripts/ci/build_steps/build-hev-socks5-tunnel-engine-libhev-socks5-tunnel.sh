@@ -30,19 +30,12 @@ case "${FCAE_MATRIX_NAME}" in
     MSVC_CC="clang --target=x86_64-pc-windows-msvc -fuse-ld=lld-link"
     MSVC_CFLAGS="-isystem $MSVC_ROOT/crt/include -isystem $MSVC_ROOT/sdk/include/ucrt -isystem $MSVC_ROOT/sdk/include/um -isystem $MSVC_ROOT/sdk/include/shared"
     MSVC_LFLAGS="-L$MSVC_ROOT/crt/lib/x86_64 -L$MSVC_ROOT/sdk/lib/ucrt/x86_64 -L$MSVC_ROOT/sdk/lib/um/x86_64"
-    make shared OS=Windows_NT ARCH=x64 \
+    make exec OS=Windows_NT ARCH=x64 \
       CC="$MSVC_CC" AR=llvm-ar \
       CFLAGS="$MSVC_CFLAGS" LFLAGS="$MSVC_LFLAGS" \
       -j"$(nproc)"
-    test -s bin/hev-socks5-tunnel.dll
-    test -s bin/hev-socks5-tunnel.dll.lib
-
-    ENGINE="$ROOT/engine"
-    rm -rf "$ENGINE"
-    install -D -m 644 bin/hev-socks5-tunnel.dll \
-      "$ENGINE/libhev-socks5-tunnel.dll"
-    echo "FCAE_HEV_DLL=$ENGINE/libhev-socks5-tunnel.dll" >> "$GITHUB_ENV"
-    echo "FCAE_HEV_ENGINE_DIR=$ENGINE" >> "$GITHUB_ENV"
+    test -s bin/hev-socks5-tunnel.exe
+    echo "FCAE_HEV_EXE=$PWD/bin/hev-socks5-tunnel.exe" >> "$GITHUB_ENV"
     ;;
   android-*)
     if [ -z "${ANDROID_NDK_HOME:-}" ]; then
@@ -108,7 +101,7 @@ case "${FCAE_MATRIX_NAME}" in
   *) echo "::error::Unsupported hev target: ${FCAE_MATRIX_NAME}"; exit 1 ;;
 esac
 case "${FCAE_MATRIX_NAME}" in
-  windows-x64) ls -lh "$GITHUB_WORKSPACE/engine" ;;
+  windows-x64) ls -lh bin/hev-socks5-tunnel.exe ;;
   android-universal) ls -lh bin/android/*/lib*.a ;;
   *) ls -lh bin/libhev-socks5-tunnel.a ;;
 esac

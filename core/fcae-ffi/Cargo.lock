@@ -1759,6 +1759,7 @@ dependencies = [
  "libc",
  "log",
  "parking_lot",
+ "serde_json",
 ]
 
 [[package]]
