@@ -433,12 +433,10 @@ impl TunBridge for ZeptunBridge {
         }
 
         self.closing.store(false, Ordering::SeqCst);
-        {
-            let active = self.active.lock();
-            if active.is_some() {
-                log::warn!("[tun] start called while a device is already up; ignoring");
-                return Ok(());
-            }
+        let mut active = self.active.lock();
+        if active.is_some() {
+            log::warn!("[tun] start called while a device is already up; ignoring");
+            return Ok(());
         }
         if self.closing.load(Ordering::SeqCst) {
             return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
@@ -539,7 +537,6 @@ impl TunBridge for ZeptunBridge {
         self.install_log_hook(config.log_level);
 
         // Keep the duplicated FD alive until the engine is destroyed.
-        let mut active = self.active.lock();
         if self.closing.load(Ordering::SeqCst) {
             return Err(CoreError::Internal(
                 "TUN start cancelled before engine creation".into(),

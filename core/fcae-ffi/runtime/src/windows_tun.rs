@@ -99,9 +99,17 @@ fn adapter(name: &str) -> Result<(NET_LUID_LH, u32, GUID)> {
     Ok((luid, index, guid))
 }
 
+fn ipv6_table_available(code: u32) -> Result<bool> {
+    if code == ERROR_NOT_FOUND { return Ok(false); }
+    checked(code, "enumerate IPv6 interfaces")?;
+    Ok(true)
+}
+
 fn non_loopback_ipv6_present() -> Result<bool> {
     let mut table: *mut MIB_IPINTERFACE_TABLE = ptr::null_mut();
-    checked(unsafe { GetIpInterfaceTable(AF_INET6, &mut table) }, "enumerate IPv6 interfaces")?;
+    if !ipv6_table_available(unsafe { GetIpInterfaceTable(AF_INET6, &mut table) })? {
+        return Ok(false);
+    }
     if table.is_null() { return Err(CoreError::Internal("Windows returned an empty IPv6 interface table".into())); }
     let result = (|| -> Result<bool> {
         let count = unsafe { (*table).NumEntries as usize };
@@ -496,6 +504,13 @@ impl Drop for DnsGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_ipv6_table_is_empty_but_other_errors_are_not_ignored() {
+        assert!(ipv6_table_available(0).unwrap());
+        assert!(!ipv6_table_available(ERROR_NOT_FOUND).unwrap());
+        assert!(ipv6_table_available(5).is_err());
+    }
 
     #[test]
     fn socket_addresses_preserve_network_byte_order() {
