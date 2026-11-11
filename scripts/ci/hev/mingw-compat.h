@@ -9,6 +9,11 @@
 #define _MODE_T_DEFINED 1
 #endif
 
+/* MinGW declares this Winsock receive flag in mswsock.h, not winsock2.h. */
+#ifndef MSG_TRUNC
+#define MSG_TRUNC 0x0100
+#endif
+
 /* The pinned task-system assembly restores these slots directly. */
 #include <stddef.h>
 #include <setjmp.h>
