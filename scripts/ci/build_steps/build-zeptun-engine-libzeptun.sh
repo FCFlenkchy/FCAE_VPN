@@ -43,12 +43,14 @@ case "${FCAE_MATRIX_NAME}" in
   *) echo "::error::Unsupported zeptun target: ${FCAE_MATRIX_NAME}"; exit 1 ;;
 esac
 if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
-  # The installed filename can collide with an import library. Pick the
-  # real GNU archive from this build's isolated cache instead of editing
-  # the upstream build file.
+  # The static archive and DLL import library can both be called zeptun.lib
+  # for a Windows COFF target. Inspect this build's isolated cache, not the
+  # potentially overwritten install output or a restored cache.
   STATIC_ZEPTUN=""
   while IFS= read -r -d '' candidate; do
-    if ! llvm-nm --defined-only "$candidate" > "$ZIG_CACHE/symbols.txt" 2>/dev/null; then
+    if ! llvm-nm --defined-only "$candidate" > "$ZIG_CACHE/symbols.txt" 2> "$ZIG_CACHE/nm-error.txt"; then
+      echo "Cannot inspect Zeptun candidate $candidate:"
+      cat "$ZIG_CACHE/nm-error.txt"
       continue
     fi
     if ! grep -Eq '[[:space:]]T[[:space:]]+zeptun_create$' "$ZIG_CACHE/symbols.txt" ||
@@ -60,9 +62,11 @@ if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
       exit 1
     fi
     STATIC_ZEPTUN="$candidate"
-  done < <(find "$ZIG_CACHE/o" -type f -name 'libzeptun.a' -print0)
+  done < <(find "$ZIG_CACHE/o" -type f \
+    \( -name 'zeptun.lib' -o -name 'libzeptun.a' \) -print0)
   if [ -z "$STATIC_ZEPTUN" ]; then
-    echo "::error::the Zeptun static archive was not found in the build cache"
+    echo "::error::no Zeptun static archive with zeptun_create found in $ZIG_CACHE/o"
+    find "$ZIG_CACHE/o" -type f \( -name '*.lib' -o -name '*.a' \) -print | head -80 || true
     exit 1
   fi
   mkdir -p zig-out/lib

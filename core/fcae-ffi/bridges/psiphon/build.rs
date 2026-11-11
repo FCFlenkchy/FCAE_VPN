@@ -100,10 +100,6 @@ fn main() {
                 .and_then(|n| n.to_str())
                 .unwrap_or_else(|| panic!("{} is not valid UTF-8", built.archive.display()));
             println!("cargo:rustc-env=FCAE_PSIPHON_DLL_NAME={name}");
-            fcae_build::note(
-                "desktop Psiphon built as libfcae_psiphon (force_shared) and embedded \
-                 in the host binary; not linked, not shipped beside it",
-            );
         }
         Err(e) => panic!(
             "failed to build the desktop Psiphon Go bridge: {e}\n\

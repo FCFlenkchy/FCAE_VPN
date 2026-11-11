@@ -11,6 +11,6 @@ fn main() {
     fcae_build::rerun_if_changed(&header);
 
     // Regenerate when cbindgen is installed; otherwise the committed header
-    // is used as-is. CI runs `verify` to catch drift.
+    // is used only after verifying its ABI fingerprint.
     fcae_build::header::generate(&abi_dir, &header);
 }

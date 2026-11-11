@@ -195,15 +195,9 @@ fn install_native_handler() {
         for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE, libc::SIGABRT] {
             let mut old: libc::sigaction = std::mem::zeroed();
             if libc::sigaction(sig, std::ptr::null(), &mut old) != 0 { continue; }
-            #[cfg(target_os = "linux")]
             if old.sa_sigaction != libc::SIG_DFL { continue; }
-            #[cfg(target_os = "macos")]
-            if old.sa_sigaction.is_some() { continue; }
             let mut action: libc::sigaction = std::mem::zeroed();
-            #[cfg(target_os = "linux")]
-            { action.sa_sigaction = fatal_signal as libc::sighandler_t; }
-            #[cfg(target_os = "macos")]
-            { action.sa_sigaction = Some(fatal_signal); }
+            action.sa_sigaction = fatal_signal as *const () as libc::sighandler_t;
             action.sa_flags = libc::SA_RESETHAND;
             libc::sigemptyset(&mut action.sa_mask);
             libc::sigaction(sig, &action, std::ptr::null_mut());

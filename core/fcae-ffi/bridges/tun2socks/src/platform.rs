@@ -27,7 +27,7 @@ pub struct TunUndo {
     #[cfg(windows)]
     pub windows: Option<fcae_runtime::windows_tun::TunGuard>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    unix: Option<fcae_runtime::unix_tun::TunGuard>,
+    _unix: Option<fcae_runtime::unix_tun::TunGuard>,
 }
 
 /// True when the process can create a TUN device.
@@ -62,14 +62,14 @@ pub fn configure(cfg: &SessionConfig, peer_ip: Option<&str>) -> Result<TunUndo> 
         if !fcae_runtime::unix_tun::wait_for_device(name, false, Duration::from_secs(3)) {
             return Err(CoreError::Internal(format!("TUN device `{name}` did not appear")));
         }
-        Ok(TunUndo { unix: Some(fcae_runtime::unix_tun::TunGuard::configure(cfg, name, peer_ip, true)?) })
+        Ok(TunUndo { _unix: Some(fcae_runtime::unix_tun::TunGuard::configure(cfg, name, peer_ip, true)?) })
     }
     #[cfg(target_os = "macos")]
     {
         let name = fcae_runtime::unix_tun::utun_devices()
             .pop()
             .ok_or_else(|| CoreError::Internal("tun2socks created no utun device".into()))?;
-        Ok(TunUndo { unix: Some(fcae_runtime::unix_tun::TunGuard::configure(cfg, &name, peer_ip, true)?) })
+        Ok(TunUndo { _unix: Some(fcae_runtime::unix_tun::TunGuard::configure(cfg, &name, peer_ip, true)?) })
     }
     #[cfg(not(any(target_os = "android", windows, target_os = "linux", target_os = "macos")))]
     {

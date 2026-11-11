@@ -50,7 +50,7 @@ fn fingerprint(src: &str) -> u64 {
 pub fn generate(abi_crate_dir: &Path, header_path: &Path) -> bool {
     crate::rerun_if_changed(abi_crate_dir.join("src/lib.rs"));
 
-    let ok = Command::new("cbindgen")
+    let result = Command::new("cbindgen")
         .arg("--lang")
         .arg("c")
         .arg("--crate")
@@ -58,17 +58,21 @@ pub fn generate(abi_crate_dir: &Path, header_path: &Path) -> bool {
         .arg("--output")
         .arg(header_path)
         .current_dir(abi_crate_dir)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+        .status();
 
-    if !ok {
-        crate::note(
-            "cbindgen not available; using the committed include/fcae.h (run \
-             `cargo install cbindgen` to regenerate)",
-        );
+    match result {
+        Ok(status) if status.success() => true,
+        other => {
+            match other {
+                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                Err(e) => crate::note(format!("cannot run cbindgen: {e}; checking the committed header")),
+                Ok(status) => crate::note(format!("cbindgen exited with {status}; checking the committed header")),
+            }
+            verify(&abi_crate_dir.join("src/lib.rs"), header_path)
+                .unwrap_or_else(|e| panic!("{e}"));
+            false
+        }
     }
-    ok
 }
 
 /// Fail the build if the committed header's fingerprint does not match the
