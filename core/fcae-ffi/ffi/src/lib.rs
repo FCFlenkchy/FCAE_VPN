@@ -29,6 +29,8 @@ use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 
 mod logger;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+mod crash_log;
 
 /// Process-wide state, created by `fcae_init`.
 struct Runtime {
@@ -481,6 +483,8 @@ pub unsafe extern "C" fn fcae_config_default(out: *mut FcaeConfig) -> FcaeStatus
 pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatus {
     let opts = options;
     guard("fcae_init", move || {
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        crash_log::init();
         config::check_init_options(opts)?;
         let opts = &*opts;
 
@@ -502,6 +506,8 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
         let telemetry = Arc::new(TelemetryCell::new());
 
         logger::install(opts.log_cb, opts.user_data, opts.max_log_level);
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        crash_log::announce();
 
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         fcae_runtime::unix_tun::recover();

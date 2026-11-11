@@ -37,7 +37,7 @@ case "${FCAE_MATRIX_NAME}" in
     test -s bin/hev-socks5-tunnel.dll
     test -s bin/hev-socks5-tunnel.dll.lib
     IMPORTS="$(x86_64-w64-mingw32-objdump -p bin/hev-socks5-tunnel.dll)"
-    if grep -qiE 'DLL Name:.*msys-2\.0\.dll' <<< "$IMPORTS"; then
+    if grep -qiE 'DLL Name:[[:space:]]*msys-2[.]0[.]dll([[:space:]]|$)' <<< "$IMPORTS"; then
       echo "::error::HEV DLL unexpectedly depends on the MSYS2 runtime"
       exit 1
     fi

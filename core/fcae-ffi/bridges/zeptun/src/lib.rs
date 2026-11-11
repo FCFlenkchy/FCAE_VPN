@@ -296,12 +296,26 @@ fn zeptun_log_level(t2s_level: u8) -> u32 {
     }
 }
 
+static WORKER_FAILED: AtomicBool = AtomicBool::new(false);
+
+fn worker_stopped(level: c_int, text: &str) -> bool {
+    level == ZEPTUN_LOG_ERROR as c_int &&
+        ((text.starts_with("worker ") &&
+          (text.contains(": enabling event loop failed:") ||
+           text.contains(": device start failed:") ||
+           text.contains(": event loop failure:"))) ||
+         (text.starts_with("wintun: receive failed on ") && text.ends_with(", stopping")))
+}
+
 unsafe extern "C" fn log_trampoline(_ctx: *mut c_void, level: c_int, message: *const c_char, len: usize) {
     if message.is_null() {
         return;
     }
     let text = String::from_utf8_lossy(std::slice::from_raw_parts(message.cast(), len));
     let text = text.trim_end();
+    if worker_stopped(level, text) {
+        WORKER_FAILED.store(true, Ordering::SeqCst);
+    }
     match level as u32 {
         ZEPTUN_LOG_ERROR => log::error!("{text}"),
         ZEPTUN_LOG_WARN => log::warn!("{text}"),
@@ -544,6 +558,7 @@ impl TunBridge for ZeptunBridge {
         config.socks5_udp = u8::from(endpoints.udp || psiphon_adapter.is_some());
         config.socks5_pipeline = ZEPTUN_SOCKS5_PIPELINE_AUTO;
         config.log_level = zeptun_log_level(cfg.tun.t2s_log_level);
+        WORKER_FAILED.store(false, Ordering::SeqCst);
         self.install_log_hook(config.log_level);
 
         // Keep the duplicated FD alive until the engine is destroyed.
@@ -624,6 +639,9 @@ impl TunBridge for ZeptunBridge {
         if self.closing.load(Ordering::SeqCst) {
             return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
         }
+        if WORKER_FAILED.load(Ordering::SeqCst) {
+            return Err(CoreError::Internal("zeptun worker failed during startup".into()));
+        }
         self.running.store(true, Ordering::SeqCst);
         *active = Some(handle);
         log::info!(
@@ -668,6 +686,9 @@ impl TunBridge for ZeptunBridge {
     }
 
     fn check_health(&self, _cfg: &SessionConfig) -> Result<()> {
+        if WORKER_FAILED.load(Ordering::SeqCst) {
+            return Err(CoreError::Internal("zeptun worker failed".into()));
+        }
         if !self.is_running() {
             return Err(CoreError::Internal("TUN engine stopped unexpectedly".into()));
         }
@@ -689,6 +710,16 @@ impl TunBridge for ZeptunBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_errors_are_not_reported_as_healthy() {
+        for text in ["worker 0: enabling event loop failed: X", "worker 0: device start failed: X", "worker 0: event loop failure: X"] {
+            assert!(worker_stopped(ZEPTUN_LOG_ERROR as c_int, text));
+            assert!(!worker_stopped(ZEPTUN_LOG_WARN as c_int, text));
+        }
+        assert!(worker_stopped(ZEPTUN_LOG_ERROR as c_int, "wintun: receive failed on FCAE (error 5), stopping"));
+        assert!(!worker_stopped(ZEPTUN_LOG_ERROR as c_int, "worker 0: unrelated error"));
+    }
 
     #[test]
     fn concurrent_start_cannot_clear_a_pending_abort() {
