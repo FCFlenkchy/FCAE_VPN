@@ -369,6 +369,7 @@ impl Drop for Handle {
 // Bridge
 
 pub struct ZeptunBridge {
+    startup: Mutex<()>,
     active: Mutex<Option<Handle>>,
     running: AtomicBool,
     /// Set by `stop`/`abort` so an in-flight `start` aborts instead of
@@ -388,11 +389,20 @@ impl Default for ZeptunBridge {
 impl ZeptunBridge {
     pub const fn new() -> Self {
         Self {
+            startup: Mutex::new(()),
             active: Mutex::new(None),
             running: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             external_fd: AtomicI32::new(-1),
         }
+    }
+
+    fn begin_start(&self) -> Result<parking_lot::MutexGuard<'_, ()>> {
+        let guard = self.startup.try_lock().ok_or_else(|| {
+            CoreError::Internal("zeptun startup already in progress".into())
+        })?;
+        self.closing.store(false, Ordering::SeqCst);
+        Ok(guard)
     }
 
     /// Out-of-band TUN fd injection (Android). The host keeps ownership of
@@ -432,7 +442,7 @@ impl TunBridge for ZeptunBridge {
             ));
         }
 
-        self.closing.store(false, Ordering::SeqCst);
+        let _startup = self.begin_start()?;
         let mut active = self.active.lock();
         if active.is_some() {
             log::warn!("[tun] start called while a device is already up; ignoring");
@@ -629,6 +639,8 @@ impl TunBridge for ZeptunBridge {
         // C API has no timeout semantics; the engine's stop is prompt by
         // design (its own worker pool joins under its control).
         self.closing.store(true, Ordering::SeqCst);
+        let _startup = self.startup.lock();
+        self.closing.store(true, Ordering::SeqCst);
         let handle = self.active.lock().take();
         let was_up = handle.is_some();
         drop(handle);
@@ -677,6 +689,15 @@ impl TunBridge for ZeptunBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_start_cannot_clear_a_pending_abort() {
+        let bridge = ZeptunBridge::new();
+        let _first = bridge.begin_start().unwrap();
+        bridge.closing.store(true, Ordering::SeqCst);
+        assert!(bridge.begin_start().is_err());
+        assert!(bridge.closing.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn stub_is_unsupported() {

@@ -22,6 +22,15 @@ const RESTART_GRACE: Duration = Duration::from_secs(2);
 const STATS_TIMEOUT: Duration = Duration::from_millis(250);
 const DLL_NAME: &str = "libhev-socks5-tunnel.dll";
 
+fn begin_run(running: &AtomicBool, closing: &AtomicBool) -> Result<()> {
+    running.store(true, Ordering::SeqCst);
+    if closing.load(Ordering::SeqCst) {
+        running.store(false, Ordering::SeqCst);
+        return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
+    }
+    Ok(())
+}
+
 #[cfg(hev_dynamic)]
 const EMBEDDED: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/engine_files.rs"));
 
@@ -231,7 +240,7 @@ impl HevSocks5TunnelBridge {
         let closing = self.closing.clone();
         let rc = Arc::new(AtomicI32::new(0));
         let rc_thread = rc.clone();
-        self.running.store(true, Ordering::SeqCst);
+        begin_run(&self.running, &self.closing)?;
         let thread = std::thread::Builder::new().name("hev-socks5-tunnel".into()).spawn(move || {
             let bytes = config.as_bytes();
             let code = run_engine(&closing, || unsafe { entry(bytes.as_ptr(), bytes.len() as c_uint, -1) });
@@ -305,5 +314,21 @@ impl TunBridge for HevSocks5TunnelBridge {
         if !self.is_running() { return Err(CoreError::Internal("TUN engine stopped".into())); }
         self.active.lock().as_ref().and_then(|a| a.undo.as_ref()).map(|g| g.check_health()).transpose()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_start_does_not_mark_engine_running() {
+        let running = AtomicBool::new(false);
+        let closing = AtomicBool::new(true);
+        assert!(begin_run(&running, &closing).is_err());
+        assert!(!running.load(Ordering::SeqCst));
+        closing.store(false, Ordering::SeqCst);
+        assert!(begin_run(&running, &closing).is_ok());
+        assert!(running.load(Ordering::SeqCst));
     }
 }
