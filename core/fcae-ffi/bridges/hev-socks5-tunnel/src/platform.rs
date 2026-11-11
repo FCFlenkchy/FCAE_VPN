@@ -2,7 +2,7 @@ pub fn is_privileged() -> bool {
     #[cfg(unix)]
     { unsafe { libc::geteuid() == 0 } }
     #[cfg(windows)]
-    { std::fs::OpenOptions::new().write(true).open("\\\\.\\PHYSICALDRIVE0").is_ok() }
+    { fcae_runtime::windows_tun::is_privileged() }
     #[cfg(not(any(unix, windows)))]
     { false }
 }

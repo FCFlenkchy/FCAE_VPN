@@ -37,14 +37,7 @@ pub fn is_privileged() -> bool {
         unsafe { libc::geteuid() == 0 }
     }
     #[cfg(windows)]
-    {
-        // Probing a privileged path is cheaper and more reliable than the
-        // token API dance, and matches what the old code concluded.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open("\\\\.\\PHYSICALDRIVE0")
-            .is_ok()
-    }
+    { fcae_runtime::windows_tun::is_privileged() }
     #[cfg(not(any(unix, windows)))]
     {
         false

@@ -22,14 +22,7 @@ pub fn is_privileged() -> bool {
         unsafe { libc::geteuid() == 0 }
     }
     #[cfg(windows)]
-    {
-        // Same cheap probe as tun2socks: opening PHYSICALDRIVE0 succeeds only
-        // for Administrators, and `net session` lists only admin sessions.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open("\\\\.\\PHYSICALDRIVE0")
-            .is_ok()
-    }
+    { fcae_runtime::windows_tun::is_privileged() }
     #[cfg(not(any(unix, windows)))]
     {
         false

@@ -586,11 +586,15 @@ impl TunBridge for ZeptunBridge {
             }
         }
 
+        #[cfg(windows)]
+        log::info!("[zeptun] starting native engine and Wintun adapter");
         let rc = unsafe { zeptun_start(handle.as_ptr()) };
         if rc != ZEPTUN_OK {
             return Err(zeptun_err("start", rc)); // Handle drops: stop+destroy.
         }
 
+        #[cfg(windows)]
+        log::info!("[zeptun] native engine started; configuring Windows networking");
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         let mut handle = handle;
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]

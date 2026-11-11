@@ -4,7 +4,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use windows_sys::core::GUID;
-use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS};
+use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
 use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Networking::WinSock::*;
@@ -13,6 +15,19 @@ use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF
 use crate::config::SessionConfig;
 use crate::error::{CoreError, Result};
 use crate::windows_dll::Library;
+
+pub fn is_privileged() -> bool {
+    unsafe {
+        let mut token = ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 { return false; }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut size = 0;
+        let ok = GetTokenInformation(token, TokenElevation, (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32, &mut size);
+        CloseHandle(token);
+        ok != 0 && elevation.TokenIsElevated != 0
+    }
+}
 
 const ADAPTER_GUID: GUID = GUID::from_u128(0x24198f4c_7895_434c_ad65_9e29a92ddc61);
 
@@ -84,6 +99,25 @@ fn adapter(name: &str) -> Result<(NET_LUID_LH, u32, GUID)> {
     Ok((luid, index, guid))
 }
 
+fn non_loopback_ipv6_present() -> Result<bool> {
+    let mut table: *mut MIB_IPINTERFACE_TABLE = ptr::null_mut();
+    checked(unsafe { GetIpInterfaceTable(AF_INET6, &mut table) }, "enumerate IPv6 interfaces")?;
+    if table.is_null() { return Err(CoreError::Internal("Windows returned an empty IPv6 interface table".into())); }
+    let result = (|| -> Result<bool> {
+        let count = unsafe { (*table).NumEntries as usize };
+        let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), count) };
+        for row in rows {
+            let mut interface = MIB_IF_ROW2::default();
+            interface.InterfaceLuid = row.InterfaceLuid;
+            checked(unsafe { GetIfEntry2(&mut interface) }, "inspect IPv6 interface")?;
+            if interface.Type != IF_TYPE_SOFTWARE_LOOPBACK { return Ok(true); }
+        }
+        Ok(false)
+    })();
+    unsafe { FreeMibTable(table.cast()); }
+    result
+}
+
 fn best_route(peer: IpAddr) -> Result<MIB_IPFORWARD_ROW2> {
     let mut row = MIB_IPFORWARD_ROW2::default();
     let mut source = SOCKADDR_INET::default();
@@ -118,6 +152,7 @@ pub struct TunGuard {
     addresses: Vec<MIB_UNICASTIPADDRESS_ROW>,
     interfaces: Vec<InterfaceChange>,
     dns: Option<DnsGuard>,
+    ipv6_unavailable: bool,
 }
 
 impl std::fmt::Debug for TunGuard {
@@ -143,7 +178,7 @@ impl TunGuard {
         }
         let servers = crate::tun_dns::servers(cfg)?;
         let (luid, index, guid) = adapter(&cfg.tun.name)?;
-        let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None };
+        let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None, ipv6_unavailable: false };
         for (position, peer) in peers.into_iter().enumerate() {
             // The endpoint the engine was told to use must be kept off the
             // device or the session flaps, so that one still fails loudly.
@@ -180,11 +215,19 @@ impl TunGuard {
         }
 
         guard.configure_interface(luid, AF_INET, cfg.tun.mtu)?;
-        guard.configure_interface(luid, AF_INET6, cfg.tun.mtu)?;
+        let ipv6_available = guard.configure_interface(luid, AF_INET6, cfg.tun.mtu)?;
+        guard.ipv6_unavailable = !ipv6_available;
+        if !ipv6_available && !servers.is_empty() && servers.iter().all(|server| server.contains(':')) {
+            return Err(CoreError::InvalidConfig("IPv6-only TUN DNS cannot be used when IPv6 is unavailable; configure an IPv4 resolver".into()));
+        }
+        if !ipv6_available { log::warn!("[tun] IPv6 is unavailable system-wide; using IPv4 only"); }
         guard.add_address(luid, address4)?;
-        if let Some(address6) = address6 { guard.add_address(luid, address6)?; }
+        if ipv6_available {
+            if let Some(address6) = address6 { guard.add_address(luid, address6)?; }
+        }
 
         for ip in [IpAddr::V4(Ipv4Addr::UNSPECIFIED), Ipv4Addr::new(128, 0, 0, 0).into(), IpAddr::V6(Ipv6Addr::UNSPECIFIED), Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0).into()] {
+            if ip.is_ipv6() && !ipv6_available { continue; }
             let mut row = MIB_IPFORWARD_ROW2::default();
             unsafe { InitializeIpForwardEntry(&mut row); }
             row.InterfaceLuid = luid;
@@ -202,7 +245,7 @@ impl TunGuard {
                 return Err(CoreError::Internal("outer endpoint bypass verification failed".into()));
             }
         }
-        guard.dns = Some(DnsGuard::apply_to(guid, &servers)?);
+        guard.dns = Some(DnsGuard::apply_to(guid, &servers, ipv6_available)?);
         log::info!(
             "[tun] Windows routing ready: interface {index}, outer endpoint(s) {:?}",
             guard.peers.iter().map(|bypass| bypass.peer).collect::<Vec<_>>()
@@ -211,6 +254,9 @@ impl TunGuard {
     }
 
     pub fn check_health(&self) -> Result<()> {
+        if self.ipv6_unavailable && non_loopback_ipv6_present()? {
+            return Err(CoreError::Internal("IPv6 became available outside the tunnel; reconnect required".into()));
+        }
         for bypass in &self.peers {
             let current = best_route(bypass.peer)?;
             if unsafe { current.InterfaceLuid.Value != bypass.luid.Value } || ip_of(&current.NextHop) != bypass.next_hop {
@@ -235,12 +281,27 @@ impl TunGuard {
         Ok(())
     }
 
-    fn configure_interface(&mut self, luid: NET_LUID_LH, family: u16, mtu: u32) -> Result<()> {
+    fn configure_interface(&mut self, luid: NET_LUID_LH, family: u16, mtu: u32) -> Result<bool> {
+        let deadline = Instant::now() + Duration::from_secs(10);
         let mut before = MIB_IPINTERFACE_ROW::default();
-        unsafe { InitializeIpInterfaceEntry(&mut before); }
-        before.InterfaceLuid = luid;
-        before.Family = family;
-        checked(unsafe { GetIpInterfaceEntry(&mut before) }, "read TUN interface settings")?;
+        loop {
+            unsafe { InitializeIpInterfaceEntry(&mut before); }
+            before.InterfaceLuid = luid;
+            before.Family = family;
+            let code = unsafe { GetIpInterfaceEntry(&mut before) };
+            if code == 0 { break; }
+            if code != ERROR_NOT_FOUND && code != ERROR_FILE_NOT_FOUND {
+                checked(code, if family == AF_INET { "read IPv4 TUN interface settings" } else { "read IPv6 TUN interface settings" })?;
+            }
+            if Instant::now() >= deadline {
+                if family == AF_INET6 && code == ERROR_NOT_FOUND {
+                    if !non_loopback_ipv6_present()? { return Ok(false); }
+                    return Err(CoreError::Internal("TUN adapter has no IPv6 interface (Win32 1168) but IPv6 is available on another interface; refusing to bypass the VPN. Check the adapter's IPv6 binding".into()));
+                }
+                checked(code, if family == AF_INET { "wait for IPv4 TUN interface settings" } else { "wait for IPv6 TUN interface settings" })?;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let mut applied = before;
         applied.NlMtu = mtu;
         applied.UseAutomaticMetric = false;
@@ -249,7 +310,7 @@ impl TunGuard {
         if family == AF_INET { applied.SitePrefixLength = 0; }
         checked(unsafe { SetIpInterfaceEntry(&mut applied) }, "configure TUN interface")?;
         self.interfaces.push(InterfaceChange { before, applied });
-        Ok(())
+        Ok(true)
     }
 
     fn add_address(&mut self, luid: NET_LUID_LH, (ip, bits): (IpAddr, u8)) -> Result<()> {
@@ -392,12 +453,13 @@ pub struct DnsGuard {
 impl DnsGuard {
     pub fn apply(cfg: &SessionConfig, name: &str) -> Result<Self> {
         let (_, _, guid) = adapter(name)?;
-        Self::apply_to(guid, &crate::tun_dns::servers(cfg)?)
+        Self::apply_to(guid, &crate::tun_dns::servers(cfg)?, true)
     }
 
-    fn apply_to(guid: GUID, servers: &[String]) -> Result<Self> {
+    fn apply_to(guid: GUID, servers: &[String], ipv6_available: bool) -> Result<Self> {
         let mut guard = Self { guid, api: DnsApi::get()?, changes: Vec::with_capacity(2) };
         for ipv6 in [false, true] {
+            if ipv6 && !ipv6_available { continue; }
             let family_servers: Vec<&str> = servers.iter().filter(|s| s.contains(':') == ipv6).map(String::as_str).collect();
             if family_servers.is_empty() { continue; }
             let before = guard.api.read(guid, ipv6)?;

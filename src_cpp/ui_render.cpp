@@ -2078,6 +2078,7 @@ static bool open_external_url(const char* url) {
             break;
         }
     }
+    if (!host_ok && strcmp(url, "https://accounts.firefox.com/signup") == 0) host_ok = true;
     if (!host_ok) return false;
 
     for (const char* c = url; *c; ++c) {
@@ -2334,6 +2335,9 @@ static void firefox_select_account(const FirefoxAccountOption& account) {
 static void firefox_account_rows(const std::string& root) {
     if (s_firefox_account_options.empty() && s_firefox_accounts_loaded) {
         ImGui::TextDisabled("No saved Firefox accounts.");
+        ImGui::TextUnformatted("Don't have an account?");
+        ImGui::SameLine();
+        if (ImGui::TextLink("Create one")) open_link("https://accounts.firefox.com/signup");
     }
     for (const FirefoxAccountOption& account : s_firefox_account_options) {
         ImGui::PushID(account.id.c_str());

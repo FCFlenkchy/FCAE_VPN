@@ -124,6 +124,7 @@ class MainActivity : AppCompatActivity() {
     private var firefoxStatusExpiry: Runnable? = null
     private var firefoxAccountRows: LinearLayout? = null
     private var firefoxAccountChoices: List<FirefoxAccountChoice> = emptyList()
+    private var firefoxAccountsLoaded = false
     private var firefoxSelectedAccountId = ""
     private var firefoxEmailView: android.widget.EditText? = null
     private var firefoxAddDialog: androidx.appcompat.app.AlertDialog? = null
@@ -2717,6 +2718,18 @@ class MainActivity : AppCompatActivity() {
             empty.textSize = 14f
             empty.setPadding(0, dp(8), 0, dp(8))
             rows.addView(empty)
+            if (firefoxAccountsLoaded) {
+                val signup = android.text.SpannableString("Don't have an account? Create one")
+                addLink(signup, "Create one", "https://accounts.firefox.com/signup")
+                val prompt = TextView(this).apply {
+                    text = signup
+                    setTextColor(Color.WHITE)
+                    textSize = 14f
+                    movementMethod = android.text.method.LinkMovementMethod.getInstance()
+                    setPadding(0, 0, 0, dp(8))
+                }
+                rows.addView(prompt)
+            }
         }
         for (choice in firefoxAccountChoices) {
             val entry = LinearLayout(this)
@@ -2783,6 +2796,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateFirefoxAccountChoices(choices: List<FirefoxAccountChoice>) {
+        firefoxAccountsLoaded = true
         firefoxAccountChoices = choices
         val savedId = prefs.getString("firefoxAccountId", "").orEmpty()
         if (firefoxSelectedAccountId.isBlank() || choices.none { it.id == firefoxSelectedAccountId }) {
