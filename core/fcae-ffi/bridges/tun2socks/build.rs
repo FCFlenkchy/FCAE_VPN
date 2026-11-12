@@ -21,6 +21,9 @@ fn main() {
     }
 
     if cfg!(feature = "stub") {
+        if cfg!(feature = "psiphon") {
+            panic!("desktop Psiphon requires the live tun2socks Go archive");
+        }
         fcae_build::note("fcae-bridge-tun2socks: `stub` feature enabled — Go bridge NOT built");
         return;
     }
@@ -40,11 +43,53 @@ fn main() {
     fcae_build::go::track_sources(&go_dir);
     fcae_build::rerun_if_changed(submodule.join("go.mod"));
 
-    let mut archive = fcae_build::go::CArchive::new(&go_dir, ".", "libfcae_go_bridge");
+    // Build both shims as one Go package when Psiphon is enabled.
+    let combined_dir;
+    let build_dir = if cfg!(feature = "psiphon") {
+        let root = fcae_build::repo_root();
+        let psi_go = root.join("core/fcae-ffi/bridges/psiphon/go");
+        let psiphon = root.join("core/psiphon");
+        if !psiphon.join("go.mod").is_file() {
+            panic!("psiphon submodule missing at {}", psiphon.display());
+        }
+        fcae_build::go::track_sources(&psi_go);
+        fcae_build::rerun_if_changed(psiphon.join("go.mod"));
+        combined_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"))
+            .join("combined-go");
+        std::fs::create_dir_all(&combined_dir).expect("create combined Go module");
+        std::fs::copy(go_dir.join("bridge.go"), combined_dir.join("bridge.go"))
+            .expect("copy tun2socks bridge");
+        let psi = std::fs::read_to_string(psi_go.join("bridge.go"))
+            .expect("read Psiphon bridge");
+        let main = "// c-archive / c-shared require a main package.\nfunc main() {}";
+        assert_eq!(psi.matches(main).count(), 1, "unexpected Psiphon bridge main");
+        std::fs::write(combined_dir.join("psiphon.go"), psi.replace(main, ""))
+            .expect("copy Psiphon bridge");
+        let original = std::fs::read_to_string(go_dir.join("go.mod"))
+            .expect("read tun2socks module");
+        let local = |path: &std::path::Path| {
+            assert!(path.is_absolute() && path.is_dir(), "missing Go module: {}", path.display());
+            let path = path.to_str().expect("Go module path must be UTF-8").replace('\\', "/");
+            format!("{:?}", path)
+        };
+        let manifest = original.replace("../../../../tun2socks", &local(&submodule));
+        let manifest = format!(
+            "{manifest}\nrequire github.com/Psiphon-Labs/psiphon-tunnel-core v0.0.0\n\
+             replace github.com/Psiphon-Labs/psiphon-tunnel-core => {}\n\
+             replace github.com/pion/dtls/v2 => {}\n\
+             replace gitlab.com/yawning/obfs4.git => github.com/jmwample/obfs4 v0.0.0-20230725223418-2d2e5b4a16ba\n",
+            local(&psiphon), local(&psiphon.join("replace/dtls"))
+        );
+        std::fs::write(combined_dir.join("go.mod"), manifest).expect("write combined Go module");
+        // Regenerate after changing inputs; generated sums must not outlive the
+        // manifest they describe in Cargo's reused OUT_DIR.
+        let _ = std::fs::remove_file(combined_dir.join("go.sum"));
+        combined_dir.as_path()
+    } else {
+        go_dir.as_path()
+    };
+    let mut archive = fcae_build::go::CArchive::new(build_dir, ".", "libfcae_go_bridge");
     archive.target = target;
-    // tun2socks only. Psiphon is a separate module (bridges/psiphon/go) and
-    // is not compiled into this archive. Do not add -checklinkname=0 here;
-    // that flag existed for Psiphon's github.com/wlynxg/anet linkname.
 
     match archive.build() {
         Ok(built) => {

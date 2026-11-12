@@ -19,10 +19,8 @@
 //! `MobileLibrary/psi` exposes `BindToDevice` — the hook that maps onto
 //! `VpnService.protect(fd)` — but it is a gobind package with no C surface.
 //!
-//! **Android:** official Psiphon AAR (`android/psiphon`). Do not compile
-//! `psi` into `libfcae_go_bridge.so`.
-//! **Desktop:** `go/bridge.go` wraps psi; that module is a second Go runtime
-//! (`force_shared`) and is not built while `enabled` is off.
+//! **Android:** the host service owns Psiphon in the combined Go shared library.
+//! **Desktop:** Psiphon and tun2socks share a single Go archive and runtime.
 //!
 //! ## Lifecycle
 //!
@@ -194,7 +192,7 @@ pub fn register() {
 
 pub struct PsiphonBackend;
 
-// App-process handshake with the Android AAR owner. IDs prevent a late READY
+// App-process handshake with the Android service owner. IDs prevent a late READY
 // from an old binding attaching its ports to a new session. No native restart
 // is needed: the carrier stays alive while the supervisor waits for this exit.
 struct HostAttach {
@@ -297,14 +295,14 @@ impl Backend for PsiphonBackend {
 
     #[cfg(not(all(feature = "enabled", psiphon_linked)))]
     fn availability(&self) -> std::result::Result<(), String> {
-        // Android: the official AAR owns the tunnel core. This backend
-        // attaches to the AAR's local SOCKS once the host passes the port.
+        // Android: the Android service owns the tunnel core. This backend
+        // attaches to the service's local SOCKS once the host passes the port.
         Ok(())
     }
 
     #[cfg(not(all(feature = "enabled", psiphon_linked)))]
     async fn start(&self, cx: BackendContext) -> Result<Box<dyn BackendHandle>> {
-        // AAR owns the tunnel core and the config JSON. Attach needs only the
+        // Android service owns the tunnel core and the config JSON. Attach needs only the
         // local SOCKS port — do not require a pasted sponsor config.
         let json: serde_json::Value = serde_json::from_str(
             cx.config.psiphon.config_json.as_deref().unwrap_or("{}")).unwrap_or_default();
@@ -477,7 +475,7 @@ impl Backend for PsiphonBackend {
     async fn drain(&self) {
         #[cfg(not(all(feature = "enabled", psiphon_linked)))]
         {
-            // The foreground owner polls this queue and stops an AAR whose
+            // The foreground owner polls this queue and stops a controller whose
             // request disappeared before an attach lease was returned.
             HOST_ATTACH.lock().take();
         }
@@ -540,7 +538,7 @@ pub(crate) struct StartInputs {
 ///
 /// Everything from here to the SERVER_LIST key is only consumed by the
 /// desktop live path (`#[cfg(all(feature = "enabled", psiphon_linked)))]`
-/// `start()`) and by unit tests. The Android/AAR attach stub builds configs
+/// `start()`) and by unit tests. The Android attach stub builds configs
 /// on the Java side, so these are gated out there instead of warning.
 #[cfg(any(test, all(feature = "enabled", psiphon_linked)))]
 pub(crate) fn validate(cfg: &fcae_runtime::config::SessionConfig) -> Result<StartInputs> {
@@ -898,346 +896,54 @@ mod ffi {
     use fcae_runtime::error::{CoreError, Result};
     use std::ffi::{c_char, c_int, CStr, CString};
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-    use std::sync::OnceLock;
 
-    /// The whole second Go runtime, carried inside this binary.
-    ///
-    /// A Go runtime cannot be shared with the tun2socks bridge — two static
-    /// c-archives duplicate `_cgo_topofstack`/`crosscall2`, and one `dlopen`'d
-    /// beside another SIGSEGVs — so Psiphon is its own module. What it does
-    /// not have to be is a file next to the executable: the bytes are
-    /// embedded here, unpacked into `deps/` beside the app on first use, and the
-    /// eleven `psi_*` exports below are bound by hand. Same shape as the
-    /// hev-socks5-tunnel engine, which is why the released desktop app is one
-    /// file rather than one file plus a DLL.
-    static EMBEDDED: &[u8] = include_bytes!(env!("FCAE_PSIPHON_DLL"));
+    // The tun2socks crate builds and links the single Go archive containing
+    // both sets of exports. Keep the dependency visible to rustc's linker.
+    use fcae_bridge_tun2socks as _;
 
-    /// The build derives this from the library it actually produced, so the
-    /// extension can never drift from what was built.
-    const DLL_NAME: &str = env!("FCAE_PSIPHON_DLL_NAME");
-    /// Beside the engine's own directory so neither overwrites the other.
-    #[cfg(unix)]
-    const EXTRACT_DIR: &str = "psiphon";
-
-    type SetLogCallback = unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int, *const c_char)>);
-    type SetProtectCallback = unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int) -> c_int>);
-    type SetNetworkCallbacks = unsafe extern "C" fn(
-        Option<super::DnsFn>,
-        Option<super::ConnectivityFn>,
-        Option<super::NetworkIdFn>,
-    );
-    type Start = unsafe extern "C" fn(*const c_char, *const c_char, c_int) -> c_int;
-    type Stop = unsafe extern "C" fn() -> c_int;
-    type State = unsafe extern "C" fn() -> c_int;
-    type Port = unsafe extern "C" fn() -> c_int;
-    type Regions = unsafe extern "C" fn() -> *mut c_char;
-    type StringFree = unsafe extern "C" fn(*mut c_char);
-    type Bytes = unsafe extern "C" fn(*mut i64, *mut i64);
+    extern "C" {
+        fn psi_set_log_callback(cb: Option<unsafe extern "C" fn(c_int, *const c_char)>);
+        fn psi_set_protect_callback(cb: Option<unsafe extern "C" fn(c_int) -> c_int>);
+        fn psi_set_network_callbacks(dns: Option<super::DnsFn>, connectivity: Option<super::ConnectivityFn>, network_id: Option<super::NetworkIdFn>);
+        fn psi_start(config: *const c_char, servers: *const c_char, binder: c_int) -> c_int;
+        fn psi_stop() -> c_int;
+        fn psi_state() -> c_int;
+        fn psi_socks_port() -> c_int;
+        fn psi_http_port() -> c_int;
+        fn psi_regions() -> *mut c_char;
+        fn psi_string_free(value: *mut c_char);
+        fn psi_bytes(up: *mut i64, down: *mut i64);
+    }
 
     struct Syms {
-        set_log_callback: SetLogCallback,
-        set_protect_callback: SetProtectCallback,
-        set_network_callbacks: SetNetworkCallbacks,
-        start: Start,
-        stop: Stop,
-        state: State,
-        socks_port: Port,
-        http_port: Port,
-        regions: Regions,
-        string_free: StringFree,
-        bytes: Bytes,
+        set_log_callback: unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int, *const c_char)>),
+        set_protect_callback: unsafe extern "C" fn(Option<unsafe extern "C" fn(c_int) -> c_int>),
+        set_network_callbacks: unsafe extern "C" fn(Option<super::DnsFn>, Option<super::ConnectivityFn>, Option<super::NetworkIdFn>),
+        start: unsafe extern "C" fn(*const c_char, *const c_char, c_int) -> c_int,
+        stop: unsafe extern "C" fn() -> c_int,
+        state: unsafe extern "C" fn() -> c_int,
+        socks_port: unsafe extern "C" fn() -> c_int,
+        http_port: unsafe extern "C" fn() -> c_int,
+        regions: unsafe extern "C" fn() -> *mut c_char,
+        string_free: unsafe extern "C" fn(*mut c_char),
+        bytes: unsafe extern "C" fn(*mut i64, *mut i64),
     }
-
-    // The module handle is deliberately leaked: unloading a Go runtime while
-    // its goroutines are parked is not a thing, and every caller holds raw
-    // pointers into it for the life of the process.
-    static SYMS: OnceLock<Syms> = OnceLock::new();
 
     fn syms() -> Result<&'static Syms> {
-        if let Some(syms) = SYMS.get() {
-            return Ok(syms);
-        }
-        // Not get_or_try_init: it is still unstable (rust-lang/rust#109737).
-        // Losing the race just costs one extra load, and set() hands the
-        // loser's value back. A failed load is retried on the next start
-        // rather than cached, which costs a temp write on a path that is
-        // already failing.
-        let loaded = load()?;
-        Ok(match SYMS.set(loaded) {
-            Ok(()) => SYMS.get().expect("set() succeeded, so the cell is full"),
-            Err(mine) => {
-                drop(mine);
-                SYMS.get().expect("a concurrent set filled the cell")
-            }
-        })
-    }
-
-    #[cfg(windows)]
-    extern "system" {
-        fn LoadLibraryW(lp_lib_filename: *const u16) -> *mut core::ffi::c_void;
-        fn GetProcAddress(
-            h_module: *mut core::ffi::c_void,
-            lp_proc_name: *const u8,
-        ) -> *mut core::ffi::c_void;
-        fn GetLastError() -> u32;
-    }
-
-    /// `RTLD_NOW | RTLD_LOCAL`, taken from libc because the numeric values
-    /// differ per platform -- on Darwin `RTLD_LOCAL` is 0x4, on glibc it is 0.
-    ///
-    /// `RTLD_NOW` resolves the Go runtime's own imports at load time rather
-    /// than on first call, so a broken library fails in `open()` with a real
-    /// `dlerror()` instead of later inside a `psi_*` call. A zero mode is not
-    /// legal: glibc rejects it with `EINVAL`, macOS with `invalid mode for
-    /// dlopen()`.
-    #[cfg(unix)]
-    const DLOPEN_FLAGS: c_int = libc::RTLD_NOW | libc::RTLD_LOCAL;
-
-    struct Error(String);
-
-    impl Error {
-        /// Reads the platform's last-error slot.
-        ///
-        /// Has to run immediately after the failed call: both slots are
-        /// thread-local and any later allocation or FFI call can overwrite
-        /// them, which is why this takes the already-formatted context rather
-        /// than building the message first.
-        fn last(context: String, path: &std::path::Path) -> Self {
-            #[cfg(windows)]
-            {
-                let code = unsafe { GetLastError() };
-                let text = std::io::Error::from_raw_os_error(
-                    i32::try_from(code).unwrap_or(i32::MAX),
-                );
-                Error(format!("{context} {}: {text} ({code})", path.to_string_lossy()))
-            }
-            #[cfg(unix)]
-            {
-                let raw = unsafe { libc::dlerror() };
-                let text = if raw.is_null() {
-                    "no diagnostic available".to_string()
-                } else {
-                    unsafe { CStr::from_ptr(raw) }.to_string_lossy().into_owned()
-                };
-                Error(format!("{context} {}: {text}", path.to_string_lossy()))
-            }
-        }
-    }
-
-    fn load() -> Result<Syms> {
-        let path = extract()?;
-        let module = open(&path)?;
-
-        macro_rules! sym {
-            ($ty:ty, $name:ident) => {{
-                // SAFETY: the bytes are a string literal plus one NUL.
-                let name = unsafe {
-                    CStr::from_bytes_with_nul_unchecked(
-                        concat!(stringify!($name), "\0").as_bytes(),
-                    )
-                };
-                symbol::<$ty>(module, name).ok_or_else(|| {
-                    CoreError::StartFailed(format!(
-                        "{DLL_NAME} does not export {}",
-                        stringify!($name)
-                    ))
-                })?
-            }};
-        }
-        // Resolved one at a time so the first missing export names itself.
-        // No placeholder pointers: a null function pointer is not a valid
-        // value, so a partially filled Syms cannot exist even transiently.
-        let resolved = Syms {
-            set_log_callback: sym!(SetLogCallback, psi_set_log_callback),
-            set_protect_callback: sym!(SetProtectCallback, psi_set_protect_callback),
-            set_network_callbacks: sym!(SetNetworkCallbacks, psi_set_network_callbacks),
-            start: sym!(Start, psi_start),
-            stop: sym!(Stop, psi_stop),
-            state: sym!(State, psi_state),
-            socks_port: sym!(Port, psi_socks_port),
-            http_port: sym!(Port, psi_http_port),
-            regions: sym!(Regions, psi_regions),
-            string_free: sym!(StringFree, psi_string_free),
-            bytes: sym!(Bytes, psi_bytes),
+        static SYMS: Syms = Syms {
+            set_log_callback: psi_set_log_callback,
+            set_protect_callback: psi_set_protect_callback,
+            set_network_callbacks: psi_set_network_callbacks,
+            start: psi_start,
+            stop: psi_stop,
+            state: psi_state,
+            socks_port: psi_socks_port,
+            http_port: psi_http_port,
+            regions: psi_regions,
+            string_free: psi_string_free,
+            bytes: psi_bytes,
         };
-        log::info!("[psiphon] loaded {DLL_NAME} from {}", path.display());
-        Ok(resolved)
-    }
-
-    /// Writes the embedded library into `deps/` beside the app (a per-user
-    /// private temp directory when that is unusable) and returns its path.
-    /// The host runs TUN elevated, so a shared, predictable extract path is
-    /// an escalation path: the directory must be 0700 and owned by this user,
-    /// and a file already on disk is trusted only when its bytes hash to the
-    /// embedded digest — a stale copy from an older version is never
-    /// dlopen'd either.
-    #[cfg(unix)]
-    fn extract() -> Result<std::path::PathBuf> {
-        let dir = match fcae_runtime::deps::dir() {
-            Some(deps) => deps.to_path_buf(),
-            None => private_temp_dir()?,
-        }
-        .join(EXTRACT_DIR);
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            CoreError::StartFailed(format!("cannot create {}: {e}", dir.display()))
-        })?;
-        let dest = dir.join(DLL_NAME);
-        if matches_embedded(&dest) {
-            return Ok(dest);
-        }
-        let staged = dir.join(format!(".{DLL_NAME}.tmp"));
-        std::fs::write(&staged, EMBEDDED).map_err(|e| {
-            CoreError::StartFailed(format!("cannot write {}: {e}", staged.display()))
-        })?;
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
-        }
-        // Renamed into place so a concurrent load never maps a half-written
-        // library.
-        std::fs::rename(&staged, &dest).map_err(|e| {
-            CoreError::StartFailed(format!("cannot move {} into place: {e}", dest.display()))
-        })?;
-        Ok(dest)
-    }
-
-    /// Stages the library like the engine DLLs: verified against the embedded
-    /// bytes and write-locked for the life of the process, so nothing can
-    /// swap it between the check and `LoadLibraryW`.
-    #[cfg(windows)]
-    fn extract() -> Result<std::path::PathBuf> {
-        use fcae_runtime::windows_dll::EmbeddedFiles;
-        static STAGED: OnceLock<EmbeddedFiles> = OnceLock::new();
-        let staged = match STAGED.get() {
-            Some(staged) => staged,
-            None => {
-                let files = EmbeddedFiles::stage("psiphon", &[(DLL_NAME, EMBEDDED)])?;
-                STAGED.get_or_init(|| files)
-            }
-        };
-        Ok(staged.directory().join(DLL_NAME))
-    }
-
-    #[cfg(unix)]
-    fn private_temp_dir() -> Result<std::path::PathBuf> {
-        use std::os::unix::fs::MetadataExt;
-        let uid = unsafe { libc::getuid() };
-        let base = std::env::temp_dir().join(format!("FCAE_VPN-{uid}"));
-        let cpath = CString::new(base.as_os_str().as_encoded_bytes()).map_err(|_| {
-            CoreError::StartFailed(format!("{} is not representable", base.display()))
-        })?;
-        // mkdir with the mode we need, atomically: create-then-chmod leaves a
-        // window where the shared default mode is live.
-        if unsafe { libc::mkdir(cpath.as_ptr(), 0o700) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(CoreError::StartFailed(format!(
-                    "cannot create {}: {error}",
-                    base.display()
-                )));
-            }
-            let meta = std::fs::metadata(&base).map_err(|e| {
-                CoreError::StartFailed(format!("cannot inspect {}: {e}", base.display()))
-            })?;
-            if meta.uid() != uid || meta.mode() & 0o022 != 0 {
-                return Err(CoreError::StartFailed(format!(
-                    "refusing to extract {DLL_NAME}: {} is not private to this user",
-                    base.display()
-                )));
-            }
-        }
-        Ok(base)
-    }
-
-    #[cfg(unix)]
-    fn embedded_digest() -> &'static [u8; 32] {
-        use sha2::Digest;
-        static DIGEST: OnceLock<[u8; 32]> = OnceLock::new();
-        DIGEST.get_or_init(|| sha2::Sha256::digest(EMBEDDED).into())
-    }
-
-    #[cfg(unix)]
-    fn matches_embedded(path: &std::path::Path) -> bool {
-        use sha2::Digest;
-        let Ok(meta) = path.metadata() else {
-            return false;
-        };
-        if meta.len() != EMBEDDED.len() as u64 {
-            return false;
-        }
-        let Ok(bytes) = std::fs::read(path) else {
-            return false;
-        };
-        sha2::Sha256::digest(bytes).as_slice() == embedded_digest().as_slice()
-    }
-
-    fn open(path: &std::path::Path) -> Result<*mut core::ffi::c_void> {
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-            let wide: Vec<u16> = path
-                .as_os_str()
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect();
-            // An absolute path, so no search order and no dependency on a
-            // copy sitting beside the executable.
-            let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
-            if handle.is_null() {
-                return Err(CoreError::StartFailed(Error::last("cannot load".into(), path).0));
-            }
-            Ok(handle)
-        }
-        #[cfg(unix)]
-        {
-            let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
-                CoreError::StartFailed(format!("{} is not representable", path.display()))
-            })?;
-            let handle = unsafe { libc::dlopen(c.as_ptr(), DLOPEN_FLAGS) };
-            if handle.is_null() {
-                return Err(CoreError::StartFailed(Error::last("cannot load".into(), path).0));
-            }
-            Ok(handle)
-        }
-    }
-
-    /// Resolves one export.
-    ///
-    /// cgo's `-extld` writes the export table, and the spelling it picks for
-    /// `__cdecl` symbols is not the same on every toolchain, so the leading
-    /// underscore is tried as a fallback rather than assumed either way. The
-    /// previous static link went through Go's own import library, which hides
-    /// the distinction; a hand-rolled lookup does not get that for free.
-    fn symbol<T: Copy>(module: *mut core::ffi::c_void, name: &CStr) -> Option<T> {
-        let ptr = lookup(module, name.as_ptr().cast());
-        let ptr = if ptr.is_null() {
-            let mut decorated = Vec::with_capacity(name.to_bytes().len() + 2);
-            decorated.push(b'_');
-            decorated.extend(name.to_bytes());
-            decorated.push(0);
-            lookup(module, decorated.as_ptr())
-        } else {
-            ptr
-        };
-        if ptr.is_null() {
-            return None;
-        }
-        // SAFETY: a non-null result is a live export, and every T used here
-        // is a function-pointer type, so it is the size of the data pointer
-        // being reinterpreted. transmute_copy rather than transmute because
-        // the latter cannot prove that of a generic parameter.
-        Some(unsafe { std::mem::transmute_copy::<*mut core::ffi::c_void, T>(&ptr) })
-    }
-
-    fn lookup(module: *mut core::ffi::c_void, name: *const u8) -> *mut core::ffi::c_void {
-        #[cfg(windows)]
-        {
-            unsafe { GetProcAddress(module, name) }
-        }
-        #[cfg(unix)]
-        {
-            unsafe { libc::dlsym(module, name.cast()) }
-        }
+        Ok(&SYMS)
     }
 
     pub(super) const STATE_STOPPED: i32 = 0;
@@ -1578,7 +1284,7 @@ impl BackendHandle for PsiphonHandle {
     /// Live traffic counters, fed by the shim's BytesTransferred notices
     /// (enabled by default in validate). Without this the UI and
     /// notification would show 0 B for a fully working Psiphon tunnel.
-    /// On Android the AAR owns the tunnel and reports through its own
+    /// On Android the service owns the tunnel and reports through its own
     /// notification; the shim's counters do not exist there, so report the
     /// zero default (the TUN-side counters stay the source of truth).
     fn counters(&self) -> fcae_runtime::backend::Counters {

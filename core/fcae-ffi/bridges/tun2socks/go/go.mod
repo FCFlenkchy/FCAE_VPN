@@ -5,8 +5,7 @@
 // directive points at the submodule checkout, so the exact pinned commit is
 // what gets compiled — no network fetch of tun2socks itself.
 //
-// Psiphon is not part of this module. Android uses the official AAR;
-// desktop uses bridges/psiphon/go as a second Go runtime when enabled.
+// FCAE combines the Psiphon shim with this bridge in a generated module.
 module github.com/FCFlenkchy/FCAE_VPN/core/fcae-ffi/bridges/tun2socks
 
 // Must be >= the `go` directive in core/tun2socks/go.mod (currently 1.26.3):

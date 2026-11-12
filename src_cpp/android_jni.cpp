@@ -20,8 +20,7 @@ extern "C" void fcae_sponsor_set_ui_active(bool active);
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// tun2socks is exported by libfcae_go_bridge.so. Psiphon is not in that
-// library: Android uses the official AAR, not a second Go runtime.
+// tun2socks and Psiphon share libfcae_go_bridge.so and its Go runtime.
 // No weak fallbacks are provided for t2s_*: silently falling back to stubs
 // can hide a broken native dependency.
 
@@ -171,6 +170,171 @@ char* call_string_method(jmethodID mid) {
 }
 
 }  // namespace
+
+// Psiphon and tun2socks are exports of the same Go shared library on Android.
+extern "C" {
+    int psi_start(char*, char*, int);
+    int psi_stop();
+    void psi_network_changed();
+    void psi_set_protect_callback(int (*)(int));
+    void psi_set_network_callbacks(char* (*)(), int (*)(), char* (*)());
+    void psi_set_notice_callback(void (*)(const char*));
+    void psi_set_ipv6_callback(int (*)());
+}
+
+namespace {
+std::mutex g_psi_owner_mu;
+jobject g_psi_owner = nullptr;
+jmethodID g_psi_bind = nullptr, g_psi_network = nullptr, g_psi_id = nullptr;
+jmethodID g_psi_ipv6 = nullptr, g_psi_notice = nullptr;
+unsigned g_psi_starts = 0, g_psi_stops = 0;
+
+enum class PsiMethod { Bind, Network, NetworkId, Ipv6, Notice };
+jobject psi_owner(JNIEnv* env, PsiMethod kind, jmethodID* method) {
+    std::lock_guard<std::mutex> lock(g_psi_owner_mu);
+    if (!g_psi_owner) return nullptr;
+    switch (kind) {
+        case PsiMethod::Bind: *method = g_psi_bind; break;
+        case PsiMethod::Network: *method = g_psi_network; break;
+        case PsiMethod::NetworkId: *method = g_psi_id; break;
+        case PsiMethod::Ipv6: *method = g_psi_ipv6; break;
+        case PsiMethod::Notice: *method = g_psi_notice; break;
+    }
+    return *method ? env->NewLocalRef(g_psi_owner) : nullptr;
+}
+
+int psi_bool(PsiMethod kind, int fd = -1) {
+    ScopedEnv scoped;
+    JNIEnv* env = scoped.get();
+    if (!env) return 0;
+    jmethodID method = nullptr;
+    jobject owner = psi_owner(env, kind, &method);
+    if (!owner) return 0;
+    jboolean result = fd < 0 ? env->CallBooleanMethod(owner, method)
+                            : env->CallBooleanMethod(owner, method, static_cast<jint>(fd));
+    if (env->ExceptionCheck()) { env->ExceptionClear(); result = JNI_FALSE; }
+    env->DeleteLocalRef(owner);
+    return result == JNI_TRUE ? 1 : 0;
+}
+int psi_bind_socket(int fd) { return psi_bool(PsiMethod::Bind, fd); }
+int psi_network_available() { return psi_bool(PsiMethod::Network); }
+int psi_ipv6_available() { return psi_bool(PsiMethod::Ipv6); }
+char* psi_dns() { return strdup("208.67.222.222:5353,9.9.9.9:9953,208.67.220.220:5353"); }
+char* psi_network_id_callback() {
+    ScopedEnv scoped;
+    JNIEnv* env = scoped.get();
+    if (!env) return nullptr;
+    jmethodID method = nullptr;
+    jobject owner = psi_owner(env, PsiMethod::NetworkId, &method);
+    if (!owner) return nullptr;
+    jstring value = static_cast<jstring>(env->CallObjectMethod(owner, method));
+    if (env->ExceptionCheck()) { env->ExceptionClear(); value = nullptr; }
+    char* result = nullptr;
+    if (value) {
+        const char* text = env->GetStringUTFChars(value, nullptr);
+        if (text) { result = strdup(text); env->ReleaseStringUTFChars(value, text); }
+        env->DeleteLocalRef(value);
+    }
+    env->DeleteLocalRef(owner);
+    return result;
+}
+void psi_notice_callback(const char* text) {
+    if (!text) return;
+    size_t size = strlen(text);
+    if (size > 1024 * 1024) return;
+    ScopedEnv scoped;
+    JNIEnv* env = scoped.get();
+    if (!env) return;
+    jmethodID method = nullptr;
+    jobject owner = psi_owner(env, PsiMethod::Notice, &method);
+    if (!owner) return;
+    jbyteArray bytes = env->NewByteArray(static_cast<jsize>(size));
+    if (bytes) {
+        env->SetByteArrayRegion(bytes, 0, static_cast<jsize>(size), reinterpret_cast<const jbyte*>(text));
+        if (!env->ExceptionCheck()) env->CallVoidMethod(owner, method, bytes);
+        env->DeleteLocalRef(bytes);
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(owner);
+}
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_fc_fcaevpn_PsiphonTunnel_nativeStart(JNIEnv* env, jclass, jstring config, jstring entries, jobject owner) {
+    if (!config || !entries || !owner) return -2;
+    jclass cls = env->GetObjectClass(owner);
+    if (!cls) return -2;
+    jmethodID bind = env->GetMethodID(cls, "bindSocket", "(I)Z");
+    jmethodID net = env->GetMethodID(cls, "networkAvailable", "()Z");
+    jmethodID id = env->GetMethodID(cls, "networkId", "()Ljava/lang/String;");
+    jmethodID ipv6 = env->GetMethodID(cls, "ipv6Available", "()Z");
+    jmethodID notice = env->GetMethodID(cls, "notice", "([B)V");
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck() || !bind || !net || !id || !ipv6 || !notice) {
+        env->ExceptionClear();
+        return -2;
+    }
+    const char* cfg = env->GetStringUTFChars(config, nullptr);
+    if (!cfg) return -2;
+    const char* servers = env->GetStringUTFChars(entries, nullptr);
+    if (!servers) { env->ReleaseStringUTFChars(config, cfg); return -2; }
+    jobject global = env->NewGlobalRef(owner);
+    if (!global) {
+        env->ReleaseStringUTFChars(entries, servers);
+        env->ReleaseStringUTFChars(config, cfg);
+        return -2;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_psi_owner_mu);
+        if (g_psi_owner) {
+            env->DeleteGlobalRef(global);
+            env->ReleaseStringUTFChars(entries, servers);
+            env->ReleaseStringUTFChars(config, cfg);
+            return -1;
+        }
+        g_psi_owner = global;
+        g_psi_bind = bind; g_psi_network = net; g_psi_id = id;
+        g_psi_ipv6 = ipv6; g_psi_notice = notice;
+        ++g_psi_starts;
+    }
+    psi_set_protect_callback(psi_bind_socket);
+    psi_set_network_callbacks(psi_dns, psi_network_available, psi_network_id_callback);
+    psi_set_notice_callback(psi_notice_callback);
+    psi_set_ipv6_callback(psi_ipv6_available);
+    int rc = psi_start(const_cast<char*>(cfg), const_cast<char*>(servers), 1);
+    {
+        std::lock_guard<std::mutex> lock(g_psi_owner_mu);
+        --g_psi_starts;
+    }
+    env->ReleaseStringUTFChars(entries, servers);
+    env->ReleaseStringUTFChars(config, cfg);
+    return rc;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_PsiphonTunnel_nativeStop(JNIEnv* env, jclass, jobject owner) {
+    {
+        std::lock_guard<std::mutex> lock(g_psi_owner_mu);
+        if (!g_psi_owner || !env->IsSameObject(g_psi_owner, owner)) return;
+        ++g_psi_stops;
+    }
+    psi_stop();
+    std::lock_guard<std::mutex> lock(g_psi_owner_mu);
+    --g_psi_stops;
+    if (!g_psi_starts && !g_psi_stops && g_psi_owner && env->IsSameObject(g_psi_owner, owner)) {
+        env->DeleteGlobalRef(g_psi_owner);
+        g_psi_owner = nullptr;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_PsiphonTunnel_nativeNetworkChanged(JNIEnv* env, jclass, jobject owner) {
+    {
+        std::lock_guard<std::mutex> lock(g_psi_owner_mu);
+        if (!g_psi_owner || !env->IsSameObject(g_psi_owner, owner)) return;
+    }
+    psi_network_changed();
+}
 
 static char* psiphon_dns_servers() {
     return call_string_method(g_dns_mid);

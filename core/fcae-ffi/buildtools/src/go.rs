@@ -5,9 +5,7 @@
 //! linkable library and hand it to rustc, so the Go runtime lives inside
 //! our own binary.
 //!
-//! Desktop Psiphon (when enabled later) is a *second* Go module built with
-//! [`CArchive::force_shared`]. Android Psiphon is the official AAR, not a
-//! Go c-shared next to tun2socks.
+//! Psiphon shares tun2socks' Go archive on desktop and Go shared library on Android.
 //!
 //! ## Why Android differs
 //!
@@ -55,15 +53,13 @@ pub struct CArchive<'a> {
     /// complete Go runtime, so `_cgo_topofstack`, `crosscall2`, `_cgo_panic`
     /// and friends are defined twice and the link fails with duplicate
     /// symbols. Only one Go archive per binary can be static; any second Go
-    /// bridge has to be dynamic, which also gives it its own isolated runtime.
+    /// bridge would need a separate runtime; multiple runtimes in one process
+    /// are not generally supported. Prefer one combined Go archive.
     pub force_shared: bool,
     /// Emit the `rustc-link-lib` directive for this archive itself.
     ///
-    /// Off for a library the host loads at runtime from its own embedded copy
-    /// (desktop Psiphon): the symbols are then resolved by hand, and naming
-    /// the library would make the dynamic loader require the file next to the
-    /// executable, which is exactly what embedding exists to avoid. The
-    /// platform system libraries this crate also lists are still emitted.
+    /// Off when the host loads a library at runtime instead of linking it.
+    /// The platform system libraries are still emitted.
     pub link_self: bool,
     /// Go build tags.
     pub tags: Vec<String>,
@@ -414,9 +410,7 @@ impl Built {
     /// the previous design shipped a tun2socks **binary** here and spawned it
     /// as a child process. Same directory, entirely different mechanism.
     pub fn stage_android_so(&self, repo_root: &Path, target: Target) -> Result<(), GoError> {
-        // `shared` alone is not the Android test: a desktop second Go
-        // runtime (Psiphon, force_shared) is also c-shared. Without the
-        // target check this copied a DLL into jniLibs and polluted the APK.
+        // A desktop shared library must not be staged into Android jniLibs.
         if !self.shared || !target.is_android() {
             return Ok(());
         }

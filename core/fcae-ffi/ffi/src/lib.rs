@@ -1149,7 +1149,7 @@ pub extern "C" fn fcae_psiphon_http_port() -> u16 {
     { 0 }
 }
 
-/// Android AAR attach request JSON. Returns required bytes excluding NUL.
+/// Android Psiphon service attach request JSON. Returns required bytes excluding NUL.
 #[no_mangle]
 pub unsafe extern "C" fn fcae_psiphon_attach_request(out: *mut std::ffi::c_char, cap: u32) -> u32 {
     #[cfg(feature = "psiphon")]

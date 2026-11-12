@@ -17,6 +17,8 @@ default = []
 # unavailable. Used by CI jobs that only type-check Rust, and by
 # `cargo test -p fcae-runtime` runs on machines without a Go toolchain.
 stub = []
+# Include the desktop Psiphon bridge in the same Go archive.
+psiphon = []
 
 [dependencies]
 fcae-runtime.workspace = true

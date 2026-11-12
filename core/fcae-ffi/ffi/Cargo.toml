@@ -23,11 +23,11 @@ aether = ["dep:fcae-bridge-aether"]
 psiphon = ["dep:fcae-bridge-psiphon"]
 # Native Rust Firefox Accounts, Guardian and Fastly IP Protection backend.
 firefox = ["dep:fcae-firefox-bridge"]
-# Psiphon that actually runs on desktop (libfcae_psiphon, force_shared,
-# embedded rather than linked).
-# Android: do not use this feature; use the official AAR (android/psiphon).
-# ClientLibrary lacks BindToDevice and cannot work on Android.
+# Desktop Psiphon and tun2socks share a single Go archive.
+# Android uses the combined Go shared library via psiphon-android.
 psiphon-live = ["psiphon", "tun", "fcae-bridge-psiphon/enabled"]
+# Android's Java service uses the Psiphon exports from the same Go .so.
+psiphon-android = ["psiphon", "tun", "fcae-bridge-tun2socks/psiphon"]
 # Link the in-process tun2socks bridge.
 tun = ["dep:fcae-bridge-tun2socks"]
 # Link the in-process zeptun bridge. Opt-in (not in `default`): it requires a

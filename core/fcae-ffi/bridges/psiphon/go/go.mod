@@ -1,9 +1,4 @@
-// Desktop Psiphon Go module — a separate runtime from tun2socks.
-//
-// Android does not build this. The official path is the Psiphon AAR
-// (android/psiphon), not a c-shared stuffed into libfcae_go_bridge.so.
-// This module is not compiled unless fcae-bridge-psiphon/enabled is on
-// (desktop psiphon-live builds turn it on; Android stays on the AAR).
+// Dependency template for the Psiphon shim in the generated combined module.
 module github.com/FCFlenkchy/FCAE_VPN/core/fcae-ffi/bridges/psiphon
 
 go 1.26.0

@@ -214,7 +214,7 @@ endfunction()
 # libfcae_go_bridge.so and staged into jniLibs/<abi>/ — it is NOT inside
 # libfcae_ffi.a, and cargo's dylib directives never reach this CMake link,
 # so the .so must be named explicitly (or ld.lld reports undefined t2s_*).
-# Do not link a second Go runtime next to it — that SIGSEGVs at dlopen.
+# Psiphon and tun2socks use the same Go runtime.
 function(fcae_link_audio_backend target_name)
     # Cargo's native-link metadata is not propagated through the later CMake
     # link of the Rust static library. Add each rodio/cpal platform backend to
@@ -260,35 +260,6 @@ function(fcae_link_go_bridges target_name abi)
     # The .so sits next to our library in the APK's native lib dir.
     target_link_options(${target_name} PRIVATE "-Wl,-rpath,\\$ORIGIN")
 endfunction()
-
-# Desktop Psiphon: a second Go runtime as libfcae_psiphon (c-shared).
-#
-# Deliberately NOT linked and NOT copied. The Rust bridge embeds the built
-# library with include_bytes!, writes it under the temp directory on first
-# use, and binds its psi_* exports with dlopen/dlsym. Linking it here would
-# put it back in the executable's import table and make the loader require a
-# copy beside the app -- which is the one thing the embedding exists to
-# avoid. This stays a configuration-time report so a missing bridge is still
-# visible in the log.
-function(fcae_link_psiphon target_name triple)
-    set(dirs
-        ${CMAKE_SOURCE_DIR}/target/${triple}/release
-        ${CMAKE_SOURCE_DIR}/core/fcae-ffi/target/${triple}/release
-    )
-    foreach(d ${dirs})
-        foreach(ext dll so dylib)
-            if(EXISTS "${d}/libfcae_psiphon.${ext}")
-                message(STATUS
-                    "desktop Psiphon embedded in ${target_name} "
-                    "(built at ${d}/libfcae_psiphon.${ext}; loaded at runtime, not linked)")
-                return()
-            endif()
-        endforeach()
-    endforeach()
-    message(STATUS "libfcae_psiphon not built for ${triple} (psiphon-live off?)")
-endfunction()
-
-# Android Psiphon: official AAR, not a second Go library.
 
 # Target-specific configuration
 if(AETHER_TARGET STREQUAL "ANDROID_ARM64")
@@ -486,14 +457,14 @@ elseif(WIN32 OR AETHER_TARGET STREQUAL "WIN_X64")
         list(APPEND FCAE_HEV_ARCHIVES "${archive}")
     endforeach()
     target_link_libraries(fcaevpn PRIVATE -Wl,--start-group ${FCAE_HEV_ARCHIVES} -Wl,--end-group)
-    fcae_link_psiphon(fcaevpn x86_64-pc-windows-gnu)
 
     # System libs only — crypto lives in the Rust staticlib (BoringSSL).
     # pthread MUST come after libfcae_ffi.a (BoringSSL thread_pthread needs it).
     target_link_libraries(fcaevpn PRIVATE
         d3d11 dxgi d3dcompiler dwmapi ntdll
         ws2_32 userenv bcrypt shell32 ole32 uuid crypt32 secur32 ncrypt
-        iphlpapi advapi32
+        iphlpapi advapi32 psapi mswsock user32 dnsapi wintrust version
+        netapi32 wtsapi32 setupapi cfgmgr32 oleaut32 pdh
         # fwpuclnt: the statically linked zeptun engine drives the Windows
         # Filtering Platform (Fwpm*) to keep the tunnel's own sockets out of
         # the tunnel; its imports land in libfcae_ffi.a, and cargo's link
@@ -583,17 +554,6 @@ elseif(APPLE OR AETHER_TARGET STREQUAL "MACOS_ARM64" OR AETHER_TARGET STREQUAL "
     endif()
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
     fcae_link_audio_backend(fcaevpn)
-    if(AETHER_TARGET STREQUAL "MACOS_ARM64")
-        fcae_link_psiphon(fcaevpn aarch64-apple-darwin)
-    elseif(AETHER_TARGET STREQUAL "MACOS_X64")
-        fcae_link_psiphon(fcaevpn x86_64-apple-darwin)
-    else()
-        if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-            fcae_link_psiphon(fcaevpn aarch64-apple-darwin)
-        else()
-            fcae_link_psiphon(fcaevpn x86_64-apple-darwin)
-        endif()
-    endif()
 
     # Link GLFW: use target if available (static), otherwise fall back to lib name
     if(TARGET glfw)
@@ -697,7 +657,6 @@ elseif(UNIX)
     fcae_ffi_lib_path(FCAE_FFI_A x86_64-unknown-linux-gnu)
     fcae_link_ffi(fcaevpn "${FCAE_FFI_A}")
     fcae_link_audio_backend(fcaevpn)
-    fcae_link_psiphon(fcaevpn x86_64-unknown-linux-gnu)
 
     # Link GLFW: use imported target if available, otherwise raw lib name
     if(TARGET glfw)

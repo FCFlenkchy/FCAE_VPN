@@ -1,9 +1,6 @@
 // Package main is a C-ABI shim over Psiphon's MobileLibrary/psi.
 //
-// Desktop only. Android must use the official Psiphon AAR
-// (ca.psiphon:psiphontunnel / android/psiphon), not this c-archive.
-// Stuffing psi into tun2socks' Go runtime, or loading a second Go
-// runtime next to libfcae_go_bridge.so, SIGSEGVs at dlopen.
+// FCAE builds this shim in the same Go package as tun2socks on all platforms.
 //
 // Why not ClientLibrary?
 //
@@ -15,8 +12,7 @@
 // MobileLibrary/psi does expose BindToDevice (via the PsiphonProvider
 // interface), which is exactly the VpnService.protect() hook Android needs.
 // It is a plain Go package though — gobind, not cgo — so it needs this shim to
-// reach C. The same shim is used on desktop with useDeviceBinder=false, so
-// both platforms run one code path.
+// reach C. Desktop uses this shim with useDeviceBinder=false.
 //
 // Lifecycle differences from ClientLibrary worth knowing:
 //
@@ -35,6 +31,8 @@ package main
 // installed on Android, where it maps onto VpnService.protect(fd).
 typedef int  (*psi_protect_cb)(int fd);
 typedef void (*psi_log_cb)(int level, const char *message);
+typedef void (*psi_notice_cb)(const char *message);
+typedef int (*psi_ipv6_cb)(void);
 
 // Network-state callbacks. The host owns the strings it returns and hands
 // ownership to Go, which releases them with free(); they must therefore come
@@ -51,6 +49,8 @@ typedef char *(*psi_network_id_cb)(void);
 
 static int  psi_call_protect(psi_protect_cb cb, int fd)                 { return cb ? cb(fd) : 1; }
 static void psi_call_log(psi_log_cb cb, int level, const char *message) { if (cb) cb(level, message); }
+static void psi_call_notice(psi_notice_cb cb, const char *message) { if (cb) cb(message); }
+static int psi_call_ipv6(psi_ipv6_cb cb) { return cb ? cb() : 0; }
 
 static char *psi_call_dns(psi_dns_cb cb)                   { return cb ? cb() : NULL; }
 static int   psi_call_connectivity(psi_connectivity_cb cb) { return cb ? cb() : 1; }
@@ -63,6 +63,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -90,6 +91,7 @@ const (
 var (
 	// psiMu guards the controller lifecycle (start/stop) and the cached psiState.
 	psiMu      sync.Mutex
+	psiLifecycle sync.Mutex
 	psiRunning bool
 	psiState   = psiStateStopped
 
@@ -121,6 +123,8 @@ var (
 	// lock deadlocked the tun2socks bridge the same way.
 	psiLogMu     sync.Mutex
 	psiLogCb     C.psi_log_cb
+	psiNoticeCb  C.psi_notice_cb
+	psiIpv6Cb    C.psi_ipv6_cb
 	psiProtectCb C.psi_protect_cb
 
 	// Network-state hooks, guarded by psiLogMu for the same reason as the
@@ -209,7 +213,17 @@ func psiEmit(level int, format string, args ...interface{}) {
 // may take psiMu, or a notice arriving during start/stop would deadlock.
 type psiProvider struct{}
 
-func (p *psiProvider) Notice(noticeJSON string) { psiHandleNotice(noticeJSON) }
+func (p *psiProvider) Notice(noticeJSON string) {
+    psiHandleNotice(noticeJSON)
+    psiLogMu.Lock()
+    cb := psiNoticeCb
+    psiLogMu.Unlock()
+    if cb != nil {
+        message := C.CString(noticeJSON)
+        C.psi_call_notice(cb, message)
+        C.free(unsafe.Pointer(message))
+    }
+}
 
 // BindToDevice protects a socket from the VPN routes. On Android this calls
 // VpnService.protect(fd); without it Psiphon's own connections are captured by
@@ -219,8 +233,7 @@ func (p *psiProvider) BindToDevice(fd int) (string, error) {
 	cb := psiProtectCb
 	psiLogMu.Unlock()
 	if cb == nil {
-		// Desktop: nothing to protect against, routes exclude the peer.
-		return "", nil
+		return "", fmt.Errorf("Psiphon socket binding callback unavailable")
 	}
 	if C.psi_call_protect(cb, C.int(fd)) == 0 {
 		return "", fmt.Errorf("VpnService.protect(%d) failed", fd)
@@ -294,7 +307,12 @@ func (p *psiProvider) GetDNSServersAsString() string {
 func (p *psiProvider) OnAccessToken(_ string) {}
 
 func (p *psiProvider) IPv6Synthesize(ipv4 string) string { return "" }
-func (p *psiProvider) HasIPv6Route() int                 { return 0 }
+func (p *psiProvider) HasIPv6Route() int {
+    psiLogMu.Lock()
+    cb := psiIpv6Cb
+    psiLogMu.Unlock()
+    return int(C.psi_call_ipv6(cb))
+}
 
 // psiNoticeEnvelope is the common shape of every psi notice.
 type psiNoticeEnvelope struct {
@@ -457,6 +475,20 @@ func psiHandleNotice(noticeJSON string) {
 	}
 }
 
+//export psi_set_notice_callback
+func psi_set_notice_callback(cb C.psi_notice_cb) {
+    psiLogMu.Lock()
+    psiNoticeCb = cb
+    psiLogMu.Unlock()
+}
+
+//export psi_set_ipv6_callback
+func psi_set_ipv6_callback(cb C.psi_ipv6_cb) {
+    psiLogMu.Lock()
+    psiIpv6Cb = cb
+    psiLogMu.Unlock()
+}
+
 //export psi_set_log_callback
 func psi_set_log_callback(cb C.psi_log_cb) {
 	psiLogMu.Lock()
@@ -506,6 +538,8 @@ func psi_set_network_callbacks(
 //
 //export psi_start
 func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
+	psiLifecycle.Lock()
+	defer psiLifecycle.Unlock()
 	psiMu.Lock()
 
 	if psiRunning {
@@ -582,14 +616,11 @@ func psi_start(configJSON *C.char, embedded *C.char, useBinder C.int) C.int {
 	// psi.Start() is deliberately called WITHOUT psiMu held.
 	//
 	// It performs the whole datastore open and embedded-server-list import
-	// before returning, and it emits notices the entire time. Holding psiMu
-	// across it blocked every notice callback, and -- worse -- blocked
-	// psi_stop() too, so a cancel arriving during start could not be
-	// serviced until start had finished on its own. psi.Start() takes its
-	// own controllerMutex upstream, so concurrent entry is still refused
-	// there; psiRunning above makes us refuse it earlier and more clearly.
+	// before returning, and it emits notices the entire time. Keep psiMu
+	// free for those callbacks. psiLifecycle serializes start/stop around
+	// upstream's controller lifecycle, including failure cleanup.
 	err := psiCatch("psi.Start", func() error {
-		return psi.Start(cfg, embeddedList, "", &psiProvider{}, useBinder != 0, false, false)
+		return psi.Start(cfg, embeddedList, "", &psiProvider{}, useBinder != 0, false, runtime.GOOS == "android")
 	})
 	if err != nil {
 		// psi.Start() is called without psiMu held (see above). On failure it
@@ -695,8 +726,15 @@ func psiEnsureServerEntrySource(configJSON, embedded string) string {
 	return string(out)
 }
 
+//export psi_network_changed
+func psi_network_changed() {
+    _ = psiCatch("network changed", func() error { psi.NetworkChanged(); return nil })
+}
+
 //export psi_stop
 func psi_stop() C.int {
+	psiLifecycle.Lock()
+	defer psiLifecycle.Unlock()
 	psiMu.Lock()
 	if !psiRunning {
 		psiMu.Unlock()

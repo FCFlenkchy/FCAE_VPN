@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Psiphon backend plugin for the FCAE FFI (disabled; Android = official AAR, not tun2socks)."
+description = "Psiphon backend plugin for the FCAE FFI."
 
 [lib]
 name = "fcae_bridge_psiphon"
@@ -12,19 +12,15 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# Desktop: compile go/ as libfcae_psiphon (force_shared), embedded into the
-# host binary and dlopen'd at runtime -- never linked. Android ignores
-# this and keeps the official AAR.
-enabled = []
+# Desktop: Psiphon and tun2socks share one Go archive.
+enabled = ["dep:fcae-bridge-tun2socks", "fcae-bridge-tun2socks/psiphon"]
 
 [dependencies]
 fcae-abi.workspace = true
 fcae-runtime.workspace = true
+fcae-bridge-tun2socks = { workspace = true, optional = true }
 async-trait.workspace = true
-# dlopen/dlsym plus the RTLD_* constants for the runtime-bound Go module.
-libc.workspace = true
 log.workspace = true
-sha2 = "0.10"
 parking_lot.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

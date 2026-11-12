@@ -26,10 +26,5 @@
     <fields>;
 }
 
-# Official Psiphon AAR (gomobile)
--keep class ca.psiphon.** { *; }
--keep class psi.** { *; }
--keep class go.** { *; }
--dontwarn ca.psiphon.**
--dontwarn psi.**
--dontwarn go.**
+# JNI calls these methods by name from Go-owned threads.
+-keep class com.fc.fcaevpn.PsiphonTunnel { *; }

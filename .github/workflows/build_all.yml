@@ -235,11 +235,6 @@ jobs:
           ndk-version: r27
           link-to-sdk: true
 
-      - name: Build Psiphon Android AAR from pinned source
-        if: startsWith(matrix.name, 'android-')
-        shell: bash
-        run: bash --noprofile --norc -eo pipefail scripts/ci/build_steps/build-psiphon-android-aar-from-pinned-source.sh
-
       - name: cache zig
         uses: actions/cache@v6
         with:

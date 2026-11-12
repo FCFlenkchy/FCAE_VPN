@@ -65,7 +65,7 @@ public class FCAEVpnService extends VpnService {
 
     /** Session identity for the readings; see {@link #sessionEpoch()}. */
     private static final AtomicLong sessionEpoch = new AtomicLong(0);
-    private static FCAEVpnService instance; // Provides immediate UI disconnect.
+    private static volatile FCAEVpnService instance; // Provides immediate UI disconnect.
 
     /** Generation stamped on shared session-state publications. */
     public static long stateGeneration() {
@@ -606,6 +606,13 @@ public class FCAEVpnService extends VpnService {
      * reports a teardown in flight — in that window a connect tap must stay a
      * connect rather than read as "something is running".
      */
+    static boolean protectPsiphonSocket(int fd) {
+        FCAEVpnService current = instance;
+        if (current == null || !ownsSession()) return true;
+        try { return current.protect(fd); }
+        catch (Throwable error) { return false; }
+    }
+
     public static boolean sessionActive() {
         FCAEVpnService current = instance;
         if (current == null) return false;

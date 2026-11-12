@@ -9,9 +9,7 @@ mkdir -p "$APP/Contents/Resources"
 
 cp build/fcaevpn "$APP/Contents/MacOS/fcaevpn"
 chmod +x "$APP/Contents/MacOS/fcaevpn"
-# No libfcae_psiphon.dylib: the second Go runtime is embedded in
-# fcaevpn and dlopen'd from deps/ beside the app (or temp) at first start, so
-# there is no framework for the bundle to carry.
+# Desktop Psiphon shares the statically linked Go archive with tun2socks.
 
 ICONSET="$RUNNER_TEMP/AppIcon.iconset"
 rm -rf "$ICONSET"

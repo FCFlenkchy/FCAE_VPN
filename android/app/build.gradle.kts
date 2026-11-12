@@ -219,7 +219,4 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    // Built in CI from the pinned core/psiphon source and its vendored tools.
-    // The Go runtime remains isolated in :psiphon.
-    implementation(project(":psiphon"))
 }

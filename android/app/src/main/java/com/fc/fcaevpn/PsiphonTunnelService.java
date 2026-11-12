@@ -22,15 +22,8 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import ca.psiphon.PsiphonTunnel;
 
-/**
- * Official Psiphon AAR ({@code ca.psiphon:psiphontunnel}) in its own process
- * ({@code :psiphon}): its Go runtime SIGSEGVs at dlopen if it shares an
- * address space with tun2socks' own. Its sockets are bound to the underlying
- * network so a TUN in the UI process cannot capture them, and the UI process
- * points tun2socks at the SOCKS port this service broadcasts.
- */
+/** Owns the Psiphon session and its physical-network binding. */
 public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostService {
 
     private static final String TAG = "FCAE_PSI";
@@ -45,25 +38,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String EXTRA_OWNER = "psiOwner";
     public static final String OWNER_VPN = "vpn";
     public static final String OWNER_PROXY = "proxy";
-    // Terminal-stop signal. processMustDie is a per-process class copy: the
-    // UI process cannot set the :psiphon one directly, so a terminal stop
-    // carries the flag across the boundary as an ACTION_STOP intent extra.
-    // Session switches (stopBound) send the plain stop and never set it.
     public static final String EXTRA_DIE = "psiphonDie";
-    /**
-     * This service runs in the {@code :psiphon} process, so the UI process
-     * killing itself does not take the tunnel down with it. Set on the way
-     * out; the process ends once the service is destroyed and the tunnel has
-     * had its teardown window.
-     */
     private static volatile boolean processMustDie = false;
     private static final java.util.concurrent.atomic.AtomicBoolean terminalStopSent =
             new java.util.concurrent.atomic.AtomicBoolean();
-    // Cancels a pending onDestroy self-kill: a fresh session starting inside
-    // the PROCESS_KILL_DELAY_MS window must not be killed mid-dial. Main
-    // thread only, :psiphon process.
-    private static int killTicket;
-    private static final long PROCESS_KILL_DELAY_MS = 500L;
     public static final String BROADCAST_READY = "com.fc.fcaevpn.PSI_READY";
     public static final String BROADCAST_FAILED = "com.fc.fcaevpn.PSI_FAILED";
     // Staged connect progress (like the Tor bootstrap percentage): INTEGER
@@ -121,17 +99,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private static volatile int rebindAttempts;
 
         /**
-         * Hard deadline for the AAR's tunnel.stop(). Upstream joins the whole
+         * Watchdog threshold for tunnel.stop(). Upstream joins the whole
          * controller — every in-flight dial and fetch — which is tens of ms when
          * healthy and seconds mid-handshake on a filtered link, long after the
          * user was told the session is over.
          *
-         * Slower than this and the process is killed instead: the kernel closes
-         * every socket, so the tunnel is gone at once. Bolt's datastore is
-         * crash-safe and the system OOM-kills this process in production anyway.
+         * A slow stop is logged; the shared app process must not be killed.
          */
     private static final long HARD_STOP_TIMEOUT_MS = 500L;
-    private static final long EXIT_FALLBACK_MS = 750L;
     private long session;
     private long attachRequestId;
     private static volatile long clientAttachId;
@@ -406,12 +381,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private static final Object LIBRARY_LOCK = new Object();
     private static final java.util.concurrent.ExecutorService libraryWorker =
             java.util.concurrent.Executors.newSingleThreadExecutor(r -> new Thread(r, "FCAE-PsiLibrary"));
-    // The AAR permits one PsiphonTunnel per process (its own static
-    // INSTANCE), and this service owns the :psiphon process, so the live
-    // tunnel is PROCESS state, not instance state: an instance recreated
-    // after its component was destroyed (binding churn, killProcessOnExit's
-    // stopService) must still be able to stop the tunnel the dead instance
-    // left behind.
+    // The controller is process-wide and can outlive a service instance.
     private static volatile PsiphonTunnel liveTunnel;
     private static PsiphonNetworkBinding liveNetworkBinding;
     // A START that arrived while a teardown was in flight (session switch:
@@ -593,10 +563,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         }
         // A fresh session outranks any stale terminal-stop flag delivered
         // while this process was being recycled: the next teardown decides
-        // again whether the process dies — and a self-kill scheduled by the
-        // dying previous instance is cancelled before it can fire mid-dial.
+        // again whether the service receives a terminal stop.
         processMustDie = false;
-        killTicket++;
         enterTunnelForeground();
         stopping = false;
         startInFlight = true;
@@ -648,7 +616,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                     liveTunnel = t;
                 }
                 try {
-                    t.setVpnMode(true);
                     t.startTunneling(embeddedList);
                 } finally {
                     // A stop that landed mid-dial swapped liveTunnel out and
@@ -786,13 +753,8 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (t != null) {
             final java.util.concurrent.CountDownLatch stopDone =
                     new java.util.concurrent.CountDownLatch(1);
-            // NOT libraryWorker: that worker may itself be blocked inside
-            // startTunneling(), and a stop queued behind it can never
-            // interrupt the connect. A dedicated thread calls stop()
-            // immediately; the AAR serializes it against an in-flight
-            // startTunneling() with its own monitor — the supported way to
-            // abort a connecting tunnel. The deadline watchdog below still
-            // guarantees the drop.
+            // Stop on a separate thread. The adapter serializes it with an
+            // in-flight start, and the watchdog reports unusually slow stops.
             new Thread(() -> {
                 try { t.stop(); } catch (Throwable ignored) {}
                 finally { stopDone.countDown(); }
@@ -807,15 +769,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             }, "FCAE-PsiStop").start();
             new Thread(() -> {
                 try {
-                    if (stopDone.await(HARD_STOP_TIMEOUT_MS,
-                            java.util.concurrent.TimeUnit.MILLISECONDS)) return;
-                } catch (InterruptedException ignored) { return; }
-                Log.w(TAG, "Psiphon stop exceeded " + HARD_STOP_TIMEOUT_MS
-                        + " ms; killing the process to drop the tunnel");
-                try { android.os.Process.killProcess(android.os.Process.myPid()); }
-                catch (Throwable ignored) {}
-                Runtime.getRuntime().halt(2); // backstop: guaranteed exit
-            }, "FCAE-PsiHardStop").start();
+                    if (!stopDone.await(HARD_STOP_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS))
+                        Log.w(TAG, "Psiphon stop is still in progress");
+                } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+            }, "FCAE-PsiStopWatchdog").start();
         } else {
             scheduleRestartReplay();
         }
@@ -848,25 +805,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (stopping || processMustDie) stopNow();
         flushLogs();
         super.onDestroy();
-        // Last thing this process does when the app is being closed for good.
-        // Delayed so stopNow()'s controller teardown gets its window instead
-        // of being cut off mid-stop.
-        if (processMustDie) {
-            final int ticket = ++killTicket;
-            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                if (ticket == killTicket) FCAEVpnService.killProcessQuietly();
-            }, PROCESS_KILL_DELAY_MS);
-        }
+
     }
 
-        /**
-         * The {@code :psiphon} process must not outlive the app. {@link
-         * #processMustDie} is a per-process copy: it is the flag that ends it, and
-         * the stop command carrying it is already with the system.
-         */
     public static void killProcessOnExit(Context context) {
         Context app = context.getApplicationContext();
-        final long stoppedEpoch;
         synchronized (bindingLock) {
             if (!terminalStopSent.compareAndSet(false, true)) return;
             boolean delivered = deliverStop(app, true);
@@ -876,28 +819,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 try { app.stopService(new Intent(app, PsiphonTunnelService.class)); }
                 catch (Throwable ignored) {}
             }
-            stoppedEpoch = bindingEpoch.get();
         }
-        new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            synchronized (bindingLock) {
-                if (stoppedEpoch != bindingEpoch.get()) return;
-                try {
-                    android.app.ActivityManager manager =
-                            (android.app.ActivityManager) app.getSystemService(Context.ACTIVITY_SERVICE);
-                    if (manager == null) return;
-                    java.util.List<android.app.ActivityManager.RunningAppProcessInfo> running =
-                            manager.getRunningAppProcesses();
-                    if (running == null) return;
-                    for (android.app.ActivityManager.RunningAppProcessInfo info : running) {
-                        if (info.uid == android.os.Process.myUid()
-                                && info.pid != android.os.Process.myPid()
-                                && (app.getPackageName() + ":psiphon").equals(info.processName)) {
-                            android.os.Process.killProcess(info.pid);
-                        }
-                    }
-                } catch (Throwable ignored) {}
-            }
-        }, EXIT_FALLBACK_MS);
     }
 
     @SuppressWarnings("deprecation")
@@ -1242,7 +1164,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             java.util.TreeSet<String> regions = new java.util.TreeSet<>();
             try {
                 java.net.HttpURLConnection conn =
-                        (java.net.HttpURLConnection) new java.net.URL(DEFAULT_SERVER_LIST_URL).openConnection();
+                        (java.net.HttpURLConnection) networkBinding.openConnection(new java.net.URL(DEFAULT_SERVER_LIST_URL));
                 conn.setConnectTimeout(15000);
                 conn.setReadTimeout(30000);
                 try {
@@ -1338,13 +1260,17 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     }
 
     @Override
-    public void bindToDevice(long fileDescriptor) throws PsiphonTunnel.Exception {
-        try {
-            networkBinding.bindSocket(fileDescriptor);
-        } catch (java.io.IOException | RuntimeException error) {
-            throw new PsiphonTunnel.Exception("bindToDevice failed", error);
+    public void bindToDevice(long fileDescriptor) throws java.lang.Exception {
+        if (fileDescriptor < 0 || fileDescriptor > Integer.MAX_VALUE
+                || !FCAEVpnService.protectPsiphonSocket((int) fileDescriptor)) {
+            throw new IOException("Cannot protect Psiphon socket");
         }
+        networkBinding.bindSocket(fileDescriptor);
     }
+
+    @Override public boolean hasPhysicalNetwork() { return networkBinding.available(); }
+    @Override public String physicalNetworkId() { return networkBinding.networkId(); }
+    @Override public boolean hasPhysicalIpv6() { return networkBinding.hasIpv6(); }
 
     @Override
     public void onDiagnosticMessage(String message) {
@@ -1468,10 +1394,14 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public void onExiting() {
         emitLog("exiting");
         flushLogs();
-        if (!stopping) {
-            broadcastFailed("Psiphon exited");
-            stopNow();
-        }
+        // Never stop while Go is delivering a notice: Stop waits for its
+        // controller goroutines, including this callback, to return.
+        logHandler.post(() -> {
+            if (!stopping && !destroyed) {
+                broadcastFailed("Psiphon exited");
+                stopNow();
+            }
+        });
     }
 
     // Keep notice JSON and diagnostic text intact. Batching is only transport,
@@ -1662,26 +1592,18 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                     public void onAvailable(Network available) {
                         synchronized (lock) {
                             if (callback != this) return;
-                            try {
-                                if (!available.equals(manager.getBoundNetworkForProcess())
-                                        && !manager.bindProcessToNetwork(available)) {
-                                    network = null;
-                                    Log.w(TAG, "Unable to bind Psiphon to the physical network");
-                                    return;
-                                }
-                                network = available;
-                            } catch (RuntimeException error) {
-                                network = null;
-                                Log.w(TAG, "Physical network binding failed", error);
-                            }
+                            network = available;
                         }
+                        networkChanged();
                     }
 
                     @Override
                     public void onLost(Network lost) {
+                        boolean changed = false;
                         synchronized (lock) {
-                            if (callback == this && lost.equals(network)) network = null;
+                            if (callback == this && lost.equals(network)) { network = null; changed = true; }
                         }
+                        if (changed) networkChanged();
                     }
                 };
                 callback = next;
@@ -1694,6 +1616,51 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                     callback = null;
                     throw new IOException("Cannot monitor the physical network", error);
                 }
+            }
+        }
+
+        private void networkChanged() {
+            libraryWorker.execute(() -> {
+                PsiphonTunnel tunnel;
+                synchronized (LIBRARY_LOCK) {
+                    tunnel = liveNetworkBinding == this ? liveTunnel : null;
+                }
+                if (tunnel != null) tunnel.networkChanged();
+            });
+        }
+
+        java.net.URLConnection openConnection(java.net.URL url) throws IOException {
+            Network selected;
+            synchronized (lock) { selected = network; }
+            if (selected == null) throw new IOException("No physical network available");
+            return selected.openConnection(url);
+        }
+
+        boolean available() {
+            synchronized (lock) { return network != null; }
+        }
+
+        String networkId() {
+            synchronized (lock) {
+                if (network == null || manager == null) return "UNKNOWN";
+                NetworkCapabilities caps = manager.getNetworkCapabilities(network);
+                if (caps == null) return "UNKNOWN";
+                String type = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? "WIFI" :
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "MOBILE" :
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ? "ETHERNET" : "NETWORK";
+                return type + "-" + network.toString();
+            }
+        }
+
+        boolean hasIpv6() {
+            synchronized (lock) {
+                if (network == null || manager == null) return false;
+                android.net.LinkProperties properties = manager.getLinkProperties(network);
+                if (properties == null) return false;
+                for (android.net.RouteInfo route : properties.getRoutes()) {
+                    if (route.isDefaultRoute() && route.getDestination().getAddress() instanceof java.net.Inet6Address) return true;
+                }
+                return false;
             }
         }
 
