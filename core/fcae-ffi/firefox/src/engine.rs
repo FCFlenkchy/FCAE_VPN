@@ -71,18 +71,18 @@ impl FirefoxEngine {
                 }).await?;
                 if config.require_udp {
                     let udp_targets = ["1.1.1.1:443".to_string(), "8.8.8.8:443".to_string()];
-                    probe_destinations("UDP", &udp_targets, timeout, |target| async move {
+                    probe_optional_destinations("UDP", &udp_targets, timeout, |target| async move {
                         proxy.probe_udp(&target).await
-                    }).await?;
+                    }).await;
                     if !config.dns_servers.is_empty() {
-                        probe_destinations("DNS", &config.dns_servers, timeout, |server| async move {
+                        probe_optional_destinations("DNS", &config.dns_servers, timeout, |server| async move {
                             if crate::doh::provider(&server).is_some() {
                                 crate::doh::check(proxy, &server).await
                             } else {
                                 log::info!("[firefox] DNS resolver {server} has no encrypted mapping; checking UDP port 53 without changing the configured resolver");
                                 proxy.probe_udp(&crate::types::authority(&server, 53)).await
                             }
-                        }).await?;
+                        }).await;
                     }
                 }
                 Ok::<_, FirefoxError>(upstream)
@@ -182,6 +182,19 @@ impl FirefoxEngine {
         self.proxies.stop().await;
         self.upstream.close().await;
         self.carrier_up.store(false, Ordering::Release);
+    }
+}
+
+async fn probe_optional_destinations<F, Fut>(stage: &str, targets: &[String], timeout: Duration, connect: F)
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let budget = timeout.min(Duration::from_secs(3));
+    match tokio::time::timeout(budget, probe_destinations(stage, targets, timeout, connect)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => log::warn!("[firefox] {stage} check failed: {error}; continuing with TCP, {stage} may be unavailable"),
+        Err(_) => log::warn!("[firefox] {stage} check timed out after {budget:?}; continuing with TCP, {stage} may be unavailable"),
     }
 }
 
@@ -293,6 +306,23 @@ mod tests {
         }).await.unwrap_err();
         assert!(matches!(error, FirefoxError::PassRejected));
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn optional_udp_and_dns_checks_do_not_fail_startup() {
+        let targets = vec!["first".into()];
+        let attempts = AtomicUsize::new(0);
+        for stage in ["UDP", "DNS"] {
+            probe_optional_destinations(stage, &targets, Duration::from_millis(50), |_| {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async { Err(FirefoxError::Http { host: "proxy".into(), status: 405,
+                    errno: None, retry_after: None, message: "method not allowed".into() }) }
+            }).await;
+        }
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        probe_optional_destinations("UDP", &targets, Duration::from_millis(1), |_| async {
+            std::future::pending::<Result<()>>().await
+        }).await;
     }
 
     #[tokio::test]

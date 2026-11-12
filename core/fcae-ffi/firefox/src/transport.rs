@@ -1094,6 +1094,15 @@ impl Upstream {
     }
 
     async fn observe_result(&self, protocol: &str, target: &str, error: Option<&FirefoxError>) {
+        if protocol == "UDP" {
+            if let Some(error) = error {
+                if !matches!(error, FirefoxError::Http { .. }) {
+                    let port = split_authority(target, 0).map(|(_, port)| port).unwrap_or(0);
+                    log::warn!("[firefox] UDP proxy stream to port {port} failed: {}", crate::control::direct_failure_detail(error));
+                }
+            }
+            return;
+        }
         let Some(error) = error else {
             self.failures.store(0, Ordering::Release);
             self.stream_health.lock().clear_ambiguous();
