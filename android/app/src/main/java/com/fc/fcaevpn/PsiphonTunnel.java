@@ -78,7 +78,9 @@ final class PsiphonTunnel {
 
     private void notice(byte[] bytes) {
         try {
-            JSONObject notice = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            String message = new String(bytes, StandardCharsets.UTF_8);
+            host.onDiagnosticMessage(message);
+            JSONObject notice = new JSONObject(message);
             String type = notice.optString("noticeType", "");
             JSONObject data = notice.optJSONObject("data");
             if (data == null) return;
@@ -108,50 +110,7 @@ final class PsiphonTunnel {
                 case "Exiting": host.onExiting(); break;
                 default: break;
             }
-            String diagnostic = diagnosticNotice(type, data);
-            if (diagnostic != null) host.onDiagnosticMessage(diagnostic);
         } catch (Throwable ignored) { }
-    }
-
-    private static String diagnosticNotice(String type, JSONObject data) throws org.json.JSONException {
-        switch (type) {
-            case "ConnectingServer": case "ConnectedServer": case "ActiveTunnel":
-            case "ConnectedServerRegion": case "CandidateServers": case "Tunnels":
-            case "EstablishTunnelTimeout": case "Warning": case "Error": case "Alert":
-                break;
-            default: return null;
-        }
-        JSONObject safe = new JSONObject();
-        for (String key : new String[]{"region", "serverRegion"}) {
-            Object value = data.opt(key);
-            if (value instanceof String && ((String) value).matches("[A-Z]{2}")) safe.put(key, value);
-        }
-        Object protocol = data.opt("protocol");
-        if (protocol instanceof String && isDiagnosticProtocol((String) protocol)) safe.put("protocol", protocol);
-        for (String key : new String[]{"candidateNumber", "uniqueCandidateEstimate", "establishedTunnelsCount", "initialCount", "count"}) {
-            Object value = data.opt(key);
-            if (value instanceof Number) {
-                long number = ((Number) value).longValue();
-                if (number >= 0 && number <= 10000000) safe.put(key, number);
-            }
-        }
-        Object replay = data.opt("isReplay");
-        if (replay instanceof Boolean) safe.put("isReplay", replay);
-        JSONObject notice = new JSONObject();
-        notice.put("noticeType", type);
-        notice.put("data", safe);
-        return notice.toString();
-    }
-
-    private static boolean isDiagnosticProtocol(String protocol) {
-        switch (protocol) {
-            case "SSH": case "OSSH": case "TLS-OSSH": case "SHADOWSOCKS-OSSH":
-            case "UNFRONTED-MEEK-OSSH": case "UNFRONTED-MEEK-HTTPS-OSSH":
-            case "UNFRONTED-MEEK-SESSION-TICKET-OSSH": case "FRONTED-MEEK-OSSH":
-            case "FRONTED-MEEK-HTTP-OSSH": case "QUIC-OSSH": case "FRONTED-MEEK-QUIC-OSSH":
-            case "TAPDANCE-OSSH": case "CONJURE-OSSH": return true;
-            default: return false;
-        }
     }
 
     private static native int nativeStart(String config, String entries, PsiphonTunnel owner);

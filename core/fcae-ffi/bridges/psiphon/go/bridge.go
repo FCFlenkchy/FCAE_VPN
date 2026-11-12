@@ -214,6 +214,7 @@ func psiEmit(level int, format string, args ...interface{}) {
 type psiProvider struct{}
 
 func (p *psiProvider) Notice(noticeJSON string) {
+    psiEmit(psiLogInfo, "[psiphon] %s", strings.TrimSuffix(noticeJSON, "\n"))
     psiHandleNotice(noticeJSON)
     psiLogMu.Lock()
     cb := psiNoticeCb
@@ -320,55 +321,6 @@ type psiNoticeEnvelope struct {
 	Data       json.RawMessage `json:"data"`
 }
 
-func psiDiagnosticNotice(n psiNoticeEnvelope) string {
-	switch n.NoticeType {
-	case "ConnectingServer", "ConnectedServer", "ActiveTunnel", "ConnectedServerRegion",
-		"CandidateServers", "Tunnels", "EstablishTunnelTimeout", "Warning":
-	default:
-		return ""
-	}
-	var data map[string]json.RawMessage
-	if json.Unmarshal(n.Data, &data) != nil {
-		return ""
-	}
-	safe := make(map[string]interface{})
-	for _, key := range []string{"region", "serverRegion"} {
-		var value string
-		if json.Unmarshal(data[key], &value) == nil && len(value) == 2 &&
-			value[0] >= 'A' && value[0] <= 'Z' && value[1] >= 'A' && value[1] <= 'Z' {
-			safe[key] = value
-		}
-	}
-	var protocol string
-	if json.Unmarshal(data["protocol"], &protocol) == nil {
-		switch protocol {
-		case "SSH", "OSSH", "TLS-OSSH", "SHADOWSOCKS-OSSH", "UNFRONTED-MEEK-OSSH",
-			"UNFRONTED-MEEK-HTTPS-OSSH", "UNFRONTED-MEEK-SESSION-TICKET-OSSH",
-			"FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH", "QUIC-OSSH",
-			"FRONTED-MEEK-QUIC-OSSH", "TAPDANCE-OSSH", "CONJURE-OSSH":
-			safe["protocol"] = protocol
-		}
-	}
-	for _, key := range []string{"candidateNumber", "uniqueCandidateEstimate", "establishedTunnelsCount", "initialCount", "count"} {
-		var value int64
-		if json.Unmarshal(data[key], &value) == nil && value >= 0 && value <= 10000000 {
-			safe[key] = value
-		}
-	}
-	var replay bool
-	if json.Unmarshal(data["isReplay"], &replay) == nil {
-		safe["isReplay"] = replay
-	}
-	message, err := json.Marshal(struct {
-		NoticeType string                 `json:"noticeType"`
-		Data       map[string]interface{} `json:"data"`
-	}{n.NoticeType, safe})
-	if err != nil {
-		return ""
-	}
-	return string(message)
-}
-
 // psiCatch turns a panic in upstream code into an error: an unrecovered Go
 // panic aborts the whole host process, UI included.
 func psiCatch(what string, f func() error) (err error) {
@@ -389,9 +341,6 @@ func psiHandleNotice(noticeJSON string) {
 	var n psiNoticeEnvelope
 	if err := json.Unmarshal([]byte(noticeJSON), &n); err != nil {
 		return
-	}
-	if diagnostic := psiDiagnosticNotice(n); diagnostic != "" {
-		psiEmit(psiLogInfo, "[psiphon] %s", diagnostic)
 	}
 
 	switch n.NoticeType {

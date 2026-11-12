@@ -11,8 +11,7 @@
 use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
-/// Longest message forwarded to the UI; the old code's unbounded strings
-/// were a real memory-pressure source on Windows.
+/// General log messages stay short; Psiphon notices have a separate larger limit.
 const MAX_MSG: usize = 512;
 
 static CALLBACK: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -50,8 +49,9 @@ impl log::Log for FcaeLogger {
         let cb: RawCb = unsafe { std::mem::transmute(ptr) };
 
         let mut msg = record.args().to_string();
-        if msg.len() > MAX_MSG {
-            let mut end = MAX_MSG;
+        let limit = if msg.starts_with("[psiphon] {") { 1024 * 1024 } else { MAX_MSG };
+        if msg.len() > limit {
+            let mut end = limit;
             while end > 0 && !msg.is_char_boundary(end) {
                 end -= 1;
             }
@@ -60,6 +60,8 @@ impl log::Log for FcaeLogger {
         }
         // Interior NULs would truncate the C string; replace them.
         let msg = msg.replace('\0', "?");
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        crate::crash_log::record_log(&msg);
 
         if let Ok(c) = CString::new(msg) {
             unsafe { cb(abi_level(record.level()), c.as_ptr(), ud) };

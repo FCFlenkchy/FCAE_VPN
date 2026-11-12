@@ -47,7 +47,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // TUNNEL / CONNECTED) — no protocol tag baked into the text.
     public static final String BROADCAST_STAGE = "com.fc.fcaevpn.PSI_STAGE";
     public static final String BROADCAST_STOPPED = "com.fc.fcaevpn.PSI_STOPPED";
-    public static final String BROADCAST_LOG = "com.fc.fcaevpn.PSI_LOG";
     public static final String BROADCAST_REGIONS = "com.fc.fcaevpn.PSI_REGIONS_AVAILABLE";
     // Persisted by the Psiphon service and read by the UI.
     public static final String REGIONS_FILE = "psiphon_egress_regions.txt";
@@ -58,7 +57,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String EXTRA_HTTP = "httpPort";
     public static final String EXTRA_ERROR = "error";
     public static final String EXTRA_REGIONS = "regions";
-    public static final String EXTRA_LOG = "log";
     public static final String EXTRA_STAGE = "psiphonStage";
     public static final String EXTRA_STAGE_LABEL = "psiphonStageLabel";
     public static final String EXTRA_RTT = "rttMs";
@@ -424,9 +422,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // 0 -> onConnecting) and reports onConnected again once one is back.
     private volatile boolean tunnelUp;
     private final Handler logHandler = new Handler(Looper.getMainLooper());
-    private boolean logFlushPending;
-    private final StringBuilder logBuf = new StringBuilder();
-    private final Runnable flushLogs = this::flushLogs;
 
     /**
      * Slow-connect heartbeat: while startTunneling() is still dialing this
@@ -723,7 +718,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             sendBroadcast(fin);
         } catch (Exception ignored) {}
         emitLog("stopping");
-        flushLogs();
         // Swap the tunnel out under the lock. The start task holds the lock
         // only while creating one, so this never queues behind a dial; a
         // start that has not created its tunnel yet sees stopping and never
@@ -788,7 +782,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onDestroy() {
         destroyed = true;
-        flushLogs();
         super.onDestroy();
     }
 
@@ -1257,18 +1250,19 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     @Override
     public void onDiagnosticMessage(String message) {
-        // Lifecycle notice types drive staged connection status.
         if (!stopping && message != null) {
-            if (message.contains("\"noticeType\":\"ConnectingServer\"")) {
-                broadcastStage(3, "ESTABLISHING TUNNEL");
-            } else if (message.contains("ConnectedServerRegion")) {
-                handshakeRegion = true;
-                broadcastStage(4, "ESTABLISHING TUNNEL");
-                maybeBroadcastReady();
-            } else if (message.contains("\"noticeType\":\"ConnectedServer\"")
-                    || message.contains("\"noticeType\":\"ActiveTunnel\"")) {
-                broadcastStage(4, "ESTABLISHING TUNNEL");
-            }
+            try {
+                String type = new JSONObject(message).optString("noticeType", "");
+                if (type.equals("ConnectingServer")) {
+                    broadcastStage(3, "ESTABLISHING TUNNEL");
+                } else if (type.equals("ConnectedServerRegion")) {
+                    handshakeRegion = true;
+                    broadcastStage(4, "ESTABLISHING TUNNEL");
+                    maybeBroadcastReady();
+                } else if (type.equals("ConnectedServer") || type.equals("ActiveTunnel")) {
+                    broadcastStage(4, "ESTABLISHING TUNNEL");
+                }
+            } catch (org.json.JSONException ignored) { }
         }
         emitLog(message);
     }
@@ -1313,7 +1307,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         if (!disableSocks && s <= 0 && t != null) s = t.getLocalSocksProxyPort();
         socksPort.set(s);
         emitLog(s > 0 ? "connected, SOCKS " + proxyBindHost() + ":" + s + lanSuffix(s) : "connected");
-        flushLogs();
         // Last-chance discovery when nothing reported regions during
         // establishing (e.g. a stale replay older than the freshness window).
         if (lastRegions.isEmpty()) fetchRemoteServerRegions();
@@ -1353,7 +1346,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onExiting() {
         emitLog("exiting");
-        flushLogs();
         // Never stop while Go is delivering a notice: Stop waits for its
         // controller goroutines, including this callback, to return.
         logHandler.post(() -> {
@@ -1364,56 +1356,17 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         });
     }
 
-    // Keep notice JSON and diagnostic text intact. Batching is only transport,
-    // not a severity/content filter. Small logcat chunks avoid its entry limit.
     private void emitLog(String message) {
         if (message == null || message.isEmpty()) return;
         for (int offset = 0; offset < message.length();) {
-            int end = chunkEnd(message, offset, 1000);
+            int end = Math.min(message.length(), offset + 1000);
+            if (end < message.length() && Character.isHighSurrogate(message.charAt(end - 1))) end--;
             Log.i(TAG, message.substring(offset, end));
             offset = end;
         }
-        boolean flushNow;
-        synchronized (logBuf) {
-            if (logBuf.length() > 0) logBuf.append('\n');
-            logBuf.append("[psiphon] ").append(message);
-            // Flush bursts instead of silently deleting the oldest notices.
-            flushNow = logBuf.length() >= 12000;
-            if (!logFlushPending) {
-                logFlushPending = true;
-                logHandler.postDelayed(flushLogs, 250L);
-            }
-        }
-        if (flushNow) flushLogs();
-    }
-
-    private static int chunkEnd(String text, int offset, int limit) {
-        int end = Math.min(text.length(), offset + limit);
-        if (end < text.length() && Character.isHighSurrogate(text.charAt(end - 1))) end--;
-        return end;
-    }
-
-    private synchronized void flushLogs() {
-        logHandler.removeCallbacks(flushLogs);
-        String chunk;
-        synchronized (logBuf) {
-            logFlushPending = false;
-            if (logBuf.length() == 0) return;
-            chunk = logBuf.toString();
-            logBuf.setLength(0);
-        }
-        // Stay well below Binder's transaction limit, even for a large JSON
-        // notice. Every character is delivered; the UI retains a bounded tail.
-        for (int offset = 0; offset < chunk.length();) {
-            int end = chunkEnd(chunk, offset, 12000);
-            Intent i = new Intent(BROADCAST_LOG);
-            i.setPackage(getPackageName());
-            i.putExtra("psiSession", session);
-        i.putExtra("requestId", attachRequestId);
-            i.putExtra(EXTRA_LOG, chunk.substring(offset, end));
-            sendBroadcast(i);
-            offset = end;
-        }
+        try {
+            if (NativeEngine.ensureLoaded()) NativeEngine.nativeAppendLog("[psiphon] " + message);
+        } catch (Throwable ignored) { }
     }
 
     /**
@@ -1505,7 +1458,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     private void broadcastFailed(String msg) {
         emitLog("failed: " + (msg == null ? "failed" : msg));
-        flushLogs();
         Intent i = new Intent(BROADCAST_FAILED);
         i.setPackage(getPackageName());
         i.putExtra("psiSession", session);

@@ -1,5 +1,7 @@
 // FCAE VPN — Android JNI bridge (Kotlin UI controls the in-process engine)
 #include <jni.h>
+#include <algorithm>
+#include <unistd.h>
 #include <android/log.h>
 #include <atomic>
 #include <cstdio>
@@ -26,6 +28,10 @@ extern "C" void fcae_sponsor_set_ui_active(bool active);
 
 static std::mutex g_log_mu;
 static std::deque<std::string> g_logs;
+static size_t g_log_bytes = 0;
+static std::string g_log_path;
+static constexpr size_t kLogFileLimit = 1024 * 1024;
+static constexpr size_t kLogFileKeep = 512 * 1024;
 // Psiphon notices are chatty; 30 lines vanished before the user saw them.
 static constexpr size_t kMaxLogs = 250;
 static std::atomic<bool> g_inited{false};
@@ -477,16 +483,53 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeUnregisterVpnService(JNIEnv* env, jobje
     }
 }
 
+static void append_log_file(const std::string& line) {
+    if (g_log_path.empty()) return;
+    FILE* f = std::fopen(g_log_path.c_str(), "r+b");
+    if (!f) f = std::fopen(g_log_path.c_str(), "w+b");
+    if (!f) return;
+    if (std::fseek(f, 0, SEEK_END) != 0) { std::fclose(f); return; }
+    long size = std::ftell(f);
+    if (size < 0) { std::fclose(f); return; }
+    std::string entry = line;
+    if (entry.size() + 1 > kLogFileLimit) {
+        entry.resize(kLogFileLimit - 32);
+        entry += " [notice truncated]";
+    }
+    if (static_cast<size_t>(size) + entry.size() + 1 > kLogFileLimit) {
+        size_t retain = std::min(static_cast<size_t>(size), kLogFileKeep);
+        if (retain + entry.size() + 1 > kLogFileLimit) retain = 0;
+        std::string tail(retain, '\0');
+        if (retain) {
+            if (std::fseek(f, size - static_cast<long>(retain), SEEK_SET) != 0 ||
+                std::fread(&tail[0], 1, retain, f) != retain) { std::fclose(f); return; }
+            if (static_cast<size_t>(size) > retain) {
+                size_t next = tail.find('\n');
+                tail.erase(0, next == std::string::npos ? tail.size() : next + 1);
+            }
+        }
+        if (std::fflush(f) != 0 || ftruncate(fileno(f), 0) != 0 || std::fseek(f, 0, SEEK_SET) != 0) {
+            std::fclose(f); return;
+        }
+        if (!tail.empty()) std::fwrite(tail.data(), 1, tail.size(), f);
+    }
+    std::fwrite(entry.data(), 1, entry.size(), f);
+    std::fputc('\n', f);
+    std::fclose(f);
+}
+
 static void push_log_line(char prefix, const char* message, bool truncate = true) {
     if (!message || !message[0]) return;
     std::string line;
     line.push_back(prefix);
     line += " ";
     line += message;
-    // One diagnostic notice can be a long JSON blob; keep the pane readable.
+    append_log_file(line);
     if (truncate && line.size() > 512) line.resize(512);
+    g_log_bytes += line.size();
     g_logs.push_back(std::move(line));
-    while (g_logs.size() > kMaxLogs) {
+    while (g_logs.size() > kMaxLogs || (g_log_bytes > 2 * 1024 * 1024 && g_logs.size() > 1)) {
+        g_log_bytes -= g_logs.front().size();
         g_logs.pop_front();
     }
 }
@@ -550,6 +593,12 @@ static std::string jstr(JNIEnv* env, jstring s) {
     std::string out(p);
     env->ReleaseStringUTFChars(s, p);
     return out;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_fc_fcaevpn_NativeEngine_nativeConfigureLogFile(JNIEnv* env, jclass, jstring path) {
+    std::lock_guard<std::mutex> lock(g_log_mu);
+    g_log_path = jstr(env, path);
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -1157,6 +1206,11 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeClearLogs(JNIEnv*, jclass) {
     std::lock_guard<std::mutex> lock(g_log_mu);
     g_logs.clear();
+    g_log_bytes = 0;
+    if (!g_log_path.empty()) {
+        FILE* f = std::fopen(g_log_path.c_str(), "wb");
+        if (f) std::fclose(f);
+    }
 }
 
 // Host-side lines supplied by the Android Psiphon service.

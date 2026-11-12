@@ -2,10 +2,6 @@ package com.fc.fcaevpn;
 
 import android.app.Activity;
 import android.app.Application;
-import android.content.BroadcastReceiver;
-import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.os.Bundle;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -14,6 +10,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class FCAEApplication extends Application {
 
     private static final AtomicInteger visibleActivities = new AtomicInteger();
+    private static volatile String logFilePath = "";
+    public static String logFilePath() { return logFilePath; }
 
     /** When the UI last appeared or disappeared, for {@link #uiOnScreen()}. */
     private static volatile long lastVisibilityChangeAt = 0L;
@@ -30,17 +28,6 @@ public class FCAEApplication extends Application {
         return android.os.SystemClock.elapsedRealtime() - lastVisibilityChangeAt
                 < VISIBLE_GRACE_MS;
     }
-
-    private final BroadcastReceiver psiphonLogReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) {
-            if (!PsiphonTunnelService.isCurrentBroadcast(intent)) return;
-            String chunk = intent.getStringExtra(PsiphonTunnelService.EXTRA_LOG);
-            if (chunk == null || chunk.trim().isEmpty()) return;
-            try {
-                if (NativeEngine.ensureLoaded()) NativeEngine.nativeAppendLog(chunk);
-            } catch (Throwable ignored) { }
-        }
-    };
 
     private final ActivityLifecycleCallbacks callbacks = new ActivityLifecycleCallbacks() {
         @Override public void onActivityCreated(Activity activity, Bundle state) {}
@@ -60,11 +47,7 @@ public class FCAEApplication extends Application {
 
     @Override public void onCreate() {
         super.onCreate();
+        logFilePath = new java.io.File(getFilesDir(), "logs.txt").getAbsolutePath();
         registerActivityLifecycleCallbacks(callbacks);
-        if (getPackageName().equals(Application.getProcessName())) {
-            androidx.core.content.ContextCompat.registerReceiver(this, psiphonLogReceiver,
-                    new IntentFilter(PsiphonTunnelService.BROADCAST_LOG),
-                    androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED);
-        }
     }
 }

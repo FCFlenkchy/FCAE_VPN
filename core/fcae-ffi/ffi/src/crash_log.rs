@@ -120,6 +120,37 @@ pub(crate) fn record(message: &str) {
     }
 }
 
+pub(crate) fn record_log(message: &str) {
+    let Some(lock) = LOG.get() else { return };
+    let Ok(mut log) = lock.lock() else { return };
+    let limit = MAX_LOG - MAX_PANIC;
+    let mut end = message.len().min(limit.saturating_sub(32));
+    while !message.is_char_boundary(end) { end -= 1; }
+    let truncated = end < message.len();
+    let suffix = if truncated { " [log truncated]\n" } else { "\n" };
+    let needed = end + suffix.len();
+    if log.bytes.saturating_add(needed) > limit {
+        let keep = KEEP_LOG.min(log.bytes).min(limit.saturating_sub(needed));
+        let size = log.bytes;
+        let mut tail = Vec::with_capacity(keep);
+        if keep > 0 {
+            if log.file.seek(SeekFrom::Start((size - keep) as u64)).is_err()
+                || Read::by_ref(&mut log.file).take(keep as u64).read_to_end(&mut tail).is_err() { return; }
+            if size > keep {
+                let first = tail.iter().position(|b| *b == b'\n').map_or(tail.len(), |i| i + 1);
+                tail.drain(..first);
+            }
+        }
+        if log.file.set_len(0).is_err() || log.file.seek(SeekFrom::Start(0)).is_err() { return; }
+        if log.file.write_all(&tail).is_err() { return; }
+        log.bytes = tail.len();
+    }
+    if log.file.write_all(message[..end].as_bytes()).is_ok() {
+        log.bytes += end;
+        if log.file.write_all(suffix.as_bytes()).is_ok() { log.bytes += suffix.len(); }
+    }
+}
+
 pub fn init() {
     INIT.call_once(|| {
         let open = |dir: &Path| open_log(dir).ok().map(|(file, size)| (file, size, dir.join("logs.txt")));

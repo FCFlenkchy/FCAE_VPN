@@ -20,6 +20,7 @@ object NativeEngine {
         try {
             System.loadLibrary("fcae_go_bridge")
             System.loadLibrary("fcaevpn_native")
+            nativeConfigureLogFile(FCAEApplication.logFilePath())
             Loaded.value = true
         } catch (t: Throwable) {
             loadFailure = t.toString()
@@ -190,6 +191,7 @@ object NativeEngine {
     @JvmStatic external fun nativeClearLogs()
     /** Inject a host-side line from the Psiphon service. */
     @JvmStatic external fun nativeAppendLog(line: String)
+    @JvmStatic private external fun nativeConfigureLogFile(path: String)
 
     // No engine start required: availability is a compile-/platform-time
     // property, queried by the UI while the engine is down.

@@ -201,6 +201,7 @@ struct AppState {
     int  max_logs    = 200;
     bool auto_scroll = true;
     uint64_t logs_revision = 0; // guarded by logs_mutex, including ring eviction
+    size_t logs_bytes = 0;
     std::atomic<bool> logging_enabled{true};
     bool auto_update_check  = true;
     // Update channel: off = stable slot only; on = pre-releases also compete
@@ -215,11 +216,13 @@ struct AppState {
     void add_log(int level, const char* msg) {
         if (!msg) return;
         std::string s(msg);
-        if (s.size() > 256) s.resize(256);
+        if (s.rfind("[psiphon] {", 0) != 0 && s.size() > 256) s.resize(256);
         std::lock_guard<std::mutex> lock(logs_mutex);
+        logs_bytes += s.size();
         logs.emplace_back(level, std::move(s));
         ++logs_revision;
-        while ((int)logs.size() > max_logs) {
+        while ((int)logs.size() > max_logs || (logs_bytes > 2 * 1024 * 1024 && logs.size() > 1)) {
+            logs_bytes -= logs.front().second.size();
             logs.pop_front();
         }
     }
@@ -238,6 +241,7 @@ struct AppState {
     void clear_logs() {
         std::lock_guard<std::mutex> lock(logs_mutex);
         logs.clear();
+        logs_bytes = 0;
         ++logs_revision;
     }
 
