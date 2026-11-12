@@ -697,7 +697,7 @@ async fn logged_h2(sender: h2::client::SendRequest<Bytes>, request: &ControlRequ
     result
 }
 
-struct ConnectionDriver(tokio::task::JoinHandle<()>);
+pub(crate) struct ConnectionDriver(tokio::task::JoinHandle<()>);
 
 impl Drop for ConnectionDriver {
     fn drop(&mut self) {
@@ -729,7 +729,7 @@ async fn connect_control(dialer: &Dialer, host: &str, port: u16, transport: Tran
     }
 }
 
-async fn open_h2<S>(stream: S, probe: bool) -> Result<(h2::client::SendRequest<Bytes>, ConnectionDriver)>
+pub(crate) async fn open_h2<S>(stream: S, probe: bool) -> Result<(h2::client::SendRequest<Bytes>, ConnectionDriver)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -746,17 +746,15 @@ where
     Ok((client, driver))
 }
 
-pub(crate) async fn over_h2<S>(stream: S, request: &ControlRequest) -> Result<ControlResponse>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let (client, driver) = open_h2(stream, false).await?;
-    let result = exchange_h2(client, request).await;
-    drop(driver);
-    result
+struct H2ExchangeGuard(Option<h2::SendStream<Bytes>>);
+
+impl Drop for H2ExchangeGuard {
+    fn drop(&mut self) {
+        if let Some(stream) = &mut self.0 { stream.send_reset(h2::Reason::CANCEL); }
+    }
 }
 
-async fn exchange_h2(client: h2::client::SendRequest<Bytes>, request: &ControlRequest) -> Result<ControlResponse> {
+pub(crate) async fn exchange_h2(client: h2::client::SendRequest<Bytes>, request: &ControlRequest) -> Result<ControlResponse> {
     let mut client = client.ready().await.map_err(h2_error)?;
     let default_port = if request.secure { 443 } else { 80 };
     let authority = if request.port == default_port && !request.host.contains(':') { request.host.clone() }
@@ -771,9 +769,10 @@ async fn exchange_h2(client: h2::client::SendRequest<Bytes>, request: &ControlRe
         head = head.header(http::header::CONTENT_LENGTH, body.len());
     }
     let head = head.body(()).map_err(|error| FirefoxError::Protocol(error.to_string()))?;
-    let (answer, mut stream) = client.send_request(head, request.body.is_none()).map_err(h2_error)?;
+    let (answer, stream) = client.send_request(head, request.body.is_none()).map_err(h2_error)?;
+    let mut guard = H2ExchangeGuard(Some(stream));
     if let Some(body) = &request.body {
-        stream.send_data(Bytes::copy_from_slice(body), true).map_err(h2_error)?;
+        guard.0.as_mut().expect("active HTTP/2 request").send_data(Bytes::copy_from_slice(body), true).map_err(h2_error)?;
     }
     let (parts, mut body) = answer.await.map_err(h2_error)?.into_parts();
     let mut data = Vec::new();
@@ -785,10 +784,18 @@ async fn exchange_h2(client: h2::client::SendRequest<Bytes>, request: &ControlRe
         data.extend_from_slice(&chunk);
         let _ = body.flow_control().release_capacity(chunk.len());
     }
+    drop(guard.0.take());
     Ok(ControlResponse { status: parts.status.as_u16(), headers: parts.headers, body: data })
 }
 
 pub(crate) async fn over_h1<S>(mut tls: S, request: &ControlRequest) -> Result<ControlResponse>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    exchange_h1(&mut tls, request, false).await.map(|(response, _)| response)
+}
+
+pub(crate) async fn exchange_h1<S>(tls: &mut S, request: &ControlRequest, persistent: bool) -> Result<(ControlResponse, bool)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -805,7 +812,7 @@ where
     if let Some(body) = &request.body {
         head.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
-    head.push_str("Connection: close\r\n\r\n");
+    head.push_str(if persistent { "Connection: keep-alive\r\n\r\n" } else { "Connection: close\r\n\r\n" });
     let mut wire = head.into_bytes();
     if let Some(body) = &request.body {
         wire.extend_from_slice(body);
@@ -828,7 +835,16 @@ where
             break;
         }
     }
-    parse_h1_response(&raw, request.method == Method::HEAD)
+    let response = parse_h1_response(&raw, request.method == Method::HEAD)?;
+    let split = raw.windows(4).position(|window| window == b"\r\n\r\n");
+    let close = response.headers.get_all(http::header::CONNECTION).iter().any(|value|
+        value.to_str().ok().is_some_and(|text| text.split(',').any(|part| part.trim().eq_ignore_ascii_case("close"))));
+    let framed = response.headers.get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok()).and_then(|value| value.trim().parse::<usize>().ok())
+        .is_some_and(|length| split.is_some_and(|head| raw.len() == head + 4 + length));
+    let reusable = persistent && raw.starts_with(b"HTTP/1.1 ") && !close && framed
+        && !response.headers.contains_key(http::header::TRANSFER_ENCODING);
+    Ok((response, reusable))
 }
 
 fn h1_response_complete(raw: &[u8], is_head: bool) -> Result<bool> {
@@ -969,6 +985,34 @@ fn h2_error(error: h2::Error) -> FirefoxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn persistent_h1_reuses_only_complete_framed_responses() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(async move {
+            for index in 0..2 {
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(server.read_u8().await.unwrap());
+                }
+                assert!(std::str::from_utf8(&head).unwrap().contains("Connection: keep-alive"));
+                let mut body = [0u8; 3];
+                server.read_exact(&mut body).await.unwrap();
+                assert_eq!(&body, b"dns");
+                let close = if index == 1 { "Connection: close\r\n" } else { "" };
+                server.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n{close}\r\nabc").as_bytes()).await.unwrap();
+            }
+        });
+        let mut request = ControlRequest::new(Method::POST, "https://example.com/dns-query").unwrap();
+        request.body = Some(b"dns".to_vec());
+        let (first, reusable) = exchange_h1(&mut client, &request, true).await.unwrap();
+        assert_eq!(first.body, b"abc");
+        assert!(reusable);
+        let (second, reusable) = exchange_h1(&mut client, &request, true).await.unwrap();
+        assert_eq!(second.body, b"abc");
+        assert!(!reusable);
+        task.await.unwrap();
+    }
 
     #[test]
     fn direct_error_diagnostics_include_only_bounded_messages() {

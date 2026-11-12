@@ -2458,24 +2458,13 @@ static void firefox_expire_status(double now) {
     }
 }
 
+static bool firefox_background_snapshot(uint64_t id, std::string& json);
+
 static void firefox_poll_job() {
     if (!g_app.firefox_job) return;
     const uint64_t job = g_app.firefox_job;
-    uint32_t needed = fcae_firefox_job_poll(job, nullptr, 0);
     std::string json;
-    bool valid_snapshot = false;
-    for (int attempt = 0; attempt < 4 && needed && needed <= 1024 * 1024; ++attempt) {
-        json.assign(needed + 1, '\0');
-        const uint32_t written = fcae_firefox_job_poll(job, json.data(), (uint32_t)json.size());
-        if (!written || written > 1024 * 1024) break;
-        if (written <= needed) {
-            json.resize(written);
-            valid_snapshot = true;
-            break;
-        }
-        needed = written;
-    }
-    if (!valid_snapshot) {
+    if (!firefox_background_snapshot(job, json)) {
         fcae_firefox_job_release(job);
         g_app.firefox_job = 0;
         set_firefox_status("Firefox account job is missing, invalid, or too large");
@@ -2691,7 +2680,9 @@ static void firefox_refresh_usage(double now) {
 }
 
 static bool firefox_background_snapshot(uint64_t id, std::string& json) {
-    uint32_t needed = fcae_firefox_job_poll(id, nullptr, 0);
+    char small[512] = {};
+    uint32_t needed = fcae_firefox_job_poll(id, small, sizeof(small));
+    if (needed && needed < sizeof(small)) { json.assign(small, needed); return true; }
     for (int attempt = 0; attempt < 4 && needed && needed <= 1024 * 1024; ++attempt) {
         json.assign(needed + 1, '\0');
         const uint32_t written = fcae_firefox_job_poll(id, json.data(), (uint32_t)json.size());

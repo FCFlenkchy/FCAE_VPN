@@ -658,7 +658,9 @@ Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxAccountSubmit(JNIEnv* env, jclass,
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeFirefoxJobPoll(JNIEnv* env, jclass, jlong id) {
-    uint32_t needed = fcae_firefox_job_poll((uint64_t)id, nullptr, 0);
+    char small[512] = {};
+    uint32_t needed = fcae_firefox_job_poll((uint64_t)id, small, sizeof(small));
+    if (needed && needed < sizeof(small)) return env->NewStringUTF(small);
     for (int attempt = 0; attempt < 4 && needed && needed <= 1024 * 1024; ++attempt) {
         std::string json(needed + 1, '\0');
         const uint32_t written = fcae_firefox_job_poll((uint64_t)id, json.data(), (uint32_t)json.size());

@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use h2::{RecvStream, SendStream};
@@ -13,7 +13,7 @@ use parking_lot::{Mutex as SyncMutex, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio_boring::SslStream;
 use zeroize::Zeroizing;
 
@@ -90,10 +90,53 @@ impl AsyncWrite for MeteredTunnel {
     }
 }
 
+struct CarrierIo<S> {
+    inner: S,
+    reads: Arc<AtomicU64>,
+    writes: Arc<AtomicU64>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for CarrierIo<S> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, output: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        let before = output.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, output);
+        if matches!(&result, Poll::Ready(Ok(()))) && output.filled().len() > before {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for CarrierIo<S> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write(cx, bytes);
+        if matches!(&result, Poll::Ready(Ok(count)) if *count > 0) {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+struct PendingConnect(Option<SendStream<Bytes>>);
+impl Drop for PendingConnect {
+    fn drop(&mut self) {
+        if let Some(send) = &mut self.0 { send.send_reset(h2::Reason::CANCEL); }
+    }
+}
+
 struct SessionInner {
     alive: AtomicBool,
+    accepting: AtomicBool,
     token: RwLock<Zeroizing<String>>,
-    last_activity: AtomicU64,
+    carrier_reads: Arc<AtomicU64>,
+    carrier_writes: Arc<AtomicU64>,
+    app_writes: AtomicU64,
     active_streams: AtomicUsize,
     driver: SyncMutex<Option<AbortHandle>>,
     keepalive: SyncMutex<Option<AbortHandle>>,
@@ -139,12 +182,18 @@ impl H2Session {
             .initial_connection_window_size(CONNECTION_WINDOW)
             .max_frame_size(MAX_FRAME)
             .max_header_list_size(64 * 1024);
-        let (sender, mut connection) = builder.handshake(tls).await.map_err(h2_error)?;
+        let carrier_reads = Arc::new(AtomicU64::new(0));
+        let carrier_writes = Arc::new(AtomicU64::new(0));
+        let io = CarrierIo { inner: tls, reads: carrier_reads.clone(), writes: carrier_writes.clone() };
+        let (sender, mut connection) = builder.handshake(io).await.map_err(h2_error)?;
         let mut ping_pong = connection.ping_pong().ok_or_else(|| FirefoxError::H2("connection has no PING support".into()))?;
         let inner = Arc::new(SessionInner {
             alive: AtomicBool::new(true),
+            accepting: AtomicBool::new(true),
             token: RwLock::new(Zeroizing::new(token)),
-            last_activity: AtomicU64::new(now_millis()),
+            carrier_reads,
+            carrier_writes,
+            app_writes: AtomicU64::new(0),
             active_streams: AtomicUsize::new(0),
             driver: SyncMutex::new(None),
             keepalive: SyncMutex::new(None),
@@ -160,40 +209,63 @@ impl H2Session {
 
         let weak = Arc::downgrade(&inner);
         let keepalive = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            let period = Duration::from_secs(5);
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut misses = 0;
+            let mut upload_grace_used = false;
+            let mut pending = false;
+            let mut started = Instant::now();
             loop {
                 interval.tick().await;
                 let Some(inner) = weak.upgrade() else { break };
                 if !inner.alive.load(Ordering::Acquire) {
                     break;
                 }
-                let sent = now_millis();
-                let started = Instant::now();
-                if let Err(error) = ping_pong.send_ping(h2::Ping::opaque()) {
-                    log::debug!("[firefox] H2 PING send failed: {error}");
-                    inner.kill();
-                    break;
+                let checked = inner.carrier_reads.load(Ordering::Relaxed);
+                let writes = inner.carrier_writes.load(Ordering::Relaxed);
+                let app_writes = inner.app_writes.load(Ordering::Relaxed);
+                if !pending {
+                    started = Instant::now();
+                    if let Err(error) = ping_pong.send_ping(h2::Ping::opaque()) {
+                        log::debug!("[firefox] H2 PING send failed: {error}");
+                        if error.is_go_away() { inner.accepting.store(false, Ordering::Release); }
+                        else { inner.kill(); }
+                        break;
+                    }
+                    pending = true;
                 }
                 let pong = std::future::poll_fn(|cx| ping_pong.poll_pong(cx));
-                match tokio::time::timeout(Duration::from_secs(5), pong).await {
+                match tokio::time::timeout(period, pong).await {
                     Ok(Ok(_)) => {
                         traffic.record_rtt(started.elapsed());
+                        pending = false;
                         misses = 0;
+                        upload_grace_used = false;
                     },
                     Ok(Err(error)) => {
                         log::debug!("[firefox] H2 PING failed: {error}");
-                        inner.kill();
+                        if error.is_go_away() { inner.accepting.store(false, Ordering::Release); }
+                        else { inner.kill(); }
                         break;
                     }
-                    Err(_) if inner.last_activity.load(Ordering::Acquire) > sent => misses = 0,
+                    // h2 permits only one outstanding user PING; keep polling it after a timeout.
+                    Err(_) if inner.carrier_reads.load(Ordering::Relaxed) != checked => {
+                        misses = 0;
+                        upload_grace_used = false;
+                    }
                     Err(_) => misses += 1,
                 }
                 if misses >= 2 {
-                    log::debug!("[firefox] H2 keepalive timed out");
-                    inner.kill();
-                    break;
+                    let uploading = inner.app_writes.load(Ordering::Relaxed) != app_writes
+                        && inner.carrier_writes.load(Ordering::Relaxed) != writes;
+                    if uploading && !upload_grace_used {
+                        upload_grace_used = true;
+                    } else {
+                        log::debug!("[firefox] H2 keepalive timed out");
+                        inner.kill();
+                        break;
+                    }
                 }
             }
         });
@@ -207,7 +279,14 @@ impl H2Session {
     }
 
     fn alive(&self) -> bool {
-        self.inner.alive.load(Ordering::Acquire)
+        self.inner.alive.load(Ordering::Acquire) && self.inner.accepting.load(Ordering::Acquire)
+    }
+
+    fn stream_error(&self, error: h2::Error) -> FirefoxError {
+        if error.is_go_away() || error.is_io() {
+            self.inner.accepting.store(false, Ordering::Release);
+        }
+        h2_error(error)
     }
 
     fn kill(&self) {
@@ -232,10 +311,11 @@ impl H2Session {
         }
         let token = self.token();
         let mut sender = self.sender.clone();
-        sender = sender.ready().await.map_err(h2_error)?;
+        sender = sender.ready().await.map_err(|error| self.stream_error(error))?;
         let request = connect_request(target, &token, None)?;
-        let (response, send) = sender.send_request(request, false).map_err(h2_error)?;
-        let response = response.await.map_err(h2_error)?;
+        let (response, send) = sender.send_request(request, false).map_err(|error| self.stream_error(error))?;
+        let mut pending = PendingConnect(Some(send));
+        let response = response.await.map_err(|error| self.stream_error(error))?;
         let (parts, recv) = response.into_parts();
         if !parts.status.is_success() {
             let host = self.authority_host();
@@ -246,7 +326,7 @@ impl H2Session {
         }
         self.inner.active_streams.fetch_add(1, Ordering::Relaxed);
         Ok(H2Tunnel {
-            send,
+            send: pending.0.take().expect("pending CONNECT stream"),
             recv,
             read_chunk: Bytes::new(),
             read_offset: 0,
@@ -265,10 +345,11 @@ impl H2Session {
         let authority = self.authority();
         let uri = format!("https://{authority}{path}");
         let mut sender = self.sender.clone();
-        sender = sender.ready().await.map_err(h2_error)?;
+        sender = sender.ready().await.map_err(|error| self.stream_error(error))?;
         let request = connect_request(&uri, &token, Some(h2::ext::Protocol::from_static("connect-udp")))?;
-        let (response, send) = sender.send_request(request, false).map_err(h2_error)?;
-        let response = response.await.map_err(h2_error)?;
+        let (response, send) = sender.send_request(request, false).map_err(|error| self.stream_error(error))?;
+        let mut pending = PendingConnect(Some(send));
+        let response = response.await.map_err(|error| self.stream_error(error))?;
         let (parts, recv) = response.into_parts();
         if !parts.status.is_success() {
             let host = self.authority_host();
@@ -278,7 +359,7 @@ impl H2Session {
             return Err(error);
         }
         self.inner.active_streams.fetch_add(1, Ordering::Relaxed);
-        Ok(UdpTunnel::new(send, recv, self.inner.clone(), traffic))
+        Ok(UdpTunnel::new(pending.0.take().expect("pending CONNECT stream"), recv, self.inner.clone(), traffic))
     }
 
     fn authority(&self) -> String {
@@ -332,7 +413,6 @@ impl AsyncRead for H2Tunnel {
                 Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, error))),
                 Poll::Ready(Some(Ok(chunk))) => {
                     let _ = self.recv.flow_control().release_capacity(chunk.len());
-                    self.inner.last_activity.store(now_millis(), Ordering::Release);
                     if chunk.is_empty() {
                         continue;
                     }
@@ -361,7 +441,7 @@ impl AsyncWrite for H2Tunnel {
         let count = buffer.len().min(self.send.capacity()).min(MAX_FRAME as usize);
         match self.send.send_data(Bytes::copy_from_slice(&buffer[..count]), false) {
             Ok(()) => {
-                self.inner.last_activity.store(now_millis(), Ordering::Release);
+                self.inner.app_writes.fetch_add(1, Ordering::Relaxed);
                 Poll::Ready(Ok(count))
             }
             Err(error) => Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, error))),
@@ -409,31 +489,44 @@ impl UdpTunnel {
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<Bytes>(256);
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(256);
         let state = Arc::new(UdpState { queued: AtomicUsize::new(0), closed: AtomicBool::new(false) });
+        let (closed_tx, mut writer_closed) = tokio::sync::watch::channel(false);
+        let mut reader_closed = closed_tx.subscribe();
+        let writer_signal = closed_tx.clone();
         let writer_state = state.clone();
         let writer_inner = inner.clone();
         let writer = tokio::spawn(async move {
-            while let Some(capsule) = outgoing_rx.recv().await {
+            loop {
+                let capsule = tokio::select! {
+                    changed = writer_closed.changed() => { let _ = changed; break; }
+                    capsule = outgoing_rx.recv() => match capsule { Some(capsule) => capsule, None => break },
+                };
                 let length = capsule.len();
-                let result = send_h2_bytes(&mut send, capsule).await;
+                let result = tokio::select! {
+                    changed = writer_closed.changed() => { let _ = changed; break; }
+                    result = send_h2_bytes(&mut send, capsule) => result,
+                };
                 writer_state.queued.fetch_sub(length, Ordering::AcqRel);
-                writer_inner.last_activity.store(now_millis(), Ordering::Release);
                 if let Err(error) = result {
                     log::debug!("[firefox] UDP H2 writer ended: {error}");
                     break;
                 }
+                writer_inner.app_writes.fetch_add(1, Ordering::Relaxed);
             }
             writer_state.closed.store(true, Ordering::Release);
-            let _ = send.send_data(Bytes::new(), true);
+            let _ = writer_signal.send(true);
+            send.send_reset(h2::Reason::CANCEL);
         });
         let reader_state = state.clone();
-        let reader_inner = inner.clone();
         let reader = tokio::spawn(async move {
             let mut capsules = Vec::<u8>::new();
             loop {
-                match recv.data().await {
+                let result = tokio::select! {
+                    changed = reader_closed.changed() => { let _ = changed; break; }
+                    result = recv.data() => result,
+                };
+                match result {
                     Some(Ok(chunk)) => {
                         let _ = recv.flow_control().release_capacity(chunk.len());
-                        reader_inner.last_activity.store(now_millis(), Ordering::Release);
                         if capsules.len().saturating_add(chunk.len()) > MAX_UDP_CAPSULE * 2 {
                             break;
                         }
@@ -466,6 +559,7 @@ impl UdpTunnel {
                 }
             }
             reader_state.closed.store(true, Ordering::Release);
+            let _ = closed_tx.send(true);
         });
         Self {
             outgoing: outgoing_tx,
@@ -547,6 +641,10 @@ impl UdpTunnel {
     }
 
     pub fn try_send(&self, packet: &[u8]) -> Result<()> {
+        self.try_send_with_capacity(packet).map(|_| ())
+    }
+
+    pub(crate) fn try_send_with_capacity(&self, packet: &[u8]) -> Result<bool> {
         if packet.len() > MAX_UDP_PACKET {
             return Err(FirefoxError::UnsupportedDestination("UDP packet exceeds 65535 bytes".into()));
         }
@@ -557,7 +655,7 @@ impl UdpTunnel {
         let mut current = self.state.queued.load(Ordering::Acquire);
         loop {
             if current.saturating_add(capsule.len()) > UDP_QUEUE_BYTES {
-                return Ok(());
+                return Ok(false);
             }
             match self.state.queued.compare_exchange_weak(current, current + capsule.len(), Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => break,
@@ -567,11 +665,11 @@ impl UdpTunnel {
         match self.outgoing.try_send(Bytes::from(capsule)) {
             Ok(()) => {
                 self.traffic.tx.fetch_add(packet.len() as u64, Ordering::Relaxed);
-                Ok(())
+                Ok(true)
             }
             Err(mpsc::error::TrySendError::Full(capsule)) => {
                 self.state.queued.fetch_sub(capsule.len(), Ordering::AcqRel);
-                Ok(())
+                Ok(false)
             }
             Err(mpsc::error::TrySendError::Closed(capsule)) => {
                 self.state.queued.fetch_sub(capsule.len(), Ordering::AcqRel);
@@ -740,11 +838,75 @@ pub(crate) fn destination_error(error: &FirefoxError) -> Option<&'static str> {
     None
 }
 
+const H1_SPARE_MAX_AGE: Duration = Duration::from_secs(20);
+
+type H1Tls = SslStream<TcpStream>;
+
+#[derive(Default)]
+struct H1SpareState {
+    slot: Option<(Instant, H1Tls)>,
+    filling: Option<JoinHandle<()>>,
+    generation: u64,
+    closed: bool,
+}
+
+#[derive(Default)]
+struct H1SparePool {
+    state: SyncMutex<H1SpareState>,
+}
+
+impl H1SparePool {
+    fn take_and_refill(self: &Arc<Self>, dialer: &Dialer, candidate: &Candidate, timeout: Duration) -> Option<H1Tls> {
+        let mut state = self.state.lock();
+        if state.closed {
+            return None;
+        }
+        let spare = state.slot.take().and_then(|(created, stream)| {
+            (created.elapsed() < H1_SPARE_MAX_AGE).then_some(stream)
+        });
+        if state.filling.is_none() {
+            let pool = self.clone();
+            let dialer = dialer.clone();
+            let candidate = candidate.clone();
+            let generation = state.generation;
+            let task = tokio::spawn(async move {
+                let result = tokio::time::timeout(timeout, crate::tls::connect(&dialer, &candidate.host, candidate.port, ALPN_H1)).await;
+                let mut state = pool.state.lock();
+                if !state.closed && state.generation == generation {
+                    if let Ok(Ok(stream)) = result {
+                        state.slot = Some((Instant::now(), stream));
+                    }
+                    state.filling = None;
+                }
+            });
+            state.filling = Some(task);
+        }
+        spare
+    }
+
+    fn invalidate(&self, close: bool) -> Option<JoinHandle<()>> {
+        let mut state = self.state.lock();
+        state.generation = state.generation.wrapping_add(1);
+        state.slot = None;
+        state.closed |= close;
+        let task = state.filling.take();
+        if let Some(task) = &task {
+            task.abort();
+        }
+        task
+    }
+}
+
+fn retry_stale_h1_spare(response_started: bool, error: &FirefoxError) -> bool {
+    !response_started && matches!(error, FirefoxError::Network(_) | FirefoxError::Protocol(_))
+}
+
 pub struct Upstream {
     candidate: RwLock<Candidate>,
     candidates: RwLock<Vec<Candidate>>,
     preference: TransportPreference,
     h1_reported: AtomicBool,
+    h1_spare: Arc<H1SparePool>,
     h1_udp_reported: AtomicBool,
     h2_reported: AtomicBool,
     dialer: Dialer,
@@ -757,6 +919,7 @@ pub struct Upstream {
     stream_health: SyncMutex<StreamHealth>,
     tcp_session: Mutex<Option<H2Session>>,
     udp_session: Mutex<Option<H2Session>>,
+    pub(crate) doh_pool: crate::doh::DohPool,
     traffic: Arc<Traffic>,
 }
 
@@ -771,6 +934,7 @@ impl Upstream {
             candidates: RwLock::new(vec![candidate]),
             preference,
             h1_reported: AtomicBool::new(false),
+            h1_spare: Arc::new(H1SparePool::default()),
             h1_udp_reported: AtomicBool::new(false),
             h2_reported: AtomicBool::new(false),
             dialer,
@@ -783,6 +947,7 @@ impl Upstream {
             stream_health: SyncMutex::new(StreamHealth::default()),
             tcp_session: Mutex::new(None),
             udp_session: Mutex::new(None),
+            doh_pool: crate::doh::DohPool::default(),
             traffic: Arc::new(Traffic::default()),
         })
     }
@@ -886,17 +1051,12 @@ impl Upstream {
                 Ok(Err(FirefoxError::PassRejected)) if attempt == 0 => {
                     self.renew(true).await?;
                 }
-                Ok(Err(error)) if retryable_session_error(&error) => {
-                    session.kill();
+                Ok(Err(error)) if retryable_session_error(&error) && !session.alive() => {
                     self.discard_tcp_session(&session).await;
                     last_error = Some(error);
                 }
                 Ok(Err(error)) => return Err(error),
-                Err(_) => {
-                    session.kill();
-                    self.discard_tcp_session(&session).await;
-                    last_error = Some(FirefoxError::Timeout(self.timeout));
-                }
+                Err(_) => return Err(FirefoxError::Timeout(self.timeout)),
             }
         }
         let error = last_error.unwrap_or_else(|| FirefoxError::H2("could not open proxy stream".into()));
@@ -968,11 +1128,29 @@ impl Upstream {
         result
     }
 
-    async fn open_h1_inner(&self, target: &str, token: &str) -> Result<BufReader<SslStream<TcpStream>>> {
+    async fn open_h1_inner(&self, target: &str, token: &str) -> Result<BufReader<H1Tls>> {
         split_authority(target, 443).ok_or_else(|| FirefoxError::UnsupportedDestination(target.into()))?;
-        let candidate = self.candidate();
-        let tls = tokio::time::timeout(self.timeout, crate::tls::connect(&self.dialer, &candidate.host, candidate.port, ALPN_H1))
-            .await.map_err(|_| FirefoxError::Timeout(self.timeout))??;
+        let (candidate, spare) = {
+            let candidate = self.candidate.read();
+            let spare = self.h1_spare.take_and_refill(&self.dialer, &candidate, self.timeout);
+            (candidate.clone(), spare)
+        };
+        if let Some(spare) = spare {
+            let mut response_started = false;
+            match self.h1_connect(spare, &candidate, target, token, &mut response_started).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) if retry_stale_h1_spare(response_started, &error) => {
+                    log::debug!("[firefox] (h1) spare connection closed before response; opening a fresh connection");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let tls = crate::tls::connect(&self.dialer, &candidate.host, candidate.port, ALPN_H1).await?;
+        let mut response_started = false;
+        self.h1_connect(tls, &candidate, target, token, &mut response_started).await
+    }
+
+    async fn h1_connect(&self, tls: H1Tls, candidate: &Candidate, target: &str, token: &str, response_started: &mut bool) -> Result<BufReader<H1Tls>> {
         let mut stream = BufReader::new(tls);
         let request = format!(
             "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Bearer {token}\r\nUser-Agent: {}\r\n\r\n",
@@ -984,10 +1162,17 @@ impl Upstream {
         loop {
             let mut line = Vec::new();
             let remaining = (MAX_HEAD + 1).saturating_sub(head.len()) as u64;
-            let read = (&mut stream).take(remaining).read_until(b'\n', &mut line).await?;
+            let read = match (&mut stream).take(remaining).read_until(b'\n', &mut line).await {
+                Ok(read) => read,
+                Err(error) => {
+                    *response_started |= !line.is_empty();
+                    return Err(error.into());
+                }
+            };
             if read == 0 {
                 return Err(FirefoxError::Protocol("proxy closed before its CONNECT response".into()));
             }
+            *response_started = true;
             if head.len().saturating_add(line.len()) > MAX_HEAD {
                 return Err(FirefoxError::Protocol("proxy CONNECT response head is too large".into()));
             }
@@ -1027,21 +1212,22 @@ impl Upstream {
                 Ok(Err(FirefoxError::PassRejected)) if attempt == 0 => {
                     self.renew(true).await?;
                 }
-                Ok(Err(error)) if attempt == 0 && retryable_session_error(&error) => {
-                    session.kill();
-                    *self.udp_session.lock().await = None;
+                Ok(Err(error)) if attempt == 0 && retryable_session_error(&error) && !session.alive() => {
+                    self.discard_udp_session(&session).await;
                     last_error = Some(error);
                 }
                 Ok(Err(error)) => return Err(error),
-                Err(_) if attempt == 0 => {
-                    session.kill();
-                    *self.udp_session.lock().await = None;
-                    last_error = Some(FirefoxError::Timeout(self.timeout));
-                }
                 Err(_) => return Err(FirefoxError::Timeout(self.timeout)),
             }
         }
         Err(last_error.unwrap_or_else(|| FirefoxError::H2("could not open UDP proxy stream".into())))
+    }
+
+    async fn discard_udp_session(&self, failed: &H2Session) {
+        let mut slot = self.udp_session.lock().await;
+        if slot.as_ref().is_some_and(|current| Arc::ptr_eq(&current.inner, &failed.inner)) {
+            *slot = None;
+        }
     }
 
     async fn open_h1_udp_authorized(&self, target: &str) -> Result<UdpTunnel> {
@@ -1127,7 +1313,10 @@ impl Upstream {
                 self.rotate_proxy().await;
             }
         } else if !ambiguous && destination_reason.is_none() {
-            self.note_error(error).await;
+            // A stream timeout or reset alone does not establish that its shared carrier failed.
+            let live_h2 = matches!(error, FirefoxError::Timeout(_) | FirefoxError::H2(_) | FirefoxError::Network(_))
+                && self.tcp_session.lock().await.as_ref().is_some_and(H2Session::alive);
+            if !live_h2 { self.note_error(error).await; }
         }
     }
 
@@ -1162,7 +1351,15 @@ impl Upstream {
         let current = self.candidate.read().address.clone();
         let index = candidates.iter().position(|candidate| candidate.address == current).unwrap_or(0);
         let replacement = candidates[(index + 1) % candidates.len()].clone();
-        *self.candidate.write() = replacement.clone();
+        let spare_task = {
+            let mut candidate = self.candidate.write();
+            *candidate = replacement.clone();
+            self.h1_spare.invalidate(false)
+        };
+        if let Some(task) = spare_task {
+            let _ = task.await;
+        }
+        self.doh_pool.clear();
         self.failures.store(0, Ordering::Release);
         if let Some(session) = self.tcp_session.lock().await.take() {
             session.kill();
@@ -1174,6 +1371,10 @@ impl Upstream {
     }
 
     pub async fn close(&self) {
+        if let Some(task) = self.h1_spare.invalidate(true) {
+            let _ = task.await;
+        }
+        self.doh_pool.clear();
         if let Some(session) = self.tcp_session.lock().await.take() {
             session.kill();
         }
@@ -1185,6 +1386,7 @@ impl Upstream {
 
 impl Drop for Upstream {
     fn drop(&mut self) {
+        self.h1_spare.invalidate(true);
         if let Some(session) = self.tcp_session.get_mut().take() {
             session.kill();
         }
@@ -1423,10 +1625,6 @@ fn path_segment(input: &str) -> String {
     output
 }
 
-fn now_millis() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64
-}
-
 fn h2_error(error: h2::Error) -> FirefoxError {
     FirefoxError::H2(error.to_string())
 }
@@ -1437,6 +1635,52 @@ mod traffic_tests {
 
     fn http_error(status: u16, message: &str) -> FirefoxError {
         FirefoxError::Http { host: "proxy".into(), status, errno: None, retry_after: None, message: message.into() }
+    }
+
+    #[tokio::test]
+    async fn carrier_activity_counts_reads_not_queued_writes() {
+        let (io, mut peer) = tokio::io::duplex(64);
+        let reads = Arc::new(AtomicU64::new(0));
+        let writes = Arc::new(AtomicU64::new(0));
+        let mut carrier = CarrierIo { inner: io, reads: reads.clone(), writes: writes.clone() };
+        carrier.write_all(b"a").await.unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        assert_eq!(writes.load(Ordering::Relaxed), 1);
+        peer.write_all(b"b").await.unwrap();
+        let mut byte = [0u8; 1];
+        carrier.read_exact(&mut byte).await.unwrap();
+        assert_eq!(byte, *b"b");
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn stale_h1_spare_retry_never_retries_a_proxy_response() {
+        let closed = FirefoxError::Network("closed".into());
+        let eof = FirefoxError::Protocol("closed before response".into());
+        assert!(retry_stale_h1_spare(false, &closed));
+        assert!(retry_stale_h1_spare(false, &eof));
+        assert!(!retry_stale_h1_spare(true, &closed));
+        assert!(!retry_stale_h1_spare(true, &eof));
+        assert!(!retry_stale_h1_spare(false, &http_error(502, "bad gateway")));
+        assert!(!retry_stale_h1_spare(false, &FirefoxError::PassRejected));
+    }
+
+    #[tokio::test]
+    async fn h1_spare_invalidation_aborts_refill_and_shutdown_stays_closed() {
+        let pool = Arc::new(H1SparePool::default());
+        let task = tokio::spawn(std::future::pending::<()>());
+        pool.state.lock().filling = Some(task);
+        let task = pool.invalidate(false).unwrap();
+        assert!(task.await.unwrap_err().is_cancelled());
+        {
+            let state = pool.state.lock();
+            assert_eq!(state.generation, 1);
+            assert!(state.slot.is_none() && state.filling.is_none() && !state.closed);
+        }
+        pool.invalidate(true);
+        pool.invalidate(false);
+        let state = pool.state.lock();
+        assert!(state.closed && state.slot.is_none() && state.filling.is_none());
     }
 
     #[test]

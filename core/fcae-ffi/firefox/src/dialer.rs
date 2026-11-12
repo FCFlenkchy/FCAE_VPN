@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use parking_lot::Mutex;
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use socket2::{Domain, Protocol, SockAddr, Socket, TcpKeepalive, Type};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use url::Url;
@@ -15,6 +15,7 @@ use crate::types::{authority, split_authority};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PROXY_RESPONSE: usize = 16 * 1024;
+static KEEPALIVE_WARNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub type ProtectCallback = Arc<dyn Fn(i32) -> bool + Send + Sync + 'static>;
 
@@ -155,6 +156,18 @@ impl Dialer {
     async fn connect_address(&self, address: SocketAddr) -> Result<TcpStream> {
         let socket = Socket::new(Domain::for_address(address), Type::STREAM, Some(Protocol::TCP)).map_err(io)?;
         socket.set_nonblocking(true).map_err(io)?;
+        let keepalive = TcpKeepalive::new().with_time(Duration::from_secs(15));
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]
+        let keepalive = keepalive.with_interval(Duration::from_secs(15)).with_retries(9);
+        if let Err(error) = socket.set_tcp_keepalive(&keepalive) {
+            let fallback = socket.set_keepalive(true);
+            if !KEEPALIVE_WARNING.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                match fallback {
+                    Ok(()) => log::warn!("[firefox] TCP keepalive parameters unavailable: {error}; using system settings"),
+                    Err(fallback) => log::warn!("[firefox] TCP keepalive unavailable: {error}; fallback failed: {fallback}"),
+                }
+            }
+        }
         self.protect(&socket)?;
         match socket.connect(&SockAddr::from(address)) {
             Ok(()) => {}

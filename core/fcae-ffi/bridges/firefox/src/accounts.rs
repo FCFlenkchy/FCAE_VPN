@@ -5,25 +5,38 @@ use std::sync::{Arc, OnceLock};
 use fcae_firefox::{Account, Accounts, ChallengeService, ControlPlane, Dialer, FirefoxError, Fxa, LoginOutcome, Result, TransportPreference};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, OnceCell};
+use tokio::sync::{mpsc, OnceCell, OwnedSemaphorePermit, Semaphore};
+use tokio::task::AbortHandle;
+use zeroize::Zeroizing;
 
 use super::{captcha_solver, protect_callback};
 
-#[derive(Clone)]
-pub struct JobSnapshot {
-    pub status: &'static str,
-    pub result: Value,
+struct JobSnapshot {
+    status: &'static str,
+    json: Arc<str>,
+    cancel_on_release: bool,
+    abort: Option<AbortHandle>,
+}
+
+impl JobSnapshot {
+    fn new(id: u64, status: &'static str, result: Value, cancel_on_release: bool) -> Self {
+        let json: Arc<str> = json!({"id": id, "status": status, "result": result}).to_string().into();
+        Self { status, json, cancel_on_release, abort: None }
+    }
 }
 
 type Services = Arc<tokio::sync::Mutex<HashMap<String, Arc<OnceCell<Accounts>>>>>;
 
 struct Command {
     id: u64,
-    request: String,
+    request: Zeroizing<String>,
+    cancel_on_release: bool,
+    _permit: OwnedSemaphorePermit,
 }
 
 struct Dispatcher {
-    sender: mpsc::UnboundedSender<Command>,
+    sender: mpsc::Sender<Command>,
+    permits: Arc<Semaphore>,
     jobs: Arc<Mutex<HashMap<u64, JobSnapshot>>>,
 }
 
@@ -133,34 +146,56 @@ pub async fn solve_captcha(image: &str) -> Result<String> {
 
 pub fn submit(request: &str) -> u64 {
     let dispatcher = DISPATCHER.get_or_init(|| {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(32);
+        let permits = Arc::new(Semaphore::new(32));
         let jobs = Arc::new(Mutex::new(HashMap::new()));
         let worker_jobs = jobs.clone();
         std::thread::Builder::new()
             .name("fcae-firefox-accounts".into())
             .spawn(move || account_worker(receiver, worker_jobs))
             .expect("failed to spawn Firefox account worker");
-        Dispatcher { sender, jobs }
+        Dispatcher { sender, permits, jobs }
     });
+    if request.len() > 64 * 1024 { return 0; }
+    let Ok(permit) = dispatcher.permits.clone().try_acquire_owned() else { return 0 };
+    let cancel_on_release = serde_json::from_str::<Value>(request).ok()
+        .and_then(|value| value.get("op").and_then(Value::as_str).map(str::to_owned))
+        .is_some_and(|op| matches!(op.as_str(), "list" | "locations_cached" | "locations"));
     let id = NEXT_JOB.fetch_add(1, Ordering::Relaxed);
-    dispatcher.jobs.lock().insert(id, JobSnapshot { status: "running", result: json!({}) });
-    if dispatcher.sender.send(Command { id, request: request.to_string() }).is_err() {
-        finish(&dispatcher.jobs, id, Err(FirefoxError::Internal("Firefox account worker is unavailable".into())));
+    {
+        let mut jobs = dispatcher.jobs.lock();
+        if jobs.len() >= 128 {
+            let completed: Vec<_> = jobs.iter().filter(|(_, job)| job.status != "running").map(|(id, _)| *id).collect();
+            for id in completed.into_iter().take(jobs.len().saturating_sub(127)) { jobs.remove(&id); }
+        }
+        jobs.insert(id, JobSnapshot::new(id, "running", json!({}), cancel_on_release));
+    }
+    let command = Command { id, request: Zeroizing::new(request.to_string()), cancel_on_release, _permit: permit };
+    if dispatcher.sender.try_send(command).is_err() {
+        finish(&dispatcher.jobs, id, Err(FirefoxError::Internal("Firefox account worker is unavailable or busy".into())));
     }
     id
 }
 
-pub fn poll(id: u64) -> Option<JobSnapshot> {
-    DISPATCHER.get().and_then(|dispatcher| dispatcher.jobs.lock().get(&id).cloned())
+pub fn poll(id: u64) -> Option<Arc<str>> {
+    DISPATCHER.get().and_then(|dispatcher| dispatcher.jobs.lock().get(&id).map(|job| job.json.clone()))
 }
 
 pub fn release(id: u64) {
     if let Some(dispatcher) = DISPATCHER.get() {
-        dispatcher.jobs.lock().remove(&id);
+        release_job(&dispatcher.jobs, id);
     }
 }
 
-fn account_worker(mut receiver: mpsc::UnboundedReceiver<Command>, jobs: Arc<Mutex<HashMap<u64, JobSnapshot>>>) {
+fn release_job(jobs: &Mutex<HashMap<u64, JobSnapshot>>, id: u64) {
+    if let Some(job) = jobs.lock().remove(&id) {
+        if job.cancel_on_release {
+            if let Some(abort) = job.abort { abort.abort(); }
+        }
+    }
+}
+
+fn account_worker(mut receiver: mpsc::Receiver<Command>, jobs: Arc<Mutex<HashMap<u64, JobSnapshot>>>) {
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -173,9 +208,14 @@ fn account_worker(mut receiver: mpsc::UnboundedReceiver<Command>, jobs: Arc<Mute
         while let Some(command) = receiver.recv().await {
             let services = services.clone();
             let jobs = jobs.clone();
-            tokio::spawn(async move {
+            let id = command.id;
+            let cancel_on_release = command.cancel_on_release;
+            let task_jobs = jobs.clone();
+            let task = tokio::spawn(async move {
+                let _permit = command._permit;
                 let result = execute(&services, &command.request).await;
-                finish(&jobs, command.id, result);
+                finish(&task_jobs, id, result);
+                let jobs = task_jobs;
                 let mut states = jobs.lock();
                 if states.len() > 128 {
                     let completed: Vec<u64> = states.iter().filter(|(_, state)| state.status != "running").map(|(id, _)| *id).collect();
@@ -184,20 +224,24 @@ fn account_worker(mut receiver: mpsc::UnboundedReceiver<Command>, jobs: Arc<Mute
                     }
                 }
             });
+            let mut states = jobs.lock();
+            if let Some(state) = states.get_mut(&id) {
+                if state.status == "running" { state.abort = Some(task.abort_handle()); }
+            } else if cancel_on_release {
+                task.abort();
+            }
         }
     });
 }
 
 fn finish(jobs: &Mutex<HashMap<u64, JobSnapshot>>, id: u64, result: Result<Value>) {
-    let snapshot = match result {
-        Ok(result) => JobSnapshot { status: "complete", result },
-        Err(error) => JobSnapshot {
-            status: "error",
-            result: json!({"code": error.reason_code(), "message": error.to_string()}),
-        },
-    };
-    if let Some(state) = jobs.lock().get_mut(&id) {
-        *state = snapshot;
+    let mut states = jobs.lock();
+    if let Some(state) = states.get_mut(&id) {
+        let cancel_on_release = state.cancel_on_release;
+        *state = match result {
+            Ok(result) => JobSnapshot::new(id, "complete", result, cancel_on_release),
+            Err(error) => JobSnapshot::new(id, "error", json!({"code": error.reason_code(), "message": error.to_string()}), cancel_on_release),
+        };
     }
 }
 
@@ -463,13 +507,38 @@ mod tests {
         ]));
     }
 
+    #[tokio::test]
+    async fn release_cancels_only_safe_background_jobs() {
+        let jobs = Mutex::new(HashMap::new());
+        let background = tokio::spawn(std::future::pending::<()>());
+        let mut safe = JobSnapshot::new(1, "running", json!({}), true);
+        safe.abort = Some(background.abort_handle());
+        jobs.lock().insert(1, safe);
+        release_job(&jobs, 1);
+        assert!(background.await.unwrap_err().is_cancelled());
+
+        let mutating = tokio::spawn(std::future::pending::<()>());
+        let mut job = JobSnapshot::new(2, "running", json!({}), false);
+        job.abort = Some(mutating.abort_handle());
+        jobs.lock().insert(2, job);
+        release_job(&jobs, 2);
+        tokio::task::yield_now().await;
+        assert!(!mutating.is_finished());
+        mutating.abort();
+        let _ = mutating.await;
+    }
+
     #[test]
     fn finishing_a_released_job_does_not_recreate_it() {
         let jobs = Mutex::new(HashMap::new());
         finish(&jobs, 42, Ok(json!({"ok": true})));
         assert!(jobs.lock().is_empty());
-        jobs.lock().insert(43, JobSnapshot { status: "running", result: json!({}) });
+        jobs.lock().insert(43, JobSnapshot::new(43, "running", json!({}), false));
         finish(&jobs, 43, Ok(json!({"ok": true})));
         assert_eq!(jobs.lock().get(&43).unwrap().status, "complete");
+        let output: Value = serde_json::from_str(&jobs.lock().get(&43).unwrap().json).unwrap();
+        assert_eq!(output["id"], 43);
+        assert_eq!(output["status"], "complete");
+        assert_eq!(output["result"]["ok"], true);
     }
 }

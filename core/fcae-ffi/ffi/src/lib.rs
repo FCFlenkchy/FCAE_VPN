@@ -1304,7 +1304,7 @@ pub unsafe extern "C" fn fcae_firefox_relay_get(data_dir: *const c_char, out: *m
 }
 
 /// Submit a Firefox account operation JSON request. Returns an opaque job ID,
-/// or 0 for a null request / unavailable feature. Secrets are consumed by the
+/// or 0 for an invalid request, a busy queue, or unavailable feature. Secrets are consumed by the
 /// account worker and are never returned by `fcae_firefox_job_poll`.
 #[no_mangle]
 pub unsafe extern "C" fn fcae_firefox_account_submit(request: *const c_char) -> u64 {
@@ -1330,15 +1330,13 @@ pub unsafe extern "C" fn fcae_firefox_account_submit(request: *const c_char) -> 
 #[no_mangle]
 pub unsafe extern "C" fn fcae_firefox_job_poll(id: u64, out: *mut c_char, cap: u32) -> u32 {
     #[cfg(feature = "firefox")]
-    let text = guard_value("fcae_firefox_job_poll", String::new(), || {
-        fcae_firefox_bridge::accounts::poll(id).map(|snapshot| {
-            serde_json::json!({"id":id, "status":snapshot.status, "result":snapshot.result}).to_string()
-        }).unwrap_or_default()
+    let text = guard_value("fcae_firefox_job_poll", std::sync::Arc::<str>::from(""), || {
+        fcae_firefox_bridge::accounts::poll(id).unwrap_or_else(|| std::sync::Arc::<str>::from(""))
     });
     #[cfg(not(feature = "firefox"))]
     let text = {
         let _ = id;
-        String::new()
+        std::sync::Arc::<str>::from("")
     };
     if !out.is_null() && cap > 0 && !text.is_empty() {
         fill(std::slice::from_raw_parts_mut(out, cap as usize), &text);

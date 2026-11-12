@@ -627,6 +627,8 @@ uint64_t   fcae_firefox_account_submit(const char *request);
 /* Poll returns the required JSON byte count excluding NUL. Use a second call
  * with a buffer of required+1 bytes. Zero means the job no longer exists. */
 uint32_t   fcae_firefox_job_poll(uint64_t id, char *out, uint32_t cap);
+/* Release discards the snapshot. Read-only listing/location work may be
+ * cancelled; account-changing and token operations may still finish. */
 void       fcae_firefox_job_release(uint64_t id);
 /* Optional host CAPTCHA solver. Receives an image data URL and writes at most
  * 256 answer bytes plus NUL. Returns the answer length, or <=0 to decline. */

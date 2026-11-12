@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -14,6 +15,10 @@ use crate::types::{authority, valid_dns_name};
 const MAX_HEAD: usize = 32 * 1024;
 const MAX_UDP_FLOWS: usize = 256;
 const MAX_DATAGRAM: usize = 65_535;
+const MAX_UDP_PENDING_BYTES: usize = 2 * 1024 * 1024;
+const UDP_FAILURE_COOLDOWN: Duration = Duration::from_secs(2);
+const UDP_UNSUPPORTED_COOLDOWN: Duration = Duration::from_secs(5);
+const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct LocalProxies {
     upstream: Arc<Upstream>,
@@ -247,14 +252,74 @@ fn socks_reply_code(error: &FirefoxError) -> u8 {
     }
 }
 
+#[derive(Default)]
+struct PendingUdp {
+    packets: VecDeque<Vec<u8>>,
+    bytes: usize,
+}
+
+enum UdpFlow {
+    Opening(PendingUdp),
+    Ready { tunnel: Arc<crate::transport::UdpTunnel>, activity: Arc<parking_lot::Mutex<Instant>> },
+}
+
+#[derive(Default)]
+struct UdpFlows {
+    entries: HashMap<String, UdpFlow>,
+    pending_bytes: usize,
+    failures: HashMap<String, (Instant, String)>,
+    unsupported: Option<(Instant, String)>,
+}
+
+impl UdpFlows {
+    fn enqueue(&mut self, target: &str, payload: &[u8]) -> bool {
+        let cost = payload.len().saturating_add(32);
+        if self.pending_bytes.saturating_add(cost) > MAX_UDP_PENDING_BYTES { return false; }
+        if let Some(UdpFlow::Opening(pending)) = self.entries.get_mut(target) {
+            pending.packets.push_back(payload.to_vec());
+            pending.bytes += cost;
+            self.pending_bytes += cost;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn blocked(&mut self, target: &str, candidate: &str, now: Instant) -> bool {
+        self.failures.retain(|_, (until, address)| *until > now && address == candidate);
+        self.unsupported.as_ref().is_some_and(|(until, address)| *until > now && address == candidate)
+            || self.failures.contains_key(target)
+    }
+
+    fn record_failure(&mut self, target: &str, candidate: &str, h1: bool, error: &FirefoxError, now: Instant) {
+        if matches!(error, FirefoxError::Http { status: 502, .. }) { return; }
+        self.failures.retain(|_, (until, address)| *until > now && address == candidate);
+        if self.failures.len() >= MAX_UDP_FLOWS {
+            if let Some(key) = self.failures.keys().next().cloned() { self.failures.remove(&key); }
+        }
+        self.failures.insert(target.to_string(), (now + UDP_FAILURE_COOLDOWN, candidate.to_string()));
+        if h1 && matches!(error, FirefoxError::Http { status: 405 | 501, .. }) {
+            self.unsupported = Some((now + UDP_UNSUPPORTED_COOLDOWN, candidate.to_string()));
+        }
+    }
+
+    fn remove(&mut self, target: &str) -> Option<UdpFlow> {
+        let flow = self.entries.remove(target)?;
+        if let UdpFlow::Opening(pending) = &flow {
+            self.pending_bytes = self.pending_bytes.saturating_sub(pending.bytes);
+        }
+        Some(flow)
+    }
+}
+
 struct UdpAssociation {
     socket: Arc<UdpSocket>,
     upstream: Arc<Upstream>,
     client_ip: IpAddr,
-    flows: Mutex<HashMap<String, Arc<crate::transport::UdpTunnel>>>,
-    opening: Mutex<()>,
+    flows: Mutex<UdpFlows>,
     client: Mutex<Option<SocketAddr>>,
-    readers: Mutex<Vec<AbortHandle>>,
+    readers: parking_lot::Mutex<Vec<AbortHandle>>,
+    stopped: std::sync::atomic::AtomicBool,
     dns_slots: Arc<tokio::sync::Semaphore>,
 }
 
@@ -264,15 +329,26 @@ impl UdpAssociation {
             socket: Arc::new(socket),
             upstream,
             client_ip,
-            flows: Mutex::new(HashMap::new()),
-            opening: Mutex::new(()),
+            flows: Mutex::new(UdpFlows::default()),
             client: Mutex::new(None),
-            readers: Mutex::new(Vec::new()),
+            readers: parking_lot::Mutex::new(Vec::new()),
+            stopped: std::sync::atomic::AtomicBool::new(false),
             dns_slots: Arc::new(tokio::sync::Semaphore::new(32)),
         })
     }
 
+    fn track(&self, task: AbortHandle) {
+        let mut readers = self.readers.lock();
+        if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+            task.abort();
+        } else {
+            readers.retain(|reader| !reader.is_finished());
+            readers.push(task);
+        }
+    }
+
     async fn run(self: Arc<Self>, mut control: BufReader<TcpStream>) -> Result<()> {
+        let _guard = UdpTaskGuard(self.clone());
         let mut control_byte = [0u8; 1];
         let mut packet = vec![0u8; MAX_DATAGRAM + 512];
         loop {
@@ -291,11 +367,12 @@ impl UdpAssociation {
                 }
             }
         }
-        self.readers.lock().await.retain(|task| {
-            task.abort();
-            false
-        });
-        self.flows.lock().await.clear();
+        {
+            let mut readers = self.readers.lock();
+            self.stopped.store(true, std::sync::atomic::Ordering::Release);
+            readers.drain(..).for_each(|task| task.abort());
+        }
+        *self.flows.lock().await = UdpFlows::default();
         Ok(())
     }
 
@@ -305,9 +382,7 @@ impl UdpAssociation {
         }
         let mut client = self.client.lock().await;
         if let Some(expected) = *client {
-            if expected != source {
-                return Ok(());
-            }
+            if expected != source { return Ok(()); }
         } else {
             *client = Some(source);
         }
@@ -315,9 +390,7 @@ impl UdpAssociation {
         let (host, port, payload_offset) = parse_udp_address(packet, 3)?;
         let target = authority(&host, port);
         let payload = &packet[payload_offset..];
-        if payload.len() > MAX_DATAGRAM {
-            return Ok(());
-        }
+        if payload.len() > MAX_DATAGRAM { return Ok(()); }
         if port == 53 && crate::doh::provider(&host).is_some() {
             let Ok(permit) = self.dns_slots.clone().try_acquire_owned() else { return Ok(()) };
             let query = payload.to_vec();
@@ -336,40 +409,67 @@ impl UdpAssociation {
                     Err(_) => log::debug!("[firefox] encrypted DNS query timed out"),
                 }
             });
-            let mut readers = self.readers.lock().await;
-            readers.retain(|reader| !reader.is_finished());
-            readers.push(task.abort_handle());
+            self.track(task.abort_handle());
             return Ok(());
         }
-        let _opening = self.opening.lock().await;
-        let existing = {
-            let flows = self.flows.lock().await;
-            if !flows.contains_key(&target) && flows.len() >= MAX_UDP_FLOWS {
-                return Ok(());
+        let mut flows = self.flows.lock().await;
+        if let Some(UdpFlow::Ready { tunnel, activity }) = flows.entries.get(&target) {
+            match tunnel.try_send_with_capacity(payload) {
+                Ok(sent) => {
+                    if sent { *activity.lock() = Instant::now(); }
+                    return Ok(());
+                }
+                Err(_) => { flows.remove(&target); }
             }
-            flows.get(&target).cloned()
-        };
-        let tunnel = if let Some(tunnel) = existing {
-            tunnel
-        } else {
-            let tunnel = Arc::new(self.upstream.open_udp(&target).await?);
-            self.flows.lock().await.insert(target.clone(), tunnel.clone());
-            let association = self.clone();
-            let reader_tunnel = tunnel.clone();
-            let reader_target = target.clone();
-            let task = tokio::spawn(async move {
-                association.read_upstream(reader_tunnel, reader_target).await;
-            });
-            let mut readers = self.readers.lock().await;
-            readers.retain(|reader| !reader.is_finished());
-            readers.push(task.abort_handle());
-            tunnel
-        };
-        drop(_opening);
-        tunnel.try_send(payload)
+        }
+        if flows.entries.contains_key(&target) {
+            flows.enqueue(&target, payload);
+            return Ok(());
+        }
+        let candidate = self.upstream.candidate().address;
+        if flows.blocked(&target, &candidate, Instant::now()) { return Ok(()); }
+        if flows.entries.len() >= MAX_UDP_FLOWS { return Ok(()); }
+        flows.entries.insert(target.clone(), UdpFlow::Opening(PendingUdp::default()));
+        if !flows.enqueue(&target, payload) {
+            flows.remove(&target);
+            return Ok(());
+        }
+        drop(flows);
+        let association = self.clone();
+        let task = tokio::spawn(async move { association.open_flow(target, candidate).await; });
+        self.track(task.abort_handle());
+        Ok(())
     }
 
-    async fn read_upstream(&self, tunnel: Arc<crate::transport::UdpTunnel>, target: String) {
+    async fn open_flow(self: Arc<Self>, target: String, candidate: String) {
+        let result = self.upstream.open_udp(&target).await;
+        let mut flows = self.flows.lock().await;
+        let Some(UdpFlow::Opening(pending)) = flows.remove(&target) else { return };
+        let tunnel = match result {
+            Ok(tunnel) if !self.stopped.load(std::sync::atomic::Ordering::Acquire) => Arc::new(tunnel),
+            Ok(_) => return,
+            Err(error) => {
+                log::debug!("[firefox] SOCKS UDP flow failed: {error}");
+                if self.upstream.candidate().address == candidate {
+                    flows.record_failure(&target, &candidate,
+                        self.upstream.transport_preference() == crate::types::TransportPreference::H1,
+                        &error, Instant::now());
+                }
+                return;
+            }
+        };
+        for packet in pending.packets {
+            if !matches!(tunnel.try_send_with_capacity(&packet), Ok(true)) { break; }
+        }
+        let activity = Arc::new(parking_lot::Mutex::new(Instant::now()));
+        flows.entries.insert(target.clone(), UdpFlow::Ready { tunnel: tunnel.clone(), activity: activity.clone() });
+        drop(flows);
+        let association = self.clone();
+        let task = tokio::spawn(async move { association.read_upstream(tunnel, activity, target).await; });
+        self.track(task.abort_handle());
+    }
+
+    async fn read_upstream(&self, tunnel: Arc<crate::transport::UdpTunnel>, activity: Arc<parking_lot::Mutex<Instant>>, target: String) {
         let header = crate::types::split_authority(&target, 53).map(|(host, port)| {
             let mut header = vec![0, 0, 0];
             append_target_address(&mut header, &host);
@@ -380,24 +480,49 @@ impl UdpAssociation {
             self.flows.lock().await.remove(&target);
             return;
         };
+        let mut cleanup = tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(30), Duration::from_secs(30));
+        cleanup.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            match tunnel.recv().await {
+            let received = tokio::select! {
+                result = tunnel.recv() => result,
+                _ = cleanup.tick() => {
+                    let mut flows = self.flows.lock().await;
+                    if !matches!(flows.entries.get(&target), Some(UdpFlow::Ready { tunnel: current, .. }) if Arc::ptr_eq(current, &tunnel)) {
+                        break;
+                    }
+                    if activity.lock().elapsed() >= UDP_IDLE_TIMEOUT {
+                        flows.remove(&target);
+                        break;
+                    }
+                    continue;
+                }
+            };
+            match received {
                 Ok(packet) => {
+                    *activity.lock() = Instant::now();
                     let Some(client) = *self.client.lock().await else { break };
                     let mut response = Vec::with_capacity(header.len() + packet.len());
                     response.extend_from_slice(&header);
                     response.extend_from_slice(&packet);
-                    if self.socket.send_to(&response, client).await.is_err() {
-                        break;
-                    }
+                    if self.socket.send_to(&response, client).await.is_err() { break; }
                 }
                 Err(_) => break,
             }
         }
         let mut flows = self.flows.lock().await;
-        if flows.get(&target).is_some_and(|current| Arc::ptr_eq(current, &tunnel)) {
+        if matches!(flows.entries.get(&target), Some(UdpFlow::Ready { tunnel: current, .. }) if Arc::ptr_eq(current, &tunnel)) {
             flows.remove(&target);
         }
+    }
+}
+
+struct UdpTaskGuard(Arc<UdpAssociation>);
+
+impl Drop for UdpTaskGuard {
+    fn drop(&mut self) {
+        let mut readers = self.0.readers.lock();
+        self.0.stopped.store(true, std::sync::atomic::Ordering::Release);
+        readers.drain(..).for_each(|task| task.abort());
     }
 }
 
@@ -585,6 +710,40 @@ async fn write_http_error<S: AsyncWrite + Unpin>(stream: &mut S, status: u16, me
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_failure_cooldown_is_scoped_and_expires_without_retrying_502() {
+        let mut flows = UdpFlows::default();
+        let now = Instant::now();
+        let error = |status| FirefoxError::Http { host: "proxy".into(), status, errno: None, retry_after: None, message: String::new() };
+        flows.record_failure("a", "proxy1", true, &error(502), now);
+        assert!(!flows.blocked("a", "proxy1", now));
+        flows.record_failure("a", "proxy1", true, &error(405), now);
+        assert!(flows.blocked("a", "proxy1", now));
+        assert!(flows.blocked("b", "proxy1", now));
+        assert!(!flows.blocked("b", "proxy2", now));
+        assert!(!flows.blocked("a", "proxy1", now + UDP_UNSUPPORTED_COOLDOWN));
+        flows.record_failure("a", "proxy1", false, &FirefoxError::Network("closed".into()), now);
+        assert!(!flows.blocked("b", "proxy1", now));
+        assert!(flows.blocked("a", "proxy1", now));
+        assert!(!flows.blocked("a", "proxy1", now + UDP_FAILURE_COOLDOWN));
+    }
+
+    #[test]
+    fn pending_udp_packets_are_byte_bounded_and_cleared_on_failure() {
+        let mut flows = UdpFlows::default();
+        flows.entries.insert("a".into(), UdpFlow::Opening(PendingUdp::default()));
+        flows.entries.insert("b".into(), UdpFlow::Opening(PendingUdp::default()));
+        for _ in 0..100 { assert!(flows.enqueue("a", b"packet")); }
+        assert!(flows.enqueue("b", b"other"));
+        let UdpFlow::Opening(pending) = flows.entries.get("a").unwrap() else { panic!("not opening") };
+        assert_eq!(pending.packets.len(), 100);
+        assert!(!flows.enqueue("a", &vec![0u8; MAX_UDP_PENDING_BYTES]));
+        assert!(flows.remove("a").is_some());
+        assert_eq!(flows.pending_bytes, 5 + 32);
+        assert!(flows.remove("b").is_some());
+        assert_eq!(flows.pending_bytes, 0);
+    }
 
     #[test]
     fn socks_replies_reflect_upstream_destination_errors() {
