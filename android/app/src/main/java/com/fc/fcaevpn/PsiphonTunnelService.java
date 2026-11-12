@@ -1580,7 +1580,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                         boolean changed;
                         synchronized (lock) {
                             if (callback != this || !candidates.containsKey(available)) return;
-                            android.net.LinkProperties old = links.put(available, new android.net.LinkProperties(properties));
+                            android.net.LinkProperties old = links.put(available, properties);
                             changed = available.equals(network) && old != null && !old.equals(properties);
                         }
                         if (changed) networkChanged();
