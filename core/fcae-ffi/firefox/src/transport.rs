@@ -240,8 +240,8 @@ impl H2Session {
         if !parts.status.is_success() {
             let host = self.authority_host();
             let status = parts.status.as_u16();
-            let error = proxy_response_error(&host, status, &parts.headers, recv).await;
-            log_proxy_failure("h2", "TCP", target, &host, status, &error);
+            let (error, message) = proxy_response_error(&host, status, &parts.headers, recv).await;
+            log_proxy_failure("h2", "TCP", target, &host, status, &error, &message);
             return Err(error);
         }
         self.inner.active_streams.fetch_add(1, Ordering::Relaxed);
@@ -273,8 +273,8 @@ impl H2Session {
         if !parts.status.is_success() {
             let host = self.authority_host();
             let status = parts.status.as_u16();
-            let error = proxy_response_error(&host, status, &parts.headers, recv).await;
-            log_proxy_failure("h2", "UDP", target, &host, status, &error);
+            let (error, message) = proxy_response_error(&host, status, &parts.headers, recv).await;
+            log_proxy_failure("h2", "UDP", target, &host, status, &error, &message);
             return Err(error);
         }
         self.inner.active_streams.fetch_add(1, Ordering::Relaxed);
@@ -915,7 +915,7 @@ impl Upstream {
     }
 
     async fn fallback_h1(&self, target: &str, h2_error: FirefoxError) -> Result<BoxedTunnel> {
-        log::warn!("[firefox] (h2) proxy unavailable reason={}; trying (h1)", h2_error.reason_code());
+        log::warn!("[firefox] (h2) proxy unavailable reason={}; trying (h1)", crate::control::direct_failure_detail(&h2_error));
         match self.open_h1_authorized(target).await {
             Ok(stream) => Ok(Box::new(stream)),
             Err(error) if !error.is_transient() => Err(error),
@@ -933,7 +933,7 @@ impl Upstream {
         let result = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
             .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(self.timeout)));
         let session = result.map_err(|error| {
-            log::warn!("[firefox] (h2) proxy connection failed reason={}", error.reason_code());
+            log::warn!("[firefox] (h2) proxy connection failed reason={}", crate::control::direct_failure_detail(&error));
             error
         })?;
         *slot = Some(session.clone());
@@ -963,7 +963,7 @@ impl Upstream {
         let result = tokio::time::timeout(self.timeout, self.open_h1_inner(target, token))
             .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(self.timeout)));
         if let Err(error) = &result {
-            log::warn!("[firefox] (h1) proxy connection failed reason={}", error.reason_code());
+            log::warn!("[firefox] (h1) proxy connection failed reason={}", crate::control::direct_failure_detail(error));
         }
         result
     }
@@ -999,7 +999,8 @@ impl Upstream {
         let (status, headers) = parse_response_head(&head)?;
         if !(200..300).contains(&status) {
             let error = proxy_status_error(&candidate.host, status, &headers);
-            log_proxy_failure("h1", "TCP", target, &candidate.host, status, &error);
+            let message = buffered_proxy_error_message(&headers, stream.buffer());
+            log_proxy_failure("h1", "TCP", target, &candidate.host, status, &error, &message);
             return Err(error);
         }
         Ok(stream)
@@ -1085,7 +1086,7 @@ impl Upstream {
         let result = tokio::time::timeout(self.timeout, H2Session::connect(&self.dialer, &candidate, token.to_string(), self.traffic.clone()))
             .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(self.timeout)));
         let session = result.map_err(|error| {
-            log::warn!("[firefox] (h2) proxy connection failed reason={}", error.reason_code());
+            log::warn!("[firefox] (h2) proxy connection failed reason={}", crate::control::direct_failure_detail(&error));
             error
         })?;
         *slot = Some(session.clone());
@@ -1108,7 +1109,7 @@ impl Upstream {
             ambiguous && health.observe_ambiguous(protocol, target, now)
         };
         if !matches!(error, FirefoxError::Http { .. }) {
-            log::warn!("[firefox] {protocol} proxy stream to port {port} failed: {}", error.reason_code());
+            log::warn!("[firefox] {protocol} proxy stream to port {port} failed: {}", crate::control::direct_failure_detail(error));
         }
         if rotate {
             let _guard = self.failover.lock().await;
@@ -1193,7 +1194,8 @@ fn retryable_session_error(error: &FirefoxError) -> bool {
     matches!(error, FirefoxError::H2(_) | FirefoxError::Network(_) | FirefoxError::Tls { .. })
 }
 
-async fn proxy_response_error(host: &str, status: u16, headers: &http::HeaderMap, mut body: RecvStream) -> FirefoxError {
+async fn proxy_response_error(host: &str, status: u16, headers: &http::HeaderMap, mut body: RecvStream) -> (FirefoxError, String) {
+    let mut response_message = String::new();
     let mut message = headers.get("proxy-status").and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
     if message.is_empty() {
         let mut bytes = Vec::new();
@@ -1212,13 +1214,28 @@ async fn proxy_response_error(host: &str, status: u16, headers: &http::HeaderMap
                 }
             }
         }).await;
+        response_message = crate::control::diagnostic_error_message(&bytes);
         message = String::from_utf8_lossy(&bytes).chars().filter(|c| !c.is_control()).take(512).collect();
     }
     let mut error = proxy_status_error(host, status, headers);
     if let FirefoxError::Http { message: detail, .. } = &mut error {
         *detail = message;
     }
-    error
+    (error, response_message)
+}
+
+fn buffered_proxy_error_message(headers: &http::HeaderMap, buffered: &[u8]) -> String {
+    if headers.contains_key(http::header::TRANSFER_ENCODING) || headers.contains_key(http::header::CONTENT_ENCODING) {
+        return String::new();
+    }
+    let length = headers.get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    match length {
+        Some(length) if length <= 2048 && length <= buffered.len() =>
+            crate::control::diagnostic_error_message(&buffered[..length]),
+        _ => String::new(),
+    }
 }
 
 fn proxy_failure_description(http: &str, protocol: &str, target: &str, host: &str, status: u16, error: &FirefoxError) -> String {
@@ -1228,8 +1245,13 @@ fn proxy_failure_description(http: &str, protocol: &str, target: &str, host: &st
     format!("[firefox] ({http}) {protocol} proxy CONNECT failed: HTTP {status} proxy={host} destination={kind} port={port} reason={reason}")
 }
 
-fn log_proxy_failure(http: &str, protocol: &str, target: &str, host: &str, status: u16, error: &FirefoxError) {
-    log::warn!("{}", proxy_failure_description(http, protocol, target, host, status, error));
+fn log_proxy_failure(http: &str, protocol: &str, target: &str, host: &str, status: u16, error: &FirefoxError, message: &str) {
+    let description = proxy_failure_description(http, protocol, target, host, status, error);
+    if message.is_empty() {
+        log::warn!("{description} category={}", error.reason_code());
+    } else {
+        log::warn!("{description} category={} message={message}", error.reason_code());
+    }
 }
 
 fn proxy_status_error(host: &str, status: u16, headers: &http::HeaderMap) -> FirefoxError {
@@ -1286,7 +1308,8 @@ async fn h1_udp_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
         }
         if status != 101 {
             let error = proxy_status_error(proxy_host, status, &headers);
-            log_proxy_failure("h1", "UDP", target, proxy_host, status, &error);
+            let message = buffered_proxy_error_message(&headers, stream.buffer());
+            log_proxy_failure("h1", "UDP", target, proxy_host, status, &error, &message);
             return Err(error);
         }
         validate_h1_udp_upgrade(&headers)?;
@@ -1523,6 +1546,17 @@ mod traffic_tests {
         headers.insert("proxy-status", HeaderValue::from_static("Fastly; error=destination_ip_prohibited"));
         assert_eq!(destination_error(&proxy_status_error("proxy", 502, &headers)), Some("destination_ip_prohibited"));
         assert!(matches!(proxy_status_error("proxy", 407, &headers), FirefoxError::PassRejected));
+    }
+
+    #[test]
+    fn buffered_http1_error_message_requires_a_complete_bounded_body() {
+        let mut headers = http::HeaderMap::new();
+        let body = br#"{"message":"not allowed","token":"secret"}"#;
+        headers.insert("content-length", HeaderValue::from_str(&body.len().to_string()).unwrap());
+        assert_eq!(buffered_proxy_error_message(&headers, body), "not allowed");
+        assert_eq!(buffered_proxy_error_message(&headers, &body[..body.len() - 1]), "");
+        headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+        assert_eq!(buffered_proxy_error_message(&headers, body), "");
     }
 
     #[test]

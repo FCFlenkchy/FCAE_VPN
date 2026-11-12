@@ -60,6 +60,12 @@ pub(crate) async fn exchange(upstream: &Upstream, server: &str, query: &[u8]) ->
 
 fn validate_response(query: &[u8], response: ControlResponse) -> Result<Vec<u8>> {
     if response.status != 200 {
+        let message = crate::control::diagnostic_error_message(&response.body);
+        if message.is_empty() {
+            log::warn!("[firefox] DNS-over-HTTPS failed: HTTP {}", response.status);
+        } else {
+            log::warn!("[firefox] DNS-over-HTTPS failed: HTTP {} message={}", response.status, message);
+        }
         return Err(FirefoxError::Http {
             host: "DNS-over-HTTPS".into(), status: response.status, errno: None,
             retry_after: response.retry_after(), message: "resolver request failed".into(),

@@ -240,7 +240,7 @@ impl ControlPlane {
                 self.exchange(request, transport).await
             };
             if let Err(error) = &response {
-                log::warn!("[firefox] (mode={}) direct service failed: {}", transport.as_str(), direct_failure_detail(error));
+                log::warn!("[firefox] (mode={}) direct request failed: {}", transport.as_str(), direct_failure_detail(error));
             }
             return response;
         };
@@ -296,7 +296,7 @@ impl ControlPlane {
                     match self.exchange_relay(&request, &relay, transport).await {
                         Ok(relayed) => Ok(relayed),
                         Err(error) => {
-                            log::warn!("[firefox] relay retry failed reason={}; keeping the direct response", error.reason_code());
+                            log::warn!("[firefox] relay retry failed reason={}; keeping the direct response", direct_failure_detail(&error));
                             Ok(response)
                         }
                     }
@@ -305,15 +305,15 @@ impl ControlPlane {
                 }
             }
             Err(error @ FirefoxError::TlsCertificate { .. }) => {
-                log::warn!("[firefox] (mode={}) direct service failed: {}; not bypassing certificate verification", transport.as_str(), direct_failure_detail(&error));
+                log::warn!("[firefox] (mode={}) direct request failed: {}; not bypassing certificate verification", transport.as_str(), direct_failure_detail(&error));
                 Err(error)
             }
             Err(error) if safe => {
-                log::warn!("[firefox] (mode={}) direct service failed: {}; trying the configured relay", transport.as_str(), direct_failure_detail(&error));
+                log::warn!("[firefox] (mode={}) direct request failed: {}; trying the configured relay", transport.as_str(), direct_failure_detail(&error));
                 self.exchange_relay(&request, &relay, transport).await
             }
             Err(error) => {
-                log::warn!("[firefox] (mode={}) direct service failed: {}", transport.as_str(), direct_failure_detail(&error));
+                log::warn!("[firefox] (mode={}) direct request failed: {}", transport.as_str(), direct_failure_detail(&error));
                 Err(error)
             },
         }
@@ -359,7 +359,7 @@ impl ControlPlane {
                 }
             }
         }.await.map_err(|error| {
-            log::warn!("[firefox] relay request failed reason={}", error.reason_code());
+            log::warn!("[firefox] relay request failed reason={}", direct_failure_detail(&error));
             error
         })?;
         if response.headers.contains_key("x-relay-error") ||
@@ -625,49 +625,60 @@ pub(crate) fn is_relay_response(headers: &HeaderMap) -> bool {
     })
 }
 
-fn direct_failure_detail(error: &FirefoxError) -> String {
+pub(crate) fn direct_failure_detail(error: &FirefoxError) -> String {
     let detail = match error {
         FirefoxError::Timeout(duration) => format!("timeout after {duration:?}"),
         FirefoxError::Dns { message, .. } => format!("DNS: {message}"),
         FirefoxError::Tls { message, .. } | FirefoxError::TlsCertificate { message, .. } => format!("TLS: {message}"),
         FirefoxError::Network(message) => format!("network: {message}"),
+        FirefoxError::H2(message) => format!("HTTP/2: {message}"),
+        FirefoxError::Protocol(message) => format!("protocol: {message}"),
         FirefoxError::Http { status, .. } => format!("HTTP {status}"),
         _ => error.reason_code().to_string(),
     };
     detail.chars().map(|c| if c.is_control() { ' ' } else { c }).take(256).collect()
 }
 
-fn direct_response_message(response: &ControlResponse) -> String {
-    let body = match std::str::from_utf8(&response.body) {
+pub(crate) fn diagnostic_error_message(bytes: &[u8]) -> String {
+    fn bounded(message: &str) -> String {
+        message.chars().map(|c| if c.is_control() { ' ' } else { c })
+            .take(256).collect::<String>().trim().to_string()
+    }
+    let body = match std::str::from_utf8(bytes) {
         Ok(body) => body.trim(),
         Err(_) => return String::new(),
     };
-    let message = if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
-        ["message", "error", "detail"].iter()
-            .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
-            .unwrap_or("")
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        for key in ["message", "error", "detail"] {
+            if let Some(message) = value.get(key).and_then(serde_json::Value::as_str) {
+                return bounded(message);
+            }
+        }
+        String::new()
     } else if !body.starts_with('<') && !body.starts_with('{') && !body.starts_with('[') {
-        body
+        bounded(body)
     } else {
-        ""
-    };
-    message.chars().map(|c| if c.is_control() { ' ' } else { c }).take(256).collect::<String>().trim().to_string()
+        String::new()
+    }
+}
+
+fn direct_response_message(response: &ControlResponse) -> String {
+    diagnostic_error_message(&response.body)
 }
 
 fn log_control_exchange(route: &str, host: &str, protocol: &str, result: &Result<ControlResponse>) {
     let host = if route == "relay" { "relay" } else { host };
     match result {
-        Ok(response) if response.status >= 400 && route == "direct" => {
+        Ok(response) if response.status >= 400 => {
             let message = direct_response_message(response);
             if message.is_empty() {
-                log::warn!("[firefox] ({}) direct service failed: HTTP {} host={}", protocol, response.status, host);
+                log::warn!("[firefox] ({}) {} request failed: HTTP {} host={}", protocol, route, response.status, host);
             } else {
-                log::warn!("[firefox] ({}) direct service failed: HTTP {} host={} message={}", protocol, response.status, host, message);
+                log::warn!("[firefox] ({}) {} request failed: HTTP {} host={} message={}", protocol, route, response.status, host, message);
             }
         }
-        Ok(response) if response.status >= 400 => log::warn!("[firefox] ({}) control HTTP {} route={} host={}", protocol, response.status, route, host),
         Ok(response) => log::info!("[firefox] ({}) control HTTP {} route={} host={}", protocol, response.status, route, host),
-        Err(error) => log::warn!("[firefox] ({}) control request failed route={} host={} reason={}", protocol, route, host, error.reason_code()),
+        Err(error) => log::warn!("[firefox] ({}) control request failed route={} host={} reason={}", protocol, route, host, direct_failure_detail(error)),
     }
 }
 
@@ -964,10 +975,15 @@ mod tests {
         let response = |body: &[u8]| ControlResponse { status: 405, headers: HeaderMap::new(), body: body.to_vec() };
         assert_eq!(direct_response_message(&response(br#"{"message":"Method not allowed","token":"secret"}"#)), "Method not allowed");
         assert_eq!(direct_response_message(&response(br#"{"token":"secret"}"#)), "");
+        assert_eq!(direct_response_message(&response(br#"{"error":"blocked","token":"secret"}"#)), "blocked");
+        assert_eq!(direct_response_message(&response(br#"{"detail":"line one\nline two"}"#)), "line one line two");
+        assert_eq!(direct_response_message(&response(&[0xff])), "");
         assert_eq!(direct_response_message(&response(b"line one\nline two")), "line one line two");
         assert_eq!(direct_response_message(&response(b"<html>private</html>")), "");
         assert_eq!(direct_response_message(&response(&vec![b'x'; 500])).len(), 256);
         assert_eq!(direct_failure_detail(&FirefoxError::Network("connection refused".into())), "network: connection refused");
+        assert_eq!(direct_failure_detail(&FirefoxError::Protocol("bad response".into())), "protocol: bad response");
+        assert_eq!(direct_failure_detail(&FirefoxError::H2("stream reset".into())), "HTTP/2: stream reset");
         assert_eq!(direct_failure_detail(&FirefoxError::Http { host: "example".into(), status: 405, errno: None,
             retry_after: None, message: "private body".into() }), "HTTP 405");
     }
