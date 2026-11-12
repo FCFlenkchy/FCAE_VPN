@@ -135,7 +135,7 @@ class MainActivity : AppCompatActivity() {
     private var firefoxResendButton: MaterialButton? = null
     private var firefoxRegionSpinner: Spinner? = null
     private var firefoxRegionAdapter: ArrayAdapter<String>? = null
-    private var firefoxRegionChoices: List<Pair<String, String>> = listOf("" to "Automatic (recommended)")
+    private var firefoxRegionChoices: List<Pair<String, String>> = listOf("" to "Auto")
     private var firefoxRegionAliases: Map<String, String> = emptyMap()
     private var firefoxHasRegions = false
     private var firefoxJob = 0L
@@ -199,6 +199,7 @@ class MainActivity : AppCompatActivity() {
     private var sponsorStaticToken = -1L
     private var holdsSponsorUi = false
     private var sponsorVisible = false
+    private var sponsorUiEpoch = 0L
     private var sponsorAudioUiEnabled: Boolean? = null
     private var sponsorAudioUiVisible = false
     private var sponsorAudioUiKnown = false
@@ -521,8 +522,9 @@ class MainActivity : AppCompatActivity() {
                     pendingPsiLan = intent.getStringExtra(PsiphonTunnelService.EXTRA_LAN) ?: ""
                     pendingPsiSocks = intent.getIntExtra(PsiphonTunnelService.EXTRA_SOCKS, pendingPsiSocks)
                     acceptPsiStats(intent)
-                    if (vpnActive && routeIncludesPsiphon()) {
+                    if (vpnActive && inForeground && routeIncludesPsiphon()) {
                         handler.post {
+                            if (!inForeground || isDestroyed) return@post
                             if (isPurePsiphon() && !isTunModeSelected() && !connecting
                                     && !commandConnecting && !notificationPause()) {
                                 showPurePsiphonStatus()
@@ -732,7 +734,7 @@ class MainActivity : AppCompatActivity() {
 
     private val poll = object : Runnable {
         override fun run() {
-            if (!vpnActive) return
+            if (!vpnActive || !inForeground || isDestroyed) return
             pollFirefoxCaptcha()
             if (!pollBusy.compareAndSet(false, true)) {
                 handler.postDelayed(this, POLL_INTERVAL_MS)
@@ -764,10 +766,12 @@ class MainActivity : AppCompatActivity() {
                     val lan = NativeEngine.nativeGetLanIp()
                     val statusMsg = NativeEngine.nativeGetStatusMsg()
                     val errMsg = NativeEngine.nativeGetLastError()
-                    handler.post { applyStatus(state, rtt, rx, tx, totalRx, totalTx, peer, lan, statusMsg, errMsg) }
+                    handler.post {
+                        if (inForeground && !isDestroyed) applyStatus(state, rtt, rx, tx, totalRx, totalTx, peer, lan, statusMsg, errMsg)
+                    }
                 } catch (e: Throwable) {
                     handler.post {
-                        showTransientError("UI error: ${e.message}", statusText.text.toString())
+                        if (inForeground && !isDestroyed) showTransientError("UI error: ${e.message}", statusText.text.toString())
                     }
                 } finally {
                     pollBusy.set(false)
@@ -1077,6 +1081,7 @@ class MainActivity : AppCompatActivity() {
             if (!sponsorVisible || !::sponsorCard.isInitialized) return
             if (sponsorPollBusy.compareAndSet(false, true)) {
                 val knownGeneration = sponsorGeneration
+                val uiEpoch = sponsorUiEpoch
                 bgExecutor.execute {
                     val info = try {
                         NativeEngine.nativePollSponsor(knownGeneration).also {
@@ -1091,7 +1096,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     handler.post {
                         try {
-                            if (isDestroyed) return@post
+                            if (isDestroyed || !sponsorVisible || uiEpoch != sponsorUiEpoch) return@post
                             val card = info
                             if (card != null) {
                                 sponsorAnimated = (card.available || card.campaignCount > 0) && card.animated
@@ -2137,8 +2142,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         sponsorVisible = false
+        sponsorUiEpoch++
         handler.removeCallbacks(sponsorPoll)
         releaseSponsorUi()
+        releaseSponsorMedia(true)
+        splitTunnelApps = null
+        if (::logText.isInitialized && ::switchLogging.isInitialized && switchLogging.isChecked) {
+            logText.text = ""
+            lastLogHash = 0L
+        }
         super.onStop()
     }
 
@@ -2165,9 +2177,7 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(sponsorManifestRefresh)
         handler.post(sponsorManifestRefresh)
         if (routeIncludesPsiphon()) {
-            // The Activity receiver is not registered while it is stopped.
-            // Ask the still-bound service to replay its learned list before
-            // deciding which Psiphon UI path to restore.
+            // Ask the still-bound service to replay its learned region list.
             refreshPsiphonRegions()
             requestPsiphonRegions()
         }
@@ -2345,10 +2355,25 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(firefoxUsageRefresh)
         handler.removeCallbacks(sponsorPoll)
         handler.removeCallbacks(sponsorManifestRefresh)
+        handler.removeCallbacks(firefoxJobPoll)
+        handler.removeCallbacks(connectionInfoSync)
+        for (id in longArrayOf(firefoxJob, firefoxRegionJob, firefoxUsageJob)) {
+            if (id != 0L) try { NativeEngine.nativeFirefoxJobRelease(id) } catch (_: Throwable) {}
+        }
+        firefoxJob = 0L
+        firefoxRegionJob = 0L
+        firefoxUsageJob = 0L
+        firefoxUsageQueue.clear()
+        firefoxLoginPassword = ""
+        dismissFirefoxFlowDialogs()
+        firefoxCaptchaDialog?.dismiss()
+        updateResultDialog?.dismiss()
+        connectionInfoDialog?.dismiss()
         firefoxStatusExpiry?.let(handler::removeCallbacks)
         firefoxStatusExpiry = null
         clearTransientError()
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
+        bgExecutor.shutdown()
         if (isFinishing && !isChangingConfigurations
             && !FCAEVpnService.sessionActive() && !ProxyNotification.sessionActive()) {
             try { PsiphonTunnelService.stopForExit(this) } catch (_: Throwable) {}
@@ -2668,7 +2693,7 @@ class MainActivity : AppCompatActivity() {
             else -> firefoxRegionAliases.entries.firstOrNull { it.key.equals(saved, ignoreCase = true) }?.value ?: saved
         }
         val merged = LinkedHashMap<String, String>()
-        merged[""] = "Automatic (recommended)"
+        merged[""] = "Auto"
         for ((value, label) in options) {
             if (value.isNotBlank() && label.isNotBlank() && !merged.containsKey(value)) {
                 merged[value] = label
@@ -5038,9 +5063,9 @@ class MainActivity : AppCompatActivity() {
         }
         bgExecutor.execute {
             val fresh = loadSplitTunnelApps()
-            splitTunnelApps = fresh
             handler.post {
-                if (!dialog.isShowing) return@post
+                if (sponsorVisible && !isDestroyed) splitTunnelApps = fresh
+                if (isDestroyed || !dialog.isShowing) return@post
                 statusView.visibility = android.view.View.GONE
                 val changed = fresh.size != allApps.size ||
                     fresh.zip(allApps).any { (a, b) -> a.packageName != b.packageName }

@@ -2223,7 +2223,7 @@ struct FirefoxAccountOption {
 
 static bool s_firefox_has_locations = false;
 static std::vector<FirefoxLocationOption> s_firefox_location_options = {
-    {"", "Automatic (recommended)", ""},
+    {"", "Auto", ""},
 };
 static std::vector<FirefoxAccountOption> s_firefox_account_options;
 static uint64_t s_firefox_status_revision = 0;
@@ -2514,7 +2514,7 @@ static void firefox_poll_job() {
         if (!options.empty()) {
             std::vector<FirefoxLocationOption> unique;
             unique.reserve(options.size() + 1);
-            unique.push_back({"", "Automatic (recommended)", ""});
+            unique.push_back({"", "Auto", ""});
             for (auto& option : options) {
                 const bool duplicate = std::any_of(unique.begin(), unique.end(), [&](const FirefoxLocationOption& existing) {
                     return existing.value == option.value;
@@ -2714,7 +2714,7 @@ static void firefox_poll_background() {
             if (status == "complete") {
                 auto options = firefox_parse_locations(json);
                 if (!options.empty()) {
-                    std::vector<FirefoxLocationOption> unique = {{"", "Automatic (recommended)", ""}};
+                    std::vector<FirefoxLocationOption> unique = {{"", "Auto", ""}};
                     for (auto& option : options) {
                         if (std::none_of(unique.begin(), unique.end(), [&](const FirefoxLocationOption& x) { return x.value == option.value; })) unique.push_back(std::move(option));
                     }
