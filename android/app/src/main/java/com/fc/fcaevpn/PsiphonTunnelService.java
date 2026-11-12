@@ -1537,6 +1537,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         private final ConnectivityManager manager;
         private final Object lock = new Object();
         private ConnectivityManager.NetworkCallback callback;
+        private ConnectivityManager.NetworkCallback defaultCallback;
+        private final java.util.Map<Network, NetworkCapabilities> candidates = new java.util.LinkedHashMap<>();
+        private final java.util.Map<Network, android.net.LinkProperties> links = new java.util.HashMap<>();
+        private Network defaultNetwork;
         private Network network;
 
         PsiphonNetworkBinding(Context context) {
@@ -1544,39 +1548,132 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         }
 
         void start() throws IOException {
+            final ConnectivityManager.NetworkCallback physical;
+            final ConnectivityManager.NetworkCallback defaults;
+            RuntimeException failure = null;
+            boolean physicalRegistered = false;
             synchronized (lock) {
                 if (callback != null) return;
                 if (manager == null) throw new IOException("ConnectivityManager unavailable");
-                ConnectivityManager.NetworkCallback next = new ConnectivityManager.NetworkCallback() {
-                    @Override
-                    public void onAvailable(Network available) {
+                physical = new ConnectivityManager.NetworkCallback() {
+                    @Override public void onAvailable(Network available) {
+                        boolean changed;
                         synchronized (lock) {
                             if (callback != this) return;
-                            network = available;
+                            if (!candidates.containsKey(available)) candidates.put(available, null);
+                            changed = selectNetwork();
                         }
-                        networkChanged();
+                        if (changed) networkChanged();
                     }
 
-                    @Override
-                    public void onLost(Network lost) {
-                        boolean changed = false;
+                    @Override public void onCapabilitiesChanged(Network available, NetworkCapabilities caps) {
+                        boolean changed;
                         synchronized (lock) {
-                            if (callback == this && lost.equals(network)) { network = null; changed = true; }
+                            if (callback != this || !candidates.containsKey(available)) return;
+                            candidates.put(available, caps);
+                            changed = selectNetwork();
+                        }
+                        if (changed) networkChanged();
+                    }
+
+                    @Override public void onLinkPropertiesChanged(Network available, android.net.LinkProperties properties) {
+                        boolean changed;
+                        synchronized (lock) {
+                            if (callback != this || !candidates.containsKey(available)) return;
+                            android.net.LinkProperties old = links.put(available, new android.net.LinkProperties(properties));
+                            changed = available.equals(network) && old != null && !old.equals(properties);
+                        }
+                        if (changed) networkChanged();
+                    }
+
+                    @Override public void onLost(Network lost) {
+                        boolean changed;
+                        synchronized (lock) {
+                            if (callback != this) return;
+                            candidates.remove(lost);
+                            links.remove(lost);
+                            changed = selectNetwork();
                         }
                         if (changed) networkChanged();
                     }
                 };
-                callback = next;
+                defaults = new ConnectivityManager.NetworkCallback() {
+                    @Override public void onAvailable(Network available) {
+                        boolean changed;
+                        synchronized (lock) {
+                            if (defaultCallback != this) return;
+                            defaultNetwork = available;
+                            changed = selectNetwork();
+                        }
+                        if (changed) networkChanged();
+                    }
+
+                    @Override public void onLost(Network lost) {
+                        boolean changed;
+                        synchronized (lock) {
+                            if (defaultCallback != this || !lost.equals(defaultNetwork)) return;
+                            defaultNetwork = null;
+                            changed = selectNetwork();
+                        }
+                        if (changed) networkChanged();
+                    }
+                };
+                callback = physical;
+                defaultCallback = defaults;
                 try {
-                    manager.requestNetwork(new NetworkRequest.Builder()
+                    manager.registerNetworkCallback(new NetworkRequest.Builder()
                             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                            .build(), next);
+                            .build(), physical);
+                    physicalRegistered = true;
+                    manager.registerDefaultNetworkCallback(defaults);
                 } catch (RuntimeException error) {
                     callback = null;
-                    throw new IOException("Cannot monitor the physical network", error);
+                    defaultCallback = null;
+                    candidates.clear();
+                    links.clear();
+                    defaultNetwork = null;
+                    network = null;
+                    failure = error;
                 }
             }
+            if (failure != null) {
+                if (physicalRegistered) {
+                    try { manager.unregisterNetworkCallback(physical); }
+                    catch (RuntimeException ignored) { }
+                }
+                throw new IOException("Cannot monitor the physical network ("
+                        + failure.getClass().getSimpleName() + ")", failure);
+            }
+        }
+
+        // The default may be a VPN. In that case choose an observed non-VPN
+        // network, keeping the current one on ties to avoid needless redials.
+        private boolean selectNetwork() {
+            Network selected = null;
+            if (defaultNetwork != null && candidates.containsKey(defaultNetwork)) {
+                selected = defaultNetwork;
+            } else {
+                int best = Integer.MIN_VALUE;
+                for (java.util.Map.Entry<Network, NetworkCapabilities> entry : candidates.entrySet()) {
+                    NetworkCapabilities caps = entry.getValue();
+                    int score = 0;
+                    if (caps != null) {
+                        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) score += 8;
+                        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) score += 4;
+                        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) score += 3;
+                        else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) score += 2;
+                        else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) score += 1;
+                    }
+                    if (score > best || (score == best && entry.getKey().equals(network))) {
+                        best = score;
+                        selected = entry.getKey();
+                    }
+                }
+            }
+            boolean changed = !java.util.Objects.equals(network, selected);
+            network = selected;
+            return changed;
         }
 
         private void networkChanged() {
@@ -1640,17 +1737,26 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
         @Override
         public void close() {
-            final ConnectivityManager.NetworkCallback previous;
+            final ConnectivityManager.NetworkCallback physical;
+            final ConnectivityManager.NetworkCallback defaults;
             synchronized (lock) {
-                previous = callback;
+                physical = callback;
+                defaults = defaultCallback;
                 callback = null;
+                defaultCallback = null;
+                candidates.clear();
+                links.clear();
+                defaultNetwork = null;
                 network = null;
             }
-            if (previous != null && manager != null) {
-                try {
-                    manager.unregisterNetworkCallback(previous);
-                } catch (RuntimeException error) {
-                    Log.w(TAG, "Physical network callback cleanup failed", error);
+            if (manager != null) {
+                for (ConnectivityManager.NetworkCallback previous :
+                        new ConnectivityManager.NetworkCallback[]{physical, defaults}) {
+                    if (previous == null) continue;
+                    try { manager.unregisterNetworkCallback(previous); }
+                    catch (RuntimeException error) {
+                        Log.w(TAG, "Physical network callback cleanup failed", error);
+                    }
                 }
             }
         }
