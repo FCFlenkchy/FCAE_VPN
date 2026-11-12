@@ -90,6 +90,11 @@ fn main() {
     };
     let mut archive = fcae_build::go::CArchive::new(build_dir, ".", "libfcae_go_bridge");
     archive.target = target;
+    if target.is_android() && cfg!(feature = "psiphon") {
+        // Psiphon's anet dependency links to Go's internal net.zoneCache on
+        // Android. This upstream-required flag applies to the whole Go .so.
+        archive.ldflags.push("-checklinkname=0".into());
+    }
 
     match archive.build() {
         Ok(built) => {

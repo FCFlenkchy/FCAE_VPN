@@ -38,7 +38,7 @@ public class FCAEVpnService extends VpnService {
     private volatile int sessionTunMtu = 1500;
     /** Psiphon is this session's exit. Set before the core requests the TUN interface. */
     private volatile boolean sessionPsiphonExit = false;
-    /** Retains a Psiphon TUN start until the AAR supplies live ports, even if the Activity closes. */
+    /** Retains a Psiphon TUN start until the Psiphon service supplies live ports, even if the Activity closes. */
     private volatile Intent pendingPsiphonStart;
     private static final String TAG = "FCAE_VPN";
 
@@ -857,7 +857,7 @@ public class FCAEVpnService extends VpnService {
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
         if (remoteDisconnect) {
-            PsiphonTunnelService.killProcessOnExit(this);
+            PsiphonTunnelService.stopForExit(this);
             ProcessExit.request(this, true);
         }
     }
@@ -982,9 +982,9 @@ public class FCAEVpnService extends VpnService {
             SessionState.markIdle(this);
             stopSelf();
             try {
-                PsiphonTunnelService.killProcessOnExit(this);
+                PsiphonTunnelService.stopForExit(this);
             } catch (Throwable ignored) {}
-            // Already nothing running: stop :psiphon as well, then exit.
+            // Already nothing running: stop Psiphon as well, then exit.
             scheduleProcessKill();
             return;
         }
@@ -1049,7 +1049,7 @@ public class FCAEVpnService extends VpnService {
                 return;
             }
         }
-        // A Psiphon session's engine attaches to the AAR's SOCKS listener and
+        // A Psiphon session's engine attaches to the Psiphon service's SOCKS listener and
         // would dial a port nobody holds, so dial Psiphon first; its READY arm
         // patches the live ports into this session and re-enters here. Same
         // order the UI's connect click uses.
@@ -1287,7 +1287,7 @@ public class FCAEVpnService extends VpnService {
         final int psiphonHttp  = intent.getIntExtra("psiphonHttpPort", 0);
         // Only the last hop supplies session DNS policy and traffic counters.
         // A Psiphon carrier or intermediate still uses the native final exit's
-        // counters, even though its AAR remains bound for attach supervision.
+        // counters, even though its Psiphon service remains bound for attach supervision.
         sessionPsiphonExit = finalBackend(intent) == 1;
         final String teamVal   = (teamName == null) ? "" : teamName;
         final String tokenVal  = (accessTok == null) ? "" : accessTok;
@@ -1522,9 +1522,9 @@ public class FCAEVpnService extends VpnService {
             handler.post(uiCleanup);
         }
 
-        // Signal the separate Psiphon process before the potentially contended
+        // Signal the Psiphon service before the potentially contended
         // native stop path. This is idempotent and also releases its TUN owner.
-        PsiphonTunnelService.killProcessOnExit(this);
+        PsiphonTunnelService.stopForExit(this);
         try { NativeEngine.nativeStopBegin(); } catch (Exception ignored) {}
         sweepTun();
 
@@ -1576,7 +1576,7 @@ public class FCAEVpnService extends VpnService {
 
         /**
          * A connect that never resolves: a dial can die without publishing a
-         * terminal state (killed AAR, lost broadcast), leaving uiConnecting set
+         * terminal state (killed Psiphon service, lost broadcast), leaving uiConnecting set
          * and the service claiming a session forever. Declares it dead when no
          * engine session, binding or activity exists by the deadline.
          */
@@ -1615,7 +1615,6 @@ public class FCAEVpnService extends VpnService {
     /**
      * Last resort so nothing of this app survives in the background. Safe from
      * any thread; used once the tunnel and the native engine are already down.
-     * Psiphon runs in its own process, so it is sent on its way separately.
      */
     static void killProcessQuietly() {
         try {
@@ -1793,11 +1792,11 @@ public class FCAEVpnService extends VpnService {
     private void notifyUi() {
         // The source is the session's own decision, taken at start — never a
         // freshness test on the last sample. See SessionState.stats().
-        final boolean aar = sessionPsiphonExit;
-        final long[] stats = SessionState.stats(lastPsiphonStats, aar);
+        final boolean psiTelemetry = sessionPsiphonExit;
+        final long[] stats = SessionState.stats(lastPsiphonStats, psiTelemetry);
         SessionState.publish(this, phase(), 1,
                 stats[0], stats[1], stats[2], stats[3], (int) stats[4],
-                aar ? SessionState.SOURCE_AAR : SessionState.SOURCE_ENGINE);
+                psiTelemetry ? SessionState.SOURCE_PSIPHON : SessionState.SOURCE_ENGINE);
     }
 
     /**
@@ -1828,7 +1827,7 @@ public class FCAEVpnService extends VpnService {
         // connecting: a session that exists and is not passing traffic yet.
         if (state <= 3) return SessionState.Phase.CONNECTING;
         if (state == 5) return SessionState.Phase.DISCONNECTED;
-        // The engine only sees the AAR's local SOCKS listener, which stays up
+        // The engine only sees the Psiphon service's local SOCKS listener, which stays up
         // while tunnel-core redials; the exit's own word decides.
         if (sessionPsiphonExit && !PsiphonTunnelService.tunnelUp(lastPsiphonStats)) {
             return SessionState.Phase.RECONNECTING;
@@ -1836,7 +1835,7 @@ public class FCAEVpnService extends VpnService {
         return SessionState.Phase.CONNECTED;
     }
 
-    /** Newest AAR sample of the running session; written by the receiver,
+    /** Newest Psiphon sample of the running session; written by the receiver,
      *  read by the publishers on the main thread and cleared by teardown. */
     private volatile Intent lastPsiphonStats;
     private final android.content.BroadcastReceiver psiphonStatsReceiver = new android.content.BroadcastReceiver() {
@@ -1845,7 +1844,7 @@ public class FCAEVpnService extends VpnService {
                 // The parked Psiphon connect: the tunnel is up and its ports
                 // are live, so the session starts here — without MainActivity,
                 // which may be swiped away. The stash carries the full config
-                // sent at the connect click; the live AAR ports replace the
+                // sent at the connect click; the live Psiphon ports replace the
                 // UI-field values the activity could not know yet.
                 Intent start = pendingPsiphonStart;
                 if (start != null && !intent.getBooleanExtra("regionsOnly", false)
@@ -1885,7 +1884,7 @@ public class FCAEVpnService extends VpnService {
 
     // The notification text is byte flow only — no state words — so it is
     // identical for Psiphon exits and plain Aether protocols. Re-posts every
-    // call on purpose: the :psiphon foreground service shares this
+    // call on purpose: the Psiphon foreground service shares this
     // notification id while its tunnel (re)dials, and the next tick must
     // always restore the owner's content.
     private void updateNotification() {
@@ -2046,7 +2045,7 @@ public class FCAEVpnService extends VpnService {
         putStr(e, i, "upstreamProxy");
         putInt(e, i, "psiphonSocksPort", 0);
         putInt(e, i, "psiphonHttpPort", 0);
-        // The AAR's transport is not a native config field, but a headless
+        // The Psiphon service's transport is not a native config field, but a headless
         // replay has to start Psiphon with the same one the UI picked.
         putInt(e, i, "psiphonTransport", 0);
         e.apply();

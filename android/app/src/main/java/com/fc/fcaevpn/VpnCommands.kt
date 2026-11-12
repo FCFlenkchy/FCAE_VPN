@@ -72,7 +72,7 @@ object VpnCommands {
     }
 
     /** Disconnect when no owner is up. The tap still has to end this process
-     *  and the :psiphon one; clearing the widget frame is not enough. */
+     *  and the Psiphon service; clearing the widget frame is not enough. */
     fun endIdle(context: Context) {
         val app = context.applicationContext
         SessionState.command(SessionState.Command.NONE)
@@ -88,7 +88,7 @@ object VpnCommands {
         } catch (_: Throwable) {
         }
         try {
-            PsiphonTunnelService.killProcessOnExit(app)
+            PsiphonTunnelService.stopForExit(app)
         } catch (_: Throwable) {
         }
         ProcessExit.request(app, true)

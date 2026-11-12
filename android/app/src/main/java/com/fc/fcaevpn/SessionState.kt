@@ -22,8 +22,8 @@ object SessionState {
     /** The engine measures the session itself. */
     const val SOURCE_ENGINE = 0
 
-        /** The exit-side AAR meter owns a session's counters once it reports. */
-    const val SOURCE_AAR = 1
+    /** The exit-side Psiphon meter owns a session's counters once it reports. */
+    const val SOURCE_PSIPHON = 1
 
     /** Shared, owner-derived session vocabulary for every UI surface. */
     enum class Phase { DISCONNECTED, CONNECTING, RECONNECTING, CONNECTED, PAUSED }
@@ -68,7 +68,7 @@ object SessionState {
     private var rttHeld = 0
     /** Session the held RTT and the frame on screen belong to. */
     private var sessionGeneration = Long.MIN_VALUE
-    /** Which meter this session's counters come from; AAR outranks the engine. */
+    /** Which meter this session's counters come from; Psiphon telemetry outranks the engine. */
     private var statsSource = SOURCE_ENGINE
     /** Last telemetry of the session's own source: rx, tx, totalRx, totalTx. */
     private var heldStats = longArrayOf(0L, 0L, 0L, 0L)
@@ -130,10 +130,10 @@ object SessionState {
             }
             clearRtt()
         }
-        // Once the AAR reports, retain its exit-side counters and discard the engine's samples.
-        val upgraded = source == SOURCE_AAR && statsSource != SOURCE_AAR
+        // Once the Psiphon service reports, retain its exit-side counters and discard the engine's samples.
+        val upgraded = source == SOURCE_PSIPHON && statsSource != SOURCE_PSIPHON
         if (upgraded) {
-            statsSource = SOURCE_AAR
+            statsSource = SOURCE_PSIPHON
             clearRtt()
         }
         val mine = source == statsSource
@@ -194,14 +194,14 @@ object SessionState {
     }
 
         /**
-         * Telemetry of the session: the AAR's when it owns the exit, the engine's
-         * otherwise. `[rx, tx, totalRx, totalTx, rtt]`. `ownAar` is the owner's
+         * Telemetry of the session: the Psiphon service's when it owns the exit, the engine's
+         * otherwise. `[rx, tx, totalRx, totalTx, rtt]`. `ownPsiphon` is the owner's
          * session-long answer, never a freshness test — a sample that stopped
          * being the newest one is still this session's reading.
          */
     @JvmStatic
-    fun stats(psiStats: Intent?, ownAar: Boolean): LongArray {
-        if (ownAar) {
+    fun stats(psiStats: Intent?, ownPsiphon: Boolean): LongArray {
+        if (ownPsiphon) {
             // The exit's numbers, or none at all: borrowing the engine's until
             // the first exit sample lands puts the carrier's rates, totals and
             // RTT on screen and then swaps them — the flinch this rule exists
@@ -270,7 +270,7 @@ object SessionState {
     fun isLive(): Boolean {
         if (FCAEVpnService.sessionActive()) return true
         if (ProxyNotification.sessionActive()) return true
-        // The AAR binding is deliberately not asked here: a binding is an
+        // The Psiphon service binding is deliberately not asked here: a binding is an
         // attachment, and the region refresh holds one — a session always has
         // one of the two owners above, and those are the parties that know.
         // The engine's own state, read through the same test the service uses:
@@ -343,7 +343,7 @@ object SessionState {
      * Session key, and the snapshot published for it.
      *
      * One session can be measured by two very different counters — the engine's
-     * and the AAR's — and either can go quiet for a tick (a rebind, a stale
+     * and the Psiphon service's — and either can go quiet for a tick (a rebind, a stale
      * sample, a source switch). Publishing that tick as-is makes the widget drag
      * the totals backwards and then up again, which is the flicker.
      */
@@ -362,7 +362,7 @@ object SessionState {
             stable = next
             return next
         }
-        // A lone bad tick is held back; a real counter restart (the AAR came
+        // A lone bad tick is held back; a real counter restart (the Psiphon service came
         // back with fresh counters) confirms itself on the next sample and is
         // shown then, honestly, instead of being pinned to the old peak.
         if (++regressions < 2) return null

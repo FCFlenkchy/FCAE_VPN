@@ -95,7 +95,7 @@ public final class ProcessExit {
         catch (Throwable ignored) {}
         try { app.stopService(new android.content.Intent(app, IdleTaskService.class)); }
         catch (Throwable ignored) {}
-        try { PsiphonTunnelService.killProcessOnExit(app); }
+        try { PsiphonTunnelService.stopForExit(app); }
         catch (Throwable ignored) {}
     }
 

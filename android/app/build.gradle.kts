@@ -74,7 +74,6 @@ android {
         // Android releases.
         minSdk = 29
         targetSdk = 34
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = androidVersionCode
         versionName = appVersion
         buildConfigField("String", "APP_VERSION", "\"${appVersion}\"")
@@ -217,6 +216,4 @@ tasks.withType<JavaCompile>().configureEach {
 dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
-    androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

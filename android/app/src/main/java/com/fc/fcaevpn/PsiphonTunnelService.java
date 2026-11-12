@@ -22,7 +22,6 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-
 /** Owns the Psiphon session and its physical-network binding. */
 public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostService {
 
@@ -31,15 +30,13 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String ACTION_STOP  = "com.fc.fcaevpn.PSI_STOP";
     public static final String ACTION_REGIONS = "com.fc.fcaevpn.PSI_REGIONS";
     // Which app-process notification owner the tunnel belongs to. The
-    // :psiphon foreground service posts the OWNER's own connecting
+    // Psiphon foreground service posts the OWNER's own connecting
     // notification (buildConnecting) under the owner's id, so the app keeps
     // exactly one status notification: VpnNotification (id 1) in TUN mode,
     // ProxyNotification (id 2) in proxy mode.
     public static final String EXTRA_OWNER = "psiOwner";
     public static final String OWNER_VPN = "vpn";
     public static final String OWNER_PROXY = "proxy";
-    public static final String EXTRA_DIE = "psiphonDie";
-    private static volatile boolean processMustDie = false;
     private static final java.util.concurrent.atomic.AtomicBoolean terminalStopSent =
             new java.util.concurrent.atomic.AtomicBoolean();
     public static final String BROADCAST_READY = "com.fc.fcaevpn.PSI_READY";
@@ -52,7 +49,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static final String BROADCAST_STOPPED = "com.fc.fcaevpn.PSI_STOPPED";
     public static final String BROADCAST_LOG = "com.fc.fcaevpn.PSI_LOG";
     public static final String BROADCAST_REGIONS = "com.fc.fcaevpn.PSI_REGIONS_AVAILABLE";
-    // Written by the isolated Psiphon process and read by the UI process.
+    // Persisted by the Psiphon service and read by the UI.
     public static final String REGIONS_FILE = "psiphon_egress_regions.txt";
     // Live telemetry while the tunnel is up: byte rates, cumulative totals
     // and tunnel RTT measured through Psiphon's own local HTTP proxy.
@@ -82,7 +79,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private static volatile long activeSession;
     // EVERY live binder, not just the latest: a rebind that was already
     // accepted can outlive a session switch, and a leaked binder reference
-    // would pin the :psiphon process (and its tunnel) after a disconnect.
+    // would pin the Psiphon service (and its tunnel) after a disconnect.
     // stopBound unbinds all of them.
     private static final java.util.Set<android.content.ServiceConnection> liveConnections =
             java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
@@ -129,8 +126,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     // startup therefore continues while the UI is backgrounded.
     public static void pollChainedRequest(Context context) {
         Context app = context.getApplicationContext();
-        // While a start is in flight, the AAR's startTunneling() internally
-        // stops any previous instance. Calling nativePsiphonAttachRequest()
+        // While a start is in flight, calling nativePsiphonAttachRequest()
         // during this window generates a new request ID that triggers a
         // stopBound/startBound cycle, which creates a tight
         // "starting tunnel -> stopping Psiphon library" loop. Skip the
@@ -261,17 +257,17 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 if (connection == null && liveConnections.contains(this)) connection = this;
             }
             @Override public void onServiceDisconnected(android.content.ComponentName name) {
-                // Process death: drop this binder from the live set no matter
+                // Drop this binder from the live set no matter
                 // what; only the CURRENT connection triggers a rebind (a
                 // stale duplicate binder must not rebind twice).
                 liveConnections.remove(this);
                 if (connection != this) return;
                 connection = null;
                 regionOnlyBinding = false;
-                // The :psiphon process died. NOT a user action: keep the
+                // A lost binder is not a user action: keep the
                 // session alive (no 0-port completion, no BROADCAST_FAILED)
                 // and rebind with the same intent instead.
-                Log.w(TAG, "Psiphon process lost the binder; rebind scheduled");
+                Log.w(TAG, "Psiphon service lost the binder; rebind scheduled");
                 scheduleRebind(app, intent);
             }
         };
@@ -291,7 +287,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                     Intent failed = new Intent(BROADCAST_FAILED).setPackage(app.getPackageName());
                     failed.putExtra("psiSession", activeSession);
                     failed.putExtra("requestId", req);
-                    failed.putExtra(EXTRA_ERROR, "Psiphon process exited (rebind exhausted)");
+                    failed.putExtra(EXTRA_ERROR, "Psiphon service disconnected (rebind exhausted)");
                     app.sendBroadcast(failed);
                     NativeEngine.nativePsiphonAttachComplete(req, 0, 0);
                     return;
@@ -320,7 +316,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public static void stopBound(Context context) {
         Context app = context.getApplicationContext();
         synchronized (bindingLock) {
-            boolean delivered = deliverStop(app, false);
+            boolean delivered = deliverStop(app);
             releaseBindings(app);
             if (!delivered) {
                 try { app.stopService(new Intent(app, PsiphonTunnelService.class)); }
@@ -390,7 +386,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     private volatile Intent pendingStart;
     private volatile boolean destroyed;
     private String region = "";
-    // Whose notification id the :psiphon FGS posts under (EXTRA_OWNER).
+    // Whose notification id the Psiphon FGS posts under (EXTRA_OWNER).
     private boolean proxyOwner;
     private volatile String lastRegions = "";
     private String upstreamProxy = "";
@@ -468,10 +464,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     public int onStartCommand(Intent intent, int flags, int startId) {
         boolean stop = intent != null && ACTION_STOP.equals(intent.getAction());
         if (stop) {
-            // The terminal stop (app exit) carries the kill flag; a session
-            // switch's plain stop must not, or the next teardown would end
-            // the process a fresh session still needs.
-            if (intent.getBooleanExtra(EXTRA_DIE, false)) processMustDie = true;
             // A stop invalidates any restart parked below.
             pendingStart = null;
             stopNow();
@@ -561,10 +553,6 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
             lanSharing = intent.getBooleanExtra("lanSharing", false);
             attachRequestId = intent.getLongExtra("requestId", 0);
         }
-        // A fresh session outranks any stale terminal-stop flag delivered
-        // while this process was being recycled: the next teardown decides
-        // again whether the service receives a terminal stop.
-        processMustDie = false;
         enterTunnelForeground();
         stopping = false;
         startInFlight = true;
@@ -629,7 +617,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 emitLog("startTunneling: returned");
                 if (!stopping) psiphonUp = true;
             } catch (Throwable err) {
-                // Throwable, not Exception: gomobile native load failures
+                // Throwable, not Exception: native library load failures
                 // (UnsatisfiedLinkError, ExceptionInInitializerError) are
                 // Errors — catching Exception only lets the thread die
                 // silently with nothing in the log, which is exactly the
@@ -800,19 +788,15 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
     @Override
     public void onDestroy() {
         destroyed = true;
-        // Android may recreate the owner/binding while the tunnel is live.
-        // Only an explicit stop is allowed to tear down Psiphon here.
-        if (stopping || processMustDie) stopNow();
         flushLogs();
         super.onDestroy();
-
     }
 
-    public static void killProcessOnExit(Context context) {
+    public static void stopForExit(Context context) {
         Context app = context.getApplicationContext();
         synchronized (bindingLock) {
             if (!terminalStopSent.compareAndSet(false, true)) return;
-            boolean delivered = deliverStop(app, true);
+            boolean delivered = deliverStop(app);
             releaseBindings(app);
             if (!delivered) {
                 terminalStopSent.set(false);
@@ -840,12 +824,11 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
         return false;
     }
 
-    private static boolean deliverStop(Context app, boolean die) {
+    private static boolean deliverStop(Context app) {
         if (!serviceExists(app)) return false;
         try {
             app.startService(new Intent(app, PsiphonTunnelService.class)
-                    .setAction(ACTION_STOP)
-                    .putExtra(EXTRA_DIE, die));
+                    .setAction(ACTION_STOP));
             return true;
         } catch (Throwable ignored) {
             return false;
@@ -1274,13 +1257,9 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
 
     @Override
     public void onDiagnosticMessage(String message) {
-        // Staged-status hooks. Diagnostic notices arrive as raw JSON here;
-        // the wrapper's own lifecycle lines arrive as plain text. All of it
-        // is cheap substring work on a low-rate channel.
+        // Lifecycle notice types drive staged connection status.
         if (!stopping && message != null) {
-            if (message.contains("starting Psiphon library")) {
-                broadcastStage(2, "CONNECTING");
-            } else if (message.contains("\"noticeType\":\"ConnectingServer\"")) {
+            if (message.contains("\"noticeType\":\"ConnectingServer\"")) {
                 broadcastStage(3, "ESTABLISHING TUNNEL");
             } else if (message.contains("ConnectedServerRegion")) {
                 handshakeRegion = true;
@@ -1291,26 +1270,7 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 broadcastStage(4, "ESTABLISHING TUNNEL");
             }
         }
-        tryMineRegionsFromNotice(message);
         emitLog(message);
-    }
-
-    // The AvailableEgressRegions payload traverses this channel as raw JSON
-    // regardless of the typed AAR callback, so the selector list is derived
-    // here too — region discovery must not hinge on a single notice-to-
-    // callback chain.
-    private void tryMineRegionsFromNotice(String message) {
-        if (stopping || message == null || !message.contains("\"AvailableEgressRegions\"")) return;
-        try {
-            JSONObject data = new JSONObject(message).optJSONObject("data");
-            if (data == null) return;
-            org.json.JSONArray reported = data.optJSONArray("regions");
-            if (reported == null || reported.length() == 0) return;
-            java.util.ArrayList<String> regions = new java.util.ArrayList<>(reported.length());
-            for (int i = 0; i < reported.length(); i++) regions.add(reported.optString(i, ""));
-            mergeReportedRegions(regions, "core-notice");
-        } catch (Exception ignored) {
-        }
     }
 
     @Override

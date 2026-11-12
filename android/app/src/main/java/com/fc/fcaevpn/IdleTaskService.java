@@ -39,7 +39,7 @@ public class IdleTaskService extends Service {
             }
             SessionState.command(SessionState.Command.NONE);
             SessionState.markIdle(IdleTaskService.this);
-            try { PsiphonTunnelService.killProcessOnExit(IdleTaskService.this); }
+            try { PsiphonTunnelService.stopForExit(IdleTaskService.this); }
             catch (Throwable ignored) {}
             ProcessExit.request(IdleTaskService.this);
             stopSelf();

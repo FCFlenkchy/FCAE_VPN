@@ -188,7 +188,7 @@ object NativeEngine {
     @JvmStatic external fun nativePsiphonRegions(): String
     @JvmStatic external fun nativeGetLogs(): String
     @JvmStatic external fun nativeClearLogs()
-    /** Inject a host-side line (Psiphon AAR notices live in :psiphon). */
+    /** Inject a host-side line from the Psiphon service. */
     @JvmStatic external fun nativeAppendLog(line: String)
 
     // No engine start required: availability is a compile-/platform-time

@@ -12,8 +12,8 @@ esac
 chmod +x package/* 2>/dev/null || true
 
 if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
-  # HEV and Zeptun are linked statically. Wintun and the Psiphon runtime
-  # retain their existing runtime staging and loading behavior.
+  # HEV, Zeptun, Psiphon and tun2socks are linked in-process.
+  # Wintun remains dynamically loaded.
   echo "Windows package:"
   ls -la package/
 fi

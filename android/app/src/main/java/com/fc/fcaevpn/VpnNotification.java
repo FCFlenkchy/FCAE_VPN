@@ -119,7 +119,7 @@ public class VpnNotification {
 
     /**
      * The notification shown while a tunnel dials, buildable from any process
-     * of the package: the :psiphon foreground service posts it under this
+     * of the package: the Psiphon foreground service posts it under this
      * same id, so the shared entry never differs from what this owner shows
      * at that moment. Runs this class's own build path, channel creation
      * included.

@@ -103,7 +103,7 @@
                 The app's own state actions used to be listed here too, and a
                 manifest receiver is delivered by STARTING its process — so
                 every state broadcast, including the ones a teardown sends on
-                its way out and the AAR's 1 Hz telemetry, was bringing the app
+                its way out and the Psiphon service's 1 Hz telemetry, was bringing the app
                 back after it had been killed. The widget renders from
                 SessionState directly (same process) instead.
             -->

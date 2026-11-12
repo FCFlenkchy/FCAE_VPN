@@ -26,7 +26,7 @@ extern "C" void fcae_sponsor_set_ui_active(bool active);
 
 static std::mutex g_log_mu;
 static std::deque<std::string> g_logs;
-// Psiphon AAR notices are chatty; 30 lines vanished before the user saw them.
+// Psiphon notices are chatty; 30 lines vanished before the user saw them.
 static constexpr size_t kMaxLogs = 250;
 static std::atomic<bool> g_inited{false};
 static std::atomic<uint64_t> g_sponsor_logged_generation{0};
@@ -1159,7 +1159,7 @@ Java_com_fc_fcaevpn_NativeEngine_nativeClearLogs(JNIEnv*, jclass) {
     g_logs.clear();
 }
 
-// Host-side lines (the :psiphon AAR process cannot touch this deque).
+// Host-side lines supplied by the Android Psiphon service.
 extern "C" JNIEXPORT void JNICALL
 Java_com_fc_fcaevpn_NativeEngine_nativeAppendLog(JNIEnv* env, jclass, jstring s) {
     std::string t = jstr(env, s);

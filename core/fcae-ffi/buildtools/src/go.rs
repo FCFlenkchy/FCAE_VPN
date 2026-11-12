@@ -20,7 +20,7 @@
 //! still in-process — the shared object is loaded into our address space and
 //! its symbols are called directly; there is no subprocess either way. The
 //! only consequence is packaging: the `.so` must be shipped in `jniLibs/<abi>/`
-//! so the dynamic loader can find it at runtime, which [`Built::staged_so`]
+//! so the dynamic loader can find it at runtime, which [`Built::stage_android_so`]
 //! handles.
 //!
 //! cgo is required in both modes, which means a C cross-compiler for the
@@ -46,21 +46,6 @@ pub struct CArchive<'a> {
     pub android_api: u32,
     /// Extra `-ldflags` entries.
     pub ldflags: Vec<String>,
-    /// Build a dynamic library even on platforms that would default to a
-    /// static c-archive.
-    ///
-    /// Two Go c-archives cannot be linked into one executable: each embeds a
-    /// complete Go runtime, so `_cgo_topofstack`, `crosscall2`, `_cgo_panic`
-    /// and friends are defined twice and the link fails with duplicate
-    /// symbols. Only one Go archive per binary can be static; any second Go
-    /// bridge would need a separate runtime; multiple runtimes in one process
-    /// are not generally supported. Prefer one combined Go archive.
-    pub force_shared: bool,
-    /// Emit the `rustc-link-lib` directive for this archive itself.
-    ///
-    /// Off when the host loads a library at runtime instead of linking it.
-    /// The platform system libraries are still emitted.
-    pub link_self: bool,
     /// Go build tags.
     pub tags: Vec<String>,
 }
@@ -75,12 +60,6 @@ pub struct Built {
     /// True when `archive` is a `c-shared` `.so` that must also be packaged
     /// into `jniLibs/<abi>/` for the runtime loader.
     pub shared: bool,
-    /// Carried over from [`CArchive::link_self`].
-    ///
-    /// `emit_link_directives` is a method on `Built`, not on `CArchive`, so it
-    /// cannot see the setting where it is made; the flag has to travel with
-    /// the build result.
-    pub link_self: bool,
 }
 
 #[derive(Debug)]
@@ -115,8 +94,6 @@ impl<'a> CArchive<'a> {
             android_api: 29,
             ldflags: vec!["-s".into(), "-w".into()],
             tags: Vec::new(),
-            force_shared: false,
-            link_self: true,
         }
     }
 
@@ -223,12 +200,8 @@ impl<'a> CArchive<'a> {
         let out_dir = PathBuf::from(
             std::env::var("OUT_DIR").map_err(|_| GoError::Build("OUT_DIR unset".into()))?,
         );
-        // Android's Go toolchain supports only c-shared. Elsewhere we prefer
-        // c-archive (statically linked, nothing extra to ship) -- but a
-        // caller can force dynamic, which is required for the *second* Go
-        // bridge in a binary since two Go runtimes cannot be linked
-        // statically into one image.
-        let shared = self.target.is_android() || self.force_shared;
+        // Android requires c-shared; desktop uses one static Go archive.
+        let shared = self.target.is_android();
         let buildmode = if shared { "c-shared" } else { "c-archive" };
         let ext = if shared {
             self.target.shared_lib_ext()
@@ -347,24 +320,6 @@ impl<'a> CArchive<'a> {
                 format!("-Wl,-z,max-page-size=16384 -Wl,-soname,{soname}"),
             );
         }
-        if shared && !self.target.is_android() {
-            // Same reasoning as the Android SONAME above: without it the
-            // dependent records an absolute build-time path that will not
-            // exist on the user's machine.
-            if self.target.is_apple() {
-                // macOS resolves @rpath against the loader's own directory,
-                // which is where we stage the dylib.
-                cmd.env(
-                    "CGO_LDFLAGS",
-                    format!("-Wl,-install_name,@rpath/{}.dylib", self.lib_name),
-                );
-            } else if !self.target.is_windows() {
-                cmd.env(
-                    "CGO_LDFLAGS",
-                    format!("-Wl,-soname,{}.so", self.lib_name),
-                );
-            }
-        }
         if self.target.is_apple() {
             if let Ok(v) = std::env::var("MACOSX_DEPLOYMENT_TARGET") {
                 cmd.env("MACOSX_DEPLOYMENT_TARGET", v);
@@ -394,7 +349,6 @@ impl<'a> CArchive<'a> {
             header,
             search_dir: out_dir,
             shared,
-            link_self: self.link_self,
         })
     }
 }
@@ -448,80 +402,6 @@ impl Built {
         Ok(())
     }
 
-    /// Copy a desktop c-shared library next to the final artifacts and make
-    /// the loader able to find it.
-    ///
-    /// Cargo puts build-script output in OUT_DIR, which is a hashed path
-    /// nobody ships. The dependent records only the SONAME/install_name, so
-    /// the library has to sit beside the executable at runtime: on Windows the
-    /// loader checks the .exe's own directory, and on Linux/macOS the rpath
-    /// emitted below points at it.
-    ///
-    /// Copies into target/<profile>/ (and its deps/ dir, where Cargo runs test
-    /// binaries from), so `cargo run`/`cargo test` work without manual steps.
-    pub fn stage_desktop_shared(&self, target: Target) -> Result<(), GoError> {
-        if !self.shared || target.is_android() {
-            return Ok(());
-        }
-
-        let file_name = self
-            .archive
-            .file_name()
-            .ok_or_else(|| GoError::Build("built library has no file name".into()))?;
-
-        // self.archive is OUT_DIR/<lib>.<ext>, and OUT_DIR is
-        // target/<triple>/<profile>/build/<pkg>-<hash>/out. Cargo puts the
-        // final artifacts in target/<triple>/<profile>, so:
-        //
-        //   pop 1 -> .../out          (drops the file name)
-        //   pop 2 -> .../<pkg>-<hash>
-        //   pop 3 -> .../build
-        //   pop 4 -> target/<triple>/<profile>   <-- what we want
-        //
-        // It was 5, which landed on target/<triple> -- a directory that
-        // exists, so the copy silently "succeeded" into the wrong place and
-        // CMake reported "psiphon bridge not built".
-        let mut artifact_dir = self.archive.clone();
-        for _ in 0..4 {
-            artifact_dir.pop();
-        }
-
-        // On Windows Go emits an import library next to the DLL; CMake links
-        // against that rather than the DLL itself, so it has to travel too.
-        let mut extras: Vec<std::ffi::OsString> = Vec::new();
-        if target.is_windows() {
-            let mut imp = file_name.to_os_string();
-            imp.push(".a");
-            if self.archive.with_file_name(&imp).is_file() {
-                extras.push(imp);
-            }
-        }
-
-        for dir in [artifact_dir.clone(), artifact_dir.join("deps")] {
-            if !dir.is_dir() {
-                continue;
-            }
-            for name in &extras {
-                let src = self.archive.with_file_name(name);
-                let dst = dir.join(name);
-                if let Err(e) = std::fs::copy(&src, &dst) {
-                    crate::note(format!("could not stage {}: {e}", dst.display()));
-                } else {
-                    crate::note(format!("staged {}", dst.display()));
-                }
-            }
-            let dest = dir.join(file_name);
-            // A running binary may hold the old copy open on Windows; a failed
-            // copy there is not fatal because the previous one is current.
-            if let Err(e) = std::fs::copy(&self.archive, &dest) {
-                crate::note(format!("could not stage {}: {e}", dest.display()));
-                continue;
-            }
-            crate::note(format!("staged {}", dest.display()));
-        }
-        Ok(())
-    }
-
     pub fn emit_link_directives(&self, lib_name: &str, target: Target) {
         println!(
             "cargo:rustc-link-search=native={}",
@@ -529,24 +409,9 @@ impl Built {
         );
         // `lib_name` arrives as `libfoo`; rustc wants `foo`.
         let link_name = lib_name.strip_prefix("lib").unwrap_or(lib_name);
-        if self.shared && self.link_self {
-            // c-shared produces a .so/.dll/.dylib, so link it dynamically.
-            // Android finds it via jniLibs/<abi>/ (see stage_android_so);
-            // desktop finds it next to the executable (stage_desktop_shared).
+        if self.shared {
             println!("cargo:rustc-link-lib=dylib={link_name}");
-
-            // Teach the loader to look beside the executable. Windows already
-            // searches the .exe's directory, and Android uses the APK's
-            // native lib dir, so neither needs an rpath.
-            if !target.is_android() && !target.is_windows() {
-                let origin = if target.is_apple() {
-                    "@loader_path"
-                } else {
-                    "$ORIGIN"
-                };
-                println!("cargo:rustc-link-arg=-Wl,-rpath,{origin}");
-            }
-        } else if self.link_self {
+        } else {
             println!("cargo:rustc-link-lib=static={link_name}");
         }
 

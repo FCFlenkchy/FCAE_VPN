@@ -42,7 +42,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var pendingPsiHttp = 0
     @Volatile private var pendingPsiLan = ""
     // Last LAN IP from native telemetry — fallback for the Psiphon LAN line
-    // when :psiphon resolved none of its own (hotspot/tether interfaces it
+    // when Psiphon resolved none of its own (hotspot/tether interfaces it
     // cannot see). The bind itself is 0.0.0.0, so any device LAN IP dials it.
     @Volatile private var lastNativeLan = ""
     private var lastLogHash = 0L
@@ -513,7 +513,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 PsiphonTunnelService.BROADCAST_STATS -> {
-                    // The AAR keeps reporting for a beat after an explicit
+                    // The Psiphon service keeps reporting for a beat after an explicit
                     // disconnect; those samples would repaint the zeroed line.
                     if (userInitiatedDisconnect) return
                     if (!connecting && !commandConnecting
@@ -2351,7 +2351,7 @@ class MainActivity : AppCompatActivity() {
         try { unregisterReceiver(vpnStateReceiver) } catch (_: Throwable) {}
         if (isFinishing && !isChangingConfigurations
             && !FCAEVpnService.sessionActive() && !ProxyNotification.sessionActive()) {
-            try { PsiphonTunnelService.killProcessOnExit(this) } catch (_: Throwable) {}
+            try { PsiphonTunnelService.stopForExit(this) } catch (_: Throwable) {}
             ProcessExit.request(this, true)
         }
         super.onDestroy()
@@ -3959,7 +3959,7 @@ class MainActivity : AppCompatActivity() {
         editPsiphonHttpPort.setText(prefs.getString("psiphonHttpPort", PsiphonTunnelService.DEFAULT_HTTP_PORT.toString()))
         savedPsiphonRegion = prefs.getString("psiphonRegion", "") ?: ""
         // Never load the Rust/Go libraries while constructing the first frame.
-        // Cached/AAR regions are sufficient until background nativeInit finishes.
+        // Cached/Psiphon regions are sufficient until background nativeInit finishes.
         applyPsiphonRegionCodes(
             (persistedRegionCodes() + readReportedRegionFile()).distinct()
         )
@@ -4198,7 +4198,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** AAR start; the foreground owner, not the Activity, owns the Psiphon bind. */
+    /** Psiphon start; the foreground owner, not the Activity, owns the Psiphon bind. */
     private fun psiphonConfigJson(): String = org.json.JSONObject()
         .put("FCAETransport", selectedPsiphonTransportIndex())
         .put("DisableLocalHTTPProxy", !switchPsiphonHttp.isChecked)
@@ -4232,7 +4232,7 @@ class MainActivity : AppCompatActivity() {
             // Full session config rides on the owner: FCAEVpnService starts
             // the engine session itself when Psiphon reports READY, so the
             // connect survives this activity being swiped away mid-dial.
-            // The TUN-mode owner raises the interface before the AAR connects
+            // The TUN-mode owner raises the interface before the Psiphon service connects
             // (TUN first); it needs the session's MTU for that first Builder.
             Intent(this, FCAEVpnService::class.java)
                 .setAction(FCAEVpnService.ACTION_PSIPHON_START)
@@ -4370,8 +4370,8 @@ class MainActivity : AppCompatActivity() {
         i.putExtra("psiphonConfig", psiphonConfigJson())
         i.putExtra("psiphonRegion", selectedPsiphonRegion())
         i.putExtra("psiphonTransport", selectedPsiphonTransportIndex())
-        // Prefer the LIVE AAR ports: when this start is the Protocol=Psiphon
-        // "raise TUN" step, the AAR already picked random ports and
+        // Prefer the LIVE Psiphon ports: when this start is the Protocol=Psiphon
+        // "raise TUN" step, the Psiphon service already picked random ports and
         // pendingPsiSocks/pendingPsiHttp hold them. Reading only the edit
         // fields sent 0 here, the native Psiphon attach backend refused with
         // "Start PsiphonTunnelService first and pass its SOCKS port", and the
@@ -4632,7 +4632,7 @@ class MainActivity : AppCompatActivity() {
         SessionState.markIdle(this)
 
         try {
-            PsiphonTunnelService.killProcessOnExit(this)
+            PsiphonTunnelService.stopForExit(this)
         } catch (_: Throwable) {}
 
         val issued = FCAEVpnService.stateGeneration()
@@ -5493,7 +5493,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * Psiphon proxy endpoints, with the LAN line on Psiphon's own ports.
      * `fallbackLan` (already gated on the LAN switch + a usable address)
-     * covers a :psiphon process that could not resolve its own LAN IP.
+     * covers a Psiphon service that could not resolve its own LAN IP.
      */
     private fun psiphonEndpointText(fallbackLan: String = ""): String {
         val lanIp = pendingPsiLan.ifEmpty { fallbackLan }
@@ -5511,7 +5511,7 @@ class MainActivity : AppCompatActivity() {
             if (shared.isEmpty()) "" else "\nPsiphon LAN: " + shared.joinToString(" | ")
     }
 
-    /** Native-detected LAN IP, usable as a Psiphon LAN fallback when :psiphon reported none. */
+    /** Native-detected LAN IP, usable as a Psiphon LAN fallback when Psiphon reported none. */
     private fun nativeLanFallback(nativeLan: String): String =
         if (switchLan.isChecked && nativeLan.isNotEmpty() && nativeLan != "127.0.0.1") nativeLan else ""
 
@@ -5585,7 +5585,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * Only Protocol=Psiphon runs the Psiphon attach backend. Egress "Psiphon
      * through the tunnel" keeps backend Aether: the engine session stays up
-     * and the supervisor requests the AAR exit through the foreground owner.
+     * and the supervisor requests the Psiphon exit through the foreground owner.
      * Its _reserved[0] flag now follows the same routing as desktop.
      */
     private fun backendForProtocolPosition(position: Int): Int = when (position) {
@@ -5597,7 +5597,7 @@ class MainActivity : AppCompatActivity() {
     private fun backendFromSelection(): Int =
         backendForProtocolPosition(if (::spinnerProtocol.isInitialized) spinnerProtocol.selectedItemPosition else 0)
 
-    /** Protocol Psiphon only. Egress Psiphon starts Aether first, then the AAR. */
+    /** Protocol Psiphon only. Egress Psiphon starts Aether first, then the Psiphon service. */
     private fun isPsiphonSelected(): Boolean = isPsiphonProtocol()
 
     /** Tor is an Aether setting and stays independent of the ordered backend chain. */
@@ -5676,9 +5676,7 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.w("FCAE_VPN", "psiphon regions unavailable: $t")
             emptyList()
         }
-        // The Android AAR runs in :psiphon, so its callback is also persisted
-        // to a small file shared by both processes. This avoids depending on
-        // the native Psiphon bridge, which is empty on the AAR path.
+        // The service persists its reported regions for later UI sessions.
         val reportedCodes = readReportedRegionFile()
         val codes = (reportedCodes + nativeCodes).distinct()
         if (codes.isNotEmpty()) persistRegionCodes(codes)
