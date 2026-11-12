@@ -1,8 +1,8 @@
 [
   {
     "version": "1.4.4",
-    "date": "2026-11-10",
-    "notes": "Default relay for firefox and auto activation Firefox vpn if already not",
+    "date": "2026-11-12",
+    "notes": "Default relay for firefox and auto activation Firefox vpn if already not and show captcha in destkops ui not browser",
     "url": "https://github.com/FCFlenkchy/FCAE_VPN/releases/tag/1.4.4"
   },
   {
