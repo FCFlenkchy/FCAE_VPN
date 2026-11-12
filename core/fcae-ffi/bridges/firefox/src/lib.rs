@@ -197,16 +197,12 @@ impl Backend for FirefoxBackend {
             socks: engine.socks_addr(),
             http: engine.http_addr(),
             peer_ip,
-            udp: transport != TransportPreference::H1,
+            udp: true,
             psiphon_dns: false,
         };
-        if config.mode == FcaeMode::Tun && (endpoints.socks.is_none() || transport == TransportPreference::H1) {
+        if config.mode == FcaeMode::Tun && endpoints.socks.is_none() {
             engine.stop().await;
-            return Err(CoreError::StartFailed(if transport == TransportPreference::H1 {
-                "Firefox TUN requires UDP-safe H2; select auto or h2".into()
-            } else {
-                "Firefox did not expose the required SOCKS endpoint".into()
-            }));
+            return Err(CoreError::StartFailed("Firefox did not expose the required SOCKS endpoint".into()));
         }
         Ok(Box::new(RunningFirefox {
             engine,

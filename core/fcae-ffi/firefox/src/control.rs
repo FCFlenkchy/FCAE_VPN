@@ -235,11 +235,14 @@ impl ControlPlane {
         };
         let Some(relay) = relay else {
             let response = if let Some(pool) = self.challenge_h2.as_ref().filter(|_| transport != TransportPreference::H1) {
-                self.exchange_challenge(request, pool, transport).await?
+                self.exchange_challenge(request, pool, transport).await
             } else {
-                self.exchange(request, transport).await?
+                self.exchange(request, transport).await
             };
-            return Ok(response);
+            if let Err(error) = &response {
+                log::warn!("[firefox] (mode={}) direct service failed: {}", transport.as_str(), direct_failure_detail(error));
+            }
+            return response;
         };
         let safe = request.method == Method::GET || request.method == Method::HEAD;
         let direct = if let Some(pool) = self.challenge_h2.as_ref().filter(|_| transport != TransportPreference::H1) {
@@ -272,9 +275,16 @@ impl ControlPlane {
                     }
                     result
                 },
-                Ok(Err(error @ FirefoxError::TlsCertificate { .. })) => return Err(error),
-                Ok(Err(_)) | Err(_) => {
-                    log::warn!("[firefox] (mode={}) direct service connection failed; trying the configured relay", transport.as_str());
+                Ok(Err(error @ FirefoxError::TlsCertificate { .. })) => {
+                    log::warn!("[firefox] (mode={}) direct service connection failed: {}; not bypassing certificate verification", transport.as_str(), direct_failure_detail(&error));
+                    return Err(error);
+                }
+                Ok(Err(error)) => {
+                    log::warn!("[firefox] (mode={}) direct service connection failed: {}; trying the configured relay", transport.as_str(), direct_failure_detail(&error));
+                    return self.exchange_relay(&request, &relay, transport).await;
+                }
+                Err(_) => {
+                    log::warn!("[firefox] (mode={}) direct service connection failed: timeout after 4s; trying the configured relay", transport.as_str());
                     return self.exchange_relay(&request, &relay, transport).await;
                 }
             }
@@ -294,12 +304,18 @@ impl ControlPlane {
                     Ok(response)
                 }
             }
-            Err(error @ FirefoxError::TlsCertificate { .. }) => Err(error),
-            Err(_) if safe => {
-                log::warn!("[firefox] (mode={}) service request failed; trying the configured relay", transport.as_str());
+            Err(error @ FirefoxError::TlsCertificate { .. }) => {
+                log::warn!("[firefox] (mode={}) direct service failed: {}; not bypassing certificate verification", transport.as_str(), direct_failure_detail(&error));
+                Err(error)
+            }
+            Err(error) if safe => {
+                log::warn!("[firefox] (mode={}) direct service failed: {}; trying the configured relay", transport.as_str(), direct_failure_detail(&error));
                 self.exchange_relay(&request, &relay, transport).await
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                log::warn!("[firefox] (mode={}) direct service failed: {}", transport.as_str(), direct_failure_detail(&error));
+                Err(error)
+            },
         }
     }
 
@@ -609,9 +625,46 @@ pub(crate) fn is_relay_response(headers: &HeaderMap) -> bool {
     })
 }
 
+fn direct_failure_detail(error: &FirefoxError) -> String {
+    let detail = match error {
+        FirefoxError::Timeout(duration) => format!("timeout after {duration:?}"),
+        FirefoxError::Dns { message, .. } => format!("DNS: {message}"),
+        FirefoxError::Tls { message, .. } | FirefoxError::TlsCertificate { message, .. } => format!("TLS: {message}"),
+        FirefoxError::Network(message) => format!("network: {message}"),
+        FirefoxError::Http { status, .. } => format!("HTTP {status}"),
+        _ => error.reason_code().to_string(),
+    };
+    detail.chars().map(|c| if c.is_control() { ' ' } else { c }).take(256).collect()
+}
+
+fn direct_response_message(response: &ControlResponse) -> String {
+    let body = match std::str::from_utf8(&response.body) {
+        Ok(body) => body.trim(),
+        Err(_) => return String::new(),
+    };
+    let message = if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        ["message", "error", "detail"].iter()
+            .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+            .unwrap_or("")
+    } else if !body.starts_with('<') && !body.starts_with('{') && !body.starts_with('[') {
+        body
+    } else {
+        ""
+    };
+    message.chars().map(|c| if c.is_control() { ' ' } else { c }).take(256).collect::<String>().trim().to_string()
+}
+
 fn log_control_exchange(route: &str, host: &str, protocol: &str, result: &Result<ControlResponse>) {
     let host = if route == "relay" { "relay" } else { host };
     match result {
+        Ok(response) if response.status >= 400 && route == "direct" => {
+            let message = direct_response_message(response);
+            if message.is_empty() {
+                log::warn!("[firefox] ({}) direct service failed: HTTP {} host={}", protocol, response.status, host);
+            } else {
+                log::warn!("[firefox] ({}) direct service failed: HTTP {} host={} message={}", protocol, response.status, host, message);
+            }
+        }
         Ok(response) if response.status >= 400 => log::warn!("[firefox] ({}) control HTTP {} route={} host={}", protocol, response.status, route, host),
         Ok(response) => log::info!("[firefox] ({}) control HTTP {} route={} host={}", protocol, response.status, route, host),
         Err(error) => log::warn!("[firefox] ({}) control request failed route={} host={} reason={}", protocol, route, host, error.reason_code()),
@@ -905,6 +958,19 @@ fn h2_error(error: h2::Error) -> FirefoxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_error_diagnostics_include_only_bounded_messages() {
+        let response = |body: &[u8]| ControlResponse { status: 405, headers: HeaderMap::new(), body: body.to_vec() };
+        assert_eq!(direct_response_message(&response(br#"{"message":"Method not allowed","token":"secret"}"#)), "Method not allowed");
+        assert_eq!(direct_response_message(&response(br#"{"token":"secret"}"#)), "");
+        assert_eq!(direct_response_message(&response(b"line one\nline two")), "line one line two");
+        assert_eq!(direct_response_message(&response(b"<html>private</html>")), "");
+        assert_eq!(direct_response_message(&response(&vec![b'x'; 500])).len(), 256);
+        assert_eq!(direct_failure_detail(&FirefoxError::Network("connection refused".into())), "network: connection refused");
+        assert_eq!(direct_failure_detail(&FirefoxError::Http { host: "example".into(), status: 405, errno: None,
+            retry_after: None, message: "private body".into() }), "HTTP 405");
+    }
 
     #[tokio::test]
     async fn relay_only_rejects_disabled_or_disallowed_routes() {

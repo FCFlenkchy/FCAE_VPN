@@ -400,7 +400,7 @@ pub struct UdpTunnel {
     incoming: Mutex<mpsc::Receiver<Vec<u8>>>,
     state: Arc<UdpState>,
     tasks: Vec<AbortHandle>,
-    inner: Arc<SessionInner>,
+    inner: Option<Arc<SessionInner>>,
     traffic: Arc<Traffic>,
 }
 
@@ -472,9 +472,78 @@ impl UdpTunnel {
             incoming: Mutex::new(incoming_rx),
             state,
             tasks: vec![writer.abort_handle(), reader.abort_handle()],
-            inner,
+            inner: Some(inner),
             traffic,
         }
+    }
+
+    fn new_h1<S>(stream: S, traffic: Arc<Traffic>) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (mut read, mut write) = tokio::io::split(stream);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<Bytes>(256);
+        let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(256);
+        let (closed_tx, mut writer_closed) = tokio::sync::watch::channel(false);
+        let mut reader_closed = closed_tx.subscribe();
+        let writer_signal = closed_tx.clone();
+        let state = Arc::new(UdpState { queued: AtomicUsize::new(0), closed: AtomicBool::new(false) });
+        let writer_state = state.clone();
+        let writer = tokio::spawn(async move {
+            loop {
+                let capsule = tokio::select! {
+                    changed = writer_closed.changed() => { let _ = changed; break; }
+                    capsule = outgoing_rx.recv() => match capsule { Some(capsule) => capsule, None => break },
+                };
+                let length = capsule.len();
+                let result = tokio::select! {
+                    changed = writer_closed.changed() => { let _ = changed; break; }
+                    result = async {
+                        write.write_all(&capsule).await?;
+                        write.flush().await
+                    } => result,
+                };
+                writer_state.queued.fetch_sub(length, Ordering::AcqRel);
+                if let Err(error) = result {
+                    log::debug!("[firefox] UDP H1 writer ended: {error}");
+                    break;
+                }
+            }
+            writer_state.closed.store(true, Ordering::Release);
+            let _ = writer_signal.send(true);
+        });
+        let reader_state = state.clone();
+        let reader = tokio::spawn(async move {
+            loop {
+                let result = tokio::select! {
+                    changed = reader_closed.changed() => { let _ = changed; break; }
+                    result = read_h1_capsule(&mut read) => result,
+                };
+                match result {
+                    Ok(Some(packet)) => { let _ = incoming_tx.try_send(packet); }
+                    Ok(None) => {}
+                    Err(error) => {
+                        log::debug!("[firefox] UDP H1 reader ended: {error}");
+                        break;
+                    }
+                }
+            }
+            reader_state.closed.store(true, Ordering::Release);
+            let _ = closed_tx.send(true);
+        });
+        Self {
+            outgoing: outgoing_tx,
+            incoming: Mutex::new(incoming_rx),
+            state,
+            tasks: vec![writer.abort_handle(), reader.abort_handle()],
+            inner: None,
+            traffic,
+        }
+    }
+
+    fn closed_error(&self, message: &str) -> FirefoxError {
+        if self.inner.is_some() { FirefoxError::H2(message.into()) }
+        else { FirefoxError::Network(message.into()) }
     }
 
     pub fn try_send(&self, packet: &[u8]) -> Result<()> {
@@ -482,7 +551,7 @@ impl UdpTunnel {
             return Err(FirefoxError::UnsupportedDestination("UDP packet exceeds 65535 bytes".into()));
         }
         if self.state.closed.load(Ordering::Acquire) {
-            return Err(FirefoxError::H2("UDP stream is closed".into()));
+            return Err(self.closed_error("UDP stream is closed"));
         }
         let capsule = encode_datagram(packet);
         let mut current = self.state.queued.load(Ordering::Acquire);
@@ -506,16 +575,16 @@ impl UdpTunnel {
             }
             Err(mpsc::error::TrySendError::Closed(capsule)) => {
                 self.state.queued.fetch_sub(capsule.len(), Ordering::AcqRel);
-                Err(FirefoxError::H2("UDP stream is closed".into()))
+                Err(self.closed_error("UDP stream is closed"))
             }
         }
     }
 
     pub async fn recv(&self) -> Result<Vec<u8>> {
         if self.state.closed.load(Ordering::Acquire) && self.incoming.lock().await.is_empty() {
-            return Err(FirefoxError::H2("UDP stream is closed".into()));
+            return Err(self.closed_error("UDP stream is closed"));
         }
-        let packet = self.incoming.lock().await.recv().await.ok_or_else(|| FirefoxError::H2("UDP stream ended".into()))?;
+        let packet = self.incoming.lock().await.recv().await.ok_or_else(|| self.closed_error("UDP stream ended"))?;
         self.traffic.rx.fetch_add(packet.len() as u64, Ordering::Relaxed);
         Ok(packet)
     }
@@ -527,8 +596,33 @@ impl Drop for UdpTunnel {
         for task in &self.tasks {
             task.abort();
         }
-        self.inner.active_streams.fetch_sub(1, Ordering::Relaxed);
+        if let Some(inner) = &self.inner {
+            inner.active_streams.fetch_sub(1, Ordering::Relaxed);
+        }
     }
+}
+
+async fn read_h1_varint<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<u64> {
+    let mut bytes = [0u8; 8];
+    reader.read_exact(&mut bytes[..1]).await?;
+    let length = 1usize << (bytes[0] >> 6);
+    reader.read_exact(&mut bytes[1..length]).await?;
+    Ok(quic_varint(&bytes[..length]).unwrap().0)
+}
+
+async fn read_h1_capsule<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
+    let kind = read_h1_varint(reader).await?;
+    let length = read_h1_varint(reader).await?;
+    if length > MAX_UDP_CAPSULE as u64 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "UDP capsule exceeds limit"));
+    }
+    let mut payload = vec![0; length as usize];
+    reader.read_exact(&mut payload).await?;
+    if kind != 0 { return Ok(None); }
+    let (context, offset) = quic_varint(&payload)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing UDP context"))?;
+    if context != 0 || payload.len() - offset > MAX_UDP_PACKET { return Ok(None); }
+    Ok(Some(payload[offset..].to_vec()))
 }
 
 async fn send_h2_bytes(send: &mut SendStream<Bytes>, mut bytes: Bytes) -> Result<()> {
@@ -651,6 +745,7 @@ pub struct Upstream {
     candidates: RwLock<Vec<Candidate>>,
     preference: TransportPreference,
     h1_reported: AtomicBool,
+    h1_udp_reported: AtomicBool,
     h2_reported: AtomicBool,
     dialer: Dialer,
     tokens: TokenManager,
@@ -676,6 +771,7 @@ impl Upstream {
             candidates: RwLock::new(vec![candidate]),
             preference,
             h1_reported: AtomicBool::new(false),
+            h1_udp_reported: AtomicBool::new(false),
             h2_reported: AtomicBool::new(false),
             dialer,
             tokens,
@@ -917,9 +1013,7 @@ impl Upstream {
 
     async fn open_udp_inner(&self, target: &str) -> Result<UdpTunnel> {
         if self.preference == TransportPreference::H1 {
-            return Err(FirefoxError::InvalidConfig(
-                "Firefox UDP requires HTTP/2 CONNECT-UDP; select auto or h2".into(),
-            ));
+            return self.open_h1_udp_authorized(target).await;
         }
         let mut last_error = None;
         for attempt in 0..2 {
@@ -947,6 +1041,37 @@ impl Upstream {
             }
         }
         Err(last_error.unwrap_or_else(|| FirefoxError::H2("could not open UDP proxy stream".into())))
+    }
+
+    async fn open_h1_udp_authorized(&self, target: &str) -> Result<UdpTunnel> {
+        for attempt in 0..2 {
+            let token = self.current_token().await?;
+            let started = Instant::now();
+            let result = tokio::time::timeout(self.timeout, self.open_h1_udp(target, &token))
+                .await.unwrap_or_else(|_| Err(FirefoxError::Timeout(self.timeout)));
+            match result {
+                Err(FirefoxError::PassRejected) if attempt == 0 => { self.renew(true).await?; }
+                Ok(stream) => {
+                    self.traffic.record_rtt(started.elapsed());
+                    self.report_tunnel_protocol(false);
+                    if !self.h1_udp_reported.swap(true, Ordering::Relaxed) {
+                        log::info!("[firefox] (h1) UDP CONNECT-UDP upgrade established");
+                    }
+                    return Ok(UdpTunnel::new_h1(stream, self.traffic.clone()));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(FirefoxError::PassRejected)
+    }
+
+    async fn open_h1_udp(&self, target: &str, token: &str) -> Result<BufReader<SslStream<TcpStream>>> {
+        let candidate = self.candidate();
+        let tls = crate::tls::connect(&self.dialer, &candidate.host, candidate.port, ALPN_H1).await?;
+        if tls.ssl().selected_alpn_protocol().is_some_and(|protocol| protocol != b"http/1.1") {
+            return Err(FirefoxError::Protocol("Mozilla proxy did not negotiate HTTP/1.1".into()));
+        }
+        h1_udp_upgrade(tls, &candidate.authority(), &candidate.host, target, token).await
     }
 
     async fn get_udp_session(&self) -> Result<H2Session> {
@@ -1123,6 +1248,69 @@ fn proxy_status_error(host: &str, status: u16, headers: &http::HeaderMap) -> Fir
     }
 }
 
+async fn h1_udp_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S, authority: &str, proxy_host: &str, target: &str, token: &str,
+) -> Result<BufReader<S>> {
+    let (host, port) = split_authority(target, 53)
+        .ok_or_else(|| FirefoxError::UnsupportedDestination(target.into()))?;
+    let authority = authority.parse::<http::uri::Authority>()
+        .map_err(|_| FirefoxError::Protocol("invalid proxy authority".into()))?;
+    let authorization = Zeroizing::new(format!("Bearer {token}"));
+    HeaderValue::from_str(&authorization)
+        .map_err(|_| FirefoxError::Protocol("proxy pass cannot be encoded as a header".into()))?;
+    let path = format!("/.well-known/masque/udp/{}/{port}/", path_segment(&host));
+    let request = Zeroizing::new(format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\nCapsule-Protocol: ?1\r\nProxy-Authorization: {}\r\nUser-Agent: {}\r\n\r\n", authorization.as_str(), firefox_user_agent()));
+    let mut stream = BufReader::new(stream);
+    stream.write_all(request.as_bytes()).await?;
+    stream.flush().await?;
+    let mut head = Vec::with_capacity(1024);
+    let mut total = 0usize;
+    loop {
+        let mut line = Vec::new();
+        let remaining = (MAX_HEAD + 1).saturating_sub(total) as u64;
+        let read = (&mut stream).take(remaining).read_until(b'\n', &mut line).await?;
+        if read == 0 { return Err(FirefoxError::Protocol("proxy closed before its CONNECT-UDP response".into())); }
+        total = total.saturating_add(line.len());
+        if total > MAX_HEAD {
+            return Err(FirefoxError::Protocol("proxy CONNECT-UDP response head is too large".into()));
+        }
+        head.extend_from_slice(&line);
+        if !head.ends_with(b"\r\n\r\n") { continue; }
+        if !head.starts_with(b"HTTP/1.1 ") {
+            return Err(FirefoxError::Protocol("CONNECT-UDP upgrade requires HTTP/1.1".into()));
+        }
+        let (status, headers) = parse_response_head(&head)?;
+        if (100..200).contains(&status) && status != 101 {
+            head.clear();
+            continue;
+        }
+        if status != 101 {
+            let error = proxy_status_error(proxy_host, status, &headers);
+            log_proxy_failure("h1", "UDP", target, proxy_host, status, &error);
+            return Err(error);
+        }
+        validate_h1_udp_upgrade(&headers)?;
+        return Ok(stream);
+    }
+}
+
+fn validate_h1_udp_upgrade(headers: &http::HeaderMap) -> Result<()> {
+    let connection_upgrade = headers.get_all("connection").iter().any(|v| v.to_str().ok().is_some_and(|s|
+        s.split(',').any(|token| token.trim().eq_ignore_ascii_case("upgrade"))));
+    let upgrades: Vec<_> = headers.get_all("upgrade").iter().collect();
+    let upgrade_ok = upgrades.len() == 1 && upgrades[0].to_str().ok()
+        .is_some_and(|s| s.trim().eq_ignore_ascii_case("connect-udp"));
+    let capsules: Vec<_> = headers.get_all("capsule-protocol").iter().collect();
+    let capsule_ok = capsules.is_empty() || (capsules.len() == 1 && capsules[0].to_str().ok()
+        .is_some_and(|s| s.split(';').next().is_some_and(|value| value.trim() == "?1")));
+    if !connection_upgrade || !upgrade_ok || !capsule_ok
+        || headers.contains_key("content-length") || headers.contains_key("content-type")
+        || headers.contains_key("transfer-encoding") {
+        return Err(FirefoxError::Protocol("invalid HTTP/1.1 CONNECT-UDP upgrade response".into()));
+    }
+    Ok(())
+}
+
 fn parse_response_head(head: &[u8]) -> Result<(u16, http::HeaderMap)> {
     let mut fields = [httparse::EMPTY_HEADER; 64];
     let mut response = httparse::Response::new(&mut fields);
@@ -1217,6 +1405,84 @@ mod traffic_tests {
 
     fn http_error(status: u16, message: &str) -> FirefoxError {
         FirefoxError::Http { host: "proxy".into(), status, errno: None, retry_after: None, message: message.into() }
+    }
+
+    #[test]
+    fn h1_udp_upgrade_response_requires_valid_upgrade_headers() {
+        let good = b"HTTP/1.1 101 Switching Protocols\r\nConnection: keep-alive, Upgrade\r\nUpgrade: connect-udp\r\nCapsule-Protocol: ?1\r\n\r\n";
+        let (_, headers) = parse_response_head(good).unwrap();
+        assert!(validate_h1_udp_upgrade(&headers).is_ok());
+        for bad in [
+            &b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: connect-udp\r\n\r\n"[..],
+            &b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: other\r\n\r\n"[..],
+            &b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\nUpgrade: connect-udp\r\n\r\n"[..],
+            &b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\nContent-Length: 0\r\n\r\n"[..],
+            &b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\nCapsule-Protocol: ?0\r\n\r\n"[..],
+        ] {
+            let (_, headers) = parse_response_head(bad).unwrap();
+            assert!(validate_h1_udp_upgrade(&headers).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn h1_udp_upgrade_preserves_buffered_capsules_and_tunnels_packets() {
+        let (client, server) = tokio::io::duplex(4096);
+        let remote = tokio::spawn(async move {
+            let mut server = BufReader::new(server);
+            let mut head = Vec::new();
+            loop {
+                let mut line = Vec::new();
+                server.read_until(b'\n', &mut line).await.unwrap();
+                head.extend_from_slice(&line);
+                if head.ends_with(b"\r\n\r\n") { break; }
+            }
+            let request = String::from_utf8(head).unwrap();
+            assert!(request.starts_with("GET /.well-known/masque/udp/2001%3Adb8%3A%3A1/53/ HTTP/1.1\r\n"));
+            assert!(request.contains("Host: proxy.example:443\r\n"));
+            assert!(request.contains("Proxy-Authorization: Bearer test-pass\r\n"));
+            assert!(request.contains("Upgrade: connect-udp\r\n"));
+            let mut response = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\nCapsule-Protocol: ?1\r\n\r\n".to_vec();
+            response.extend_from_slice(&encode_datagram(b"reply"));
+            server.write_all(&response).await.unwrap();
+            let packet = read_h1_capsule(&mut server).await.unwrap().unwrap();
+            assert_eq!(packet, b"hello");
+        });
+        let stream = h1_udp_upgrade(client, "proxy.example:443", "proxy.example", "[2001:db8::1]:53", "test-pass").await.unwrap();
+        let traffic = Arc::new(Traffic::default());
+        let tunnel = UdpTunnel::new_h1(stream, traffic.clone());
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), tunnel.recv()).await.unwrap().unwrap(), b"reply");
+        tunnel.try_send(b"hello").unwrap();
+        remote.await.unwrap();
+        assert_eq!(traffic.totals(), (5, 5));
+    }
+
+    #[tokio::test]
+    async fn h1_udp_rejects_bad_http_status_and_http_10() {
+        for (response, status) in [
+            (&b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n"[..], 405),
+            (&b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n"[..], 407),
+            (&b"HTTP/1.0 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\n\r\n"[..], 101),
+        ] {
+            let (client, mut server) = tokio::io::duplex(4096);
+            server.write_all(response).await.unwrap();
+            let result = h1_udp_upgrade(client, "proxy.example:443", "proxy.example", "1.1.1.1:53", "pass").await;
+            match status {
+                405 => assert!(matches!(result, Err(FirefoxError::Http { status: 405, .. }))),
+                407 => assert!(matches!(result, Err(FirefoxError::PassRejected))),
+                _ => assert!(matches!(result, Err(FirefoxError::Protocol(_)))),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn h1_udp_capsules_enforce_limits_and_skip_unknown_contexts() {
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        writer.write_all(&[0, 2, 1, 9]).await.unwrap();
+        assert!(read_h1_capsule(&mut reader).await.unwrap().is_none());
+        let mut oversized = vec![0];
+        append_quic_varint(&mut oversized, MAX_UDP_CAPSULE as u64 + 1);
+        writer.write_all(&oversized).await.unwrap();
+        assert_eq!(read_h1_capsule(&mut reader).await.unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

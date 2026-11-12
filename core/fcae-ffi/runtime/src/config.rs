@@ -859,18 +859,13 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
             "socks_port and http_port are both {}; they must differ", cfg.socks_port
         )));
     }
-    if cfg.exit_backend() == FcaeBackend::Firefox && cfg.is_tun() && cfg.firefox.transport == "h1" {
-        return Err(CoreError::InvalidConfig(
-            "Firefox TUN requires UDP-safe H2; select firefox.transport auto or h2".into(),
-        ));
-    }
     let aether_provides_udp = |protocol| {
         protocol != FcaeProtocol::Tor && !matches!(raw.tor.mode, FcaeTorMode::Only | FcaeTorMode::Chain)
     };
     let mut previous_udp = match cfg.backend {
         FcaeBackend::Aether => aether_provides_udp(cfg.protocol),
         FcaeBackend::Psiphon => false,
-        FcaeBackend::Firefox => cfg.firefox.transport != "h1",
+        FcaeBackend::Firefox => true,
     };
     for exit in cfg.chain.clone() {
         let mut hop = cfg.clone();
@@ -886,7 +881,7 @@ pub unsafe fn parse(raw: *const FcaeConfig) -> Result<SessionConfig> {
         }
         previous_udp = match exit.backend {
             FcaeBackend::Psiphon => false,
-            FcaeBackend::Firefox => cfg.firefox.transport != "h1",
+            FcaeBackend::Firefox => true,
             FcaeBackend::Aether => aether_provides_udp(exit.protocol),
         };
     }
@@ -1825,6 +1820,24 @@ mod tests {
         raw.chain.hop_count = 1;
         assert!(unsafe { parse(&raw) }.is_err());
         raw.http_port = 1820;
+        assert!(unsafe { parse(&raw) }.is_ok());
+    }
+
+    #[test]
+    fn firefox_h1_tun_and_udp_chains_are_not_rejected_by_configuration() {
+        let mut raw = raw_test_config();
+        raw.struct_size = std::mem::size_of::<FcaeConfig>() as u32;
+        raw.abi_version = FCAE_ABI_VERSION;
+        raw.mode = FcaeMode::Tun;
+        raw.backend = FcaeBackend::Firefox;
+        raw.firefox.transport = c"h1".as_ptr();
+        raw.socks_port = 1819;
+        assert_eq!(unsafe { parse(&raw) }.unwrap().firefox.transport, "h1");
+        let hops = [FcaeChainHop {
+            backend: FcaeBackend::Aether, protocol: FcaeProtocol::WireGuard, h2_enabled: false,
+        }];
+        raw.chain.hops = hops.as_ptr();
+        raw.chain.hop_count = 1;
         assert!(unsafe { parse(&raw) }.is_ok());
     }
 
