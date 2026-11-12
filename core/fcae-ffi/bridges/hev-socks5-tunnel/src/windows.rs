@@ -256,8 +256,6 @@ impl TunBridge for HevSocks5TunnelBridge {
         }
         self.closing.store(false, Ordering::SeqCst);
         crate::platform::ensure_wintun(crate::platform::wintun_bytes())?;
-        // Resolve the native bridge before changing engine state or spawning a
-        // worker so a missing/incompatible DLL becomes a normal start error.
         let rt = runtime()?;
         drain_calls(&rt.calls, &self.enqueue, RESTART_GRACE)?;
         let base_socks = endpoints.socks.ok_or_else(|| CoreError::Internal("TUN needs SOCKS endpoint".into()))?;

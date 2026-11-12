@@ -26,7 +26,7 @@ case "${FCAE_MATRIX_NAME}" in
     make clean OS=Windows_NT ARCH=x64
     make static OS=Windows_NT ARCH=x64 \
       CC="$CC" PP="$CC -E" AR="$AR" \
-      CFLAGS="-include $COMPAT -Wno-error" -j"$(nproc)"
+      CFLAGS="-include $COMPAT -Wno-error -Wno-unknown-pragmas" -j"$(nproc)"
 
     # Upstream produces four independent .lib archives. Copy them under GNU
     # archive names and namespace its libyaml symbols to avoid collisions with

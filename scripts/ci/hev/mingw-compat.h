@@ -5,6 +5,8 @@
 /* HEV's Windows header supplies an MSVC mode_t when _MODE_T_DEFINED is
  * absent. MinGW uses a different guard and already supplies mode_t. */
 #include <sys/types.h>
+/* HEV later defines usleep as a macro; declare MinGW's function first. */
+#include <unistd.h>
 #ifndef _MODE_T_DEFINED
 #define _MODE_T_DEFINED 1
 #endif
