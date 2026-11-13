@@ -895,8 +895,8 @@ public class FCAEVpnService extends VpnService {
             handler.postDelayed(replayHandoffWatchdog, 15000L);
             return;
         }
-        if (VpnService.prepare(this) != null) {
-            failReplay(startId, "Open FCAE VPN to grant VPN permission.");
+        if (!ensureVpnConsent()) {
+            failReplay(startId, "Allow FCAE VPN to connect, then press Start again");
             return;
         }
         notificationPause = false;
@@ -1017,10 +1017,50 @@ public class FCAEVpnService extends VpnService {
      * engine, queue this until that cleanup returns — never start on top
      * of an aborting warp-in-warp task.
      */
+    /**
+     * Hand the VPN prepare right back to FCAE — or show the consent dialog and
+     * fail the start if the user has to grant it.
+     *
+     * Only one app can hold the prepare right, and it is revoked when another
+     * VPN app establishes (onRevoke). Until FCAE is prepared again, every
+     * dial dies with protect() rejected and TUN establish() returns null —
+     * no matter which surface started the session (widget / notification /
+     * tile / replay bypass the Activity's own VpnService.prepare call).
+     * Pressing Start IS a request to take the slot back, so the re-prepare
+     * belongs here, at the shared choke point.
+     *
+     * For a prepared app this is one binder IPC with no side effects; for a
+     * pre-consented one the framework re-prepares FCAE silently (which is what
+     * actually "recovers" the VPN); otherwise the consent activity is shown.
+     * Returns true when FCAE is prepared afterwards.
+     */
+    private boolean ensureVpnConsent() {
+        Intent consent = VpnService.prepare(this);
+        if (consent == null) return true;
+        try {
+            startActivity(new Intent(consent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Throwable ignored) {
+            // No window to show it right now; the caller's toast still tells
+            // the user what to do.
+        }
+        return false;
+    }
+
     private synchronized void requestStart(Intent intent) {
         if (!nativeReady || !NativeEngine.ensureLoaded()) {
             Log.e(TAG, "start ignored: native engine is unavailable");
             showReady();
+            return;
+        }
+        if (!ensureVpnConsent()) {
+            // Grant dialog shown. The start is abandoned; the user presses
+            // Start again once consent is granted.
+            uiConnecting = false;
+            SessionState.command(SessionState.Command.NONE);
+            SessionState.markIdle(this);
+            showReady();
+            Toast.makeText(this, "Allow FCAE VPN to connect, then press Start again",
+                    Toast.LENGTH_LONG).show();
             return;
         }
         Intent src = intent;
