@@ -240,3 +240,20 @@ fn run(program: &str, args: &[&str]) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+/// Stage `wintun.dll` for `target` into `OUT_DIR` (see [`stage`]) and, when one
+/// was produced, emit both the `wintun_staged` rustc-cfg and the rustc-env
+/// variable carrying the staged path.
+///
+/// The engines LoadLibraryExW the stock `"wintun.dll"` (pool "Wintun") from
+/// the application directory or System32, so the DLL also travels next to
+/// the produced library; a plausible DLL that cannot be staged is skipped,
+/// not fatal. `env` is the engine crate's rustc-env name
+/// (e.g. `FCAE_HEV_WINTUN_DLL`); the accessor side is
+/// `fcae_runtime::wintun_bytes!` macro.
+pub fn stage_and_emit(target: Target, env: &str) {
+    if let Some(dll) = stage(target) {
+        println!("cargo:rustc-cfg=wintun_staged");
+        println!("cargo:rustc-env={env}={}", dll.display());
+    }
+}

@@ -15,10 +15,7 @@ fn main() {
 
     // Windows still needs wintun.dll at runtime for the TUN device itself
     // (that is a driver, not a process), so stage it next to the library.
-    if let Some(dll) = fcae_build::wintun::stage(target) {
-        println!("cargo:rustc-cfg=wintun_staged");
-        println!("cargo:rustc-env=FCAE_WINTUN_DLL={}", dll.display());
-    }
+    fcae_build::wintun::stage_and_emit(target, "FCAE_WINTUN_DLL");
 
     if cfg!(feature = "stub") {
         if cfg!(feature = "psiphon") {

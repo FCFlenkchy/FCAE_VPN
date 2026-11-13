@@ -56,18 +56,9 @@ use fcae_runtime::socks5p;
 
 pub mod platform;
 
-#[cfg(all(windows, wintun_staged))]
-static WINTUN_DLL: &[u8] = include_bytes!(env!("FCAE_WINTUN_DLL"));
-
-#[cfg(all(windows, wintun_staged))]
-fn wintun_bytes() -> Option<&'static [u8]> {
-    Some(WINTUN_DLL)
-}
-
-#[cfg(all(windows, not(wintun_staged)))]
-fn wintun_bytes() -> Option<&'static [u8]> {
-    None
-}
+// `wintun.dll` staged at build time, embedded so the loader can drop it next
+// to the executable. Expands to the staged slice + a `wintun_bytes()` accessor.
+fcae_runtime::wintun_bytes!("FCAE_WINTUN_DLL");
 
 // C ABI declarations.
 

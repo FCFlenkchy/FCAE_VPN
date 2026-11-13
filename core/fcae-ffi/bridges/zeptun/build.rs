@@ -28,12 +28,7 @@ fn main() {
 
     // Windows still needs wintun.dll at runtime for the TUN device itself
     // (that is a driver, not a process), so stage it next to the library.
-    // zeptun dynamically LoadLibraryExW's the stock "wintun.dll" (pool
-    // "Wintun") from the application directory or System32.
-    if let Some(dll) = fcae_build::wintun::stage(target) {
-        println!("cargo:rustc-cfg=wintun_staged");
-        println!("cargo:rustc-env=FCAE_WINTUN_DLL={}", dll.display());
-    }
+    fcae_build::wintun::stage_and_emit(target, "FCAE_WINTUN_DLL");
 
     // Features reach build scripts as CARGO_FEATURE_* env, never as cfg().
     if std::env::var_os("CARGO_FEATURE_STUB").is_some() {

@@ -96,9 +96,8 @@ pub mod platform;
 
 /// `wintun.dll` staged at build time, embedded so the runtime can drop it
 /// next to the executable. The TUN *driver* is still a DLL — only the
-/// tun2socks *process* is gone.
-#[cfg(all(windows, wintun_staged))]
-static WINTUN_DLL: &[u8] = include_bytes!(env!("FCAE_WINTUN_DLL"));
+/// tun2socks *process* is gone. Expands to the staged slice + `wintun_bytes()`.
+fcae_runtime::wintun_bytes!("FCAE_WINTUN_DLL");
 
 // Go c-archive symbols.
 
@@ -611,15 +610,6 @@ impl TunBridge for Tun2SocksBridge {
     }
 }
 
-#[cfg(all(windows, wintun_staged))]
-fn wintun_bytes() -> Option<&'static [u8]> {
-    Some(WINTUN_DLL)
-}
-
-#[cfg(all(windows, not(wintun_staged)))]
-fn wintun_bytes() -> Option<&'static [u8]> {
-    None
-}
 
 #[cfg(test)]
 mod tests {
