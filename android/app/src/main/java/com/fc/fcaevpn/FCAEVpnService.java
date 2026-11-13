@@ -38,6 +38,8 @@ public class FCAEVpnService extends VpnService {
     private volatile int sessionTunMtu = 1500;
     /** Psiphon is this session's exit. Set before the core requests the TUN interface. */
     private volatile boolean sessionPsiphonExit = false;
+    /** This session wants the Android TUN. Set at session start (and cleared at teardown); the protect recovery uses it to seize the VPN slot when another app holds it. */
+    private volatile boolean sessionWantsTun = false;
     /** Retains a Psiphon TUN start until the Psiphon service supplies live ports, even if the Activity closes. */
     private volatile Intent pendingPsiphonStart;
     private static final String TAG = "FCAE_VPN";
@@ -903,6 +905,25 @@ public class FCAEVpnService extends VpnService {
         requestStart(recalled);
     }
 
+    /**
+     * VpnService.protect(fd) was refused by the system — most often because
+     * another VPN app holds the slot. Recover instead of letting the dial die:
+     * seize the slot by establishing FCAE's TUN now (cached — the core re-uses
+     * the very same interface when it asks for the TUN later, so no second
+     * interface is created), then retry protect().
+     *
+     * Deliberately not used for proxy sessions: claiming the slot would put
+     * routes on a proxy-only session, so proxy mode fails closed as before.
+     * If our session is genuinely not prepared (establish throws and returns
+     * null), recovery returns false and the dial fails closed as before too.
+     */
+    public boolean protectCarrierSocket(int fd) {
+        try { if (protect(fd)) return true; } catch (Throwable ignored) { }
+        if (!sessionWantsTun) return false;
+        if (establishTunNow() < 0) return false;
+        try { return protect(fd); } catch (Throwable ignored) { return false; }
+    }
+
     private boolean initializeNative() {
         if (nativeReady) return true;
         if (!NativeEngine.ensureLoaded()) return false;
@@ -1145,6 +1166,7 @@ public class FCAEVpnService extends VpnService {
         running = false;
         uiConnecting = true;
         sessionPsiphonExit = finalBackend(intent) == 1;
+        sessionWantsTun = intent.getIntExtra("mode", 1) == 1;
         sessionTunMtu = Math.max(1280, Math.min(9000,
                 intent.getIntExtra("tunMtu", 1500)));
         pendingSessionGen = cleanupGeneration.incrementAndGet();
@@ -1198,6 +1220,7 @@ public class FCAEVpnService extends VpnService {
         // Mode is protocol-independent: a selected TUN session is always
         // FCAE_MODE_TUN, including Tor, Psiphon, and every Aether protocol.
         final int mode        = intent.getIntExtra("mode", 1) == 1 ? 1 : 0;
+        sessionWantsTun = (mode == 1);
         final int scanMode    = intent.getIntExtra("scanMode", 0);
         final int ipVersion   = intent.getIntExtra("ipVersion", 4);
         final boolean quick   = intent.getBooleanExtra("quickReconnect", false);
@@ -1465,6 +1488,7 @@ public class FCAEVpnService extends VpnService {
         sessionEpoch.incrementAndGet();
         lastPsiphonStats = null;
         sessionPsiphonExit = false;
+        sessionWantsTun = false;
                 // Idempotent: Disconnect, onRevoke and onDestroy can all land for one
                 // session, and a second pass would repeat nativeStopBegin/nativeStop
                 // ("tun2socks 2 times torn down"). Every field below is cleared by the

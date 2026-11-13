@@ -121,11 +121,20 @@
                     android:gravity="center"
                     android:orientation="horizontal">
 
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnConnect"
+                        android:layout_width="0dp"
+                        android:layout_height="match_parent"
+                        android:layout_weight="2"
+                        android:text="CONNECT"
+                        android:textAllCaps="false"
+                        android:textSize="14sp" />
+
                     <LinearLayout
                         android:id="@+id/layoutTunPauseResume"
                         android:layout_width="0dp"
                         android:layout_height="match_parent"
-                        android:layout_marginEnd="6dp"
+                        android:layout_marginStart="6dp"
                         android:layout_weight="1"
                         android:orientation="horizontal"
                         android:visibility="gone">
@@ -148,15 +157,6 @@
                             android:textSize="13sp"
                             android:visibility="gone" />
                     </LinearLayout>
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnConnect"
-                        android:layout_width="0dp"
-                        android:layout_height="match_parent"
-                        android:layout_weight="2"
-                        android:text="CONNECT"
-                        android:textAllCaps="false"
-                        android:textSize="14sp" />
                 </LinearLayout>
 
                 <LinearLayout

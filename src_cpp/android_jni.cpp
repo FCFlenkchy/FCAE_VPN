@@ -418,12 +418,15 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeRegisterVpnService(JNIEnv* env, jobject
     }
     g_vpn_service = env->NewGlobalRef(thiz);
     jclass cls = env->GetObjectClass(thiz);
-    // VpnService.protect(int) -> boolean
-    g_protect_mid = env->GetMethodID(cls, "protect", "(I)Z");
+    // VpnService.protectCarrierSocket(int) -> boolean. The service-side
+    // method wraps protect(fd) with recovery: when the system refuses the
+    // protect (another VPN holds the slot), it seizes the slot by
+    // establishing FCAE's TUN and retries instead of failing the dial.
+    g_protect_mid = env->GetMethodID(cls, "protectCarrierSocket", "(I)Z");
     if (!g_protect_mid) {
         env->ExceptionClear();
         env->DeleteLocalRef(cls);
-        LOGE("could not resolve VpnService.protect(int)");
+        LOGE("could not resolve FCAEVpnService.protectCarrierSocket(int)");
         return;
     }
 
