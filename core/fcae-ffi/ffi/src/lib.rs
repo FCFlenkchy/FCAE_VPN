@@ -621,7 +621,7 @@ pub unsafe extern "C" fn fcae_init(options: *const FcaeInitOptions) -> FcaeStatu
             SupervisorConfig {
                 tun_bridge,
                 #[cfg(feature = "tun")]
-                is_privileged: fcae_bridge_tun2socks::platform::is_privileged,
+                is_privileged: fcae_runtime::privilege::is_privileged,
                 #[cfg(not(feature = "tun"))]
                 is_privileged: || false,
                 ..Default::default()
@@ -888,7 +888,8 @@ pub extern "C" fn fcae_set_tun_fd_provider(
 ///
 /// OR-ed across every TUN bridge linked into this build: a Windows release may
 /// carry `zeptun` or `hev` without `tun`, and each of those raises its adapter
-/// with the same admin gate. Consulting one bridge would let the C++ frontend
+/// with the same admin gate. The probe lives in `fcae_runtime::privilege` and
+/// answers for the whole build. Consulting one bridge would let the C++ frontend
 /// skip its elevation prompt, after which the bridge refuses to create the
 /// device and the session fails with no visible cause.
 #[no_mangle]
@@ -897,25 +898,13 @@ pub extern "C" fn fcae_is_privileged() -> bool {
 }
 
 fn is_privileged() -> bool {
-    #[cfg(feature = "tun")]
+    // The shared probe is identical to every bridge's old private copy; one
+    // call answers for the whole build.
+    #[cfg(any(feature = "tun", feature = "zeptun", feature = "hev"))]
     {
-        if fcae_bridge_tun2socks::platform::is_privileged() {
-            return true;
-        }
+        fcae_runtime::privilege::is_privileged()
     }
-    #[cfg(feature = "zeptun")]
-    {
-        if fcae_bridge_zeptun::platform::is_privileged() {
-            return true;
-        }
-    }
-    #[cfg(feature = "hev")]
-    {
-        if fcae_bridge_hev_socks5_tunnel::platform::is_privileged() {
-            return true;
-        }
-    }
-    #[allow(unreachable_code)]
+    #[cfg(not(any(feature = "tun", feature = "zeptun", feature = "hev")))]
     {
         false
     }

@@ -1,22 +1,43 @@
-use std::ffi::{c_int, c_uchar, c_uint};
+//! The HEV engine host — one implementation for every platform; `cfg` appears
+//! only where the platforms genuinely differ.
+//!
+//! * Windows drives the in-process C engine through a dedicated call thread
+//!   (`hev-calls`) that serializes `quit`/`stats`, and protects the existing
+//!   Wintun adapter with `windows_tun::TunGuard`.
+//! * Unix hands the engine an fd (Android fd or its own device) and applies
+//!   host addresses/routes/DNS through `unix_tun::TunGuard` on Linux/macOS.
+//!
+//! Both share the lifecycle machinery: reaping, the generation latch for the
+//! deferred-cleanup thread, the stop/abort paths and the wait-for-cleanup
+//! contract the supervisor relies on across engine switches.
+
+use std::ffi::{c_int, c_uchar, c_uint, CString};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use std::sync::{mpsc, OnceLock};
 
 use fcae_runtime::backend::Endpoints;
 use fcae_runtime::config::SessionConfig;
 use fcae_runtime::error::{CoreError, Result};
 use fcae_runtime::session::TunBridge;
+use fcae_runtime::socks5p;
 use parking_lot::Mutex;
 
-use fcae_runtime::socks5p;
 use crate::{generate_config, run_engine, HevStats};
 
 const RESTART_GRACE: Duration = Duration::from_secs(2);
+/// Poll interval while waiting for the engine thread to exit; the caller's
+/// deadline is what bounds the loop.
+const REAP_POLL: Duration = Duration::from_millis(5);
+#[cfg(windows)]
+const STATS_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[cfg(hev_linked)]
 extern "C" {
-    fn hev_socks5_tunnel_main_from_str(config_str: *const c_uchar, config_len: c_uint, tun_fd: c_int) -> c_int;
+    fn hev_socks5_tunnel_main_from_str(config: *const c_uchar, len: c_uint, fd: c_int) -> c_int;
     fn hev_socks5_tunnel_quit();
     fn hev_socks5_tunnel_stats(tx_packets: *mut usize, tx_bytes: *mut usize, rx_packets: *mut usize, rx_bytes: *mut usize);
 }
@@ -29,6 +50,9 @@ mod stub {
     pub fn hev_socks5_tunnel_stats(_tx_packets: *mut usize, _tx_bytes: *mut usize, _rx_packets: *mut usize, _rx_bytes: *mut usize) {}
 }
 
+// --- Direct in-process calls (non-Windows) -----------------------------------
+
+#[cfg(not(windows))]
 unsafe fn engine_main_from_str(config_str: *const c_uchar, config_len: c_uint, tun_fd: c_int) -> c_int {
     #[cfg(hev_linked)]
     { hev_socks5_tunnel_main_from_str(config_str, config_len, tun_fd) }
@@ -36,6 +60,7 @@ unsafe fn engine_main_from_str(config_str: *const c_uchar, config_len: c_uint, t
     { stub::hev_socks5_tunnel_main_from_str(config_str, config_len, tun_fd) }
 }
 
+#[cfg(not(windows))]
 fn engine_quit() -> bool {
     #[cfg(hev_linked)]
     { unsafe { hev_socks5_tunnel_quit() }; true }
@@ -43,6 +68,7 @@ fn engine_quit() -> bool {
     { stub::hev_socks5_tunnel_quit(); true }
 }
 
+#[cfg(not(windows))]
 unsafe fn engine_stats(tx_packets: *mut usize, tx_bytes: *mut usize, rx_packets: *mut usize, rx_bytes: *mut usize) -> bool {
     #[cfg(hev_linked)]
     { hev_socks5_tunnel_stats(tx_packets, tx_bytes, rx_packets, rx_bytes); true }
@@ -50,14 +76,136 @@ unsafe fn engine_stats(tx_packets: *mut usize, tx_bytes: *mut usize, rx_packets:
     { stub::hev_socks5_tunnel_stats(tx_packets, tx_bytes, rx_packets, rx_bytes); true }
 }
 
-pub fn unavailable_reason() -> Option<&'static str> {
+// --- Serialized call thread (Windows) ----------------------------------------
+
+#[cfg(windows)]
+type MainFn = unsafe extern "C" fn(*const c_uchar, c_uint, c_int) -> c_int;
+#[cfg(windows)]
+type QuitFn = unsafe extern "C" fn();
+#[cfg(windows)]
+type StatsFn = unsafe extern "C" fn(*mut usize, *mut usize, *mut usize, *mut usize);
+
+#[cfg(windows)]
+struct Ffi {
+    main_from_str: MainFn,
+    quit: QuitFn,
+    stats: StatsFn,
+}
+
+#[cfg(windows)]
+enum Call {
+    Quit,
+    Stats(mpsc::SyncSender<HevStats>),
+    Barrier(mpsc::SyncSender<()>),
+}
+
+#[cfg(windows)]
+struct Runtime {
+    ffi: Ffi,
+    calls: mpsc::Sender<Call>,
+}
+
+#[cfg(windows)]
+fn drain_calls(calls: &mpsc::Sender<Call>, enqueue: &Mutex<()>, timeout: Duration) -> Result<()> {
+    let (reply, done) = mpsc::sync_channel(1);
+    {
+        // A stop that observed the previous run must enqueue its quit before
+        // this barrier, even if that run has already exited.
+        let _enqueue = enqueue.lock();
+        calls.send(Call::Barrier(reply))
+            .map_err(|_| CoreError::Internal("hev call thread stopped".into()))?;
+    }
+    done.recv_timeout(timeout)
+        .map_err(|_| CoreError::Internal("hev calls from the previous run did not finish".into()))
+}
+
+#[cfg(windows)]
+static RUNTIME: OnceLock<std::result::Result<Runtime, String>> = OnceLock::new();
+
+#[cfg(windows)]
+fn load() -> Result<Ffi> {
     #[cfg(hev_linked)]
-    { None }
+    {
+        Ok(Ffi {
+            main_from_str: hev_socks5_tunnel_main_from_str,
+            quit: hev_socks5_tunnel_quit,
+            stats: hev_socks5_tunnel_stats,
+        })
+    }
     #[cfg(not(hev_linked))]
-    { Some("hev-socks5-tunnel not linked (stub build)") }
+    {
+        Err(CoreError::Internal("hev-socks5-tunnel not linked (stub build)".into()))
+    }
+}
+
+#[cfg(windows)]
+fn serve(queue: mpsc::Receiver<Call>, quit: QuitFn, stats: StatsFn) {
+    for call in queue {
+        match call {
+            Call::Quit => unsafe { quit() },
+            Call::Stats(reply) => {
+                let mut s = HevStats::default();
+                unsafe { stats(&mut s.tx_packets, &mut s.tx_bytes, &mut s.rx_packets, &mut s.rx_bytes) };
+                let _ = reply.send(s);
+            }
+            Call::Barrier(reply) => { let _ = reply.send(()); }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn runtime() -> Result<&'static Runtime> {
+    RUNTIME
+        .get_or_init(|| {
+            std::panic::catch_unwind(load)
+                .unwrap_or_else(|_| Err(CoreError::Internal("initializing the hev runtime panicked".into())))
+                .and_then(|ffi| {
+                    let (calls, queue) = mpsc::channel();
+                    let (quit, stats) = (ffi.quit, ffi.stats);
+                    std::thread::Builder::new()
+                        .name("hev-calls".into())
+                        .spawn(move || serve(queue, quit, stats))
+                        .map_err(|e| CoreError::Internal(format!("cannot start the hev call thread: {e}")))?;
+                    Ok(Runtime { ffi, calls })
+                })
+                .map_err(|e| {
+                    log::error!("[hev] {e}");
+                    e.to_string()
+                })
+        })
+        .as_ref()
+        .map_err(|e| CoreError::Internal(e.clone()))
+}
+
+/// The runtime if a start already initialized it.
+#[cfg(windows)]
+fn loaded() -> Option<&'static Runtime> {
+    RUNTIME.get()?.as_ref().ok()
+}
+
+// --- Shared surface -----------------------------------------------------------
+
+pub fn unavailable_reason() -> Option<&'static str> {
+    if !cfg!(hev_linked) {
+        Some("hev-socks5-tunnel not linked (stub build)")
+    } else if cfg!(all(windows, not(wintun_staged))) {
+        Some("Wintun not embedded")
+    } else {
+        None
+    }
 }
 
 pub fn is_supported() -> bool { unavailable_reason().is_none() }
+
+/// Claim the engine as running unless a stop is already in flight.
+fn begin_run(running: &AtomicBool, closing: &AtomicBool) -> Result<()> {
+    running.store(true, Ordering::SeqCst);
+    if closing.load(Ordering::SeqCst) {
+        running.store(false, Ordering::SeqCst);
+        return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
+    }
+    Ok(())
+}
 
 struct Engine {
     thread: std::thread::JoinHandle<()>,
@@ -71,6 +219,8 @@ struct Active {
     _psiphon: Option<socks5p::Adapter>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     _host: Option<fcae_runtime::unix_tun::TunGuard>,
+    #[cfg(windows)]
+    undo: Option<fcae_runtime::windows_tun::TunGuard>,
     log_relay: Option<crate::LogRelay>,
 }
 
@@ -89,6 +239,8 @@ fn configure_host(cfg: &SessionConfig, peer_ip: Option<&str>, #[cfg_attr(target_
 
 pub struct HevSocks5TunnelBridge {
     lifecycle: Mutex<()>,
+    #[cfg(windows)]
+    enqueue: Mutex<()>,
     active: Arc<Mutex<Option<Active>>>,
     running: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
@@ -103,6 +255,8 @@ impl HevSocks5TunnelBridge {
     pub fn new() -> Self {
         Self {
             lifecycle: Mutex::new(()),
+            #[cfg(windows)]
+            enqueue: Mutex::new(()),
             active: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
             closing: Arc::new(AtomicBool::new(false)),
@@ -116,20 +270,43 @@ impl HevSocks5TunnelBridge {
 
     pub fn stats(&self) -> Option<HevStats> {
         if !self.running.load(Ordering::SeqCst) { return None; }
-        let mut stats = HevStats::default();
-        let ok = unsafe { engine_stats(&mut stats.tx_packets, &mut stats.tx_bytes, &mut stats.rx_packets, &mut stats.rx_bytes) };
-        ok.then_some(stats)
+        #[cfg(not(windows))]
+        {
+            let mut stats = HevStats::default();
+            let ok = unsafe { engine_stats(&mut stats.tx_packets, &mut stats.tx_bytes, &mut stats.rx_packets, &mut stats.rx_bytes) };
+            ok.then_some(stats)
+        }
+        #[cfg(windows)]
+        {
+            let (reply, result) = mpsc::sync_channel(1);
+            loaded()?.calls.send(Call::Stats(reply)).ok()?;
+            result.recv_timeout(STATS_TIMEOUT).ok()
+        }
     }
 
+    /// The engine's quit request. Non-Windows calls in place; Windows queues
+    /// the call to the call thread so it never runs on the UI thread.
     fn signal_stop(&self) -> bool {
+        #[cfg(windows)]
+        let _enqueue = self.enqueue.lock();
         if !self.running.swap(false, Ordering::SeqCst) { return false; }
-        engine_quit()
+        #[cfg(not(windows))]
+        { engine_quit() }
+        #[cfg(windows)]
+        {
+            log::info!("[tun:hev] down");
+            loaded().is_some_and(|rt| rt.calls.send(Call::Quit).is_ok())
+        }
     }
 
     fn reap_locked(slot: &mut Option<Active>) -> bool {
         if slot.as_ref().is_some_and(|a| a.thread.is_finished()) {
             if let Some(done) = slot.take() {
                 let _ = done.thread.join();
+                #[cfg(windows)]
+                if let Some(undo) = done.undo {
+                    fcae_runtime::windows_tun::restore_wrapper(undo);
+                }
                 if let Some(relay) = done.log_relay { relay.shutdown(); }
             }
         }
@@ -141,8 +318,23 @@ impl HevSocks5TunnelBridge {
         loop {
             if Self::reap_locked(&mut self.active.lock()) { return true; }
             if Instant::now() >= deadline { return false; }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(REAP_POLL);
         }
+    }
+
+    fn shutdown(&self, timeout: Duration) {
+        self.closing.store(true, Ordering::SeqCst);
+        self.signal_stop();
+        if !self.reap(timeout) {
+            log::warn!("[hev] engine did not stop within {timeout:?}; cleanup is deferred until it exits");
+            self.reap_later();
+        }
+    }
+
+    /// The engine's exit status once its thread is gone, as a start error.
+    fn exited(&self, rc: &AtomicI32) -> Option<CoreError> {
+        self.active.lock().as_ref().is_some_and(|a| a.thread.is_finished())
+            .then(|| CoreError::Internal(format!("hev-socks5-tunnel exited during startup (code {})", rc.load(Ordering::SeqCst))))
     }
 
     /// Block a later TUN start until the previous HEV run and its host
@@ -188,27 +380,46 @@ impl HevSocks5TunnelBridge {
         }
     }
 
+    /// Runs the engine on a dedicated thread. Unix passes a dup of the TUN fd
+    /// (or -1 to let the engine create its own device); Windows passes -1 and
+    /// reaches the engine through the call thread.
     fn spawn_engine(&self, yaml: &str, fd: i32) -> Result<Engine> {
-        let config = std::ffi::CString::new(yaml).map_err(|_| CoreError::Internal("hev-socks5-tunnel config contains a NUL byte".into()))?;
+        let config = CString::new(yaml).map_err(|_| CoreError::Internal("hev-socks5-tunnel config contains a NUL byte".into()))?;
+        #[cfg(not(windows))]
         let dup = if fd >= 0 {
             let dup = unsafe { libc::dup(fd) };
             if dup < 0 { return Err(CoreError::Internal(format!("dup(tun fd {fd}) failed: {}", std::io::Error::last_os_error()))); }
             Some(dup)
         } else { None };
+        #[cfg(windows)]
+        let entry = {
+            let _ = fd;
+            runtime()?.ffi.main_from_str
+        };
         let running = self.running.clone();
         let closing = self.closing.clone();
         let rc = Arc::new(AtomicI32::new(0));
         let rc_thread = rc.clone();
-        self.running.store(true, Ordering::SeqCst);
+        begin_run(&self.running, &self.closing)?;
         let thread = std::thread::Builder::new().name("hev-socks5-tunnel".into()).spawn(move || {
             let bytes = config.as_bytes();
-            let code = run_engine(&closing, || unsafe { engine_main_from_str(bytes.as_ptr() as *const c_uchar, bytes.len() as c_uint, dup.unwrap_or(-1)) });
+            #[cfg(not(windows))]
+            let code = run_engine(&closing, || unsafe { engine_main_from_str(bytes.as_ptr(), bytes.len() as c_uint, dup.unwrap_or(-1)) });
+            #[cfg(windows)]
+            let code = {
+                log::info!("[hev] entering native engine");
+                let code = run_engine(&closing, || unsafe { entry(bytes.as_ptr(), bytes.len() as c_uint, -1) });
+                log::info!("[hev] native engine returned code {code}");
+                code
+            };
+            #[cfg(not(windows))]
             if let Some(dup) = dup { unsafe { libc::close(dup) }; }
             running.store(false, Ordering::SeqCst);
             rc_thread.store(code, Ordering::SeqCst);
             if code != 0 && !closing.load(Ordering::SeqCst) { log::error!("[hev] engine exited with code {code}"); }
         }).map_err(|e| {
             self.running.store(false, Ordering::SeqCst);
+            #[cfg(not(windows))]
             if let Some(dup) = dup { unsafe { libc::close(dup) }; }
             CoreError::Internal(format!("cannot spawn the hev-socks5-tunnel engine thread: {e}"))
         })?;
@@ -218,7 +429,15 @@ impl HevSocks5TunnelBridge {
 
 impl TunBridge for HevSocks5TunnelBridge {
     fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
+        #[cfg(windows)]
+        {
+            log::info!("[hev] validating Windows TUN settings");
+            fcae_runtime::windows_tun::validate_backend(cfg, endpoints.peer_ip.as_deref())?;
+        }
         if !is_supported() {
+            #[cfg(windows)]
+            return Err(CoreError::Internal(unavailable_reason().unwrap_or("hev unavailable").into()));
+            #[cfg(not(windows))]
             return Err(CoreError::Internal("hev-socks5-tunnel is not available in this build".into()));
         }
         let _lifecycle = self.lifecycle.lock();
@@ -226,14 +445,26 @@ impl TunBridge for HevSocks5TunnelBridge {
             return Err(CoreError::Internal("the previous hev-socks5-tunnel engine is still shutting down".into()));
         }
         self.closing.store(false, Ordering::SeqCst);
-        let base_socks = endpoints.socks.ok_or_else(|| CoreError::Internal("TUN requested but the backend exposed no SOCKS endpoint".into()))?;
-        let psiphon_adapter = if endpoints.psiphon_dns {
-            let resolvers = fcae_runtime::tun_dns::psiphon_resolvers(cfg)?;
-            Some(socks5p::Adapter::start("hev", base_socks, resolvers).map_err(|e| CoreError::Internal(format!("hev socks5p adapter: {e}")))?)
-        } else { None };
-        let effective_socks = psiphon_adapter.as_ref().map(|a| a.endpoint()).unwrap_or(base_socks);
+        #[cfg(windows)]
+        {
+            log::info!("[hev] loading Wintun");
+            fcae_runtime::windows_dll::ensure_wintun(crate::platform::wintun_bytes())?;
+            log::info!("[hev] Wintun loaded; preparing native engine");
+            let rt = runtime()?;
+            drain_calls(&rt.calls, &self.enqueue, RESTART_GRACE)?;
+        }
+        // Psiphon exits dial through a loopback socks5p adapter so the engine
+        // never sees a UDP ASSOCIATE (0x03) it cannot serve; DNS rides the
+        // engine's UDP gateway instead.
+        let (psiphon_adapter, socks) = fcae_runtime::exit_adapter::psiphon_socks5p(cfg, endpoints, "hev")?;
         let fd = cfg.tun.fd.or_else(|| self.android_fd()).unwrap_or(-1);
-        let (_, yaml) = generate_config(cfg, effective_socks)?;
+        #[cfg(windows)]
+        // HEV can only create its adapter (it always passes the shared requested
+        // GUID); Wintun keeps one persistent device identity for that GUID, so
+        // the shared adapter is reused when it exists and created otherwise.
+        // The host-side guard resolves the adapter by GUID first.
+        log::info!("[tun:hev] using shared Wintun adapter '{}' (GUID {})", cfg.tun.name, fcae_runtime::config::WINTUN_ADAPTER_GUID);
+        let (_, yaml) = generate_config(cfg, socks)?;
         #[cfg(target_os = "macos")]
         let before = fcae_runtime::unix_tun::utun_devices();
         #[cfg(target_os = "linux")]
@@ -245,7 +476,7 @@ impl TunBridge for HevSocks5TunnelBridge {
             Ok(host) => (host, Ok(())),
             Err(error) => (None, Err(error)),
         };
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(all(not(any(target_os = "linux", target_os = "macos")), not(windows)))]
         let configured: Result<()> = Ok(());
         let log_relay = crate::relay_engine_log(cfg.tun.t2s_log_level);
         *self.active.lock() = Some(Active {
@@ -255,25 +486,44 @@ impl TunBridge for HevSocks5TunnelBridge {
             _psiphon: psiphon_adapter,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             _host: host,
+            #[cfg(windows)]
+            undo: None,
             log_relay,
         });
-        let exited = self.active.lock().as_ref().is_some_and(|a| a.thread.is_finished());
-        let outcome = if exited {
-            Err(CoreError::Internal(format!("hev-socks5-tunnel exited during startup (code {})", exit_code.load(Ordering::SeqCst))))
+        #[cfg(windows)]
+        // Windows needs the guard stashed on the active run so `stop` restores
+        // routes/DNS even when the engine is already gone; the undo slot exists
+        // only after Active does, hence the split from the Unix path above.
+        let configured: Result<()> = (|| {
+            log::info!("[hev] configuring Windows TUN networking");
+            let undo = fcae_runtime::windows_tun::TunGuard::configure(cfg, endpoints.peer_ip.as_deref())
+                .map_err(|e| self.exited(&exit_code).unwrap_or(e))?;
+            self.active.lock().as_mut().ok_or_else(|| CoreError::Internal("HEV startup cancelled".into()))?.undo = Some(undo);
+            if let Some(e) = self.exited(&exit_code) { return Err(e); }
+            if self.closing.load(Ordering::SeqCst) {
+                return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
+            }
+            Ok(())
+        })();
+        let outcome = if let Some(e) = self.exited(&exit_code) {
+            Err(e)
         } else if configured.is_ok() && self.closing.load(Ordering::SeqCst) {
             Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()))
         } else {
             configured
         };
         if outcome.is_err() {
-            self.closing.store(true, Ordering::SeqCst);
-            self.signal_stop();
+            self.shutdown(RESTART_GRACE);
+        }
+        #[cfg(windows)]
+        if outcome.is_ok() {
+            log::info!("[tun:hev] up (socks {}, mtu {})", socks, cfg.tun.mtu);
         }
         outcome
     }
 
     /// Lock-free so a Disconnect never waits behind a start that is still
-    /// configuring the host; that start sees `closing` and unwinds itself.
+    /// bringing the adapter up; that start sees `closing` and unwinds itself.
     fn abort(&self) {
         self.closing.store(true, Ordering::SeqCst);
         self.signal_stop();
@@ -282,12 +532,7 @@ impl TunBridge for HevSocks5TunnelBridge {
 
     fn stop(&self, timeout: Duration) {
         let _lifecycle = self.lifecycle.lock();
-        self.closing.store(true, Ordering::SeqCst);
-        self.signal_stop();
-        if !self.reap(timeout) {
-            log::warn!("[hev] engine did not stop within {timeout:?}; reconnect is blocked until it exits");
-            self.reap_later();
-        }
+        self.shutdown(timeout);
         self.clear_android_fd();
     }
 
@@ -296,6 +541,50 @@ impl TunBridge for HevSocks5TunnelBridge {
 
     fn check_health(&self, _cfg: &SessionConfig) -> Result<()> {
         if !self.is_running() { return Err(CoreError::Internal("TUN engine stopped unexpectedly".into())); }
+        #[cfg(windows)]
+        self.active.lock().as_ref().and_then(|a| a.undo.as_ref()).map(|g| g.check_health()).transpose()?;
         Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn barrier_waits_for_a_stop_enqueued_by_an_exiting_run() {
+        let enqueue = Arc::new(Mutex::new(()));
+        let (calls, queue) = mpsc::channel();
+        let lock = enqueue.lock();
+        let calls_for_barrier = calls.clone();
+        let enqueue_for_barrier = enqueue.clone();
+        let waiter = std::thread::spawn(move || {
+            drain_calls(&calls_for_barrier, &enqueue_for_barrier, Duration::from_secs(2))
+        });
+        assert!(calls.send(Call::Quit).is_ok());
+        drop(lock);
+        assert!(matches!(queue.recv_timeout(Duration::from_secs(1)).unwrap(), Call::Quit));
+        match queue.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Call::Barrier(reply) => { reply.send(()).unwrap(); }
+            _ => panic!("barrier must follow quit"),
+        }
+        assert!(waiter.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn barrier_fails_if_the_call_thread_is_stuck() {
+        let (calls, _queue) = mpsc::channel();
+        assert!(drain_calls(&calls, &Mutex::new(()), Duration::from_millis(5)).is_err());
+    }
+
+    #[test]
+    fn cancelled_start_does_not_mark_engine_running() {
+        let running = AtomicBool::new(false);
+        let closing = AtomicBool::new(true);
+        assert!(begin_run(&running, &closing).is_err());
+        assert!(!running.load(Ordering::SeqCst));
+        closing.store(false, Ordering::SeqCst);
+        assert!(begin_run(&running, &closing).is_ok());
+        assert!(running.load(Ordering::SeqCst));
     }
 }

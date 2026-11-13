@@ -1,16 +1,7 @@
-pub fn is_privileged() -> bool {
-    #[cfg(unix)]
-    { unsafe { libc::geteuid() == 0 } }
-    #[cfg(windows)]
-    { fcae_runtime::windows_tun::is_privileged() }
-    #[cfg(not(any(unix, windows)))]
-    { false }
-}
-
-#[cfg(windows)]
-pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> fcae_runtime::error::Result<()> {
-    fcae_runtime::windows_dll::ensure_wintun(bytes)
-}
+//! Windows Wintun staging for the HEV engine (the engine LoadLibraryExW's
+//! "wintun.dll" from the application directory or System32). The admin/root
+//! probe lives in [`fcae_runtime::privilege`]; the DLL loader itself lives in
+//! [`fcae_runtime::windows_dll`].
 
 #[cfg(all(windows, wintun_staged))]
 pub fn wintun_bytes() -> Option<&'static [u8]> {

@@ -11,6 +11,9 @@
 //! * [`deps`] — the `deps/` folder embedded native libraries unpack into.
 //! * [`update`] — app-level update checking: release manifest fetch, decode, compare.
 //! * [`upstream`] — the user's upstream proxy and its loopback SOCKS5 relay.
+//! * [`exit_adapter`] — the shared Psiphon loopback socks5p adapter the TUN
+//!   bridges dial instead of the raw exit endpoint.
+//! * [`privilege`] — the single admin/root probe behind `fcae_is_privileged()`.
 //! * [`session`] — the supervisor that owns the runtime thread, starts the
 //!   backend, raises the TUN bridge, and guarantees teardown ordering.
 //!
@@ -21,6 +24,8 @@ pub mod backend;
 pub mod config;
 pub mod deps;
 pub mod error;
+pub mod exit_adapter;
+pub mod privilege;
 pub mod registry;
 pub mod session;
 pub mod socks5p;

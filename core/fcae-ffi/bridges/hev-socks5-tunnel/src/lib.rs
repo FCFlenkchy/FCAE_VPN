@@ -22,16 +22,10 @@
 //!
 //! Do not ship a stub build: it reports the engine as unavailable in the UI.
 
-#[cfg(not(windows))]
-mod engine;
-#[cfg(windows)]
-#[path = "windows.rs"]
 mod engine;
 
-/// Platform glue: the privilege probe compiles on every target (the FFI
-/// layer's `fcae_is_privileged()` reaches it as
-/// `fcae_bridge_hev_socks5_tunnel::platform::is_privileged`), the Wintun
-/// DLL staging is Windows-only and cfg-gated inside the module.
+/// Platform glue: the Wintun DLL staging is Windows-only and cfg-gated
+/// inside the module. The admin/root probe lives in [`fcae_runtime::privilege`].
 pub mod platform;
 
 pub use engine::{HevSocks5TunnelBridge, unavailable_reason};
@@ -43,12 +37,6 @@ pub use fcae_runtime::config::WINTUN_ADAPTER_GUID;
 /// in and, on Windows, Wintun is staged.
 pub fn is_supported() -> bool {
     engine::is_supported()
-}
-
-/// Re-exported so the FFI layer's `fcae_is_privileged()` covers hev-only
-/// builds too.
-pub fn is_privileged() -> bool {
-    platform::is_privileged()
 }
 
 /// Traffic statistics from the engine.

@@ -30,20 +30,6 @@ pub struct TunUndo {
     _unix: Option<fcae_runtime::unix_tun::TunGuard>,
 }
 
-/// True when the process can create a TUN device.
-pub fn is_privileged() -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::geteuid() == 0 }
-    }
-    #[cfg(windows)]
-    { fcae_runtime::windows_tun::is_privileged() }
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
-    }
-}
-
 /// Apply addresses, routes and DNS for a freshly created device.
 pub fn configure(cfg: &SessionConfig, peer_ip: Option<&str>) -> Result<TunUndo> {
     #[cfg(target_os = "android")]
@@ -83,8 +69,3 @@ pub fn restore(undo: TunUndo, _timeout: Duration) {
     drop(undo);
 }
 
-
-#[cfg(windows)]
-pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {
-    fcae_runtime::windows_dll::ensure_wintun(bytes)
-}

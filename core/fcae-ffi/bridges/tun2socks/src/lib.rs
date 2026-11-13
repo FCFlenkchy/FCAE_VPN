@@ -79,7 +79,7 @@
 //! Windows still needs `wintun.dll` — that is the TUN *driver*, not a process.
 //! `fcae-build::wintun` downloads and verifies it at build time (with a size
 //! sanity check, so a captive-portal HTML page can no longer be embedded as if
-//! it were a DLL), and [`platform::ensure_wintun`] places it where the
+//! it were a DLL), and `fcae_runtime::windows_dll::ensure_wintun` places it where the
 //! in-process loader will find it.
 
 use std::ffi::{c_char, c_int, CStr, CString};
@@ -432,15 +432,13 @@ impl TunBridge for Tun2SocksBridge {
             ));
         }
 
-        let socks = endpoints.socks.ok_or_else(|| {
-            CoreError::Internal("TUN requested but the backend exposed no SOCKS endpoint".into())
-        })?;
+        let socks = fcae_runtime::exit_adapter::require_socks(endpoints)?;
 
         self.install_log_hook();
 
         // Windows needs wintun.dll discoverable before the device is created.
         #[cfg(windows)]
-        platform::ensure_wintun(wintun_bytes())?;
+        fcae_runtime::windows_dll::ensure_wintun(wintun_bytes())?;
 
         let (device, owned_fd) = self.device_spec(cfg)?;
         // Aether keeps the upstream full SOCKS5 schema, including its own

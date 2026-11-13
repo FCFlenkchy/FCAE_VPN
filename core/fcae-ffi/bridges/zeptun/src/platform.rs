@@ -2,36 +2,12 @@
 //!
 //! Deliberately thin: on desktop the shared runtime guards (`windows_tun`,
 //! `unix_tun`) own addressing, routes and DNS, and on Android the VpnService
-//! owns the device.
+//! owns the device. The admin/root probe lives in [`fcae_runtime::privilege`];
+//! the Wintun DLL loader lives in [`fcae_runtime::windows_dll`].
 
 /// True when building for the mobile preset (Android: VpnService-created fd).
 pub const fn is_android() -> bool {
     cfg!(target_os = "android")
-}
-
-/// zeptun creates its TUN device in-process through Wintun / the kernel TUN
-/// driver; both need admin / root. Mirrors the tun2socks check so
-/// `fcae_is_privileged()` answers for every TUN engine linked into the build.
-/// The coarse `geteuid` / `net session` probes are enough: this only decides
-/// whether the frontend shows its elevation prompt, and the engine reports a
-/// precise error when the answer is wrong.
-pub fn is_privileged() -> bool {
-    #[cfg(unix)]
-    {
-        // SAFETY: geteuid is async-signal safe and takes no args.
-        unsafe { libc::geteuid() == 0 }
-    }
-    #[cfg(windows)]
-    { fcae_runtime::windows_tun::is_privileged() }
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
-    }
-}
-
-#[cfg(windows)]
-pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> fcae_runtime::error::Result<()> {
-    fcae_runtime::windows_dll::ensure_wintun(bytes)
 }
 
 /// Close the device-fd dup after a failed `zeptun_create`: the engine never

@@ -54,8 +54,6 @@ use parking_lot::Mutex;
 
 use fcae_runtime::socks5p;
 
-// Public for the FFI layer's fcae_is_privileged(), which ORs the privilege
-// probe across every TUN bridge linked into the build (see tun2socks).
 pub mod platform;
 
 #[cfg(all(windows, wintun_staged))]
@@ -270,12 +268,6 @@ pub fn platform_enabled() -> bool {
     is_supported()
 }
 
-/// Re-exported so `fcae_is_privileged()` covers zeptun too: it raises its
-/// Wintun adapter in-engine, the same admin-gated step as tun2socks.
-pub fn is_privileged() -> bool {
-    platform::is_privileged()
-}
-
 /// Engine version string zeptun was built from; a placeholder in stub builds.
 pub fn version() -> String {
     unsafe { CStr::from_ptr(zeptun_version_string()) }
@@ -483,31 +475,16 @@ impl ZeptunBridge {
             return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
         }
 
-        let socks = endpoints.socks.ok_or_else(|| {
-            CoreError::Internal("TUN requested but the backend exposed no SOCKS endpoint".into())
-        })?;
-
-        let psiphon_adapter = if endpoints.psiphon_dns {
-            let resolvers = fcae_runtime::tun_dns::psiphon_resolvers(cfg)?;
-            if resolvers.is_empty() {
-                log::info!("[zeptun] socks5p: Psiphon exit resolver through the UDP gateway");
-            } else {
-                log::info!("[zeptun] socks5p: TUN DNS {:?} through the Psiphon UDP gateway", resolvers);
-            }
-            Some(socks5p::Adapter::start("zeptun", socks, resolvers).map_err(|e| {
-                CoreError::Internal(format!("zeptun socks5p adapter: {e}"))
-            })?)
-        } else {
-            None
-        };
-        let socks = psiphon_adapter.as_ref().map(|adapter| adapter.endpoint()).unwrap_or(socks);
+        // Psiphon exits dial through a loopback socks5p adapter so the
+        // engine never sees UDP ASSOCIATE; DNS rides the UDP gateway.
+        let (psiphon_adapter, socks) = fcae_runtime::exit_adapter::psiphon_socks5p(cfg, endpoints, "zeptun")?;
 
         // Windows needs wintun.dll discoverable before the device is created:
         // zeptun loads it from the application directory or System32.
         #[cfg(windows)]
         {
             log::info!("[zeptun] loading Wintun");
-            platform::ensure_wintun(wintun_bytes())?;
+            fcae_runtime::windows_dll::ensure_wintun(wintun_bytes())?;
             log::info!("[zeptun] Wintun loaded");
         }
 
