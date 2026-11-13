@@ -247,7 +247,7 @@ impl TunBridge for HevSocks5TunnelBridge {
         };
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let configured: Result<()> = Ok(());
-        let log_relay = crate::relay_engine_log();
+        let log_relay = crate::relay_engine_log(cfg.tun.t2s_log_level);
         *self.active.lock() = Some(Active {
             generation: Arc::new(()),
             reaping: false,

@@ -325,7 +325,7 @@ impl TunBridge for HevSocks5TunnelBridge {
         log::info!("[hev] launching engine thread");
         let engine = self.spawn_engine(rt, &yaml)?;
         let exit_code = engine.rc;
-        let log_relay = crate::relay_engine_log();
+        let log_relay = crate::relay_engine_log(cfg.tun.t2s_log_level);
         *self.active.lock() = Some(Active { generation: Arc::new(()), reaping: false, thread: engine.thread, _psiphon: psiphon, undo: None, log_relay });
         let configured = (|| -> Result<()> {
             log::info!("[hev] configuring Windows TUN networking");
