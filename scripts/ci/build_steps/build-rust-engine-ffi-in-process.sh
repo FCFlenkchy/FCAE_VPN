@@ -74,7 +74,7 @@ if [[ "${FCAE_MATRIX_NAME}" == android-* ]]; then
       export CXX="${NDK_CLANG_PREFIX}29-clang++"
       export AR=llvm-ar
 
-      export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+      export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot -D__ANDROID_API__=29"
       export "CFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
       export "CXXFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
 
@@ -123,7 +123,7 @@ if [[ "${FCAE_MATRIX_NAME}" == android-* ]]; then
     export CXX="${NDK_CLANG_PREFIX}29-clang++"
     export AR=llvm-ar
 
-    export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--sysroot=$PREBUILT/sysroot"
+    export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot -D__ANDROID_API__=29"
     export "CFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
     export "CXXFLAGS_${RUST_ENV_LOWER}"="--target=${NDK_CLANG_PREFIX}29 --sysroot=$PREBUILT/sysroot"
 
