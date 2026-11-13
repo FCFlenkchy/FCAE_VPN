@@ -66,6 +66,16 @@ val androidVersionCode = System.getenv("FCAE_ANDROID_VERSION_CODE")?.takeIf { it
 android {
     namespace = "com.fc.fcaevpn"
     compileSdk = 36
+    // Build the native code with the 2026 LTS NDK instead of AGP's tested
+    // default (28.2.13676358). r30 ships clang-r574158c (fixes the LTO +
+    // nested-exception segfault this project can hit at -O3 -flto), max API
+    // 37 sysroots and current 16 KB page-alignment support; minSdk 29 is
+    // well above the NDK floor. CI installs exactly this package in
+    // scripts/ci/build_steps/build-apk.sh - without it a clean runner fails
+    // at ":app" configuration with InstallFailedException (AGP's internal
+    // component installer cannot fetch the pinned NDK). The Rust FFI step
+    // uses the same version (.github/workflows/build_all.yml).
+    ndkVersion = "30.0.16248370"
 
     defaultConfig {
         applicationId = "com.fc.fcaevpn"

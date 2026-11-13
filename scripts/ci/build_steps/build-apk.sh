@@ -8,7 +8,7 @@ if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
 fi
 export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
 yes | sdkmanager --licenses || true
-sdkmanager "platforms;android-36" "build-tools;36.0.0"
+sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;30.0.16248370"
 
 cd android
 if [ "${FCAE_MATRIX_NAME}" = "android-universal" ]; then
