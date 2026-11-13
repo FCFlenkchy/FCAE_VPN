@@ -212,6 +212,11 @@ static void CleanupDeviceD3D() {
 #endif
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
+    // Kick the runtime/config initializer off first: it does not touch ImGui
+    // or the window, so engine setup overlaps window and D3D creation
+    // instead of serializing behind it.
+    ui_init();
+
     HINSTANCE inst = hInst ? hInst : GetModuleHandleW(nullptr);
 
     WNDCLASSEXW wc = {};
@@ -294,8 +299,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     g_imgui_win32_ready = true;
     ShowWindow(hWnd, SW_SHOWDEFAULT);
     UpdateWindow(hWnd);
-
-    ui_init();
 
     // Paint only for input, changed UI content, or an explicit redraw request.
     // Block on the message queue while idle instead of repainting unconditionally.

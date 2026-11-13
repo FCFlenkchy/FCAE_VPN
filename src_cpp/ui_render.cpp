@@ -372,6 +372,10 @@ static bool s_busy_anim = false;      // connect/scan spinner is on screen
 // initialization writes, so startup is responsive without partial-runtime races.
 enum class RuntimeInitState : uint8_t { Starting, Ready, Failed };
 static std::atomic<RuntimeInitState> s_runtime_init{RuntimeInitState::Starting};
+// Flips true once the settings file has been loaded into AppState. The UI
+// may paint the real window as soon as this is set; the runtime itself
+// publishes Ready separately.
+static std::atomic<bool> s_config_loaded{false};
 static std::thread s_runtime_init_thread;
 
 bool build_is_prerelease() {
@@ -1677,7 +1681,43 @@ static void draw_spinner(float radius, int segments, float speed) {
 void ui_init() {
     s_runtime_init.store(RuntimeInitState::Starting, std::memory_order_relaxed);
     s_runtime_init_thread = std::thread([] {
-#ifdef _WIN32
+        // Settings first: the file parse takes milliseconds and the first
+        // paints need nothing else. Once this block finishes it flips
+        // s_config_loaded and the UI swaps the splash shell for the real
+        // window; runtime initialisation below runs in the background of
+        // that first paint and publishes Ready separately.
+        if (!load_config()) {
+            if (s_config_load_failed) {
+                // The file is there but none of it could be applied; don't
+                // pretend this was a fresh install.
+                set_save_status_error("Couldn't load config (invalid or unreadable)");
+                g_app.add_log(1, ("[ui] couldn't load config (invalid or unreadable): "
+                                  + resolve_config_path_for_load()).c_str());
+            } else if (save_config()) {
+                // First run: write defaults next to the executable (or app files on
+                // Android). AppState defaults mode = 1, so a fresh install starts in
+                // TUN (full-system) mode on every desktop platform; a saved config
+                // keeps whatever the user last chose.
+                set_save_status("Created FCAE_VPN.cfg");
+                g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
+            }
+        }
+        // Data paths stay relative to data_dir() so the folder can move
+        // between machines; resolve_data_path() anchors them at use.
+        bool migrated = make_portable(g_app.config_path, sizeof(g_app.config_path));
+        migrated |= make_portable(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir));
+        migrated |= make_portable(g_app.routes_file, sizeof(g_app.routes_file));
+        if (!g_app.psiphon_data_dir[0]) {
+            snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir), "psiphon");
+            migrated = true;
+        }
+        if (migrated) save_config();
+        g_app.add_log(4, ("[ui] data folder: " + data_dir()).c_str());
+        g_app.add_log(4, ("[ui] settings file: " + get_config_path()).c_str());
+        g_app.add_log(4, ("[ui] identity file: " + resolve_data_path(g_app.config_path)).c_str());
+        s_config_loaded.store(true, std::memory_order_release);
+        ui_request_redraw();   // the first real frame becomes paintable
+        #ifdef _WIN32
         DWORD handoff_pid = 0;
         DWORD handoff_result = WAIT_FAILED;
         int argc = 0;
@@ -1697,7 +1737,7 @@ void ui_init() {
             }
             LocalFree(argv);
         }
-#endif
+        #endif
         bool runtime_ok = true;
         FcaeInitOptions opt = {};
         opt.struct_size   = sizeof(opt);
@@ -1716,37 +1756,8 @@ void ui_init() {
             fcae_ui_diagnostic(7, handoff_result);
         }
 #endif
-        if (!load_config()) {
-            if (s_config_load_failed) {
-                // The file is there but none of it could be applied; don't
-                // pretend this was a fresh install.
-                set_save_status_error("Couldn't load config (invalid or unreadable)");
-                g_app.add_log(1, ("[ui] couldn't load config (invalid or unreadable): "
-                                  + resolve_config_path_for_load()).c_str());
-            } else if (save_config()) {
-                // First run: write defaults next to the executable (or app files on
-                // Android). AppState defaults mode = 1, so a fresh install starts in
-                // TUN (full-system) mode on every desktop platform; a saved config
-                // keeps whatever the user last chose.
-                set_save_status("Created FCAE_VPN.cfg");
-                g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
-            }
-        }
         if (runtime_ok && g_app.mode == 1)
             fcae_ui_diagnostic(0, uint32_t(g_app.tun_engine));
-        // Data paths stay relative to data_dir() so the folder can move
-        // between machines; resolve_data_path() anchors them at use.
-        bool migrated = make_portable(g_app.config_path, sizeof(g_app.config_path));
-        migrated |= make_portable(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir));
-        migrated |= make_portable(g_app.routes_file, sizeof(g_app.routes_file));
-        if (!g_app.psiphon_data_dir[0]) {
-            snprintf(g_app.psiphon_data_dir, sizeof(g_app.psiphon_data_dir), "psiphon");
-            migrated = true;
-        }
-        if (migrated) save_config();
-        g_app.add_log(4, ("[ui] data folder: " + data_dir()).c_str());
-        g_app.add_log(4, ("[ui] settings file: " + get_config_path()).c_str());
-        g_app.add_log(4, ("[ui] identity file: " + resolve_data_path(g_app.config_path)).c_str());
 
         // Auto-trigger update check once on startup if enabled and the FFI is live.
         if (runtime_ok && g_app.auto_update_check) {
@@ -1789,13 +1800,23 @@ void ui_frame() {
     s_update_in_progress = false;
 
     const RuntimeInitState init = s_runtime_init.load(std::memory_order_acquire);
-    if (init != RuntimeInitState::Ready) {
-        render_startup_shell(init == RuntimeInitState::Failed);
+    if (!s_config_loaded.load()) {
+        // Settings parse only: this phase lasts a frame or two.
+        render_startup_shell(false);
+        s_busy_anim = false;
+        s_painted_once = true;
+        return;
+    }
+    if (init == RuntimeInitState::Failed) {
+        render_startup_shell(true);
         s_busy_anim = false;
         s_painted_once = true;
         return;
     }
 
+    // The real UI from the first frame; engine-dependent actions gate
+    // themselves on Ready inside render_ui() instead of blocking everything
+    // behind the INITIALIZING shell.
     render_ui();
 
     // The connect/scan spinner keeps requesting frames while it moves; every
@@ -3237,13 +3258,17 @@ void render_ui() {
                        || cur == FCAE_STATE_CONNECTING || cur == FCAE_STATE_RECONNECTING)
                       || g_app.start_busy.load();
     bool errored    = (cur == FCAE_STATE_ERROR);
+    // Until the runtime reports Ready the window paints these fields as
+    // defaults; the state label and the engine-dependent buttons say so
+    // instead of pretending we're already connected (or usable).
+    const bool startup = (s_runtime_init.load(std::memory_order_acquire) != RuntimeInitState::Ready);
 
     {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 10));
 
         const float title_right_x = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
-        ImVec4 sc = state_color(cur);
+        ImVec4 sc = startup ? ImVec4(0.55f, 0.58f, 0.65f, 1.0f) : state_color(cur);
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
         ImGui::Text("FCAE VPN");
         ImGui::PopStyleColor();
@@ -3391,6 +3416,7 @@ void render_ui() {
 
         float btn_w = narrow ? (ImGui::GetContentRegionAvail().x - 72.0f) : 130.0f;
         bool show_disconnect = connected || busy || tun_paused;
+        if (startup) ImGui::BeginDisabled();
         if (ImGui::Button(show_disconnect ? " DISCONNECT " : " CONNECT ", ImVec2(btn_w, 32))) {
             if (connected || busy || errored || tun_paused) {
                 g_app.start_busy.store(false);
@@ -3670,6 +3696,10 @@ void render_ui() {
                 }).detach();
             }
         }
+        if (startup) {
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Finishing initialization...");
+        }
         ImGui::PopStyleColor(3);
 
         if (g_app.mode == 1 && (connected || tun_paused)) {
@@ -3709,7 +3739,9 @@ void render_ui() {
 
         ImGui::SameLine(0, 10);
         ImGui::PushStyleColor(ImGuiCol_Text, sc);
-        if (errored && telem.last_error[0] && s_error_detail_visible) {
+        if (startup) {
+            ImGui::TextUnformatted("INITIALIZING...");
+        } else if (errored && telem.last_error[0] && s_error_detail_visible) {
             ImGui::Text("ERROR: %s", telem.last_error);
         } else {
             ImGui::Text("%s", state_label(cur));
@@ -3718,11 +3750,26 @@ void render_ui() {
 
         if (busy) { ImGui::SameLine(0, 8); draw_spinner(7.0f, 14, 7.0f); }
 
-        // "Check for Updates" rides in the CONNECT row, not under the Info
-        // button; on narrow windows it drops to its own line.
+        if (g_app.save_status[0]) {
+            ImGui::SameLine(0, 8);
+            ImGui::TextColored(s_save_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
+                                                   : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
+                               "%s", g_app.save_status);
+            s_save_status_painted_revision = s_save_status_revision;
+        }
+
+        // "Check for Updates" rides in the CONNECT row, pinned as far right
+        // as the window allows; on narrow windows it drops to its own line,
+        // still flush right. Gated until the runtime is live.
+        if (startup) ImGui::BeginDisabled();
         if (!narrow) ImGui::SameLine(0, 10);
         {
             float btn_width = 136.0f;
+            {
+                const float right_x = ImGui::GetWindowContentRegionMax().x - btn_width;
+                if (ImGui::GetCursorPosX() < right_x)
+                    ImGui::SetCursorPosX(right_x);
+            }
             ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
             FcaeUpdateInfo info = {};
             info.struct_size = sizeof(info);
@@ -3815,14 +3862,7 @@ void render_ui() {
             }
             ImGui::PopStyleVar(); // Pop ButtonTextAlign
         }
-
-        if (g_app.save_status[0]) {
-            ImGui::SameLine(0, 8);
-            ImGui::TextColored(s_save_status_error ? ImVec4(0.95f, 0.38f, 0.38f, 1.0f)
-                                                   : ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
-                               "%s", g_app.save_status);
-            s_save_status_painted_revision = s_save_status_revision;
-        }
+        if (startup) ImGui::EndDisabled();
 
         {
             if (s_about_popup_open) {

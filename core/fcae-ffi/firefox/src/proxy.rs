@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -162,12 +162,17 @@ async fn handle_socks(stream: TcpStream, upstream: Arc<Upstream>) -> Result<()> 
             Ok(())
         }
         3 => {
-            let bind_ip = match stream.get_ref().local_addr()?.ip() {
-                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            };
+            // RFC 1928 permits 0.0.0.0 in the UDP ASSOCIATE reply to mean
+            // "same address as the SOCKS server", but only clients that
+            // special-case it can use that. hev does not: it connect()s its
+            // relay socket to whatever we advertise, and connect() to
+            // 0.0.0.0 fails on Windows, killing every UDP session (DNS,
+            // QUIC) right after a successful handshake. Bind the relay to
+            // the address the client used to reach us and advertise exactly
+            // that, so the advertised relay is always connectible.
+            let local_ip = stream.get_ref().local_addr()?.ip();
             let client_ip = stream.get_ref().peer_addr()?.ip();
-            let socket = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
+            let socket = UdpSocket::bind(SocketAddr::new(local_ip, 0)).await?;
             let address = socket.local_addr()?;
             let association = UdpAssociation::new(socket, upstream, client_ip);
             socks_reply_addr(&mut stream, 0, address).await?;
