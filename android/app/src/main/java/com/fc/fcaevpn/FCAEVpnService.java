@@ -2230,6 +2230,10 @@ public class FCAEVpnService extends VpnService {
         // host hook and triggers a reconnect or crash.
         if (shuttingDown || killProcessOnCleanup) {
             try { nativeUnregisterVpnService(); } catch (Throwable ignored) {}
+            // The native side dropped the fd provider (fcae_set_tun_fd_provider
+            // (nullptr)). nativeReady must not keep us from re-registering on a
+            // start that outlives this teardown in the same process.
+            nativeReady = false;
         }
         super.onDestroy();
     }

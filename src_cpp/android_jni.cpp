@@ -422,12 +422,15 @@ Java_com_fc_fcaevpn_FCAEVpnService_nativeRegisterVpnService(JNIEnv* env, jobject
     // method wraps protect(fd) with recovery: when the system refuses the
     // protect (another VPN holds the slot), it seizes the slot by
     // establishing FCAE's TUN and retries instead of failing the dial.
+    // A missing protect hook fails dials closed in psiphon_protect() (loudly).
+    // It must never skip the rest of the registration below: the fd provider
+    // is what keeps the supervisor's TUN privilege gate from refusing every
+    // session, and it is unrelated to the protect hook.
     g_protect_mid = env->GetMethodID(cls, "protectCarrierSocket", "(I)Z");
     if (!g_protect_mid) {
         env->ExceptionClear();
-        env->DeleteLocalRef(cls);
-        LOGE("could not resolve FCAEVpnService.protectCarrierSocket(int)");
-        return;
+        LOGE("could not resolve FCAEVpnService.protectCarrierSocket(int); "
+             "dials will fail closed, but the fd provider is still registered");
     }
 
     // Network state, implemented on FCAEVpnService. Missing methods are not

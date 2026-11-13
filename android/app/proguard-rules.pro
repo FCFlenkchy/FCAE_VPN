@@ -13,6 +13,7 @@
     boolean psiphonHasConnectivity();
     java.lang.String psiphonNetworkId();
     int establishTunNow();
+    boolean protectCarrierSocket(int);
 }
 
 # Constructed and populated directly by nativePollUpdate.
