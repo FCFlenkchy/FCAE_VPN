@@ -240,6 +240,16 @@ fn install_native_handler() {
 static EXCEPTION_FILE: std::sync::atomic::AtomicPtr<std::ffi::c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 #[cfg(windows)]
 static EXCEPTION_RECORDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(windows)]
+static WATCH_EXCEPTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(windows)]
+static FIRST_CHANCE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(windows)]
+pub(crate) fn watch_exceptions() {
+    WATCH_EXCEPTIONS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 
 #[cfg(windows)]
 #[repr(C)]
@@ -255,7 +265,46 @@ static PREVIOUS_FILTER: OnceLock<Option<Filter>> = OnceLock::new();
 #[link(name = "kernel32")]
 extern "system" {
     fn SetUnhandledExceptionFilter(filter: Option<Filter>) -> Option<Filter>;
+    fn AddVectoredExceptionHandler(first: u32, handler: Option<Filter>) -> *mut std::ffi::c_void;
+    fn GetCurrentThreadId() -> u32;
+    fn GetLastError() -> u32;
+    fn SetLastError(error: u32);
+    fn GetModuleHandleW(name: *const u16) -> *mut std::ffi::c_void;
     fn WriteFile(file: *mut std::ffi::c_void, buffer: *const std::ffi::c_void, len: u32, written: *mut u32, overlapped: *mut std::ffi::c_void) -> i32;
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn first_chance(info: *mut ExceptionPointers) -> i32 {
+    use std::sync::atomic::Ordering;
+    if !WATCH_EXCEPTIONS.load(Ordering::Relaxed) || info.is_null() { return 0; }
+    let Some(exception) = (*info).record.as_ref() else { return 0 };
+    // These can be handled by another runtime. Never consume or alter them.
+    if !matches!(exception.code, 0xC0000005 | 0xC000001D | 0xC0000094 | 0xC0000409) {
+        return 0;
+    }
+    struct SavedError(u32);
+    impl Drop for SavedError {
+        fn drop(&mut self) { unsafe { SetLastError(self.0); } }
+    }
+    let _saved_error = SavedError(GetLastError());
+    let Some(lock) = LOG.get() else { return 0 };
+    let Ok(mut log) = lock.try_lock() else { return 0 };
+    if FIRST_CHANCE_COUNT.load(Ordering::Relaxed) >= 8 { return 0; }
+    let mut text = *b"first-chance Windows exception (may be handled) code=0x00000000 address=0x0000000000000000 thread=0x00000000\n";
+    if log.bytes.saturating_add(text.len()) > MAX_LOG - MAX_PANIC { return 0; }
+    let hex = b"0123456789ABCDEF";
+    let address = exception.address as usize as u64;
+    let thread = GetCurrentThreadId();
+    for i in 0..8 { text[55 + i] = hex[((exception.code >> ((7 - i) * 4)) & 15) as usize]; }
+    for i in 0..16 { text[74 + i] = hex[((address >> ((15 - i) * 4)) & 15) as usize]; }
+    for i in 0..8 { text[100 + i] = hex[((thread >> ((7 - i) * 4)) & 15) as usize]; }
+    let mut written = 0;
+    let file = EXCEPTION_FILE.load(Ordering::Relaxed);
+    if !file.is_null() && WriteFile(file, text.as_ptr().cast(), text.len() as u32, &mut written, std::ptr::null_mut()) != 0 {
+        log.bytes += written as usize;
+        FIRST_CHANCE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    0 // EXCEPTION_CONTINUE_SEARCH
 }
 
 #[cfg(windows)]
@@ -281,6 +330,10 @@ unsafe extern "system" fn exception_filter(info: *mut ExceptionPointers) -> i32 
 
 #[cfg(windows)]
 fn install_native_handler() {
+    let base = unsafe { GetModuleHandleW(std::ptr::null()) };
+    record_log(&format!("[crash] executable module base: {base:p}"));
+    let handler = unsafe { AddVectoredExceptionHandler(1, Some(first_chance)) };
+    if handler.is_null() { record_log("[crash] could not install first-chance exception observer"); }
     let previous = unsafe { SetUnhandledExceptionFilter(Some(exception_filter)) };
     let _ = PREVIOUS_FILTER.set(previous);
 }

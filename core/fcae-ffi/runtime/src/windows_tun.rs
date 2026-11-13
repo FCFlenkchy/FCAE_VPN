@@ -183,7 +183,9 @@ impl TunGuard {
             return Err(CoreError::InvalidConfig("Windows TUN MTU must be between 1280 and 65535".into()));
         }
         let servers = crate::tun_dns::servers(cfg)?;
+        log::info!("[tun] resolving Windows TUN adapter");
         let (luid, index, guid) = adapter(&cfg.tun.name)?;
+        log::info!("[tun] adapter found; configuring bypass routes");
         let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None, ipv6_unavailable: false };
         for (position, peer) in peers.into_iter().enumerate() {
             // The endpoint the engine was told to use must be kept off the
@@ -220,6 +222,7 @@ impl TunGuard {
             guard.peers.push(PeerBypass { peer, luid: physical.InterfaceLuid, next_hop: ip_of(&physical.NextHop) });
         }
 
+        log::info!("[tun] configuring adapter interfaces and addresses");
         guard.configure_interface(luid, AF_INET, cfg.tun.mtu)?;
         let ipv6_available = guard.configure_interface(luid, AF_INET6, cfg.tun.mtu)?;
         guard.ipv6_unavailable = !ipv6_available;
@@ -232,6 +235,7 @@ impl TunGuard {
             if let Some(address6) = address6 { guard.add_address(luid, address6)?; }
         }
 
+        log::info!("[tun] configuring tunnel routes");
         for ip in [IpAddr::V4(Ipv4Addr::UNSPECIFIED), Ipv4Addr::new(128, 0, 0, 0).into(), IpAddr::V6(Ipv6Addr::UNSPECIFIED), Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0).into()] {
             if ip.is_ipv6() && !ipv6_available { continue; }
             let mut row = MIB_IPFORWARD_ROW2::default();
@@ -251,6 +255,7 @@ impl TunGuard {
                 return Err(CoreError::Internal("outer endpoint bypass verification failed".into()));
             }
         }
+        log::info!("[tun] configuring adapter DNS");
         guard.dns = Some(DnsGuard::apply_to(guid, &servers, ipv6_available)?);
         log::info!(
             "[tun] Windows routing ready: interface {index}, outer endpoint(s) {:?}",

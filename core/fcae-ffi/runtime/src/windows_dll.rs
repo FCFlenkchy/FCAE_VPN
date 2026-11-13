@@ -145,11 +145,16 @@ static WINTUN: OnceLock<std::result::Result<Library, String>> = OnceLock::new();
 
 pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {
     WINTUN.get_or_init(|| {
+        log::info!("[tun] initializing Wintun ({})", if bytes.is_some() { "embedded" } else { "application/system search" });
         let library = if let Some(bytes) = bytes {
             Library::embedded("wintun", &[("wintun.dll", bytes)], "wintun.dll")
         } else {
             Library::load(OsStr::new("wintun.dll"), LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32, Vec::new())
         };
+        match &library {
+            Ok(_) => log::info!("[tun] Wintun library loaded"),
+            Err(error) => log::error!("[tun] Wintun library load failed: {error}"),
+        }
         library.map_err(|e| e.to_string())
     }).as_ref().map(|_| ()).map_err(|e| CoreError::Internal(e.clone()))
 }

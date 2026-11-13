@@ -11,6 +11,8 @@
 #include <cerrno>
 #include <cstring>
 #include <cstdarg>
+#include <cstdlib>
+#include <cwchar>
 #include <utility>
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -35,6 +37,7 @@
 
 // UI-lifetime audio gate is an embedding hook rather than a public ABI field.
 extern "C" void fcae_sponsor_set_ui_active(bool active);
+extern "C" void fcae_ui_diagnostic(uint32_t event, uint32_t value);
 
 
 static std::string join_chain_transports(const std::vector<int>& transports) {
@@ -1659,6 +1662,27 @@ static void draw_spinner(float radius, int segments, float speed) {
 void ui_init() {
     s_runtime_init.store(RuntimeInitState::Starting, std::memory_order_relaxed);
     s_runtime_init_thread = std::thread([] {
+#ifdef _WIN32
+        DWORD handoff_pid = 0;
+        DWORD handoff_result = WAIT_FAILED;
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv) {
+            if (argc == 3 && std::wcscmp(argv[1], L"--fcae-wait-parent") == 0) {
+                wchar_t* end = nullptr;
+                unsigned long pid = std::wcstoul(argv[2], &end, 10);
+                if (end != argv[2] && *end == L'\0' && pid != 0 && pid != GetCurrentProcessId()) {
+                    handoff_pid = static_cast<DWORD>(pid);
+                    HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, handoff_pid);
+                    if (parent) {
+                        handoff_result = WaitForSingleObject(parent, 8000);
+                        CloseHandle(parent);
+                    }
+                }
+            }
+            LocalFree(argv);
+        }
+#endif
         bool runtime_ok = true;
         FcaeInitOptions opt = {};
         opt.struct_size   = sizeof(opt);
@@ -1671,6 +1695,12 @@ void ui_init() {
             g_app.add_log(FCAE_LOG_ERROR, fcae_last_error());
             runtime_ok = false;
         }
+#ifdef _WIN32
+        if (handoff_pid) {
+            fcae_ui_diagnostic(6, handoff_pid);
+            fcae_ui_diagnostic(7, handoff_result);
+        }
+#endif
         if (!load_config()) {
             // First run: write defaults next to the executable (or app files on
             // Android). AppState defaults mode = 1, so a fresh install starts in
@@ -1681,6 +1711,8 @@ void ui_init() {
                 g_app.add_log(4, ("[ui] created default config: " + get_config_path()).c_str());
             }
         }
+        if (runtime_ok && g_app.mode == 1)
+            fcae_ui_diagnostic(0, uint32_t(g_app.tun_engine));
         // Data paths stay relative to data_dir() so the folder can move
         // between machines; resolve_data_path() anchors them at use.
         bool migrated = make_portable(g_app.config_path, sizeof(g_app.config_path));
@@ -1759,6 +1791,7 @@ void ui_frame() {
 }
 
 void ui_shutdown() {
+    fcae_ui_diagnostic(5, 0);
     fcae_sponsor_set_ui_active(false);
     s_sponsor_rgba.clear();
     s_sponsor_rgba.shrink_to_fit();
@@ -3236,6 +3269,7 @@ void render_ui() {
                     ui_request_redraw();
                 }).detach();
             } else if (!g_app.start_busy.load()) {
+                fcae_ui_diagnostic(1, (uint32_t(g_app.mode) << 16) | uint32_t(g_app.tun_engine));
                 const auto has_hop = [](int transport) {
                     return std::find(g_app.chain_transports.begin(), g_app.chain_transports.end(), transport) != g_app.chain_transports.end();
                 };
@@ -3279,9 +3313,12 @@ void render_ui() {
                     sei.cbSize = sizeof(sei);
                     sei.lpVerb = L"runas";
                     sei.lpFile = exe_path;
-                    sei.lpParameters = L"";
+                    wchar_t handoff_args[64];
+                    std::swprintf(handoff_args, 64, L"--fcae-wait-parent %lu", static_cast<unsigned long>(GetCurrentProcessId()));
+                    sei.lpParameters = handoff_args;
                     sei.nShow = SW_NORMAL;
                     sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS;
+                    fcae_ui_diagnostic(2, 0);
                     if (ShellExecuteExW(&sei)) {
                         // Successfully launched elevated copy — give it a moment
                         // to take over the launcher slot and surface any UAC
@@ -3293,6 +3330,7 @@ void render_ui() {
                         // elevated PID the session was handed to, and a later
                         // bind failure has a breadcrumb.
                         DWORD child_pid = sei.hProcess ? GetProcessId(sei.hProcess) : 0;
+                        fcae_ui_diagnostic(3, child_pid);
                         char msg[160];
                         snprintf(msg, sizeof(msg),
                             "[ui] TUN mode needs elevation -- relaunching elevated (PID %lu). "
@@ -3320,6 +3358,7 @@ void render_ui() {
                         // "not working": the usual cause is a declined UAC
                         // prompt, where GetLastError() is ERROR_CANCELLED.
                         DWORD err = GetLastError();
+                        fcae_ui_diagnostic(4, err);
                         const char* why =
                             err == ERROR_CANCELLED ? "UAC consent was cancelled"
                             : err == ERROR_ACCESS_DENIED ? "access was denied"
@@ -4107,7 +4146,7 @@ void render_ui() {
                 : final_backend == FCAE_BACKEND_PSIPHON ? "Psiphon" : "Aether";
             if (final_backend != FCAE_BACKEND_PSIPHON) {
                 if (g_app.protocol != 4 && g_app.listener_socks_enabled())
-                    endpoint(final_name, g_app.mode == 1 ? "internal SOCKS5" : "SOCKS5",
+                    endpoint(final_name, "SOCKS5",
                              g_app.listener_socks_port() ? g_app.listener_socks_port() : g_app.default_listener_socks_port());
                 if (g_app.protocol != 4 && g_app.listener_http_enabled())
                     endpoint(final_name, "HTTP", g_app.listener_http_port());
@@ -4212,8 +4251,10 @@ void render_ui() {
                     te_names[i] = fcae_tun_engine_info(i, &tei[i]) == FCAE_OK ? tei[i].display_name : "?";
                 }
                 int te_sel = (g_app.tun_engine >= 0 && g_app.tun_engine < (int)te_n) ? g_app.tun_engine : 0;
-                if (ImGui::Combo("##tun_engine", &te_sel, te_names, (int)te_n))
+                if (ImGui::Combo("##tun_engine", &te_sel, te_names, (int)te_n)) {
                     g_app.tun_engine = te_sel;
+                    fcae_ui_diagnostic(0, uint32_t(te_sel));
+                }
                 ImGui::PopItemWidth();
                 if (te_sel < (int)te_n && !tei[te_sel].available)
                     ImGui::TextColored(ImVec4(1, 0.6f, 0.2f, 1), "%s", tei[te_sel].unavailable_reason);

@@ -5367,27 +5367,25 @@ class MainActivity : AppCompatActivity() {
             peerLine.append("Peer: $peer")
         }
         if (listenersUp && !isPurePsiphon()) {
-            fun endpoints(backend: String, socks: String?, http: String?, socksKind: String = "SOCKS5") {
+            fun endpoints(backend: String, socks: String?, http: String?) {
                 val local = mutableListOf<String>()
                 val shared = mutableListOf<String>()
                 fun add(kind: String, port: String) {
                     local.add("$kind 127.0.0.1:$port")
                     if (switchLan.isChecked && lan.isNotEmpty() && lan != "127.0.0.1") shared.add("$kind $lan:$port")
                 }
-                socks?.let { add(socksKind, it) }
+                socks?.let { add("SOCKS5", it) }
                 http?.let { add("HTTP", it) }
                 if (local.isNotEmpty()) peerLine.append("\n$backend local: " + local.joinToString(" | "))
                 if (shared.isNotEmpty()) peerLine.append("\n$backend LAN: " + shared.joinToString(" | "))
             }
             if (!isTorOnly()) {
-                val tun = isTunModeSelected()
                 val finalBackend = routeBackends().lastOrNull() ?: 0
                 if (finalBackend != 1) {
                     endpoints(if (finalBackend == 2) "Firefox" else "Aether",
                         if (finalSocksEnabled())
                             effectiveSocksPort().toString() else null,
-                        if (finalHttpEnabled()) effectiveHttpPort().toString() else null,
-                        if (tun) "internal SOCKS5" else "SOCKS5")
+                        if (finalHttpEnabled()) effectiveHttpPort().toString() else null)
                 }
             }
             if (isTorOnly() || effectiveTorMode() in 1..2) endpoints("Tor",

@@ -505,7 +505,11 @@ impl ZeptunBridge {
         // Windows needs wintun.dll discoverable before the device is created:
         // zeptun loads it from the application directory or System32.
         #[cfg(windows)]
-        platform::ensure_wintun(wintun_bytes())?;
+        {
+            log::info!("[zeptun] loading Wintun");
+            platform::ensure_wintun(wintun_bytes())?;
+            log::info!("[zeptun] Wintun loaded");
+        }
 
         // config_init must run first: it zeroes the struct, stamps
         // struct_size for the ABI check, and fills preset-secure defaults.
@@ -514,6 +518,7 @@ impl ZeptunBridge {
         } else {
             ZEPTUN_PRESET_DESKTOP
         };
+        log::info!("[zeptun] initializing native configuration");
         let mut config = unsafe {
             let mut c = std::mem::zeroed::<ZeptunConfig>();
             let rc = zeptun_config_init(&mut c, preset);
@@ -597,7 +602,9 @@ impl ZeptunBridge {
         }
 
         let mut raw: *mut c_void = std::ptr::null_mut();
+        log::info!("[zeptun] creating native engine");
         let rc = unsafe { zeptun_create(&config, &mut raw) };
+        log::info!("[zeptun] create returned code {rc}");
         if rc != ZEPTUN_OK {
             platform::close_dup(fd, &config);
             return Err(zeptun_err("create", rc));
@@ -619,6 +626,7 @@ impl ZeptunBridge {
         #[cfg(windows)]
         {
             let guid = CString::new(WINTUN_ADAPTER_GUID).unwrap();
+            log::info!("[zeptun] setting adapter GUID");
             let rc = unsafe { zeptun_set_adapter_guid(handle.as_ptr(), guid.as_ptr()) };
             if rc != ZEPTUN_OK {
                 return Err(zeptun_err("set_adapter_guid", rc));
@@ -628,6 +636,7 @@ impl ZeptunBridge {
         #[cfg(windows)]
         log::info!("[zeptun] starting native engine and Wintun adapter");
         let rc = unsafe { zeptun_start(handle.as_ptr()) };
+        log::info!("[zeptun] native start returned code {rc}");
         if rc != ZEPTUN_OK {
             return Err(zeptun_err("start", rc)); // Handle drops: stop+destroy.
         }

@@ -275,7 +275,9 @@ impl HevSocks5TunnelBridge {
         begin_run(&self.running, &self.closing)?;
         let thread = std::thread::Builder::new().name("hev-socks5-tunnel".into()).spawn(move || {
             let bytes = config.as_bytes();
+            log::info!("[hev] entering native engine");
             let code = run_engine(&closing, || unsafe { entry(bytes.as_ptr(), bytes.len() as c_uint, -1) });
+            log::info!("[hev] native engine returned code {code}");
             running.store(false, Ordering::SeqCst);
             rc_thread.store(code, Ordering::SeqCst);
             if code != 0 && !closing.load(Ordering::SeqCst) { log::error!("[hev] engine exited code {code}"); }
@@ -289,6 +291,7 @@ impl HevSocks5TunnelBridge {
 
 impl TunBridge for HevSocks5TunnelBridge {
     fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()> {
+        log::info!("[hev] validating Windows TUN settings");
         fcae_runtime::windows_tun::validate_backend(cfg, endpoints.peer_ip.as_deref())?;
         if !is_supported() {
             return Err(CoreError::Internal(unavailable_reason().unwrap_or("hev unavailable").into()));
@@ -298,7 +301,9 @@ impl TunBridge for HevSocks5TunnelBridge {
             return Err(CoreError::Internal("previous hev engine shutting down".into()));
         }
         self.closing.store(false, Ordering::SeqCst);
+        log::info!("[hev] loading Wintun");
         crate::platform::ensure_wintun(crate::platform::wintun_bytes())?;
+        log::info!("[hev] Wintun loaded; preparing native engine");
         let rt = runtime()?;
         drain_calls(&rt.calls, &self.enqueue, RESTART_GRACE)?;
         let base_socks = endpoints.socks.ok_or_else(|| CoreError::Internal("TUN needs SOCKS endpoint".into()))?;
@@ -308,10 +313,12 @@ impl TunBridge for HevSocks5TunnelBridge {
         } else { None };
         let socks = psiphon.as_ref().map(|a| a.endpoint()).unwrap_or(base_socks);
         let (_, yaml) = generate_config(cfg, socks)?;
+        log::info!("[hev] launching engine thread");
         let engine = self.spawn_engine(rt, &yaml)?;
         let exit_code = engine.rc;
         *self.active.lock() = Some(Active { generation: Arc::new(()), reaping: false, thread: engine.thread, _psiphon: psiphon, undo: None });
         let configured = (|| -> Result<()> {
+            log::info!("[hev] configuring Windows TUN networking");
             let undo = fcae_runtime::windows_tun::TunGuard::configure(cfg, endpoints.peer_ip.as_deref())
                 .map_err(|e| self.exited(&exit_code).unwrap_or(e))?;
             self.active.lock().as_mut().ok_or_else(|| CoreError::Internal("HEV startup cancelled".into()))?.undo = Some(undo);
@@ -325,6 +332,7 @@ impl TunBridge for HevSocks5TunnelBridge {
             self.shutdown(RESTART_GRACE);
             return Err(e);
         }
+        log::info!("[hev] Windows TUN startup complete");
         Ok(())
     }
     /// Lock-free so a Disconnect never waits behind a start that is still

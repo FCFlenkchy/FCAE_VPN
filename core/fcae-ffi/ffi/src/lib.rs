@@ -192,6 +192,9 @@ impl TunEngines {
         endpoints: &fcae_runtime::backend::Endpoints,
         cancel: Option<&fcae_runtime::backend::CancelToken>,
     ) -> Result<(), CoreError> {
+        #[cfg(windows)]
+        crash_log::watch_exceptions();
+        log::info!("[tun] preparing {:?}", cfg.tun.engine);
         // HEV may still be leaving its previous run after a bounded stop.
         // Do not let another engine reuse its device or routes until cleanup
         // has completed, even when the next engine is not HEV.
@@ -220,6 +223,7 @@ impl TunEngines {
             (config::TunEngine::Hev, true) => "hev: started\n",
             (config::TunEngine::Hev, false) => "hev: start failed\n",
         });
+        if let Err(error) = &result { log::error!("[tun] {:?} start failed: {error}", cfg.tun.engine); }
         result
     }
 
@@ -638,6 +642,31 @@ fn sponsor_proxy_for(config: &config::SessionConfig) -> Option<String> {
     (port != 0).then(|| format!("{scheme}://127.0.0.1:{port}"))
 }
 
+#[no_mangle]
+pub extern "C" fn fcae_ui_diagnostic(event: u32, value: u32) {
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    {
+        let message = match event {
+            0 => format!("[ui] TUN engine selected: {value}"),
+            1 => format!("[ui] connect clicked: mode={} TUN engine={}", value >> 16, value & 0xffff),
+            2 => "[ui] requesting administrator elevation".to_string(),
+            3 => format!("[ui] elevated process launched: pid={value}; this process will exit"),
+            4 => format!("[ui] administrator elevation failed: Windows error {value}"),
+            5 => "[ui] normal shutdown requested".to_string(),
+            6 => format!("[ui] elevated handoff from pid={value}"),
+            7 => format!("[ui] elevated handoff wait result=0x{value:08X} (0=parent exited, 0x102=timeout)"),
+            _ => return,
+        };
+        crash_log::record_log(&message);
+        #[cfg(windows)]
+        if event == 0 || (event == 1 && value >> 16 == 1) {
+            crash_log::watch_exceptions();
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    let _ = (event, value);
+}
+
 /// Start a session.
 ///
 /// # Safety
@@ -645,8 +674,11 @@ fn sponsor_proxy_for(config: &config::SessionConfig) -> Option<String> {
 #[no_mangle]
 pub unsafe extern "C" fn fcae_start(cfg: *const FcaeConfig) -> FcaeStatus {
     guard("fcae_start", move || {
+        log::info!("[session] start requested; parsing configuration");
         let rt = runtime()?;
         let parsed = config::parse(cfg)?;
+        log::info!("[session] configuration accepted: backend={:?}, mode={:?}, TUN engine={:?}",
+            parsed.backend, parsed.mode, parsed.tun.engine);
 
         // Hand the Android descriptor to the bridge before the session runs.
         //
@@ -664,6 +696,7 @@ pub unsafe extern "C" fn fcae_start(cfg: *const FcaeConfig) -> FcaeStatus {
 
         let sponsor_proxy = sponsor_proxy_for(&parsed);
         rt.supervisor.start(parsed)?;
+        log::info!("[session] worker started");
         fcae_sponsor::set_proxy(sponsor_proxy);
         fcae_sponsor::set_connected(false);
         Ok(())

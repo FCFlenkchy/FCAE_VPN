@@ -314,6 +314,7 @@ impl Supervisor {
         let thread = std::thread::Builder::new()
             .name("fcae-session".into())
             .spawn(move || {
+                log::info!("[session] worker entered; initializing async runtime");
                 let workers = if cfg!(target_os = "android") { 2 } else { 4 };
                 let rt = match tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
@@ -595,6 +596,7 @@ async fn run_session(
         } else {
             carrier_config.start_timeout()
         };
+        log::info!("[session] starting carrier backend (attempt {})", attempt + 1);
         let handle = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(()),
@@ -616,6 +618,7 @@ async fn run_session(
                 continue;
             }
         };
+        log::info!("[session] carrier started; preparing exit route");
         let carrier: Arc<dyn BackendHandle> = Arc::from(handle);
         let mut handles: Vec<Arc<dyn BackendHandle>> = vec![carrier];
         let mut endpoints = handles[0].endpoints();
@@ -678,6 +681,7 @@ async fn run_session(
             }
         };
         if let Err(error) = tun_start {
+            log::error!("[session] TUN startup failed: {error}");
             stop_all(&mut handles, stop_timeout).await;
             if cancel.is_cancelled() {
                 return Ok(());

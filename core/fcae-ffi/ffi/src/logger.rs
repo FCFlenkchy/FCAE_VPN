@@ -38,15 +38,7 @@ impl log::Log for FcaeLogger {
         ACTIVE_CALLS.fetch_add(1, Ordering::SeqCst);
 
         let ptr = CALLBACK.load(Ordering::SeqCst);
-        if ptr.is_null() {
-            ACTIVE_CALLS.fetch_sub(1, Ordering::SeqCst);
-            return;
-        }
-
         let ud = USER_DATA.load(Ordering::SeqCst);
-
-        // SAFETY: only ever stored from `install` with a valid fn pointer.
-        let cb: RawCb = unsafe { std::mem::transmute(ptr) };
 
         let mut msg = record.args().to_string();
         let limit = if msg.starts_with("[psiphon] {") { 1024 * 1024 } else { MAX_MSG };
@@ -63,8 +55,12 @@ impl log::Log for FcaeLogger {
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         crate::crash_log::record_log(&msg);
 
-        if let Ok(c) = CString::new(msg) {
-            unsafe { cb(abi_level(record.level()), c.as_ptr(), ud) };
+        if !ptr.is_null() {
+            // SAFETY: only ever stored from `install` with a valid fn pointer.
+            let cb: RawCb = unsafe { std::mem::transmute(ptr) };
+            if let Ok(c) = CString::new(msg) {
+                unsafe { cb(abi_level(record.level()), c.as_ptr(), ud) };
+            }
         }
 
         ACTIVE_CALLS.fetch_sub(1, Ordering::SeqCst);
@@ -114,8 +110,8 @@ pub fn install(cb: fcae_abi::FcaeLogCallback, user_data: *mut c_void, max_level:
     });
 }
 
-/// Detach the host callback. The logger stays registered but becomes a no-op,
-/// waiting for any concurrent callback invocation to finish before returning.
+/// Detach the host callback and wait for in-flight callbacks. Desktop
+/// diagnostic logging remains active after the callback is detached.
 pub fn uninstall() {
     CALLBACK.store(std::ptr::null_mut(), Ordering::SeqCst);
     USER_DATA.store(std::ptr::null_mut(), Ordering::SeqCst);
