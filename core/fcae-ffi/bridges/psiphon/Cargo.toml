@@ -13,12 +13,12 @@ path = "src/lib.rs"
 [features]
 default = []
 # Desktop: Psiphon and tun2socks share one Go archive.
-enabled = ["dep:fcae-bridge-tun2socks", "fcae-bridge-tun2socks/psiphon"]
+enabled = ["dep:fcae-go-bridge", "fcae-go-bridge/psiphon"]
 
 [dependencies]
 fcae-abi.workspace = true
 fcae-runtime.workspace = true
-fcae-bridge-tun2socks = { workspace = true, optional = true }
+fcae-go-bridge = { workspace = true, optional = true }
 async-trait.workspace = true
 log.workspace = true
 parking_lot.workspace = true

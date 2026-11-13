@@ -3,7 +3,7 @@
 //! Implements [`fcae_runtime::session::TunBridge`] with **hev-socks5-tunnel**, a
 //! C SOCKS5 tunnel engine (coroutine I/O over lwip) that converts the local
 //! SOCKS5 endpoint a backend already exposes into a TUN device. It is a drop-in
-//! sibling of `fcae-bridge-tun2socks` and `fcae-bridge-zeptun`: no Go runtime,
+//! sibling of `fcae-go-bridge` and `fcae-bridge-zeptun`: no Go runtime,
 //! no subprocess, and every engine shares one wintun adapter identity
 //! (see [`WINTUN_ADAPTER_GUID`]).
 //!

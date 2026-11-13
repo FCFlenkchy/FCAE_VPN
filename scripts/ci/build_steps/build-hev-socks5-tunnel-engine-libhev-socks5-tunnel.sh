@@ -26,7 +26,7 @@ case "${FCAE_MATRIX_NAME}" in
     make clean OS=Windows_NT ARCH=x64
     make static OS=Windows_NT ARCH=x64 \
       CC="$CC" PP="$CC -E" AR="$AR" \
-      CFLAGS="-include $COMPAT -Wno-error -Wno-unknown-pragmas" -j"$(nproc)"
+      CFLAGS="-include $COMPAT -femulated-tls -Wno-error -Wno-unknown-pragmas" -j"$(nproc)"
 
     # Upstream produces four independent .lib archives. Copy them under GNU
     # archive names and namespace its libyaml symbols to avoid collisions with
@@ -37,6 +37,11 @@ case "${FCAE_MATRIX_NAME}" in
     for name in yaml lwip hev-task-system; do
       install -m 644 "third-part/$name/bin/$name.lib" "$STAGE/lib$name.a"
     done
+    "$NM" -u "$STAGE/libhev-task-system.a" > "$RUNNER_TEMP/fcae-hev-undefined.txt"
+    if ! grep -q '__emutls_get_address' "$RUNNER_TEMP/fcae-hev-undefined.txt"; then
+      echo "::error::HEV task-system was not built with emulated TLS"
+      exit 1
+    fi
     MAP="$RUNNER_TEMP/fcae-hev-yaml-symbols.txt"
     "$NM" -g --defined-only "$STAGE/libyaml.a" | \
       awk 'NF >= 3 && $(NF-1) ~ /^[A-Za-z]$/ && $NF ~ /^yaml_/ { print $NF, "fcae_hev_" $NF }' | \

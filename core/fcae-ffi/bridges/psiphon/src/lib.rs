@@ -3,7 +3,7 @@
 //! Adapts Psiphon to the [`Backend`] trait.
 //!
 //! This is a *tunnel* bridge: it implements [`Backend`], meaning it
-//! **produces** a SOCKS endpoint. Contrast `fcae-bridge-tun2socks`, which
+//! **produces** a SOCKS endpoint. Contrast `fcae-go-bridge`, which
 //! implements `TunBridge` and **consumes** one. Because Psiphon terminates in
 //! a local SOCKS5 proxy, **TUN mode works for free**: the supervisor layers
 //! the in-process tun2socks bridge over whatever SOCKS endpoint a backend

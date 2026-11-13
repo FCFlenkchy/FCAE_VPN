@@ -24,7 +24,7 @@ fn main() {
         if cfg!(feature = "psiphon") {
             panic!("desktop Psiphon requires the live tun2socks Go archive");
         }
-        fcae_build::note("fcae-bridge-tun2socks: `stub` feature enabled — Go bridge NOT built");
+        fcae_build::note("fcae-go-bridge: `stub` feature enabled — Go bridge NOT built");
         return;
     }
 
@@ -115,7 +115,7 @@ fn main() {
             "failed to build the in-process tun2socks bridge: {e}\n\
              Install Go (toolchain auto via GOTOOLCHAIN=auto from go.mod) and a C \
              toolchain for the target, or build with \
-             `--features fcae-bridge-tun2socks/stub` to skip TUN support."
+             `--features fcae-go-bridge/stub` to skip TUN support."
         ),
     }
 }

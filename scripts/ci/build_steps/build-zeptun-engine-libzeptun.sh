@@ -8,7 +8,12 @@ if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
 fi
 case "${FCAE_MATRIX_NAME}" in
   linux-x64)   zig build -Dtarget=x86_64-linux-gnu -Doptimize=small ;;
-  windows-x64) zig build -Dtarget=x86_64-windows-gnu -Doptimize=small --cache-dir "$ZIG_CACHE" ;;
+  windows-x64)
+    # Use Zeptun's own libc allocator path, avoiding Zig's TLS-backed SMP
+    # allocator in the Windows host. Keep the upstream sources unchanged.
+    (cd .. && zig build -Dtarget=x86_64-windows-gnu -Doptimize=small \
+      --cache-dir "$ZIG_CACHE" --prefix "$PWD/zeptun/zig-out")
+    ;;
   macos-arm64) zig build -Dtarget=aarch64-macos -Doptimize=small ;;
   macos-x64)   zig build -Dtarget=x86_64-macos -Doptimize=small ;;
   android-*)
@@ -67,6 +72,11 @@ if [ "${FCAE_MATRIX_NAME}" = "windows-x64" ]; then
   if [ -z "$STATIC_ZEPTUN" ]; then
     echo "::error::no Zeptun static archive with zeptun_create found in $ZIG_CACHE/o"
     find "$ZIG_CACHE/o" -type f \( -name '*.lib' -o -name '*.a' \) -print | head -80 || true
+    exit 1
+  fi
+  llvm-nm --undefined-only "$STATIC_ZEPTUN" > "$ZIG_CACHE/undefined.txt"
+  if ! grep -Eq '[[:space:]]U[[:space:]]+(__imp_)?malloc$' "$ZIG_CACHE/undefined.txt"; then
+    echo "::error::Windows Zeptun archive does not reference the C allocator"
     exit 1
   fi
   mkdir -p zig-out/lib

@@ -257,7 +257,7 @@ pub fn configure_linux(cfg: &SessionConfig, interface: &str) -> Result<(Vec<Stri
         for server in &servers {
             let family = if server.contains(':') { "-6" } else { "-4" };
             let prefix = format!("{server}/{}", if family == "-6" { 128 } else { 32 });
-            run("ip", &[family, "route", "replace", &prefix, "dev", interface])?;
+            run("ip", &[family, "route", "add", &prefix, "dev", interface])?;
             routes.push(prefix);
         }
         Ok(())

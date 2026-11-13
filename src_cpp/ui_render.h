@@ -390,8 +390,8 @@ struct AppState {
         const bool psiphon_exit   = (final_backend == 1);
 
         c.dns.sni = sni[0] ? sni : nullptr;
-        // TUN DNS override: NULL keeps the bridge's default (no system DNS
-        // change); a value is applied on `up` and restored on `down`.
+        // Desktop uses default IPv4 resolvers when this override is empty.
+        // Configured DNS is applied on `up` and restored on `down`.
         // In a psiphon_exit session the override carries the v4 servers
         // ONLY: a v6 entry would point the host resolver at an address the
         // v4-only exit cannot reach -- and on a host with native IPv6 the

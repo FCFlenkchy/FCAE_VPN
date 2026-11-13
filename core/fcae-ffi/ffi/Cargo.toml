@@ -27,9 +27,9 @@ firefox = ["dep:fcae-firefox-bridge"]
 # Android uses the combined Go shared library via psiphon-android.
 psiphon-live = ["psiphon", "tun", "fcae-bridge-psiphon/enabled"]
 # Android's Java service uses the Psiphon exports from the same Go .so.
-psiphon-android = ["psiphon", "tun", "fcae-bridge-tun2socks/psiphon"]
+psiphon-android = ["psiphon", "tun", "fcae-go-bridge/psiphon"]
 # Link the in-process tun2socks bridge.
-tun = ["dep:fcae-bridge-tun2socks"]
+tun = ["dep:fcae-go-bridge"]
 # Link the in-process zeptun bridge. Opt-in (not in `default`): it requires a
 # prebuilt libzeptun.a for the target (CI builds one from core/zeptun with
 # Zig first; without the archive any consumer can still build with the
@@ -51,7 +51,7 @@ tor = ["aether", "fcae-bridge-aether/tor"]
 fcae-abi.workspace = true
 fcae-runtime.workspace = true
 fcae-sponsor.workspace = true
-fcae-bridge-tun2socks = { workspace = true, optional = true }
+fcae-go-bridge = { workspace = true, optional = true }
 fcae-bridge-aether = { workspace = true, optional = true }
 fcae-bridge-psiphon = { workspace = true, optional = true }
 fcae-firefox-bridge = { workspace = true, optional = true }

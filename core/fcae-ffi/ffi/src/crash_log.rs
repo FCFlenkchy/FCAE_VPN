@@ -253,7 +253,19 @@ pub(crate) fn watch_exceptions() {
 
 #[cfg(windows)]
 #[repr(C)]
-struct ExceptionRecord { code: u32, flags: u32, record: *mut std::ffi::c_void, address: *mut std::ffi::c_void }
+struct ExceptionRecord {
+    code: u32,
+    flags: u32,
+    record: *mut std::ffi::c_void,
+    address: *mut std::ffi::c_void,
+    parameter_count: u32,
+}
+#[cfg(windows)]
+#[repr(C)]
+struct AccessExceptionRecord {
+    header: ExceptionRecord,
+    information: [usize; 15],
+}
 #[cfg(windows)]
 #[repr(C)]
 struct ExceptionPointers { record: *const ExceptionRecord, context: *const std::ffi::c_void }
@@ -274,6 +286,29 @@ extern "system" {
 }
 
 #[cfg(windows)]
+unsafe fn write_access_details(file: *mut std::ffi::c_void, exception: &ExceptionRecord) -> usize {
+    if file.is_null() || !matches!(exception.code, 0xC0000005 | 0xC0000006) || exception.parameter_count < 2 {
+        return 0;
+    }
+    let mut text = *b"access violation operation=0x0000000000000000 target=0x0000000000000000\n";
+    let hex = b"0123456789ABCDEF";
+    let full = (exception as *const ExceptionRecord).cast::<AccessExceptionRecord>();
+    let information = std::ptr::addr_of!((*full).information).cast::<usize>();
+    let operation = information.read() as u64;
+    let address = information.add(1).read() as u64;
+    for i in 0..16 {
+        text[29 + i] = hex[((operation >> ((15 - i) * 4)) & 15) as usize];
+        text[55 + i] = hex[((address >> ((15 - i) * 4)) & 15) as usize];
+    }
+    let mut written = 0;
+    if WriteFile(file, text.as_ptr().cast(), text.len() as u32, &mut written, std::ptr::null_mut()) != 0 {
+        written as usize
+    } else {
+        0
+    }
+}
+
+#[cfg(windows)]
 unsafe extern "system" fn first_chance(info: *mut ExceptionPointers) -> i32 {
     use std::sync::atomic::Ordering;
     if !WATCH_EXCEPTIONS.load(Ordering::Relaxed) || info.is_null() { return 0; }
@@ -291,7 +326,7 @@ unsafe extern "system" fn first_chance(info: *mut ExceptionPointers) -> i32 {
     let Ok(mut log) = lock.try_lock() else { return 0 };
     if FIRST_CHANCE_COUNT.load(Ordering::Relaxed) >= 8 { return 0; }
     let mut text = *b"first-chance Windows exception (may be handled) code=0x00000000 address=0x0000000000000000 thread=0x00000000\n";
-    if log.bytes.saturating_add(text.len()) > MAX_LOG - MAX_PANIC { return 0; }
+    if log.bytes.saturating_add(text.len() + 72) > MAX_LOG - MAX_PANIC { return 0; }
     let hex = b"0123456789ABCDEF";
     let address = exception.address as usize as u64;
     let thread = GetCurrentThreadId();
@@ -302,6 +337,7 @@ unsafe extern "system" fn first_chance(info: *mut ExceptionPointers) -> i32 {
     let file = EXCEPTION_FILE.load(Ordering::Relaxed);
     if !file.is_null() && WriteFile(file, text.as_ptr().cast(), text.len() as u32, &mut written, std::ptr::null_mut()) != 0 {
         log.bytes += written as usize;
+        log.bytes += write_access_details(file, exception);
         FIRST_CHANCE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
     0 // EXCEPTION_CONTINUE_SEARCH
@@ -320,7 +356,10 @@ unsafe extern "system" fn exception_filter(info: *mut ExceptionPointers) -> i32 
         for i in 0..16 { text[49 + i] = hex[((address >> ((15 - i) * 4)) & 15) as usize]; }
         let mut written = 0;
         let file = EXCEPTION_FILE.load(Ordering::Relaxed);
-        if !file.is_null() { WriteFile(file, text.as_ptr().cast(), text.len() as u32, &mut written, std::ptr::null_mut()); }
+        if !file.is_null() {
+            WriteFile(file, text.as_ptr().cast(), text.len() as u32, &mut written, std::ptr::null_mut());
+            if let Some(exception) = record { write_access_details(file, exception); }
+        }
     }
     match PREVIOUS_FILTER.get().copied().flatten() {
         Some(previous) => previous(info),

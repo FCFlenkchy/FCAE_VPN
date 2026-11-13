@@ -1729,24 +1729,13 @@ version = "2.0.0"
 dependencies = [
  "async-trait",
  "fcae-abi",
- "fcae-bridge-tun2socks",
  "fcae-build",
+ "fcae-go-bridge",
  "fcae-runtime",
  "log",
  "parking_lot",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "fcae-bridge-tun2socks"
-version = "2.0.0"
-dependencies = [
- "fcae-build",
- "fcae-runtime",
- "libc",
- "log",
- "parking_lot",
 ]
 
 [[package]]
@@ -1772,10 +1761,10 @@ dependencies = [
  "fcae-bridge-aether",
  "fcae-bridge-hev-socks5-tunnel",
  "fcae-bridge-psiphon",
- "fcae-bridge-tun2socks",
  "fcae-bridge-zeptun",
  "fcae-build",
  "fcae-firefox-bridge",
+ "fcae-go-bridge",
  "fcae-runtime",
  "fcae-sponsor",
  "libc",
@@ -1836,6 +1825,17 @@ dependencies = [
  "serde_json",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "fcae-go-bridge"
+version = "2.0.0"
+dependencies = [
+ "fcae-build",
+ "fcae-runtime",
+ "libc",
+ "log",
+ "parking_lot",
 ]
 
 [[package]]

@@ -36,4 +36,6 @@ pub use error::{CoreError, Result};
 #[cfg(windows)]
 pub mod windows_dll;
 #[cfg(windows)]
+mod windows_dns_firewall;
+#[cfg(windows)]
 pub mod windows_tun;

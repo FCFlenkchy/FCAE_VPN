@@ -158,6 +158,7 @@ pub struct TunGuard {
     addresses: Vec<MIB_UNICASTIPADDRESS_ROW>,
     interfaces: Vec<InterfaceChange>,
     dns: Option<DnsGuard>,
+    dns_firewall: Option<crate::windows_dns_firewall::DnsFirewall>,
     ipv6_unavailable: bool,
 }
 
@@ -182,11 +183,16 @@ impl TunGuard {
         if cfg.tun.mtu < 1280 || cfg.tun.mtu > 65535 {
             return Err(CoreError::InvalidConfig("Windows TUN MTU must be between 1280 and 65535".into()));
         }
-        let servers = crate::tun_dns::servers(cfg)?;
+        let mut servers = crate::tun_dns::servers(cfg)?;
+        if servers.is_empty() {
+            log::info!("[tun] no TUN DNS configured; using the default IPv4 resolvers");
+            servers = vec!["1.1.1.1".into(), "1.0.0.1".into()];
+        }
         log::info!("[tun] resolving Windows TUN adapter");
         let (luid, index, guid) = adapter(&cfg.tun.name)?;
         log::info!("[tun] adapter found; configuring bypass routes");
-        let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None, ipv6_unavailable: false };
+        let mut guard = Self { peers: Vec::with_capacity(peers.len()), routes: Vec::with_capacity(5 + peers.len()), addresses: Vec::with_capacity(2), interfaces: Vec::with_capacity(2), dns: None, dns_firewall: None, ipv6_unavailable: false };
+        guard.dns_firewall = Some(crate::windows_dns_firewall::DnsFirewall::install(index, unsafe { luid.Value })?);
         for (position, peer) in peers.into_iter().enumerate() {
             // The endpoint the engine was told to use must be kept off the
             // device or the session flaps, so that one still fails loudly.
@@ -248,6 +254,28 @@ impl TunGuard {
             row.Metric = 0;
             row.Protocol = MIB_IPPROTO_NETMGMT;
             guard.add_route(row, false)?;
+        }
+        // Explicit resolver routes beat LAN prefixes and are never allowed to
+        // replace a carrier bypass. WFP still blocks a conflicting route.
+        for server in &servers {
+            let ip: IpAddr = server.parse().map_err(|_| CoreError::InvalidConfig(format!("invalid TUN DNS address: {server}")))?;
+            if ip.is_ipv6() && !ipv6_available { continue; }
+            if guard.peers.iter().any(|bypass| bypass.peer == ip) {
+                return Err(CoreError::InvalidConfig(format!("TUN DNS server {ip} is also a carrier endpoint; choose a different resolver")));
+            }
+            let mut row = MIB_IPFORWARD_ROW2::default();
+            unsafe { InitializeIpForwardEntry(&mut row); }
+            row.InterfaceLuid = luid;
+            row.InterfaceIndex = index;
+            row.DestinationPrefix.Prefix = sockaddr(ip);
+            row.DestinationPrefix.PrefixLength = if ip.is_ipv4() { 32 } else { 128 };
+            row.NextHop = sockaddr(if ip.is_ipv4() { Ipv4Addr::UNSPECIFIED.into() } else { Ipv6Addr::UNSPECIFIED.into() });
+            row.Metric = 0;
+            row.Protocol = MIB_IPPROTO_NETMGMT;
+            guard.add_route(row, true)?;
+            if unsafe { best_route(ip)?.InterfaceLuid.Value != luid.Value } {
+                return Err(CoreError::Internal(format!("TUN DNS server {ip} routes outside the tunnel; remove the conflicting route or choose another resolver")));
+            }
         }
         for bypass in &guard.peers {
             let current = best_route(bypass.peer)?;
@@ -385,6 +413,7 @@ impl Drop for TunGuard {
             if current.Family == AF_INET { current.SitePrefixLength = 0; }
             cleanup(unsafe { SetIpInterfaceEntry(&mut current) }, "restore TUN interface settings");
         }
+        drop(self.dns_firewall.take());
     }
 }
 

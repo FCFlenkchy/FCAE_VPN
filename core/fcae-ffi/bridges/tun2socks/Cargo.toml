@@ -1,11 +1,11 @@
 [package]
-name = "fcae-bridge-tun2socks"
+name = "fcae-go-bridge"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "In-process tun2socks bridge: links the Go engine as a c-archive, no subprocess on any platform."
-links = "tun2socks_bridge"
+description = "Shared in-process Go bridge for tun2socks and Psiphon."
+links = "fcae_go_bridge"
 
 [lib]
 name = "fcae_bridge_tun2socks"

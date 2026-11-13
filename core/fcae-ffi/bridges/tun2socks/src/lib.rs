@@ -1,4 +1,4 @@
-//! # fcae-bridge-tun2socks — in-process TUN bridge
+//! # fcae-go-bridge — in-process Go bridge
 //!
 //! Implements [`fcae_runtime::session::TunBridge`] by driving the tun2socks
 //! gVisor stack **inside this process** via a Go c-archive.
@@ -70,7 +70,7 @@
 //!   * Windows cross-build → `x86_64-w64-mingw32-gcc`
 //!   * otherwise → `cc` (override with `CC` or `CGO_CC`)
 //!
-//! Building without Go: `cargo build --features fcae-bridge-tun2socks/stub` compiles
+//! Building without Go: `cargo build --features fcae-go-bridge/stub` compiles
 //! a stub where TUN reports "unavailable" and everything else works. Do not
 //! ship a stub build.
 //!

@@ -4,7 +4,7 @@
 //! userspace network engine inside this process via its stable C ABI
 //! (`core/zeptun/include/zeptun.h`), statically linked.
 //!
-//! This is a drop-in sibling of `fcae-bridge-tun2socks`: both are *TUN*
+//! This is a drop-in sibling of `fcae-go-bridge`: both are *TUN*
 //! bridges that **consume** the local SOCKS5 endpoint a tunnel bridge
 //! (aether / psiphon) **produces**, and expose it as a TUN device. The
 //! supervisor layers this over whichever tunnel backend is selected.
