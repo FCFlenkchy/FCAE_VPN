@@ -150,6 +150,7 @@ struct Active {
     thread: std::thread::JoinHandle<()>,
     _psiphon: Option<socks5p::Adapter>,
     undo: Option<fcae_runtime::windows_tun::TunGuard>,
+    log_relay: Option<crate::LogRelay>,
 }
 
 pub struct HevSocks5TunnelBridge {
@@ -197,6 +198,7 @@ impl HevSocks5TunnelBridge {
             if let Some(done) = slot.take() {
                 let _ = done.thread.join();
                 if let Some(undo) = done.undo { fcae_runtime::windows_tun::restore_wrapper(undo); }
+                if let Some(relay) = done.log_relay { relay.shutdown(); }
             }
         }
         slot.is_none()
@@ -323,7 +325,8 @@ impl TunBridge for HevSocks5TunnelBridge {
         log::info!("[hev] launching engine thread");
         let engine = self.spawn_engine(rt, &yaml)?;
         let exit_code = engine.rc;
-        *self.active.lock() = Some(Active { generation: Arc::new(()), reaping: false, thread: engine.thread, _psiphon: psiphon, undo: None });
+        let log_relay = crate::relay_engine_log();
+        *self.active.lock() = Some(Active { generation: Arc::new(()), reaping: false, thread: engine.thread, _psiphon: psiphon, undo: None, log_relay });
         let configured = (|| -> Result<()> {
             log::info!("[hev] configuring Windows TUN networking");
             let undo = fcae_runtime::windows_tun::TunGuard::configure(cfg, endpoints.peer_ip.as_deref())

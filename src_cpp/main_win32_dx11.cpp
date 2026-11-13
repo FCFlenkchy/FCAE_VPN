@@ -163,8 +163,14 @@ static bool CreateDeviceD3D(HWND hWnd) {
 
     const D3D_DRIVER_TYPE drivers[] = {
         D3D_DRIVER_TYPE_HARDWARE,
-        D3D_DRIVER_TYPE_WARP,
-        D3D_DRIVER_TYPE_REFERENCE
+        D3D_DRIVER_TYPE_WARP
+        // No D3D_DRIVER_TYPE_REFERENCE: the reference rasterizer is a
+        // conformance-validation library that emulates the pipeline in
+        // software without any optimization. A shipping UI that lands on it
+        // is effectively frozen — the window appears after seconds or
+        // minutes of a task that never settles. HARDWARE (any real GPU) or
+        // WARP (software D3D11, ample for a 2D UI) is the correct floor;
+        // failing to get either should fail startup, not crawl.
     };
     HRESULT device_result = E_FAIL;
     // The flip model presents without a DWM copy; Windows before 10 lacks it.

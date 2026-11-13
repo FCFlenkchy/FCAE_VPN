@@ -101,6 +101,102 @@ pub(crate) fn run_engine(closing: &std::sync::atomic::AtomicBool, mut main: impl
     main()
 }
 
+/// The `misc.log-file` path for the engine: a session-local spool in the
+/// temp directory. The engine (a C library that cannot call back into FCAE)
+/// writes its diagnostics there; [`relay_engine_log`] tails the spool and
+/// re-emits every line into the app's normal logging path, so `logs.txt`
+/// stays the single place that holds everything. The spool is removed when
+/// the session ends.
+fn hev_log_path() -> String {
+    std::env::temp_dir()
+        .join(format!("fcae-hev-{}.log", std::process::id()))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Re-emits new lines from the engine's own log file into FCAE's diagnostic
+/// log (`logs.txt` on desktop via the crash logger; the host log callback on
+/// Android), so a TUN session that comes up with no traffic can be diagnosed
+/// from the same place as everything else. The engine writes the spool file
+/// itself; this only tails it and never blocks the engine.
+pub(crate) struct LogRelay {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    path: std::path::PathBuf,
+}
+
+impl LogRelay {
+    /// Stops the tail, drains whatever the engine wrote before its exit, and
+    /// removes the spool. Call only after the engine thread has joined.
+    pub(crate) fn shutdown(mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        // Best effort: the spool is redundant once drained into logs.txt.
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Starts the relay that mirrors the engine's spool into the app log.
+/// Lines already present in the spool when the relay starts are skipped
+/// (the spool is named per process, so they can only be from a previous
+/// run of this PID).
+pub(crate) fn relay_engine_log() -> Option<LogRelay> {
+    let path = std::path::PathBuf::from(hev_log_path());
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread_stop = std::sync::Arc::clone(&stop);
+    let thread_path = path.clone();
+    let thread = std::thread::Builder::new()
+        .name("hev-log".into())
+        .spawn(move || {
+            use std::io::{Read as _, Seek as _, SeekFrom};
+            let mut offset = std::fs::metadata(&thread_path).map(|m| m.len()).unwrap_or(0);
+            let mut carry = String::new();
+            loop {
+                let stopping = thread_stop.load(std::sync::atomic::Ordering::SeqCst);
+                match std::fs::File::open(&thread_path) {
+                    Ok(mut file) => {
+                        let len = file.metadata().map(|m| m.len()).unwrap_or(offset);
+                        if len < offset {
+                            // Truncated or replaced: start over.
+                            offset = 0;
+                            carry.clear();
+                        }
+                        if len > offset {
+                            if file.seek(SeekFrom::Start(offset)).is_ok() {
+                                let mut buf = Vec::new();
+                                let mut limited = file.take(len - offset);
+                                if limited.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+                                    offset = len;
+                                    carry.push_str(&String::from_utf8_lossy(&buf));
+                                    while let Some(index) = carry.find('\n') {
+                                        let line = carry[..index].trim_end_matches(&['\r', '\n'][..]);
+                                        if !line.is_empty() {
+                                            log::info!("[hev] {line}");
+                                        }
+                                        carry.drain(..=index);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {}
+                }
+                if stopping {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let trailing = carry.trim();
+            if !trailing.is_empty() {
+                log::info!("[hev] {trailing}");
+            }
+        })
+        .ok()?;
+    Some(LogRelay { stop, thread: Some(thread), path })
+}
+
 pub(crate) fn generate_config(cfg: &fcae_runtime::config::SessionConfig, socks: std::net::SocketAddr) -> fcae_runtime::error::Result<(std::net::SocketAddr, String)> {
     #[cfg(not(target_os = "android"))]
     if cfg.tun.name.is_empty() || cfg.tun.name.len() > 63 || cfg.tun.name.chars().any(char::is_control) {
@@ -129,6 +225,14 @@ pub(crate) fn generate_config(cfg: &fcae_runtime::config::SessionConfig, socks: 
     yaml.push_str("  udp: 'udp'\n");
     yaml.push_str("\nmisc:\n");
     yaml.push_str(&format!("  log-level: '{}'\n", log_level(cfg.tun.t2s_log_level)));
+    // The C library logs to stderr only when `log-file` is unset, and a GUI
+    // process has no stderr — every engine diagnostic used to vanish. It
+    // writes a small spool in the temp dir; `relay_engine_log` mirrors every
+    // line into the app's normal logging path (logs.txt) while the session is
+    // up, then removes the spool.
+    let spool = hev_log_path();
+    yaml.push_str(&format!("  log-file: '{}'\n", spool.replace('\'', "''")));
+    log::info!("[hev] engine config: name='{}' mtu={}", cfg.tun.name, cfg.tun.mtu);
     Ok((socks, yaml))
 }
 

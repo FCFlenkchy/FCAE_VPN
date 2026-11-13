@@ -5021,6 +5021,17 @@ class MainActivity : AppCompatActivity() {
         val adapter = AppListAdapter()
         listView.adapter = adapter
 
+        // Selection applies live — no Done button to press. Every toggle is
+        // committed to the shared preferences immediately (the VPN service
+        // reads them at session start), so closing the dialog any way
+        // (Close, back button, outside tap) keeps the pick.
+        fun commitSelection() {
+            splitTunnelSelectedApps.clear()
+            splitTunnelSelectedApps.addAll(tempSelected)
+            prefs.edit().putStringSet("splitTunnelApps", HashSet(splitTunnelSelectedApps)).apply()
+            updateSplitTunnelButtonText()
+        }
+
         listView.setOnItemClickListener { _, _, position, _ ->
             val entry = filteredList[position]
             if (tempSelected.contains(entry.packageName)) {
@@ -5028,6 +5039,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 tempSelected.add(entry.packageName)
             }
+            commitSelection()
             refilter()
             adapter.notifyDataSetChanged()
         }
@@ -5045,18 +5057,11 @@ class MainActivity : AppCompatActivity() {
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Select Apps")
             .setView(rootLayout)
-            .setPositiveButton("Done") { _, _ ->
-                splitTunnelSelectedApps.clear()
-                splitTunnelSelectedApps.addAll(tempSelected)
-                updateSplitTunnelButtonText()
-                saveSettings()
-            }
-            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Close", null)
             .create()
 
         dialog.show()
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.CYAN)
-        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.CYAN)
 
         // Already-listed open: the dialog is usable in this frame. The refresh
         // still runs (apps get installed while the process lives), but it only

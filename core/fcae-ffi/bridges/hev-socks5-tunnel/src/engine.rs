@@ -71,6 +71,7 @@ struct Active {
     _psiphon: Option<socks5p::Adapter>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     _host: Option<fcae_runtime::unix_tun::TunGuard>,
+    log_relay: Option<crate::LogRelay>,
 }
 
 /// hev addresses and raises its own device but never touches routes or DNS,
@@ -127,7 +128,10 @@ impl HevSocks5TunnelBridge {
 
     fn reap_locked(slot: &mut Option<Active>) -> bool {
         if slot.as_ref().is_some_and(|a| a.thread.is_finished()) {
-            if let Some(done) = slot.take() { let _ = done.thread.join(); }
+            if let Some(done) = slot.take() {
+                let _ = done.thread.join();
+                if let Some(relay) = done.log_relay { relay.shutdown(); }
+            }
         }
         slot.is_none()
     }
@@ -243,6 +247,7 @@ impl TunBridge for HevSocks5TunnelBridge {
         };
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let configured: Result<()> = Ok(());
+        let log_relay = crate::relay_engine_log();
         *self.active.lock() = Some(Active {
             generation: Arc::new(()),
             reaping: false,
@@ -250,6 +255,7 @@ impl TunBridge for HevSocks5TunnelBridge {
             _psiphon: psiphon_adapter,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             _host: host,
+            log_relay,
         });
         let exited = self.active.lock().as_ref().is_some_and(|a| a.thread.is_finished());
         let outcome = if exited {

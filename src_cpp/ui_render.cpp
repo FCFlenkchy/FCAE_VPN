@@ -3260,104 +3260,7 @@ void render_ui() {
         if (round_icon_button("##about_btn", UiIcon::Info, false, "About FCAE VPN"))
             s_about_popup_open = true;
 
-        ImGui::Spacing();
         {
-            // Right-aligned under the Info button.
-            const float update_right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
-            ImGui::SetCursorPosX(update_right - 136.0f);
-            float btn_width = 136.0f;
-            ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
-            FcaeUpdateInfo info = {};
-            info.struct_size = sizeof(info);
-            info.abi_version = FCAE_ABI_VERSION;
-            bool done = (fcae_poll_update(&info) == FCAE_OK);
-            s_update_in_progress = info.check_in_progress;
-            snprintf(s_update_date, sizeof(s_update_date), "%s", info.release_date);
-
-            if (info.check_in_progress) {
-                auto now = std::chrono::steady_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - s_check_start_time).count();
-                if (elapsed > 15) {
-                    const bool new_result = !s_update_checked;
-                    s_update_checked = true;
-                    if (new_result) s_update_error_popup_open = true;
-                    s_update_available = false;
-                    s_update_error_kind = FCAE_UPDATE_ERROR_NETWORK;
-                    snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.14f, 0.14f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.76f, 0.19f, 0.19f, 1.0f));
-                    if (ImGui::Button("Check Timed Out", ImVec2(btn_width, 32)))
-                        s_update_error_popup_open = true;
-                    ImGui::PopStyleColor(2);
-                } else {
-                    char checking_label[32];
-                    snprintf(checking_label, sizeof(checking_label), "Checking... %llds", (long long)elapsed);
-                    ImGui::BeginDisabled();
-                    ImGui::Button(checking_label, ImVec2(btn_width, 32));
-                    ImGui::EndDisabled();
-                }
-            } else if (done && info.update_available) {
-                const bool new_result = !s_update_checked;
-                s_update_available = true;
-                s_update_checked = true;
-                if (new_result) s_update_popup_open = true;
-                snprintf(s_update_latest, sizeof(s_update_latest), "%s", info.latest_version);
-                snprintf(s_update_notes, sizeof(s_update_notes), "%s", info.release_notes);
-                snprintf(s_update_dl_url, sizeof(s_update_dl_url), "%s", info.download_url);
-                snprintf(s_update_status, sizeof(s_update_status), "%s", info.status_message);
-                s_update_error_kind = FCAE_UPDATE_ERROR_NONE;
-
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
-                if (ImGui::Button("Update Available!", ImVec2(btn_width, 32))) {
-                    s_update_popup_open = true;
-                }
-                ImGui::PopStyleColor(2);
-            } else if (done && !info.update_available) {
-                const bool new_result = !s_update_checked;
-                s_update_available = false;
-                s_update_checked = true;
-                s_update_error_kind = info.error_kind;
-                snprintf(s_update_status, sizeof(s_update_status), "%s", info.status_message);
-                snprintf(s_update_raw_body, sizeof(s_update_raw_body), "%s", info.raw_body);
-                if (s_update_error_kind == FCAE_UPDATE_ERROR_DECODE) {
-                    if (new_result) s_update_decode_popup_open = true;
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.78f, 0.16f, 0.16f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.22f, 0.22f, 1.0f));
-                    if (ImGui::Button("ATTENTION!", ImVec2(btn_width, 32)))
-                        s_update_decode_popup_open = true;
-                    ImGui::PopStyleColor(2);
-                } else {
-                    const bool failed = s_update_error_kind != FCAE_UPDATE_ERROR_NONE;
-                    if (new_result && failed) s_update_error_popup_open = true;
-                    ImGui::PushStyleColor(ImGuiCol_Button,
-                        failed ? ImVec4(0.62f, 0.14f, 0.14f, 1.0f)
-                               : ImVec4(0.12f, 0.48f, 0.20f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                        failed ? ImVec4(0.76f, 0.19f, 0.19f, 1.0f)
-                               : ImVec4(0.16f, 0.60f, 0.26f, 1.0f));
-                    if (ImGui::Button(failed ? "Check Failed" : "Up to Date", ImVec2(btn_width, 32))) {
-                        if (failed) {
-                            s_update_error_popup_open = true;
-                        } else {
-                            fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
-                            s_update_checked = false;
-                            s_update_available = false;
-                            s_check_start_time = std::chrono::steady_clock::now();
-                        }
-                    }
-                    ImGui::PopStyleColor(2);
-                }
-            } else {
-                if (ImGui::Button("Check for Updates", ImVec2(btn_width, 32))) {
-                    fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
-                    s_update_checked = false;
-                    s_update_available = false;
-                    s_check_start_time = std::chrono::steady_clock::now();
-                }
-            }
-            ImGui::PopStyleVar(); // Pop ButtonTextAlign
-
             if (s_update_popup_open) {
                 ImGui::OpenPopup("##update_popup");
                 s_update_popup_open = false;
@@ -3814,6 +3717,104 @@ void render_ui() {
         ImGui::PopStyleColor();
 
         if (busy) { ImGui::SameLine(0, 8); draw_spinner(7.0f, 14, 7.0f); }
+
+        // "Check for Updates" rides in the CONNECT row, not under the Info
+        // button; on narrow windows it drops to its own line.
+        if (!narrow) ImGui::SameLine(0, 10);
+        {
+            float btn_width = 136.0f;
+            ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
+            FcaeUpdateInfo info = {};
+            info.struct_size = sizeof(info);
+            info.abi_version = FCAE_ABI_VERSION;
+            bool done = (fcae_poll_update(&info) == FCAE_OK);
+            s_update_in_progress = info.check_in_progress;
+            snprintf(s_update_date, sizeof(s_update_date), "%s", info.release_date);
+
+            if (info.check_in_progress) {
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - s_check_start_time).count();
+                if (elapsed > 15) {
+                    const bool new_result = !s_update_checked;
+                    s_update_checked = true;
+                    if (new_result) s_update_error_popup_open = true;
+                    s_update_available = false;
+                    s_update_error_kind = FCAE_UPDATE_ERROR_NETWORK;
+                    snprintf(s_update_status, sizeof(s_update_status), "Check timed out (network unreachable?)");
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.14f, 0.14f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.76f, 0.19f, 0.19f, 1.0f));
+                    if (ImGui::Button("Check Timed Out", ImVec2(btn_width, 32)))
+                        s_update_error_popup_open = true;
+                    ImGui::PopStyleColor(2);
+                } else {
+                    char checking_label[32];
+                    snprintf(checking_label, sizeof(checking_label), "Checking... %llds", (long long)elapsed);
+                    ImGui::BeginDisabled();
+                    ImGui::Button(checking_label, ImVec2(btn_width, 32));
+                    ImGui::EndDisabled();
+                }
+            } else if (done && info.update_available) {
+                const bool new_result = !s_update_checked;
+                s_update_available = true;
+                s_update_checked = true;
+                if (new_result) s_update_popup_open = true;
+                snprintf(s_update_latest, sizeof(s_update_latest), "%s", info.latest_version);
+                snprintf(s_update_notes, sizeof(s_update_notes), "%s", info.release_notes);
+                snprintf(s_update_dl_url, sizeof(s_update_dl_url), "%s", info.download_url);
+                snprintf(s_update_status, sizeof(s_update_status), "%s", info.status_message);
+                s_update_error_kind = FCAE_UPDATE_ERROR_NONE;
+
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.65f, 0.1f, 1.0f));
+                if (ImGui::Button("Update Available!", ImVec2(btn_width, 32))) {
+                    s_update_popup_open = true;
+                }
+                ImGui::PopStyleColor(2);
+            } else if (done && !info.update_available) {
+                const bool new_result = !s_update_checked;
+                s_update_available = false;
+                s_update_checked = true;
+                s_update_error_kind = info.error_kind;
+                snprintf(s_update_status, sizeof(s_update_status), "%s", info.status_message);
+                snprintf(s_update_raw_body, sizeof(s_update_raw_body), "%s", info.raw_body);
+                if (s_update_error_kind == FCAE_UPDATE_ERROR_DECODE) {
+                    if (new_result) s_update_decode_popup_open = true;
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.78f, 0.16f, 0.16f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.22f, 0.22f, 1.0f));
+                    if (ImGui::Button("ATTENTION!", ImVec2(btn_width, 32)))
+                        s_update_decode_popup_open = true;
+                    ImGui::PopStyleColor(2);
+                } else {
+                    const bool failed = s_update_error_kind != FCAE_UPDATE_ERROR_NONE;
+                    if (new_result && failed) s_update_error_popup_open = true;
+                    ImGui::PushStyleColor(ImGuiCol_Button,
+                        failed ? ImVec4(0.62f, 0.14f, 0.14f, 1.0f)
+                               : ImVec4(0.12f, 0.48f, 0.20f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                        failed ? ImVec4(0.76f, 0.19f, 0.19f, 1.0f)
+                               : ImVec4(0.16f, 0.60f, 0.26f, 1.0f));
+                    if (ImGui::Button(failed ? "Check Failed" : "Up to Date", ImVec2(btn_width, 32))) {
+                        if (failed) {
+                            s_update_error_popup_open = true;
+                        } else {
+                            fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
+                            s_update_checked = false;
+                            s_update_available = false;
+                            s_check_start_time = std::chrono::steady_clock::now();
+                        }
+                    }
+                    ImGui::PopStyleColor(2);
+                }
+            } else {
+                if (ImGui::Button("Check for Updates", ImVec2(btn_width, 32))) {
+                    fcae_check_update_async(FCAE_VERSION, g_app.check_prereleases);
+                    s_update_checked = false;
+                    s_update_available = false;
+                    s_check_start_time = std::chrono::steady_clock::now();
+                }
+            }
+            ImGui::PopStyleVar(); // Pop ButtonTextAlign
+        }
 
         if (g_app.save_status[0]) {
             ImGui::SameLine(0, 8);
