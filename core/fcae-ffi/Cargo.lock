@@ -1845,6 +1845,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "fcae-abi",
+ "fcae-build",
  "futures",
  "libc",
  "log",

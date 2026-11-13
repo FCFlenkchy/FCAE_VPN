@@ -38,7 +38,6 @@ fcae-bridge-aether = { path = "bridges/aether" }
 fcae-bridge-psiphon = { path = "bridges/psiphon" }
 fcae-bridge-zeptun = { path = "bridges/zeptun" }
 fcae-bridge-hev-socks5-tunnel = { path = "bridges/hev-socks5-tunnel" }
-fcae-firefox = { path = "firefox" }
 fcae-firefox-bridge = { path = "bridges/firefox" }
 aether-engine = { package = "aether", path = "../aether/aether" }
 
