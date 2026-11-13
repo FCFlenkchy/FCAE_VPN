@@ -46,6 +46,7 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
+use fcae_runtime::backend::CancelToken;
 use fcae_runtime::config::{SessionConfig, T2S_LOG_DEBUG, T2S_LOG_ERROR, T2S_LOG_INFO, T2S_LOG_WARN, T2S_LOG_SILENT};
 use fcae_runtime::error::{CoreError, Result};
 use fcae_runtime::session::TunBridge;
@@ -415,10 +416,20 @@ impl ZeptunBridge {
     }
 
     fn begin_start(&self) -> Result<parking_lot::MutexGuard<'_, ()>> {
+        self.begin_start_cancellable(None)
+    }
+
+    fn begin_start_cancellable(&self, cancel: Option<&CancelToken>) -> Result<parking_lot::MutexGuard<'_, ()>> {
         let guard = self.startup.try_lock().ok_or_else(|| {
             CoreError::Internal("zeptun startup already in progress".into())
         })?;
         self.closing.store(false, Ordering::SeqCst);
+        // Cancellation before the reset must not be lost. Cancellation after
+        // this check invokes abort(), which sets closing again.
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            self.closing.store(true, Ordering::SeqCst);
+            return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
+        }
         Ok(guard)
     }
 
@@ -447,8 +458,8 @@ impl ZeptunBridge {
     }
 }
 
-impl TunBridge for ZeptunBridge {
-    fn start(&self, cfg: &SessionConfig, endpoints: &fcae_runtime::backend::Endpoints) -> Result<()> {
+impl ZeptunBridge {
+    fn start_inner(&self, cfg: &SessionConfig, endpoints: &fcae_runtime::backend::Endpoints, cancel: Option<&CancelToken>) -> Result<()> {
         #[cfg(windows)]
         fcae_runtime::windows_tun::validate_backend(cfg, endpoints.peer_ip.as_deref())?;
         if !platform_enabled() {
@@ -459,7 +470,10 @@ impl TunBridge for ZeptunBridge {
             ));
         }
 
-        let _startup = self.begin_start()?;
+        let _startup = match cancel {
+            Some(cancel) => self.begin_start_cancellable(Some(cancel))?,
+            None => self.begin_start()?,
+        };
         let mut active = self.active.lock();
         if active.is_some() {
             log::warn!("[tun] start called while a device is already up; ignoring");
@@ -654,6 +668,17 @@ impl TunBridge for ZeptunBridge {
             config.mtu
         );
         Ok(())
+    }
+
+}
+
+impl TunBridge for ZeptunBridge {
+    fn start(&self, cfg: &SessionConfig, endpoints: &fcae_runtime::backend::Endpoints) -> Result<()> {
+        self.start_inner(cfg, endpoints, None)
+    }
+
+    fn start_cancellable(&self, cfg: &SessionConfig, endpoints: &fcae_runtime::backend::Endpoints, cancel: &CancelToken) -> Result<()> {
+        self.start_inner(cfg, endpoints, Some(cancel))
     }
 
     fn stop(&self, _timeout: std::time::Duration) {

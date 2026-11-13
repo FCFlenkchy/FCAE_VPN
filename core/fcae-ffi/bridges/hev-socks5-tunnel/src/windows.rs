@@ -145,6 +145,8 @@ struct Engine {
 }
 
 struct Active {
+    generation: Arc<()>,
+    reaping: bool,
     thread: std::thread::JoinHandle<()>,
     _psiphon: Option<socks5p::Adapter>,
     undo: Option<fcae_runtime::windows_tun::TunGuard>,
@@ -153,7 +155,7 @@ struct Active {
 pub struct HevSocks5TunnelBridge {
     lifecycle: Mutex<()>,
     enqueue: Mutex<()>,
-    active: Mutex<Option<Active>>,
+    active: Arc<Mutex<Option<Active>>>,
     running: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
     external_fd: AtomicI32,
@@ -168,7 +170,7 @@ impl HevSocks5TunnelBridge {
         Self {
             lifecycle: Mutex::new(()),
             enqueue: Mutex::new(()),
-            active: Mutex::new(None),
+            active: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
             closing: Arc::new(AtomicBool::new(false)),
             external_fd: AtomicI32::new(-1),
@@ -210,10 +212,8 @@ impl HevSocks5TunnelBridge {
         self.closing.store(true, Ordering::SeqCst);
         self.signal_stop();
         if !self.reap(timeout) {
-            log::warn!("[hev] engine did not stop within {timeout:?}");
-            if let Some(active) = self.active.lock().as_mut() {
-                if let Some(undo) = active.undo.take() { fcae_runtime::windows_tun::restore_wrapper(undo); }
-            }
+            log::warn!("[hev] engine did not stop within {timeout:?}; retaining network configuration until it exits");
+            self.reap_later();
         }
     }
     /// The engine's exit status once its thread is gone, as a start error.
@@ -221,6 +221,49 @@ impl HevSocks5TunnelBridge {
         self.active.lock().as_ref().is_some_and(|a| a.thread.is_finished())
             .then(|| CoreError::Internal(format!("hev exited during startup code {}", rc.load(Ordering::SeqCst))))
     }
+    /// Block a later TUN start until the previous HEV run and its host
+    /// configuration have both been released, including across engine switches.
+    pub fn wait_for_cleanup(&self) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock();
+        if self.reap(RESTART_GRACE) {
+            Ok(())
+        } else {
+            Err(CoreError::Internal("previous HEV engine is still shutting down".into()))
+        }
+    }
+
+    fn reap_later(&self) {
+        let generation = {
+            let mut active = self.active.lock();
+            let Some(run) = active.as_mut() else { return; };
+            if run.reaping { return; }
+            run.reaping = true;
+            run.generation.clone()
+        };
+        let active = self.active.clone();
+        let worker_generation = generation.clone();
+        if let Err(error) = std::thread::Builder::new().name("hev-reaper".into()).spawn(move || {
+            loop {
+                {
+                    let mut slot = active.lock();
+                    match slot.as_ref() {
+                        Some(run) if Arc::ptr_eq(&run.generation, &worker_generation) => {
+                            if Self::reap_locked(&mut slot) { return; }
+                        }
+                        _ => return,
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }) {
+            let mut active = self.active.lock();
+            if let Some(run) = active.as_mut().filter(|run| Arc::ptr_eq(&run.generation, &generation)) {
+                run.reaping = false;
+            }
+            log::error!("[hev] cannot start cleanup thread: {error}; cleanup will be retried on the next stop or start");
+        }
+    }
+
     /// Runs the engine on a dedicated thread.
     fn spawn_engine(&self, rt: &'static Runtime, yaml: &str) -> Result<Engine> {
         let config = CString::new(yaml).map_err(|_| CoreError::Internal("hev config contains NUL".into()))?;
@@ -267,7 +310,7 @@ impl TunBridge for HevSocks5TunnelBridge {
         let (_, yaml) = generate_config(cfg, socks)?;
         let engine = self.spawn_engine(rt, &yaml)?;
         let exit_code = engine.rc;
-        *self.active.lock() = Some(Active { thread: engine.thread, _psiphon: psiphon, undo: None });
+        *self.active.lock() = Some(Active { generation: Arc::new(()), reaping: false, thread: engine.thread, _psiphon: psiphon, undo: None });
         let configured = (|| -> Result<()> {
             let undo = fcae_runtime::windows_tun::TunGuard::configure(cfg, endpoints.peer_ip.as_deref())
                 .map_err(|e| self.exited(&exit_code).unwrap_or(e))?;

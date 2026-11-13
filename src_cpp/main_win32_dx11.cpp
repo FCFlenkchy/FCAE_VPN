@@ -98,19 +98,25 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             // A restored/maximized window must be painted even if the render
             // gate had nothing new to show.
             ui_request_redraw();
-            if (g_pd3dDevice != nullptr && g_pSwapChain != nullptr && wParam != SIZE_MINIMIZED) {
-                // Release old RTV before ResizeBuffers invalidates its backing buffer
+            if (g_pd3dDevice != nullptr && g_pd3dDeviceContext != nullptr
+                    && g_pSwapChain != nullptr && wParam != SIZE_MINIMIZED) {
+                // The immediate context keeps its own reference to the bound
+                // target. Release that reference as well before ResizeBuffers.
+                g_pd3dDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
                 if (g_mainRenderTargetView) {
                     g_mainRenderTargetView->Release();
                     g_mainRenderTargetView = nullptr;
                 }
-                if (FAILED(g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0)))
-                    return 0;
+                const HRESULT resized = g_pSwapChain->ResizeBuffers(
+                    0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
+                // If resizing failed, keep rendering to the existing back
+                // buffer instead of leaving the window permanently blank.
                 ID3D11Texture2D* pBackBuffer = nullptr;
                 if (SUCCEEDED(g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer))) && pBackBuffer) {
                     g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
                     pBackBuffer->Release();
                 }
+                if (FAILED(resized)) ui_request_redraw();
             }
             return 0;
         case WM_SYSCOMMAND:

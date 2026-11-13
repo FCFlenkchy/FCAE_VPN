@@ -107,6 +107,7 @@ impl TunEngines {
         &self,
         cfg: &config::SessionConfig,
         endpoints: &fcae_runtime::backend::Endpoints,
+        cancel: Option<&fcae_runtime::backend::CancelToken>,
     ) -> Result<(), CoreError> {
         #[cfg(feature = "zeptun")]
         {
@@ -121,11 +122,14 @@ impl TunEngines {
                     self.zeptun.set_external_fd(fd);
                 }
             }
-            self.zeptun.start(cfg, endpoints)
+            match cancel {
+                Some(cancel) => self.zeptun.start_cancellable(cfg, endpoints, cancel),
+                None => self.zeptun.start(cfg, endpoints),
+            }
         }
         #[cfg(not(feature = "zeptun"))]
         {
-            let _ = (cfg, endpoints);
+            let _ = (cfg, endpoints, cancel);
             Err(CoreError::Internal(
                 "the zeptun TUN engine is not compiled into this build (feature `zeptun`)".into(),
             ))
@@ -181,12 +185,21 @@ impl TunEngines {
     }
 }
 
-impl TunBridge for TunEngines {
-    fn start(
+impl TunEngines {
+    fn start_inner(
         &self,
         cfg: &config::SessionConfig,
         endpoints: &fcae_runtime::backend::Endpoints,
+        cancel: Option<&fcae_runtime::backend::CancelToken>,
     ) -> Result<(), CoreError> {
+        // HEV may still be leaving its previous run after a bounded stop.
+        // Do not let another engine reuse its device or routes until cleanup
+        // has completed, even when the next engine is not HEV.
+        #[cfg(feature = "hev")]
+        self.hev.wait_for_cleanup()?;
+        if cancel.is_some_and(fcae_runtime::backend::CancelToken::is_cancelled) {
+            return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
+        }
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         crash_log::record(match cfg.tun.engine {
             config::TunEngine::Tun2socks => "tun2socks: starting\n",
@@ -195,7 +208,7 @@ impl TunBridge for TunEngines {
         });
         let result = match cfg.tun.engine {
             config::TunEngine::Tun2socks => self.t2s_start(cfg, endpoints),
-            config::TunEngine::Zeptun => self.zeptun_start(cfg, endpoints),
+            config::TunEngine::Zeptun => self.zeptun_start(cfg, endpoints, cancel),
             config::TunEngine::Hev => self.hev_start(cfg, endpoints),
         };
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -208,6 +221,17 @@ impl TunBridge for TunEngines {
             (config::TunEngine::Hev, false) => "hev: start failed\n",
         });
         result
+    }
+
+}
+
+impl TunBridge for TunEngines {
+    fn start(&self, cfg: &config::SessionConfig, endpoints: &fcae_runtime::backend::Endpoints) -> Result<(), CoreError> {
+        self.start_inner(cfg, endpoints, None)
+    }
+
+    fn start_cancellable(&self, cfg: &config::SessionConfig, endpoints: &fcae_runtime::backend::Endpoints, cancel: &fcae_runtime::backend::CancelToken) -> Result<(), CoreError> {
+        self.start_inner(cfg, endpoints, Some(cancel))
     }
 
     fn stop(&self, timeout: std::time::Duration) {

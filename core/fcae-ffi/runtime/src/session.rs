@@ -48,6 +48,13 @@ const CHAIN_START_GRACE: Duration = Duration::from_secs(10);
 pub trait TunBridge: Send + Sync {
     /// Start forwarding TUN traffic into `endpoints.socks`.
     fn start(&self, cfg: &SessionConfig, endpoints: &Endpoints) -> Result<()>;
+    /// Start against the owning session's cancellation token.
+    fn start_cancellable(&self, cfg: &SessionConfig, endpoints: &Endpoints, cancel: &CancelToken) -> Result<()> {
+        if cancel.is_cancelled() {
+            return Err(CoreError::Internal("TUN start cancelled (session is stopping)".into()));
+        }
+        self.start(cfg, endpoints)
+    }
     /// Stop forwarding and release the device. Must be idempotent.
     fn stop(&self, timeout: Duration);
     /// Drop the TUN fds immediately. Must not wait on the data-plane engine.
@@ -494,7 +501,9 @@ impl Supervisor {
                 "no live session to re-raise the TUN data plane on".into(),
             ));
         };
-        self.cfg.tun_bridge.start(&live.config, &live.endpoints)?;
+        let cancel = self.running.lock().as_ref().map(|running| running.cancel.clone())
+            .ok_or_else(|| CoreError::Internal("no session to resume TUN for".into()))?;
+        self.cfg.tun_bridge.start_cancellable(&live.config, &live.endpoints, &cancel)?;
         if self.stopping.load(Ordering::SeqCst) || !self.is_running() {
             self.cfg.tun_bridge.stop(self.cfg.stop_timeout);
             return Err(CoreError::Internal("session stopped during TUN resume".into()));
@@ -659,7 +668,7 @@ async fn run_session(
             let _control = tun_control.lock();
             *live_tun.lock() = Some(LiveTun { config: config.clone(), endpoints: endpoints.clone() });
             if config.is_tun() && !cancel.is_cancelled() && !tun_paused.load(Ordering::SeqCst) {
-                let started = tun_bridge.start(&config, &endpoints);
+                let started = tun_bridge.start_cancellable(&config, &endpoints, &cancel);
                 if started.is_ok() {
                     *tun_settle.lock() = Some(std::time::Instant::now() + TUN_SETTLE);
                 }
@@ -670,6 +679,9 @@ async fn run_session(
         };
         if let Err(error) = tun_start {
             stop_all(&mut handles, stop_timeout).await;
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
             return Err(error);
         }
         if cancel.is_cancelled() {
@@ -770,8 +782,8 @@ async fn run_session(
                                 let _control = tun_control.lock();
                                 tun_bridge.stop(stop_timeout);
                                 if !tun_paused.load(Ordering::SeqCst) {
-                                    if let Err(error) = tun_bridge.start(&config, &rebuilt) {
-                                        break Err(error);
+                                    if let Err(error) = tun_bridge.start_cancellable(&config, &rebuilt, &cancel) {
+                                        break if cancel.is_cancelled() { Ok(()) } else { Err(error) };
                                     }
                                     *tun_settle.lock() = Some(std::time::Instant::now() + TUN_SETTLE);
                                 }
