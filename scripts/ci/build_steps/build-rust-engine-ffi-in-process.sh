@@ -20,6 +20,22 @@ if [[ "${FCAE_MATRIX_NAME}" == android-* ]]; then
   export ANDROID_NDK_HOME="$NDK"
   export ANDROID_NDK_ROOT="$NDK"
 
+  # Stale-NDK purge: a restored cargo cache (rust-cache, or a local target/)
+  # can embed absolute paths to a previous NDK. CMake then reuses its cached
+  # CMakeSystem.cmake and dies with "include could not find requested file:
+  # .../android.toolchain.cmake". Drop any cached native build output that
+  # references a *different* NDK than the one now in use.
+  NDK_REF="$(printf '%s' "$ANDROID_NDK_HOME" | grep -oE 'hostedtoolcache/ndk/r[0-9]+' | head -n1 || true)"
+  if [ -n "$NDK_REF" ] && [ -d target ]; then
+    while IFS= read -r -d '' out_dir; do
+      refs="$(grep -rhoEs 'hostedtoolcache/ndk/r[0-9]+' --exclude-dir=.git "$out_dir" 2>/dev/null | sort -u || true)"
+      if [ -n "$refs" ] && printf '%s\n' "$refs" | grep -vqFx "$NDK_REF"; then
+        echo "  -> purging stale cached build output: $out_dir"
+        rm -rf "$out_dir"
+      fi
+    done < <(find target -type d -path '*/release/build/*/out' -print0)
+  fi
+
   if [ "${FCAE_MATRIX_NAME}" = "android-universal" ]; then
     echo "Building Rust for all Android ABIs (universal)..."
 

@@ -204,7 +204,11 @@ jobs:
       - name: cache rust
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.name }}
+          # Include the NDK: restored cargo caches carry absolute paths to
+          # the toolchain that built them. This key stayed constant across
+          # the r30 bump, so cmake reused a cached CMakeSystem.cmake that
+          # pointed at the removed r27 toolchain and boring-sys died.
+          key: ${{ matrix.name }}-ndk-r30
           workspaces: |
             core/fcae-ffi -> ../../target
           cache-on-failure: true
