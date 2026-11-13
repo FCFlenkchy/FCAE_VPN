@@ -1093,13 +1093,9 @@ mod ffi {
     // it: one HTTP round trip through the shim's local HTTP proxy
     // (absolute-URI HEAD against Google's generate_204 edge) -- a full tunnel
     // round trip to the internet. Like the Android service, it is measured
-    // once per connect and then held: periodic probes made the figure jump
-    // on every refresh, spammed Psiphon notices and, on a broken server,
-    // inflated its port-forward failure count. Until the first success it
-    // retries with backoff (2, 4, then every 8 s, 12 attempts) on a
-    // short-lived thread, so the telemetry pump never blocks on a dead or
-    // filtered tunnel. 0 means "no measurement yet".
-    const RTT_ATTEMPTS: u32 = 12;
+    // once per connect and then held. A failed probe leaves the reading
+    // unavailable for that session; the telemetry pump never blocks on it.
+    const RTT_ATTEMPTS: u32 = 1;
     static PSI_RTT_MS: AtomicU64 = AtomicU64::new(0);
     static PSI_RTT_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
     static PSI_RTT_NEXT_PROBE_SECS: AtomicU64 = AtomicU64::new(0);

@@ -226,6 +226,7 @@ impl TelemetryCell {
         let published = Counters {
             total_rx: g.folded_rx.saturating_add(c.total_rx),
             total_tx: g.folded_tx.saturating_add(c.total_tx),
+            rtt_ms: if g.counters.rtt_ms > 0 { g.counters.rtt_ms } else { c.rtt_ms },
             ..c
         };
         g.counters = published;
@@ -313,6 +314,22 @@ pub fn abi_level(level: log::Level) -> FcaeLogLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_nonzero_rtt_is_held_until_next_session() {
+        let cell = TelemetryCell::new();
+        let sample = |rtt_ms| Counters { rtt_ms, ..Counters::default() };
+        cell.begin_session(FcaeBackend::Firefox, FcaeMode::Proxy, false);
+        cell.set_counters(sample(0));
+        assert_eq!(cell.snapshot().counters.rtt_ms, 0);
+        cell.set_counters(sample(27));
+        cell.set_counters(sample(44));
+        cell.set_counters(sample(0));
+        assert_eq!(cell.snapshot().counters.rtt_ms, 27);
+        cell.begin_session(FcaeBackend::Firefox, FcaeMode::Proxy, false);
+        cell.set_counters(sample(44));
+        assert_eq!(cell.snapshot().counters.rtt_ms, 44);
+    }
 
     #[test]
     fn error_is_sticky_until_reconnect() {

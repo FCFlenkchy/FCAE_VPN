@@ -141,8 +141,9 @@ fn stage(path: &Path, bytes: &[u8]) -> Result<File> {
     result.map_err(|e| CoreError::Internal(format!("cannot stage {}: {e}", path.display())))
 }
 
+static WINTUN: OnceLock<std::result::Result<Library, String>> = OnceLock::new();
+
 pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {
-    static WINTUN: OnceLock<std::result::Result<Library, String>> = OnceLock::new();
     WINTUN.get_or_init(|| {
         let library = if let Some(bytes) = bytes {
             Library::embedded("wintun", &[("wintun.dll", bytes)], "wintun.dll")
@@ -151,6 +152,29 @@ pub fn ensure_wintun(bytes: Option<&'static [u8]>) -> Result<()> {
         };
         library.map_err(|e| e.to_string())
     }).as_ref().map(|_| ()).map_err(|e| CoreError::Internal(e.clone()))
+}
+
+/// Resolve the LUID from the Wintun adapter the selected engine actually
+/// opened, rather than assuming Windows used the requested creation GUID.
+pub fn wintun_adapter_luid(name: &str) -> Result<windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+    let library = WINTUN.get().and_then(|result| result.as_ref().ok())
+        .ok_or_else(|| CoreError::Internal("Wintun has not been loaded".into()))?;
+    type Open = unsafe extern "system" fn(*const u16) -> *mut c_void;
+    type GetLuid = unsafe extern "system" fn(*mut c_void, *mut NET_LUID_LH);
+    type Close = unsafe extern "system" fn(*mut c_void);
+    let open: Open = unsafe { library.symbol(CStr::from_bytes_with_nul(b"WintunOpenAdapter\0").unwrap())? };
+    let get_luid: GetLuid = unsafe { library.symbol(CStr::from_bytes_with_nul(b"WintunGetAdapterLUID\0").unwrap())? };
+    let close: Close = unsafe { library.symbol(CStr::from_bytes_with_nul(b"WintunCloseAdapter\0").unwrap())? };
+    let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let adapter = unsafe { open(name.as_ptr()) };
+    if adapter.is_null() {
+        return Err(CoreError::Internal(format!("cannot open the engine's Wintun adapter: {}", std::io::Error::last_os_error())));
+    }
+    let mut luid = NET_LUID_LH::default();
+    unsafe { get_luid(adapter, &mut luid); close(adapter); }
+    Ok(luid)
 }
 
 #[cfg(test)]

@@ -52,7 +52,8 @@ impl Traffic {
     }
 
     fn record_rtt(&self, elapsed: Duration) {
-        self.rtt_ms.store(elapsed.as_millis().clamp(1, u32::MAX as u128) as u32, Ordering::Relaxed);
+        let sample = elapsed.as_millis().clamp(1, u32::MAX as u128) as u32;
+        let _ = self.rtt_ms.compare_exchange(0, sample, Ordering::Relaxed, Ordering::Relaxed);
     }
 }
 
@@ -1853,9 +1854,10 @@ mod traffic_tests {
         traffic.record_rtt(Duration::ZERO);
         assert_eq!(traffic.rtt_ms(), 1);
         traffic.record_rtt(Duration::from_millis(42));
-        assert_eq!(traffic.rtt_ms(), 42);
-        traffic.record_rtt(Duration::from_secs(u64::MAX));
-        assert_eq!(traffic.rtt_ms(), u32::MAX);
+        assert_eq!(traffic.rtt_ms(), 1);
+        let next = Traffic::default();
+        next.record_rtt(Duration::from_secs(u64::MAX));
+        assert_eq!(next.rtt_ms(), u32::MAX);
     }
 
     #[tokio::test]

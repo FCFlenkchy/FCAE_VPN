@@ -77,15 +77,13 @@ fn adapter(name: &str) -> Result<(NET_LUID_LH, u32, GUID)> {
         return Err(CoreError::InvalidConfig("invalid TUN adapter name".into()));
     }
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut luid = NET_LUID_LH::default();
-    loop {
-        let code = unsafe { ConvertInterfaceGuidToLuid(&ADAPTER_GUID, &mut luid) };
-        if code == 0 { break; }
-        if Instant::now() >= deadline {
-            checked(code, &format!("waiting for FCAE TUN adapter {name} (fixed GUID)"))?;
+    let luid = loop {
+        match crate::windows_dll::wintun_adapter_luid(name) {
+            Ok(luid) => break luid,
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
         }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    };
     let mut guid = GUID::default();
     let mut index = 0;
     unsafe {
@@ -94,7 +92,7 @@ fn adapter(name: &str) -> Result<(NET_LUID_LH, u32, GUID)> {
     }
     if guid.data1 != ADAPTER_GUID.data1 || guid.data2 != ADAPTER_GUID.data2
         || guid.data3 != ADAPTER_GUID.data3 || guid.data4 != ADAPTER_GUID.data4 {
-        return Err(CoreError::Internal(format!("refusing to configure unrelated adapter {name}")));
+        log::info!("[tun] Wintun returned a different interface GUID for {name}; using its actual identity");
     }
     Ok((luid, index, guid))
 }

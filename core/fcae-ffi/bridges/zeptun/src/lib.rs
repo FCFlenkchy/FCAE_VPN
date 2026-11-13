@@ -130,6 +130,9 @@ pub struct ZeptunConfig {
     reserved: [u32; 8],
 }
 
+#[cfg(target_pointer_width = "64")]
+const _: [(); 848] = [(); std::mem::size_of::<ZeptunConfig>()];
+
 /// Mirrors `ZeptunStats` — read-only snapshot, cheap enough to poll from a UI.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
@@ -428,10 +431,10 @@ impl ZeptunBridge {
     /// Re-point the engine's (single, process-global) log hook at our
     /// trampoline with the session's level. Called on every start: the
     /// level is a per-session setting, so it must not latch from the first.
-    fn install_log_hook(&self, level: u32) {
-        unsafe {
-            zeptun_set_log_callback(Some(log_trampoline), std::ptr::null_mut(), level as c_int);
-        }
+    fn install_log_hook(&self, level: u32) -> Result<()> {
+        let rc = unsafe { zeptun_set_log_callback(Some(log_trampoline), std::ptr::null_mut(), level as c_int) };
+        if rc != ZEPTUN_OK { return Err(zeptun_err("set_log_callback", rc)); }
+        Ok(())
     }
 
     /// Live engine counters (see `ZeptunStats`); `None` when not running.
@@ -559,7 +562,7 @@ impl TunBridge for ZeptunBridge {
         config.socks5_pipeline = ZEPTUN_SOCKS5_PIPELINE_AUTO;
         config.log_level = zeptun_log_level(cfg.tun.t2s_log_level);
         WORKER_FAILED.store(false, Ordering::SeqCst);
-        self.install_log_hook(config.log_level);
+        self.install_log_hook(config.log_level)?;
 
         // Keep the duplicated FD alive until the engine is destroyed.
         if self.closing.load(Ordering::SeqCst) {

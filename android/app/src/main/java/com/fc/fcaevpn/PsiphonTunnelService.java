@@ -1401,12 +1401,10 @@ public class PsiphonTunnelService extends Service implements PsiphonTunnel.HostS
                 prevUp = up;
                 prevDown = down;
                 prevAt = now;
-                // RTT is measured ONCE per connect (probe now, then a small
-                // retry budget with backoff) instead of every 2 s: periodic
-                // probing spams per-second notices and, on a broken server,
-                // inflates the 'port forward failures' counter.
+                // One display measurement per connection; do not probe again
+                // if it fails. Traffic counters still refresh every second.
                 int port = httpPort.get();
-                if (lastRttMs == 0 && rttAttempts < 12 && port > 0 && now >= nextRttProbeAt) {
+                if (lastRttMs == 0 && rttAttempts < 1 && port > 0 && now >= nextRttProbeAt) {
                     rttAttempts++;
                     nextRttProbeAt = now + (1L << Math.min(rttAttempts, 3)) * 1000L;
                     Integer r = probeTunnelRtt(port);
